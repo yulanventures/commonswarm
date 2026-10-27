@@ -490,7 +490,7 @@ test('R8 final authentication failure rolls back refusal audit and first use', {
     await blocker`SELECT pg_sleep(greatest(0,extract(epoch FROM (expires_at-clock_timestamp())))+0.05)
       FROM swarm.agent_tokens WHERE token_id=${agent.token}::uuid`;
   });
-  assert.equal((await pending!).status,403);
+  assert.deepEqual(await pending!,{status:401,body:{error:'unauthenticated'}});
   assert.deepEqual(await resumeAudits(),audits,'late authentication failure rolls back the audit');
   assert.equal((await sql`SELECT first_used_at IS NULL AS unused FROM swarm.agent_tokens WHERE token_id=${agent.token}::uuid`)[0].unused,true);
   assert.deepEqual((await sql`SELECT last_used_at,last_used_device_id FROM swarm.renewal_grants WHERE renewal_grant_id=${agent.grant}::uuid`)[0],grantBefore);

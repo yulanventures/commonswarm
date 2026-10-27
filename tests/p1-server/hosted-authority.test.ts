@@ -396,6 +396,73 @@ async function waitForDeadline(observer, grantId, deadline) {
   throw new Error("actual owner deadline did not elapse under the database clock");
 }
 
+// Schedule only the real SQL transport: no authorization result or clock is
+// mocked. Hold delivery of the initial fresh clock sample until that stored
+// deadline elapses, so the following live-policy resolver must return no rows.
+async function policyEligibilityBoundary() {
+  return await raceSessions(async (_gateDb,observer) => {
+    const edit = grantId => publicCommand(input.ownerJwt,input.workspaceA,{
+      kind:"set_connection_expiry",connection_kind:"hosted",grant_id:grantId,connection_expires_at:null });
+    const positive=await edit(input.grantId);
+    if(positive.status!==200) throw new Error('live owner boundary positive refused');
+    const chosen=await chooseDeadline(observer,input.grantId);
+    await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=$1::uuid",[input.foreignGrantId]);
+    const snapshot=async()=>{
+      const rows=[];
+      for(const [table,key] of [['hosted_mcp_grants','home_workspace_id'],
+        ...['hosted_mcp_grant_workspaces','hosted_mcp_seats','hosted_mcp_seat_handles',
+          'memberships','workspaces','streams','events','audit_log','idempotency_keys'].map(table=>[table,'workspace_id'])]) {
+        rows.push([table,...await observer.unsafe("SELECT count(*)::int AS n,md5(coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text)::text,'[]')) AS digest FROM swarm."+table+" r WHERE "+key+"=ANY($1::uuid[])",[input.workspaces])]);
+      }
+      return rows;
+    };
+    const before=await snapshot();
+    let sampled=null,elapsed=null,eligibilityRows=null;
+    const wrap=tx=>new Proxy(tx,{
+      apply(target,thisArg,args) {
+        const text=Array.isArray(args[0]) ? args[0].join('?') : '';
+        const pending=Reflect.apply(target,thisArg,args);
+        if(text.includes('AS now_ms') && text.includes('AS live_member')) return (async()=>{
+          const rows=await pending;
+          if(sampled!==null || rows.length!==1) throw new Error('owner clock boundary not unique');
+          sampled=Number(rows[0].now_ms);
+          if(sampled>=Date.parse(chosen)) throw new Error('deadline already elapsed at first sample');
+          elapsed=await waitForDeadline(observer,input.grantId,chosen);
+          return rows;
+        })();
+        if(text.includes('FROM swarm.resolve_hosted_grant_authorization(')) return (async()=>{
+          const rows=await pending;
+          eligibilityRows=rows.length;
+          return rows;
+        })();
+        return pending;
+      },
+      get(target,key,receiver) {
+        if(key==='savepoint') return (...args)=>{
+          const callback=args.pop();
+          return target.savepoint(...args,sp=>callback(wrap(sp)));
+        };
+        return Reflect.get(target,key,receiver);
+      },
+    });
+    const begin=db.begin;
+    db.begin=function(...args) {
+      const callback=args.pop();
+      return begin.call(this,...args,tx=>callback(wrap(tx)));
+    };
+    let owner;
+    try { owner=await edit(input.grantId); }
+    finally { db.begin=begin; }
+    if(sampled===null || elapsed===null || eligibilityRows!==0) throw new Error('expired resolver boundary not reached');
+    const ownerAfter=await snapshot();
+    const foreign=await edit(input.foreignGrantId);
+    const foreignAfter=await snapshot();
+    const missing=await edit(input.missingGrantId);
+    const missingAfter=await snapshot();
+    return {positive,owner,foreign,missing,sampled,elapsed,eligibilityRows,before,ownerAfter,foreignAfter,missingAfter};
+  });
+}
+
 async function authorityWaitRace() {
   const remove = () => publicCommand(input.otherJwt, input.workspaceB,
     { kind: "remove_member", user_id: input.ownerUserId });
@@ -814,6 +881,7 @@ async function contextHttp() {
 
 let result;
 if (input.operation === "activation-removal" || input.operation === "policy-wait") result = await authorityWaitRace();
+else if (input.operation === "policy-eligibility-boundary") result = await policyEligibilityBoundary();
 else if (input.operation === "mcp-policy") result = await mcpPolicy();
 else if (input.operation === "household-wait") result = await householdWait();
 else if (input.operation === "admin-removal") result = await adminRemoval();
@@ -2286,7 +2354,66 @@ test("connection policy storage preserves nullable shape and exact existing ACLs
   })));
 });
 
-test("legacy hosted and local inserts keep NULL policy and nullable approval linkage enforces its FK", async () => {
+// Revised R02-hosted 3/198, COMMONSWARM-RELEASE-CONFLICT-RULINGS-20261027.md:
+// exercise the independent nullable FK behind the binding guard only inside an
+// owned disposable clone. Capture and restore the exact installed guard.
+test("00002 nullable approval FK holds behind the installed binding guard in an owned clone", async()=>{
+  const isolated=await adminEdgeDatabase(local.DB_URL);
+  try {
+    await isolated.db.begin(async tx=>{
+      const [database]=await tx`SELECT current_database() AS name`;
+      assert.match(database!.name,/^admin_edge_[a-f0-9]{32}$/);
+      const guardQuery=()=>tx`SELECT pg_get_triggerdef(oid) AS ddl,tgfoid,tgenabled
+        FROM pg_trigger WHERE tgrelid='swarm.household_content_connections'::regclass
+          AND tgname='aa_household_local_family_binding' AND NOT tgisinternal`;
+      const [guard]=await guardQuery();
+      assert.equal(guard?.tgenabled,'O','installed binding guard is enabled');
+      const [catalog]=await tx`SELECT EXISTS (SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid='swarm.household_content_connections'::regclass AND c.contype='f'
+          AND c.confrelid='swarm.renewal_grants'::regclass AND c.convalidated
+          AND NOT c.condeferrable AND c.confupdtype='a' AND c.confdeltype='a'
+          AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='renewal_grant_id')]
+          AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='renewal_grant_id')]) AS fk,
+        (SELECT NOT attnotnull FROM pg_attribute WHERE attrelid='swarm.household_content_connections'::regclass
+          AND attname='renewal_grant_id') AS nullable`;
+      assert.deepEqual(catalog,{fk:true,nullable:true});
+      const owner=randomUUID(),workspace=randomUUID(),principal=randomUUID(),run=randomUUID(),device=randomUUID(),family=randomUUID(),connection=randomUUID();
+      await tx`INSERT INTO auth.users(id,aud,role,email) VALUES(${owner}::uuid,'authenticated','authenticated',${owner+'@example.test'})`;
+      await tx`INSERT INTO swarm.users(user_id,display_name) VALUES(${owner}::uuid,'Compatibility owner')`;
+      await tx`INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES(${workspace}::uuid,'Compatibility',${owner}::uuid)`;
+      await tx`INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES(${workspace}::uuid,${owner}::uuid,'owner')`;
+      await tx`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${device}::uuid,${owner}::uuid,'Compatibility')`;
+      await tx`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name)
+        VALUES(${principal}::uuid,${workspace}::uuid,${owner}::uuid,'Compatibility')`;
+      await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES(${run}::uuid,${principal}::uuid,${device}::uuid)`;
+      await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,horizon_expires_at,max_successors)
+        VALUES(${family}::uuid,${workspace}::uuid,${principal}::uuid,${run}::uuid,${owner}::uuid,clock_timestamp()+interval '30 days',800)`;
+      const receipt=randomUUID();
+      await tx`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose,owner_user_id) VALUES(${workspace}::uuid,'personal',${owner}::uuid)`;
+      await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+        VALUES(${workspace}::uuid,${owner}::uuid,'editor',${receipt}::uuid,clock_timestamp())`;
+      await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at)
+        VALUES(${connection}::uuid,${run}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'personal',ARRAY['read'],${receipt}::uuid,NULL)`;
+      const assignment=(sp: postgres.TransactionSql)=>sp`UPDATE swarm.household_content_connections SET renewal_grant_id=${family}::uuid
+        WHERE connection_id=${connection}::uuid RETURNING connection_id`;
+      assert.equal((await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id=${connection}::uuid`)[0]!.renewal_grant_id,null);
+      await assert.rejects(tx.savepoint(assignment),{code:'23514',message:'LOCAL_APPROVAL_BINDING_REFUSED'},
+        'installed guard refuses this same binding without a matching token');
+      await tx.unsafe('DROP TRIGGER aa_household_local_family_binding ON swarm.household_content_connections');
+      await assert.rejects(tx.savepoint(sp=>sp`UPDATE swarm.household_content_connections SET renewal_grant_id=${randomUUID()}::uuid
+        WHERE connection_id=${connection}::uuid`),{code:'23503'},'nullable FK still rejects a missing family');
+      assert.equal((await assignment(tx)).length,1,'a valid referenced family can be assigned');
+      await assert.rejects(tx.savepoint(sp=>sp`DELETE FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`),
+        {code:'23503'},'referenced family cannot be deleted');
+      assert.equal((await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id=${connection}::uuid`)[0]!.renewal_grant_id,family);
+      await tx.unsafe(guard!.ddl);
+      const [restored]=await guardQuery();
+      assert.deepEqual(restored,guard,'guard definition, function and enabled state restored byte-identically');
+    });
+  } finally { await isolated.close(); }
+});
+
+test("ACTIVE NULL policy and nullable legacy approvals retain exact immutable family binding", async () => {
   const fixture = await seedHostedFixture();
   const rollback = new Error("rollback connection compatibility fixtures");
   await sql.begin(async tx => {
@@ -2315,16 +2442,27 @@ test("legacy hosted and local inserts keep NULL policy and nullable approval lin
     await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
       VALUES (${fixture.workspaceA}::uuid, ${fixture.owner}::uuid, 'editor', ${receipt}::uuid, statement_timestamp())`;
     const connection = randomUUID();
+    await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+      VALUES(${connection}::uuid,${principal}::uuid,${run}::uuid,${randomUUID()}::uuid,1,'["post_signal"]'::jsonb,
+        ${randomBytes(32)},clock_timestamp()+interval '1 hour',${randomUUID()}::uuid,${renewal}::uuid)`;
     await tx`INSERT INTO swarm.household_content_connections (connection_id, grant_id, workspace_id, principal_id,
       owner_user_id, purpose, operations, consent_receipt_id, expires_at)
-      VALUES (${connection}::uuid, ${randomUUID()}::uuid, ${fixture.workspaceA}::uuid, ${principal}::uuid,
-        ${fixture.owner}::uuid, 'personal', ARRAY['read'], ${receipt}::uuid, statement_timestamp() + interval '1 hour')`;
+      VALUES (${connection}::uuid, ${run}::uuid, ${fixture.workspaceA}::uuid, ${principal}::uuid,
+        ${fixture.owner}::uuid, 'personal', ARRAY['read'], ${receipt}::uuid, NULL)`;
     const [approval] = await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id = ${connection}::uuid`;
     assert.equal(approval?.renewal_grant_id, null, "old approval INSERT omits the new FK");
     await tx`UPDATE swarm.household_content_connections SET renewal_grant_id = ${renewal}::uuid WHERE connection_id = ${connection}::uuid`;
     await assert.rejects(tx.savepoint(async sp => {
       await sp`UPDATE swarm.household_content_connections SET renewal_grant_id = ${randomUUID()}::uuid WHERE connection_id = ${connection}::uuid`;
-    }), { code: "23503" }, "missing family fails the real FK after a valid family succeeds");
+    }), { code: "23514" }, "assigned family is immutable even when the proposed family is missing");
+    const otherFamily=randomUUID();
+    await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,horizon_expires_at,max_successors)
+      VALUES(${otherFamily}::uuid,${fixture.workspaceA}::uuid,${principal}::uuid,${run}::uuid,${fixture.owner}::uuid,clock_timestamp()+interval '30 days',800)`;
+    await assert.rejects(tx.savepoint(sp=>sp`UPDATE swarm.household_content_connections SET renewal_grant_id=${otherFamily}::uuid WHERE connection_id=${connection}::uuid`),{code:'23514'},'another existing family cannot replace the bound one');
+    await assert.rejects(tx.savepoint(sp=>sp`INSERT INTO swarm.household_content_connections
+      (connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,renewal_grant_id)
+      VALUES(${randomUUID()}::uuid,${run}::uuid,${fixture.workspaceA}::uuid,${principal}::uuid,${fixture.owner}::uuid,'personal',ARRAY['read'],${receipt}::uuid,NULL,${renewal}::uuid)`),
+      {code:'23514'},'first binding requires a real matching token identity');
     const [linked] = await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id = ${connection}::uuid`;
     assert.equal(linked?.renewal_grant_id, renewal);
     // Store both independent terminal evidence and an optional deadline; this
@@ -2709,6 +2847,25 @@ test("owner cannot clear a deadline that passes while the grant lock is awaited"
   assert.equal(policy!.expired, true);
 });
 
+
+test("owner expiry between clock sample and eligibility keeps its reason; foreign and missing stay generic", {timeout:120_000}, async()=>{
+  const f=await seedHostedFixture(true);
+  const result=runHostedHarness<{positive:HarnessResult;owner:HarnessResult;foreign:HarnessResult;missing:HarnessResult;
+    sampled:number;elapsed:{deadline:string;now:string;elapsed:boolean};eligibilityRows:number;
+    before:unknown;ownerAfter:unknown;foreignAfter:unknown;missingAfter:unknown}>({
+      operation:"policy-eligibility-boundary",ownerJwt:f.ownerJwt,workspaceA:f.workspaceA,
+      workspaces:[f.workspaceA,f.workspaceB],grantId:f.grantA,foreignGrantId:f.grantB,missingGrantId:randomUUID() });
+  assert.equal(result.positive.status,200,'live verified owner can edit');
+  assert.ok(result.sampled<Date.parse(result.elapsed.deadline),'first database clock is before the stored deadline');
+  assert.equal(result.elapsed.elapsed,true);
+  assert.ok(Date.parse(result.elapsed.now)>=Date.parse(result.elapsed.deadline));
+  assert.equal(result.eligibilityRows,0,'actual live-policy resolver sees the elapsed deadline');
+  assert.deepEqual(result.owner,{status:403,body:{error:'connection_expired'}});
+  assert.deepEqual(result.foreign,{status:403,body:{error:'forbidden'}});
+  assert.deepEqual(result.missing,result.foreign,'foreign and missing targets have identical wire refusals');
+  for(const after of [result.ownerAfter,result.foreignAfter,result.missingAfter])
+    assert.deepEqual(after,result.before,'denial changes no policy, authority, event, audit or ledger row');
+});
 
 test("already-issued MCP JWT cannot read, write or check after canonical owner deadline", { timeout: 120_000 }, async () => {
   const f = await seedHostedFixture();
@@ -3533,60 +3690,62 @@ for(const role of ['owner','member'] as const) {
   });
 }
 
-test('human owner queue refreshes liveness after the actual queueFacts content row wait', {timeout:180_000}, async()=>{
-  const f=await ownerContentHttpFixture(),workspace=f.fixture.workspaceA;
-  const principal=randomUUID(),seat=randomUUID(),handle='seat_'+randomBytes(18).toString('base64url');
-  const http={ownerJwt:f.fixture.ownerJwt,workspaceId:workspace};
-  const grantLocker=await sql.reserve();let locked=false,pending:Promise<ContextHttpResult[]>|undefined;
-  let chosen='',blocker=0;
-  try {
-    const control=runHostedHarness<ContextHttpResult[]>(f.call([{name:'todo_create',arguments:{request_id:randomUUID(),title:'Queue clock control'}},
-      {name:'todo_queue',transport:'http',arguments:{principal_id:f.seat.body.principal_id}}],http),{databaseUrl:f.edgeUrl});
-    assert.equal(control[0]!.body.status,'committed');
-    const live=control[1]!.body.queue as {content_access:string;status:{facts:{connection:string}}};
-    assert.equal(live.status.facts.connection,'live');assert.equal(live.content_access,'read_write');
-    await sql`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
-      VALUES (${principal}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${'queue-clock-'+principal},'hosted_mcp',true)`;
-    await sql.begin(async streamLocker=>{
-      const [session]=await streamLocker`SELECT pg_backend_pid() AS pid`;
-      await streamLocker`SELECT stream_id FROM swarm.household_todo_streams WHERE workspace_id=${workspace}::uuid FOR UPDATE`;
-      pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([{name:'todo_queue',transport:'http',arguments:{principal_id:principal}}],http),f.edgeUrl);
-      void pending.catch(()=>{});
-      await observeHouseholdRowWait(Number(session!.pid),'SELECT stream_id,last_seq FROM swarm.household_todo_streams');
-      // The first candidate scan was empty. Publish a new synthetic seat while
-      // state() waits, so queueFacts itself must acquire its existing grant lock.
-      // No previously revoked handle/seat or historical marker is reopened.
-      const [date]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
+for (const interleaving of ['known-grant','publish-binding'] as const) {
+  test(`human owner queue refreshes liveness after ${interleaving} HTTP wait`, {timeout:180_000}, async()=>{
+    const f=await ownerContentHttpFixture(),workspace=f.fixture.workspaceA;
+    const http={ownerJwt:f.fixture.ownerJwt,workspaceId:workspace};
+    let pending:Promise<ContextHttpResult[]>|undefined;
+    try {
+      const control=runHostedHarness<ContextHttpResult[]>(f.call([
+        {name:'todo_create',arguments:{request_id:randomUUID(),title:'Queue clock control'}},
+        {name:'todo_queue',transport:'http',arguments:{principal_id:f.seat.body.principal_id}}],http),{databaseUrl:f.edgeUrl});
+      assert.equal(control[0]!.body.status,'committed');
+      const live=control[1]!.body.queue as {content_access:string;status:{facts:{connection:string}}};
+      assert.equal(live.status.facts.connection,'live');assert.equal(live.content_access,'read_write');
+      const principal=interleaving==='known-grant' ? String(f.seat.body.principal_id) : randomUUID();
+      if(interleaving==='publish-binding') await sql`INSERT INTO swarm.agent_principals
+        (principal_id,workspace_id,owner_user_id,name,transport,turn_only)
+        VALUES (${principal}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${'queue-clock-'+principal},'hosted_mcp',true)`;
+      const [date]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '10 seconds'
         WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
-      chosen=new Date(date!.connection_expires_at as string).toISOString();
-      await grantLocker.unsafe('BEGIN');locked=true;
-      const [grantSession]=await grantLocker`SELECT pg_backend_pid() AS pid`;blocker=Number(grantSession!.pid);
-      await grantLocker`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid FOR NO KEY UPDATE`;
-      await sql.begin(async fixture=>{
-        await fixture`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
-          VALUES (${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${principal}::uuid,${'queue-clock-'+principal},clock_timestamp())`;
-        await fixture`INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
-          VALUES (${handle},${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${principal}::uuid,clock_timestamp())`;
+      const chosen=new Date(date!.connection_expires_at as string).toISOString();
+      await sql.begin(async blocker=>{
+        const [session]=await blocker`SELECT pg_backend_pid() AS pid`;
+        if(interleaving==='known-grant')
+          await blocker`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid FOR UPDATE`;
+        else await blocker`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${workspace}::uuid FOR UPDATE`;
+        pending=runHostedHarnessAsync<ContextHttpResult[]>(f.call([
+          {name:'todo_queue',transport:'http',arguments:{principal_id:principal}}],http),f.edgeUrl);
+        void pending.catch(()=>{});
+        await observeHouseholdRowWait(Number(session!.pid),interleaving==='known-grant'
+          ? 'SELECT grant_id FROM swarm.hosted_mcp_grants' : 'SELECT workspace_id FROM swarm.workspaces');
+        const [before]=await blocker`SELECT clock_timestamp()<${chosen}::timestamptz AS future`;
+        assert.equal(before!.future,true,'the served request reached its canonical prefix wait before expiry');
+        if(interleaving==='publish-binding') {
+          // The publishing transaction already owns W. Publish before releasing
+          // that lock, so no FK insert waits behind the request's workspace UPDATE.
+          const seat=randomUUID(),handle='seat_'+randomBytes(18).toString('base64url');
+          await blocker`INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
+            VALUES (${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${principal}::uuid,${'queue-clock-'+principal},clock_timestamp())`;
+          await blocker`INSERT INTO swarm.hosted_mcp_seat_handles(handle,seat_id,grant_id,workspace_id,principal_id,created_at)
+            VALUES (${handle},${seat}::uuid,${f.fixture.grantA}::uuid,${workspace}::uuid,${principal}::uuid,clock_timestamp())`;
+        }
+        await awaitHouseholdDeadline(chosen);
       });
-    });
-    await observeHouseholdRowWait(blocker,'SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants');
-    const [before]=await sql`SELECT clock_timestamp()<${chosen}::timestamptz AS future`;
-    assert.equal(before!.future,true,'queueFacts reached the existing content wait before the chosen date');
-    await awaitHouseholdDeadline(chosen);
-    await grantLocker.unsafe('ROLLBACK');locked=false;
-    const result=(await pending!)[0]!;
-    const [after]=await sql`SELECT clock_timestamp()>=connection_expires_at AS elapsed,connection_expires_at
-      FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
-    assert.equal(after!.elapsed,true);assert.equal(new Date(after!.connection_expires_at as string).toISOString(),chosen);
-    assert.equal(result.status,200);assert.equal(result.body.status,'ok');
-    const queue=result.body.queue as {content_access:string;status:{facts:{connection:string}}};
-    assert.equal(queue.status.facts.connection,'connection_off','pre-wait queue clock would incorrectly report live');
-    assert.equal(queue.content_access,'none');
-  } finally {
-    if(locked)await grantLocker.unsafe('ROLLBACK');grantLocker.release();
-    if(pending)await pending.catch(()=>{});await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
-  }
-});
+      const result=(await pending!)[0]!;
+      const [after]=await sql`SELECT clock_timestamp()>=connection_expires_at AS elapsed,connection_expires_at
+        FROM swarm.hosted_mcp_grants WHERE grant_id=${f.fixture.grantA}::uuid`;
+      assert.equal(after!.elapsed,true);assert.equal(new Date(after!.connection_expires_at as string).toISOString(),chosen);
+      assert.equal(result.status,200);assert.equal(result.body.status,'ok');
+      const queue=result.body.queue as {content_access:string;status:{facts:{connection:string}}};
+      assert.equal(queue.status.facts.connection,'connection_off','fresh queue truth includes the published binding and elapsed policy');
+      assert.equal(queue.content_access,'none');
+    } finally {
+      if(pending)await pending.catch(()=>{});
+      await releaseSql.unsafe('ALTER ROLE commonswarm_edge PASSWORD NULL');
+    }
+  });
+}
 
 async function observeAllowGrantWait(blocker: number) {
   for(let attempt=0;attempt<400;attempt++) {

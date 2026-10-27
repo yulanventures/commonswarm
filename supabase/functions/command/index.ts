@@ -9959,6 +9959,27 @@ async function handleLocalConnectionExpiry(
   return {status:200,body:{status:"accepted",...response,...await localPolicyFields(tx,command.grant_id),events:[]}};
 }
 
+/** Routing proof for the stored owner's policy editor. Expiry is deliberately
+ * absent: it selects a refusal route, never authority to change expired policy. */
+async function hostedPolicyOwnerRoute(tx: Sql, grantId: string, owner: string): Promise<string | null> {
+  const [route] = await tx<{workspace_id:string}[]>`
+    SELECT c.workspace_id FROM swarm.hosted_mcp_grants g
+    JOIN swarm.hosted_mcp_grant_workspaces c ON c.grant_id=g.grant_id
+      AND c.owner_user_id=g.owner_user_id AND c.revoked_at IS NULL
+    JOIN swarm.workspaces w ON w.workspace_id=c.workspace_id AND w.archived_at IS NULL
+    JOIN swarm.memberships m ON m.workspace_id=c.workspace_id
+      AND m.user_id=g.owner_user_id AND m.revoked_at IS NULL
+    JOIN swarm.streams s ON s.workspace_id=c.workspace_id AND s.kind='workspace'
+    WHERE g.grant_id=${grantId}::uuid AND g.owner_user_id=${owner}::uuid
+      AND c.workspace_id=ANY(g.selected_workspace_ids)
+      AND g.state='active' AND g.revoked_at IS NULL
+      AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones t
+        WHERE (t.kind='membership' AND t.target_id=g.owner_user_id)
+          OR (t.kind='hosted_grant' AND t.target_id=g.grant_id))
+    ORDER BY (c.workspace_id=g.home_workspace_id) DESC,c.workspace_id LIMIT 1`;
+  return route?.workspace_id ?? null;
+}
+
 async function handleHostedManagement(
   tx: Sql,
   body: RequestBody,
@@ -9978,6 +9999,8 @@ async function handleHostedManagement(
 
   if (command.kind==="set_connection_expiry" && command.connection_kind==="renewal")
     return await handleLocalConnectionExpiry(tx,body,auth,command);
+  if (command.kind==='set_connection_expiry' && !auth.identityVerified)
+    return {status:403,body:{error:'forbidden'}};
 
   const preliminary = command.kind === "begin_hosted_mcp_grant"
     ? []
@@ -9987,6 +10010,10 @@ async function handleHostedManagement(
       LIMIT 1
     `;
   const preliminaryGrant = preliminary[0];
+  // Reject absent/foreign targets before target-dependent route discovery or waits.
+  if (command.kind !== 'begin_hosted_mcp_grant' &&
+      (!preliminaryGrant || preliminaryGrant.owner_user_id !== auth.actor.user))
+    return {status:403,body:{error:'forbidden'}};
   const routeWorkspaceId = command.kind === "begin_hosted_mcp_grant"
     ? command.home_workspace_id
     : command.kind === "consent_hosted_mcp_workspace"
@@ -9999,12 +10026,7 @@ async function handleHostedManagement(
         LIMIT 1
       `)[0]?.workspace_id ?? null
     : command.kind === "set_connection_expiry" && preliminaryGrant
-    ? (await tx<{ workspace_id: string }[]>`
-        SELECT a.workspace_id FROM unnest(${preliminaryGrant.selected_workspace_ids}::uuid[]) selected(workspace_id)
-        CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
-          ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
-        ORDER BY (a.workspace_id=${preliminaryGrant.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1
-      `)[0]?.workspace_id ?? null
+    ? await hostedPolicyOwnerRoute(tx, command.grant_id, auth.actor.user)
     : preliminaryGrant?.home_workspace_id ?? null;
   if (routeWorkspaceId === null || body.workspace_id !==
       (command.kind === "set_connection_expiry" ? preliminaryGrant?.home_workspace_id : routeWorkspaceId)) {
@@ -10025,11 +10047,8 @@ async function handleHostedManagement(
       SELECT workspace_id,principal_id FROM swarm.hosted_mcp_seats
       WHERE seat_id=${command.seat_id}::uuid AND grant_id=${command.grant_id}::uuid` : [];
     if (seats.some(seat=>seat.workspace_id!==routeWorkspaceId)) throw new LocalAuthDiscoveryChanged();
-    const eligible = command.kind==='set_connection_expiry' && current ? (await tx<{workspace_id:string}[]>`
-      SELECT a.workspace_id FROM unnest(${current.selected_workspace_ids}::uuid[]) selected(workspace_id)
-      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
-        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
-      ORDER BY (a.workspace_id=${current.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`)[0]?.workspace_id : null;
+    const eligible = command.kind==='set_connection_expiry' && current
+      ? await hostedPolicyOwnerRoute(tx, command.grant_id, auth.actor.user!) : null;
     if (command.kind==='set_connection_expiry' && eligible!==routeWorkspaceId) throw new LocalAuthDiscoveryChanged();
     const workspaces=command.kind==='activate_hosted_mcp_grant'
       ? [routeWorkspaceId,...(current?.selected_workspace_ids ?? [])] : [routeWorkspaceId];
@@ -10144,16 +10163,31 @@ async function handleHostedManagement(
        (grant.connection_expires_at !== null && grant.connection_expires_at.getTime() <= frame.now))) {
     return { status: 403, body: { error: "connection_expired" } };
   }
+  // An empty live-policy resolver can mean that the stored deadline elapsed
+  // after freshRoute. Re-prove the verified owner's refusal route, then sample
+  // the database clock again. This classification never authorizes a write.
+  const policyRefusal = async (): Promise<HttpResult> => {
+    if (command.kind === "set_connection_expiry" && auth.identityVerified &&
+        grant?.home_workspace_id === body.workspace_id &&
+        await hostedPolicyOwnerRoute(tx, command.grant_id, auth.actor.user!) === route.workspaceId) {
+      const [policy] = await tx<{ expired: boolean }[]>`SELECT connection_expired_at IS NOT NULL OR
+        (connection_expires_at IS NOT NULL AND connection_expires_at<=clock_timestamp()) OR
+        (${grant.connection_expires_at}::timestamptz IS NOT NULL AND
+          ${grant.connection_expires_at}::timestamptz<=clock_timestamp()) AS expired
+        FROM swarm.hosted_mcp_grants
+        WHERE grant_id=${command.grant_id}::uuid AND owner_user_id=${auth.actor.user}::uuid`;
+      if (policy?.expired) return { status: 403, body: { error: "connection_expired" } };
+    }
+    return { status: 403, body: { error: "forbidden" } };
+  };
   if (command.kind === "set_connection_expiry") {
-    const [eligible] = await tx<{ workspace_id: string }[]>`
-      SELECT a.workspace_id FROM unnest(${grant!.selected_workspace_ids}::uuid[]) selected(workspace_id)
-      CROSS JOIN LATERAL swarm.resolve_hosted_grant_authorization(
-        ${command.grant_id}::uuid,${auth.actor.user}::uuid,selected.workspace_id,'claim_hosted_seat') a
-      ORDER BY (a.workspace_id=${grant!.home_workspace_id}::uuid) DESC,a.workspace_id LIMIT 1`;
+    const [eligible] = await tx<{workspace_id:string}[]>`SELECT workspace_id
+      FROM swarm.resolve_hosted_grant_authorization(
+        ${command.grant_id}::uuid,${auth.actor.user}::uuid,${route.workspaceId}::uuid,'claim_hosted_seat')`;
     if (!auth.identityVerified || eligible?.workspace_id !== route.workspaceId ||
         grant!.home_workspace_id !== body.workspace_id ||
         !routeRow.live_member || routeRow.archived_at !== null) {
-      return { status: 403, body: { error: "forbidden" } };
+      return await policyRefusal();
     }
     if (command.connection_expires_at !== null && Date.parse(command.connection_expires_at) <= frame.now) {
       return { status: 400, body: { error: "invalid_connection_expiry" } };
@@ -10178,11 +10212,14 @@ async function handleHostedManagement(
         NOT EXISTS(SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
           WHERE NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_workspaces c
             WHERE c.grant_id=${command.grant_id}::uuid AND c.workspace_id=r.workspace_id AND c.revoked_at IS NULL)))
+      AND (NOT ${command.kind==='set_connection_expiry'}::boolean OR
+        EXISTS(SELECT 1 FROM swarm.resolve_hosted_grant_authorization(
+          ${command.grant_id}::uuid,${auth.actor.user}::uuid,${route.workspaceId}::uuid,'claim_hosted_seat')))
       AND (${grant?.connection_expires_at ?? null}::timestamptz IS NULL OR
         ${grant?.connection_expires_at ?? null}::timestamptz>clock_timestamp())
       AND (${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz IS NULL OR
         ${command.kind==='set_connection_expiry' ? command.connection_expires_at : null}::timestamptz>clock_timestamp()) AS ok`;
-    if (!fresh?.ok) throw new LocalCommandRefused({status:403,body:{error:'forbidden'}});
+    if (!fresh?.ok) throw new LocalCommandRefused(await policyRefusal());
   };
   const hash = await hostedRequestHash("user", auth.actor.user, body);
   const consentRows = grant === null || !['consent_hosted_mcp_workspace','activate_hosted_mcp_grant'].includes(command.kind) ? [] : await tx<{ workspace_id: string }[]>`
@@ -10299,6 +10336,10 @@ async function handleHostedManagement(
           OR ${command.connection_expires_at}::timestamptz > clock_timestamp())
       RETURNING grant_id`;
     if (changed.length !== 1) {
+      const [policy]=await tx<{expired:boolean}[]>`SELECT connection_expired_at IS NOT NULL OR
+        (connection_expires_at IS NOT NULL AND connection_expires_at<=clock_timestamp()) AS expired
+        FROM swarm.hosted_mcp_grants WHERE grant_id=${command.grant_id}::uuid`;
+      if (policy?.expired) return {status:403,body:{error:'connection_expired'}};
       return { status: 403, body: { error: "connection_expiry_unavailable" } };
     }
   }
@@ -10947,6 +10988,10 @@ async function handleTransaction(
       // handler checks stored ownership even after membership loss or archive.
       if (!verifiedHuman || !localWorkspace || kind==='accept_invitation'
         || kind==='revoke_hosted_mcp_grant') return 'allowed';
+      // This editor derives surviving selected tenancy from stored ownership in
+      // its handler; the submitted home workspace need not retain membership.
+      if (kind==='set_connection_expiry' && rawLocal?.connection_kind==='hosted'
+          && parseHostedManagementCommand(body.command)?.kind==='set_connection_expiry') return 'allowed';
       const [admission]=await tx<{role:string}[]>`SELECT m.role FROM swarm.memberships m
         JOIN swarm.workspaces w USING(workspace_id)
         WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
@@ -10954,7 +10999,7 @@ async function handleTransaction(
       if (!admission) return 'forbidden';
       if (['remove_member','change_role','archive_workspace'].includes(kind)
         && !['owner','admin'].includes(admission.role))
-        return kind==='change_role' ? 'forbidden' : 'business-refusal';
+        return 'business-refusal';
       const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;
       if (targetPrincipal && ['mint_agent_token','revoke_agent_principal','set_agent_model','disable_agent_session','recover_agent_session'].includes(kind)) {
         const [target]=await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.agent_principals
@@ -11085,7 +11130,7 @@ async function handleTransaction(
           || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
         ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
         ...(revocation ? {revocation}:{}),
-        memberTargets:removeUser ? [removeUser] : kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+        memberTargets:removeUser ? [removeUser] : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
         principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
           : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
         sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',

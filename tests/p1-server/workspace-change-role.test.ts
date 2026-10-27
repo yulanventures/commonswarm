@@ -468,11 +468,24 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
   assertRejected(demoteSelf, "last_owner", "last Owner cannot be demoted");
   assert.equal((await liveRoles(f.workspaceA))[f.owner.id], "owner");
 
-  const plainCaller = await postChange(f.plain.jwt, f.workspaceA, {
-    kind: "change_role",
-    user_id: f.promoted.id,
-    role: "member",
-  });
+  let memberRequest: Promise<CommandResult> | undefined;
+  let plainCaller: CommandResult;
+  try {
+    plainCaller = await sql.begin(async blocker => {
+      // Admission must reach the actor's domain refusal without locking the
+      // submitted target. Changing only admission would park on this U row.
+      await blocker`SELECT user_id FROM swarm.users WHERE user_id=${f.promoted.id}::uuid FOR UPDATE`;
+      memberRequest=postChange(f.plain.jwt, f.workspaceA, {
+        kind: "change_role", user_id: f.promoted.id, role: "member",
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([memberRequest,new Promise<never>((_,reject)=>{
+          timer=setTimeout(()=>reject(new Error('member role refusal waited on unauthorized target')),5_000);
+        })]);
+      } finally { if(timer)clearTimeout(timer); }
+    });
+  } finally { if(memberRequest)await memberRequest.catch(()=>{}); }
   assertRejected(
     plainCaller,
     "role_forbidden",

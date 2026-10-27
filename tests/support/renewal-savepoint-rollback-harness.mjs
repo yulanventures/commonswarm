@@ -34,6 +34,7 @@ Deno.serve = (handler) => {
 const out = { tree, mode, source:config?.source ? {commit:config.source.commit,tree:config.source.tree} : null,
   read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
 const sqlstate = (e) => (e && typeof e === 'object' && typeof e.code === 'string' && /^[0-9A-Z]{5}$/u.test(e.code) ? e.code : 'non_sql');
+const safeName = value => typeof value==='string' && /^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(value) ? value : null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const id = () => crypto.randomUUID();
 const logLines = async (needle) => serverLog ? (await Deno.readTextFile(serverLog)).split('\n').filter((l) => l.includes(needle)) : [];
@@ -58,9 +59,30 @@ try {
   const authTypes = await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
   let discoveryRetries = 0;
   const commandCodes = [];
+  const commandExceptions = [];
+  const exceptionDiagnostic = error => {
+    const code=sqlstate(error),identity=error?.constructor?.name;
+    const discovery=error instanceof authTypes.LocalAuthDiscoveryChanged && code==='40001'
+      && error.detail==='LOCAL_AUTH_DISCOVERY_CHANGED';
+    const credential=error instanceof authTypes.LocalCredentialDenied && error.credentialInvalid===true;
+    // The command refusal class is private. Name its constructor and exact
+    // result shape for diagnosis only; this grants no exemption to an assertion.
+    const commandRefusal=error instanceof Error && identity==='LocalCommandRefused'
+      && error.result?.status===401 && error.result?.body?.error==='unauthenticated'
+      && Object.keys(error.result.body).length===1;
+    return {category:discovery ? 'owned_discovery_retry'
+      : code!=='non_sql' ? 'real_or_unowned_sql_failure'
+      : credential || commandRefusal ? 'expected_owned_refusal_rollback' : 'unexpected_non_sql',
+      identity:discovery ? 'LocalAuthDiscoveryChanged' : credential ? 'LocalCredentialDenied'
+        : commandRefusal ? 'LocalCommandRefused' : identity==='PostgresError' ? 'PostgresError' : 'unexpected',
+      identity_proof:discovery || credential ? 'instanceof' : commandRefusal ? 'private_constructor_and_exact_result' : 'unowned',
+      sqlstate:code==='non_sql' ? null : code,constraint:safeName(error?.constraint_name),
+      detail:discovery ? 'LOCAL_AUTH_DISCOVERY_CHANGED' : null,
+      status:commandRefusal ? 401 : null,reason:commandRefusal || credential ? 'unauthenticated' : null};
+  };
   const begin = command.db.begin;
   command.db.begin = function (...args) {
-    return begin.apply(this, args).catch((error) => { commandCodes.push(sqlstate(error)); if(error instanceof authTypes.LocalAuthDiscoveryChanged) discoveryRetries++; throw error; });
+    return begin.apply(this, args).catch((error) => { commandCodes.push(sqlstate(error)); commandExceptions.push(exceptionDiagnostic(error)); if(error instanceof authTypes.LocalAuthDiscoveryChanged) discoveryRetries++; throw error; });
   };
   const { CLIENT_PROTOCOL_VERSION } = await import(`${tree}/src/cloud/config.ts`);
   const {HOUSEHOLD_LOCAL_SEAT}=await import(`${tree}/supabase/functions/_shared/protocol.js`);
@@ -1202,6 +1224,7 @@ try {
     await observer.unsafe(`CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(130013, ${gateKey}); RETURN NEW; END $$`);
     await observer.unsafe(`CREATE TRIGGER ${fn} AFTER UPDATE OF last_used_at ON swarm.renewal_grants FOR EACH ROW WHEN (NEW.renewal_grant_id = '${s.grant}'::uuid) EXECUTE FUNCTION public.${fn}()`);
     const before=await snapshot(),state0=await seatState(s),code0=commandCodes.length;
+    const exception0=commandExceptions.length;
     let reader,renewal;
     try {
       // The real reader owns W/P/G/T and has stamped S1. Park it before
@@ -1220,6 +1243,21 @@ try {
         token_before_workspace:observed[0]?.token_before_workspace??null,command_sqlstates:commandCodes.slice(code0),
         read_response:shape(readResponse),response:shape(response),state_before:state0,state_after:await seatState(s),rows:diff(before,after),
         successor_still_works:shape(await readAs(rawS1)),retry_predecessor:shape(await renew(s.raw,C))};
+      const v=out.results.real_read,exceptions=commandExceptions.slice(exception0);
+      const categories=Object.fromEntries(['owned_discovery_retry','expected_owned_refusal_rollback',
+        'real_or_unowned_sql_failure','unexpected_non_sql'].map(category=>[category,exceptions.filter(e=>e.category===category).length]));
+      const responseMetadata=response=>({status:response.status,
+        reason:safeName(response.body?.error) ?? safeName(response.body?.reason)});
+      const durable={};
+      for(const failure of v.state_after.command_failures_renew.slice(v.state_before.command_failures_renew.length)) {
+        const [reason,code]=failure.split('/');
+        const key=JSON.stringify({reason:safeName(reason),sqlstate:/^[0-9A-Z]{5}$/.test(code) ? code : null});
+        durable[key]=(durable[key]??0)+1;
+      }
+      out.diagnostics={revocation_retry:responseMetadata(out.results.revocation.retry_same_command_id.response),
+        real_read:{response:responseMetadata(v.response),retry:responseMetadata(v.retry_predecessor),
+        reader:responseMetadata(v.read_response),categories,exceptions:exceptions.slice(0,24),
+        omitted:Math.max(0,exceptions.length-24),durable_failures:Object.entries(durable).slice(0,24).map(([key,count])=>({...JSON.parse(key),count}))}};
     } finally {
       await gate`SELECT pg_advisory_unlock(130013,${gateKey}::int)`;
       if(reader) await reader;if(renewal) await renewal;
@@ -1282,6 +1320,9 @@ try {
   out.stage = 'complete';
   await observer.end();
 } catch (error) {
+  out.failure_diagnostic={category:sqlstate(error)==='non_sql' ? 'unexpected_non_sql' : 'real_or_unowned_sql_failure',
+    identity:error?.constructor?.name==='PostgresError' ? 'PostgresError' : 'unexpected',
+    sqlstate:sqlstate(error)==='non_sql' ? null : sqlstate(error),constraint:safeName(error?.constraint_name)};
   out.error = sqlstate(error) !== 'non_sql' ? sqlstate(error) : (typeof error?.code === 'string' ? error.code : 'non_sql');
   out.error_name = error?.name ?? null;
 }

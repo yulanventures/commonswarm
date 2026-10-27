@@ -486,31 +486,33 @@ test("perpetual standing renewal has no idle gate and chosen expiry stays termin
     const f=await seed(sql);
     await sql`UPDATE swarm.renewal_grants SET last_used_at=clock_timestamp()-interval '90 days'
       WHERE renewal_grant_id=${f.grant}::uuid`;
-    const prepare=()=>sql.begin(async tx=>{
+    const prepare=(seat=f)=>sql.begin(async tx=>{
       await tx`SET LOCAL ROLE swarm_command`;
-      await tx`SELECT user_id FROM swarm.users WHERE user_id=${f.user}::uuid FOR NO KEY UPDATE`;
-      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${f.workspace}::uuid FOR SHARE`;
-      await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${f.workspace}::uuid AND user_id=${f.user}::uuid FOR SHARE`;
-      await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${f.principal}::uuid FOR SHARE`;
-      await tx`SELECT run_id FROM swarm.agent_runs WHERE run_id=${f.run}::uuid FOR SHARE`;
-      await tx`SELECT device_id FROM swarm.devices WHERE device_id=${f.device}::uuid FOR SHARE`;
-      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid FOR UPDATE`;
-      await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid FOR UPDATE`;
-      const [result]=await tx`SELECT swarm.prepare_renewal_grant(${f.grant}::uuid,${f.device}::uuid) AS code`;
+      await tx`SELECT user_id FROM swarm.users WHERE user_id=${seat.user}::uuid FOR NO KEY UPDATE`;
+      await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${seat.workspace}::uuid FOR SHARE`;
+      await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${seat.workspace}::uuid AND user_id=${seat.user}::uuid FOR SHARE`;
+      await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${seat.principal}::uuid FOR SHARE`;
+      await tx`SELECT run_id FROM swarm.agent_runs WHERE run_id=${seat.run}::uuid FOR SHARE`;
+      await tx`SELECT device_id FROM swarm.devices WHERE device_id=${seat.device}::uuid FOR SHARE`;
+      await tx`SELECT renewal_grant_id FROM swarm.renewal_grants WHERE renewal_grant_id=${seat.grant}::uuid FOR UPDATE`;
+      await tx`SELECT token_id FROM swarm.agent_tokens WHERE token_id=${seat.tokenId}::uuid FOR UPDATE`;
+      const [result]=await tx`SELECT swarm.prepare_renewal_grant(${seat.grant}::uuid,${seat.device}::uuid) AS code`;
       return result!.code;
     });
     assert.equal(await prepare(),null,"ninety idle days require no resume");
     const [live]=await sql`SELECT suspension_active,suspended_at,connection_expired_at FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
     assert.deepEqual(live,{suspension_active:false,suspended_at:null,connection_expired_at:null});
-    await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${f.grant}::uuid`;
-    assert.equal(await prepare(),null,"historical automatic idle suspension adds no resume ceremony");
-    const [history]=await sql`SELECT suspended_at,resumed_at,resumed_by FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
-    assert.ok(history!.suspended_at instanceof Date,"historical idle record is retained");
-    assert.equal(history!.resumed_at,null);assert.equal(history!.resumed_by,null,"no fictional human resume");
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day' WHERE renewal_grant_id=${f.grant}::uuid`;
-    assert.equal(await prepare(),null,"a future chosen date also ignores technical idle history");
+    assert.equal(await prepare(),null,"a future chosen date has no idle gate");
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=NULL WHERE renewal_grant_id=${f.grant}::uuid`;
     assert.equal(await prepare(),null,"clearing a live future policy requires no resume");
+    const paused=await seed(sql);
+    await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${paused.grant}::uuid`;
+    assert.equal(await prepare(paused),'renewal_grant_suspended','legacy pauses require explicit human recovery');
+    const [history]=await sql`SELECT suspension_active,suspended_at,resumed_at,resumed_by,resume_count
+      FROM swarm.renewal_grants WHERE renewal_grant_id=${paused.grant}::uuid`;
+    assert.equal(history!.suspension_active,true);assert.ok(history!.suspended_at instanceof Date);
+    assert.equal(history!.resumed_at,null);assert.equal(history!.resumed_by,null);assert.equal(history!.resume_count,0);
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${f.grant}::uuid`;
     assert.equal(await prepare(),'renewal_grant_revoked');
     await sql`UPDATE swarm.renewal_grants SET connection_expires_at=NULL WHERE renewal_grant_id=${f.grant}::uuid`;
@@ -615,6 +617,16 @@ test("long rotation history renews and reads; unrelated workspace history cannot
         body:JSON.stringify({command_id:randomUUID(),client_version:"0.1.0",workspace_id:f.workspace,stream:{kind:"workspace"},command})});
       return {status:response.status,body:await response.json() as Record<string,unknown>};
     };
+    await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${f.grant}::uuid`;
+    const resumed=await call(owner.jwt,{kind:'resume_renewal_grant',renewal_grant_id:f.grant});
+    assert.equal(resumed.status,200);assert.equal(resumed.body.status,'accepted');
+    const [recovery]=await sql`SELECT suspension_active,resumed_by,resume_count,resumed_at>suspended_at AS later
+      FROM swarm.renewal_grants WHERE renewal_grant_id=${f.grant}::uuid`;
+    assert.deepEqual(recovery,{suspension_active:false,resumed_by:owner.user,resume_count:1,later:true});
+    const [resumeAudit]=await sql`SELECT count(*)::int AS n FROM swarm.audit_log
+      WHERE workspace_id=${f.workspace}::uuid AND actor_user=${owner.user}::uuid
+        AND command_kind='resume_renewal_grant' AND outcome='accepted'`;
+    assert.equal(resumeAudit!.n,1,'one explicit human recovery is audited');
     const keeperConsent=await call(keeper.jwt,{kind:'household_permissions',purpose:'shared',content_role:'editor'});
     assert.equal(keeperConsent.body.status,'committed');
     const originalAllow=await call(owner.jwt,{kind:'household_permissions',purpose:'shared',content_role:'editor',
@@ -685,6 +697,9 @@ test("long rotation history renews and reads; unrelated workspace history cannot
         AND a.detail::jsonb->'after'->'operations'='["read","create","update"]'::jsonb) AS retained`;
     assert.equal(decisionHistory!.retained,true,'same-bearer widening retains its prior permission and receipt snapshot');
     const created=await createTodo(liveRaw,'explicit widening control');
+    const safeReason=(value:unknown)=>typeof value==='string' && /^[a-z][a-z0-9_]{0,79}$/.test(value) ? value : null;
+    process.stdout.write(`R14_WIDENING_DIAGNOSTIC ${JSON.stringify({status:created.status,
+      result:safeReason(created.body.status),reason:safeReason(created.body.reason),error:safeReason(created.body.error)})}\n`);
     assert.equal(created.body.status,'committed');
     const [{n}]=await sql`SELECT count(*)::int AS n FROM swarm.household_todos
       WHERE workspace_id=${f.workspace}::uuid AND title='explicit widening control'`;

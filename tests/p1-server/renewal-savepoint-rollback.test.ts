@@ -60,7 +60,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
     const line = stdout.split("\n").find((entry) => entry.startsWith("R13_PROBE "));
     assert.ok(line, `probe did not report: exit=${exit.code}, signal=${exit.signal}`);
     const result = JSON.parse(line.slice("R13_PROBE ".length)) as {
-      stage: string; error?: string; verdict?: string; tables_counted: number;
+      stage: string; error?: string; verdict?: string; tables_counted: number; diagnostics?: unknown; failure_diagnostic?: unknown;
       source?: {commit: string; tree: string} | null;
       read_source?: {commit: string; tree: string} | null;
       hook_sleep?: string | null;
@@ -69,6 +69,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       checks?: { name: string; ok: boolean }[];
     };
     process.stdout.write(`ACTIVE_FLOOR_RENEWAL_SOURCE ${JSON.stringify({generation,readGeneration,mode,source:result.source,read_source:result.read_source})}\n`);
+    if(mode==='real_read') process.stdout.write(`R18_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,mode,diagnostics:result.diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
     if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
     assert.equal(exit.signal, null, "a signalled child cannot supply proof");
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);
