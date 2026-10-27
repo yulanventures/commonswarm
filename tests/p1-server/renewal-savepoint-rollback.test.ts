@@ -67,8 +67,11 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       unused_root_baseline?: {commit: string; tree: string} | null;
       active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
       checks?: { name: string; ok: boolean }[];
+      contract_diagnostics?: unknown;
     };
     process.stdout.write(`ACTIVE_FLOOR_RENEWAL_SOURCE ${JSON.stringify({generation,readGeneration,mode,source:result.source,read_source:result.read_source})}\n`);
+    if(mode==='permanence') process.stdout.write(`R8_CONTRACT_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,
+      contracts:result.contract_diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
     if(mode==='real_read' || result.stage!=='complete') process.stdout.write(`R18_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,mode,diagnostics:result.diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
     if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
     assert.equal(exit.signal, null, "a signalled child cannot supply proof");
@@ -104,6 +107,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
         'unused-root admission starts unused expired and bound',
         'unused-root concurrency owned grant wait','unused-root concurrency distinct PID waits on first recovery',
         'unused-root concurrent live successor authenticates','unused-root concurrent used successor wins',
+        'decided rejection fixture has a genuine unused successor','decided rejection waits at its real final ledger write',
         'unused-root-session-missing','unused-root-session-wrong-key','unused-root-session-valid',
         'unused-root discovery change owned workspace wait','unused-root discovery change retries whole transaction',
         'unused-root removal owned membership wait','unused-root removal wins without effects',

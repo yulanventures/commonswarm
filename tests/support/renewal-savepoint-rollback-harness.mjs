@@ -22,8 +22,16 @@ Deno.env.set('SUPABASE_URL', 'http://lock-order.invalid');
 Deno.env.set('SUPABASE_ANON_KEY', 'lock-order-no-api');
 Deno.env.set('SWARM_COMMAND_ALLOWED_ORIGINS', 'https://commonswarm.com');
 let httpRefused = 0;
-globalThis.fetch = async () => {
+const httpRefusals = [];
+let httpControl = 'outside-refusal-control';
+globalThis.fetch = async (input) => {
   httpRefused += 1;
+  // No URL, query, headers, token, or error text leaves this tripwire.
+  let authUser = false;
+  try { const url = new URL(input instanceof Request ? input.url : String(input));
+    authUser = url.origin === 'http://lock-order.invalid' && url.pathname === '/auth/v1/user';
+  } catch { /* only the allowlisted classification is retained */ }
+  if (httpRefusals.length < 8) httpRefusals.push({control:httpControl, configured_auth_user:authUser});
   throw new TypeError('probe has no network access');
 };
 const served = [];
@@ -33,6 +41,17 @@ Deno.serve = (handler) => {
 };
 const out = { tree, mode, source:config?.source ? {commit:config.source.commit,tree:config.source.tree} : null,
   read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
+const diagnosedContracts = [
+  'unused-root-parent-token-scope','unused-root-parent-principal-scope',
+  'unused-root-wrong-creator-denied-without-effects','unused-root-wrong-family-denied-without-effects',
+  'unused-root date crossing adoption wait rolls back stamp',
+  'decided rejection waits at its real final presence write',
+  'decided rejection waits at its real final ledger write',
+  'date crossing during refusal wait overrides decided commit',
+  'converted elapsed family is denied by runtime','converted revoked family is denied by runtime',
+  'no external authentication or HTTP mocks',
+];
+if (mode === 'permanence') out.contract_diagnostics = Object.fromEntries(diagnosedContracts.map(name => [name,{ran:false}]));
 const sqlstate = (e) => (e && typeof e === 'object' && typeof e.code === 'string' && /^[0-9A-Z]{5}$/u.test(e.code) ? e.code : 'non_sql');
 const safeName = value => typeof value==='string' && /^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(value) ? value : null;
 // Only harness-owned labels and allowlisted database metadata leave the probe.
@@ -289,7 +308,10 @@ try {
   if(mode==='permanence') {
     out.stage='permanence';
     const checks=[];
-    const check=(name,ok)=>{checks.push({name,ok:Boolean(ok)});lastCheck=name;completedChecks=checks.length;};
+    const check=(name,ok,observed={})=>{
+      checks.push({name,ok:Boolean(ok)});lastCheck=name;completedChecks=checks.length;
+      if (Object.hasOwn(out.contract_diagnostics,name)) out.contract_diagnostics[name]={ran:true,ok:Boolean(ok),observed};
+    };
     // Ordinary unused expiry must remain a refusal even after the separate
     // permanent-root change. Pair with a real live read under the same policy.
     const ordinaryControl=await seat('ordinary-live',true,null,'timeboxed');
@@ -505,8 +527,9 @@ try {
       const bad=await seat(`unused-${variant}`,false,undefined,'standing',options);
       await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bad.t0}::uuid`;
       const before=await seatState(bad),denied=await renew(bad.raw,id());
+      const stateUnchanged=JSON.stringify(before)===JSON.stringify(await seatState(bad));
       check(`unused-root-${variant}-denied-without-effects`,denied.status===403
-        && JSON.stringify(before)===JSON.stringify(await seatState(bad)));
+        && stateUnchanged,{status:denied.status,credential_returned:credential(denied)!==null,state_unchanged:stateUnchanged});
     }
     // Reuse admin-schema-db's installed-table fixture shape, with real parent
     // liveness/scope routines and command auth. Cover both ancestry owners.
@@ -527,9 +550,11 @@ try {
       if(policy==='withdrawn') await observer`UPDATE swarm.admin_grants SET withdrawn_workspace_ids=ARRAY[${W}::uuid] WHERE grant_id=${parent}::uuid`;
       if(policy==='scope') await observer`UPDATE swarm.admin_grants SET worker_scope_ceiling=ARRAY[]::text[] WHERE grant_id=${parent}::uuid`;
       const before=await seatState(fixture),response=await renew(fixture.raw,id());
+      const stateUnchanged=JSON.stringify(before)===JSON.stringify(await seatState(fixture));
       check(`unused-root-parent-${slot}-${policy}`,policy==='live'
         ? response.status===200 && credential(response)!==null
-        : response.status===403 && JSON.stringify(before)===JSON.stringify(await seatState(fixture)));
+        : response.status===403 && stateUnchanged,
+        {status:response.status,credential_returned:credential(response)!==null,state_unchanged:stateUnchanged});
     }
     // Session validation owns stamp rollback before issuance, a different
     // contract from the unmanaged and used-token baseline session controls.
@@ -616,19 +641,23 @@ try {
     const crossingBefore=await seatState(crossing);
     await observer.unsafe(`CREATE FUNCTION public.${clockFn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(130014, ${clockKey}); RETURN NEW; END $$`);
     await observer.unsafe(`CREATE TRIGGER ${clockFn} AFTER UPDATE OF first_used_at ON swarm.agent_tokens FOR EACH ROW WHEN (OLD.token_id='${crossing.t0}'::uuid AND OLD.first_used_at IS NULL AND NEW.first_used_at IS NOT NULL) EXECUTE FUNCTION public.${clockFn}()`);
-    let crossingPending;
+    let crossingPending,crossingWaiter=0;
     try {
       await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds' WHERE renewal_grant_id=${crossing.grant}::uuid`;
       await observer.begin(async tx=>{
         const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
         await tx`SELECT pg_advisory_xact_lock(130014,${clockKey}::int)`;
         crossingPending=renew(crossing.raw,id());
-        check('unused-root final-clock fixture reaches actual adoption wait',await waitBlockedBy(pid,100)>0);
+        crossingWaiter=await waitBlockedBy(pid,100);
+        check('unused-root final-clock fixture reaches actual adoption wait',crossingWaiter>0);
         await sleep(3200);
       });
       const denied=await crossingPending;
+      const crossingAfter=await seatState(crossing);
       check('unused-root date crossing adoption wait rolls back stamp',denied.status===403
-        && JSON.stringify(crossingBefore)===JSON.stringify(await seatState(crossing)));
+        && JSON.stringify(crossingBefore)===JSON.stringify(crossingAfter),
+        {status:denied.status,wait_observed:crossingWaiter>0,state_unchanged:JSON.stringify(crossingBefore)===JSON.stringify(crossingAfter),
+          root_used:crossingAfter.tokens.find(t=>t.token==='T0')?.used,token_count:crossingAfter.tokens.length});
     } finally {
       if(crossingPending) await crossingPending;
       await observer.unsafe(`DROP TRIGGER ${clockFn} ON swarm.agent_tokens`);
@@ -664,21 +693,45 @@ try {
     const replay=await renew(interrupted.raw,interruptedId);
     check('unused-root used successor prevents root secret replay',[401,403].includes(replay.status) && credential(replay)===null
       && (await seatState(interrupted)).tokens.length===3);
-    // A final effect wait must still defeat the new domain-commit path.
+    // A rejected renewal skips presence. Gate its real ledger INSERT instead;
+    // its final credential recheck must defeat the decided-commit path.
     const late=await seat('refusal-final-wait');
-    await renew(late.raw,id()); // establish presence so the final write can wait
     const lateIssue=await renew(late.raw,id()),lateRaw=credential(lateIssue);
+    const lateInitial=await seatState(late);
+    const unusedSuccessor=lateInitial.tokens.find(t=>t.token===JSON.parse(lateIssue.text).token_id)?.used===false;
+    check('decided rejection fixture has a genuine unused successor',lateIssue.status===200 && lateRaw!==null && unusedSuccessor);
+    if(lateRaw===null || !unusedSuccessor) throw Object.assign(new Error('refusal_fixture'),{code:'REFUSAL_FIXTURE_NO_CREDENTIAL'});
+    const lateCommand=id(),lateFn=`refusal_clock_${tag}`,lateKey=Math.floor(Math.random()*1000000000);
+    await observer.unsafe(`CREATE FUNCTION public.${lateFn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(130015, ${lateKey}); RETURN NEW; END $$`);
+    await observer.unsafe(`CREATE TRIGGER ${lateFn} AFTER INSERT ON swarm.idempotency_keys FOR EACH ROW WHEN (NEW.command_id='${lateCommand}' AND NEW.response->>'ok'='false' AND NEW.response->>'reason'='predecessor_pending_first_use') EXECUTE FUNCTION public.${lateFn}()`);
+    out.contract_diagnostics['decided rejection waits at its real final presence write']={ran:false,
+      replaced_by:'decided rejection waits at its real final ledger write',reason:'rejected_renewal_skips_presence'};
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
       WHERE renewal_grant_id=${late.grant}::uuid`;
-    const lateBefore=await seatState(late),lateDatabaseBefore=await snapshot();let latePending;
-    await observer.begin(async tx=>{
-      const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
-      await tx`SELECT principal_id FROM swarm.agent_presence WHERE principal_id=${late.principal}::uuid FOR UPDATE`;
-      latePending=renew(lateRaw,id());
-      check('decided rejection waits at its real final presence write',await waitBlockedBy(pid,100)>0);
-      await sleep(3200);
-    });
-    check('date crossing during refusal wait overrides decided commit',(await latePending).status===403);
+    const lateBefore=await seatState(late),lateDatabaseBefore=await snapshot();let latePending,lateWaiter=0;
+    try {
+      await observer.begin(async tx=>{
+        const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
+        await tx`SELECT pg_advisory_xact_lock(130015,${lateKey}::int)`;
+        httpControl='decided-refusal-ledger-wait';
+        latePending=renew(lateRaw,lateCommand);
+        lateWaiter=await waitBlockedBy(pid,100);
+        const ledgerWait=lateWaiter>0 && (await waitDetail(lateWaiter)).statement?.includes('swarm.idempotency_keys');
+        check('decided rejection waits at its real final ledger write',ledgerWait,
+          {wait_observed:lateWaiter>0,ledger_statement:ledgerWait===true,credential_present:lateRaw!==null});
+        await sleep(3200);
+      });
+      const lateResponse=await latePending,lateAfter=await seatState(late);
+      check('date crossing during refusal wait overrides decided commit',lateResponse.status===403,
+        {status:lateResponse.status,wait_observed:lateWaiter>0,state_unchanged:JSON.stringify(lateBefore)===JSON.stringify(lateAfter),
+          successor_used:lateAfter.tokens.find(t=>t.token===JSON.parse(lateIssue.text).token_id)?.used,
+          rejected_ledger_survived:lateAfter.idempotency.some(row=>row.command_id===lateCommand)});
+    } finally {
+      if(latePending) await latePending;
+      httpControl='outside-refusal-control';
+      await observer.unsafe(`DROP TRIGGER ${lateFn} ON swarm.idempotency_keys`);
+      await observer.unsafe(`DROP FUNCTION public.${lateFn}()`);
+    }
     check('failed final fence rolls back refused-use adoption and ledger',JSON.stringify(lateBefore)===JSON.stringify(await seatState(late)));
     check('command denial rolls back both adoptions and every table',JSON.stringify(lateDatabaseBefore)===JSON.stringify(await snapshot()));
     // Activity owns a distinct final wait: the transactional realtime send.
@@ -1017,11 +1070,15 @@ try {
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
       WHERE renewal_grant_id=${convertedGrant}::uuid`;
     check('converted elapsed date is terminal despite NULL binding',(await convertedStatus())?.facts.connection==='key_ended');
-    check('converted elapsed family is denied by runtime',(await convertedRead()).status===403);
+    const convertedElapsed=await convertedRead();
+    check('converted elapsed family is denied by runtime',convertedElapsed.status===403,
+      {status:convertedElapsed.status,bearer:'expired_predecessor'});
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=NULL,revoked_at=clock_timestamp(),revoked_by=${owner}::uuid
       WHERE renewal_grant_id=${convertedGrant}::uuid`;
     check('converted revoked family never appears live',(await convertedStatus())?.facts.connection!=='live');
-    check('converted revoked family is denied by runtime',(await convertedRead()).status===403);
+    const convertedRevoked=await convertedRead();
+    check('converted revoked family is denied by runtime',convertedRevoked.status===403,
+      {status:convertedRevoked.status,bearer:'expired_predecessor'});
     // Independent non-NULL binding control: the expired bearer cannot mask it.
     atControl('read-model-binding/fixture','INSERT independent device binding control');
     const mismatch=await readSeat('read-model-binding',false);
@@ -1154,7 +1211,8 @@ try {
       await tx`UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp() WHERE connection_id=${family.t0}::uuid`;
     });
     check('original withdrawal stops the rotated successor',rotatedSecret!==null && await accessAs(rotatedSecret)===null);
-    check('no external authentication or HTTP mocks',httpRefused===0);
+    check('no external authentication or HTTP mocks',httpRefused===0,
+      {refused_count:httpRefused,attempts:httpRefusals,omitted:Math.max(0,httpRefused-httpRefusals.length)});
     out.checks=checks;out.verdict=checks.every(c=>c.ok)?'PASS':'FAIL';out.stage='complete';out.http_refused=httpRefused;
     await observer.end();
     console.log('R13_PROBE '+JSON.stringify(out));
