@@ -60,9 +60,10 @@ export interface AccountMenuState {
   /** The theme switch's current label ("Theme: System"), or null when the page has no theme switch. */
   theme: string | null;
   connectedApps: boolean;
+  yourAgents?: boolean;
   signOut: boolean;
 }
-export type AccountMenuAction = "theme" | "connected-apps" | "sign-out" | { kind: "organization"; workspaceId: string };
+export type AccountMenuAction = "theme" | "your-agents" | "connected-apps" | "sign-out" | { kind: "organization"; workspaceId: string };
 
 export interface OrganizationMenuItem {
   id: string;
@@ -280,6 +281,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       li.append(button); built.push(li); accountButtons.push(button);
     };
     if (state.theme) entry(state.theme, "theme", "menuTheme");
+    if (state.yourAgents) entry("Your agents", "your-agents", "menuYourAgents");
     if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
     if (state.signOut) entry("Sign out", "sign-out", "menuSignOut");
     const home = node(doc, "li", "hm-menu__entry"); home.setAttribute("role", "none");
