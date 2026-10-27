@@ -94,3 +94,13 @@
     outline: none;
     box-shadow: var(--focus-ring);
   }
+
+  .dashboard__workspace-move,
+  .dashboard__workspace-move label { display: grid; gap: var(--s-2); }
+  .dashboard__workspace-move { margin-block-start: var(--s-2); }
+  .dashboard__workspace-move select {
+    min-inline-size: 0; inline-size: 100%; padding: var(--s-2) var(--s-3);
+    color: var(--text); background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius); font: inherit;
+  }
+  .dashboard__workspace-move select:focus-visible { outline: none; box-shadow: var(--focus-ring); }

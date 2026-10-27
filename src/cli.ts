@@ -1864,7 +1864,7 @@ async function runUse(args: Arguments): Promise<void> {
   process.stdout.write(`${message}\n`);
 }
 
-export const RUN_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "name", "json"] as const;
+export const RUN_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "name", "org-id", "json"] as const;
 
 async function runNew(args: Arguments): Promise<void> {
   const named = args.has("name");
@@ -1877,6 +1877,8 @@ async function runNew(args: Arguments): Promise<void> {
   // Validated before any credential or network work, so a typo costs one line.
   const name = (named ? args.required("name") : args.positionals[1]!).trim();
   assertWorkspaceName(name);
+  const orgId = args.has("org-id") ? args.required("org-id") : undefined;
+  if (orgId !== undefined && !UUID_RE.test(orgId)) throw new Error("--org-id must be a UUID");
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   // The id is ours: the workspace has no route to be addressed by until it exists,
@@ -1885,7 +1887,7 @@ async function runNew(args: Arguments): Promise<void> {
   let result: ConnectCommandResult;
   try {
     result = await new ThinCommandClient(cloud, human.fetcher).sendConnect({
-      command: { kind: "create_workspace", workspace_id: proposedId, name },
+      command: { kind: "create_workspace", workspace_id: proposedId, name, ...(orgId ? { org_id: orgId } : {}) },
       credential: human.accessToken,
     });
   } catch (error) {
@@ -10381,7 +10383,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
   workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
-  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]`] }),
+  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: RUN_NEW_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "provider", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
   principal: group({
     create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]"] }),

@@ -566,6 +566,8 @@ interface WorkspaceDecideCtx {
 }
 
 interface StoredResponse {
+  org_id?: string;
+  from_org_id?: string;
   ok: boolean;
   reason?: string;
   detail?: string;
@@ -2933,6 +2935,8 @@ function storedResponse(value: unknown): StoredResponse {
   }
   return {
     ok: response.ok,
+    ...(typeof response.org_id === "string" ? { org_id: response.org_id } : {}),
+    ...(typeof response.from_org_id === "string" ? { from_org_id: response.from_org_id } : {}),
     ...(typeof response.reason === "string" ? { reason: response.reason as StoredResponse["reason"] } : {}),
     ...(typeof response.detail === "string" ? { detail: response.detail } : {}),
     ...(response.class === "authz" || response.class === "domain"
@@ -5265,7 +5269,9 @@ async function createSelfServeWorkspace(
     body.stream === undefined &&
     typeof body.client_version === "string" &&
     command !== null &&
-    exactKeys(command, ["kind", "workspace_id", "name"]) &&
+    (exactKeys(command, ["kind", "workspace_id", "name"]) ||
+      exactKeys(command, ["kind", "workspace_id", "name", "org_id"]) &&
+      typeof command.org_id === "string" && UUID_RE.test(command.org_id)) &&
     command.kind === CREATE_WORKSPACE_KIND &&
     typeof command.workspace_id === "string" &&
     UUID_RE.test(command.workspace_id) &&
@@ -5314,6 +5320,13 @@ async function createSelfServeWorkspace(
 
   await tx`SELECT user_id FROM swarm.users WHERE user_id=${auth.actor.user}::uuid FOR UPDATE`; const workspaceId = command!.workspace_id as string;
   const name = command!.name as string;
+  const orgId = typeof command!.org_id === "string" ? command!.org_id.toLowerCase() : null;
+  // Match the move writer's workspace-before-org lock order on a creation retry.
+  await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id=${workspaceId}::uuid FOR UPDATE`;
+  if (orgId !== null) {
+    const [allowed] = await tx<{ok:boolean}[]>`SELECT swarm.org_allows_workspace_create(${orgId}::uuid,${auth.actor.user}::uuid) AS ok`;
+    if (!allowed?.ok) return await forbid("org_membership_required");
+  }
 
   // §8's degraded mode. Refused here — with its own audit reason, never a
   // per-identity one — because the caller has done nothing wrong and their own
@@ -5393,19 +5406,22 @@ async function createSelfServeWorkspace(
   }
 
   await tx`
-    INSERT INTO swarm.workspaces (workspace_id, name, created_by)
-    VALUES (${workspaceId}::uuid, ${name}, ${auth.actor.user}::uuid)
+    INSERT INTO swarm.workspaces (workspace_id, name, created_by, org_id)
+    VALUES (${workspaceId}::uuid, ${name}, ${auth.actor.user}::uuid, ${orgId}::uuid)
     ON CONFLICT (workspace_id) DO NOTHING
   `;
   // A client-proposed id that is already taken must not silently hand the
   // caller someone else's tenant — the same guard seedDogfood applies.
-  const owned = await tx<{ created_by: string }[]>`
-    SELECT created_by
+  const owned = await tx<{ created_by: string; org_id: string }[]>`
+    SELECT created_by, org_id
     FROM swarm.workspaces
     WHERE workspace_id = ${workspaceId}::uuid
   `;
   if (owned[0]?.created_by !== auth.actor.user) {
     return await forbid("workspace_id_taken");
+  }
+  if (orgId !== null && owned[0]?.org_id !== orgId) {
+    return { status: 409, body: { error: "workspace_org_conflict" } };
   }
   await tx`
     INSERT INTO swarm.memberships (workspace_id, user_id, role, revoked_at)
@@ -5449,10 +5465,126 @@ async function createSelfServeWorkspace(
       ok: true,
       event_ids: [],
       workspace_id: workspaceId,
+      org_id: owned[0].org_id,
       stream_id: streamId,
       min_client_version: minClientVersion,
     },
   };
+}
+
+/** Human-only metadata move. Workspace/content/connection IDs never change. */
+async function moveWorkspaceToOrg(
+  tx: Sql,
+  body: RequestBody,
+  auth: AuthContext,
+  detail: string | null,
+): Promise<HttpResult> {
+  const kind = "move_workspace_to_org";
+  const refuse = async (status: number, error: string): Promise<HttpResult> => {
+    await insertAudit(tx, {
+      auth,
+      commandKind: kind,
+      outcome: status === 400 ? "validation" : "authz",
+      reason: error,
+      detail,
+    });
+    return { status, body: { error } };
+  };
+  if (auth.credentialKind !== "user" || !auth.actor.user) {
+    return await refuse(403, "forbidden");
+  }
+  const command = record(body.command);
+  if (
+    !command || !exactKeys(command, ["kind", "org_id"]) ||
+    typeof command.org_id !== "string" || !UUID_RE.test(command.org_id) ||
+    typeof body.workspace_id !== "string" || !UUID_RE.test(body.workspace_id) ||
+    body.stream !== undefined &&
+      (record(body.stream)?.kind !== "workspace" ||
+        !exactKeys(record(body.stream)!, ["kind"])) ||
+    typeof body.client_version !== "string"
+  ) return await refuse(400, "invalid_request");
+  const [config] = await tx<
+    { value: unknown }[]
+  >`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const comparison = typeof config?.value === "string"
+    ? compareSemver(body.client_version, config.value)
+    : null;
+  if (comparison === null) return await refuse(400, "invalid_request");
+  if (comparison < 0) {
+    return {
+      status: 426,
+      body: { error: "upgrade_required", min_client_version: config.value },
+    };
+  }
+  const workspaceId = body.workspace_id.toLowerCase(),
+    destination = command.org_id.toLowerCase();
+  const [workspace] = await tx<
+    { org_id: string }[]
+  >`SELECT org_id FROM swarm.workspaces
+    WHERE workspace_id=${workspaceId}::uuid AND archived_at IS NULL FOR UPDATE`;
+  const [stream] = await tx<
+    { stream_id: string }[]
+  >`SELECT stream_id FROM swarm.streams
+    WHERE workspace_id=${workspaceId}::uuid AND kind='workspace' LIMIT 1`;
+  if (!workspace || !stream) return await refuse(403, "forbidden");
+  const hash = await hostedRequestHash("user", auth.actor.user, body);
+  const [prior] = await tx<
+    {
+      workspace_id: string;
+      stream_id: string;
+      request_hash: string;
+      response: unknown;
+    }[]
+  >`
+    SELECT workspace_id,stream_id,request_hash,response FROM swarm.idempotency_keys
+    WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
+  if (prior) {
+    if (
+      prior.request_hash !== hash || prior.workspace_id !== workspaceId ||
+      prior.stream_id !== stream.stream_id
+    ) {
+      return { status: 409, body: { error: "command_id_conflict" } };
+    }
+    const saved = storedResponse(prior.response);
+    const source = typeof saved.from_org_id === "string"
+      ? saved.from_org_id
+      : workspace.org_id;
+    const [allowed] = await tx<
+      { receipt: unknown }[]
+    >`SELECT swarm.move_workspace_to_org(
+      ${workspaceId}::uuid,${destination}::uuid,${auth.actor.user}::uuid,${source}::uuid) AS receipt`;
+    if (!allowed?.receipt) return await refuse(403, "forbidden");
+    await insertAudit(tx, {
+      auth,
+      commandKind: kind,
+      workspaceId,
+      streamId: stream.stream_id,
+      outcome: "replayed",
+      hash,
+      detail,
+    });
+    return replayResult(saved, kind);
+  }
+  const [moved] = await tx<
+    { receipt: Record<string, unknown> | null }[]
+  >`SELECT swarm.move_workspace_to_org(
+    ${workspaceId}::uuid,${destination}::uuid,${auth.actor.user}::uuid) AS receipt`;
+  if (!moved?.receipt) return await refuse(403, "forbidden");
+  const response = { ok: true, event_ids: [], ...moved.receipt };
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES('user',${auth.actor.user},${body.command_id},${workspaceId}::uuid,${stream.stream_id}::uuid,${hash},${
+    tx.json(response as postgres.JSONValue)
+  })`;
+  await insertAudit(tx, {
+    auth,
+    commandKind: kind,
+    workspaceId,
+    streamId: stream.stream_id,
+    outcome: "accepted",
+    hash,
+    detail: JSON.stringify(moved.receipt),
+  });
+  return { status: 200, body: { status: "accepted", ...response } };
 }
 
 interface SignalRateLimit {
@@ -11289,8 +11421,12 @@ async function handleTransaction(
       return await registerLoginDevice(tx, body, auth, ignoredIdentity);
     }
 
-    // Must precede resolveRoute: the caller has no membership anywhere yet, so
-    // route resolution would reject them before the command could be read.
+    // The move handler locks both organizations and checks live workspace ownership.
+    if (kind === "move_workspace_to_org") {
+      return await moveWorkspaceToOrg(tx, body, auth, ignoredIdentity);
+    }
+
+    // Must precede resolveRoute: a new caller may have no workspace membership yet.
     if (kind === CREATE_WORKSPACE_KIND) {
       return await createSelfServeWorkspace(tx, body, auth, ignoredIdentity);
     }

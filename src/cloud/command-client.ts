@@ -87,7 +87,8 @@ export type ConnectCommand =
   | { kind: "invite_member"; email: string; ttl_ms?: number }
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }
-  | { kind: "create_workspace"; workspace_id: string; name: string }
+  | { kind: "create_workspace"; workspace_id: string; name: string; org_id?: string }
+  | { kind: "move_workspace_to_org"; org_id: string }
   | { kind: "archive_workspace" }
   | { kind: "remove_member"; user_id: string }
   | {

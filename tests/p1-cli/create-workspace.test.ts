@@ -261,3 +261,23 @@ test("new is discoverable in the usage block", async () => {
   assert.match(help.stdout, /cswarm new --name "<workspace name>"/);
   assert.match(help.stdout, /cswarm new starts a workspace of your own/);
 });
+
+test("create_workspace carries the chosen organization inside the command", async () => {
+  const workspaceId=randomUUID(),orgId=randomUUID();
+  let request:Record<string,unknown>|undefined;
+  const fetcher=(async (_url:URL|RequestInfo,init?:RequestInit)=>{
+    request=JSON.parse(String(init?.body)); return accepted(workspaceId);
+  }) as typeof fetch;
+  const result=await new ThinCommandClient(cloudTarget("http://127.0.0.1:54321","anon-key"),fetcher).sendConnect({
+    command:{kind:"create_workspace",workspace_id:workspaceId,name:"Sibling",org_id:orgId},credential:"human-jwt",
+  });
+  assert.equal(result.httpStatus,200);
+  assert.equal((request?.command as Record<string,unknown>).org_id,orgId);
+  assert.equal(Object.hasOwn(request!,"workspace_id"),false);
+});
+
+test("new validates org-id before credentials or network", async () => {
+  const result=await cli(["new","Sibling","--org-id","invalid"]);
+  assert.notEqual(result.code,0);
+  assert.match(result.stderr,/org-id.*UUID/i);
+});
