@@ -1,8 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="CommonSwarm">
-  <title>CommonSwarm</title>
-  <circle cx="24" cy="24" r="5.5" fill="#252A32"/>
-  <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"/>
-  <circle cx="40" cy="24" r="5.5" fill="#F3B89D"/>
-  <circle cx="24" cy="40" r="5.5" fill="#AACBB7"/>
-  <circle cx="8" cy="24" r="5.5" fill="#315CFF"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="CommonSwarm"><title>CommonSwarm</title><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/></svg>
