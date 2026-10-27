@@ -608,6 +608,8 @@ with tarfile.open(archive) as t:
 (p/'archive.sha256').write_text(d['archive_sha256']+'\n')
 (p/'oauth-releases-inventory.json').write_text(json.dumps({'baseline':d['baseline_oauth_sha'],'release':d['release_sha'],'other_releases_ignored':sorted(n for n in os.listdir('/home/commonswarm/oauth/releases') if n not in (d['baseline_oauth_sha'],d['release_sha']))},sort_keys=True)+'\n')
 PY
+# Normalize the build context even when extraction ran under umask 077.
+chmod -R a+rX "$NEW_OAUTH"
 cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.yaml" "$NEW_OAUTH/deploy/mcp-auth/compose.yaml"
 cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" "$NEW_OAUTH/deploy/mcp-auth/compose.management.yaml"
 printf 'PASS\n' >"$PROOF_DIR/preflight.txt"
