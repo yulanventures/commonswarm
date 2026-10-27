@@ -120,7 +120,7 @@ test("chooser offers only configured provider links without scripts; initial sin
   const page = await h.run();
   assert.equal(page.status, 200);
   assert.match(page.body, /<a href="\/interaction\/same-interaction\/sign-in\?provider=google">Continue with Google<\/a>/);
-  assert.match(page.body, /<a href="\/interaction\/same-interaction\/sign-in\?provider=github">Continue with GitHub<\/a>/);
+  assert.match(page.body, /<a class="provider-secondary" href="\/interaction\/same-interaction\/sign-in\?provider=github">Continue with GitHub<\/a>/);
   assert.doesNotMatch(page.body, /<form\b/u);
   assert.doesNotMatch(page.body, /<script|<img|<link|javascript:|fixture-access/);
   assert.match(page.headers["content-security-policy"], /^default-src 'none';/);
