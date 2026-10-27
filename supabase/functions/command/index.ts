@@ -5559,7 +5559,7 @@ async function moveWorkspaceToOrg(
   if (comparison < 0) {
     return {
       status: 426,
-      body: { error: "upgrade_required", min_client_version: config.value },
+      body: { error: "upgrade_required", min_client_version: config?.value },
     };
   }
   const workspaceId = body.workspace_id.toLowerCase(),
