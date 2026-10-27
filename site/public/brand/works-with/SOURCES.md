@@ -2,6 +2,9 @@
 
 These assets identify the services shown. Their use does not imply vendor endorsement; no written vendor approval is recorded. Vendor logo geometry and colors have not been modified. Logos are displayed with white padding; the homepage character crop below is a separate, documented exception. Older collection notes described earlier homepage designs and are not the current inventory.
 
+- Anthropic's [trademark guidelines](https://www.anthropic.com/legal/trademark-guidelines), rechecked 2026-10-27, say its marks require specific permission and advance approval of materials; marks should remain unchanged and not imply endorsement. No written vendor approval is recorded.
+- OpenAI's [design guidelines](https://openai.com/brand/), rechecked 2026-10-27, call for unmodified marks in a related context without implying endorsement or giving them prominence over one's own brand.
+
 | Shown as | File | Source | Usage rules found |
 | --- | --- | --- | --- |
 | Grok | `grok.svg` | xAI brand pack linked from [x.ai/legal/brand-guidelines](https://x.ai/legal/brand-guidelines): `Grok_Logomark_Dark.svg` (`#0A0A0A`). | Use only to refer to xAI services, exactly as supplied, no alteration, no implied endorsement, not combined into a new mark. |
