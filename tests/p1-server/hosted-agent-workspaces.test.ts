@@ -8,6 +8,7 @@ import {join} from 'node:path';
 import {runSql,repoSql,dbAssert,refuses} from '../support/admin-schema-db.js';
 import {releaseCatalogQuery} from '../support/release-catalog-query.js';
 import {adminEdgeDatabase} from '../support/admin-edge-database.js';
+import {proveHostedContentWithdrawal} from '../support/hosted-content-withdrawal.js';
 const root='deploy/release-proofs/agents/20261028000003';
 const migration='supabase/migrations/20261028000003_hosted_agent_workspaces.sql';
 const catalog=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${root}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'hosted agents catalog');
@@ -28,6 +29,15 @@ test('hosted migration rollback/reapply preserves the prior authority catalog an
 
 const A='13000000-0000-4000-8000-000000000001',B='13000000-0000-4000-8000-000000000002';
 const P='23000000-0000-4000-8000-000000000001',U='03000000-0000-4000-8000-000000000001',G='33000000-0000-4000-8000-000000000001';
+
+test('real hosted content withdrawal revokes only the target workspace and retains origin, inactive and local behavior',async()=>{
+ const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
+ const isolated=await adminEdgeDatabase(local.DB_URL);
+ try {
+  await isolated.db.unsafe(repoSql(`${root}-rollback.sql`)+legacy()+repoSql(migration));
+  await isolated.db.begin(proveHostedContentWithdrawal);
+ } finally {await isolated.close();}
+});
 
 test('real hosted commands add without OAuth, claim the same agent, replay safely and preserve sibling/dormant connections',async()=>{
  const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
