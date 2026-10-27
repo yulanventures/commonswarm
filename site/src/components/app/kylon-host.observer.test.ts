@@ -681,9 +681,9 @@ const fixtureScript = `
       [...invites, ...adds].every(node => head.contains(node) && node.getClientRects().length > 0 && !node.closest('[hidden],[inert]')) &&
       roster.querySelectorAll('.pd-page-actions').length === Number(expected.invite || expected.add), peopleFacts());
     if (expected.invite) check('Invite remains the named button ' + expected.label, invites[0]?.tagName === 'BUTTON' &&
-      invites[0].type === 'button' && invites[0].textContent === 'Invite someone', peopleFacts());
+      invites[0].type === 'button' && invites[0].textContent === 'Add people', peopleFacts());
     if (expected.add) check('Add retains supplied workspace href ' + expected.label,
-      adds[0]?.tagName === 'A' && adds[0].textContent === 'Add an agent' &&
+      adds[0]?.tagName === 'A' && adds[0].textContent === 'Connect new agent' &&
       adds[0].href === new URL(fixture.people.addHref, document.baseURI).href, peopleFacts());
     if (expected.invite && expected.add) this.peopleHeaderOrder();
     // Explicit starting position for the subsequent native Tab/Enter journey, not a return-focus assertion.
@@ -693,10 +693,10 @@ const fixtureScript = `
   },
   peopleHeaderOrder() {
     const roster = fixture.people.roster, head = roster.querySelector('.pd-page-head');
-    const ordered = [head.querySelector('#pd-page-title'), head.querySelector('[data-people-page-invite]'),
-      head.querySelector('[data-people-page-add-agent]'), fixture.people.search, head.querySelector('[role=group][aria-label="Show roster"]'),
+    const ordered = [head.querySelector('#pd-page-title'), head.querySelector('[role=group][aria-label="Show roster"]'),
+      fixture.people.search, head.querySelector('[data-people-page-invite]'), head.querySelector('[data-people-page-add-agent]'),
       roster.querySelector('.pd-page-main')];
-    check('real title, Invite, Add, search, filters, roster DOM order at ' + innerWidth,
+    check('real title, sections, search, Add people, Connect, roster DOM order at ' + innerWidth,
       ordered.every(Boolean) && ordered.slice(1).every((node, i) => !!(ordered[i].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)), peopleFacts());
   },
   peopleDoorFocus(kind) {
@@ -941,11 +941,13 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
         await evaluate(`window.hostObserver.peopleHeader(${JSON.stringify(row)},${JSON.stringify({ label: row.label, invite: row.wantInvite, add: row.wantAdd })})`);
         if (row.label === 'owner has both doors') {
           const nativeDoors = async () => {
+            // Back -> three section controls -> search -> membership actions.
+            for (let step = 0; step < 4; step++) await key('Tab');
+            await evaluate("window.hostObserver.peopleDoorFocus('search')");
             for (const kind of ['invite', 'add']) {
               await key('Tab'); await evaluate(`window.hostObserver.peopleDoorFocus('${kind}')`);
               await key('Enter'); await evaluate(`window.hostObserver.peopleDoorIntent('${kind}')`);
             }
-            await key('Tab'); await evaluate("window.hostObserver.peopleDoorFocus('search')");
           };
           await nativeDoors();
           await evaluate('window.hostObserver.peopleHeaderRefresh()');

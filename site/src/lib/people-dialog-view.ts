@@ -269,7 +269,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const focusWithinDetail = !!active && detail.contains(active);
   const oldEditor = detail.querySelector<HTMLFormElement>("[data-model-editor]");
   const draft = oldEditor ? { id: oldEditor.dataset.modelEditor, value: oldEditor.querySelector<HTMLInputElement>("input")?.value } : null;
-  const openActions = new Set(Array.from(root.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]"), menu => menu.closest<HTMLElement>("[data-agent-row]")?.dataset.agentRow));
+  const openActions = new Set(Array.from(root.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]"), menu => menu.dataset.memberMenu));
   if (appliedFocus) openActions.clear();
   root.replaceChildren(); detail.replaceChildren();
   const outer = root.closest<HTMLDialogElement>("[data-roster-dialog]");
@@ -460,13 +460,17 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
-    nameLine.append(doc.createTextNode(" "), chip(doc, agent.status));
+    const presence = node(doc, "span", "pd-agent-presence"); presence.title = agent.status.label;
+    presence.dataset.agentStatus = agent.status.kind; presence.dataset.attention = String(agent.status.attention);
+    presence.setAttribute("aria-hidden", "true");
+    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(presence, name);
+    nameLine.append(node(doc, "span", "pd-agent-tag", "agent"));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
-    const details = node(doc, "span", "pd-agent-app", sentence || [agent.app, secondary].filter(Boolean).join(" · "));
-    // Name follows visible content; retain owner, replaced model/app and access facts for assistive technology.
-    const supplement = [agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent",
-      ...(sentence ? [agent.app, secondary].filter(Boolean) : [])].join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
+    const details = node(doc, "span", "pd-agent-app pd-ellipsis",
+      [agent.ownerName ?? "Owner no longer a member", agent.app, secondary].filter(Boolean).join(" · "));
+    details.title = details.textContent ?? "";
+    // Keep the dot's measured status and access facts in the row's accessible name.
+    const supplement = [agent.status.label, sentence].filter(Boolean).join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
     copy.append(nameLine, doc.createTextNode(" "), details);
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-sr-only", ` ${supplement}`)); row.append(disclosure);
     const notice = noticeFor(agent);
@@ -477,11 +481,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     // A row with a fix shows that one action, as the canvas does for a disconnected agent; its name still opens every detail.
     if (agentHref && agent.mayManage && !model.sample && !next) { const manage = link(doc, "Manage", agentHref(agent.id), "pd-pill-link", options.page?.navigate);
       manage.setAttribute("aria-label", `Manage ${agent.name}`); manage.dataset.pdFocus = `manage-${agent.id}`; actions.append(manage); }
-    if (peopleDialogCanAct(model, "remove-agent", agent.id)) { const remove = actionButton("remove-agent", agent, "Remove", notice);
+    if (peopleDialogCanAct(model, "remove-agent", agent.id)) { const remove = actionButton("remove-agent", agent, "Remove from workspace", notice);
       remove.className = "pd-text-button"; remove.setAttribute("aria-label", `Remove ${agent.name}`); remove.dataset.pdFocus = `row-remove-agent-${agent.id}`; actions.append(remove); }
     if (actions.childElementCount) {
       const menu = node(doc, "details", "pd-row-actions"); const toggle = node(doc, "summary", "pd-actions-toggle");
-      menu.open = openActions.has(agent.id);
+      menu.dataset.memberMenu = agent.id; menu.open = openActions.has(agent.id);
       const glyph = node(doc, "span", "", "•••"); glyph.setAttribute("aria-hidden", "true");
       toggle.append(glyph, node(doc, "span", "pd-sr-only", `Actions for ${agent.name}`)); toggle.dataset.pdFocus = `actions-${agent.id}`;
       menu.addEventListener("keydown", event => {
@@ -493,9 +497,31 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (state.selected?.id !== agent.id && agent.receipt) row.append(notice);
     const error = node(doc, "p", "pd-error"); error.setAttribute("role", "alert"); error.dataset.agentRowError = agent.id; error.hidden = true; row.append(error); return row;
   };
-  // Page rows are navigation. Editing and destructive membership actions live in the selected profile.
+  // Person menus use the existing role editor and confirmed membership removal.
   const pageHead = (person: PeopleDialogPerson, head: HTMLElement, roleText: HTMLElement) => {
-    roleText.classList.add("pd-person-sub");
+    roleText.classList.add("pd-sr-only");
+    head.append(node(doc, "span", "pd-member-role", ROLE_LABELS[person.role]));
+    const actions = node(doc, "span", "pd-agent-actions");
+    if (callbacks.changeRole && peopleDialogRoleOptions(model, person.id).length) {
+      const change = button(doc, "Change role", () => select("person", person.id));
+      change.dataset.pdFocus = `row-role-${person.id}`; actions.append(change);
+    }
+    if (peopleDialogCanAct(model, "remove-person", person.id)) {
+      const remove = button(doc, "Remove from workspace", opener => callbacks.confirm("remove-person", person.id, opener));
+      remove.classList.add("pd-member-remove"); remove.dataset.pdFocus = `row-remove-person-${person.id}`; actions.append(remove);
+    }
+    if (actions.childElementCount) {
+      const menu = node(doc, "details", "pd-row-actions"); menu.dataset.memberMenu = `person-${person.id}`;
+      menu.open = openActions.has(menu.dataset.memberMenu);
+      const toggle = node(doc, "summary", "pd-actions-toggle"); toggle.dataset.pdFocus = `person-actions-${person.id}`;
+      const glyph = node(doc, "span", "", "•••"); glyph.setAttribute("aria-hidden", "true");
+      toggle.append(glyph, node(doc, "span", "pd-sr-only", `Actions for ${person.name}`));
+      menu.addEventListener("keydown", event => {
+        if (event.key !== "Escape" || !menu.open) return;
+        event.preventDefault(); event.stopPropagation(); menu.open = false; toggle.focus();
+      });
+      menu.append(toggle, actions); head.append(menu);
+    }
     if (state.selected?.type === "person" && state.selected.id === person.id) head.dataset.selected = "true";
   };
   const card = (person: PeopleDialogPerson | null, agents: PeopleDialogAgent[]) => {
@@ -515,7 +541,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     } else {
       const face = node(doc, "span", "pd-initials pd-neutral-avatar"); face.setAttribute("aria-hidden", "true");
       const copy = node(doc, "div", "pd-person-copy");
-      copy.append(node(doc, "h3", "pd-person-name", "Other agents"), node(doc, "span", "pd-muted", "Their owner is no longer a member"));
+      copy.append(node(doc, "h3", "pd-person-name", "Other agents"), node(doc, "span", "pd-sr-only", "Their owner is no longer a member"));
       head.append(face, copy);
     }
     if (!page || state.filter !== "agents") element.append(head);

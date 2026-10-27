@@ -240,7 +240,9 @@ export async function kylonHostFixture(observe: string): Promise<string> {
     <style>${css}\n${inline}\nhtml,body{margin:0;height:100%}live-dashboard{display:block;height:100dvh}.dashboard__product{height:100dvh}</style></head><body>
     <live-dashboard class="dashboard" data-kylon-shell data-state="channel"><div class="dashboard__root"><section class="dashboard__product">
     <div hidden></div><div hidden></div><div class="hm-frame dashboard__frame"><aside class="hm-frame__rail dashboard__rail">
-    <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button" aria-label="Invented account">
+    <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button" aria-label="Field studio">
+    <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark aria-hidden="true">F</span>
+    <span class="dashboard__user-trigger-brand" data-org-name>Field studio</span>
     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></button><div data-user-menu hidden><button type="button" data-local-account-option>Local account option</button></div></div>
     <div class="hm-frame__rail-content" data-home-rail-slot><nav aria-label="Invented context"><a href="#fixture">Invented workspace</a></nav></div></aside>
     <div class="hm-frame__main"><div data-home-workspace-shell></div><section class="hm-route-pane" data-home-route-pane><p>Invented local callbacks; no backend.</p></section><div class="dashboard__channel-body" hidden>${wikiSections[0][0]}</div></div><aside class="hm-frame__side" data-home-side-slot aria-label="Workspace cards"></aside>

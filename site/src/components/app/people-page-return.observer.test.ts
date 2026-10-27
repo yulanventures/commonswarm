@@ -179,7 +179,7 @@ const peopleReturnScript = `
         contexts: doc.querySelectorAll("[data-people-context]").length, contextInShell: !!context?.closest(".cs-org-context-body"), contextInPage: !!page && !!context && page.contains(context) };
     };
     const pageReady = () => { const q = state(); return q.page && q.detailInPage && q.detailHosts === 1 && q.contexts === 1 && q.openers > 0 &&
-      (view.matchMedia("(max-width:52rem)").matches ? q.contextInPage : q.contextInShell) && doc.fonts.status === "loaded" &&
+      q.contextInPage && doc.fonts.status === "loaded" &&
       visible(doc.querySelector("[data-people-context] .pd-page-head [data-member-details]")); };
     go("?w=" + workspace + "&v=people");
     await until(pageReady, "the People page/context/sign-in host/fonts");
@@ -291,15 +291,15 @@ test("People & agents comes back with its detail column after another route took
          leaving, and the other route really replaced the pane (the page left the document). Without them,
          an unrendered page or a route that never left would pass the checks below. */
       assert.ok(result.before.page && result.before.detailInPage && result.before.openers > 0, `${label}: the People page never rendered: ${facts}`);
-      assert.ok(result.before.contexts === 1 && result.before.contextInShell && !result.before.contextInPage, `${label}: the actual desktop roster must be projected once into context: ${facts}`);
+      assert.ok(result.before.contexts === 1 && !result.before.contextInShell && result.before.contextInPage, `${label}: the members panel must appear once in the main pane: ${facts}`);
       assert.equal(result.away.peoplePageInDom, false, `${label}: the other route did not replace the pane, so this measures nothing: ${facts}`);
       assert.equal(result.sameDocument, true, `${label}: the app reloaded, so this is not the in-app path: ${facts}`);
       assert.match(result.after.search, /v=people/, `${label}: the route did not return to People: ${facts}`);
       assert.ok(result.after.page, `${label}: the URL says People but the page is blank: ${facts}`);
       assert.ok(result.after.detailInPage, `${label}: the page came back without its detail column: ${facts}`);
       assert.equal(result.after.detailHosts, 1, `${label}: there must be exactly one detail host: ${facts}`);
-      assert.ok(result.after.contexts === 1 && result.after.contextInShell && !result.after.contextInPage && result.after.openers === result.before.openers,
-        `${label}: return must restore the whole desktop roster once, outside the main profile: ${facts}`);
+      assert.ok(result.after.contexts === 1 && !result.after.contextInShell && result.after.contextInPage && result.after.openers === result.before.openers,
+        `${label}: return must restore the whole members panel once: ${facts}`);
       /* Parking keeps the one host (and any state on it); a recreated host means a route cleared the pane unparked. */
       assert.equal(result.sameDetailHost, true, `${label}: the detail host was lost and recreated, so a pane replacement skipped parkPeopleHosts: ${facts}`);
       assert.equal(result.detail.opened, true, `${label}: a person's details did not open on the returned page: ${facts}`);
