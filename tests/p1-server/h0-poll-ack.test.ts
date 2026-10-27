@@ -707,39 +707,157 @@ test("an expired batch closes and its rows re-claim through the normal path", as
   assert.equal(old[0]?.status, "closed");
 });
 
-test("a second concurrent poll gets the documented response", async () => {
-  const seat = await makeSeat();
-  const started = Date.now();
-  const firstPromise = h0("poll", seat.token, { wait: 2 });
-  const seen = Date.now() + 3_000;
-  let locked = false;
-  while (Date.now() < seen) {
-    const rows = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n
-      FROM swarm.h0_poll_locks
-      WHERE principal_id = ${seat.principalId}::uuid
-        AND expires_at > statement_timestamp()
-    `;
-    if ((rows[0]?.n ?? 0) > 0) {
-      locked = true;
-      break;
+test("a second concurrent poll gets the documented response", { timeout: 20_000 }, async (t) => {
+  const cleanup = new AbortController();
+  // Leave time to abort/drain HTTP and close cleanup SQL before the watchdog.
+  const signal = AbortSignal.any([t.signal, cleanup.signal, AbortSignal.timeout(15_000)]);
+  const requests: Promise<HttpResult>[] = [];
+  const track = (request: Promise<HttpResult>) => {
+    requests.push(request);
+    void request.catch(() => {});
+    return request;
+  };
+  const caseCommand = (
+    bearer: string,
+    body: Record<string, unknown>,
+    workspaceId = owner.workspace,
+    stream: Record<string, unknown> = { kind: "workspace" },
+  ) => track((async (): Promise<HttpResult> => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        command_id: randomUUID(), client_version: "0.1.0",
+        workspace_id: workspaceId, stream, command: body,
+      }),
+      signal,
+    });
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: await response.json() as Record<string, unknown>,
+    };
+  })());
+  const boundedSql = async <T>(
+    run: (client: postgres.Sql) => PromiseLike<T>,
+    operationSignal: AbortSignal,
+  ): Promise<T> => {
+    const client = postgres(local.DB_URL, {
+      prepare: false, max: 1, connect_timeout: 1,
+      connection: { statement_timeout: 1_000, lock_timeout: 500 },
+    });
+    const deadline = AbortSignal.any([operationSignal, AbortSignal.timeout(1_500)]);
+    // Closing the dedicated client cancels queued/in-flight queries even when
+    // the server cannot receive a cancellation request or return an error.
+    const cancel = () => { void client.end({ timeout: 0 }); };
+    deadline.addEventListener("abort", cancel, { once: true });
+    try {
+      deadline.throwIfAborted();
+      const result = await run(client);
+      deadline.throwIfAborted();
+      return result;
+    } finally {
+      deadline.removeEventListener("abort", cancel);
+      await client.end({ timeout: 0 });
     }
-    await delay(50);
+  };
+  let seat: Seat | undefined;
+  let firstSettled = false;
+  const waitingLock = async (principalId: string) => {
+    const rows = await boundedSql((client) => client<{ holder: string; listener_instance_id: string }[]>`
+      SELECT holder::text, listener_instance_id::text
+      FROM swarm.h0_poll_locks
+      WHERE workspace_id = ${owner.workspace}::uuid
+        AND principal_id = ${principalId}::uuid
+        AND waiting
+        AND expires_at > statement_timestamp()
+    `, signal);
+    return rows.at(0);
+  };
+  try {
+    // Use the same command envelopes as makeSeat, with cancellation throughout
+    // fixture setup as well as the wake request.
+    const minted = await caseCommand(owner.ownerJwt, {
+      kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 4,
+    });
+    assert.equal(minted.status, 200, JSON.stringify(minted.body));
+    const registered = await caseCommand(String(minted.body.join_credential), {
+      kind: "register_agent_seat", attempt_id: randomUUID(), name: "H0 poll seat",
+    }, randomUUID(), { kind: "repo", repo_mapping_id: randomUUID() });
+    assert.equal(registered.status, 200, String(registered.body.error ?? "register failed"));
+    assert.equal(typeof registered.body.agent_token, "string");
+    assert.equal(typeof registered.body.principal_id, "string");
+    seat = { token: String(registered.body.agent_token), principalId: String(registered.body.principal_id) };
+    const revoked = await caseCommand(owner.ownerJwt, {
+      kind: "revoke_agent_join_credential", join_credential_id: String(minted.body.join_credential_id),
+    });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    const firstPromise = track(h0("poll", seat.token, { wait: 50 }, "", signal));
+    void firstPromise.then(() => { firstSettled = true; }, () => { firstSettled = true; });
+    const seenBy = performance.now() + 8_000;
+    let held: Awaited<ReturnType<typeof waitingLock>> = undefined;
+    while (performance.now() < seenBy) {
+      held = await waitingLock(seat.principalId);
+      if (held !== undefined || firstSettled) break;
+      await delay(50, undefined, { signal });
+    }
+    assert.ok(held, `the first poll did not commit a live waiting lock; firstSettled=${firstSettled}`);
+    assert.equal(firstSettled, false, "the first poll ended before the overlap");
+
+    const secondStarted = performance.now();
+    const secondPromise = track(h0("poll", seat.token, { wait: 0 }, "", signal));
+    const second = await secondPromise;
+    const diagnostics = JSON.stringify({
+      status: second.status,
+      error: second.body.error,
+      message: second.body.message,
+      cacheControl: second.headers.get("cache-control"),
+      robotsTag: second.headers.get("x-robots-tag"),
+      elapsedMs: performance.now() - secondStarted,
+      firstSettled,
+      held,
+    });
+    assert.equal(second.status, H0_POLL_IN_PROGRESS_STATUS, diagnostics);
+    assert.equal(second.body.error, H0_POLL_IN_PROGRESS, diagnostics);
+    assert.equal(second.body.message, H0_POLL_IN_PROGRESS_MESSAGE, diagnostics);
+    assert.equal(second.headers.get("cache-control"), H0_CACHE_CONTROL, diagnostics);
+    assert.equal(second.headers.get("x-robots-tag"), H0_ROBOTS_TAG, diagnostics);
+    assert.equal(firstSettled, false, `the first poll ended before the conflict response; ${diagnostics}`);
+    const stillHeld = await waitingLock(seat.principalId);
+    assert.deepEqual(stillHeld, held, `the second poll changed the live waiting holder/listener; ${diagnostics}`);
+    assert.equal(firstSettled, false, `the first poll ended while checking its holder; ${diagnostics}`);
+
+    const posted = await caseCommand(owner.ownerJwt, {
+      kind: "post_signal", signal_kind: "ask", body: `h0 poll ${randomUUID()}`,
+      to_user_id: null, about: null, to_agent_principal_id: seat.principalId, in_reply_to: null,
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    const postedSignal = posted.body.signal as { id?: string } | undefined;
+    assert.equal(typeof postedSignal?.id, "string");
+    if (postedSignal === undefined || typeof postedSignal.id !== "string") {
+      assert.fail(JSON.stringify(posted.body));
+    }
+    const signalId = postedSignal.id;
+    const first = await firstPromise;
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(typeof first.body.batchId, "string");
+    assert.equal(first.body.listener_instance_id, held.listener_instance_id);
+    assert.deepEqual(deliveriesOf(first.body).map((row) => row.signal.id), [signalId]);
+  } finally {
+    cleanup.abort();
+    await Promise.allSettled(requests);
+    if (seat !== undefined) {
+      // Also end the server-side wait if the gateway does not forward disconnects.
+      // This deadline is independent: the foreground signal is already aborted.
+      const principalId = seat.principalId;
+      await boundedSql((client) => client`
+        UPDATE swarm.h0_poll_locks
+        SET waiting = false, expires_at = statement_timestamp()
+        WHERE workspace_id = ${owner.workspace}::uuid
+          AND principal_id = ${principalId}::uuid
+      `, AbortSignal.timeout(2_000));
+    }
   }
-  assert.equal(locked, true, "the first poll did not publish its lock");
-  const secondStarted = Date.now();
-  const second = await h0("poll", seat.token, { wait: 0 });
-  const secondMs = Date.now() - secondStarted;
-  assert.ok(secondMs < 1_000, `second poll blocked for ${secondMs}ms`);
-  assert.equal(second.status, H0_POLL_IN_PROGRESS_STATUS);
-  assert.equal(second.body.error, H0_POLL_IN_PROGRESS);
-  assert.equal(second.body.message, H0_POLL_IN_PROGRESS_MESSAGE);
-  assertVerbHeaders(second.headers);
-  const first = await firstPromise;
-  assert.equal(first.status, 200, JSON.stringify(first.body));
-  assert.equal(first.body.batchId, null);
-  assert.equal(typeof first.body.listener_instance_id, "string");
-  assert.ok(Date.now() - started >= 1_500, "the first poll did not wait");
 });
 
 test("a waiting slice and a second poll use one principal-seat lock order", { timeout: 20_000 }, async () => {

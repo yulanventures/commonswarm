@@ -512,6 +512,7 @@ export function classifyMinClientVersion(row) {
 export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
 
 const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+const HISTORICAL_SCHEMAS = [...DUMP_SCHEMAS, 'public', 'extensions'];
 /** Pinned pre-fix source for an unsupported diagnostic comparison on ACTIVE.
  * Live read/renewal controls must succeed before its expiry refusal counts.
  * This is not a supported rollback or a historical-schema equivalence claim. */
@@ -557,7 +558,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
     phase = 'dump';
     // Both sections and the catalog witness see one exported, retained schema snapshot.
     // No application data is copied from the shared database.
-    const schemas = historical ? [...DUMP_SCHEMAS, 'extensions'] : DUMP_SCHEMAS;
+    const schemas = historical ? HISTORICAL_SCHEMAS : DUMP_SCHEMAS;
     let pre, post, dump;
     let extensionOptions = [];
     const section = (snapshot, part) => docker.execWithSecret(binding.db_container_id,
@@ -584,7 +585,10 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
     await master.unsafe(`CREATE DATABASE ${name} TEMPLATE template0`);
     created = true;
     phase = 'restore';
-    const restore = text => db.unsafe(text.replace(/^\\(?:un)?restrict \S+\r?$/gmu, ''));
+    // Keep template0's public schema and its initdb privileges: pg_dump emits its
+    // CREATE but computes public ACL changes relative to that initial baseline.
+    const restore = text => db.unsafe(text.replace(/^\\(?:un)?restrict \S+\r?$/gmu, '')
+      .replace(/^CREATE SCHEMA public;\r?$/gmu, ''));
     if (historical) {
       await restore(pre);
       phase = 'historical-initial-data';
@@ -633,40 +637,50 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
 /** Catalog equality covers the actual source definitions, not an invented schema.
  * OIDs are deliberately resolved to names because a fresh database allocates new OIDs. */
 async function historicalCatalog(sql) {
-  const schemas = [...DUMP_SCHEMAS, 'extensions'];
+  const schemas = HISTORICAL_SCHEMAS;
+  // Compare effective grants, including grant options, rather than aclitem ordering,
+  // grantor provenance or explicit-default vs NULL storage. The same rule applies
+  // to every schema; no platform ACL or application privilege is skipped.
+  const effectiveAcl = acl => sql`coalesce((SELECT jsonb_agg(
+    jsonb_build_array(is_public,grantee,privilege_type,is_grantable) ORDER BY is_public,grantee,privilege_type)
+    FROM (SELECT a.grantee=0 AS is_public, CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee,
+      a.privilege_type,bool_or(a.is_grantable) AS is_grantable
+      FROM aclexplode(${acl}) a GROUP BY a.grantee,a.privilege_type) privileges), '[]'::jsonb)`;
   const rows = await sql`
     SELECT kind, identity, body FROM (
       -- Resolve UNION identities to text, so long column/constraint identities
       -- cannot truncate to PostgreSQL's 63-byte name type and collide.
       SELECT 'schema' AS kind,n.nspname::text AS identity,
-        jsonb_build_array(pg_get_userbyid(n.nspowner),n.nspacl) AS body
+        jsonb_build_array(pg_get_userbyid(n.nspowner),${effectiveAcl(sql`coalesce(n.nspacl,acldefault('n'::"char",n.nspowner))`)}) AS body
         FROM pg_namespace n WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'extension',e.extname,jsonb_build_array(n.nspname,e.extversion,pg_get_userbyid(e.extowner))
         FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'default-acl',n.nspname||'.'||pg_get_userbyid(a.defaclrole)||'.'||a.defaclobjtype::text,
-        to_jsonb(a.defaclacl) FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
+        ${effectiveAcl(sql`a.defaclacl`)} FROM pg_default_acl a JOIN pg_namespace n ON n.oid=a.defaclnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'index',n.nspname||'.'||c.relname,to_jsonb(pg_get_indexdef(c.oid))
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='i' AND n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'relation',n.nspname||'.'||c.relname,
-        -- pg_dump omits an explicit owner-only ACL when the default is equal.
+        -- NULL ACLs mean default privileges; aclitem order and grantors can change on restore.
         jsonb_build_array(c.relkind,pg_get_userbyid(c.relowner),
-          coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,c.relowner)),
+          ${effectiveAcl(sql`coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,c.relowner))`)},
           c.relrowsecurity,c.relforcerowsecurity,c.reloptions,
           CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid) ELSE NULL END)
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'column',n.nspname||'.'||c.relname||'.'||a.attname,
-        jsonb_build_array(a.attnum,format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,a.attacl,
+        -- Dropped columns leave attnum holes; dumps preserve only the live name sequence.
+        jsonb_build_array(row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum),
+          format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,${effectiveAcl(sql`a.attacl`)},
           pg_get_expr(d.adbin,d.adrelid))
         FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
         LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
         WHERE n.nspname=ANY(${schemas}::text[]) AND a.attnum>0 AND NOT a.attisdropped
       UNION ALL SELECT 'function',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
         -- Explicit default function ACLs can restore as NULL, just as relation ACLs do.
-        jsonb_build_array(pg_get_userbyid(p.proowner),coalesce(p.proacl,acldefault('f'::"char",p.proowner)),p.prokind,CASE WHEN p.prokind='a' THEN NULL ELSE pg_get_functiondef(p.oid) END)
+        jsonb_build_array(pg_get_userbyid(p.proowner),${effectiveAcl(sql`coalesce(p.proacl,acldefault('f'::"char",p.proowner))`)},p.prokind,CASE WHEN p.prokind='a' THEN NULL ELSE pg_get_functiondef(p.oid) END)
         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'type',n.nspname||'.'||t.typname,
-        jsonb_build_array(pg_get_userbyid(t.typowner),coalesce(t.typacl,acldefault('T'::"char",t.typowner)),t.typtype)
+        jsonb_build_array(pg_get_userbyid(t.typowner),${effectiveAcl(sql`coalesce(t.typacl,acldefault('T'::"char",t.typowner))`)},t.typtype)
         FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=ANY(${schemas}::text[])
       UNION ALL SELECT 'constraint',n.nspname||'.'||c.relname||'.'||k.conname,
         -- Pretty deparsing removes redundant nested AND parentheses that the
@@ -688,7 +702,7 @@ async function historicalCatalog(sql) {
   return JSON.stringify(rows);
 }
 
-/** Compare every catalog byte as before; diagnostics expose identities and field names only. */
+/** Compare the complete canonical inventory; diagnostics expose identities and field names only. */
 async function assertHistoricalCatalog(sql, retained) {
   const restored = await historicalCatalog(sql);
   if (restored === retained) return;
@@ -710,17 +724,29 @@ function historicalCatalogDelta(retained, restored) {
   for (const key of new Set([...before.keys(), ...after.keys()])) {
     const old = before.get(key), fresh = after.get(key), row = fresh ?? old;
     const schema = row.kind === 'schema' ? row.identity : row.kind === 'extension' ? row.body[0]
-      : [...DUMP_SCHEMAS, 'extensions'].find(name => row.identity.startsWith(`${name}.`));
+      : HISTORICAL_SCHEMAS.find(name => row.identity.startsWith(`${name}.`));
     const name = row.kind === 'schema' || row.kind === 'extension' ? row.identity : row.identity.slice(schema.length + 1);
     const changed = !old || !fresh ? ['presence'] : fields[row.kind]
       ? fields[row.kind].filter((_, i) => JSON.stringify(old.body[i]) !== JSON.stringify(fresh.body[i]))
       : JSON.stringify(old.body) !== JSON.stringify(fresh.body) ? [row.kind === 'default-acl' ? 'acl' : 'definition'] : [];
     for (const field of changed) {
       delta.push({kind:row.kind, schema:schema.slice(0,256), name:name.slice(0,256), field});
-      if (delta.length === 20) return delta;
     }
   }
-  return delta;
+  // Count the complete delta before applying the display cap. Application schemas
+  // precede platform schemas, even when an auth object sorts first by kind/name.
+  const application = new Set(['swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'public']);
+  delta.sort((a,b) => Number(!application.has(a.schema)) - Number(!application.has(b.schema))
+    || a.schema.localeCompare(b.schema) || a.kind.localeCompare(b.kind)
+    || a.name.localeCompare(b.name) || a.field.localeCompare(b.field));
+  const counts = new Map();
+  for (const {schema,kind} of delta) {
+    const key = `${schema}\0${kind}`;
+    const count = counts.get(key) ?? {schema,kind,count:0};
+    count.count++;
+    counts.set(key,count);
+  }
+  return {counts:[...counts.values()], total:delta.length, entries:delta.slice(0,20)};
 }
 
 /** Synthetic imported INITIAL history; no claim of observed historical issuance.
