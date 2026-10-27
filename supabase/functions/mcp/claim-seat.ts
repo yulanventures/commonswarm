@@ -52,6 +52,8 @@ export async function executeClaimSeat(
     client_version: "0.1.80",
     workspace_id: authorized.workspaceId,
     stream: { kind: "workspace" },
-    command: { kind: "claim_hosted_seat", name: call.arguments.name },
+    command: { kind: "claim_hosted_seat",
+      ...(call.arguments.name === undefined ? {} : {name:call.arguments.name}),
+      ...(call.arguments.agent_id === undefined ? {} : {agent_id:call.arguments.agent_id}) },
   }, authorized.capability);
 }

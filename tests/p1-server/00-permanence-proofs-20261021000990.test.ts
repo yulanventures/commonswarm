@@ -92,7 +92,7 @@ ${dbAssert(`SELECT suspension_active FROM swarm.renewal_grants WHERE renewal_gra
  AND g.resume_count=b.resume_count AND g.revoked_at IS NULL
  FROM swarm.renewal_grants g JOIN before_suspension b USING(renewal_grant_id)`, 'suspended_at and resumed_at untouched');
 
-  runSql(`${fixture}
+  runSql(repoSql("deploy/release-proofs/agents/20261028000002-rollback.sql") + `${fixture}
 CREATE TEMP TABLE before_fence AS
   SELECT p.oid AS routine_oid, pg_get_functiondef(p.oid) AS definition, p.proowner, p.prosecdef, p.proconfig,
     (SELECT array_agg(x::text ORDER BY x::text) FROM unnest(p.proacl) x) AS acl

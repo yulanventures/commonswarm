@@ -412,7 +412,10 @@ export type WorkspaceDecision = WorkspaceDecisionAccepted | WorkspaceDecisionRej
  * agent may not issue is still listed here — adding renewal to the list, or
  * removing anything else from it, both break §2.3.
  */
-export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind']>([
+export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org'>([
+  'add_agent_to_workspace',
+  'remove_agent_from_workspace',
+  'move_workspace_to_org',
   'create_workspace',
   'archive_workspace',
   'invite_member',
@@ -454,6 +457,7 @@ export function isAgentScopeDenylisted(scope: string): boolean {
   if (has('invite', 'invitation')) return true;
   if (has('membership', 'member', 'role', 'owner', 'ownership') && mutates) return true;
   if (has('repo', 'repository') && has('archive', 'map', 'remap')) return true;
+  if (words.has('workspace') && has('agent') && has('add','remove')) return true;
   if (words.has('workspace') && has('archive', 'create', 'delete')) return true;
   if (words.has('capability') && words.has('url') && has('create', 'issue', 'mint')) return true;
   if (words.has('discard')) return true;
@@ -815,7 +819,7 @@ export function decideWorkspace(
   }
 
   const actorRole = ctx.role(user_id);
-  if (actorRole === null) {
+  if (actorRole === null && cmd.kind !== 'renew_agent_token') {
     return authz('bad_state', 'caller is not a current workspace member');
   }
 

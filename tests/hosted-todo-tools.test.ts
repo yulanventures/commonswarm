@@ -45,7 +45,7 @@ function answer(sql: string, values: unknown[]): Row[] {
   if (sql.includes('SELECT p.*')) return [self, other, id(9)].includes(String(values.at(-1))) ? [{ owner_user_id: owner, revoked_at: null, member_live: true, transport: 'hosted_mcp', hosted_live: true, turn_only: true }] : [];
   if (sql.includes('SELECT greatest(')) return [{ last_activity_at: at, messages_waiting_since: null }];
   if (sql.includes('id,created_at,until')) return [];
-  if (sql.includes('owner_user_id,revoked_at FROM swarm.agent_principals')) return [self, other, id(9)].map(principal_id => ({ principal_id, workspace_id: ws, owner_user_id: owner, revoked_at: null }));
+  if (sql.includes('FROM swarm.agent_principals p JOIN swarm.agent_workspace_memberships am')) return [self, other, id(9)].map(principal_id => ({ principal_id, workspace_id: ws, owner_user_id: owner, revoked_at: null }));
   if (sql.includes('role FROM swarm.memberships')) return [{ user_id: owner, workspace_id: ws, revoked_at: flags.member ? at : null, role: 'owner' }];
   if (sql.includes('archived_at FROM swarm.workspaces')) { box.surface += 1; return [{ archived_at: null }]; }
   if (sql.includes('purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: owner }];
@@ -54,7 +54,7 @@ function answer(sql: string, values: unknown[]): Row[] {
   if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
   if (sql.includes('household_content_connections')) return [{ connection_id: conn, grant_id: grant, hosted_grant_id: grant, renewal_grant_id: null, operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: flags.connection ? at : null, expires_at: null }];
   if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: flags.grant ? 'revoked' : 'active', revoked_at: flags.grant ? at : null, connection_expires_at: null, connection_expired_at: null }];
-  if (sql.includes('hosted_mcp_grant_workspaces')) return ws && flags.bind.has(ws) ? [{ revoked_at: null }] : [];
+  if (sql.includes('SELECT swarm.hosted_binding_eligible')) return [{live:!!ws && flags.bind.has(ws)}];
   if (sql.includes('hosted_mcp_seats')) return [{ revoked_at: null }];
   if (sql.includes('AS now')) return [{ now: at }];
   if (sql.includes('INSERT INTO swarm.household_todo_streams')) {

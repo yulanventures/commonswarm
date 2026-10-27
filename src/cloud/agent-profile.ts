@@ -404,3 +404,20 @@ export async function profileSessionContext(profile: AgentProfile, hostSessionId
   });
   return { context, path };
 }
+
+/** Per-call target; the saved home and credential lineage remain unchanged. */
+export function selectAgentWorkspace(profile:AgentProfile,workspaceId?:string):AgentProfile {
+  if(workspaceId===undefined) return profile;
+  if(!ONBOARDING_UUID.test(workspaceId)) throw new AgentSetupError('workspace_id_invalid','Use a workspace UUID.');
+  return {...profile,workspace_id:workspaceId.toLowerCase(),workspace_name:undefined};
+}
+export function agentWorkspaceStatePath(profilePath:string,homeWorkspace:string,workspace:string):string {
+  if(!ONBOARDING_UUID.test(workspace)) throw new AgentSetupError('workspace_id_invalid','Use a workspace UUID.');
+  return workspace.toLowerCase()===homeWorkspace.toLowerCase() ? profilePath
+    : join(dirname(profilePath),`workspace-${workspace.toLowerCase()}`,'profile.json');
+}
+
+export async function profileWorkspaceSession(home:AgentProfile,target:AgentProfile,hostSessionId?:string) {
+  return await profileSessionContext(target,hostSessionId)
+    ?? (target.workspace_id===home.workspace_id ? null : await profileSessionContext(home,hostSessionId));
+}

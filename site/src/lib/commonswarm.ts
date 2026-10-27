@@ -1388,8 +1388,14 @@ export async function archiveWorkspace(
   }
 }
 
+export async function addAgentToWorkspace(session:Session,commandId:string,workspaceId:string,principalId:string):Promise<void> {
+  const {status,body}=await postCommand(session,commandId,{kind:'add_agent_to_workspace',principal_id:principalId},
+    {workspace_id:workspaceId,stream:{kind:'workspace'}});
+  if(status!==200 || body.status!=='accepted') throw new Error('The agent could not be added to this workspace.');
+}
+
 /**
- * Ends an agent identity in this workspace: the principal and every live credential.
+ * Removes workspace access. Local account connections remain available in other workspaces.
  * Browser surface is principal-only — there is no per-token UI.
  */
 export async function revokeAgentPrincipal(

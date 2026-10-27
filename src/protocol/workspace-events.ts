@@ -24,6 +24,8 @@ export type WorkspaceEventType = AdminRoutineEventType
   | 'MemberJoined'
   | 'MemberRemoved'
   | 'MemberRoleChanged'
+  | 'AgentAddedToWorkspace'
+  | 'AgentRemovedFromWorkspace'
   | 'AgentPrincipalCreated'
   | 'AgentPrincipalRevoked'
   | 'AgentModelDeclared'
@@ -48,6 +50,8 @@ export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   'MemberJoined',
   'MemberRemoved',
   'MemberRoleChanged',
+  'AgentAddedToWorkspace',
+  'AgentRemovedFromWorkspace',
   'AgentPrincipalCreated',
   'AgentPrincipalRevoked',
   'AgentModelDeclared',

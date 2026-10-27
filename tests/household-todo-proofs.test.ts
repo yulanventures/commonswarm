@@ -32,6 +32,8 @@ function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, operati
     const sql = parts.join('?');
     if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
     if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    if (sql.includes('SELECT swarm.hosted_binding_eligible(')) return [{ live: agent.revoked_at == null && agent.hosted_live !== false }];
+    if (sql.startsWith('SELECT token_id FROM swarm.local_content_approval_workspaces')) return [{ token_id: id(6) }];
     // Discovery and nullable policy fields mirror the permanent family schema.
     // Hosted seats have no local token; local approvals bind to their family.
     if (sql.includes('FROM swarm.discover_local_target_ids(')) return agent.transport === 'local' ? [{

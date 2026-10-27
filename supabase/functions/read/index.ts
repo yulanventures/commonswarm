@@ -251,9 +251,10 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | null {
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
   if (body.resource === "human_invitations" && exactKeys(body, ["resource"])) return { resource: "human_invitations" };
   if (isAdminReadResource(body.resource)) return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
@@ -535,6 +536,14 @@ async function handle(
     humanUserId = data.user.id.toLowerCase();
   }
   const tokenHash = agentCredential ? await sha256(token) : null;
+  if (body.resource === "workspaces") {
+    if (!tokenHash) return json(403,{error:"credential_kind_forbidden"});
+    return await withReadTransaction(async tx=>{
+      await setReadTransaction(tx);
+      const [row]=await tx<{workspaces:unknown}[]>`SELECT swarm.agent_reachable_workspaces(${tokenHash}) AS workspaces`;
+      return json(200,{workspaces:row?.workspaces ?? []});
+    });
+  }
   let localProof: {hash:Uint8Array;workspace:string} | undefined;
   if (tokenHash !== null) {
     if (body.workspace_id === null) return json(400, { error: "invalid_request" });
@@ -835,7 +844,7 @@ async function handle(
         LEFT JOIN swarm_read.agent_presence AS presence
           ON presence.workspace_id = p.workspace_id
          AND presence.principal_id = p.principal_id
-        LEFT JOIN swarm_read.agent_execution_sessions s ON s.principal_id = p.principal_id
+        LEFT JOIN swarm_read.agent_execution_sessions s ON s.principal_id = p.principal_id AND s.workspace_id=p.workspace_id
         JOIN swarm_read.member_profiles AS owner
           ON owner.workspace_id = p.workspace_id
          AND owner.user_id = p.owner_user_id

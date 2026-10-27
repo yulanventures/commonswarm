@@ -63,7 +63,7 @@ test('permanence release proofs for 20261019000010 are the same bytes in the res
 });
 
 test('read model proofs hold, the reserve restores the previous projections and the nine-column view exactly, and roll forward restores 00010', () => {
-  runSql(`
+  runSql(repoSql("deploy/release-proofs/agents/20261028000002-rollback.sql") + `
 -- The clone carries the 20261021000990 bodies of the three read models, so 00010 is not the installed state yet.
 ${proof('catalog', false)}
 ${repoSql(FENCE_ROLLBACK)}

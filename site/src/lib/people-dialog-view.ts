@@ -108,7 +108,7 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialo
   if (action === "resume") return agent.mayManage && agent.status.kind === "paused" && agent.status.fix.allowed;
   if (action === "allow") return agent.own && agent.accessReadState === "succeeded" && !agent.access;
   if (action === "new-key" || action === "connected-apps") return agent.own;
-  if (action === "turn-off-key") return agent.mayManage && agent.liveKey;
+  if (action === "turn-off-key") return agent.liveKey && (agent.hosted ? agent.mayManage : agent.own);
   return action === "remove-agent" && agent.mayManage;
 }
 /** The `window.confirm` text of the withdraw button on the Lists & docs card. */
@@ -119,7 +119,7 @@ export function withdrawConfirmText(name: string, hosted: boolean): string {
 export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string }) {
   const name = item.name;
   if (action === "remove-agent") return { title: `Remove ${name}?`, button: `Remove ${name}`,
-    stops: [`${name} will lose access to this space. Its identity and every connection will end.`, "This cannot be undone."],
+    stops: item.hosted ? [`${name} will lose access to this space. Its identity and every connection will end.`, "This cannot be undone."] : [`${name} will lose access to this workspace immediately.`],
     stays: [`Its history stays as “${name} (removed)”.`, ...(item.hosted ? ["Its owner can connect a new agent with the same name."] : [])] };
   if (action === "turn-off-key") return { title: `Turn off ${name}’s key?`, button: "Turn off key",
     stops: [`${name} stops when its current access ends.`, "This key cannot be used again."],
@@ -632,7 +632,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       } detail.append(technical);
       if (agent.mayManage && !model.sample) { const danger = node(doc, "section", "pd-danger-zone"); danger.append(node(doc, "h3", "", "Stop or remove")); const actions = node(doc, "div", "pd-danger-actions");
         if (peopleDialogCanAct(model, "turn-off-key", agent.id)) { const stop = actionButton("turn-off-key", agent, page ? "Turn off key" : `Turn off key for ${agent.name}`, notice, "data-revoke-grant"); if (page) stop.setAttribute("aria-label", `Turn off key for ${agent.name}`); actions.append(stop); }
-        const remove = actionButton("remove-agent", agent, page ? "Remove agent" : `Remove ${agent.name}`, notice, "data-remove-agent"); if (page) remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); detail.append(danger); }
+        const remove = actionButton("remove-agent", agent, page ? (agent.hosted ? "Remove agent" : "Remove from this workspace") : `Remove ${agent.name}`, notice, "data-remove-agent"); if (page) remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); detail.append(danger); }
       const error = node(doc, "p", "pd-error"); error.dataset.agentError = ""; error.setAttribute("role", "alert"); error.hidden = true; detail.append(error);
     } else {
       const person = selected as PeopleDialogPerson; const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person);
@@ -678,7 +678,7 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
   const addFact = (text: string, keep: boolean) => { const row = node(doc, "li", keep ? "keep" : "stop"); row.append(node(doc, "span", "pd-sr-only", keep ? "Stays or can be restored: " : "Stops or cannot be undone: "), node(doc, "span", "", text)); facts.append(row); };
   copy.stops.forEach((text, index) => { addFact(text, false); if (copy.stays[index]) addFact(copy.stays[index]!, true); });
   copy.stays.slice(copy.stops.length).forEach((text) => addFact(text, true)); dialog.append(symbol, title, facts);
-  if (action === "remove-agent" && item.liveKey && alternative) { const option = node(doc, "section", "pd-alternative"); option.append(node(doc, "h3", "", "Would turning off the key be enough?"), node(doc, "p", "", `Keep ${item.name} and its history here. It stops when its current access ends; a new key can bring it back.`), button(doc, "Turn off key instead →", () => alternative())); dialog.append(option); }
+  if (action === "remove-agent" && item.hosted && item.liveKey && alternative) { const option = node(doc, "section", "pd-alternative"); option.append(node(doc, "h3", "", "Would turning off the key be enough?"), node(doc, "p", "", `Keep ${item.name} and its history here. It stops when its current access ends; a new key can bring it back.`), button(doc, "Turn off key instead →", () => alternative())); dialog.append(option); }
   const notice = node(doc, "p", "pd-error"); notice.setAttribute("role", "alert"); notice.hidden = true;
   let pending = false;
   // The page layout has no outer dialog: its host is the current People & agents page (a render replaces the element).

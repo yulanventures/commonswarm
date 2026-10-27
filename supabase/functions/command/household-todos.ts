@@ -122,7 +122,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       return { outcome, events: [], notices: replayed ? stored.notices : [], replayed };
     }
     const members = await tx`SELECT user_id,workspace_id,revoked_at,role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid`;
-    const agents = await tx`SELECT principal_id,workspace_id,owner_user_id,revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid`;
+    const agents = await tx`SELECT p.principal_id,am.workspace_id,p.owner_user_id,coalesce(p.revoked_at,am.revoked_at) AS revoked_at FROM swarm.agent_principals p JOIN swarm.agent_workspace_memberships am USING(principal_id,owner_user_id) WHERE am.workspace_id=${workspaceId}::uuid`;
     const [objects] = await tx`SELECT projection FROM swarm.household_object_streams WHERE workspace_id=${workspaceId}::uuid`;
     const projection = objects?.projection as { objects?: Record<string, { object_id: string; kind: 'list' | 'doc' | 'file' }> } | undefined;
     const identityAttempts = await rate(tx, `todo:${identity.principal_id ? 'agent' : 'user'}:${principal.toLowerCase()}`, core.TODO_IDENTITY_WRITE_HOURLY_LIMIT);
@@ -198,7 +198,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       JOIN swarm.agent_tokens original ON original.token_id=c.connection_id AND original.run_id=c.grant_id
         AND original.principal_id=c.principal_id
       LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id
-        AND g.workspace_id=c.workspace_id AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
+        AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
       JOIN swarm.agent_tokens t ON t.run_id=c.grant_id AND t.principal_id=c.principal_id
         AND (c.renewal_grant_id IS NULL AND t.token_id=c.connection_id
           OR t.renewal_grant_id=c.renewal_grant_id AND t.lineage_id=original.lineage_id)
@@ -208,7 +208,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         AND (c.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL
           AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-          AND (g.local_content_approval_token_id IS NULL OR g.local_content_approval_token_id=c.connection_id))
+          AND ((SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) IS NULL OR (SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid)=c.connection_id))
         AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
         AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
         AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
@@ -253,18 +253,17 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const familyIds=[...new Set(planned.flatMap(r=>r.renewal_grant_id ? [r.renewal_grant_id]:[]))];
     const [clock] = await tx`SELECT clock_timestamp() AS now`;
     now = new Date(clock!.now as string).getTime();
-    const [agent] = await tx`SELECT p.*,
-      EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
+    const [agent] = await tx`SELECT p.*,${workspaceId}::uuid AS workspace_id,
+      EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
       EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_grants g USING(grant_id)
-        JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=g.grant_id AND b.workspace_id=s.workspace_id
-        WHERE s.workspace_id=p.workspace_id AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
-          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND b.revoked_at IS NULL) AS hosted_live,
+        WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND swarm.hosted_binding_eligible(s.grant_id,s.workspace_id,s.principal_id)) AS hosted_live,
       EXISTS (SELECT 1 FROM swarm.agent_tokens t
         JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
         JOIN swarm.devices d ON d.device_id=r.device_id
         LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
-        JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
-        JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id
+        JOIN swarm.workspaces w ON w.workspace_id=${workspaceId}::uuid
         WHERE t.principal_id=p.principal_id AND p.revoked_at IS NULL AND NOT p.turn_only
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
@@ -275,14 +274,14 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
           AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[t.parent_admin_grant_id,p.parent_admin_grant_id]) parent(id)
           WHERE parent.id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM swarm.admin_grants a
-            JOIN swarm.memberships am ON am.workspace_id=p.workspace_id AND am.user_id=a.owner_user_id
+            JOIN swarm.memberships am ON am.workspace_id=${workspaceId}::uuid AND am.user_id=a.owner_user_id
             JOIN swarm.workspaces aw ON aw.workspace_id=am.workspace_id
-            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=p.workspace_id
+            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=${workspaceId}::uuid
             WHERE a.grant_id=parent.id AND a.state='active' AND a.revoked_at IS NULL
               AND a.expires_at>${new Date(now)} AND a.refresh_deadline>${new Date(now)}
               AND am.revoked_at IS NULL AND am.role IN ('owner','admin') AND aw.archived_at IS NULL
-              AND NOT p.workspace_id=ANY(a.withdrawn_workspace_ids)
-              AND (p.workspace_id=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
+              AND NOT ${workspaceId}::uuid=ANY(a.withdrawn_workspace_ids)
+              AND (${workspaceId}::uuid=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
                 OR a.workspace_selector='owned_and_selected' AND am.role='owner')
               AND (ac.grant_id IS DISTINCT FROM a.grant_id OR
                 'seats:create'=ANY(ac.scope_names) AND a.created_workspace_policy->'scope_names' ? 'seats:create')
@@ -296,8 +295,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
         JOIN swarm.devices d ON d.device_id=r.device_id
         LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
-        JOIN swarm.memberships m ON m.workspace_id=p.workspace_id AND m.user_id=p.owner_user_id
-        JOIN swarm.workspaces w ON w.workspace_id=p.workspace_id
+        JOIN swarm.memberships m ON m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id
+        JOIN swarm.workspaces w ON w.workspace_id=${workspaceId}::uuid
         WHERE t.principal_id=p.principal_id AND p.revoked_at IS NULL AND NOT p.turn_only
           AND t.revoked_at IS NULL AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL
           AND d.user_id=p.owner_user_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
@@ -308,14 +307,14 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
           AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[t.parent_admin_grant_id,p.parent_admin_grant_id]) parent(id)
           WHERE parent.id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM swarm.admin_grants a
-            JOIN swarm.memberships am ON am.workspace_id=p.workspace_id AND am.user_id=a.owner_user_id
+            JOIN swarm.memberships am ON am.workspace_id=${workspaceId}::uuid AND am.user_id=a.owner_user_id
             JOIN swarm.workspaces aw ON aw.workspace_id=am.workspace_id
-            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=p.workspace_id
+            LEFT JOIN swarm.admin_created_workspaces ac ON ac.workspace_id=${workspaceId}::uuid
             WHERE a.grant_id=parent.id AND a.state='active' AND a.revoked_at IS NULL
               AND a.expires_at>${new Date(now)} AND a.refresh_deadline>${new Date(now)}
               AND am.revoked_at IS NULL AND am.role IN ('owner','admin') AND aw.archived_at IS NULL
-              AND NOT p.workspace_id=ANY(a.withdrawn_workspace_ids)
-              AND (p.workspace_id=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
+              AND NOT ${workspaceId}::uuid=ANY(a.withdrawn_workspace_ids)
+              AND (${workspaceId}::uuid=ANY(a.workspace_ids) OR ac.grant_id=a.grant_id
                 OR a.workspace_selector='owned_and_selected' AND am.role='owner')
               AND (ac.grant_id IS DISTINCT FROM a.grant_id OR
                 'seats:create'=ANY(ac.scope_names) AND a.created_workspace_policy->'scope_names' ? 'seats:create')
@@ -338,7 +337,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
-      FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
+      FROM swarm.agent_principals p WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=p.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL) AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(
       (SELECT max(last_command_at) FROM swarm.agent_presence WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),

@@ -120,7 +120,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     if (adminTransactionContext(false) && model === "Grant") return { family };
     if (binding?.grant_class === "hosted_mcp") {
       assertHostedPayload(model,id,payload,binding);
-      // DCR -> union of stored selected workspace streams -> family -> exact
+      // DCR -> union of original and human-added workspace streams -> family -> exact
       // hosted grant -> artifact. Never enter this envelope with a family held.
       await client.query("SELECT client_id FROM commonswarm_oauth.registered_clients WHERE client_id=$1 FOR UPDATE", [binding.client_id]);
       const candidates = (await client.query("SELECT * FROM commonswarm_oauth.lock_hosted_client_streams($1)", [binding.client_id])).rows;
@@ -180,8 +180,9 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     const { family, binding } = envelope;
     // Only the existing definer's freshly validated, non-pending authority can
     // make a terminal decision. Missing rows and query errors are not evidence.
-    // The post-wait policy read is the decision point: a later membership
-    // re-add cannot undo this fence, while restoration before it stays active.
+    // active describes connection liveness, including a dormant family with
+    // zero reachable workspaces. Only explicit revocation/expiry retires it;
+    // tool resolvers independently require live target authority.
     if (!binding || policy?.active !== false || !["active","revoked"].includes(policy.state) ||
         policy.grant_id !== binding.hosted_grant_id) return false;
     if (providerGrant) {
