@@ -240,7 +240,7 @@ function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: Ra
   return item;
 }
 
-/** The left rail: brand row, Catch up, Workspaces, People & agents and New workspace. The ownership line is
+/** The left rail: brand row, Catch up, Workspaces with its create action, then People & agents. The ownership line is
  *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
 export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
   const currentAgentId = vm.currentAgentId;
@@ -264,6 +264,16 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
   workspaces.setAttribute("aria-labelledby", "hm-rail-workspaces-title");
   const workspacesTitle = node(doc, "h2", "hm-rail__heading", "Workspaces");
   workspacesTitle.id = "hm-rail-workspaces-title";
+  const workspacesHead = node(doc, "div", "hm-rail__section-head");
+  workspacesHead.append(workspacesTitle);
+  if (!vm.sample) {
+    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__new", callbacks);
+    create.dataset.homeNewWorkspace = "";
+    create.setAttribute("aria-label", "New workspace");
+    create.title = "New workspace";
+    create.append(icon(doc, "plus"));
+    workspacesHead.append(create);
+  }
   const list = node(doc, "ul", "hm-rail__workspace-list");
   list.id = "hm-rail-workspace-list";
   list.dataset.homeWorkspaceList = "";
@@ -287,7 +297,7 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
     list.append(item);
   }
   if (options.draftWorkspace) list.append(draftRow(doc, options.draftWorkspace.name));
-  workspaces.append(workspacesTitle, list);
+  workspaces.append(workspacesHead, list);
   const moreLabel = railMoreLabel(overflowCount, expanded);
   if (moreLabel) {
     const more = node(doc, "button", "hm-rail__more", moreLabel);
@@ -328,15 +338,6 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
     section.append(title, peopleList);
     if (!currentAgentId) section.append(node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
     root.append(section);
-  }
-  /* New workspace is the outline button pinned to the foot of the rail. A sample has no doors. */
-  if (!vm.sample) {
-    const foot = node(doc, "div", "hm-rail__foot");
-    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__new", callbacks);
-    create.dataset.homeNewWorkspace = "";
-    create.append(icon(doc, "plus"), node(doc, "span", "hm-rail__new-label", "New workspace"));
-    foot.append(create);
-    root.append(foot);
   }
   return root;
 }

@@ -19,7 +19,7 @@
 
 .hm-rail ul { margin: 0; padding: 0; list-style: none; }
 
-/* Brand row: the two-shape mark and the word in the display face. */
+/* Brand row: the junction-C mark and the word in the display face. */
 .hm-rail__brand {
   display: flex;
   flex: none;
@@ -38,8 +38,8 @@
 /* Junction-C brand mark, with a contrast-aware ink stroke. */
 .hm-rail__mark { position: relative; flex: none; inline-size: 26px; block-size: 26px; }
 .hm-rail__mark::before, .hm-rail__mark::after { content: ""; position: absolute; inset: 0; mask-position: center; mask-repeat: no-repeat; mask-size: contain; }
-.hm-rail__mark::before { background: var(--home-rail-strong); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M22.6 8.15a9.7 9.7 0 1 0 0 15.7' fill='none' stroke='black' stroke-width='4.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
-.hm-rail__mark::after { background: #BA3D23; mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='18.35' y='11.4' width='9.2' height='9.2' rx='2.35'/%3E%3C/svg%3E"); }
+.hm-rail__mark::before { background: var(--home-rail-strong); mask-image: image-set("/brand/mark.svg" 1x); }
+.hm-rail__mark::after { background: var(--cs-rail-accent, #BA3D23); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='18.35' y='11.4' width='9.2' height='9.2' rx='2.35'/%3E%3C/svg%3E"); }
 
 .hm-rail__nav {
   display: flex;
@@ -131,7 +131,7 @@
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 9.5l2-6h7l2 6v3a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-3z'/%3E%3Cpath d='M2.5 9.5h3.2a2.3 2.3 0 0 0 4.6 0h3.2'/%3E%3C/svg%3E");
 }
 .hm-rail__icon[data-icon="workspace"] {
-  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='2' width='9' height='12' rx='1.5'/%3E%3Cpath d='M9.8 8.2h.1'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='m6 2-2 12M12 2l-2 12M2.5 6h11M1.5 10h11'/%3E%3C/svg%3E");
 }
 .hm-rail__icon[data-icon="plus"] {
   inline-size: 14px;
@@ -278,29 +278,23 @@
   white-space: nowrap;
 }
 
-/* New workspace: the outline button pinned to the foot of the rail. */
-.hm-rail__foot { display: flex; flex: none; flex-direction: column; gap: 8px; margin-block-start: auto; }
+/* The section owns its create action; its accessible name stays explicit. */
+.hm-rail__section-head { display: flex; align-items: center; justify-content: space-between; flex: none; }
+.hm-rail__section-head .hm-rail__heading { padding-block: 0; letter-spacing: 0; text-transform: none; }
 .hm-rail__new {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  box-sizing: border-box;
-  /* The canvas button is min-height 44px INSIDE a 1.5px stroke: 47px outside. Chromium rounds a 1.5px border to
-     1px, so the stroke is an inset 1.5px ring (the primitives' outline method; 3 device px at DPR 2), and the
-     padding carries the 1.5px the border used to. */
-  min-block-size: 47px;
-  padding: 0 13.5px;
+  flex: none;
+  inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0;
   border: 0;
-  border-radius: 12px;
-  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
-  color: var(--home-rail-strong);
-  font-weight: 600;
+  border-radius: 6px;
+  color: var(--home-rail-text);
   text-decoration: none;
 }
 .hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
-.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--home-focus-ring); }
-.hm-rail__new .hm-rail__icon { color: var(--home-accent-text); }
 
 .hm-rail__sr {
   position: absolute;
