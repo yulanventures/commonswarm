@@ -18,11 +18,12 @@ These are editable UI illustrations of current concepts, not screenshots of a ne
 | Workspace, shopping and handoff illustrations | `site/src/components/landing/WorkspacePreview.astro` and `ConsumerStory.astro` | Original HTML/CSS; fictional sample content authored for this page. All text remains editable. |
 | Product behavior and audience | `docs/product/VISION.md`, repository/site `AGENTS.md`, current engineering status, `site/src/lib/agent-hosts.ts`, server tool registry | Current code/status takes precedence over older marketing copy and stale `llms.txt`. |
 | Brand mark | Existing `site/src/components/Wordmark.astro` | Reused unchanged; homepage tokens set its accent. |
-| Person/agent avatars | Existing `site/public/landing/avatars/*.webp`, from commit `843a65ad`; rendered through existing `LandingAvatar.astro` | Reused unchanged. Previous source describes photos and generated agent artwork. Original photo URLs and generation prompts are not recorded in this checkout; provenance is incomplete. These are fictional examples, not customers. |
+| People avatars | Existing person photos in `site/public/landing/avatars/*.webp`, from commit `843a65ad`; rendered through `LandingAvatar.astro` | Photos reused unchanged. Original photo URLs are not recorded in this checkout; their provenance remains incomplete. These are fictional examples, not customers. |
+| Agent identities | Official Claude SVG, ChatGPT ICO, existing Grok SVG and an exact crop of Meta’s Muse character | Replaced the earlier generated agent artwork. Sources, crop coordinates and usage limitations: `site/public/brand/works-with/SOURCES.md`. Muse is an illustrative preview. |
 | Type | Existing self-hosted Bricolage Grotesque and DM Sans; Instrument Sans in the shared header/footer | Existing OFL licenses in `site/public/fonts/`. No external font requests. |
 | Connection symbols | Text glyphs in the editable markup | Generic decorative symbols, not vendor marks or endorsement badges. |
 
-No new AI raster imagery was generated, so there are no new image-generation prompts. Existing screenshot artifacts and their generator remain available; the redesigned page does not download them. Existing shared social-card artwork is retained.
+No new AI raster imagery was generated, so there are no new image-generation prompts. Existing screenshot artifacts and their generator remain available; the redesigned page does not download them. The existing social-card composition is reused; its current mark and headline are regenerated with `site/scripts/og-card.mjs`.
 
 ## Reproduce
 

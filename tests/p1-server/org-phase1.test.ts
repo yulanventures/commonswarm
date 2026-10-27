@@ -11,7 +11,8 @@ const viewColumns = (expected: unknown) => dbAssert(`SELECT jsonb_agg(jsonb_buil
   FROM pg_attribute WHERE attrelid='swarm_read.workspaces'::regclass AND attnum>0 AND NOT attisdropped`, 'workspace projection baseline');
 const root = 'deploy/release-proofs/org/20261027000001';
 test('organizations backfill, compatible writers and workspace-only visibility', () => {
-  runSql(repoSql('deploy/release-proofs/org/20261027000002-rollback.sql')
+  runSql(repoSql('deploy/release-proofs/agents/20261028000001-rollback.sql')
+    + repoSql('deploy/release-proofs/org/20261027000002-rollback.sql')
     + repoSql(`${root}-rollback.sql`)
     + viewColumns(baseline.historical)
     + repoSql('tests/fixtures/org-phase1-before.sql')

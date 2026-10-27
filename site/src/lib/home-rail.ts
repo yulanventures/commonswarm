@@ -170,8 +170,7 @@ function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement 
   return mark;
 }
 
-/** The two-shape mark, the canvas's own SVG geometry (Main.dc.html), drawn by rail.css as two masks: a lime circle and an
- *  outlined rounded square. */
+/** Shared CommonSwarm mark. */
 function brandMark(doc: Document): HTMLElement {
   const mark = node(doc, "span", "hm-rail__mark");
   mark.setAttribute("aria-hidden", "true");

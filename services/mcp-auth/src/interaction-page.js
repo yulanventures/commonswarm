@@ -41,7 +41,7 @@ const PROVIDER_GLYPHS = {
   google: '<svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47a5.53 5.53 0 0 1-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09A11.99 11.99 0 0 0 12 24z"/><path fill="#FBBC05" d="M5.27 14.29A7.2 7.2 0 0 1 4.89 12c0-.8.14-1.57.38-2.29V6.62H1.29A11.99 11.99 0 0 0 0 12c0 1.94.47 3.76 1.29 5.38z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42A11.96 11.96 0 0 0 12 0 11.99 11.99 0 0 0 1.29 6.62l3.98 3.09C6.22 6.86 8.87 4.75 12 4.75z"/></svg>',
   email: '<svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="4.5" width="15" height="11" rx="2"/><path d="m3 5.5 7 5.5 7-5.5"/></svg>',
 };
-const BRAND_MARK = '<svg class="brand-mark" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="8" fill="#D4F04A"/><rect x="12" y="12" width="14" height="14" rx="4.5" stroke="currentColor" stroke-width="2"/></svg>';
+const BRAND_MARK = '<svg class="brand-mark" width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true" focusable="false"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" stroke="currentColor" stroke-width="4.8" stroke-linecap="round"></path><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="var(--accent)"></rect></svg>';
 
 export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
   const redirect = new URL(redirectUri);
@@ -119,24 +119,24 @@ function renderAccount(identity, csrfToken, switchAccount) {
 
 const CONSENT_STYLES = `:root{
   color-scheme:light dark;
-  --canvas:#EEF2EA;--card:#FCFDFA;--soft:#F1F5EC;--soft-strong:#E7EDE1;--hair:#E3E9DD;--border:#D3DBCC;--lip:#C9D2C1;
-  --ink:#17231C;--muted:#4F5E54;--lime:#D4F04A;--lime-ink:#17231C;
-  --primary-bg:#17231C;--primary-fg:#FCFDFA;--primary-hover:#2F4438;--link:#17231C;--focus:#17231C;
-  --tile-bg:#DDE7FA;--tile-line:#2A5DBF;--tile-ink:#1B3F87;--avatar:#2A5DBF;
-  --warn-bg:#FCEBCB;--warn-line:#F0B25A;--warn-ink:#5E3300;--warn-icon:#8A4B00;
+  --canvas:#F8F6EF;--card:#FFFEFA;--soft:#E9ECDF;--soft-strong:#E1E2D6;--hair:#DDDED3;--border:#DDDED3;--lip:#DDDED3;
+  --ink:#292C25;--muted:#64675D;--accent:#BA3D23;
+  --primary-bg:#BA3D23;--primary-fg:#FFFAF2;--primary-hover:#9E321D;--link:#292C25;--focus:#BA3D23;
+  --tile-bg:#F2E4D6;--tile-line:#BA3D23;--tile-ink:#292C25;--avatar:#BA3D23;
+  --warn-bg:#F2E4D6;--warn-line:#C47A3A;--warn-ink:#5E3300;--warn-icon:#8A4B00;
   --danger:#8C2A14;--danger-bg:#FBE4D5;--danger-line:#E9B79B;
-  --pill-dot:#D4F04A;
-  --display:"Bricolage Grotesque",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
-  --body:"Instrument Sans",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --pill-dot:#FFFAF2;
+  --display:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --body:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
 @media (prefers-color-scheme:dark){:root{
-  --canvas:#0F1712;--card:#17231C;--soft:#1E2D24;--soft-strong:#22332A;--hair:#2C3F34;--border:#2A3D32;--lip:#0A100C;
-  --ink:#EEF2EA;--muted:#B4C2B8;--lime:#D4F04A;--lime-ink:#17231C;
-  --primary-bg:#D4F04A;--primary-fg:#17231C;--primary-hover:#E4F78A;--link:#D4F04A;--focus:#D4F04A;
-  --tile-bg:#1E3156;--tile-line:#7FA3EC;--tile-ink:#DDE7FA;--avatar:#3B6FD4;
-  --warn-bg:#3A2B10;--warn-line:#8A5A12;--warn-ink:#FCEBCB;--warn-icon:#F0B25A;
+  --canvas:#20231E;--card:#2B2F27;--soft:#343B2C;--soft-strong:#3D4434;--hair:#4C5144;--border:#4C5144;--lip:#151912;
+  --ink:#F0F0E6;--muted:#B8BCAE;--accent:#ED957A;
+  --primary-bg:#ED957A;--primary-fg:#28251E;--primary-hover:#F4B09B;--link:#ED957A;--focus:#ED957A;
+  --tile-bg:#46392D;--tile-line:#ED957A;--tile-ink:#F0F0E6;--avatar:#ED957A;
+  --warn-bg:#46392D;--warn-line:#ED957A;--warn-ink:#F2E4D6;--warn-icon:#ED957A;
   --danger:#FFB4A0;--danger-bg:#3A1D14;--danger-line:#7A3420;
-  --pill-dot:#17231C;
+  --pill-dot:#28251E;
 }}
 *,*::before,*::after{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
@@ -158,7 +158,7 @@ svg{flex:none}
 .app-mark,.cs-mark{width:40px;height:40px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .app-mark{background:var(--tile-bg);border:1.5px solid var(--tile-line);color:var(--tile-ink);font-family:var(--display);font-weight:700;font-size:18px}
 .unverified .app-mark{background:var(--warn-bg);border:1.5px dashed var(--warn-icon);color:var(--warn-ink)}
-.cs-mark{background:#17231C;color:#EEF2EA}
+.cs-mark{background:var(--card);color:var(--ink);border:1px solid var(--border)}
 .pair-link{display:inline-flex;gap:3px}
 .pair-link i{width:4px;height:4px;border-radius:50%;background:var(--muted);opacity:.7}
 .badge{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:3px 11px 3px 8px;border-radius:999px;font-size:13px;font-weight:700}
@@ -195,7 +195,7 @@ svg{flex:none}
 .progress>p{margin-top:8px;font-size:14px;color:var(--muted);font-weight:600}
 .progress ul{list-style:none;margin:6px 0 0;padding:0}
 .progress li{position:relative;padding:4px 0 4px 26px;font-size:15px}
-.progress li::before{content:"";position:absolute;left:2px;top:9px;width:14px;height:14px;border-radius:50%;background:var(--lime);box-shadow:inset 0 0 0 1.5px #17231C}
+.progress li::before{content:"";position:absolute;left:2px;top:9px;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:inset 0 0 0 1.5px var(--ink)}
 .progress .error{margin-top:10px;font-weight:600;color:var(--danger);font-size:15px}
 form{margin:0}
 form[action$="/consent"]>*+*{margin-top:22px}
@@ -235,6 +235,11 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
 .actions button{min-height:52px;padding:0 30px;border:0;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);font:inherit;font-size:17px;font-weight:700;cursor:pointer}
 .actions button:hover{background:var(--primary-hover)}
 .actions a{display:inline-flex;align-items:center;min-height:44px;color:var(--link);font-weight:600;font-size:15px;text-underline-offset:3px}
+.sign-in-actions{flex-direction:column;align-items:stretch}
+.sign-in-actions a{justify-content:center;min-height:52px;padding:0 30px;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);text-decoration:none;font-weight:700}
+.sign-in-actions a:hover{background:var(--primary-hover);color:var(--primary-fg)}
+.sign-in-actions a.provider-secondary{background:transparent;color:var(--ink);border:1px solid var(--border)}
+.sign-in-actions a.provider-secondary:hover{background:var(--soft)}
 :focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:6px}
 .actions button:focus-visible,.switch-button:focus-visible{outline-offset:3px;border-radius:999px}
 .workspace-pick:has(input:focus-visible),.home-choice:has(input:focus-visible){outline:3px solid var(--focus);outline-offset:1px}
@@ -262,18 +267,18 @@ export function renderSignInPage({ interactionUid, providers, selectAccount = fa
     <title>Sign in to CommonSwarm</title><style>${CONSENT_STYLES}</style></head>
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header>
     <div class="card"><h1>Sign in to CommonSwarm</h1><p class="lede">Choose an account to continue connecting your app.</p>
-    <div class="actions">${providers.map((id) => {
+    <div class="actions sign-in-actions">${[...providers].sort((a, b) => (a === "google" ? -1 : b === "google" ? 1 : 0)).map((id) => {
       const entry = AUTH_PROVIDER_CATALOG.find((candidate) => candidate.id === id);
       if (!entry) throw new TypeError("unknown sign-in provider");
       const query = new URLSearchParams({ provider: id });
       if (selectAccount) query.set("select_account", "1");
-      return `<a href="/interaction/${encodeURIComponent(interactionUid)}/sign-in?${escapeHtml(query.toString())}">Continue with ${escapeHtml(entry.name)}</a>`;
+      return `<a${id === "github" ? ' class="provider-secondary"' : ""} href="/interaction/${encodeURIComponent(interactionUid)}/sign-in?${escapeHtml(query.toString())}">Continue with ${escapeHtml(entry.name)}</a>`;
     }).join("")}</div></div></main></body></html>`;
 }
 
 export function renderDifferentAccountPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Start again</title><style>${CONSENT_STYLES}</style></head><body><main class="page"><div class="card">
+    <title>Start again</title><style>${CONSENT_STYLES}</style></head><body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span></header><div class="card">
     <h1>You signed in as a different account; start again</h1><p>Start a new connection from your app.</p></div></main></body></html>`;
 }
 
@@ -286,7 +291,7 @@ export function renderConsentResultPage({ completed = false, clientName, restart
     ${completed ? `<p class="lede">You can return to <strong>${escapeHtml(clientName || "your app")}</strong>.</p>
       <p>If your app did not finish connecting, start a new connection from that app.</p>`
       : `<p class="lede">This connection attempt expired or was opened in another window. Start the connection again from your app.</p>`}
-    <div class="actions">${restartUrl ? `<a href="${escapeHtml(restartUrl)}">Return to ${escapeHtml(clientName || "your app")}${completed ? "" : " to start again"}</a>`
+    <div class="actions sign-in-actions">${restartUrl ? `<a href="${escapeHtml(restartUrl)}">Return to ${escapeHtml(clientName || "your app")}${completed ? "" : " to start again"}</a>`
       : '<a href="https://commonswarm.com/app">Return to CommonSwarm</a>'}</div></div></main></body></html>`;
 }
 

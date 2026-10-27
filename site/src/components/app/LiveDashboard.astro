@@ -44,6 +44,7 @@ import "../../styles/kylon-people.css";
 import "../../styles/kylon-wiki.css";
 import "../../styles/kylon-wiki-context.css";
 import "../../styles/kylon-account-dialogs.css";
+import "../../styles/account-agents.css";
 import "../../styles/dashboard-welcome.css";
 import "../../styles/kylon-todos.css";
 import "../../styles/kylon-todos-context.css";
@@ -309,6 +310,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 </svg>
                 <span data-theme-toggle-label>System</span>
               </button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-account-agents-open>Your agents</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
@@ -1002,6 +1004,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
   </dialog>
 
+  <dialog data-account-agents-dialog aria-labelledby="dashboard-account-agents-title">
+    <header>
+      <h2 id="dashboard-account-agents-title">Your agents</h2>
+      <button type="button" data-account-agents-close aria-label="Close Your agents">×</button>
+    </header>
+    <p data-account-agents-status role="status" aria-live="polite" hidden></p>
+    <div data-account-agents-list></div>
+    <button type="button" data-account-agents-retry hidden>Try again</button>
+  </dialog>
+
   {/* PEOPLE & AGENTS IS A PAGE (the canvas Members artboard, route `?v=people`), rendered by
       renderPeopleDialog(..., { layout: "page" }) into the route pane. ~~"The agent management dialog. A
       native <dialog> ... At ≤52rem it is a bottom sheet"~~, retired 2026-10-07 (home visual lane): the
@@ -1034,7 +1046,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { createListsChrome } from "../../lib/lists-chrome";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { buildAccountAgents } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -1390,6 +1403,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let session: Session | null = null;
     let connectedApps: ConnectedApp[] = [];
     let connectedAppsGeneration = 0;
+    let accountAgentsGeneration = 0;
     let workspaces: Workspace[] = [];
     let moveOrganizations: Organization[] = [];
     let selectedOrgId: string | null = null;
@@ -1968,6 +1982,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
+        yourAgents: !!session,
         signOut: !!signOut && !signOut.hidden,
       };
     };
@@ -1975,6 +1990,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (typeof action === "object") { void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push"); }
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
+      else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
 
@@ -6980,6 +6996,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (connectedDialog?.open) connectedDialog.close();
       connectedAppsGeneration += 1;
       connectedApps = [];
+      accountAgentsGeneration += 1;
+      const accountAgentsDialog = one<HTMLDialogElement>("[data-account-agents-dialog]");
+      if (accountAgentsDialog?.open) accountAgentsDialog.close();
+      one<HTMLElement>("[data-account-agents-list]")?.replaceChildren();
+      one<HTMLElement>("[data-account-agents-status]")?.replaceChildren();
       connectionSettingsGeneration += 1;
       connectionDateDrafts.clear();
       one<HTMLElement>("[data-connected-apps-list]")?.replaceChildren();
@@ -7379,6 +7400,33 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const workspaceMoveCommands=new Map<string,string>();
+
+    const loadAccountAgentsDialog = async (): Promise<void> => {
+      const generation = ++accountAgentsGeneration;
+      const ownerId = session?.user.id;
+      const list = one<HTMLElement>("[data-account-agents-list]");
+      const status = one<HTMLElement>("[data-account-agents-status]");
+      const retry = one<HTMLButtonElement>("[data-account-agents-retry]");
+      if (!ownerId || !list || !status || !retry) return;
+      list.replaceChildren();
+      status.textContent = "Loading agents…";
+      status.hidden = false;
+      retry.hidden = true;
+      const current = () => generation === accountAgentsGeneration && ownerId === session?.user.id && !sampleMode
+        && !!one<HTMLDialogElement>("[data-account-agents-dialog]")?.open;
+      try {
+        const agents = await myAccountAgents();
+        if (!current()) return;
+        list.replaceChildren(buildAccountAgents(document, agents));
+        status.textContent = "";
+        status.hidden = true;
+      } catch (error) {
+        if (!current()) return;
+        status.textContent = readableError(error);
+        retry.hidden = false;
+      }
+    };
+
     const renderWorkspaceSettingsPanel = (workspace: Workspace): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
       if (!root) return;
@@ -9963,6 +10011,25 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       document.addEventListener("focusin", dismiss);
     };
     wirePopover("[data-user-menu-trigger]", "[data-user-menu]");
+    one<HTMLButtonElement>("[data-account-agents-open]")?.addEventListener("click", () => {
+      if (!session || sampleMode) return;
+      const menu = one<HTMLElement>("[data-user-menu]");
+      if (menu) menu.hidden = true;
+      one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+      one<HTMLDialogElement>("[data-account-agents-dialog]")?.showModal();
+      void loadAccountAgentsDialog();
+    });
+    one<HTMLButtonElement>("[data-account-agents-close]")?.addEventListener("click", () => {
+      one<HTMLDialogElement>("[data-account-agents-dialog]")?.close();
+    });
+    one<HTMLButtonElement>("[data-account-agents-retry]")?.addEventListener("click", () => void loadAccountAgentsDialog());
+    {
+      const dialog = one<HTMLDialogElement>("[data-account-agents-dialog]");
+      dialog?.addEventListener("close", () => {
+        if (!dialog.open && session) one<HTMLButtonElement>("[data-user-menu-trigger]")?.focus();
+      });
+      dialog?.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+    }
     one<HTMLButtonElement>("[data-connected-apps-open]")?.addEventListener("click", openConnectedApps);
     one<HTMLButtonElement>("[data-connected-apps-close]")?.addEventListener("click", () => {
       one<HTMLDialogElement>("[data-connected-apps-dialog]")?.close();

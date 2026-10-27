@@ -1,0 +1,41 @@
+live-dashboard [data-account-agents-dialog] {
+  margin: auto;
+  inline-size: min(640px, calc(100% - 32px));
+  max-inline-size: calc(100% - 32px);
+  max-block-size: calc(100dvh - 32px);
+  padding: 24px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  background: var(--k-shell-surface, var(--surface));
+  color: var(--k-shell-ink, var(--text));
+  border: 1px solid var(--k-shell-line, var(--border));
+  border-radius: 12px;
+  box-shadow: var(--k-shell-shadow);
+  font: 13px/1.6 var(--k-shell-font, inherit);
+}
+live-dashboard [data-account-agents-dialog]::backdrop { background: rgb(0 0 0 / 32%); }
+live-dashboard [data-account-agents-dialog] > header,
+.account-agents__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+live-dashboard [data-account-agents-dialog] h2 { margin: 0; font-size: 20px; }
+live-dashboard [data-account-agents-dialog] button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  border: 1px solid var(--k-shell-control, var(--border));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+live-dashboard [data-account-agents-dialog] [data-account-agents-close] { border-color: transparent; font-size: 24px; }
+live-dashboard [data-account-agents-dialog] :is(button, a):focus-visible {
+  outline: 2px solid var(--k-shell-focus, currentColor); outline-offset: 2px;
+}
+.account-agents, .account-agents__workspaces { list-style: none; margin: 0; padding: 0; }
+.account-agents__agent { padding-block: 20px; border-block-end: 1px solid var(--k-shell-line, var(--border)); }
+.account-agents__agent:last-child { border-block-end: 0; padding-block-end: 0; }
+.account-agents__name { margin: 0; font-size: 14px; font-weight: 600; }
+.account-agents__model, .account-agents__empty { margin: 4px 0 12px; color: var(--k-shell-secondary, var(--text-muted)); }
+.account-agents__workspace { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; padding-block: 4px; }
+.account-agents__workspace-name { color: inherit; }
+.account-agents__org, .account-agents__state { color: var(--k-shell-secondary, var(--text-muted)); }
