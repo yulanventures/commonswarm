@@ -1,6 +1,7 @@
 import { connectionPolicyFields, type ConnectionPolicy } from "./standing-grants";
 import { homeOverviewUnavailable } from "./home-map";
 import type { HomeOverview } from "./home/contract";
+import type { AccountAgent } from "./account-agents";
 /*
  * The browser client. This file is the whole of the web app's contact with the backend.
  *
@@ -3129,6 +3130,33 @@ export async function browserDeliveryReceipts(
     receipts,
     ...(broadcastRoster === undefined ? {} : { broadcastRoster }),
   };
+}
+
+/** Owner-filtered account directory; no agent credentials or workspace selection required. */
+export async function myAccountAgents(): Promise<AccountAgent[]> {
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const agents: AccountAgent[] = [];
+  const pageSize = 50;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await readWithDeadline("your agents", signal => c
+      .schema("swarm_read").from("account_agents")
+      .select("principal_id,name,model,transport,revoked_at,workspaces")
+      .order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1).abortSignal(signal));
+    if (error) throw new Error(error.message);
+    const page = data ?? [];
+    agents.push(...page.map(row => ({
+      id: String(row.principal_id), name: String(row.name), model: row.model ?? null,
+      transport: String(row.transport), revokedAt: row.revoked_at ?? null,
+      workspaces: (Array.isArray(row.workspaces) ? row.workspaces : []).map((workspace: Record<string, unknown>) => ({
+        id: String(workspace.workspace_id), name: String(workspace.workspace_name),
+        orgId: String(workspace.org_id), orgName: String(workspace.org_name),
+        revokedAt: workspace.revoked_at == null ? null : String(workspace.revoked_at),
+        archivedAt: workspace.archived_at == null ? null : String(workspace.archived_at),
+      })),
+    })));
+    if (page.length < pageSize) return agents;
+  }
 }
 
 /**
