@@ -82,9 +82,8 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
           AND h.revoked_at IS NULL ORDER BY h.created_at DESC LIMIT 1) AS handle
       FROM swarm.hosted_mcp_seats s JOIN swarm.agent_principals p USING(principal_id)
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
-      JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
       WHERE s.workspace_id=${workspaceId}::uuid AND s.owner_user_id=${identity.user_id}::uuid
-        AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND p.revoked_at IS NULL AND b.revoked_at IS NULL
+        AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND p.revoked_at IS NULL AND swarm.hosted_binding_eligible(s.grant_id,s.workspace_id,s.principal_id)
       ORDER BY s.created_at LIMIT 50`;
     // Enumerate durable families, including an elapsed technical bearer. The
     // content resolver below alone decides whether a bearer can act now.

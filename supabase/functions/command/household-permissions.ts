@@ -40,18 +40,17 @@ async function permissionContext(tx: Sql, workspaceId: string, actor: HouseholdI
 async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdIdentity, connection: ConnectionConsent, plan: LocalAuthLockPlan | null = null): Promise<{ allowed: boolean; expires_at: Date | null; renewal_grant_id?: string | null }> {
   let expiry: Date | null = null;
   if (connection.kind === 'local' && !plan?.locked) return { allowed: false, expires_at: null };
-  const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid
+  const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL)
     AND principal_id=${connection.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal || principal.revoked_at !== null) return { allowed: false as const, expires_at: null };
   if (connection.kind === 'hosted') {
     const [seat] = await tx`SELECT s.seat_id,g.connection_expires_at,g.connection_expired_at FROM swarm.hosted_mcp_seats s
       JOIN swarm.hosted_mcp_grants g USING(grant_id)
-      JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=s.grant_id AND b.workspace_id=s.workspace_id
       WHERE s.seat_id=${connection.connection_id}::uuid AND s.grant_id=${connection.grant_id}::uuid
       AND s.workspace_id=${workspaceId}::uuid AND s.principal_id=${connection.principal_id}::uuid
       AND s.owner_user_id=${actor.user_id}::uuid AND g.owner_user_id=${actor.user_id}::uuid
-      AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND b.revoked_at IS NULL
-      FOR SHARE OF s,g,b`;
+      AND g.state='active' AND g.revoked_at IS NULL AND s.revoked_at IS NULL AND swarm.hosted_binding_eligible(s.grant_id,s.workspace_id,s.principal_id)
+      FOR SHARE OF s,g`;
     if (!seat) return { allowed: false as const, expires_at: null };
     // Evaluate chosen policy with a fresh database clock after the existing
     // principal/seat/grant/binding waits. A terminal family stays terminal.
@@ -235,10 +234,10 @@ export async function withdrawHouseholdConnection(tx: Sql, workspaceId: string, 
   const [principal] = await tx`SELECT principal_id FROM swarm.agent_principals WHERE (workspace_id=${workspaceId}::uuid AND transport='hosted_mcp' OR swarm.local_agent_workspace_live(principal_id,${workspaceId}::uuid))
     AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal) return refused('connection_access_refused');
-  await tx`SELECT connection_id FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid
+  await tx`SELECT connection_id FROM swarm.household_content_connections WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL)
     AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid
     ORDER BY connection_id,grant_id FOR UPDATE`;
-  const [seat] = await tx`SELECT seat_id,grant_id FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspaceId}::uuid
+  const [seat] = await tx`SELECT seat_id,grant_id FROM swarm.hosted_mcp_seats WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL)
     AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   await auditContext(tx, actor, requestId, request.digest, 'household_withdraw_connection');
   if (seat) await writeHostedContentRestriction(tx, workspaceId, actor.user_id,

@@ -57,8 +57,8 @@ export function buildAccountAgents(doc: Document, agents: readonly AccountAgent[
   return list;
 }
 
-export function addableLocalAgents(agents:readonly AccountAgent[],workspaceId:string,orgId:string):AccountAgent[] {
-  return agents.filter(agent=>agent.transport==='local' && agent.revokedAt===null
+export function addableAccountAgents(agents:readonly AccountAgent[],workspaceId:string,orgId:string):AccountAgent[] {
+  return agents.filter(agent=>['local','hosted_mcp'].includes(agent.transport) && agent.revokedAt===null
     && !agent.workspaces.some(w=>w.id===workspaceId && w.revokedAt===null)
-    && agent.workspaces.some(w=>w.orgId===orgId && w.archivedAt===null && (w.revokedAt===null || w.id===workspaceId)));
+    && agent.workspaces.some(w=>w.orgId===orgId && w.archivedAt===null && (agent.transport==='hosted_mcp' || w.revokedAt===null || w.id===workspaceId)));
 }
