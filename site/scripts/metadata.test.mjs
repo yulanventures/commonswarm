@@ -16,11 +16,11 @@ const distDir = join(siteDir, "dist");
  * link previewed copy that was no longer on the page, and every gate stayed green. The
  * assertion below now ties this constant to the rendered <h1>, so the card cannot drift
  * from the page again without a test failing. */
-const currentHomeTitle = "CommonSwarm: A shared workspace for home, work and your agents";
+const currentHomeTitle = "CommonSwarm: Put your agents on the same page";
 const currentHomeDescription =
-  "Share messages, files and notes with the people and agents you use at home and at work.";
-const currentOgHeadline = "Your people. Your agents. One shared workspace.";
-const currentOgMechanism = "Share messages, files and notes about home and work.";
+  "A shared workspace for you, your people and your agents. Make plans, share messages, lists and files, and keep home and work moving together.";
+const currentOgHeadline = "Put your agents on the same page.";
+const currentOgMechanism = "Make plans, share the details and move things along.";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
 const routes = [
@@ -138,7 +138,7 @@ test("L4: every built route publishes coherent, route-specific social metadata",
       assert.equal(description, currentHomeDescription, "home: description");
       const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? "";
       const normalise = (value) =>
-        value.replace(/<[^>]+>/g, "").replace(/&#39;|&rsquo;|’/g, "'").replace(/\s+/g, " ").trim();
+        value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/&#39;|&rsquo;|’/g, "'").replace(/\s+/g, " ").trim();
       assert.equal(
         normalise(h1).length > 0,
         true,
