@@ -584,15 +584,6 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
   for (const w of plan.workspaces) for (const id of sortedIds(s.bindings.map(r=>r.principal_id)))
     await tx`SELECT principal_id FROM swarm.agent_workspace_memberships WHERE workspace_id=${w.id}::uuid AND principal_id=${id}::uuid FOR SHARE`;
   await same();
-  for (const id of s.hostedGrants ?? sortedIds((s.hosted ?? []).map(r=>r.grant))) {
-    if(plan.hostedMode==='update') await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${id}::uuid FOR UPDATE`;
-    else await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${id}::uuid FOR SHARE`;
-  }
-  for (const h of s.hostedBindings ?? s.hosted ?? []) {
-    if(plan.hostedMode==='update') await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${h.grant}::uuid AND workspace_id=${h.workspace}::uuid FOR UPDATE`;
-    else await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${h.grant}::uuid AND workspace_id=${h.workspace}::uuid FOR SHARE`;
-  }
-  for (const id of sortedIds((s.hosted ?? []).map(r=>r.seat))) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${id}::uuid FOR UPDATE`;
   for (const a of s.approvals) await tx`
     SELECT connection_id FROM swarm.household_content_connections
     WHERE connection_id=${a.connection}::uuid AND grant_id=${a.grant}::uuid
@@ -603,6 +594,16 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
   for (const id of [...plan.streamIds].sort()) await tx`SELECT stream_id FROM swarm.streams WHERE stream_id=${id}::uuid FOR UPDATE`;
   for (const e of s.objectStreams ?? []) await tx`SELECT stream_id FROM swarm.household_object_streams WHERE workspace_id=${e.workspace}::uuid AND stream_id=${e.stream}::uuid FOR UPDATE`;
   for (const e of s.todoStreams ?? []) await tx`SELECT stream_id FROM swarm.household_todo_streams WHERE workspace_id=${e.workspace}::uuid AND stream_id=${e.stream}::uuid FOR UPDATE`;
+  await same();
+  for (const id of s.hostedGrants ?? sortedIds((s.hosted ?? []).map(r=>r.grant))) {
+    if(plan.hostedMode==='update') await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${id}::uuid FOR UPDATE`;
+    else await tx`SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=${id}::uuid FOR SHARE`;
+  }
+  for (const h of s.hostedBindings ?? s.hosted ?? []) {
+    if(plan.hostedMode==='update') await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${h.grant}::uuid AND workspace_id=${h.workspace}::uuid FOR UPDATE`;
+    else await tx`SELECT grant_id FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${h.grant}::uuid AND workspace_id=${h.workspace}::uuid FOR SHARE`;
+  }
+  for (const id of sortedIds((s.hosted ?? []).map(r=>r.seat))) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${id}::uuid FOR UPDATE`;
   await same();
   for (const j of s.joins ?? []) {
     await tx`SELECT id FROM swarm.agent_join_credentials WHERE id=${j.credential}::uuid FOR UPDATE`;
@@ -767,11 +768,14 @@ export async function planLocalOperation(tx: Sql, options: {
     let approvals: LocalApprovalLock[] = await tx<LocalApprovalLock[]>`SELECT connection_id AS connection,grant_id AS grant,workspace_id AS workspace,principal_id AS principal,'update'::text AS mode FROM swarm.household_content_connections WHERE workspace_id=${workspace}::uuid AND (
       ${options.household===true || options.revocation!==undefined || options.allWorkspace===true}
         AND principal_id=ANY(${principals}::uuid[])) ORDER BY connection_id,grant_id,workspace_id,principal_id`;
-    let hosted = options.household || options.revocation || options.allWorkspace ? await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid
+    let hosted = options.household || options.revocation || options.allWorkspace || options.memberMutation ? await tx<{grant:string;workspace:string;seat:string|null;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,seat_id AS seat,principal_id AS principal FROM swarm.hosted_mcp_seats WHERE workspace_id=${workspace}::uuid
       AND (principal_id=ANY(${principals}::uuid[]) OR owner_user_id=ANY(${options.memberTargets ?? []}::uuid[])) ORDER BY grant_id,workspace_id,seat_id,principal_id` : [];
-    const hostedGrants=options.household || options.revocation || options.allWorkspace ? (await tx<{grant_id:string}[]>`SELECT g.grant_id FROM swarm.hosted_mcp_grants g
+    const hostedGrants=options.household || options.revocation || options.allWorkspace || options.memberMutation ? (await tx<{grant_id:string}[]>`SELECT g.grant_id FROM swarm.hosted_mcp_grants g
       WHERE (g.owner_user_id=ANY(${options.memberTargets ?? []}::uuid[])
-          AND ${workspace}::uuid=ANY(g.selected_workspace_ids))
+          AND (${workspace}::uuid=ANY(g.selected_workspace_ids) OR EXISTS(
+            SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds a WHERE a.grant_id=g.grant_id AND a.workspace_id=${workspace}::uuid)))
+        OR (${options.memberMutation===true} AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_agents ga
+          WHERE ga.grant_id=g.grant_id AND ga.principal_id=ANY(${principals}::uuid[])))
         OR g.grant_id=ANY(${sortedIds(hosted.map(h=>h.grant))}::uuid[])
       ORDER BY g.grant_id`).map(r=>r.grant_id) : [];
     if(hostedGrants.length) {
@@ -789,7 +793,7 @@ export async function planLocalOperation(tx: Sql, options: {
     const hostedBindings=hostedGrants.length ? await tx<{grant:string;workspace:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace
       FROM swarm.hosted_mcp_grant_workspaces WHERE workspace_id=${workspace}::uuid
       AND grant_id=ANY(${hostedGrants}::uuid[]) ORDER BY grant_id,workspace_id` : [];
-    const routeStreams = await tx<{id:string;workspace:string;kind:string;repo:string|null}[]>`SELECT stream_id AS id,workspace_id AS workspace,kind,repo_mapping_id AS repo FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND (stream_id=ANY(${options.streamIds ?? []}::uuid[]) OR ${options.admin!==undefined} AND kind='workspace') ORDER BY stream_id`;
+    const routeStreams = await tx<{id:string;workspace:string;kind:string;repo:string|null}[]>`SELECT stream_id AS id,workspace_id AS workspace,kind,repo_mapping_id AS repo FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND (stream_id=ANY(${options.streamIds ?? []}::uuid[]) OR ${options.admin!==undefined || options.memberMutation===true} AND kind='workspace') ORDER BY stream_id`;
     const restrictions = hostedGrants.length ? await tx<{grant:string;workspace:string;principal:string}[]>`SELECT grant_id AS grant,workspace_id AS workspace,principal_id AS principal FROM swarm.household_hosted_content_restrictions WHERE workspace_id=${workspace}::uuid
       AND grant_id=ANY(${hostedGrants}::uuid[]) ORDER BY grant_id,workspace_id,principal_id` : [];
     const objectStreams = options.household ? await tx<{workspace:string;stream:string}[]>`SELECT workspace_id AS workspace,stream_id AS stream FROM swarm.household_object_streams WHERE workspace_id=${workspace}::uuid ORDER BY stream_id` : [];

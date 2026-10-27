@@ -256,9 +256,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const [agent] = await tx`SELECT p.*,${workspaceId}::uuid AS workspace_id,
       EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
       EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_grants g USING(grant_id)
-        JOIN swarm.hosted_mcp_grant_workspaces b ON b.grant_id=g.grant_id AND b.workspace_id=s.workspace_id
         WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
-          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND b.revoked_at IS NULL) AS hosted_live,
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND swarm.hosted_binding_eligible(s.grant_id,s.workspace_id,s.principal_id)) AS hosted_live,
       EXISTS (SELECT 1 FROM swarm.agent_tokens t
         JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
         JOIN swarm.devices d ON d.device_id=r.device_id
@@ -338,7 +337,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
-      FROM swarm.agent_principals p WHERE (p.workspace_id=${workspaceId}::uuid AND p.transport='hosted_mcp' OR swarm.local_agent_workspace_live(p.principal_id,${workspaceId}::uuid)) AND p.principal_id=${principalId}::uuid`;
+      FROM swarm.agent_principals p WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=p.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL) AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(
       (SELECT max(last_command_at) FROM swarm.agent_presence WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),

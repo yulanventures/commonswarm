@@ -40,12 +40,12 @@ test("empty accounts and owned agents without readable workspaces have honest em
     .some(node => node.textContent === "No workspaces"));
 });
 
-test('picker offers only live local identities in this organization and permits explicit membership restoration',async()=>{
-  const {addableLocalAgents}=await import('./account-agents.ts');
+test('picker offers live local and hosted identities in this organization and permits explicit membership restoration',async()=>{
+  const {addableAccountAgents}=await import('./account-agents.ts');
   const target='sibling';
   const choices=[agent,{...agent,id:'hosted',transport:'hosted_mcp'},{...agent,id:'revoked',revokedAt:'now'},
     {...agent,id:'foreign',workspaces:[{...workspace,orgId:'elsewhere'}]},
     {...agent,id:'present',workspaces:[workspace,{...workspace,id:target}]},
     {...agent,id:'restore',workspaces:[{...workspace,id:target,revokedAt:'now'}]}];
-  assert.deepEqual(addableLocalAgents(choices,target,'org').map(a=>a.id),['local','restore']);
+  assert.deepEqual(addableAccountAgents(choices,target,'org').map(a=>a.id),['local','hosted','restore']);
 });

@@ -1047,7 +1047,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { buildAccountAgents, addableLocalAgents } from "../../lib/account-agents";
+  import { buildAccountAgents, addableAccountAgents } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -5296,7 +5296,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const value=session,workspaceId=activeWorkspaceId;
           add.disabled=true; picker.hidden=false; status.textContent='Loading…';
           try {
-            const choices=addableLocalAgents(await myAccountAgents(),workspaceId,workspace.orgId);
+            const choices=addableAccountAgents(await myAccountAgents(),workspaceId,workspace.orgId);
             if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id || !picker.isConnected) return;
             status.textContent=choices.length?'':'No agents to add.';
             picker.replaceChildren(status);

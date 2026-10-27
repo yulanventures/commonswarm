@@ -149,6 +149,23 @@ test("claim emits hosted turn-only identity and folds deterministically", () => 
   });
   const foldedWorkspace = reduceWorkspace(workspaceState, decision.events[0]!);
   assert.equal(foldedWorkspace.principals[principal]?.transport, "hosted_mcp");
+  // Human membership precedes a seat claim for a reusable hosted identity.
+  const member = reduceWorkspace(workspaceState, { ...decision.events[0]!, type: "AgentAddedToWorkspace",
+    payload: { principal_id: principal, owner_user_id: owner, name: claim.name,
+      model: "original-model", transport: "hosted_mcp", turn_only: true, created_at: 10 } });
+  const seatEvent = { ...decision.events[0]!, seq: decision.events[0]!.seq + 1 };
+  const claimed = reduceWorkspace(member, seatEvent);
+  assert.deepEqual(claimed.principals[principal], member.principals[principal], "seat creation preserves the account identity");
+  for (const change of [{ owner_user_id: "foreign" }, { name: "Other" },
+    { transport: "local", turn_only: false }, { revoked_at: 100 }] as const) {
+    const tampered = { ...member, principals: { ...member.principals,
+      [principal]: { ...member.principals[principal]!, ...change } } };
+    assert.throws(() => reduceWorkspace(tampered, seatEvent), /hosted seat principal mismatch/);
+  }
+  for (const change of [{ owner_user_id: "foreign" }, { name: "Other" }, { transport: "local", turn_only: false }]) {
+    assert.throws(() => reduceWorkspace(member, { ...seatEvent, type: "AgentAddedToWorkspace",
+      payload: { ...member.principals[principal], ...change } }), /agent (ownership|identity) changed/);
+  }
 });
 
 test("stable reuse never adopts a collision or resurrects a revoked seat", () => {

@@ -51,7 +51,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
   let credential: HouseholdAccessFacts['credential'] = { kind: 'human' };
   if (identity.principal_id !== null) {
     if (!identity.connection) return null;
-    const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE (workspace_id=${workspaceId}::uuid AND transport='hosted_mcp' OR swarm.local_agent_workspace_live(principal_id,${workspaceId}::uuid)) AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
+    const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL) AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
     if (!principal || principal.revoked_at !== null) return null;
     const [presented] = await tx`SELECT t.renewal_grant_id,t.lineage_id,t.run_id
       FROM swarm.agent_tokens t JOIN swarm.agent_runs run ON run.run_id=t.run_id AND run.principal_id=t.principal_id
@@ -108,9 +108,9 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
         WHERE c.workspace_id=${workspaceId}::uuid AND c.hosted_grant_id=${canonicalSeat.grant_id}::uuid
         ORDER BY c.connection_id,c.principal_id FOR SHARE OF c`;
       const [grant] = await tx`SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants WHERE grant_id=${canonicalSeat.grant_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
-      const [binding] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces WHERE grant_id=${canonicalSeat.grant_id}::uuid AND workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
+      const [binding] = await tx`SELECT swarm.hosted_binding_eligible(${canonicalSeat.grant_id}::uuid,${workspaceId}::uuid,${identity.principal_id}::uuid) AS live`;
       const [seat] = await tx`SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${canonicalSeat.seat_id}::uuid FOR SHARE`;
-      if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding || binding.revoked_at !== null || !seat || seat.revoked_at !== null) return null;
+      if (!grant || grant.state !== 'active' || grant.revoked_at !== null || !binding?.live || !seat || seat.revoked_at !== null) return null;
       connectionPolicy = { connection_expires_at: grant.connection_expires_at, connection_expired_at: grant.connection_expired_at };
       const policies = await tx`SELECT r.*, (EXISTS(SELECT 1 FROM swarm.hosted_mcp_seats cs WHERE cs.grant_id=r.grant_id
           AND cs.workspace_id=r.workspace_id AND cs.principal_id=r.principal_id AND cs.owner_user_id=r.owner_user_id)

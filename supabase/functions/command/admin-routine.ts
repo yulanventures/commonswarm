@@ -302,27 +302,15 @@ export async function revokeHostedWorkspaceApproval(
     if (!plan?.locked || plan.principalMode !== "update" || plan.hostedMode !== "update") {
       throw new LocalAuthDiscoveryChanged();
     }
-    const principals = await tx<{ principal_id: string }[]>`
-      SELECT principal_id FROM swarm.agent_principals
-      WHERE workspace_id = ${workspaceId}::uuid AND owner_user_id = ${owner}::uuid
-        AND transport = 'hosted_mcp'
-      ORDER BY principal_id
-    `;
-    if (principals.some((row) => !plan.snapshot.bindings.some((binding) =>
-      binding.principal_id === row.principal_id && binding.workspace_id === workspaceId &&
-      binding.owner_user_id === owner))) throw new LocalAuthDiscoveryChanged();
-    for (const row of principals) {
-      await tx`UPDATE swarm.agent_principals SET revoked_at = coalesce(revoked_at,${revokedAt})
-        WHERE principal_id = ${row.principal_id}::uuid AND workspace_id = ${workspaceId}::uuid
-          AND owner_user_id = ${owner}::uuid AND transport = 'hosted_mcp'`;
-      await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
-        VALUES('principal',${row.principal_id}::uuid,${createdBy}::uuid) ON CONFLICT DO NOTHING`;
-    }
+    await tx`SELECT swarm.remove_hosted_agents_for_member(${workspaceId}::uuid,${owner}::uuid,${createdBy}::uuid)`;
+    return;
+
   }
   const grants = await tx<{ grant_id: string }[]>`
     SELECT g.grant_id FROM swarm.hosted_mcp_grants g
     WHERE (${owner}::uuid IS NOT NULL AND g.owner_user_id = ${owner}::uuid
-      AND ${workspaceId}::uuid = ANY(g.selected_workspace_ids))
+      AND (${workspaceId}::uuid = ANY(g.selected_workspace_ids) OR EXISTS(
+        SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds a WHERE a.grant_id=g.grant_id AND a.workspace_id=${workspaceId}::uuid))))
       OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats hs
         WHERE hs.grant_id = g.grant_id AND hs.workspace_id = ${workspaceId}::uuid
           AND hs.principal_id = ${principal}::uuid)
@@ -342,6 +330,8 @@ export async function revokeHostedWorkspaceApproval(
       await tx`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
         VALUES('hosted_seat',${seat.seat_id}::uuid,${createdBy}::uuid) ON CONFLICT DO NOTHING`;
     }
+    await tx`UPDATE swarm.hosted_mcp_agent_workspace_adds SET revoked_at=coalesce(revoked_at,${revokedAt})
+      WHERE grant_id=${grant.grant_id}::uuid AND workspace_id=${workspaceId}::uuid`;
     await tx`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = coalesce(revoked_at,${revokedAt})
       WHERE grant_id = ${grant.grant_id}::uuid AND workspace_id = ${workspaceId}::uuid`;
   }
@@ -422,6 +412,12 @@ export async function applyAdminRoutine(
         expires_at: c.expires_at,
       };
     } else if (e.type === "AgentPrincipalRevoked") {
+      const [target]=await tx<{transport:string}[]>`SELECT transport FROM swarm.agent_principals WHERE principal_id=${String(p.principal_id)}::uuid`;
+      if(target?.transport==='hosted_mcp') {
+        const [changed]=await tx<{ok:boolean}[]>`SELECT swarm.change_hosted_agent_membership(${e.workspace_id}::uuid,${String(p.principal_id)}::uuid,${ctx.owner_user_id}::uuid,false) AS ok`;
+        if(!changed?.ok) throw new LocalAuthDiscoveryChanged();
+        continue;
+      }
       const revoked = await tx<{ transport: "local" | "hosted_mcp" }[]>`UPDATE swarm.agent_principals SET revoked_at=${
         date(ctx.now)
       } WHERE principal_id=${String(p.principal_id)}::uuid AND workspace_id=${e.workspace_id}::uuid

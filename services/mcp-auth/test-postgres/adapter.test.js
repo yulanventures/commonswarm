@@ -447,7 +447,7 @@ test('post-wait owner extension, clear, removal and elapsed policy control retai
         WHERE grant_id=$1`,[g.id,change]);
       await blocker.query('COMMIT');
       const result = await pending;
-      assert.equal(Boolean(result),change === 'extend' || change === 'clear',change);
+      assert.equal(Boolean(result),change !== 'elapsed',change);
       if (change === 'clear') assert.equal(Object.hasOwn(result,'exp'),false);
       if (change === 'extend') assert.ok(result.exp > Date.now()/1000+100*86400);
     } finally {
@@ -561,13 +561,13 @@ test('DCR reconciliation rechecks removal after a stream wait before retaining o
     waiting = createPostgresRegistrationStore(single).find(g.clientId); await waitOnBackend(c.processID);
     await blocker.query('UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=clock_timestamp() WHERE grant_id=$1',[g.id]);
     await blocker.query('COMMIT');
-    assert.equal(await waiting,undefined,'a pending sibling does not retain the removed live family');
+    assert.ok(await waiting,'a dormant live family retains its client without tool authority');
   } finally {
     await blocker.query('ROLLBACK').catch(() => {}); blocker.release();
     if (waiting) await Promise.allSettled([waiting]); c.release();
   }
   await store.cleanup();
-  assert.equal((await admin.query('SELECT 1 FROM commonswarm_oauth.registered_clients WHERE client_id=$1',[g.clientId])).rowCount,0);
+  assert.equal((await admin.query('SELECT 1 FROM commonswarm_oauth.registered_clients WHERE client_id=$1',[g.clientId])).rowCount,1);
 });
 
 test('refresh normalization can finish before a waiting removal, which fences the following use', { timeout: 20000 }, async () => {
@@ -595,7 +595,8 @@ test('refresh normalization can finish before a waiting removal, which fences th
     await Promise.allSettled([refresh,removal].filter(Boolean));
     await remover.query('ROLLBACK').catch(() => {}); remover.release(); c.release();
   }
-  assert.equal(await rt.find(token),undefined,'the following use sees the committed removal');
+  assert.ok(await rt.find(token),'workspace withdrawal preserves refresh continuity');
+  assert.equal((await admin.query("SELECT * FROM swarm.resolve_hosted_grant_authorization($1,$2,$3,'claim_hosted_seat')",[g.id,g.owner,g.workspace])).rowCount,0,'tool authority still sees committed removal');
 });
 
 test('changed or missing stored stream sets refuse before family locking and permit a whole-transaction retry', { timeout: 20000 }, async () => {
@@ -651,7 +652,7 @@ test('stored owner, client and resource mismatches never acquire permanent famil
 
 // The account-validation caller reaches this public method only if policy
 // changes after the provider's earlier successful artifact lookup.
-test('public retirement commits refresh-race removal and preserves authority restored during a real wait', { timeout: 30000 }, async () => {
+test('public retirement commits elapsed connection policy and preserves policy extended during a real wait', { timeout: 30000 }, async () => {
   for (const restore of [false,true]) {
     const f = await hostedClients(), [g,other] = f.grants;
     const adapters = createPostgresAdapter(runtime), rt = adapters('RefreshToken');
@@ -665,7 +666,7 @@ test('public retirement commits refresh-race removal and preserves authority res
     const otherBefore = await artifact('RefreshToken',otherToken);
     assert.equal(await rt.retireInactiveHostedFamily(g.family,g.owner),true);
     assert.deepEqual(await familyStorage(g),{ tombstones: 0,artifacts: 1,exact_grant: 1 });
-    if (restore) await admin.query('DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+    if (restore) await admin.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=$1",[g.id]);
     const status = async () => (await admin.query('SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)',[g.family])).rows[0].active;
     assert.equal(await status(),!restore,'pre-wait authority is the opposite of the final decision');
     const blocker = await admin.connect(), c = await runtime.connect();
@@ -676,8 +677,8 @@ test('public retirement commits refresh-race removal and preserves authority res
       await blocker.query("SELECT stream_id FROM swarm.streams WHERE workspace_id=$1 AND kind='workspace' FOR UPDATE",[g.workspace]);
       waiting = createPostgresAdapter(single)('RefreshToken').retireInactiveHostedFamily(predecessor.grantId,g.owner);
       await waitOnBackend(c.processID);
-      if (restore) await blocker.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",[g.workspace,g.owner]);
-      else await blocker.query('DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+      if (restore) await blocker.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=NULL WHERE grant_id=$1',[g.id]);
+      else await blocker.query("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=$1",[g.id]);
       await blocker.query('COMMIT');
       assert.equal(await waiting,restore,'the public method uses post-wait canonical authority');
       assert.deepEqual(await familyStorage(g),restore
@@ -688,8 +689,8 @@ test('public retirement commits refresh-race removal and preserves authority res
       assert.equal((await rt.find(otherToken)).grantId,other.family);
       if (restore) assert.equal((await rt.find(token)).grantId,g.family);
       else {
-        // Re-adding membership cannot revive a committed fence.
-        await admin.query("INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",[g.workspace,g.owner]);
+        // Extending policy cannot revive a committed terminal fence.
+        await admin.query('UPDATE swarm.hosted_mcp_grants SET connection_expires_at=NULL WHERE grant_id=$1',[g.id]);
         assert.equal(await rt.find(token),undefined);
         await assert.rejects(rt.upsert(randomUUID(),refreshPayload(g),60),e => e.error === 'invalid_grant');
         assert.deepEqual(await familyStorage(g),{ tombstones: 1,artifacts: 0,exact_grant: 0 });
@@ -831,4 +832,30 @@ test('real delegated-admin artifacts refuse hosted reads and retirement outside 
   const hosted = (await hostedClients({ families: 1 })).grants[0], control = randomUUID();
   await rt.upsert(control,refreshPayload(hosted),60);
   assert.equal((await rt.find(control)).grantId,hosted.family,'the same runtime role can still read a hosted family');
+});
+
+
+test('dormant hosted Grant and refresh artifacts survive last workspace loss, restart and explicit re-add; disconnect remains terminal',async()=>{
+ const f=await hostedClients({families:1}),g=f.grants[0],token=randomUUID();
+ const adapters=createPostgresAdapter(runtime),rt=adapters('RefreshToken');
+ const principal=randomUUID();
+ await admin.query("INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only) VALUES($1,$2,$3,'Dormant hosted','hosted_mcp',true)",[principal,g.workspace,g.owner]);
+ await admin.query('INSERT INTO swarm.hosted_mcp_grant_agents(grant_id,principal_id,owner_user_id) VALUES($1,$2,$3)',[g.id,principal,g.owner]);
+ await adapters('Grant').upsert(g.family,grantPayload(g),60);await rt.upsert(token,refreshPayload(g),60);
+ await admin.query('UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at=clock_timestamp() WHERE grant_id=$1',[g.id]);
+ await admin.query('UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+ const restarted=createPostgresAdapter(runtime);
+ assert.ok(await restarted('Grant').find(g.family));assert.ok(await restarted('RefreshToken').find(token));
+ assert.equal(await restarted('RefreshToken').retireInactiveHostedFamily(g.family,g.owner),true);
+ assert.deepEqual(await familyStorage(g),{tombstones:0,artifacts:1,exact_grant:1});
+ assert.equal((await admin.query("SELECT * FROM swarm.resolve_hosted_grant_authorization($1,$2,$3,'claim_hosted_seat')",[g.id,g.owner,g.workspace])).rowCount,0);
+ await admin.query('UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=$1 AND user_id=$2',[g.workspace,g.owner]);
+ // A normal human add creates a receipt for a bound identity, without editing consent.
+ assert.equal((await admin.query('SELECT swarm.change_hosted_agent_membership($1,$2,$3,true) AS ok',[g.workspace,principal,g.owner])).rows[0].ok,true);
+ assert.ok(await restarted('RefreshToken').find(token));
+ assert.equal((await admin.query("SELECT * FROM swarm.resolve_hosted_grant_authorization($1,$2,$3,'claim_hosted_seat')",[g.id,g.owner,g.workspace])).rowCount,1);
+ await restarted('RefreshToken').revokeByGrantId(g.family);
+ assert.equal(await rt.find(token),undefined);
+ assert.equal((await admin.query('SELECT swarm.change_hosted_agent_membership($1,$2,$3,true) AS ok',[g.workspace,principal,g.owner])).rows[0].ok,false);
+ await assert.rejects(rt.upsert(randomUUID(),refreshPayload(g),60),e=>e.error==='invalid_grant');
 });

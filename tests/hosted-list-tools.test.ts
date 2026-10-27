@@ -21,6 +21,7 @@ function query(sql: string, values: any[]): Row[] {
   const ws = values.find(value => value === wa || value === wb);
   if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
   if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+  if (sql.includes('SELECT swarm.hosted_binding_eligible(')) return [{ live: true }];
   // Hosted seats have no local bearer or renewal family.
   if (sql.includes('FROM swarm.discover_local_target_ids(')) return [];
   if (sql.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return [];

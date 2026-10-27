@@ -54,7 +54,7 @@ function answer(sql: string, values: unknown[]): Row[] {
   if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
   if (sql.includes('household_content_connections')) return [{ connection_id: conn, grant_id: grant, hosted_grant_id: grant, renewal_grant_id: null, operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: flags.connection ? at : null, expires_at: null }];
   if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: flags.grant ? 'revoked' : 'active', revoked_at: flags.grant ? at : null, connection_expires_at: null, connection_expired_at: null }];
-  if (sql.includes('hosted_mcp_grant_workspaces')) return ws && flags.bind.has(ws) ? [{ revoked_at: null }] : [];
+  if (sql.includes('SELECT swarm.hosted_binding_eligible')) return [{live:!!ws && flags.bind.has(ws)}];
   if (sql.includes('hosted_mcp_seats')) return [{ revoked_at: null }];
   if (sql.includes('AS now')) return [{ now: at }];
   if (sql.includes('INSERT INTO swarm.household_todo_streams')) {

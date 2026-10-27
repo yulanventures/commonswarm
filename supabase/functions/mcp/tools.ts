@@ -39,9 +39,10 @@ export const CORE_TOOL_TABLE = [
   {
     name: "claim_seat", effect: "write", title: "Claim a named seat",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.",
+    description: "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. To use an existing agent in a workspace a person added, pass agent_id and workspace_id. Omit workspace_id for the consented home workspace. Retry with the same request_id.",
     annotations: { title: "Claim a named seat", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]),
+    inputSchema: {...objectSchema({ workspace_id: claimWorkspace, agent_id: uuid, name: text(1, 80), request_id: requestId }, ["request_id"]),
+      anyOf:[{required:['name']},{required:['agent_id','workspace_id']}]},
   },
   {
     name: "whoami", effect: "read", title: "Show seat identity",
@@ -164,7 +165,7 @@ function validRecipients(value: unknown): boolean {
 }
 
 const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; required: readonly string[] }>> = {
-  claim_seat: { allowed: ["workspace_id", "name", "request_id"], required: ["name", "request_id"] },
+  claim_seat: { allowed: ["workspace_id", "agent_id", "name", "request_id"], required: ["request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
   ask: { allowed: ["seat", "recipients", "body", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
@@ -187,6 +188,7 @@ export function hostedToolName(value: string): value is HostedToolName {
 
 const EXPECTED: Record<string, string> = {
   seat: "provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_)",
+  agent_id: "provide the existing account agent UUID and workspace_id",
   name: "provide 1 to 80 characters with no surrounding spaces or control characters",
   request_id: "provide 8 to 72 letters, digits, underscores or hyphens; reuse it only for the same request",
   workspace_id: "provide a real workspace UUID or omit it to use the grant's home workspace",
@@ -222,7 +224,10 @@ export function validateHostedToolArguments(
   if (name === "claim_seat") {
     if (Object.hasOwn(args, "workspace_id") &&
         (!validUuid(args.workspace_id) || claimWorkspace.not.enum.includes(args.workspace_id))) invalid("workspace_id");
-    if (!validSeatName(args.name)) invalid("name");
+    if (args.agent_id !== undefined) {
+      if (!validUuid(args.agent_id) || args.workspace_id === undefined) invalid("agent_id");
+      if (args.name !== undefined && !validSeatName(args.name)) invalid("name");
+    } else if (!validSeatName(args.name)) invalid("name");
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
   }

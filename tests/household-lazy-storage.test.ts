@@ -28,6 +28,7 @@ function fixture() {
     const query = parts.join('?');
     if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
     if (query.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    if (query.includes('SELECT swarm.hosted_binding_eligible(')) return [{ live: true }];
     if (query.includes('SELECT role, revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
     if (query.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return [{
       seat_id: connection.connection_id, grant_id: connection.grant_id, owner_user_id: user }];
@@ -139,6 +140,7 @@ test('connection summaries preserve family consent across bearer replacement and
       if (q.includes('SELECT revoked_at FROM swarm.agent_principals')) return c.principalRevoked ? [] : [{ revoked_at: null }];
       if (q.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return c.bearerExpired ? [] : [{ renewal_grant_id: family, lineage_id: id(24), run_id: run }];
       if (q.includes('FROM swarm.renewal_grants')) return [policy];
+      if (q.includes('FROM swarm.local_content_approval_workspaces')) return [{ token_id: original }];
       if (q.includes('SELECT c.*')) return [approval];
       if (q.includes('SELECT seat_id,grant_id,owner_user_id')) return [];
       if (q.includes('clock_timestamp() AS now')) return [{ now: at }];
