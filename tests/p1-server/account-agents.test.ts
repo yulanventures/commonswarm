@@ -9,7 +9,8 @@ const catalog = (rollback = false) => dbAssert(
     .trim().replace(/;$/, ''), rollback ? 'agent rollback catalog' : 'agent catalog');
 
 test('account agents backfill, legacy writers, owner isolation and guarded rollback', () => {
-  runSql(repoSql(`deploy/release-proofs/agents/20261028000002-rollback.sql`) + repoSql(`${root}-rollback.sql`)
+  runSql(repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')
+    + repoSql('deploy/release-proofs/agents/20261028000002-rollback.sql') + repoSql(`${root}-rollback.sql`)
     + catalog(true)
     + repoSql('tests/fixtures/account-agents-before.sql')
     + repoSql('supabase/migrations/20261028000001_account_agents.sql')

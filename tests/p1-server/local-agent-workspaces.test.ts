@@ -6,11 +6,11 @@ const proofRoot='deploy/release-proofs/agents/20261028000002';
 const catalogProof=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${proofRoot}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'local agent migration catalog');
 
 test('local account credential survives sibling membership, origin loss and dormant restoration; tenancy and revocation stay fenced',()=>{
-  runSql(catalogProof()+repoSql(`${proofRoot}-functional.sql`)+repoSql('tests/fixtures/account-agents-before.sql')+repoSql('tests/fixtures/local-agent-workspaces.sql')+refuses(repoSql(`${proofRoot}-rollback.sql`),'55000'));
+  runSql(repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-functional.sql`)+repoSql('tests/fixtures/account-agents-before.sql')+repoSql('tests/fixtures/local-agent-workspaces.sql')+refuses(repoSql(`${proofRoot}-rollback.sql`),'55000'));
 });
 
 test('local agent migration reserve restores prior authority and safely reapplies',()=>{
- runSql(catalogProof()+repoSql(`${proofRoot}-rollback.sql`)+catalogProof(true)
+ runSql(repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-rollback.sql`)+catalogProof(true)
   +repoSql('supabase/migrations/20261028000002_local_agent_workspaces.sql')+catalogProof());
 });
 
