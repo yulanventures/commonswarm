@@ -42,7 +42,8 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-
   position: relative; display: grid; grid-template-columns: minmax(0,1fr) auto 44px; align-items: center; gap: 0 10px;
   border-radius: 6px; padding: 0; min-block-size: 44px;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:not(:has(> .pd-row-actions)) { grid-template-columns: minmax(0,1fr) auto 44px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent { grid-template-columns: minmax(0,1fr) 44px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:not(:has(> .pd-row-actions)) { grid-template-columns: minmax(0,1fr); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-disclosure,.pd-agent-disclosure) {
   grid-column: 1; grid-row: 1; gap: 12px; min-block-size: 44px; padding: 4px 6px; font-size: 15px;
 }
@@ -54,11 +55,22 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-initial
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-copy { gap: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-line { align-items: center; gap: 6px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-app { font-size: 12px; line-height: 16px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-presence {
+  flex: 0 0 8px; inline-size: 8px; block-size: 8px; box-sizing: border-box;
+  border: 1.5px solid var(--k-shell-secondary); border-radius: 50%;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-presence[data-agent-status="active"] {
+  border-color: var(--home-teal-deep); background: var(--home-teal-deep);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-presence[data-attention="true"] {
+  border-color: var(--home-offline-deep); background: var(--home-offline-deep);
+}
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-tag {
   padding: 0 4px; border: 1px solid var(--k-shell-line); border-radius: 4px; color: var(--k-shell-secondary); font-size: 11px; line-height: 16px; font-weight: 400;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-role { grid-column: 2; grid-row: 1; color: var(--k-shell-secondary); font-size: 13px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions { grid-column: 3; grid-row: 1; padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent > .pd-row-actions { grid-column: 2; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-agent,.pd-person-head):has(> .pd-row-actions[open]) { padding-block-end: 0; z-index: 2; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions[open] > .pd-agent-actions {
   position: absolute; z-index: 3; inset: 44px 4px auto auto; display: grid; gap: 0; min-inline-size: 210px;

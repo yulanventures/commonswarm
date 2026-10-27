@@ -460,15 +460,19 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
+    const presence = node(doc, "span", "pd-agent-presence"); presence.title = agent.status.label;
+    presence.dataset.agentStatus = agent.status.kind; presence.dataset.attention = String(agent.status.attention);
+    presence.setAttribute("aria-hidden", "true");
+    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(presence, name);
     nameLine.append(node(doc, "span", "pd-agent-tag", "agent"));
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
-    const details = node(doc, "span", "pd-agent-app", agent.ownerName ?? "Owner no longer a member");
-    // Name follows visible content; retain owner, replaced model/app and access facts for assistive technology.
-    const supplement = [agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent",
-      agent.status.label, sentence, agent.app, secondary].filter(Boolean).join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
+    const details = node(doc, "span", "pd-agent-app pd-ellipsis",
+      [agent.ownerName ?? "Owner no longer a member", agent.app, secondary].filter(Boolean).join(" · "));
+    details.title = details.textContent ?? "";
+    // Keep the dot's measured status and access facts in the row's accessible name.
+    const supplement = [agent.status.label, sentence].filter(Boolean).join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
     copy.append(nameLine, doc.createTextNode(" "), details);
-    disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-sr-only", ` ${supplement}`)); row.append(disclosure, node(doc, "span", "pd-member-role", "Agent"));
+    disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-sr-only", ` ${supplement}`)); row.append(disclosure);
     const notice = noticeFor(agent);
     const actions = node(doc, "span", "pd-agent-actions");
     const next = agent.status.attention ? fix(agent, notice) : null;
