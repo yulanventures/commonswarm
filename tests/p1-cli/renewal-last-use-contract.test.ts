@@ -48,7 +48,7 @@ test("SQL and served races are independent and served startup has the 60-second 
   assert.match(serverTest, /\$\{f\.tokenId\}::uuid, \$\{f\.otherDevice\}::uuid, 'older'\)/);
   assert.match(serverTest, /test\("served member read survives an older blocked use"/);
   assert.match(serverTest, /test\("successor use takes a fresh post-wait clock while still spending capacity"/);
-  assert.match(serverTest, /const deadline = Date\.now\(\) \+ 60_000/);
+  assert.match(serverTest, /url: `\$\{local\.API_URL\}\/functions\/v1\/read`, fetcher: fetch, timeoutMs: 60_000/);
   assert.match(serverTest, /l\.relation = 'swarm\.renewal_grants'::regclass/);
   assert.match(serverTest, /pg_blocking_pids\(a\.pid\)/);
 });

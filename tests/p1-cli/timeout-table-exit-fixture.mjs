@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makePrivateProfileCopy } from "../../scripts/timeout-table/core.mjs";
@@ -16,7 +16,7 @@ resources.tempRoot = await mkdtemp(join(tmpdir(), "cswarm-timeout-run-"));
 await chmod(resources.tempRoot, 0o700);
 const copy = await makePrivateProfileCopy(profile, { tempParent: resources.tempRoot });
 const source = await sourceRootForRef(gitRepo, "HEAD", resources.tempRoot, resources);
-await writeFile(marker, JSON.stringify({
+await writeFile(`${marker}.tmp`, JSON.stringify({
   tempRoot: resources.tempRoot,
   worktreePath: resources.worktreePath,
   copyRoot: copy.root,
@@ -24,6 +24,8 @@ await writeFile(marker, JSON.stringify({
   credentialFile: copy.profile.credential_file,
   sourceRoot: source.root,
 }), { mode: 0o600 });
+// File existence tells the parent the complete JSON is ready to read.
+await rename(`${marker}.tmp`, marker);
 
 if (mode === "sigterm" || mode === "sighup" || mode === "sigint") {
   setInterval(() => {}, 1 << 30);
