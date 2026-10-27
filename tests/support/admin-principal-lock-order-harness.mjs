@@ -344,10 +344,10 @@ export function tlsClientOptions(target) {
 /** `issuance` is { record, measure, enable }: the reviewed test-only SQL of
  * tests/support/admin-schema-db.ts (recordChecksumEvidenceForTest, measureIssuanceForTest,
  * enableIssuanceForTest). It runs only for the admin races (ensureAdminIssuance). */
-export function lockOrderConnector(issuance) {
+export function lockOrderConnector(issuance, { includeRealtime = false } = {}) {
   return async (binding, { docker, tlsCaPem }) => (binding.mode === 'fixture'
     ? await restoredDatabaseTarget(binding, tlsCaPem, issuance)
-    : await isolatedDatabaseTarget(binding, docker, issuance));
+    : await isolatedDatabaseTarget(binding, docker, issuance, false, null, null, includeRealtime));
 }
 
 /** Fixture (D1, D4): the bound database is a fresh restore of c1-staging and is not empty.
@@ -524,7 +524,7 @@ export const HISTORICAL_BASELINE_SOURCE = Object.freeze({
 /** CI only: a throwaway database on the CLI cluster, as adminEdgeDatabase builds one, but from
  * the verified container. Only its DDL comes from the shared database; its seed rows are the
  * migrations' own, so earlier server files cannot change them. Admin issuance opens only inside it. */
-async function isolatedDatabaseTarget(binding, docker, issuance, historical = false, initial = null, snapshot = null) {
+async function isolatedDatabaseTarget(binding, docker, issuance, historical = false, initial = null, snapshot = null, includeRealtime = false) {
   if (binding.mode !== 'ci') throw new Error('isolated_database_ci_only');
   const { default: postgres } = await import('postgres');
   const source = new URL(binding.db_url);
@@ -551,14 +551,16 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
   try {
     const minimum = migrationMinClientVersion(readMigrations());
     phase = 'source';
+    // Activity proofs need the actual platform send function, partitioned table,
+    // policies and ACLs. Copy their source DDL; never replace realtime with a stub.
+    const schemas = historical ? HISTORICAL_SCHEMAS : includeRealtime ? [...DUMP_SCHEMAS, 'realtime'] : DUMP_SCHEMAS;
     const [present] = await master`SELECT bool_and(to_regnamespace(s) IS NOT NULL) AS ok,
       to_regclass('commonswarm_oauth.admin_cutover_state') IS NOT NULL AS cutover
-      FROM unnest(${DUMP_SCHEMAS}::text[]) AS s`;
+      FROM unnest(${schemas}::text[]) AS s`;
     if (present?.ok !== true || present.cutover !== true) setupFailure('source_schema_missing');
     phase = 'dump';
     // Both sections and the catalog witness see one exported, retained schema snapshot.
     // No application data is copied from the shared database.
-    const schemas = historical ? HISTORICAL_SCHEMAS : DUMP_SCHEMAS;
     let pre, post, dump;
     let extensionOptions = [];
     const section = (snapshot, part) => docker.execWithSecret(binding.db_container_id,

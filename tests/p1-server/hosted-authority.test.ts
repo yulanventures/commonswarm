@@ -2308,7 +2308,7 @@ test("connection policy storage preserves nullable shape and exact existing ACLs
       p.privilege_type AS privilege, p.is_grantable AS grantable
     FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) p
     WHERE a.attrelid = 'swarm.household_content_connections'::regclass ORDER BY column_name, role, privilege`;
-  assert.deepEqual([...contentColumnGrants], ["connection_id", "consent_receipt_id", "expires_at", "operations", "revoked_at"]
+  assert.deepEqual([...contentColumnGrants], ["connection_id", "consent_receipt_id", "expires_at", "operations", "renewal_grant_id", "revoked_at"]
     .map(column_name => ({ column_name, role: "swarm_command", privilege: "UPDATE", grantable: false })));
   const functions = await sql<{ signature: string; owner: string; grants: string[] }[]>`
     SELECT p.oid::regprocedure::text AS signature, pg_get_userbyid(p.proowner) AS owner,
@@ -3602,14 +3602,15 @@ test('inherited queue rechecks unchanged chosen deadline after another PostgreSQ
 // Real HTTP is the owning boundary: copied approval deadlines and a stale
 // queue clock can disagree with canonical policy even when authentication works.
 async function observeHouseholdRowWait(blocker: number, query: string) {
-  for(let attempt=0;attempt<400;attempt++) {
+  const stop=performance.now()+3500;
+  do {
     const [wait]=await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
       WHERE a.usename='commonswarm_edge' AND ${blocker}::int=ANY(pg_blocking_pids(a.pid))
         AND a.query LIKE ${'%' + query + '%'}) AS blocked`;
     if(wait!.blocked) return;
     await new Promise(resolve=>setTimeout(resolve,25));
-  }
-  assert.fail('HTTP request did not reach the intended PostgreSQL row wait');
+  } while(performance.now()<stop);
+  assert.fail('HTTP request did not reach the intended PostgreSQL row wait before the production lock timeout');
 }
 async function awaitHouseholdDeadline(deadline: string) {
   for(let attempt=0;attempt<800;attempt++) {
@@ -3646,8 +3647,7 @@ for(const role of ['owner','member'] as const) {
         // a live owner before demoting the connection owner.
         for(const [userId,nextRole] of [[f.fixture.other,'owner'],[f.fixture.owner,'member']] as const) {
           const changed=runHostedHarness<HarnessResult>({operation:'public',ownerJwt:f.fixture.ownerJwt,
-            workspaceId:workspace,command:{kind:'change_role',user_id:userId,role:nextRole,
-              landing_authority_successor_user_id:f.fixture.other}});
+            workspaceId:workspace,command:{kind:'change_role',user_id:userId,role:nextRole}});
           assert.equal(changed.status,200);assert.equal(changed.body.status,'accepted');
           const [event]=await sql`SELECT payload->>'to_role' AS role FROM swarm.events
             WHERE workspace_id=${workspace}::uuid AND type='MemberRoleChanged'
@@ -3706,7 +3706,8 @@ for (const interleaving of ['known-grant','publish-binding'] as const) {
       if(interleaving==='publish-binding') await sql`INSERT INTO swarm.agent_principals
         (principal_id,workspace_id,owner_user_id,name,transport,turn_only)
         VALUES (${principal}::uuid,${workspace}::uuid,${f.fixture.owner}::uuid,${'queue-clock-'+principal},'hosted_mcp',true)`;
-      const [date]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '10 seconds'
+      // Cross the unchanged chosen date within the read handler's 5s lock budget.
+      const [date]=await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
         WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
       const chosen=new Date(date!.connection_expires_at as string).toISOString();
       await sql.begin(async blocker=>{

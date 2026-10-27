@@ -611,10 +611,10 @@ test("long rotation history renews and reads; unrelated workspace history cannot
     await sql`INSERT INTO swarm.memberships(workspace_id,user_id,role)
       VALUES(${f.workspace}::uuid,${keeper.user}::uuid,'owner')`;
     await sql`UPDATE swarm.memberships SET role='member' WHERE workspace_id=${f.workspace}::uuid AND user_id=${owner.user}::uuid`;
-    const call=async(token:string,command:Record<string,unknown>)=>{
+    const call=async(token:string,command:Record<string,unknown>,commandId=randomUUID())=>{
       const response=await fetch(`${local.API_URL}/functions/v1/command`,{method:"POST",
         headers:{authorization:`Bearer ${token}`,"content-type":"application/json"},
-        body:JSON.stringify({command_id:randomUUID(),client_version:"0.1.0",workspace_id:f.workspace,stream:{kind:"workspace"},command})});
+        body:JSON.stringify({command_id:commandId,client_version:"0.1.0",workspace_id:f.workspace,stream:{kind:"workspace"},command})});
       return {status:response.status,body:await response.json() as Record<string,unknown>};
     };
     await sql`UPDATE swarm.renewal_grants SET suspended_at=clock_timestamp() WHERE renewal_grant_id=${f.grant}::uuid`;
@@ -675,8 +675,11 @@ test("long rotation history renews and reads; unrelated workspace history cannot
     const {HOUSEHOLD_LOCAL_SEAT}=await import('../../supabase/functions/_shared/protocol.js');
     const content=(token:string)=>call(token,{kind:'household_tool',tool:'object_list',
       arguments:{seat:HOUSEHOLD_LOCAL_SEAT,offset:0,limit:10}});
-    const createTodo=(token:string,title:string)=>call(token,{kind:'household_tool',tool:'todo_create',
-      arguments:{seat:HOUSEHOLD_LOCAL_SEAT,title}});
+    const createTodo=(token:string,title:string)=>{
+      const requestId=randomUUID();
+      return call(token,{kind:'household_tool',tool:'todo_create',
+        arguments:{seat:HOUSEHOLD_LOCAL_SEAT,request_id:requestId,title}},requestId);
+    };
     assert.equal((await content(String(renewed.body.agent_token))).body.status,'ok','rotation retains original consent');
     const withdrawn=await call(owner.jwt,{kind:'household_withdraw_connection',principal_id:f.principal});
     assert.equal(withdrawn.body.status,'committed');

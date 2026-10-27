@@ -65,8 +65,8 @@ try {
     const discovery=error instanceof authTypes.LocalAuthDiscoveryChanged && code==='40001'
       && error.detail==='LOCAL_AUTH_DISCOVERY_CHANGED';
     const credential=error instanceof authTypes.LocalCredentialDenied && error.credentialInvalid===true;
-    // The command refusal class is private. Name its constructor and exact
-    // result shape for diagnosis only; this grants no exemption to an assertion.
+    // The command refusal class is private. Recognize only its constructor name
+    // and exact unauthenticated result; all other non-SQL errors remain unexpected.
     const commandRefusal=error instanceof Error && identity==='LocalCommandRefused'
       && error.result?.status===401 && error.result?.body?.error==='unauthenticated'
       && Object.keys(error.result.body).length===1;
@@ -75,7 +75,7 @@ try {
       : credential || commandRefusal ? 'expected_owned_refusal_rollback' : 'unexpected_non_sql',
       identity:discovery ? 'LocalAuthDiscoveryChanged' : credential ? 'LocalCredentialDenied'
         : commandRefusal ? 'LocalCommandRefused' : identity==='PostgresError' ? 'PostgresError' : 'unexpected',
-      identity_proof:discovery || credential ? 'instanceof' : commandRefusal ? 'private_constructor_and_exact_result' : 'unowned',
+      identity_proof:discovery || credential ? 'instanceof' : commandRefusal ? 'private_constructor_name_and_exact_result' : 'unowned',
       sqlstate:code==='non_sql' ? null : code,constraint:safeName(error?.constraint_name),
       detail:discovery ? 'LOCAL_AUTH_DISCOVERY_CHANGED' : null,
       status:commandRefusal ? 401 : null,reason:commandRefusal || credential ? 'unauthenticated' : null};
@@ -1244,6 +1244,7 @@ try {
         read_response:shape(readResponse),response:shape(response),state_before:state0,state_after:await seatState(s),rows:diff(before,after),
         successor_still_works:shape(await readAs(rawS1)),retry_predecessor:shape(await renew(s.raw,C))};
       const v=out.results.real_read,exceptions=commandExceptions.slice(exception0);
+      v.command_exceptions=exceptions; // Include the same-command retry above.
       const categories=Object.fromEntries(['owned_discovery_retry','expected_owned_refusal_rollback',
         'real_or_unowned_sql_failure','unexpected_non_sql'].map(category=>[category,exceptions.filter(e=>e.category===category).length]));
       const responseMetadata=response=>({status:response.status,
@@ -1295,7 +1296,7 @@ try {
       if (serverLog && label !== 'revocation') check(`${label}: server log confirms renewal victim`, same(v.server_log_victims, ['renewal']));
     }
     if (label === 'revocation') {
-      check('revocation: retry refuses the now revoked credential', v.retry_same_command_id.response.status === 403 && same(v.retry_same_command_id.response.body, { error: 'forbidden' }));
+      check('revocation: retry refuses the now revoked credential', v.retry_same_command_id.response.status === 401 && same(v.retry_same_command_id.response.body, { error: 'unauthenticated' }));
       check('revocation: cascade revoked T0 and S1', v.retry_same_command_id.state_after.tokens.every((t) => t.revoked));
     } else {
       check(`${label}: SAME command_id retry succeeds`, accepted(v.retry_same_command_id.response));
@@ -1306,7 +1307,12 @@ try {
     const v=R.real_read;
     check('real read: fixture parks an actual reader after its adoption',v.read_waited_on_fixture);
     check('real read: real renewal waits on that reader before token acquisition',v.renewal_waited_on_reader && v.token_before_workspace===false);
-    check('real read: no deadlock or command diagnostic',same(v.command_sqlstates,[]) && !v.rows.content_changed.includes('swarm.command_failures'));
+    // R18 permits only identified owned discovery retries and exact credential-refusal rollbacks.
+    // Real/unowned SQL failures and every unexpected non-SQL exception remain failures.
+    check('real read: no deadlock or command diagnostic',v.command_exceptions.every(e=>
+      e.category==='owned_discovery_retry' || e.category==='expected_owned_refusal_rollback')
+      && !v.rows.content_changed.includes('swarm.command_failures')
+      && same(v.state_before.command_failures_renew,v.state_after.command_failures_renew));
     check('real read: committed first use wins',v.read_response.status===200);
     check('real read: consumed predecessor refuses renewal',v.response.status===401 && v.retry_predecessor.status===401);
     check('real read: original successor remains usable',v.successor_still_works.status===200);

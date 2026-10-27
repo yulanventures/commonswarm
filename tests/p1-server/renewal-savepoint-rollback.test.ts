@@ -16,7 +16,7 @@ interface Target { url: string; mode: string; close(): Promise<void> }
 interface TargetHarness {
   ACTIVE_FLOOR_SOURCES: Record<"H" | "F" | "B", {commit: string; tree: string}>;
   openLockOrderTarget(options: { connector: unknown }): Promise<Target>;
-  lockOrderConnector(issuance: { record: string; measure: string; enable: string }): unknown;
+  lockOrderConnector(issuance: { record: string; measure: string; enable: string }, options?: { includeRealtime: boolean }): unknown;
   materializeActiveFloorSource(directory: string, generation: "current" | "H" | "F" | "B"): {path: string; commit: string; tree: string};
 }
 const harness = await import(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url).href) as TargetHarness;
@@ -29,7 +29,7 @@ for(const [generation,readGeneration] of [['current','current'],['H','H'],['F','
 for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: rollback, retry and credential continuity${generation==='current' && readGeneration==='current' ? '' : ` exact ${generation}/${readGeneration}`}`, { timeout: 300_000 }, async () => {
   const target = await harness.openLockOrderTarget({ connector: harness.lockOrderConnector({
     record: recordChecksumEvidenceForTest, measure: measureIssuanceForTest, enable: enableIssuanceForTest,
-  }) });
+  }, { includeRealtime: mode === "permanence" }) });
   const root = realpathSync(process.platform === "darwin" ? "/private/tmp" : tmpdir());
   let directory: string | undefined;
   try {
@@ -69,7 +69,7 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       checks?: { name: string; ok: boolean }[];
     };
     process.stdout.write(`ACTIVE_FLOOR_RENEWAL_SOURCE ${JSON.stringify({generation,readGeneration,mode,source:result.source,read_source:result.read_source})}\n`);
-    if(mode==='real_read') process.stdout.write(`R18_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,mode,diagnostics:result.diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
+    if(mode==='real_read' || result.stage!=='complete') process.stdout.write(`R18_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,mode,diagnostics:result.diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
     if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
     assert.equal(exit.signal, null, "a signalled child cannot supply proof");
     assert.equal(result.stage, "complete", `probe stopped at ${result.stage}: ${result.error ?? "unknown"}`);

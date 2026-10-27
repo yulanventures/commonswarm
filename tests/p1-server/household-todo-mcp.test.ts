@@ -58,7 +58,7 @@ const originalBegin = api.db.begin.bind(api.db);
 try {
   await assert.rejects(originalBegin(async tx => {
     await tx.unsafe(input.schema); await tx.unsafe(input.setup);
-    // One top-level transaction, so a notice signal keeps the outer xmin.
+    // One top-level transaction carries the server-stamped notice creation proof.
     // RESET ROLE clears a transaction-local role at once. Handlers also set
     // other transaction-local settings, so each call restores those from the
     // fixture snapshot. The hosted pre-check uses this same wrapper. Auth,
@@ -421,7 +421,7 @@ try {
     });
     let commandDenial = 'completed';
     // ROLLBACK TO starts a new subtransaction and leaves the savepoint open.
-    // Release it before the next notice so that notice keeps the top-level xmin.
+    // Release it before the next notice; creation proof uses top-level xid8 and cluster identity.
     await tx.unsafe('SAVEPOINT command_denial');
     try {
       await tx.unsafe("SELECT set_config('role', 'swarm_command', true)");
@@ -436,9 +436,9 @@ try {
     await tx.unsafe('RELEASE SAVEPOINT command_denial');
     assert.equal(commandDenial, '42501', 'command role is refused the hosted read resolver');
     const [stillFresh] = await tx.unsafe<[{ fresh: boolean }]>(
-      "SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh FROM swarm.signals WHERE id=$1::uuid",
+      "SELECT creation_xact_id=pg_current_xact_id() AND creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS fresh FROM swarm.signals WHERE id=$1::uuid",
       [signal]);
-    assert.equal(stillFresh!.fresh, true, 'resolver probe leaves the notice on the top-level transaction');
+    assert.equal(stillFresh!.fresh, true, 'resolver probe retains both server-stamped notice creation proofs');
     const queue=await call('todo_queue'); assert.equal(queue.status,200); assert.equal(queue.body.status,'ok');
     assert.equal(queue.body.queue.status.work,'idle');
     assert.equal(queue.body.queue.status.facts.connection,'live');
@@ -493,9 +493,10 @@ try {
     assert.equal(offeredResult.body.notices.length,1); assert.equal(offeredResult.body.notices[0].status,'sent');
     const offeredSignal=offeredResult.body.notices[0].signal_id;
     assert.notEqual(offeredSignal, signal);
-    const offeredFresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+    const offeredFresh=await tx\x60SELECT creation_xact_id=pg_current_xact_id() AND
+      creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS fresh
       FROM swarm.signals WHERE id=\x24{offeredSignal}::uuid\x60;
-    assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe uses the top-level transaction');
+    assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe carries both server-stamped creation proofs');
     const answered=committed(await human(envelope({kind:'household_todo_answer',todo_id:offered.todo_id,offer_id:offered.offer.offer_id,answer:'accept'})));
     assert.equal(answered.assignee.id,f.sibling); assert.equal(answered.offer,null);
     const acceptedId=crypto.randomUUID();
