@@ -104,7 +104,7 @@ test "$(id -gn commonswarm-ci)" = commonswarm-ci
 cat >"$stage/Dockerfile" <<'DOCKERFILE'
 FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS archivepython
 FROM docker:28.0.4-cli AS dockercli
-FROM node:22.23.3-bookworm
+FROM node:22.23.4-bookworm
 ARG CI_UID
 ARG CI_GID
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]

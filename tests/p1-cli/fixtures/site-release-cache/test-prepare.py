@@ -12,7 +12,7 @@ BASE=Path(__file__).resolve().parents[4]
 TOOLS=BASE/'deploy/site'
 h=lambda data:hashlib.sha256(data).hexdigest()
 revision='1234567890abcdef1234567890abcdef12345678'
-image='node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c'
+image='node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d'
 # Synthetic public anon-role JWT: no credentials used by this fixture.
 key='e30.'+base64.urlsafe_b64encode(b'{"role":"anon"}').decode().rstrip('=')+'.fixture'
 pub=dict(PUBLIC_SUPABASE_URL='https://api.commonswarm.com',PUBLIC_SUPABASE_ANON_KEY=key,PUBLIC_H0_LINK_JOIN='0')
