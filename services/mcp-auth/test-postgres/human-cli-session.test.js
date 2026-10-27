@@ -94,7 +94,9 @@ if (process.argv[2] === 'human-session-child') {
 } else {
 const { test } = await import('node:test');
 test('CI GoTrue: lost rotation, real CLI deadline, journal adoption and immediate cached-client revocation', {
-  skip: process.env.CI === 'true' ? false : 'CI only: private disposable PostgreSQL/GoTrue namespace', timeout: 90000,
+  skip: process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted'
+    ? 'requires the pe-ci-1 standalone controller private namespace; mandatory there'
+    : process.env.CI === 'true' ? false : 'CI only: private disposable PostgreSQL/GoTrue namespace', timeout: 90000,
 }, async t => {
   requirePrivateNamespace();
   let h, bootstrapping;
