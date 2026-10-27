@@ -34,6 +34,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     todoContext.clear();
     peopleContext.clear();
     restoreMenu();
+    accountIcon?.querySelector(".cs-org-switcher-chevron")?.remove();
     if (accountIcon && originalIcon.viewBox != null) accountIcon.setAttribute("viewBox", originalIcon.viewBox);
     if (accountPath && originalIcon.path != null) accountPath.setAttribute("d", originalIcon.path);
     shell?.destroy(); shell = null; menuDock = null; key = "";
@@ -93,10 +94,14 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
         shell.root.dataset.kylonLiveLayout = "";
         menuDock = doc.createElement("div"); menuDock.className = "cs-kylon-workspace-menu";
         shell.slots.phoneHeader.insertBefore(menuDock, shell.slots.phoneHeader.lastElementChild);
-        const mark = doc.createElement("a"); mark.href = "/";
-        mark.className = "cs-kylon-brand"; mark.setAttribute("aria-label", "CommonSwarm home");
-        const logo = doc.createElement("span"); logo.className = "hm-rail__mark"; logo.setAttribute("aria-hidden", "true");
-        mark.append(logo); shell.slots.brand.append(mark);
+        // The same account node owns organization switching on desktop and phone.
+        const desktopAccount = shell.slots.rail.querySelector(".cs-org-rail-account") as HTMLElement | null;
+        if (desktopAccount) shell.root.prepend(desktopAccount);
+        if (accountIcon) {
+          const chevron = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+          chevron.setAttribute("class", "cs-org-switcher-chevron");
+          chevron.setAttribute("d", "M6 9l6 6 6-6"); accountIcon.append(chevron);
+        }
       }
       todoContext.set(vm.todo === true);
       wikiContext.set(vm.wiki === true);

@@ -1,0 +1,14 @@
+{
+  "historical": [
+    ["workspace_id", "uuid"],
+    ["name", "text"],
+    ["archived_at", "timestamp with time zone"]
+  ],
+  "phase1": [
+    ["workspace_id", "uuid"],
+    ["name", "text"],
+    ["archived_at", "timestamp with time zone"],
+    ["org_id", "uuid"],
+    ["org_display_name", "text"]
+  ]
+}

@@ -267,12 +267,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          {/* On a wide screen the rail's BRAND ROW is the account control: the mark and "CommonSwarm", as the canvas
-              rail draws them, plus a chevron that shows only on hover, keyboard focus or while the menu is open (so New
-              workspace is the rail's last element, 16px above the bottom). It comes before the rail in the DOM, so focus meets it at the top, where it is drawn; the
-              rail's own brand link stands down there (rail.css), and the menu's "CommonSwarm home" is the way to
-              the site home. On a phone it is the chevron disc at the top right. The menu keeps the theme switch,
-              Connected apps and Sign out. */}
+          {/* The organization switcher shares its account menu with the phone control. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -281,11 +276,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               aria-haspopup="menu"
               aria-expanded="false"
               aria-controls="dashboard-user-menu"
-              aria-label="CommonSwarm, account menu"
+              aria-label="Organizations and account"
             >
-              <span class="hm-rail__mark dashboard__user-trigger-mark" aria-hidden="true"></span>
-              <span class="dashboard__user-trigger-brand">CommonSwarm</span>
-              <span class="dashboard__user-trigger-name" data-rail-account>Your account</span>
+              <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark aria-hidden="true">O</span>
+              <span class="dashboard__user-trigger-brand" data-org-name>Organizations</span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
               </svg>
@@ -295,14 +289,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               id="dashboard-user-menu"
               data-user-menu
               role="menu"
-              aria-label="Account"
+              aria-label="Organizations and account"
               hidden
             >
-              {/* Who you are signed in as. Below 52rem the trigger shows a chevron only —
-                  its name was 75px of a bar that has to carry the workspace name and the
-                  view switcher too — so this line is the phone's answer to that question.
-                  It carries `data-rail-account`, which is what every writer of the account
-                  name already selects, so the two stay in step without new wiring. */}
+              <div data-org-menu></div>
+              <div class="hm-menu__separator" role="separator"></div>
               <p class="dashboard__user-menu-account" data-rail-account>Your account</p>
               <button
                 class="dashboard__theme-toggle"
@@ -1037,7 +1028,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
+    buildOrganizationMenu, organizationMenuItems, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
@@ -1308,7 +1299,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type ConnectedApp,
   } from "../../lib/connected-apps";
 
-  interface Workspace extends CloseableWorkspace {}
+  interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string }
 
   interface Agent {
     principalId: string;
@@ -1398,6 +1389,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let connectedApps: ConnectedApp[] = [];
     let connectedAppsGeneration = 0;
     let workspaces: Workspace[] = [];
+    let selectedOrgId: string | null = null;
     let homeRoute: HomeRoute = { view: "catchup" };
     let homeNavigation = 0;
     let catchUpGeneration = 0;
@@ -1969,6 +1961,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const signOut = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
       const apps = one<HTMLButtonElement>("[data-connected-apps-open]");
       return {
+        organizations: organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId),
         signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
@@ -1976,7 +1969,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       };
     };
     const accountMenuAction = (action: AccountMenuAction): void => {
-      if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
+      if (typeof action === "object") { void navigateHome({ view: "chat", workspaceId: action.workspaceId }, "push"); }
+      else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
@@ -4523,6 +4517,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
     const renderHomeRail = (): void => {
       syncVisibleShell();
+      const orgs = organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId);
+      const currentOrg = orgs.find(org => org.current);
+      selectedOrgId = currentOrg?.id ?? null;
+      const orgName = currentOrg?.name ?? "Organizations";
+      const name = one<HTMLElement>("[data-org-name]");
+      if (name) name.textContent = orgName;
+      const mark = one<HTMLElement>("[data-org-mark]");
+      if (mark) mark.textContent = Array.from(orgName.trim())[0]?.toLocaleUpperCase() ?? "O";
+      one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${orgName}, organizations and account`);
+      const orgSlot = one<HTMLElement>("[data-org-menu]");
+      const orgKey = JSON.stringify(orgs);
+      if (orgSlot && orgSlot.dataset.orgKey !== orgKey) {
+        orgSlot.dataset.orgKey = orgKey;
+        orgSlot.replaceChildren(buildOrganizationMenu(document, orgs, workspaceId => {
+          const menu = one<HTMLElement>("[data-user-menu]"); if (menu) menu.hidden = true;
+          const trigger = one<HTMLElement>("[data-user-menu-trigger]");
+          trigger?.setAttribute("aria-expanded", "false"); trigger?.focus({ preventScroll: true });
+          void navigateHome({ view: "chat", workspaceId }, "push");
+        }));
+      }
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
       /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
@@ -9885,6 +9899,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } else {
           trigger.focus({ preventScroll: true });
         }
+      });
+      trigger.addEventListener("keydown", event => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault(); set(true);
+        const items = popover.querySelectorAll<HTMLElement>('[role^="menuitem"]');
+        items[event.key === "ArrowDown" ? 0 : items.length - 1]?.focus();
+      });
+      popover.addEventListener("keydown", event => {
+        if (event.key === "Tab") { close(); return; }
+        const items = [...popover.querySelectorAll<HTMLElement>('[role^="menuitem"]')];
+        const next = menuFocusIndex(items.indexOf(document.activeElement as HTMLElement), event.key, items.length);
+        if (next !== null) { event.preventDefault(); items[next]?.focus(); }
       });
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape" || popover.hidden) return;

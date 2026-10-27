@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { capsuleSubline, joinNames, menuFocusIndex, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { buildOrganizationMenu, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -75,4 +75,47 @@ test("shell copy uses plain words only", () => {
     ...workspaceNavItems({ pane: "chat", hrefs, todosAvailable: true }).map((item) => item.label),
   ].join(" ");
   assert.doesNotMatch(copy, /online|offline|seat|grant|token|turn|wake|principal/iu);
+});
+
+test("organization choices include only live readable workspaces, deduplicate orgs and keep the selected workspace", () => {
+  const workspaces = [
+    { id: "a", name: "A", orgId: "org-a", orgName: "Alpha", archived: false },
+    { id: "b", name: "B", orgId: "org-a", orgName: "Alpha", archived: false },
+    { id: "c", name: "C", orgId: "org-c", orgName: "Other", archived: false },
+    { id: "closed", name: "Closed", orgId: "closed-org", orgName: "Closed", archived: true },
+  ];
+  assert.deepEqual(organizationMenuItems(workspaces, "b"), [
+    { id: "org-a", name: "Alpha", workspaceId: "b", current: true },
+    { id: "org-c", name: "Other", workspaceId: "c", current: false },
+  ]);
+  assert.deepEqual(organizationMenuItems(workspaces, "", "org-c").map(org => org.current), [false, true],
+    "Catch up retains the organization selected before leaving a workspace");
+  assert.deepEqual(organizationMenuItems(workspaces.slice(0, 2), "", "removed-org").map(org => org.current), [true],
+    "removal falls back to a readable organization");
+  assert.deepEqual(organizationMenuItems([], ""), []);
+  assert.deepEqual(organizationMenuItems([{ id: "sample", name: "Sample", archived: false }], "sample"),
+    [{ id: "sample", name: "Sample", workspaceId: "sample", current: true }], "sample workspaces retain a local identity");
+});
+
+
+test("organization menu renders safe names and the checked choice, and sends workspace selection", () => {
+  const element = tag => ({ tag, children: [], attrs: {}, listeners: {}, dataset: {},
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+  });
+  const selected = [];
+  const menu = buildOrganizationMenu({ createElement: element }, [
+    { id: "one", name: "<img src=x>", workspaceId: "space-one", current: false },
+    { id: "two", name: "Yulan", workspaceId: "space-two", current: true },
+  ], workspaceId => selected.push(workspaceId));
+  assert.equal(menu.attrs.role, "group");
+  assert.equal(menu.attrs["aria-label"], "Organizations");
+  assert.deepEqual(menu.children.map(button => [button.attrs.role, button.attrs["aria-checked"]]),
+    [["menuitemradio", "false"], ["menuitemradio", "true"]]);
+  assert.equal(menu.children[0].children[1].textContent, "<img src=x>", "the org name is text, never markup");
+  assert.equal(menu.children[1].children[0].textContent, "Y");
+  assert.equal(menu.children[1].children[2].textContent, "✓");
+  menu.children[0].listeners.click();
+  assert.deepEqual(selected, ["space-one"], "an org selects its readable workspace through the caller");
 });
