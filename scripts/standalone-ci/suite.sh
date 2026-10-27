@@ -76,7 +76,8 @@ case "$suite" in
 PGPASSWORD=$(supabase status -o json | python3 -c 'import json,sys; from urllib.parse import urlsplit,unquote; u=urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname,u.port,u.username,u.path)==("127.0.0.1",54322,"postgres","/postgres"); assert u.password; print(unquote(u.password))')
 export PGPASSWORD
 test "$(psql -X -v ON_ERROR_STOP=1 -At --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user")" = 'supabase_admin|supabase_admin|t'
-PGOPTIONS='-c search_path="$user",public' supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
+# Match the workflow: per-file box transaction and migration-only search path.
+PGOPTIONS='-c search_path="$user",public' bash scripts/ci/apply-migrations.sh
 psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command 'GRANT swarm_admin, swarm_command, swarm_read, swarm_capability TO postgres WITH ADMIN OPTION, INHERIT TRUE, SET TRUE'
 psql -X -v ON_ERROR_STOP=1 --dbname postgresql://postgres@127.0.0.1:54322/postgres --file supabase/seed.sql
 psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "NOTIFY pgrst, 'reload schema'"
