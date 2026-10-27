@@ -43,6 +43,11 @@ const out = { tree, mode, source:config?.source ? {commit:config.source.commit,t
   read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
 const diagnosedContracts = [
   'unused-root-parent-token-scope','unused-root-parent-principal-scope',
+  ...['token','principal'].flatMap(slot=>[
+    `unused-root-parent-${slot}-scope-root-authenticates`,
+    `unused-root-parent-${slot}-scope-live-child-authenticates`,
+  ]),
+  'unused-root-wrong-device-owner-denied-without-effects',
   'unused-root-wrong-creator-denied-without-effects','unused-root-wrong-family-denied-without-effects',
   'unused-root date crossing adoption wait rolls back stamp',
   'decided rejection waits at its real final ledger write',
@@ -566,15 +571,24 @@ try {
         && failureRows.inserted===1 && failureRows.updated===0 && failureRows.deleted===0
         && failureRows.inserted_match_binding_failure;
       const bindingExceptions=commandExceptions.slice(exceptionsBefore).filter(error=>error.binding_failure).length;
-      check(`unused-root-${variant}-denied-without-effects`,denied.status===403
-        && stateUnchanged,
+      const denialBody=JSON.parse(denied.text);
+      const genericDenial=denied.status===403 && JSON.stringify(denialBody)===JSON.stringify({error:'forbidden'})
+        && credential(denied)===null && stateUnchanged
+        && tableDelta.content_changed.length===0 && Object.keys(tableDelta.counts).length===0;
+      // Stop-rule item A (cleared, run 40472260842): ONLY these three
+      // public-entry controls in the immutable F command generation may retain
+      // its one binding-matched diagnostic. Trusted-entry controls below still
+      // require no diagnostic, and release/current/H stay exact 403/no write.
+      const historicalDiagnosticOnly=config?.source?.commit===ACTIVE_FLOOR_SOURCES.F.commit
+        && ['wrong-device-owner','wrong-creator','wrong-family'].includes(variant)
+        && diagnosticOnly && bindingExceptions===1 && commandExceptions.length===exceptionsBefore+1
+        && denied.status===500 && JSON.stringify(denialBody)===JSON.stringify({error:'internal_error'})
+        && credential(denied)===null;
+      check(`unused-root-${variant}-denied-without-effects`,genericDenial || historicalDiagnosticOnly,
         {status:denied.status,credential_returned:credential(denied)!==null,state_unchanged:stateUnchanged,
           table_delta:tableDelta,failure_rows:failureRows,unmapped_binding_exceptions:bindingExceptions,
           diagnostic_only:diagnosticOnly});
       // STOP-RULE: no later fixture may obscure a business/authority write.
-      const historicalDiagnosticOnly=config?.source?.commit===ACTIVE_FLOOR_SOURCES.F.commit
-        && ['wrong-creator','wrong-family'].includes(variant) && diagnosticOnly && bindingExceptions===1
-        && denied.status===500 && credential(denied)===null;
       if(unexpectedTables.length || ((!stateUnchanged || tableDelta.content_changed.length>0) && !historicalDiagnosticOnly)) {
         out.checks=checks;
         throw Object.assign(new Error('binding_denial_unexpected_write'),{code:'BINDING_DENIAL_UNEXPECTED_WRITE'});
@@ -584,6 +598,7 @@ try {
     // liveness/scope routines and command auth. Cover both ancestry owners.
     await observer`INSERT INTO swarm.admin_accounts(owner_user_id,stream_id) VALUES(${owner}::uuid,${id()}::uuid) ON CONFLICT DO NOTHING`;
     for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope']) {
+      atControl(`unused-root-parent-${slot}-${policy}`,'real parent-bound root and renewal successor');
       const parent=id(),recipient=id();
       await observer`INSERT INTO swarm.admin_grants(grant_id,owner_user_id,admin_identity_id,connection_id,client_id,resource,registry_version,
         workspace_ids,created_workspace_policy,target_rules,worker_scope_ceiling,role_ceiling,renewal_limits,issuance_limits,
@@ -596,14 +611,36 @@ try {
         {...(slot==='token'?{tokenParent:parent}:{principalParent:parent}),recipient});
       // A scope refusal must not be masked by expired-root admission. Obtain
       // a genuine child and prove it authenticates before narrowing its parent.
-      let parentBearer=fixture.raw,parentPositiveStatus=null;
+      let parentBearer=fixture.raw,parentPositiveStatus=null,parentRootStatus=null,parentChildBound=null;
       if(policy==='scope') {
+        // A live unused root's first renewal is a decided
+        // predecessor_pending_first_use refusal, not issuance. Complete a real
+        // read first, then issue through the normal renewal transaction. Never
+        // seed first_used_at, a successor, or ancestry around the guards.
+        parentRootStatus=(await readAs(fixture.raw)).status;
+        const [root]=await observer`SELECT first_used_at IS NOT NULL AS used FROM swarm.agent_tokens
+          WHERE token_id=${fixture.t0}::uuid`;
+        check(`unused-root-parent-${slot}-scope-root-authenticates`,parentRootStatus===200 && root?.used===true,
+          {status:parentRootStatus,root_used:root?.used===true});
+        if(parentRootStatus!==200 || root?.used!==true)
+          throw Object.assign(new Error('parent_scope_root_fixture'),{code:'PARENT_SCOPE_ROOT_UNUSABLE'});
         const issued=await renew(fixture.raw,id());
         parentBearer=credential(issued);
+        const [child]=await observer`SELECT t.predecessor_token_id=${fixture.t0}::uuid
+          AND t.renewal_grant_id=${fixture.grant}::uuid AND t.parent_admin_grant_id=${parent}::uuid
+          AND t.recipient_connection_id=${recipient}::uuid
+          AND p.parent_admin_grant_id IS NOT DISTINCT FROM ${slot==='principal'?parent:null}::uuid
+          AND t.expires_at>clock_timestamp() AND t.revoked_at IS NULL AND t.first_used_at IS NULL AS bound
+          FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+          WHERE t.token_id=${JSON.parse(issued.text).token_id ?? null}::uuid`;
+        parentChildBound=child?.bound===true;
         parentPositiveStatus=parentBearer!==null ? (await readAs(parentBearer)).status : null;
         check(`unused-root-parent-${slot}-scope-live-child-authenticates`,issued.status===200
-          && parentPositiveStatus===200);
-        if(parentBearer===null) throw Object.assign(new Error('parent_scope_fixture'),{code:'PARENT_SCOPE_NO_CHILD'});
+          && parentChildBound && parentPositiveStatus===200,
+          {issuance_status:issued.status,credential_returned:parentBearer!==null,child_bound:parentChildBound,
+            positive_auth_status:parentPositiveStatus});
+        if(issued.status!==200 || parentBearer===null || !parentChildBound || parentPositiveStatus!==200)
+          throw Object.assign(new Error('parent_scope_fixture'),{code:'PARENT_SCOPE_NO_CHILD'});
       } else await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${fixture.t0}::uuid`;
       if(policy==='expired') await observer`UPDATE swarm.admin_grants SET expires_at=clock_timestamp()-interval '1 second' WHERE grant_id=${parent}::uuid`;
       if(policy==='withdrawn') await observer`UPDATE swarm.admin_grants SET withdrawn_workspace_ids=ARRAY[${W}::uuid] WHERE grant_id=${parent}::uuid`;
@@ -617,7 +654,8 @@ try {
           && credential(response)===null && stateUnchanged
           && tableDelta.content_changed.length===0 && Object.keys(tableDelta.counts).length===0,
         {status:response.status,credential_returned:credential(response)!==null,state_unchanged:stateUnchanged,
-          bearer:policy==='scope'?'live_child':'expired_root',positive_auth_status:parentPositiveStatus,table_delta:tableDelta});
+          bearer:policy==='scope'?'live_child':'expired_root',root_auth_status:parentRootStatus,
+          child_bound:parentChildBound,positive_auth_status:parentPositiveStatus,table_delta:tableDelta});
     }
     // Session validation owns stamp rollback before issuance, a different
     // contract from the unmanaged and used-token baseline session controls.
@@ -847,18 +885,25 @@ try {
         signal_id:null,tool_title:null,elapsed_ms:0}),
     }));
     const activitySeat=await seat('activity-deadline'),activityIssued=await renew(activitySeat.raw,id()),activityRaw=credential(activityIssued);
-    check('activity fixture has a genuine unused successor',activityRaw!==null);
-    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '3 seconds'
-      WHERE renewal_grant_id=${activitySeat.grant}::uuid`;
-    const activityBefore=await seatState(activitySeat),activityDatabaseBefore=await snapshot();
+    const activityInitial=await seatState(activitySeat);
+    const activityUnused=activityInitial.tokens.find(t=>t.token===JSON.parse(activityIssued.text).token_id)?.used===false;
+    check('activity fixture has a genuine unused successor',activityIssued.status===200 && activityRaw!==null && activityUnused);
+    if(activityIssued.status!==200 || activityRaw===null || !activityUnused)
+      throw Object.assign(new Error('activity_fixture'),{code:'ACTIVITY_FIXTURE_NO_CREDENTIAL'});
     const [broadcastBefore]=await observer`SELECT count(*)::int AS n FROM realtime.messages`;
-    let activityPending;
+    let activityBefore,activityDatabaseBefore,activityPending;
     await observer.begin(async tx=>{
       const [{pid}]=await tx`SELECT pg_backend_pid() AS pid`;
       await tx`LOCK TABLE realtime.messages IN SHARE MODE`;
+      // Inventory work must finish before the short date is armed, as in the
+      // adoption and ledger waits. Otherwise a large database can expire the
+      // fixture before it ever reaches realtime.send.
+      ({before:activityBefore,databaseBefore:activityDatabaseBefore}=await armFamilyDate(activitySeat));
       activityPending=activity(activityRaw);
-      check('actual activity send waited at realtime after adoption',await waitBlockedBy(pid,100)>0);
-      await sleep(3200);
+      const activityWaiter=await waitBlockedBy(pid,100);
+      check('actual activity send waited at realtime after adoption',activityWaiter>0
+        && (await waitDetail(activityWaiter)).statement?.includes('SELECT realtime.send('));
+      await waitPastFamilyDate(activitySeat.grant);
     });
     const activityDenied=await activityPending;
     check('activity rejects a chosen deadline elapsed during its final send wait',activityDenied.status===403);

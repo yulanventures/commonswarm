@@ -118,9 +118,9 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       for(const variant of ['wrong-device-owner','wrong-creator','wrong-family'])
         assert.ok(result.checks?.some(check=>check.name===`unused-root-${variant}-denied-without-effects` && check.ok),
           `${variant}: unused-root authority denial required`);
-      for(const slot of ['token','principal'])
-        assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-scope-live-child-authenticates` && check.ok),
-          `${slot}/scope: real live child authentication required`);
+      for(const slot of ['token','principal']) for(const proof of ['root-authenticates','live-child-authenticates'])
+        assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-scope-${proof}` && check.ok),
+          `${slot}/scope/${proof}: real root use and parent-bound child authentication required`);
       for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope'])
         assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-${policy}` && check.ok),
           `${slot}/${policy}: real parent gate required`);
