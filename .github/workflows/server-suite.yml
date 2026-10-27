@@ -82,6 +82,9 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
+      - name: Typecheck edge functions
+        if: matrix.suite == 'unit'
+        run: npm run check:edge
       # P0: measured official Caddy release + publisher checksum in; verified binary out.
       # Invariant: both Caddy gates fail closed; no latest/custom-build fallback.
       - name: Install box-matched Caddy for server and unit

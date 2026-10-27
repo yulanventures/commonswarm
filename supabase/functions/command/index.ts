@@ -10168,7 +10168,7 @@ async function handleHostedManagement(
   // the database clock again. This classification never authorizes a write.
   const policyRefusal = async (): Promise<HttpResult> => {
     if (command.kind === "set_connection_expiry" && auth.identityVerified &&
-        grant?.home_workspace_id === body.workspace_id &&
+        grant !== null && grant.home_workspace_id === body.workspace_id &&
         await hostedPolicyOwnerRoute(tx, command.grant_id, auth.actor.user!) === route.workspaceId) {
       const [policy] = await tx<{ expired: boolean }[]>`SELECT connection_expired_at IS NOT NULL OR
         (connection_expires_at IS NOT NULL AND connection_expires_at<=clock_timestamp()) OR
