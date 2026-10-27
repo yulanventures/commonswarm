@@ -67,11 +67,11 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       unused_root_baseline?: {commit: string; tree: string} | null;
       active_catalog?: {functions:number;migrations:number;view_columns:number;measured_view_sha256:string};
       checks?: { name: string; ok: boolean }[];
-      contract_diagnostics?: unknown;
+      contract_diagnostics?: unknown; contract_replacements?: unknown;
     };
     process.stdout.write(`ACTIVE_FLOOR_RENEWAL_SOURCE ${JSON.stringify({generation,readGeneration,mode,source:result.source,read_source:result.read_source})}\n`);
     if(mode==='permanence') process.stdout.write(`R8_CONTRACT_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,
-      contracts:result.contract_diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
+      contracts:result.contract_diagnostics ?? null,replacements:result.contract_replacements ?? [],failure:result.failure_diagnostic ?? null})}\n`);
     if(mode==='real_read' || result.stage!=='complete') process.stdout.write(`R18_DIAGNOSTIC ${JSON.stringify({generation,readGeneration,mode,diagnostics:result.diagnostics ?? null,failure:result.failure_diagnostic ?? null})}\n`);
     if (mode === "permanence") assert.equal(result.hook_sleep, null, "permanence runs without fault hooks");
     assert.equal(exit.signal, null, "a signalled child cannot supply proof");
@@ -118,6 +118,9 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
       for(const variant of ['wrong-device-owner','wrong-creator','wrong-family'])
         assert.ok(result.checks?.some(check=>check.name===`unused-root-${variant}-denied-without-effects` && check.ok),
           `${variant}: unused-root authority denial required`);
+      for(const slot of ['token','principal'])
+        assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-scope-live-child-authenticates` && check.ok),
+          `${slot}/scope: real live child authentication required`);
       for(const slot of ['token','principal']) for(const policy of ['live','expired','withdrawn','scope'])
         assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-${policy}` && check.ok),
           `${slot}/${policy}: real parent gate required`);
