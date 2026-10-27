@@ -10979,8 +10979,15 @@ async function handleTransaction(
       localWorkspace=hint?.workspace_id;
     }
     const rawLocal = record(body.command);
-    if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never))
-      return {status:403,body:{error:'forbidden'}};
+    if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never)) {
+      if (kind!=='change_role') return {status:403,body:{error:'forbidden'}};
+      // Transport discovery grants no authority. Only a known local bearer may
+      // reach actor-only planning and verified authentication for the audit.
+      const [localAgent]=await tx`SELECT t.token_id FROM swarm.agent_tokens t
+        JOIN swarm.agent_principals p USING(principal_id)
+        WHERE t.token_hash=${agentTokenHash} AND p.transport='local' AND NOT p.turn_only`;
+      if (!localAgent) return {status:403,body:{error:'forbidden'}};
+    }
     // Admission selects a lock suffix, never a domain reason. The reducer
     // remains the sole owner of authenticated business refusals.
     const humanLocalAdmission = async (): Promise<'allowed' | 'business-refusal' | 'forbidden'> => {

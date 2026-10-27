@@ -47,6 +47,8 @@ interface RoleFixture {
   agentCredential: string;
   agentOutOfScopeCredential: string;
   agentPrincipal: string;
+  hostedAgentCredential: string;
+  hostedAgentPrincipal: string;
 }
 
 interface CommandResult {
@@ -110,8 +112,10 @@ async function roleFixture(): Promise<RoleFixture> {
   const workspaceB = randomUUID();
   const device = randomUUID();
   const agentPrincipal = randomUUID();
+  const hostedAgentPrincipal = randomUUID();
   const agentCredential = `swm_agt_${randomBytes(32).toString("base64url")}`;
   const agentOutOfScopeCredential = `swm_agt_${randomBytes(32).toString("base64url")}`;
+  const hostedAgentCredential = `swm_agt_${randomBytes(32).toString("base64url")}`;
   const installation = randomUUID();
   const repository = randomUUID();
   await sql.begin(async (tx) => {
@@ -188,15 +192,30 @@ async function roleFixture(): Promise<RoleFixture> {
       INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
       VALUES (${run}::uuid, ${agentPrincipal}::uuid, ${device}::uuid)
     `;
+    const renewalGrant = randomUUID();
+    const predecessor = randomUUID();
+    const lineage = randomUUID();
+    await tx`INSERT INTO swarm.renewal_grants (
+      renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,
+      horizon_expires_at,bound_device_id,created_by
+    ) VALUES (${renewalGrant}::uuid,${workspaceA}::uuid,${agentPrincipal}::uuid,
+      ${run}::uuid,'standing',NULL,NULL,${device}::uuid,${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (
+      token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,renewal_grant_id
+    ) VALUES (${predecessor}::uuid,${agentPrincipal}::uuid,${run}::uuid,'["change_role"]'::jsonb,
+      ${randomBytes(32)},statement_timestamp()+interval '1 hour',${lineage}::uuid,${renewalGrant}::uuid)`;
+    await tx`UPDATE swarm.agent_tokens SET first_used_at=clock_timestamp()
+      WHERE token_id=${predecessor}::uuid`;
     await tx`
       INSERT INTO swarm.agent_tokens (
         token_id, principal_id, run_id, scopes, token_hash,
-        expires_at, lineage_id
+        expires_at, lineage_id, renewal_grant_id, predecessor_token_id
       ) VALUES (
         ${randomUUID()}::uuid, ${agentPrincipal}::uuid, ${run}::uuid,
         ${tx.json(["change_role"])}::jsonb,
         ${createHash("sha256").update(agentCredential).digest()},
-        statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid
+        statement_timestamp() + interval '1 hour', ${lineage}::uuid,
+        ${renewalGrant}::uuid, ${predecessor}::uuid
       )
     `;
     await tx`
@@ -205,6 +224,18 @@ async function roleFixture(): Promise<RoleFixture> {
         ${createHash("sha256").update(agentOutOfScopeCredential).digest()},
         statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)
     `;
+    await tx`INSERT INTO swarm.agent_principals (
+      principal_id,workspace_id,owner_user_id,name,transport,turn_only
+    ) VALUES (${hostedAgentPrincipal}::uuid,${workspaceA}::uuid,${owner.id}::uuid,
+      'role-hosted-worker','hosted_mcp',true)`;
+    const hostedRun = randomUUID();
+    await tx`INSERT INTO swarm.agent_runs (run_id,principal_id,device_id)
+      VALUES (${hostedRun}::uuid,${hostedAgentPrincipal}::uuid,${device}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (
+      token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id
+    ) VALUES (${randomUUID()}::uuid,${hostedAgentPrincipal}::uuid,${hostedRun}::uuid,
+      '["change_role"]'::jsonb,${createHash("sha256").update(hostedAgentCredential).digest()},
+      statement_timestamp()+interval '1 hour',${randomUUID()}::uuid)`;
   });
   return {
     workspaceA,
@@ -217,6 +248,8 @@ async function roleFixture(): Promise<RoleFixture> {
     agentCredential,
     agentOutOfScopeCredential,
     agentPrincipal,
+    hostedAgentCredential,
+    hostedAgentPrincipal,
   };
 }
 
@@ -526,16 +559,24 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
   const agentEffects = async () => {
     const [state] = await sql`SELECT
       (SELECT md5(jsonb_agg(to_jsonb(t) ORDER BY token_id)::text)
-        FROM swarm.agent_tokens t WHERE principal_id=${f.agentPrincipal}::uuid) AS tokens,
+        FROM swarm.agent_tokens t WHERE principal_id IN
+          (${f.agentPrincipal}::uuid,${f.hostedAgentPrincipal}::uuid)) AS tokens,
+      (SELECT md5(jsonb_agg(to_jsonb(g) ORDER BY renewal_grant_id)::text)
+        FROM swarm.renewal_grants g WHERE principal_id=${f.agentPrincipal}::uuid) AS renewal,
       (SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY principal_id)::text)
-        FROM swarm.agent_presence p WHERE principal_id=${f.agentPrincipal}::uuid) AS presence,
+        FROM swarm.agent_presence p WHERE principal_id IN
+          (${f.agentPrincipal}::uuid,${f.hostedAgentPrincipal}::uuid)) AS presence,
       (SELECT count(*)::int FROM swarm.idempotency_keys
-        WHERE principal_kind='agent' AND principal_id=${f.agentPrincipal}) AS ledger,
+        WHERE principal_kind='agent' AND principal_id IN
+          (${f.agentPrincipal},${f.hostedAgentPrincipal})) AS ledger,
+      (SELECT md5(jsonb_agg(to_jsonb(b) ORDER BY bucket_key,window_start)::text)
+        FROM swarm.rate_buckets b) AS metering,
       (SELECT count(*)::int FROM swarm.events WHERE workspace_id=${f.workspaceA}::uuid) AS events,
       (SELECT count(*)::int FROM swarm.audit_log WHERE workspace_id=${f.workspaceA}::uuid) AS audits`;
     return state!;
   };
-  const deniedAgentWithoutTargetWait = async (credential: string) => {
+  const deniedAgentWithoutTargetWait = async (credential: string, audited = true) => {
+    const before = await agentEffects();
     let pending: Promise<CommandResult> | undefined;
     try {
       return await sql.begin(async blocker => {
@@ -557,8 +598,10 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
           WHERE workspace_id=${f.workspaceA}::uuid AND command_kind='change_role'
             AND credential_id=(SELECT token_id FROM swarm.agent_tokens WHERE token_hash=
               ${createHash("sha256").update(credential).digest()})`;
-        assert.deepEqual(Array.from(audits,r=>({...r})),[{outcome:"authz",reason:"forbidden"}],
-          'exactly one security audit is visible while the target is still locked');
+        assert.deepEqual(Array.from(audits,r=>({...r})),audited ? [{outcome:"authz",reason:"forbidden"}] : [],
+          'only a verified local agent has one security audit while the target is still locked');
+        assert.deepEqual(await agentEffects(),{...before,audits:before.audits+Number(audited)},
+          'before target unlock, only the verified refusal audit may change');
         return result;
       });
     } finally { if(pending)await pending.catch(()=>{}); }
@@ -587,6 +630,16 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
   assert.deepEqual(Array.from(outOfScopeAudit,r=>({...r})),[{outcome:"authz",reason:"forbidden"}]);
   assert.deepEqual(await agentEffects(), {...beforeOutOfScope,audits:beforeOutOfScope.audits+1},
     'out-of-scope agent commits exactly one audit and no other effect');
+  for (const credential of [
+    `swm_agt_${randomBytes(32).toString("base64url")}`,
+    f.hostedAgentCredential,
+  ]) {
+    const before = await agentEffects();
+    assert.deepEqual(await deniedAgentWithoutTargetWait(credential,false),
+      {status:403,body:{error:"forbidden"}});
+    assert.deepEqual(await agentEffects(),before,
+      'unknown bearer and hosted agent retain the early refusal with no audit or other effect');
+  }
   // Neither a missing target nor a user with current tenancy only in B may
   // change the denial, reveal membership, or lose its one security audit.
   for(const credential of [f.agentCredential,f.agentOutOfScopeCredential]) {
