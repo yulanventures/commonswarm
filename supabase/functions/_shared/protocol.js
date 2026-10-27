@@ -3002,8 +3002,13 @@ function reduceWorkspace(prev, env3) {
       const p = req2(env3.payload, ["principal_id", "owner_user_id", "name", "created_at"], env3.type, env3.seq);
       const existing = s.principals[p.principal_id];
       if (existing && existing.owner_user_id !== p.owner_user_id) throw new StreamIntegrityError(`agent ownership changed at seq ${env3.seq}`);
-      if (p.transport !== "local" || p.turn_only !== false) throw new StreamIntegrityError(`non-local workspace addition at seq ${env3.seq}`);
-      next = { ...s, principals: { ...s.principals, [p.principal_id]: { ...p, model: p.model ?? null, transport: "local", turn_only: false, revoked_at: null } } };
+      if (!(p.transport === "local" && p.turn_only === false || p.transport === "hosted_mcp" && p.turn_only === true)) {
+        throw new StreamIntegrityError(`invalid workspace agent transport at seq ${env3.seq}`);
+      }
+      if (existing && (existing.transport !== p.transport || existing.turn_only !== p.turn_only || existing.name !== p.name)) {
+        throw new StreamIntegrityError(`agent identity changed at seq ${env3.seq}`);
+      }
+      next = { ...s, principals: { ...s.principals, [p.principal_id]: { ...p, model: p.model ?? null, transport: p.transport, turn_only: p.turn_only, revoked_at: null } } };
       break;
     }
     case "AgentRemovedFromWorkspace": {
@@ -3168,17 +3173,18 @@ function reduceWorkspace(prev, env3) {
       if (p.workspace_id !== s.workspace.workspace_id) {
         throw new StreamIntegrityError(`hosted seat workspace mismatch at seq ${env3.seq}`);
       }
-      if (s.principals[p.principal_id]) {
-        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
       if (p.transport !== "hosted_mcp" || p.turn_only !== true) {
         throw new StreamIntegrityError(`hosted seat has invalid transport at seq ${env3.seq}`);
+      }
+      const existing = s.principals[p.principal_id];
+      if (existing && (existing.owner_user_id !== p.owner_user_id || existing.name !== p.name || existing.transport !== "hosted_mcp" || existing.turn_only !== true || existing.revoked_at !== null)) {
+        throw new StreamIntegrityError(`hosted seat principal mismatch at seq ${env3.seq}`);
       }
       next = {
         ...s,
         principals: {
           ...s.principals,
-          [p.principal_id]: {
+          [p.principal_id]: existing ?? {
             principal_id: p.principal_id,
             owner_user_id: p.owner_user_id,
             name: p.name,

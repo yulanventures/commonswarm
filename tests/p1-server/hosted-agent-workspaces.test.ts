@@ -2,37 +2,47 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {execFileSync,spawnSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,rmSync,readFileSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {runSql,repoSql,dbAssert,refuses} from '../support/admin-schema-db.js';
 import {releaseCatalogQuery} from '../support/release-catalog-query.js';
 import {adminEdgeDatabase} from '../support/admin-edge-database.js';
 import {proveHostedContentWithdrawal} from '../support/hosted-content-withdrawal.js';
+import {offlineHostedData,offlineHostedDatabase,runOfflineHostedCommands} from '../support/hosted-agent-offline.js';
 const root='deploy/release-proofs/agents/20261028000003';
 const migration='supabase/migrations/20261028000003_hosted_agent_workspaces.sql';
 const catalog=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${root}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'hosted agents catalog');
 const legacy=()=>repoSql('tests/fixtures/hosted-agent-workspaces-before.sql')+repoSql('supabase/migrations/20261025000001_permanence_grandfather.sql');
+async function schemaSql(sql:string) {
+ if (!offlineHostedData) return runSql(sql);
+ const isolated=await offlineHostedDatabase();
+ try {await isolated.db.begin(tx=>tx.unsafe(sql));} finally {await isolated.close();}
+}
+async function commandDatabase() {
+ if (offlineHostedData) return {isolated:await offlineHostedDatabase(),local:null};
+ const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
+ return {isolated:await adminEdgeDatabase(local.DB_URL),local};
+}
 
-test('hosted migration backfills exact identities, preserves grandfathered consent/handles, fences removal and keeps dormant families',()=>{
- runSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+legacy()+repoSql(migration)+catalog()
+test('hosted migration backfills exact identities, preserves grandfathered consent/handles, fences removal and keeps dormant families',async()=>{
+ await schemaSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+legacy()+repoSql(migration)+catalog()
   +repoSql('tests/fixtures/hosted-agent-workspaces.sql')+repoSql(`${root}-functional.sql`)+refuses(repoSql(`${root}-rollback.sql`),'55000'));
 });
 
-test('hosted migration rollback/reapply preserves the prior authority catalog and reserve bytes',()=>{
+test('hosted migration rollback/reapply preserves the prior authority catalog and reserve bytes',async()=>{
  for(const suffix of ['catalog','functional','rollback','rollback-catalog']) {
   const name=`20261028000003-${suffix}.sql`;
   assert.deepEqual(readFileSync(`supabase/agents-reserve/${name}`),readFileSync(`deploy/release-proofs/agents/${name}`));
  }
- runSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+repoSql(migration)+catalog());
+ await schemaSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+repoSql(migration)+catalog());
 });
 
 const A='13000000-0000-4000-8000-000000000001',B='13000000-0000-4000-8000-000000000002';
 const P='23000000-0000-4000-8000-000000000001',U='03000000-0000-4000-8000-000000000001',G='33000000-0000-4000-8000-000000000001';
 
 test('real hosted content withdrawal revokes only the target workspace and retains origin, inactive and local behavior',async()=>{
- const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
- const isolated=await adminEdgeDatabase(local.DB_URL);
+ const {isolated}=await commandDatabase();
  try {
   await isolated.db.unsafe(repoSql(`${root}-rollback.sql`)+legacy()+repoSql(migration));
   await isolated.db.begin(proveHostedContentWithdrawal);
@@ -40,8 +50,7 @@ test('real hosted content withdrawal revokes only the target workspace and retai
 });
 
 test('real hosted commands add without OAuth, claim the same agent, replay safely and preserve sibling/dormant connections',async()=>{
- const local=JSON.parse(execFileSync('supabase',['status','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}));
- const isolated=await adminEdgeDatabase(local.DB_URL);
+ const {isolated,local}=await commandDatabase();
  const dir=mkdtempSync(join(tmpdir(),'hosted-agent-commands-'));
  try {
   await isolated.db.unsafe(repoSql(`${root}-rollback.sql`)+legacy()+repoSql(migration));
@@ -54,7 +63,7 @@ import assert from 'node:assert/strict';
 const {db,handleHostedCommand,handleHostedManagementCommand}=await import(${JSON.stringify(commandUrl)});
 const {authenticateHostedGrantCapability,authenticateHostedSeatCapability}=await import(${JSON.stringify(authUrl)});
 const A=${JSON.stringify(A)},B=${JSON.stringify(B)},P=${JSON.stringify(P)},U=${JSON.stringify(U)},G=${JSON.stringify(G)};
-const human={userId:U,email:null,displayName:'Hosted owner',identityVerified:true,interactiveAuthAtSeconds:null};
+const human={userId:U,email:null,displayName:'Hosted owner',identityVerified:true,interactiveAuthAtSeconds:Math.floor(Date.now()/1000)};
 const manage=(workspace,add)=>handleHostedManagementCommand({command_id:crypto.randomUUID(),client_version:'0.1.83',workspace_id:workspace,stream:{kind:'workspace'},command:{kind:add?'add_agent_to_workspace':'remove_agent_from_workspace',principal_id:P}},human);
 async function claim(workspace,id=crypto.randomUUID()) {
  const cap=await db.begin(tx=>authenticateHostedGrantCapability(tx,{grantId:G,ownerUserId:U,providerGrantId:'hosted-workspace-family',workspaceId:workspace,tool:'claim_hosted_seat',providerStatus:async()=>({active:true})}));
@@ -87,11 +96,16 @@ try {
  console.log('HOSTED_AGENT_COMMANDS_PASS');
 } finally {await db.end();}
 `);
+  if (offlineHostedData) {
+   await runOfflineHostedCommands(harness,isolated.db,dir);
+   return;
+  }
+  assert.ok('url' in isolated);
   const result=spawnSync('deno',['run','--no-lock','--config','supabase/functions/command/deno.json','--allow-env','--allow-net','--allow-read',harness],{
    encoding:'utf8',timeout:90000,env:{...process.env,SWARM_ENV:'test',SWARM_MCP_PUBLIC_ENABLED:'1',SWARM_DATABASE_URL:isolated.url,
     SUPABASE_DB_URL:isolated.url,SUPABASE_URL:local.API_URL,SUPABASE_ANON_KEY:local.ANON_KEY},
   });
   assert.equal(result.status,0,`hosted command harness failed: ${result.stderr}`);
   assert.match(result.stdout,/HOSTED_AGENT_COMMANDS_PASS/);
- } finally {await isolated.close();rmSync(dir,{recursive:true,force:true});}
+ } finally {try {await isolated.close();} finally {execFileSync('rm',['-rf',dir]);}}
 });
