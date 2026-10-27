@@ -906,7 +906,8 @@ test("turn-only transport is excluded while an otherwise eligible local seat rem
     });
     const readBody = await read.json() as Record<string, unknown>;
     assert.equal(read.status, 403, JSON.stringify(readBody));
-    assert.equal(readBody.error, "transport_unavailable");
+    // Round 3 1/211: the permanence read-context fence precedes transport routing.
+    assert.deepEqual(readBody, { error: "forbidden" });
     const managed = await runCmd(shared.ownerJwt, {
       kind: "enable_agent_management",
       principal_id: hostedSeat.principalId,

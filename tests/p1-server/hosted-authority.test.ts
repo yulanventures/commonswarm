@@ -2,11 +2,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
@@ -1070,7 +1071,7 @@ async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = f
   return fixture;
 }
 
-function hostedHarnessLaunch(input: Record<string, unknown>, options: {databaseUrl?: string; rollbackBeforeStep?: number}) {
+function hostedHarnessLaunch(input: Record<string, unknown>, options: {databaseUrl?: string; rollbackBeforeStep?: number; harnessPath?: string}) {
   return { args: [
     "run",
     "--no-lock",
@@ -1079,7 +1080,7 @@ function hostedHarnessLaunch(input: Record<string, unknown>, options: {databaseU
     "--allow-env",
     "--allow-net",
     "--allow-read",
-    harnessPath,
+    options.harnessPath ?? harnessPath,
   ], options: {
     cwd: process.cwd(),
     encoding: "utf8" as const,
@@ -1105,7 +1106,7 @@ function hostedHarnessLaunch(input: Record<string, unknown>, options: {databaseU
 }
 
 function runHostedHarness<T>(input: Record<string, unknown>, options: {
-  databaseUrl?: string; rollbackBeforeStep?: number;
+  databaseUrl?: string; rollbackBeforeStep?: number; harnessPath?: string;
 } = {}): T {
   const config = hostedHarnessLaunch(input, options);
   const result = spawnSync("deno", config.args, {...config.options, input:JSON.stringify(input)});
@@ -2404,7 +2405,8 @@ test("00002 nullable approval FK holds behind the installed binding guard in an 
         WHERE connection_id=${connection}::uuid`),{code:'23503'},'nullable FK still rejects a missing family');
       assert.equal((await assignment(tx)).length,1,'a valid referenced family can be assigned');
       await assert.rejects(tx.savepoint(sp=>sp`DELETE FROM swarm.renewal_grants WHERE renewal_grant_id=${family}::uuid`),
-        {code:'23503'},'referenced family cannot be deleted');
+        {code:'55000',message:'SWARM_RENEWAL_GRANT_UNDELETABLE'},
+        'Round 3 3/198: immutable families refuse deletion before the catalog-proven NO ACTION FK');
       assert.equal((await tx`SELECT renewal_grant_id FROM swarm.household_content_connections WHERE connection_id=${connection}::uuid`)[0]!.renewal_grant_id,family);
       await tx.unsafe(guard!.ddl);
       const [restored]=await guardQuery();
@@ -3847,51 +3849,83 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     const [configuration]=await shared.sql`SELECT value FROM swarm.config WHERE key='min_client_version'`;
     assert.ok(configuration,'shared fixture has the minimum client version');
     await sql`INSERT INTO swarm.config(key,value) VALUES('min_client_version',${sql.json(configuration.value)})`;
-    // The shared schema is already M-migrated. Recreate the exact B legacy
-    // row shape only in this empty, owned clone; RESTRICT refuses dependencies.
-    // Hosted policy columns stay available to the M harness during B controls.
-    const [privateState]=await sql`SELECT current_database() AS name,
-      (SELECT count(*)::int FROM swarm.household_content_connections) AS approvals`;
-    assert.match(privateState!.name as string,/^admin_edge_[a-f0-9]{32}$/);
-    assert.equal(privateState!.approvals,0,'no approval or historical snapshot is dropped');
-    await sql.unsafe('ALTER TABLE swarm.household_content_connections DROP COLUMN IF EXISTS renewal_grant_id RESTRICT');
-    const [beforeColumn]=await sql`SELECT EXISTS(SELECT 1 FROM pg_attribute
-      WHERE attrelid='swarm.household_content_connections'::regclass
-        AND attname='renewal_grant_id' AND NOT attisdropped) AS present`;
-    assert.equal(beforeColumn!.present,false,'bootstrap must be B layout before M00002');
+    // Prepare real identities while the current identity/claim adapter is valid.
+    // No approval or closed-target receipt exists before the reverse reserves.
+    const f=await ownerContentHttpFixture(true);
+    const workspace=f.fixture.workspaceA, owner=f.fixture.owner, grant=f.fixture.grantA;
+    const oldSeat=String(f.seat.body.seat_id), oldPrincipal=String(f.seat.body.principal_id);
+    const fresh=claimSeat(f.fixture,grant,`snapshot-new-${randomUUID()}`);
+    const seat=String(fresh.body.seat_id), principal=String(fresh.body.principal_id);
+    // Use the exact deployed B writer and its eight reviewed SQL templates:
+    // b2cf0260 household-permissions.ts:88-102 and household-content-access.ts:142-176.
+    // Its real request/consent checks, workspace lock and audit context run too.
+    // Archive is read-only Git access; CI checks out full history. All B runtime
+    // dependencies stay pinned together, and the existing harness drives HTTP.
+    const bRoot=mkdtempSync(join(harnessDir,'snapshot-b-'));
+    const bArchive=execFileSync('git',['archive','b2cf02604ba598da8d1484d5a9ebfacf6309339b','supabase/functions','src'],
+      {maxBuffer:32*1024*1024});
+    execFileSync('tar',['-x','-C',bRoot],{input:bArchive});
+    const bHarness=join(bRoot,'command-harness.ts');
+    writeFileSync(bHarness,harnessSource.replaceAll(new URL('../../supabase/functions/',import.meta.url).href,
+      pathToFileURL(join(bRoot,'supabase/functions/')).href));
     const functionIdentity=()=>sql`SELECT p.proowner,p.prosecdef,p.proacl,p.proargtypes::text,p.proconfig
       FROM pg_proc p WHERE p.oid='swarm.audit_household_hosted_restriction()'::regprocedure`;
     const fnBefore=await functionIdentity();
     const functionFingerprint=()=>sql`SELECT md5(pg_get_functiondef(
       'swarm.audit_household_hosted_restriction()'::regprocedure)) AS fingerprint`;
-    // CI clones the fully migrated stack. Restore only the exact B00006
-    // function in this disposable database so the before phase exercises B.
+    const [privateState]=await sql`SELECT current_database() AS name,
+      (SELECT count(*)::int FROM swarm.household_content_connections) AS approvals`;
+    assert.match(privateState!.name as string,/^admin_edge_[a-f0-9]{32}$/);
+    assert.equal(privateState!.approvals,0,'no approval or historical snapshot is dropped');
+    const permanenceVersions=[
+      '20261025000001','20261022000992','20261021000990','20261019000010',
+      '20261019000009','20261019000008','20261019000007','20261019000004',
+      '20261019000003','20261019000002',
+    ];
+    // Revised 3/252 ruling, COMMONSWARM-RELEASE-CONFLICT-RULINGS-20261027.md:
+    // recreate B through the exact release reserves, as in 3/283, with proof
+    // after every step. No individual column/guard is removed as a substitute.
+    await sql.begin(async tx=>{
+      const [emptyPolicy]=await tx`SELECT NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_grants
+        WHERE connection_expires_at IS NOT NULL OR connection_expired_at IS NOT NULL)
+        AND NOT EXISTS(SELECT 1 FROM swarm.renewal_grants
+        WHERE connection_expires_at IS NOT NULL OR connection_expired_at IS NOT NULL) AS empty`;
+      assert.equal(emptyPolicy!.empty,true,'fixture never discards a chosen or terminal policy');
+      for(const version of permanenceVersions) {
+        const reserve=`deploy/release-proofs/permanence/${version}`;
+        await tx.unsafe(repoSql(`${reserve}-rollback.sql`));
+        const [proof]=await tx.unsafe(releaseCatalogQuery(repoSql(`${reserve}-rollback-catalog.sql`),'rollback_ok'));
+        assert.equal(proof!.rollback_ok,true,`${version} rollback catalog`);
+      }
+    });
+    const [beforeColumn]=await sql`SELECT EXISTS(SELECT 1 FROM pg_attribute
+      WHERE attrelid='swarm.household_content_connections'::regclass
+        AND attname='renewal_grant_id' AND NOT attisdropped) AS present`;
+    assert.equal(beforeColumn!.present,false,'bootstrap must be B layout before M00002');
+    // The 00009 reserve must have restored the exact B00006 definition.
     const bFunction=repoSql('supabase/migrations/20261019000006_hosted_owner_content_access.sql')
       .match(/^CREATE OR REPLACE FUNCTION swarm\.audit_household_hosted_restriction\(\) RETURNS trigger\n[\s\S]*?^END \$\$;/m);
     assert.ok(bFunction,'extract the existing B00006 trigger function, without its table/ACL DDL');
-    await sql.unsafe(bFunction[0]);
+    const [installedB]=await sql`SELECT prosrc FROM pg_proc
+      WHERE oid='swarm.audit_household_hosted_restriction()'::regprocedure`;
+    assert.equal(installedB!.prosrc,bFunction[0].split('AS $$')[1]!.split('$$;')[0]);
     const bFingerprint=await functionFingerprint();
     assert.deepEqual(await functionIdentity(),fnBefore,'restoring B preserves original owner/signature/invoker/config/ACL');
-    const f=await ownerContentHttpFixture(true);
     edge=postgres(f.edgeUrl,{prepare:false,max:1});
     const [login]=await edge`SELECT session_user,current_user,rolsuper,rolbypassrls
       FROM pg_roles WHERE rolname=current_user`;
     assert.deepEqual(login,{session_user:'commonswarm_edge',current_user:'commonswarm_edge',rolsuper:false,rolbypassrls:false});
     await edge.begin(async tx=>{await tx.unsafe('SET LOCAL ROLE swarm_command');});
     await assert.rejects(edge.begin(async tx=>{await tx.unsafe('SET LOCAL ROLE commonswarm_oauth_runtime');}),{code:'42501'});
-    const workspace=f.fixture.workspaceA, owner=f.fixture.owner, grant=f.fixture.grantA;
-    const oldSeat=String(f.seat.body.seat_id), oldPrincipal=String(f.seat.body.principal_id);
-    const allow=(seat:string,principal:string,operations:string[])=>runHostedHarness<HarnessResult>({
+    const allow=(seat:string,principal:string,operations:string[],historical=true)=>runHostedHarness<HarnessResult>({
       operation:'public',household:true,ownerJwt:f.fixture.ownerJwt,workspaceId:workspace,
       command:{kind:'household_approve_connection',connection:{kind:'hosted',connection_id:seat,
-        grant_id:grant,principal_id:principal,operations}}},{databaseUrl:f.edgeUrl});
+        grant_id:grant,principal_id:principal,operations}}},{databaseUrl:f.edgeUrl,...(historical?{harnessPath:bHarness}:{})});
     assert.equal(allow(oldSeat,oldPrincipal,['read']).body.status,'committed');
     // Setup models a retained closed historical version. Actual authorization
     // below uses the normal login through HTTP; only setup uses the admin pool.
     await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at=clock_timestamp() WHERE seat_id=${oldSeat}::uuid`;
     await sql`UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp() WHERE connection_id=${oldSeat}::uuid`;
-    const fresh=claimSeat(f.fixture,grant,`snapshot-new-${randomUUID()}`);
-    const seat=String(fresh.body.seat_id), principal=String(fresh.body.principal_id);
     assert.equal(allow(seat,principal,['read','create','update']).body.status,'committed');
     const [saved]=await sql`SELECT closed_target_replacements AS markers
       FROM swarm.household_hosted_content_restrictions WHERE grant_id=${grant}::uuid
@@ -3908,9 +3942,10 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
       return state;
     };
     const unchanged=await durable();
+    let upgraded=false;
     const content=()=>runHostedHarness<ContextHttpResult[]>(f.call([
       {name:'todo_list',arguments:{scope:'open'}},{name:'todo_create',arguments:{request_id:randomUUID(),title:'Snapshot compatibility synthetic'}}],
-      {handle:fresh.body.handle}),{databaseUrl:f.edgeUrl});
+      {handle:fresh.body.handle}),{databaseUrl:f.edgeUrl,...(!upgraded?{harnessPath:bHarness}:{})});
     const positive=()=>{const result=content();assert.equal(result[0]!.body.status,'ok');assert.equal(result[1]!.body.status,'committed');};
     // Direct real command-role trigger check uses existing authenticated context,
     // not an owner bypass. It retains the marker bytes and makes no new approval.
@@ -3927,28 +3962,22 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
         WHERE grant_id=${grant}::uuid AND workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
     });
     positive(); await capture(markers); assert.deepEqual(await durable(),unchanged,'B00006 before M0 and M00002');
-    await sql.unsafe(repoSql('supabase/migrations/20261019000009_hosted_snapshot_null_compat.sql'));
+    // Apply the unmodified M files in filename order with each catalog proof.
+    // Commit before HTTP: it must observe the actual upgrade, not a DDL lock.
+    await sql.begin(async tx=>{
+      const migrations=readdirSync('supabase/migrations').filter(name=>permanenceVersions.includes(name.slice(0,14))).sort();
+      assert.equal(migrations.length,permanenceVersions.length,'each reserve has exactly one forward migration');
+      for(const name of migrations) {
+        const version=name.slice(0,14);
+        await tx.unsafe(repoSql(`supabase/migrations/${name}`));
+        const [proof]=await tx.unsafe(releaseCatalogQuery(repoSql(`deploy/release-proofs/permanence/${version}-catalog.sql`),'catalog_ok'));
+        assert.equal(proof!.catalog_ok,true,`${version} forward catalog`);
+      }
+    });
+    upgraded=true;
     assert.notDeepEqual(await functionFingerprint(),bFingerprint,'M0 changes the actual installed B00006 definition');
     assert.deepEqual(await functionIdentity(),fnBefore,'M0 preserves original owner/signature/invoker/config/ACL');
-    positive(); await capture(markers); assert.deepEqual(await durable(),unchanged,'M0 before M00002');
-    // COMMIT before HTTP starts: a second connection must see M00002; no DDL
-    // lock is held while the synchronous harness waits for its response.
-    await sql.begin(async tx=>{
-      // Replay the complete, byte-exact M00002 fixture. These four technical
-      // columns came from the schema-only clone and have no chosen policy.
-      // Remove/re-add them atomically: HTTP never sees them absent. Dropping
-      // their columns also drops only the two dependent M00002 indexes.
-      const [emptyPolicy]=await tx`SELECT NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_grants
-        WHERE connection_expires_at IS NOT NULL OR connection_expired_at IS NOT NULL)
-        AND NOT EXISTS(SELECT 1 FROM swarm.renewal_grants
-        WHERE connection_expires_at IS NOT NULL OR connection_expired_at IS NOT NULL) AS empty`;
-      assert.equal(emptyPolicy!.empty,true,'fixture never discards a chosen or terminal policy');
-      await tx.unsafe(`ALTER TABLE swarm.hosted_mcp_grants
-        DROP COLUMN connection_expires_at RESTRICT, DROP COLUMN connection_expired_at RESTRICT;
-        ALTER TABLE swarm.renewal_grants
-        DROP COLUMN connection_expires_at RESTRICT, DROP COLUMN connection_expired_at RESTRICT;`);
-      await tx.unsafe(repoSql('tests/fixtures/permanence-m00002.sql'));
-    });
+    positive(); await capture(markers); assert.deepEqual(await durable(),unchanged,'M0 after filename-ordered M00002');
     const [newColumn]=await sql`SELECT to_jsonb(c)->'renewal_grant_id' AS value
       FROM swarm.household_content_connections c WHERE connection_id=${oldSeat}::uuid`;
     assert.equal(newColumn!.value,null);
@@ -3987,16 +4016,29 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     // principal_id is outside swarm_command's column UPDATE grant, so this
     // negative proves the ACL boundary before the trigger can check immutability.
     await assert.rejects(capture(markers,owner,'household_permissions',oldPrincipal),{code:'42501'},'column ACL denies scope UPDATE');
-    // Persist synthetic bad snapshots only with the private setup role, then
-    // require normal HTTP runtime denial. Constraints still reject SQL NULL,
-    // non-arrays and over-bound arrays; do not weaken them for the fixture.
+    // 3/252 defense-in-depth ruling, COMMONSWARM-RELEASE-CONFLICT-RULINGS-20261027.md:
+    // only this verified admin_edge_* database (force-dropped in finally) may
+    // contain impossible committed rows for an independent HTTP reader check.
+    // Prove the same write is refused with the installed guard; preserve its
+    // exact definition AND enabled state around each transactional bypass.
+    const restrictionTrigger=()=>sql`SELECT pg_get_triggerdef(oid) AS definition,tgenabled
+      FROM pg_trigger WHERE tgrelid='swarm.household_hosted_content_restrictions'::regclass
+        AND tgname='household_hosted_restriction_audit' AND NOT tgisinternal`;
+    const restrictionGuard=await restrictionTrigger();
+    assert.equal(restrictionGuard.length,1);assert.equal(restrictionGuard[0]!.tgenabled,'O');
+    const writeMarker=(tx:postgres.TransactionSql,value:unknown)=>tx`UPDATE swarm.household_hosted_content_restrictions
+      SET closed_target_replacements=${tx.json(value as postgres.JSONValue)}
+      WHERE grant_id=${grant}::uuid AND workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
     const setMarker=async(value:unknown)=>{
+      await assert.rejects(sql.begin(tx=>writeMarker(tx,value)),
+        {code:'42501',message:'owned hosted restriction context required'},'installed guard refuses the same setup write');
+      assert.deepEqual(await restrictionTrigger(),restrictionGuard);
       await sql.begin(async tx=>{
         await tx.unsafe('ALTER TABLE swarm.household_hosted_content_restrictions DISABLE TRIGGER household_hosted_restriction_audit');
-        await tx`UPDATE swarm.household_hosted_content_restrictions SET closed_target_replacements=${tx.json(value as postgres.JSONValue)}
-          WHERE grant_id=${grant}::uuid AND workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
+        await writeMarker(tx,value);
         await tx.unsafe('ALTER TABLE swarm.household_hosted_content_restrictions ENABLE TRIGGER household_hosted_restriction_audit');
       });
+      assert.deepEqual(await restrictionTrigger(),restrictionGuard,'restriction guard definition and state restored exactly');
     };
     for(const [label,value] of bad.filter(([label])=>!['SQL NULL','JSON null','bound','order','duplicate'].includes(label))) {
       await setMarker(value); content().forEach(assertContentDenied);
@@ -4011,9 +4053,30 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,
       successors_used,horizon_expires_at,bound_device_id,created_by) VALUES(${renewal}::uuid,${workspace}::uuid,
       ${oldPrincipal}::uuid,${run}::uuid,'standing',NULL,0,NULL,${device}::uuid,${owner}::uuid)`;
-    await sql`UPDATE swarm.household_content_connections SET renewal_grant_id=${renewal}::uuid WHERE connection_id=${oldSeat}::uuid`;
+    // Same 3/252 defense-in-depth ruling: the installed binding guard must
+    // refuse this exact non-NULL hosted write, before testing the next layer.
+    const bindingTrigger=()=>sql`SELECT pg_get_triggerdef(oid) AS definition,tgenabled
+      FROM pg_trigger WHERE tgrelid='swarm.household_content_connections'::regclass
+        AND tgname='aa_household_local_family_binding' AND NOT tgisinternal`;
+    const bindingGuard=await bindingTrigger();
+    assert.equal(bindingGuard.length,1);assert.equal(bindingGuard[0]!.tgenabled,'O');
+    const writeFamily=(tx:postgres.TransactionSql,value:string|null)=>tx`UPDATE swarm.household_content_connections
+      SET renewal_grant_id=${value}::uuid WHERE connection_id=${oldSeat}::uuid`;
+    const setFamily=async(value:string|null)=>{
+      await assert.rejects(sql.begin(tx=>writeFamily(tx,value)),{code:'23514',
+        message:value===null?'LOCAL_APPROVAL_FAMILY_IMMUTABLE':'LOCAL_APPROVAL_POLICY_BINDING'},
+      'installed binding guard refuses the same setup write');
+      assert.deepEqual(await bindingTrigger(),bindingGuard);
+      await sql.begin(async tx=>{
+        await tx.unsafe('DROP TRIGGER aa_household_local_family_binding ON swarm.household_content_connections');
+        await writeFamily(tx,value);
+        await tx.unsafe(bindingGuard[0]!.definition as string);
+      });
+      assert.deepEqual(await bindingTrigger(),bindingGuard,'binding guard definition and state restored exactly');
+    };
+    await setFamily(renewal);
     content().forEach(assertContentDenied); await assert.rejects(capture(markers),{code:'42501'});
-    await sql`UPDATE swarm.household_content_connections SET renewal_grant_id=NULL WHERE connection_id=${oldSeat}::uuid`;
+    await setFamily(null);
     positive(); await capture(markers); assert.deepEqual(await durable(),unchanged);
     // Unrelated current-row changes remain binding even when the new FK is NULL.
     await sql`UPDATE swarm.household_content_connections SET operations=ARRAY['read','update'] WHERE connection_id=${oldSeat}::uuid`;
@@ -4038,6 +4101,15 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     content().forEach(assertContentDenied);
     assert.deepEqual(await durable(),unchanged);
     assert.deepEqual(await functionIdentity(),fnBefore);
+    // Only after every no-re-Allow reader/capture/rollback check: prove that
+    // the current HTTP writer independently captures the ordinary new shape.
+    await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at=NULL WHERE seat_id=${seat}::uuid`;
+    assert.equal(allow(seat,principal,['read','create','update'],false).body.status,'committed');
+    const [currentMarker]=await sql`SELECT closed_target_replacements AS markers
+      FROM swarm.household_hosted_content_restrictions WHERE grant_id=${grant}::uuid
+        AND workspace_id=${workspace}::uuid AND principal_id=${principal}::uuid`;
+    assert.deepEqual(currentMarker!.markers,strict,'current writer captures the strict NULL-key version of the same retired rows');
+    positive();
   } finally {
     try { await edge?.end(); } finally {
       sql=shared.sql;releaseSql=shared.releaseSql;local=shared.local;

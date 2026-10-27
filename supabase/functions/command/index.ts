@@ -10921,10 +10921,10 @@ async function claimHostedSeat(
 class LocalBusinessRefused<T> extends Error {
   constructor(readonly outcome:T) { super('Local business operation refused'); }
 }
-/** Authenticated validation intent survives only after its business savepoint
+/** Authenticated validation or scope refusal survives only after its business savepoint
  * (including first-use and predecessor handover) has rolled back. */
-class LocalValidationRefused extends Error {
-  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local validation refused'); }
+class LocalAuditedRefused extends Error {
+  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local audited refusal'); }
 }
 class LocalCommandRefused extends Error {
   constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
@@ -11023,7 +11023,10 @@ async function handleTransaction(
     // revocation target before the reducer's exact-token confinement decision.
     const agentTokenRevocationRefusal = agentTokenHash !== null && kind==='revoke_agent_token'
       && (await discoverLocalCredential(tx,agentTokenHash))?.token_id!==rawLocal?.token_id;
-    const actorOnlyRefusal = humanBusinessRefusal || agentTokenRevocationRefusal;
+    // change_role is always agent-forbidden, including when named in scopes.
+    // Authenticate and audit the refusal without locking its submitted target.
+    const actorOnlyRefusal = humanBusinessRefusal || agentTokenRevocationRefusal
+      || agentTokenHash !== null && kind==='change_role';
     if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
       || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
       return {status:400,body:{error:'invalid_request'}};
@@ -11270,7 +11273,7 @@ async function handleTransaction(
         reason: "client-supplied from is forbidden",
       };
       const refusal: HttpResult = { status: 400, body: { error: "invalid_request" } };
-      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      if (agentTokenHash !== null) throw new LocalAuditedRefused(refusal, audit);
       await insertAudit(tx, audit);
       return refusal;
     }
@@ -11549,7 +11552,7 @@ async function handleTransaction(
           message: validation.reason,
         },
       };
-      if (agentTokenHash !== null) throw new LocalValidationRefused(refusal, audit);
+      if (agentTokenHash !== null) throw new LocalAuditedRefused(refusal, audit);
       await insertAudit(tx, audit);
       return refusal;
     }
@@ -11715,7 +11718,7 @@ async function handleTransaction(
         !auth.agent.scopes.includes(validation.command.kind)
       )
     ) {
-      await insertAudit(tx, {
+      const audit: Audit = {
         auth,
         commandKind: kind,
         workspaceId: route.workspaceId,
@@ -11723,8 +11726,13 @@ async function handleTransaction(
         outcome: "authz",
         reason: "forbidden",
         detail: ignoredIdentity,
-      });
-      return { status: 403, body: { error: "forbidden" } };
+      };
+      const refusal: HttpResult = { status: 403, body: { error: "forbidden" } };
+      // Keep only the security audit, after rolling back all authenticated
+      // work. The catch below rechecks without stamping use and decides it.
+      if (agentTokenHash !== null) throw new LocalAuditedRefused(refusal, audit);
+      await insertAudit(tx, audit);
+      return refusal;
     }
     const command = validation.command;
     if (!await mintBindingsValid(tx, auth, command)) {
@@ -13622,7 +13630,7 @@ async function handleTransaction(
     };
     return agentTokenHash === null ? await executeAuthenticated(tx) : await tx.savepoint(executeAuthenticated);
     } catch (error) {
-      if (!(error instanceof LocalValidationRefused)) throw error;
+      if (!(error instanceof LocalAuditedRefused)) throw error;
       if (!agentTokenHash || !localState.localPlan || !localState.authenticatedAgent) throw error;
       // No credential stamping on this recheck. The final session fence below
       // also runs before this outer transaction can retain its one audit row.

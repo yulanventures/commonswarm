@@ -45,6 +45,7 @@ interface RoleFixture {
   former: Person;
   /** Plaintext agent credential whose scopes include change_role. */
   agentCredential: string;
+  agentOutOfScopeCredential: string;
   agentPrincipal: string;
 }
 
@@ -110,6 +111,7 @@ async function roleFixture(): Promise<RoleFixture> {
   const device = randomUUID();
   const agentPrincipal = randomUUID();
   const agentCredential = `swm_agt_${randomBytes(32).toString("base64url")}`;
+  const agentOutOfScopeCredential = `swm_agt_${randomBytes(32).toString("base64url")}`;
   const installation = randomUUID();
   const repository = randomUUID();
   await sql.begin(async (tx) => {
@@ -141,7 +143,8 @@ async function roleFixture(): Promise<RoleFixture> {
         (${workspaceA}::uuid, ${plain.id}::uuid, 'member', NULL),
         (${workspaceA}::uuid, ${former.id}::uuid, 'member', statement_timestamp()),
         (${workspaceB}::uuid, ${owner.id}::uuid, 'owner', NULL),
-        (${workspaceB}::uuid, ${promoted.id}::uuid, 'member', NULL)
+        (${workspaceB}::uuid, ${promoted.id}::uuid, 'member', NULL),
+        (${workspaceB}::uuid, ${former.id}::uuid, 'member', NULL)
     `;
     await tx`
       INSERT INTO swarm.streams (stream_id, workspace_id, kind)
@@ -196,6 +199,12 @@ async function roleFixture(): Promise<RoleFixture> {
         statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid
       )
     `;
+    await tx`
+      INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
+      VALUES (${randomUUID()}::uuid, ${agentPrincipal}::uuid, ${run}::uuid, '[]'::jsonb,
+        ${createHash("sha256").update(agentOutOfScopeCredential).digest()},
+        statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)
+    `;
   });
   return {
     workspaceA,
@@ -206,6 +215,7 @@ async function roleFixture(): Promise<RoleFixture> {
     plain,
     former,
     agentCredential,
+    agentOutOfScopeCredential,
     agentPrincipal,
   };
 }
@@ -491,6 +501,10 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
     "role_forbidden",
     "changing roles requires Owner/Admin",
   );
+  const memberAudit = await sql`SELECT outcome,reason FROM swarm.audit_log
+    WHERE workspace_id=${f.workspaceA}::uuid AND command_kind='change_role'
+      AND actor_user=${f.plain.id}::uuid`;
+  assert.deepEqual(Array.from(memberAudit,r=>({...r})),[{outcome:"domain",reason:"role_forbidden"}]);
   assert.equal((await liveRoles(f.workspaceA))[f.promoted.id], "admin");
 
   const missing = await postChange(f.owner.jwt, f.workspaceA, {
@@ -507,11 +521,50 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
   `;
   assert.equal(formerRow?.revoked, true);
 
-  const agent = await postChange(f.agentCredential, f.workspaceA, {
-    kind: "change_role",
-    user_id: f.promoted.id,
-    role: "member",
-  });
+  // The denied command must retain only its security record. In particular,
+  // an unused token must stay unused: authentication stamps inside a savepoint.
+  const agentEffects = async () => {
+    const [state] = await sql`SELECT
+      (SELECT md5(jsonb_agg(to_jsonb(t) ORDER BY token_id)::text)
+        FROM swarm.agent_tokens t WHERE principal_id=${f.agentPrincipal}::uuid) AS tokens,
+      (SELECT md5(jsonb_agg(to_jsonb(p) ORDER BY principal_id)::text)
+        FROM swarm.agent_presence p WHERE principal_id=${f.agentPrincipal}::uuid) AS presence,
+      (SELECT count(*)::int FROM swarm.idempotency_keys
+        WHERE principal_kind='agent' AND principal_id=${f.agentPrincipal}) AS ledger,
+      (SELECT count(*)::int FROM swarm.events WHERE workspace_id=${f.workspaceA}::uuid) AS events,
+      (SELECT count(*)::int FROM swarm.audit_log WHERE workspace_id=${f.workspaceA}::uuid) AS audits`;
+    return state!;
+  };
+  const deniedAgentWithoutTargetWait = async (credential: string) => {
+    let pending: Promise<CommandResult> | undefined;
+    try {
+      return await sql.begin(async blocker => {
+        // Agent change_role target-lock ruling (2026-10-27): hold only the
+        // submitted U row; response AND committed audit must precede release.
+        await blocker`SELECT user_id FROM swarm.users WHERE user_id=${f.promoted.id}::uuid FOR UPDATE`;
+        pending=postChange(credential,f.workspaceA,{
+          kind:"change_role",user_id:f.promoted.id,role:"member",
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let result: CommandResult;
+        try {
+          result=await Promise.race([pending,new Promise<never>((_,reject)=>{
+            timer=setTimeout(()=>reject(new Error('agent role refusal waited on unauthorized target')),5_000);
+          })]);
+        } finally { if(timer)clearTimeout(timer); }
+        assert.deepEqual(result,{status:403,body:{error:"forbidden"}});
+        const audits=await blocker`SELECT outcome,reason FROM swarm.audit_log
+          WHERE workspace_id=${f.workspaceA}::uuid AND command_kind='change_role'
+            AND credential_id=(SELECT token_id FROM swarm.agent_tokens WHERE token_hash=
+              ${createHash("sha256").update(credential).digest()})`;
+        assert.deepEqual(Array.from(audits,r=>({...r})),[{outcome:"authz",reason:"forbidden"}],
+          'exactly one security audit is visible while the target is still locked');
+        return result;
+      });
+    } finally { if(pending)await pending.catch(()=>{}); }
+  };
+  const beforeAgent = await agentEffects();
+  const agent = await deniedAgentWithoutTargetWait(f.agentCredential);
   assert.equal(agent.status, 403, JSON.stringify(agent.body));
   assert.deepEqual(agent.body, { error: "forbidden" });
   const agentAudit = await sql<{ outcome: string; reason: string | null }[]>`
@@ -522,6 +575,40 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
       AND actor_agent_principal = ${f.agentPrincipal}::uuid
   `;
   assert.deepEqual(Array.from(agentAudit, (r) => ({ ...r })), [{ outcome: "authz", reason: "forbidden" }]);
+  assert.deepEqual(await agentEffects(), {...beforeAgent, audits:beforeAgent.audits+1},
+    'in-scope agent commits exactly one audit, no use stamp, presence, ledger or event');
+  const beforeOutOfScope = await agentEffects();
+  const outOfScope = await deniedAgentWithoutTargetWait(f.agentOutOfScopeCredential);
+  assert.deepEqual(outOfScope,{status:403,body:{error:"forbidden"}});
+  const outOfScopeAudit = await sql`SELECT outcome,reason FROM swarm.audit_log
+    WHERE workspace_id=${f.workspaceA}::uuid AND command_kind='change_role'
+      AND credential_id=(SELECT token_id FROM swarm.agent_tokens WHERE token_hash=
+        ${createHash("sha256").update(f.agentOutOfScopeCredential).digest()})`;
+  assert.deepEqual(Array.from(outOfScopeAudit,r=>({...r})),[{outcome:"authz",reason:"forbidden"}]);
+  assert.deepEqual(await agentEffects(), {...beforeOutOfScope,audits:beforeOutOfScope.audits+1},
+    'out-of-scope agent commits exactly one audit and no other effect');
+  // Neither a missing target nor a user with current tenancy only in B may
+  // change the denial, reveal membership, or lose its one security audit.
+  for(const credential of [f.agentCredential,f.agentOutOfScopeCredential]) {
+    for(const target of [randomUUID(),f.former.id]) {
+      const before=await agentEffects();
+      assert.deepEqual(await postChange(credential,f.workspaceA,{
+        kind:"change_role",user_id:target,role:"member",
+      }),{status:403,body:{error:"forbidden"}});
+      assert.deepEqual(await agentEffects(),{...before,audits:before.audits+1},
+        'missing/foreign targets retain one audit and no other effect');
+    }
+  }
+  const beforeForeign = await agentEffects();
+  const foreign = await postChange(f.former.jwt,f.workspaceA,{
+    kind:"change_role",user_id:f.promoted.id,role:"member",
+  });
+  assert.deepEqual(foreign,{status:403,body:{error:"forbidden"}});
+  const unauthenticated = await postChange('invalid-session',f.workspaceA,{
+    kind:"change_role",user_id:f.promoted.id,role:"member",
+  });
+  assert.deepEqual(unauthenticated,{status:401,body:{error:"unauthenticated"}});
+  assert.deepEqual(await agentEffects(),beforeForeign,'foreign and unauthenticated callers create no audit or write');
   assert.equal((await liveRoles(f.workspaceA))[f.promoted.id], "admin");
   assert.equal(await roleChangeCount(f.workspaceA), 1);
 
