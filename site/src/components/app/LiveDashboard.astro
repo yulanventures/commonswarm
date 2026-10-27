@@ -1047,7 +1047,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { buildAccountAgents, addableAccountAgents } from "../../lib/account-agents";
+  import { buildAccountAgents, addableAccountAgents, buildWorkspaceAgentChoice } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -5288,28 +5288,29 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const actions=list.querySelector<HTMLElement>('.pd-page-actions');
       if(actions && session && !sampleMode) {
         const add=document.createElement('button'); add.type='button'; add.className='pd-page-primary'; add.textContent='Add your agents';
-        const picker=document.createElement('section'); picker.hidden=true; picker.setAttribute('aria-label','Add your agents');
+        const picker=document.createElement('section'); picker.hidden=true; picker.className='pd-agent-picker'; picker.id='pd-agent-picker'; picker.setAttribute('aria-label','Add your agents');
+        add.setAttribute('aria-expanded','false'); add.setAttribute('aria-controls',picker.id);
         const status=document.createElement('p'); status.setAttribute('role','status'); picker.append(status);
-        actions.prepend(add); actions.after(picker);
+        actions.append(add); actions.after(picker);
         add.addEventListener('click',async()=>{
           if(!session || !activeWorkspaceId) return;
+          if(!picker.hidden) { picker.hidden=true; add.setAttribute('aria-expanded','false'); return; }
           const value=session,workspaceId=activeWorkspaceId;
-          add.disabled=true; picker.hidden=false; status.textContent='Loading…';
+          add.disabled=true; picker.hidden=false; add.setAttribute('aria-expanded','true'); status.textContent='Loading…';
           try {
             const choices=addableAccountAgents(await myAccountAgents(),workspaceId,workspace.orgId);
             if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id || !picker.isConnected) return;
             status.textContent=choices.length?'':'No agents to add.';
             picker.replaceChildren(status);
             for(const agent of choices) {
-              const button=document.createElement('button'); button.type='button'; button.className='pd-page-secondary'; button.textContent=agent.name;
-              button.addEventListener('click',async()=>{
+              const {row,button}=buildWorkspaceAgentChoice(document,agent,async()=>{
                 if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id) return;
                 button.disabled=true; status.textContent='';
                 try {
                   await addAgentToWorkspace(value,uuid(),workspaceId,agent.id);
                   if(activeWorkspaceId===workspaceId && session?.user.id===value.user.id) await reloadPeopleDialog(workspaceId,agent.id,`${agent.name} added.`);
                 } catch(error) { status.textContent=readableError(error); button.disabled=false; }
-              }); picker.append(button);
+              }); picker.append(row);
             }
           } catch(error) { status.textContent=readableError(error); }
           finally { add.disabled=false; }
@@ -5319,7 +5320,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       restoreConnectionDateFocus(detail, endDateFocus);
       // A removal or role change that needs a fresh sign-in shows its block under the page header.
       mountMemberDetails(list);
-      layout.peopleContext(list.querySelector<HTMLElement>("[data-people-context]"));
+      // Keep the members panel in the main pane beside the workspace rail.
+      layout.peopleContext(null);
       if (held?.isConnected && document.activeElement !== held) {
         held.focus({ preventScroll: true });
         if (range && range[0] !== null && range[1] !== null) try { (held as HTMLInputElement).setSelectionRange(range[0], range[1]); } catch { /* not a text field */ }

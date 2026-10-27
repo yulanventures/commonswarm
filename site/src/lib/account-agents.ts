@@ -62,3 +62,19 @@ export function addableAccountAgents(agents:readonly AccountAgent[],workspaceId:
     && !agent.workspaces.some(w=>w.id===workspaceId && w.revokedAt===null)
     && agent.workspaces.some(w=>w.orgId===orgId && w.archivedAt===null && (agent.transport==='hosted_mcp' || w.revokedAt===null || w.id===workspaceId)));
 }
+
+/** The workspace picker shares the roster's avatar and compact row geometry. */
+export function buildWorkspaceAgentChoice(doc: Document, agent: AccountAgent, add: () => void) {
+  const row = doc.createElement("div"); row.className = "pd-agent-choice";
+  const avatar = doc.createElement("span"); avatar.className = "pd-orb";
+  avatar.textContent = Array.from(agent.name.trim())[0] ?? "A"; avatar.setAttribute("aria-hidden", "true");
+  const copy = doc.createElement("span"); copy.className = "pd-agent-copy";
+  const name = doc.createElement("strong"); name.textContent = agent.name;
+  const model = doc.createElement("span"); model.className = "pd-agent-app";
+  model.textContent = agent.model ?? (agent.transport === "hosted_mcp" ? "Connected app" : "Terminal");
+  copy.append(name, model);
+  const button = doc.createElement("button"); button.type = "button"; button.className = "pd-choice-add";
+  button.textContent = "Add"; button.setAttribute("aria-label", `Add ${agent.name} to workspace`);
+  button.addEventListener("click", add); row.append(avatar, copy, button);
+  return { row, button };
+}
