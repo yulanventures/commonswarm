@@ -755,7 +755,7 @@ async function contextHttp() {
   const results = [];
   for (const call of input.calls) {
     if (call.policy_loader) {
-      await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END,connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END,revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END WHERE grant_id=$1::uuid",[input.grantId,call.policy_loader]);
+      await observer.unsafe("UPDATE swarm.hosted_mcp_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END,connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END,state=CASE WHEN $2='revoked' THEN 'revoked' ELSE 'active' END,revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END WHERE grant_id=$1::uuid",[input.grantId,call.policy_loader]);
       const { loadHouseholdContentAccess } = await import(${JSON.stringify(new URL('../../supabase/functions/command/household-content-access.ts', import.meta.url).href)});
       const checked = await db.begin(async tx=>{
         await tx.unsafe('SET LOCAL ROLE swarm_command');
@@ -2191,6 +2191,8 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
 
 // The normal server harness applies the complete historical chain. These probes
 // inspect that migrated database without replaying DDL over the shared schemas.
+// Narrow Allow ACL decision: 8b477b1655ac;
+// deploy/release-proofs/permanence/20261019000007-catalog.sql:1-10,48-50.
 test("connection policy storage preserves nullable shape and exact existing ACLs", async () => {
   const columns = await sql<{ table_name: string; column_name: string; type: string; nullable: boolean; has_default: boolean; column_acl: string | null }[]>`
     SELECT a.attrelid::regclass::text AS table_name, a.attname::text AS column_name,
@@ -2207,7 +2209,7 @@ test("connection policy storage preserves nullable shape and exact existing ACLs
       nullable: true, has_default: false, column_acl: null,
     })),
     { table_name: "swarm.household_content_connections", column_name: "renewal_grant_id",
-      type: "uuid", nullable: true, has_default: false, column_acl: null },
+      type: "uuid", nullable: true, has_default: false, column_acl: "{swarm_command=w/swarm_admin}" },
     ...["connection_expired_at", "connection_expires_at"].map(column_name => ({
       table_name: "swarm.renewal_grants", column_name, type: "timestamp with time zone",
       nullable: true, has_default: false, column_acl: null,
@@ -3482,7 +3484,22 @@ for(const role of ['owner','member'] as const) {
       }
     };
     try {
-      await sql`UPDATE swarm.memberships SET role=${role} WHERE workspace_id=${workspace}::uuid AND user_id=${f.fixture.owner}::uuid`;
+      if(role==='member') {
+        // Use real role commands so both events and membership projection retain
+        // a live owner before demoting the connection owner.
+        for(const [userId,nextRole] of [[f.fixture.other,'owner'],[f.fixture.owner,'member']] as const) {
+          const changed=runHostedHarness<HarnessResult>({operation:'public',ownerJwt:f.fixture.ownerJwt,
+            workspaceId:workspace,command:{kind:'change_role',user_id:userId,role:nextRole,
+              landing_authority_successor_user_id:f.fixture.other}});
+          assert.equal(changed.status,200);assert.equal(changed.body.status,'accepted');
+          const [event]=await sql`SELECT payload->>'to_role' AS role FROM swarm.events
+            WHERE workspace_id=${workspace}::uuid AND type='MemberRoleChanged'
+              AND payload->>'user_id'=${userId} ORDER BY seq DESC LIMIT 1`;
+          const [member]=await sql`SELECT role FROM swarm.memberships
+            WHERE workspace_id=${workspace}::uuid AND user_id=${userId}::uuid AND revoked_at IS NULL`;
+          assert.equal(event!.role,nextRole);assert.equal(member!.role,nextRole);
+        }
+      }
       const [dates]=await sql`SELECT clock_timestamp()+interval '10 seconds' AS old,clock_timestamp()+interval '1 hour' AS extended`;
       const original=new Date(dates!.old as string).toISOString(),extended=new Date(dates!.extended as string).toISOString();
       const initial=runHostedHarness<ContextHttpResult[]>(f.call([setExpiry(original),{name:'allow',transport:'http',command:allow},setExpiry(extended)],http),{databaseUrl:f.edgeUrl});
@@ -3571,6 +3588,21 @@ test('human owner queue refreshes liveness after the actual queueFacts content r
   }
 });
 
+async function observeAllowGrantWait(blocker: number) {
+  for(let attempt=0;attempt<400;attempt++) {
+    const [wait]=await sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+      WHERE a.usename='commonswarm_edge' AND a.wait_event_type='Lock'
+        AND ${blocker}::int=ANY(pg_blocking_pids(a.pid))
+        AND a.query='SELECT grant_id FROM swarm.hosted_mcp_grants WHERE grant_id=$1::uuid FOR SHARE'
+        AND EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid
+          AND l.relation='swarm.hosted_mcp_grants'::regclass
+          AND l.mode='RowShareLock' AND l.granted)) AS blocked`;
+    if(wait!.blocked) return;
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.fail('Allow did not reach its canonical hosted grant FOR SHARE wait');
+}
+
 for(const policy of ['null','future','elapsed'] as const) {
   test(`human Allow checks ${policy} canonical policy after its existing grant row wait`, {timeout:180_000}, async()=>{
     const f=await ownerContentHttpFixture(),workspace=f.fixture.workspaceA;
@@ -3586,16 +3618,16 @@ for(const policy of ['null','future','elapsed'] as const) {
           command:{kind:'household_approve_connection',connection:{kind:'hosted',connection_id:f.seat.body.seat_id,
             grant_id:f.fixture.grantA,principal_id:f.seat.body.principal_id,operations:['read','create','update']}}}],
           {ownerJwt:f.fixture.ownerJwt,workspaceId:workspace}),f.edgeUrl);void pending.catch(()=>{});
-        await observeHouseholdRowWait(Number(session!.pid),'SELECT s.seat_id,g.connection_expires_at,g.connection_expired_at');
-        // Change policy under the existing blocker, after HTTP reached the
-        // actual checkedConnection query. The response must use the new row.
+        await observeAllowGrantWait(Number(session!.pid));
+        // Canonical admission locks this grant before checkedConnection. Keep
+        // that exact blocker while changing policy; Allow must use the new row.
         const [date]=await locker`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=CASE WHEN ${policy}='null' THEN NULL
           WHEN ${policy}='future' THEN clock_timestamp()+interval '2 hours' ELSE clock_timestamp()+interval '3 seconds' END
           WHERE grant_id=${f.fixture.grantA}::uuid RETURNING connection_expires_at`;
         chosen=date!.connection_expires_at == null ? null : new Date(date!.connection_expires_at as string).toISOString();
         if(policy==='elapsed') {
           const [before]=await sql`SELECT clock_timestamp()<${chosen}::timestamptz AS future`;
-          assert.equal(before!.future,true,'Allow reached its checkedConnection wait before the chosen date');
+          assert.equal(before!.future,true,'Allow reached its canonical grant wait before the chosen date');
           await awaitHouseholdDeadline(chosen!);
         }
       });
@@ -3652,6 +3684,9 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
   try {
     // All permanent DDL below targets this newly owned disposable database.
     sql=isolated.db; releaseSql=isolated.db; local={...local,DB_URL:isolated.url};
+    const [configuration]=await shared.sql`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+    assert.ok(configuration,'shared fixture has the minimum client version');
+    await sql`INSERT INTO swarm.config(key,value) VALUES('min_client_version',${sql.json(configuration.value)})`;
     // The shared schema is already M-migrated. Recreate the exact B legacy
     // row shape only in this empty, owned clone; RESTRICT refuses dependencies.
     // Hosted policy columns stay available to the M harness during B controls.

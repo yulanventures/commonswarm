@@ -1,5 +1,6 @@
 /** CI-only PostgreSQL proof: real ACLs, provenance, independent confirmation,
  * append-only audit and the exact reserve rollback. No live-service targets. */
+import { installedApprovalFamilyAcl, historicalApprovalFamilyAcl } from '../support/historical-household-acl.js';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { runSql, repoSql, dbAssert, refuses } from '../support/admin-schema-db.js';
@@ -11,6 +12,8 @@ test('household permission writes require authenticated provenance and cannot co
   const inverse = repoSql('supabase/household-storage-reserve/20261004000005-rollback.sql');
   const rollbackCatalog = repoSql('deploy/release-proofs/household-storage/20261004000005-rollback-catalog.sql');
   runSql(`
+    ${installedApprovalFamilyAcl}
+    ${historicalApprovalFamilyAcl}
     -- This historical 005 inverse drill owns the 005 body inside its rollback transaction.
     ${repoSql('supabase/household-approval-reserve/20261004000015-rollback.sql')}
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','hh-owner-${owner}@example.test'),

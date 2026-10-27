@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localClusterAdminUrl } from '../support/admin-schema-db.js';
+import { adminEdgeDatabase } from '../support/admin-edge-database.js';
 import { after, before, test } from 'node:test';
 import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
@@ -385,14 +386,33 @@ async function legacyFileHttp(policyCases = false) {
       SELECT ${tokenId}::uuid,${run}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,'shared',ARRAY['read'],content_consent_id,
         clock_timestamp()+interval '1 hour' FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
   });
-  const families = Object.fromEntries(['null','future','elapsed','terminal','revoked','mismatch'].map(name => [name,randomUUID()]));
-  const alternateRun = randomUUID();
+  const scenarios: Record<string,{tokenId:string;token:string;family:string;approvalFamily:string}> = {
+    unlinked:{tokenId,token,family:renewalGrant,approvalFamily:renewalGrant},
+  };
   if (policyCases) {
-    await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES (${alternateRun}::uuid,${principal}::uuid,${device}::uuid)`;
-    for (const [name,id] of Object.entries(families)) {
-      const familyRun = name === 'mismatch' ? alternateRun : run;
-      await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,horizon_expires_at,max_successors)
-        VALUES (${id}::uuid,${workspace}::uuid,${principal}::uuid,${familyRun}::uuid,${owner}::uuid,clock_timestamp()+interval '30 days',800)`;
+    // Every case owns a live run/token/family. Never rebind a linked approval,
+    // restore a terminal family, or let a previous denial mask the next policy.
+    for (const policy of ['null','future','elapsed','terminal','revoked','mismatch']) {
+      const caseRun=randomUUID(),family=randomUUID(),caseToken=randomUUID();
+      const secret=`swm_agt_${randomBytes(32).toString('base64url')}`;
+      await sql.begin(async tx=>{
+        await tx`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
+          VALUES (${caseRun}::uuid,${principal}::uuid,${device}::uuid)`;
+        // A finite technical renewal window remains an independent NULL-policy positive.
+        await tx`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,horizon_expires_at,max_successors)
+          VALUES (${family}::uuid,${workspace}::uuid,${principal}::uuid,${caseRun}::uuid,${owner}::uuid,clock_timestamp()+interval '30 days',800)`;
+        await tx`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+          VALUES (${caseToken}::uuid,${principal}::uuid,${caseRun}::uuid,'["post_signal"]',${createHash('sha256').update(secret).digest()},
+            clock_timestamp()+interval '1 hour',${randomUUID()}::uuid,${family}::uuid)`;
+        await tx`INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,
+          purpose,operations,consent_receipt_id,expires_at,renewal_grant_id)
+          SELECT ${caseToken}::uuid,${caseRun}::uuid,${workspace}::uuid,${principal}::uuid,${owner}::uuid,
+            'shared',ARRAY['read'],content_consent_id,NULL,${policy==='mismatch'?null:family}::uuid
+          FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${owner}::uuid`;
+      });
+      // The mismatch links once from NULL to a real foreign-run family during
+      // historical setup below. All ordinary positives bind the exact real family.
+      scenarios[policy]={tokenId:caseToken,token:secret,family,approvalFamily:policy==='mismatch'?renewalGrant:family};
     }
   }
   const release = postgres(localClusterAdminUrl(local.DB_URL), { prepare: false, max: 1 });
@@ -407,8 +427,9 @@ const { db, handleRequest } = await import(${JSON.stringify(commandUrl.href)});
 const { default: postgres } = await import("postgres");
 const fixture = postgres(input.adminUrl, { prepare: false, max: 1 });
 const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, handleRequest);
+let bearer=input.token;
 const request = () => fetch("http://127.0.0.1:" + server.addr.port + "/functions/v1/command", {
-  method: "POST", headers: { authorization: "Bearer " + input.token, "content-type": "application/json" },
+  method: "POST", headers: { authorization: "Bearer " + bearer, "content-type": "application/json" },
   body: JSON.stringify(input.policyCases ? {...input.body,command_id:crypto.randomUUID()} : input.body),
 }).then(async response => ({ status: response.status, body: await response.json(),
   retryAfter: response.headers.get("retry-after"), challenge: response.headers.get("www-authenticate") }));
@@ -435,9 +456,43 @@ try {
   if (input.policyCases) {
     const cases = [];
     for (const policy of ['unlinked','null','future','elapsed','terminal','revoked','mismatch']) {
-      await fixture.unsafe("UPDATE swarm.renewal_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END, connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END, revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END WHERE renewal_grant_id=$1::uuid", [input.families[policy]??input.families.null,policy]);
-      await fixture.unsafe("UPDATE swarm.household_content_connections SET renewal_grant_id=$2::uuid WHERE connection_id=$1::uuid", [input.tokenId,policy==='unlinked'?null:input.families[policy]]);
-      cases.push({ policy, result: await request() });
+      const scenario=input.scenarios[policy];bearer=scenario.token;
+      const positive=await request();
+      if (policy==='mismatch') {
+        // Revised R02 storage mismatch ruling, COMMONSWARM-RELEASE-CONFLICT-
+        // RULINGS-20261027.md: this unreachable mismatch tests the Storage
+        // loader behind the binding guard, only in the disposable owned clone.
+        // First prove the installed guard refuses that exact write, then restore
+        // its exact definition, function and enabled state before HTTP/Storage.
+        await fixture.begin(async tx=>{
+          const [database]=await tx.unsafe("SELECT current_database() AS name");
+          if(!/^admin_edge_[a-f0-9]{32}$/.test(database.name)) throw new Error('historical setup requires owned clone');
+          const [guard]=await tx.unsafe("SELECT pg_get_triggerdef(oid) AS ddl,tgfoid,tgenabled FROM pg_trigger WHERE tgrelid='swarm.household_content_connections'::regclass AND tgname='aa_household_local_family_binding' AND NOT tgisinternal");
+          if(guard?.tgenabled!=='O') throw new Error('current family guard missing');
+          const assignMismatch=sp=>sp.unsafe("UPDATE swarm.household_content_connections SET renewal_grant_id=$2::uuid,expires_at=NULL WHERE connection_id=$1::uuid AND renewal_grant_id IS NULL RETURNING connection_id",[scenario.tokenId,scenario.approvalFamily]);
+          let bindingRefused=false;
+          try {await tx.savepoint(async sp=>{await assignMismatch(sp);});}
+          catch(error) {if(error.code!=='23514' || error.message!=='LOCAL_APPROVAL_BINDING_REFUSED') throw error;bindingRefused=true;}
+          if(!bindingRefused) throw new Error('installed family guard admitted foreign-run binding');
+          await tx.unsafe('DROP TRIGGER aa_household_local_family_binding ON swarm.household_content_connections');
+          const updated=await assignMismatch(tx);
+          if(updated.length!==1) throw new Error('historical NULL linkage required');
+          await tx.unsafe(guard.ddl);
+          const [restored]=await tx.unsafe("SELECT pg_get_triggerdef(oid) AS ddl,tgfoid,tgenabled FROM pg_trigger WHERE tgrelid='swarm.household_content_connections'::regclass AND tgname='aa_household_local_family_binding' AND NOT tgisinternal");
+          if(restored?.ddl!==guard.ddl || restored.tgfoid!==guard.tgfoid || restored.tgenabled!==guard.tgenabled) throw new Error('family guard not restored');
+          let refused=false;
+          try {await tx.savepoint(async sp=>{await sp.unsafe("UPDATE swarm.household_content_connections SET renewal_grant_id=$2::uuid WHERE connection_id=$1::uuid",[scenario.tokenId,scenario.family]);});}
+          catch(error) {if(error.code!=='23514' || error.message!=='LOCAL_APPROVAL_FAMILY_IMMUTABLE') throw error;refused=true;}
+          if(!refused) throw new Error('restored immutable-family guard admitted rebind');
+          const [mismatch]=await tx.unsafe("SELECT c.grant_id<>g.run_id AND t.renewal_grant_id<>c.renewal_grant_id AND t.run_id=c.grant_id AS mismatched FROM swarm.household_content_connections c JOIN swarm.agent_tokens t ON t.token_id=c.connection_id JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id WHERE c.connection_id=$1::uuid",[scenario.tokenId]);
+          if(!mismatch.mismatched) throw new Error('historical foreign-run family mismatch missing');
+        });
+      } else if(policy!=='unlinked') {
+        // The approval already bound the matching eligible family. Only now
+        // choose the date, terminal stamp or attributed revocation under test.
+        await fixture.unsafe("UPDATE swarm.renewal_grants SET connection_expires_at=CASE WHEN $2='future' THEN clock_timestamp()+interval '1 hour' WHEN $2='elapsed' THEN clock_timestamp()-interval '1 second' ELSE NULL END, connection_expired_at=CASE WHEN $2='terminal' THEN clock_timestamp() ELSE NULL END, revoked_at=CASE WHEN $2='revoked' THEN clock_timestamp() ELSE NULL END, revoked_by=CASE WHEN $2='revoked' THEN $3::uuid ELSE NULL END WHERE renewal_grant_id=$1::uuid", [scenario.family,policy,input.owner]);
+      }
+      cases.push({ policy, positive, result: await request() });
     }
     console.log("LEGACY_HTTP_RESULT:" + JSON.stringify({ identity, role, oauthDenied, cases }));
   } else {
@@ -473,7 +528,7 @@ try {
         SWARM_DATABASE_URL: edgeUrl.href, SUPABASE_DB_URL: edgeUrl.href, SUPABASE_URL: local.API_URL,
         SUPABASE_ANON_KEY: local.ANON_KEY,
         SUPABASE_SERVICE_ROLE_KEY: local.SERVICE_ROLE_KEY },
-      input: JSON.stringify({ adminUrl: localClusterAdminUrl(local.DB_URL), workspace, principal, token, policyCases, families, tokenId,
+      input: JSON.stringify({ adminUrl: localClusterAdminUrl(local.DB_URL), workspace, principal, owner, token, policyCases, scenarios, tokenId,
         body: { command_id: randomUUID(), client_version: '0.1.0', client_build: '0.1.0', workspace_id: workspace,
           stream: { kind: 'workspace' }, command: { kind: 'file_download_url', file_id: String(binding!.file_id), version_n: null } } }),
     });
@@ -487,7 +542,10 @@ try {
     assert.equal(result.oauthDenied, true);
     if (policyCases) {
       assert.equal(result.cases.length,7);
-      for (const {policy: name,result: response} of result.cases) {
+      for (const {policy: name,positive,result: response} of result.cases) {
+        assert.equal(positive.status,200,name+' starts live');
+        assert.equal(positive.body.status,'ok',name+' starts authorized');
+        assert.deepEqual(positive.body.content,proposal('Legacy HTTP control').content,name+' live control returns genuine Storage content');
         if (['unlinked','null','future'].includes(name)) {
           assert.equal(response.status,200,name);
           assert.equal(response.body.status,'ok',name);
@@ -528,4 +586,18 @@ try {
 test('legacy FILE HTTP redirect rolls back gated requests and resumes in the same process after DROP', { timeout: 180_000 }, () => legacyFileHttp());
 // Real token auth remains live: only linked family policy changes, with legacy
 // and finite technical-window NULL-policy positives in the same invocation.
-test('local FILE HTTP applies linked renewal policy before returning genuine Storage content', { timeout: 180_000 }, () => legacyFileHttp(true));
+test('local FILE HTTP applies linked renewal policy before returning genuine Storage content', { timeout: 180_000 }, async () => {
+  const shared={sql,local};
+  const isolated=await adminEdgeDatabase(local.DB_URL);
+  try {
+    const [configuration]=await shared.sql`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+    assert.ok(configuration,'shared fixture has the minimum client version');
+    sql=isolated.db;local={...local,DB_URL:isolated.url};
+    await sql`INSERT INTO swarm.config(key,value) VALUES('min_client_version',${sql.json(configuration.value)})`;
+    for(const user of [owner,other]) {
+      await sql`INSERT INTO auth.users(id,aud,role) VALUES(${user}::uuid,'authenticated','authenticated')`;
+      await sql`INSERT INTO swarm.users(user_id,display_name) VALUES(${user}::uuid,'Storage policy fixture')`;
+    }
+    await legacyFileHttp(true);
+  } finally {sql=shared.sql;local=shared.local;await isolated.close();}
+});

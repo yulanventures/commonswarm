@@ -1,4 +1,5 @@
 /** CI only: real PostgreSQL ACLs and triggers, with rollback-only fixtures. */
+import { installedApprovalFamilyAcl, historicalApprovalFamilyAcl } from '../support/historical-household-acl.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -73,6 +74,8 @@ function psqlProof(suffix: 'catalog' | 'rollback-catalog') {
 test('approval trigger preserves human consent; reader ceiling, owner-only withdrawal, mutation refusals and rollback preserve audits', () => {
   const f = fixture(), newer = randomUUID();
   runSql(`
+    ${installedApprovalFamilyAcl}
+    ${historicalApprovalFamilyAcl}
     ${migration()}
     ${f.setup}
     CREATE TEMP TABLE before_rights AS SELECT to_jsonb(r) AS row FROM swarm.household_member_content_roles r WHERE workspace_id='${f.workspace}';
@@ -423,6 +426,20 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.equal(await localRow(), undefined, 'device revocation removes the family from the owner projection');
       assert.deepEqual(await approvals(), originalApproval, 'revocation retains original consent history');
       await tx`RESET ROLE`;
+      // Revised R01 3/283 ruling, COMMONSWARM-RELEASE-CONFLICT-RULINGS-20261027.md:
+      // undo the permanence overlays in the release's exact reverse order,
+      // with each real rollback proof, inside this rollback-only clone before
+      // the historical 00015 snapshots and inverse. Keep the adapter's receipt.
+      for (const version of [
+        '20261025000001', '20261022000992', '20261021000990', '20261019000010',
+        '20261019000009', '20261019000008', '20261019000007', '20261019000004',
+        '20261019000003', '20261019000002',
+      ]) {
+        const reserve = `deploy/release-proofs/permanence/${version}`;
+        await tx.unsafe(repoSql(`${reserve}-rollback.sql`));
+        const [proof] = await tx.unsafe(releaseCatalogQuery(repoSql(`${reserve}-rollback-catalog.sql`), 'rollback_ok'));
+        assert.equal(proof!.rollback_ok, true, `${version} rollback catalog`);
+      }
       const [forward] = await tx.unsafe(releaseCatalogQuery(repoSql(`${proofRoot}-catalog.sql`), 'catalog_ok'));
       assert.equal(forward!.catalog_ok, true);
       await t.test('rollback ends NULL-expiry approvals without deleting rows or changing audits and restores NOT NULL', async () => {

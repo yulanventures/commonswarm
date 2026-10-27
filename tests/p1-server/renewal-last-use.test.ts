@@ -143,7 +143,7 @@ test("a wrong run device cannot overwrite an authorized use after its grant wait
         ${f.tokenId}::uuid, ${f.otherDevice}::uuid, 'older')`.then(
           () => ({}), (error: unknown) => ({ error }),
         );
-      await waitForGrantLock(monitor, bPid, 5_000, aPid);
+      await waitForGrantLock(monitor, bPid, 5_000, aPid, "RowShareLock");
       await b`SELECT swarm.record_renewal_grant_use(${f.tokenId}::uuid, ${f.device}::uuid, 'newer')`;
       // A future authorized observation is an independent monotonic floor:
       // the fresh post-wait request must not overwrite any of its fields.
@@ -521,7 +521,7 @@ test("perpetual standing renewal has no idle gate and chosen expiry stays termin
 test("read owner routine checks chosen deadline after a blocked family wait and rolls back adoption", {timeout:30_000},async()=>{
   const sql=postgres(localEnvironment().DB_URL,options),blocker=postgres(localEnvironment().DB_URL,options),
     reader=postgres(localEnvironment().DB_URL,options),monitor=postgres(localEnvironment().DB_URL,options);
-  let pending:Promise<unknown>|undefined;
+  let pending:Promise<postgres.RowList<postgres.Row[]>>|undefined;
   try {
     const f=await seed(sql);
     const [before]=await sql`SELECT first_used_at,expires_at FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid`;
@@ -535,7 +535,7 @@ test("read owner routine checks chosen deadline after a blocked family wait and 
       await waitForGrantLock(monitor,pid,5000,null,'RowShareLock','%agent_delivery_read_context%');
       await tx`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${f.grant}::uuid`;
     });
-    assert.deepEqual(await pending,[],"deadline committed during the wait refuses this invocation");
+    assert.equal((await pending!).length,0,"deadline committed during the wait refuses this invocation");
     const [after]=await sql`SELECT first_used_at,expires_at FROM swarm.agent_tokens WHERE token_id=${f.tokenId}::uuid`;
     assert.deepEqual(after,before,"a denied read adopts nothing");
     const control=await seed(sql);

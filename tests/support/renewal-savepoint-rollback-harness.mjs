@@ -435,7 +435,7 @@ try {
         variant==='timeboxed'?'timeboxed':variant==='no-family'?'no-family':'standing');
       await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${bad.t0}::uuid`;
       if(variant==='surrendered') await observer`UPDATE swarm.agent_tokens SET surrender_only=true WHERE token_id=${bad.t0}::uuid`;
-      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${bad.grant}::uuid`;
+      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner}::uuid WHERE renewal_grant_id=${bad.grant}::uuid`;
       if(variant==='principal-revoked') await observer`UPDATE swarm.agent_principals SET revoked_at=clock_timestamp() WHERE principal_id=${bad.principal}::uuid`;
       if(variant==='family-tombstone') await observer`INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
         SELECT 'family',lineage_id,${owner}::uuid FROM swarm.agent_tokens WHERE token_id=${bad.t0}::uuid`;
@@ -737,9 +737,9 @@ try {
         SET connection_expires_at=clock_timestamp()-interval '1 second' WHERE renewal_grant_id=${newer.grant}::uuid`;
       if(['dead-run','silent-renewal','none-eligible','dead-token'].includes(variant)) await observer`UPDATE swarm.agent_runs SET ended_at=clock_timestamp() WHERE run_id=${newer.run}::uuid`;
       if(variant==='dead-device') await observer`UPDATE swarm.devices SET revoked_at=clock_timestamp() WHERE device_id=${newer.device}::uuid`;
-      if(variant==='legacy' || variant==='none-eligible') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${old.grant}::uuid`;
+      if(variant==='legacy' || variant==='none-eligible') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner}::uuid WHERE renewal_grant_id=${old.grant}::uuid`;
       if(variant==='silent-renewal') await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${old.t0}::uuid`;
-      if(variant==='both-revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id IN (${old.grant}::uuid,${newer.grant}::uuid)`;
+      if(variant==='both-revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner}::uuid WHERE renewal_grant_id IN (${old.grant}::uuid,${newer.grant}::uuid)`;
       if(variant==='dead-token') await observer`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,
         issued_at,expires_at,lineage_id,renewal_grant_id,revoked_at)
         SELECT ${id()}::uuid,principal_id,run_id,task_id,epoch,scopes,${await hashOf(mintRaw())},clock_timestamp()+interval '1 second',
@@ -821,7 +821,7 @@ try {
         WHERE renewal_grant_id=${fixture.grant}::uuid OR token_id=${fixture.t0}::uuid`;
       if(variant==='elapsed') await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()-interval '1 second'
         WHERE renewal_grant_id=${fixture.grant}::uuid`;
-      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${fixture.grant}::uuid`;
+      if(variant==='revoked') await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner}::uuid WHERE renewal_grant_id=${fixture.grant}::uuid`;
       if(['unused-future-bound','unused-future-unbound'].includes(variant)) await observer`UPDATE swarm.renewal_grants
         SET connection_expires_at=clock_timestamp()+interval '1 day' WHERE renewal_grant_id=${fixture.grant}::uuid`;
       if(variant==='unused-terminal') await observer`UPDATE swarm.renewal_grants SET connection_expired_at=clock_timestamp()
@@ -930,7 +930,7 @@ try {
       WHERE renewal_grant_id=${convertedGrant}::uuid`;
     check('converted elapsed date is terminal despite NULL binding',(await convertedStatus())?.facts.connection==='key_ended');
     check('converted elapsed family is denied by runtime',(await convertedRead()).status===403);
-    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=NULL,revoked_at=clock_timestamp()
+    await observer`UPDATE swarm.renewal_grants SET connection_expires_at=NULL,revoked_at=clock_timestamp(),revoked_by=${owner}::uuid
       WHERE renewal_grant_id=${convertedGrant}::uuid`;
     check('converted revoked family never appears live',(await convertedStatus())?.facts.connection!=='live');
     check('converted revoked family is denied by runtime',(await convertedRead()).status===403);
@@ -942,7 +942,7 @@ try {
       kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
       VALUES(${id()}::uuid,${readWorkspace}::uuid,${mismatch.principal}::uuid,${mismatch.run}::uuid,'standing',NULL,0,NULL,
         ${otherDevice}::uuid,${owner}::uuid)`;
-    await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp() WHERE renewal_grant_id=${mismatch.grant}::uuid`;
+    await observer`UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by=${owner}::uuid WHERE renewal_grant_id=${mismatch.grant}::uuid`;
     await observer`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_id=${mismatch.t0}::uuid`;
     const mismatchOverview=await overviewAs(owner);
     const mismatchConnection=mismatchOverview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)

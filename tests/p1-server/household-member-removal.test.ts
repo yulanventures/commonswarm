@@ -1,4 +1,5 @@
 /** CI only: member removal revokes content in the database and a rejoin restores none of it. */
+import { installedApprovalFamilyAcl, historicalApprovalFamilyAcl } from '../support/historical-household-acl.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash, randomUUID } from 'node:crypto';
@@ -37,6 +38,8 @@ test('member removal trigger allows one content stamp and refuses a second write
   const role = (workspaceId: string, userId: string) =>
     `workspace_id='${workspaceId}' AND user_id='${userId}'`;
   runSql(`
+    ${installedApprovalFamilyAcl}
+    ${historicalApprovalFamilyAcl}
     ${repoSql('supabase/migrations/20261005000001_household_member_removal.sql')}
     INSERT INTO auth.users(id,aud,role,email) VALUES
       ('${owner}','authenticated','authenticated','${owner}@example.test'),

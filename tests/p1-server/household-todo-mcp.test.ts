@@ -395,9 +395,12 @@ try {
     assert.equal(assignedResult.body.notices.length,1); assert.equal(assignedResult.body.notices[0].status,'sent');
     assert.equal(await noticeSpend(),spendBefore+1,'the committed notice is metered');
     const signal=assignedResult.body.notices[0].signal_id;
-    const fresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+    // 20261022000992_signal_savepoint_creation_guard.sql:1-7 specifies
+    // top-level xid8 plus physical cluster identity, including SAVEPOINT inserts.
+    const fresh=await tx\x60SELECT creation_xact_id=pg_current_xact_id() AS same_transaction,
+      creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS same_cluster
       FROM swarm.signals WHERE id=\x24{signal}::uuid\x60;
-    assert.equal(fresh[0]!.fresh,true,'notice uses the normal directed-signal transaction');
+    assert.deepEqual(fresh[0],{same_transaction:true,same_cluster:true},'notice carries both server-stamped creation proofs');
     const deliveries=await tx\x60SELECT signal_id FROM swarm.signal_deliveries WHERE workspace_id=\x24{f.workspace}::uuid AND recipient_agent_principal_id=\x24{f.principal}::uuid\x60;
     assert.deepEqual(deliveries.map(r=>r.signal_id),[signal]);
     const replay=await call('todo_assign',assign,request);
