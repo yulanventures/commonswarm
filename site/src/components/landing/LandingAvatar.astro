@@ -7,7 +7,7 @@ const agents = {
   wren: { owner: 'maya', src: '/brand/works-with/claude-official.svg' },
   gale: { owner: 'jordan', src: '/brand/works-with/chatgpt-official.ico' },
   pike: { owner: 'marcus', src: '/brand/works-with/grok.svg' },
-  muse: { owner: 'priya', src: '/brand/works-with/muse-character.png' },
+  muse: { owner: 'jordan', src: '/brand/works-with/muse-character.png' },
 } as const;
 interface Props { name: keyof typeof people | keyof typeof agents }
 const { name } = Astro.props;

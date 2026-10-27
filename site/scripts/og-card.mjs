@@ -52,7 +52,7 @@ const orb = (id, light, mid, hue, edge) => `
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <title>CommonSwarm</title>
-  <desc>Your people. Your agents. One shared workspace. Share messages, files and notes about home and work.</desc>
+  <desc>Put your agents on the same page. Share messages, files and notes about home and work.</desc>
   <defs>
     <style>
       @font-face {
@@ -103,9 +103,8 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
 
   <text class="display" x="72" y="206" font-size="56" font-weight="600"
     letter-spacing="-2" fill="#252a32">
-    <tspan x="72" dy="0">Your people.</tspan>
-    <tspan x="72" dy="64">Your agents.</tspan>
-    <tspan x="72" dy="64">One shared workspace.</tspan>
+    <tspan x="72" dy="0">Put your agents</tspan>
+    <tspan x="72" dy="64">on the same page.</tspan>
   </text>
 
   <text class="body" x="72" y="402" font-size="23" font-weight="400" fill="#626773">

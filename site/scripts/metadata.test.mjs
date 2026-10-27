@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(siteDir, "dist");
 /* The social card copy is checked against its alt and generator below. */
-const currentOgHeadline = "Your people. Your agents. One shared workspace.";
+const currentOgHeadline = "Put your agents on the same page.";
 const currentOgMechanism = "Share messages, files and notes about home and work.";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
@@ -121,6 +121,7 @@ test("L4: every built route publishes coherent, route-specific social metadata",
       const normalise = (value) => decode(value.replace(/<[^>]+>/g, " "))
         .replace(/[.’]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
       assert.ok(normalise(h1), "home: missing readable headline");
+      assert.equal(normalise(currentOgHeadline), normalise(h1), "home: social card headline must match the homepage");
       assert.ok(normalise(title).includes(normalise(h1)), "home: title should reflect the headline");
       assert.ok(description.trim().length > 0, "home: missing description");
     }
