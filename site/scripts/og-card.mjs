@@ -13,7 +13,7 @@
  *   ink        #252a32  --text / --ink
  *   muted      #626773  --text-muted
  *   orbs       lavender #b8adf2, peach #f3b89d, sage #aacbb7, sky #a8cbed, pearl centre
- *   mark       ink centre, lavender N, peach E, sage S, cobalt #315cff W (Wordmark.astro)
+ *   mark       junction-C in ink and vermilion (Wordmark.astro)
  *
  * Usage:
  *   node scripts/og-card.mjs public/og.png
@@ -95,11 +95,7 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
 
   <g transform="translate(72 60)">
     <g transform="scale(.75)">
-      <circle cx="24" cy="24" r="5.5" fill="#252a32"/>
-      <circle cx="24" cy="8" r="5.5" fill="#b8adf2"/>
-      <circle cx="40" cy="24" r="5.5" fill="#f3b89d"/>
-      <circle cx="24" cy="40" r="5.5" fill="#aacbb7"/>
-      <circle cx="8" cy="24" r="5.5" fill="#315cff"/>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/></g>
     </g>
     <text class="display" x="48" y="27" font-size="27" font-weight="600"
       letter-spacing="-1.08" fill="#252a32">CommonSwarm</text>
@@ -137,11 +133,7 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
       <rect x="85" y="150" width="290" height="250" rx="24" fill="#ffffff" stroke="#dedcd6"/>
     </g>
     <g transform="translate(109 174) scale(.6)">
-      <circle cx="24" cy="24" r="5.5" fill="#252a32"/>
-      <circle cx="24" cy="8" r="5.5" fill="#b8adf2"/>
-      <circle cx="40" cy="24" r="5.5" fill="#f3b89d"/>
-      <circle cx="24" cy="40" r="5.5" fill="#aacbb7"/>
-      <circle cx="8" cy="24" r="5.5" fill="#315cff"/>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/></g>
     </g>
     <text class="display" x="149" y="192" font-size="18" font-weight="600" letter-spacing="-.4" fill="#252a32">Home base</text>
     <text class="body" x="149" y="211" font-size="13" fill="#626773">Example workspace</text>

@@ -1,21 +1,6 @@
 #!/usr/bin/env node
-/**
- * Generates the three PNG app icons from the current CommonSwarm mark.
- *
- * Geometry source: public/favicon.svg (32-unit grid). Colour literals copied from it
- * (the sync boundary, as in og-card.mjs): tile #FAF8F3, circle #2471A8, square stroke #1E2A33.
- * The favicon's hairline (#DEDCD6) is dropped; it only separates the 32px favicon from browser chrome.
- *
- * Usage: node scripts/brand-icons.mjs [output-dir]   (default: public/ and public/brand/)
- *
- * - app-icon-512.png (any): tile and mark scaled x16, transparent outside the rounded tile (rx 128).
- * - apple-touch-icon.png (180): opaque full-bleed square, mark at the favicon's scale and position (x 180/32).
- * - app-icon-maskable-512.png: opaque full-bleed square. The mark's bounding box is centred on the
- *   tile centre (16,16); its farthest point is the square's outer rounded corner, at
- *   (26.56-4.032-16)*sqrt(2)+4.032 = 13.264 units from the centre. The safe zone has radius
- *   204.8px (80% of 512), so scale <= 204.8/13.264 = 15.44; scale 15 puts it at 198.96px.
- *
- * The PNGs are the shipping artifacts; open and inspect them after every regeneration.
+/** Generate app icons from the junction-C geometry in public/brand/mark.svg.
+ * Usage: node scripts/brand-icons.mjs [output-dir]
  */
 
 import { dirname, join } from "node:path";
@@ -25,9 +10,9 @@ import sharp from "sharp";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const TILE = "#FAF8F3";
-const mark = `<g transform="translate(4 4)">
-    <circle cx="8.16" cy="8.16" r="6.72" fill="#2471A8"/>
-    <rect x="10.12" y="10.12" width="11.44" height="11.44" rx="3.032" fill="none" stroke="#1E2A33" stroke-width="2"/>
+const mark = `<g transform="translate(4 4) scale(.75)">
+    <path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/>
+    <rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/>
   </g>`;
 
 const svg = (size, body) =>
