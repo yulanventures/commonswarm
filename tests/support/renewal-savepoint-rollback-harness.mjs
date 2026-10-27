@@ -35,6 +35,19 @@ const out = { tree, mode, source:config?.source ? {commit:config.source.commit,t
   read_source:config?.read_source ? {commit:config.read_source.commit,tree:config.read_source.tree} : null, hook_sleep: Deno.env.get('SWARM_CMD_TEST_SLEEP_AFTER_STEP') ?? null, stage: 'import' };
 const sqlstate = (e) => (e && typeof e === 'object' && typeof e.code === 'string' && /^[0-9A-Z]{5}$/u.test(e.code) ? e.code : 'non_sql');
 const safeName = value => typeof value==='string' && /^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(value) ? value : null;
+// Only harness-owned labels and allowlisted database metadata leave the probe.
+// Never include error.query, parameters, raw message/detail/where or stack: they
+// can contain the bearer/hash supplied to discovery.
+let failureControl=null,lastCheck=null,completedChecks=0;
+const atControl=(control,statement)=>{failureControl={control,statement};};
+const sqlMessages=new Set(['LOCAL_DISCOVERY_SELECTOR','LOCAL_DISCOVERY_SCOPE','LOCAL_DISCOVERY_BINDING',
+  'LOCAL_DISCOVERY_CYCLE','LOCAL_DISCOVERY_CAP','LOCAL_RESIDUAL_SELECTOR']);
+const databaseLocation=error=>{
+  const where=typeof error?.where==='string' ? error.where : '';
+  const match=/PL\/pgSQL function (?:swarm\.)?discover_local_target_ids\([^)]*\) line ([0-9]+) at (RAISE|SQL statement)/u.exec(where);
+  return match ? {statement:'SELECT * FROM swarm.discover_local_target_ids',
+    function:'swarm.discover_local_target_ids',line:Number(match[1]),operation:match[2]} : null;
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const id = () => crypto.randomUUID();
 const logLines = async (needle) => serverLog ? (await Deno.readTextFile(serverLog)).split('\n').filter((l) => l.includes(needle)) : [];
@@ -276,7 +289,7 @@ try {
   if(mode==='permanence') {
     out.stage='permanence';
     const checks=[];
-    const check=(name,ok)=>checks.push({name,ok:Boolean(ok)});
+    const check=(name,ok)=>{checks.push({name,ok:Boolean(ok)});lastCheck=name;completedChecks=checks.length;};
     // Ordinary unused expiry must remain a refusal even after the separate
     // permanent-root change. Pair with a real live read under the same policy.
     const ordinaryControl=await seat('ordinary-live',true,null,'timeboxed');
@@ -824,6 +837,7 @@ try {
     const wrongDevice=id();
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${wrongDevice}::uuid,${owner}::uuid,'Mismatched read fixture')`;
     for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device','unused-unbound','unused-future-bound','unused-future-unbound','unused-terminal','unused-elapsed','unused-timeboxed','unused-no-family','unused-wrong-creator','unused-foreign-device','unused-wrong-family','unused-token-tombstone','unused-family-tombstone']) {
+      atControl(`current-proof-${variant}/fixture`,'INSERT devices, principal, run, renewal_grant and root token');
       const unused=variant.startsWith('unused-') || ['live-bootstrap','expired-unused','mismatched-device'].includes(variant);
       const unbound=['unused-unbound','unused-future-unbound'].includes(variant);
       const fixture=await readSeat(`truth-${variant}`,!unused,
@@ -831,9 +845,11 @@ try {
         variant==='unused-timeboxed' ? 'timeboxed':variant==='unused-no-family' ? 'no-family':'standing',
         variant==='unused-wrong-creator' ? {creator:outsider}:variant==='unused-foreign-device' ? {deviceOwner:outsider}:
           variant==='unused-wrong-family' ? {familyPrincipal:otherFamily.principal,familyRun:otherFamily.run}:{});
+      atControl(`current-proof-${variant}/binding`,'SELECT bound_device_id FROM swarm.renewal_grants');
       const [binding]=await observer`SELECT bound_device_id FROM swarm.renewal_grants WHERE renewal_grant_id=${fixture.grant}::uuid`;
       check(`current-proof-${variant}-binding`,binding.bound_device_id===(variant==='mismatched-device'?wrongDevice:unbound ? null:fixture.device));
       let child;
+      atControl(`current-proof-${variant}/state`,'prepare credential lifecycle control');
       if(['pending','retired-history','predecessor-tombstone'].includes(variant)) {
         const issued=await readRenew(fixture.raw,id());child=JSON.parse(issued.text);
         if(issued.status!==200 || !child.agent_token) throw Object.assign(new Error('truth successor'),{code:'TRUTH_SUCCESSOR'});
@@ -862,10 +878,13 @@ try {
       const [beforeRead]=await observer`SELECT first_used_at,predecessor_token_id,expires_at>clock_timestamp() AS unexpired
         FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
       const expected=['live-bootstrap','expired-unused','expired-used','pending','unused-unbound','unused-future-bound','unused-future-unbound'].includes(variant);
+      atControl(`current-proof-${variant}/home`,'SELECT swarm_read.home_overview()');
       const overview=await overviewAs(owner);
       const home=overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
         .find(agent=>agent.principal_id===fixture.principal)?.status.facts.connection;
+      atControl(`current-proof-${variant}/queue`,'household_tool/todo_queue through handleHostedManagementCommand');
       const queue=await queueFor(fixture.principal);
+      atControl(`current-proof-${variant}/virgin`,'SELECT first_used_at FROM swarm.agent_tokens');
       if(unused && variant!=='live-bootstrap') {
         const [afterRead]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
         check(`current-proof-${variant}-virgin`,beforeRead.first_used_at===null && beforeRead.predecessor_token_id===null
@@ -873,6 +892,7 @@ try {
       }
       check(`current-proof-${variant}-home-and-queue`,home!==undefined && queue!==undefined && (home==='live')===expected && (queue==='live')===expected);
     }
+    atControl('converted-read-model/fixture','INSERT converted read-model fixture');
 
     // SQL fixture provenance permits the real owner-only conversion trigger.
     // Minting is outside this read-model contract; conversion, first-use and
@@ -927,6 +947,7 @@ try {
         .find(agent=>agent.principal_id===convertedPrincipal)?.status;
     };
     for(const future of [false,true]) {
+      atControl(`converted-read-model/${future?'future-date':'permanent'}`,'home_overview and household_tool/todo_queue');
       if(future) await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
         WHERE renewal_grant_id=${convertedGrant}::uuid`;
       const home=await convertedVirginStatus(),queue=await queueFor(convertedPrincipal,convertedWorkspace);
@@ -934,6 +955,7 @@ try {
         && home.work==='idle' && queue==='live');
     }
     const [stillVirgin]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${convertedToken}::uuid`;
+    atControl('converted-read-model/recovery','renew_agent_token and successor read');
     check('converted read projections do not authorize or stamp bearer',stillVirgin.first_used_at===null
       && [401,403].includes((await convertedRead()).status));
     const convertedRecovery=await readRenew(convertedRaw,id(),{},convertedWorkspace);
@@ -964,6 +986,7 @@ try {
     check('converted revoked family never appears live',(await convertedStatus())?.facts.connection!=='live');
     check('converted revoked family is denied by runtime',(await convertedRead()).status===403);
     // Independent non-NULL binding control: the expired bearer cannot mask it.
+    atControl('read-model-binding/fixture','INSERT independent device binding control');
     const mismatch=await readSeat('read-model-binding',false);
     const otherDevice=id();
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${otherDevice}::uuid,${owner}::uuid,'Other binding')`;
@@ -977,6 +1000,7 @@ try {
     const mismatchConnection=mismatchOverview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
       .find(agent=>agent.principal_id===mismatch.principal)?.status.facts.connection;
     check('non-NULL mismatched device cannot claim renewal liveness',mismatchConnection!=='live');
+    atControl('read-model-policy','home_overview, renewal roster and token-scoped read');
 
     await observer`UPDATE swarm.renewal_grants SET connection_expires_at=clock_timestamp()+interval '1 day'
       WHERE renewal_grant_id=${readModels.grant}::uuid`;
@@ -1048,6 +1072,7 @@ try {
     check('read-model owners, barrier and role ACL boundary survive',acl.owner_ok && acl.barrier_ok && acl.select_ok && acl.execute_ok);
     // Exact family consumer: real command-role loader + production access
     // consumer. Fixture setup writes consent; the consumer never backfills it.
+    atControl('family-approval','exact-family approval, rotation, content consumer and withdrawal');
     const authModule=await import(`${tree}/supabase/functions/_shared/agent-auth.ts`);
     const accessModule=await import(`${tree}/supabase/functions/command/household-content-access.ts`);
     const family=await seat('family-approval');
@@ -1335,7 +1360,11 @@ try {
 } catch (error) {
   out.failure_diagnostic={category:sqlstate(error)==='non_sql' ? 'unexpected_non_sql' : 'real_or_unowned_sql_failure',
     identity:error?.constructor?.name==='PostgresError' ? 'PostgresError' : 'unexpected',
-    sqlstate:sqlstate(error)==='non_sql' ? null : sqlstate(error),constraint:safeName(error?.constraint_name)};
+    sqlstate:sqlstate(error)==='non_sql' ? null : sqlstate(error),constraint:safeName(error?.constraint_name),
+    control:failureControl,last_check:lastCheck,completed_checks:completedChecks,
+    sql_message:sqlMessages.has(error?.message) ? error.message : null,
+    sql_detail:sqlMessages.has(error?.detail) ? error.detail : null,
+    routine:safeName(error?.routine),database_location:databaseLocation(error)};
   out.error = sqlstate(error) !== 'non_sql' ? sqlstate(error) : (typeof error?.code === 'string' ? error.code : 'non_sql');
   out.error_name = error?.name ?? null;
 }

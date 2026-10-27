@@ -3882,6 +3882,29 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
       '20261019000009','20261019000008','20261019000007','20261019000004',
       '20261019000003','20261019000002',
     ];
+    const proveCatalog=async(tx:postgres.TransactionSql,source:string,alias:'catalog_ok'|'rollback_ok',label:string)=>{
+      const query=releaseCatalogQuery(source,alias);
+      const [path]=await tx`SELECT current_setting('search_path') AS value,
+        'auth'=ANY(current_schemas(false)) AS auth_visible,
+        pg_get_viewdef('swarm_read.hosted_mcp_connections'::regclass) LIKE '%auth.uid()%' AS view_auth_qualified`;
+      const [native]=await tx.unsafe(query);
+      // As in emptyApplicationSchema(), deparse catalog definitions with an
+      // explicit path. An auth-visible session prints uid() rather than
+      // auth.uid(), making 00010's unchanged view predicate spuriously false.
+      // This changes only the proof session, never a migration or its checks.
+      await tx.unsafe('SET LOCAL search_path=pg_catalog');
+      try {
+        const [proof]=await tx.unsafe(query);
+        const diagnostic={label,native_ok:native?.[alias]===true,
+          catalog_ok:proof?.[alias]===true,auth_visible:path!.auth_visible,
+          native_view_auth_qualified:path!.view_auth_qualified};
+        if(!diagnostic.native_ok || !diagnostic.catalog_ok)
+          process.stdout.write(`B_SNAPSHOT_CATALOG ${JSON.stringify(diagnostic)}\n`);
+        assert.equal(proof?.[alias],true,`${label}: ${JSON.stringify(diagnostic)}`);
+      } finally {
+        await tx`SELECT set_config('search_path',${path!.value},true)`;
+      }
+    };
     // Revised 3/252 ruling, COMMONSWARM-RELEASE-CONFLICT-RULINGS-20261027.md:
     // recreate B through the exact release reserves, as in 3/283, with proof
     // after every step. No individual column/guard is removed as a substitute.
@@ -3894,8 +3917,7 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
       for(const version of permanenceVersions) {
         const reserve=`deploy/release-proofs/permanence/${version}`;
         await tx.unsafe(repoSql(`${reserve}-rollback.sql`));
-        const [proof]=await tx.unsafe(releaseCatalogQuery(repoSql(`${reserve}-rollback-catalog.sql`),'rollback_ok'));
-        assert.equal(proof!.rollback_ok,true,`${version} rollback catalog`);
+        await proveCatalog(tx,repoSql(`${reserve}-rollback-catalog.sql`),'rollback_ok',`${version} rollback catalog`);
       }
     });
     const [beforeColumn]=await sql`SELECT EXISTS(SELECT 1 FROM pg_attribute
@@ -3970,8 +3992,7 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
       for(const name of migrations) {
         const version=name.slice(0,14);
         await tx.unsafe(repoSql(`supabase/migrations/${name}`));
-        const [proof]=await tx.unsafe(releaseCatalogQuery(repoSql(`deploy/release-proofs/permanence/${version}-catalog.sql`),'catalog_ok'));
-        assert.equal(proof!.catalog_ok,true,`${version} forward catalog`);
+        await proveCatalog(tx,repoSql(`deploy/release-proofs/permanence/${version}-catalog.sql`),'catalog_ok',`${version} forward catalog`);
       }
     });
     upgraded=true;
