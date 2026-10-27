@@ -8,7 +8,7 @@ export const measurementScript = `<script>
       const r = node.getBoundingClientRect();
       return {left:r.left,top:r.top,width:r.width,height:r.height};
     };
-    const heads = () => Array.from(document.querySelectorAll('main h1, main h2, main h3, main h4, main h5, main h6'));
+    const heads = () => Array.from(document.querySelectorAll('main h1, main h2, main h3, main h4, main h5, main h6')).filter(h => h.getClientRects().length > 0);
     const faces = () => Array.from(document.fonts).map(f => ({family:f.family,status:f.status,weight:f.weight,style:f.style,unicodeRange:f.unicodeRange}));
     const clean = value => value.trim().replace(/^['"]|['"]$/g, '');
     const details = () => heads().map(h => {

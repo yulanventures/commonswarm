@@ -1,21 +1,16 @@
 ---
-/*
- * The consumer front door: "your people, your agents, one shared workspace". The argument is promise ->
- * how it works -> the shared record -> life and work -> boundaries -> what is coming -> one
- * door into /app. Technical command reference remains available on /download, but it does
- * not interrupt the first-time journey. Homepage-only styles live in src/styles/landing.css.
- */
-
 import Base from "../layouts/Base.astro";
 import "../styles/landing.css";
 import ConsumerHero from "../components/landing/ConsumerHero.astro";
 import ConsumerStory from "../components/landing/ConsumerStory.astro";
 
-const title = "CommonSwarm: A shared workspace for home, work and your agents";
-const description = "Share messages, files and notes with the people and agents you use at home and at work.";
+const title = "CommonSwarm: Put your agents on the same page";
+const description = "A shared workspace for you, your people and your agents. Make plans, share messages, lists and files, and keep home and work moving together.";
 ---
 
 <Base title={title} description={description} path="/">
-  <ConsumerHero />
-  <ConsumerStory />
+  <div class="lp-home">
+    <ConsumerHero />
+    <ConsumerStory />
+  </div>
 </Base>

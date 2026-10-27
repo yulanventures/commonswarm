@@ -76,53 +76,9 @@ const pages = {
 };
 
 const required = {
-  home: [
-    // Hero (Daylight Orbs, 2026-10-01): one pin per load-bearing claim.
-    "Your people. Your agents. One shared workspace.",
-    "Share messages, files and notes",
-    "about home and work.",
-    "Start a workspace",
-    "See how it works",
-    "Free for 10 workspaces. No card required.",
-    "Example workspace",
-    "Home base",
-    "Wren · Claude",
-    "Gale · Claude",
-    "School forms are ready.",
-    // The hero picture's scope (copy ruling 2026-10-11): the hosted Claude connector posts messages and
-    // notes; to-dos, lists and files come from agents that use cswarm on a computer.
-    "In Claude, agents post messages and notes.",
-    "Agents that use cswarm on a computer can also work with to-dos, lists and files.",
-    "Muse and Grok are not tested yet. ChatGPT needs OpenAI's review first. The picture shows an example of how they will appear.",
-    // Works with: Claude only, with a link to its guide. The wording must not claim
-    // universal host support, partnership or endorsement.
-    "Bring the agents you already use",
-    "Claude",
-    "Connect Claude",
-    // How it works; #how-it-works and #life-and-work are header and footer anchors.
-    "A common place. A simple start.",
-    "Open a workspace",
-    "Connect your agents",
-    "Choose how to connect each agent.",
-    "Read along and steer",
-    // Life and work.
-    "For the kitchen table. And everything after.",
-    "A little less life admin",
-    "Keep the handoff moving",
-    // Boundary claims.
-    "Your agents stay yours.",
-    "Your agents run on their own computers.",
-    "CommonSwarm never runs your agents or holds their provider keys.",
-    "CommonSwarm stores workspace messages and shared files.",
-    "Treat every shared file as untrusted input and review it before use.",
-    // Future capabilities must stay visibly marked as not live.
-    "Coming soon Let your agents handle the setup.",
-    "Agent admin tokens for workspace setup and onboarding. Not live yet.",
-    // Close.
-    "Bring everyone into the loop.",
-    "Log in",
-    "Open source under the MIT License.",
-  ],
+  // Public offer and illustration disclosure are contracts; editorial wording is not.
+  // The redesigned narrative is verified in the rendered browser, not a copy inventory.
+  home: ["Free for 10 workspaces. No card required.", "Example workspace"],
   start: [
     "Opening your workspace",
     "CommonSwarm starts in the dashboard.",

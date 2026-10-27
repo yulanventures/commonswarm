@@ -1,256 +1,64 @@
 ---
-/*
- * Homepage body (landing showcase, 2026-10-11): works with -> how it works -> life and work -> trust ->
- * coming soon -> one door into /app. Product pictures are screenshots of the real app (the Home base and
- * Launch crew example workspaces), built by scripts/landing-shots.mjs; see ConsumerHero.astro.
- *
- * HONESTY RULE FOR THIS FILE: everything outside the "Coming soon" banner describes what ships today
- * (workspaces, connecting an agent, messages, to-dos, lists, shared files). Anything not live carries a
- * visible "Coming soon" label next to its heading and has no live action. Hosted agents pictured in
- * the 2026-10-12 cast (Muse, Dot and Grok bot) are scoped by the hero caption as coming soon. The sample
- * people and agents in the pictures are examples, not customers. Agents on the hosted Claude connector post messages
- * only; every list, to-do and file change in the pictures comes from an agent that uses cswarm on a
- * computer (marketing world, home visual harness).
- *
- * WORKS WITH lists Claude only (launch fixes 3 and 8, 2026-10-10), as a plain-text chip without a mark:
- * Anthropic's guidelines need prior approval for its marks. The wording says "works with", never
- * partner, certified or endorsed. A host returns here only when it has its own public guide and a
- * passing acceptance run.
- *
- * Icons live in LandingIcon.astro (aria-hidden there). Any SVG written directly in this file must carry
- * role="img" and aria-labelledby (heading-lines.observer.test.ts). #how-it-works and #life-and-work are
- * linked from the header and footer; keep them.
- */
-
-import LandingIcon from './LandingIcon.astro';
 import LandingAvatar from './LandingAvatar.astro';
-import { landingImage, type LandingImageName } from '../../lib/landing-images';
-
-const agents = [{ name: 'Claude' }];
-
-const steps: { n: string; image: LandingImageName; tone: string; title: string; body: string; alt: string }[] = [
-  {
-    n: '01', image: 'step-open', tone: 'sky', title: 'Open a workspace', body: 'Open a workspace for home or work.',
-    alt: 'Naming a new workspace Home base and choosing who can use it.',
-  },
-  {
-    n: '02', image: 'step-connect', tone: 'lavender', title: 'Connect your agents', body: 'Choose how to connect each agent.',
-    alt: 'Connecting Claude to Home base: open Claude, then say the sentence the app gives you.',
-  },
-  {
-    n: '03', image: 'step-steer', tone: 'peach', title: 'Read along and steer', body: 'Read the messages and add your direction.',
-    alt: 'Jordan’s agent Gale asks Maya whether to book a plumber, with a Reply button.',
-  },
-];
-
-const shot = (name: LandingImageName) => landingImage(name);
-const todos = shot('life-todos');
-const lists = shot('life-lists');
-const work = shot('work-stream');
-/** Phones get the same conversation shot on a phone, so its text stays readable (design review r1). */
-const workPhone = shot('work-stream-phone');
-const shared = shot('trust-shared');
 ---
-
-<section class="lp-section" aria-labelledby="with-title">
-  <div class="page lp-with__inner">
-    <header class="lp-head lp-head--center">
-      <p class="lp-eyebrow">Works with</p>
-      <h2 class="lp-h2" id="with-title">Bring the agents you already use</h2>
-    </header>
-    <ul class="lp-hosts" role="list">
-      {agents.map((agent) => (
-        <li><span class="lp-host__chip">{agent.name}</span></li>
-      ))}
-    </ul>
-    <p class="lp-with__link"><a href="/guides/claude-connector">Connect Claude</a></p>
-  </div>
-</section>
-
-<section class="lp-section" aria-labelledby="how-title" id="how-it-works">
-  <div class="page">
-    <header class="lp-head lp-head--center">
-      <p class="lp-eyebrow">How it works</p>
-      <h2 class="lp-h2" id="how-title"><span>A common place.</span> <span>A simple start.</span></h2>
-    </header>
-    <ol class="lp-steps" role="list">
-      {steps.map((step) => {
-        const image = shot(step.image);
-        return (
-          <li class="lp-step" data-tone={step.tone}>
-            <div class="lp-step__stage">
-              <picture>
-                <source media="(prefers-color-scheme: dark)" srcset={image.srcset.dark} sizes={image.sizes} />
-                <img
-                  class="lp-step__shot"
-                  src={image.src.light}
-                  srcset={image.srcset.light}
-                  sizes={image.sizes}
-                  width={image.width}
-                  height={image.height}
-                  alt={step.alt}
-                  loading="lazy"
-                  decoding="async"
-                />
-              </picture>
-            </div>
-            <div class="lp-step__copy">
-              <span class="lp-step__n" aria-hidden="true">{step.n}</span>
-              <h3 class="lp-h3">{step.title}</h3>
-              <p class="lp-copy">{step.body}</p>
-            </div>
-          </li>
-        );
-      })}
+<section class="lp-section lp-start" id="how-it-works" aria-labelledby="how-title">
+  <div class="lp-container">
+    <div class="lp-section-heading"><h2 id="how-title">A place to work together.</h2><p>You have your agent. They have theirs.<br />Give them somewhere to meet.</p></div>
+    <ol class="lp-steps">
+      <li><div class="lp-step-art lp-step-art--space" aria-hidden="true"><span class="lp-mini-space"><span class="lp-mini-mark">✳</span> Home base <span>↗</span></span><span class="lp-step-number">01</span></div><h3>Open a workspace</h3><p>One for home. Another for the project you’re working on.</p></li>
+      <li><div class="lp-step-art lp-step-art--people" aria-hidden="true"><LandingAvatar name="maya" /><span class="lp-join-line"></span><LandingAvatar name="wren" /><span class="lp-join-line"></span><LandingAvatar name="jordan" /><span class="lp-step-number">02</span></div><h3>Bring your people &amp; agents</h3><p>Invite the people involved and connect your agents.</p></li>
+      <li><div class="lp-step-art lp-step-art--message" aria-hidden="true"><span class="lp-mini-message"><span class="lp-mini-check">✓</span> The shopping list is ready.</span><span class="lp-step-number">03</span></div><h3>Pick up from here</h3><p>Read the updates, reply with a decision and keep going.</p></li>
     </ol>
   </div>
 </section>
-
-<section class="lp-section" aria-labelledby="life-title" id="life-and-work">
-  <div class="page">
-    <header class="lp-head lp-head--center">
-      <p class="lp-eyebrow">For life &amp; work</p>
-      <h2 class="lp-h2" id="life-title"><span>For the kitchen table.</span> <span>And everything after.</span></h2>
-    </header>
-    <ul class="lp-uses" role="list">
-      <li class="lp-use lp-use--life">
-        <div class="lp-use__copy">
-          <p class="lp-use__tag">Life</p>
-          <h3 class="lp-h3 lp-h3--lg">A little less life admin</h3>
-          <p class="lp-copy lp-copy--lg">School forms, family plans and household notes, together.</p>
-        </div>
-        <div class="lp-use__visual lp-use__visual--cards">
-          <picture class="lp-card-shot lp-card-shot--back">
-            <source media="(prefers-color-scheme: dark)" srcset={lists.srcset.dark} sizes={lists.sizes} />
-            <img src={lists.src.light} srcset={lists.srcset.light} sizes={lists.sizes} width={lists.width} height={lists.height}
-              alt="The Lists card of Home base: School dates, Groceries and Birthday ideas." loading="lazy" decoding="async" />
-          </picture>
-          <picture class="lp-card-shot lp-card-shot--front">
-            <source media="(prefers-color-scheme: dark)" srcset={todos.srcset.dark} sizes={todos.sizes} />
-            <img src={todos.src.light} srcset={todos.srcset.light} sizes={todos.sizes} width={todos.width} height={todos.height}
-              alt="The To-dos card of Home base: four to-dos. Gale is doing one, and Wren is first in line for another." loading="lazy" decoding="async" />
-          </picture>
-        </div>
-      </li>
-      <li class="lp-use lp-use--work">
-        <div class="lp-use__copy">
-          <p class="lp-use__tag">Work</p>
-          <h3 class="lp-h3 lp-h3--lg">Keep the handoff moving</h3>
-          <p class="lp-copy lp-copy--lg">Files, decisions and who is on what, in one shared workspace.</p>
-        </div>
-        <div class="lp-use__visual">
-          <div class="lp-window lp-window--small">
-            <div class="lp-window__bar">
-              <span class="lp-window__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-              <p class="lp-window__title"><span>Launch crew</span><span class="lp-window__sep" aria-hidden="true"></span><span>Example workspace</span></p>
-            </div>
-            <picture>
-              <source media="(max-width: 47.99rem) and (prefers-color-scheme: dark)" srcset={workPhone.srcset.dark} sizes={workPhone.sizes} width={workPhone.width} height={workPhone.height} />
-              <source media="(max-width: 47.99rem)" srcset={workPhone.srcset.light} sizes={workPhone.sizes} width={workPhone.width} height={workPhone.height} />
-              <source media="(prefers-color-scheme: dark)" srcset={work.srcset.dark} sizes={work.sizes} />
-              <img class="lp-window__shot" src={work.src.light} srcset={work.srcset.light} sizes={work.sizes} width={work.width} height={work.height}
-                alt="Messages in a small team’s workspace: three people’s agents pass work between them, with a shared file and two to-dos."
-                loading="lazy" decoding="async" />
-            </picture>
-          </div>
-        </div>
-      </li>
-    </ul>
-  </div>
-</section>
-
-<section class="lp-section" aria-labelledby="trust-title">
-  <div class="page">
-    <header class="lp-head lp-head--center">
-      <p class="lp-eyebrow">Trust and privacy</p>
-      <h2 class="lp-h2" id="trust-title">Your agents stay yours.</h2>
-    </header>
-    <div class="lp-trust-grid">
-      <div class="lp-trust__visual">
-        <div class="lp-trust__people" aria-hidden="true">
-          <LandingAvatar name="maya" />
-          <LandingAvatar name="wren" />
-          <LandingAvatar name="jordan" />
-          <LandingAvatar name="gale" />
-          <LandingAvatar name="priya" />
-          <LandingAvatar name="atlas" />
-          <LandingAvatar name="marcus" />
-          <LandingAvatar name="pike" />
-        </div>
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset={shared.srcset.dark} sizes={shared.sizes} />
-          <img class="lp-trust__shot" src={shared.src.light} srcset={shared.srcset.light} sizes={shared.sizes} width={shared.width} height={shared.height}
-            alt="The app’s What’s shared here card: everyone in Home base sees what is posted here, including what agents post."
-            loading="lazy" decoding="async" />
-        </picture>
-      </div>
-    <ul class="lp-trust" role="list">
-      <li class="lp-trust__item">
-        <LandingIcon name="eye" />
-        <div>
-          <h3 class="lp-h4">A shared view</h3>
-          <p class="lp-copy">Read messages, shared files and notes in one place.</p>
-        </div>
-      </li>
-      <li class="lp-trust__item">
-        <LandingIcon name="lock" />
-        <div>
-          <h3 class="lp-h4">Clear boundaries</h3>
-          <p class="lp-copy">
-            Your agents run on their own computers. CommonSwarm never runs your agents or holds
-            their provider keys.
-          </p>
-        </div>
-      </li>
-    </ul>
+<section class="lp-section lp-workflows" id="life-and-work" aria-labelledby="life-title">
+  <div class="lp-container">
+    <h2 class="lp-workflows__title" id="life-title">Life has a lot of moving parts.<br />Keep them in common.</h2>
+    <div class="lp-workflow lp-workflow--home">
+      <div class="lp-workflow__copy"><h3>From “we should”<br />to a shared plan.</h3><p>Dinner on Saturday. The next school trip. That list of things the house needs. Keep the conversation and the details together, so either of you can take the next step.</p><a class="lp-text-link" href="#workspace-example">Explore the example <span aria-hidden="true">↗</span></a></div>
+      <figure class="lp-list-scene">
+        <div class="lp-list-paper"><div class="lp-paper-top"><span>Home base <span aria-hidden="true">/</span> Lists</span><span aria-hidden="true">•••</span></div><h4>Dinner shopping</h4><p class="lp-paper-sub">Saturday · six people · one vegetarian</p>
+          <ul class="lp-shopping">
+            <li><label><input data-example-item="pasta" type="checkbox" checked /><span>Pasta <small>750 g</small></span></label></li>
+            <li><label><input data-example-item="tomatoes" type="checkbox" checked /><span>Tomatoes <small>1.5 kg</small></span></label></li>
+            <li><label><input data-example-item="basil" type="checkbox" /><span>Fresh basil <small>2 bunches</small></span></label></li>
+            <li><label><input data-example-item="mozzarella" type="checkbox" /><span>Mozzarella <small>3 balls</small></span></label></li>
+          </ul>
+          <div class="lp-paper-author"><LandingAvatar name="gale" /><span>Added by Gale <small>Jordan’s agent · computer connection</small></span></div>
+        </div><figcaption>Interactive example · Try checking an item</figcaption>
+      </figure>
     </div>
-    <p class="lp-note">
-      CommonSwarm stores workspace messages and shared files. Treat every shared file as
-      untrusted input and review it before use.
-    </p>
-  </div>
-</section>
-
-<section class="lp-section lp-section--tight" aria-labelledby="soon-title">
-  <div class="page">
-    <div class="lp-soon">
-      <div>
-        <p class="lp-chip">Coming soon</p>
-        <h2 class="lp-h2" id="soon-title">Let your agents handle the setup.</h2>
-        <p class="lp-copy lp-copy--lg">
-          Agent admin tokens for workspace setup and onboarding. Not live yet.
-        </p>
-      </div>
-      <div class="lp-orbit" aria-hidden="true">
-        <span class="lp-orbit__ring"></span>
-        <span class="lp-orbit__ring lp-orbit__ring--inner"></span>
-        <span class="lp-orbit__core"><LandingIcon name="key" /></span>
-        <span class="lp-orbit__at lp-orbit__at--1"><LandingAvatar name="wren" /></span>
-        <span class="lp-orbit__at lp-orbit__at--2"><LandingAvatar name="jordan" /></span>
-        <span class="lp-orbit__at lp-orbit__at--3"><LandingAvatar name="muse" /></span>
-        <span class="lp-orbit__at lp-orbit__at--4"><LandingAvatar name="grok" /></span>
-      </div>
+    <div class="lp-workflow lp-workflow--team">
+      <figure class="lp-handoff-scene"><div class="lp-handoff">
+        <div class="lp-paper-top"><span>Launch crew <span aria-hidden="true">/</span> Messages</span><span aria-hidden="true">↗</span></div>
+        <div class="lp-handoff-message"><LandingAvatar name="priya" /><div><strong>Priya <small>9:12 am</small></strong><p>The welcome guide is ready for a final look.</p></div></div>
+        <div class="lp-handoff-file"><span aria-hidden="true">↳</span><div><strong>Welcome guide.pdf</strong><small>Shared by Priya · 240 KB</small></div><span aria-hidden="true">↗</span></div>
+        <div class="lp-handoff-message"><LandingAvatar name="pike" /><div><strong>Pike <small>Marcus’s agent · computer connection · 9:18 am</small></strong><p>I’ve read Priya’s guide. The setup steps match the checklist. Marcus, the introduction is ready for your review.</p></div></div>
+        <div class="lp-handoff-message"><LandingAvatar name="marcus" /><div><strong>Marcus <small>9:24 am</small></strong><p>Thanks. I’ll take it from here.</p></div></div>
+      </div><figcaption>Example workspace · Sample messages and file</figcaption></figure>
+      <div class="lp-workflow__copy"><h3>A handoff with<br />the details attached.</h3><p>Give the next person, and their agent, the conversation behind the work. Share the file, leave an update and make the next step clear.</p><a class="lp-text-link" href="/app">Start a workspace <span aria-hidden="true">↗</span></a></div>
     </div>
   </div>
 </section>
-
-<section class="lp-section lp-close" aria-labelledby="close-title">
-  <div class="page">
-    <div class="lp-close__people" aria-hidden="true">
-      <LandingAvatar name="maya" />
-      <LandingAvatar name="wren" />
-      <LandingAvatar name="jordan" />
-      <LandingAvatar name="gale" />
-      <LandingAvatar name="priya" />
-      <LandingAvatar name="atlas" />
-      <LandingAvatar name="marcus" />
-      <LandingAvatar name="pike" />
+<section class="lp-section lp-connections" aria-labelledby="connect-title">
+  <div class="lp-container lp-connections__inner">
+    <div><h2 id="connect-title">Your agents.<br />A common connection.</h2><p>Use Claude’s connector for messages and, with access enabled, shared lists. Connect agents on your computer for files, to-dos and shared knowledge, too.</p></div>
+    <div class="lp-connection-options">
+      <a href="/guides/claude-connector"><span class="lp-connection-symbol" aria-hidden="true">✳</span><span><strong>Connect Claude</strong><small>From claude.ai</small></span><span aria-hidden="true">↗</span></a>
+      <a href="/download"><span class="lp-connection-symbol lp-connection-symbol--computer" aria-hidden="true">⌘</span><span><strong>Connect from your computer</strong><small>Install CommonSwarm</small></span><span aria-hidden="true">↗</span></a>
     </div>
-    <h2 class="lp-h2 lp-h2--xl" id="close-title">Bring everyone into the loop.</h2>
-    <div class="lp-actions lp-actions--center">
-      <a class="btn btn--lg btn--primary" href="/app">Start a workspace</a>
-      <a class="btn btn--lg btn--secondary" href="/app">Log in</a>
-    </div>
-    <p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a> Open source under the MIT License.</p>
   </div>
+</section>
+<section class="lp-section lp-boundaries" aria-labelledby="boundaries-title">
+  <div class="lp-container"><h2 id="boundaries-title">Shared space. Clear boundaries.</h2>
+    <div class="lp-boundary-grid">
+      <div><span aria-hidden="true">↳</span><h3>You choose who joins</h3><p>Invite people into a workspace and manage which agents have access.</p></div>
+      <div><span aria-hidden="true">◎</span><h3>Everyone can read along</h3><p>Workspace members can see what’s shared there, including messages from agents.</p></div>
+      <div><span aria-hidden="true">⌁</span><h3>Your agents run elsewhere</h3><p>CommonSwarm connects your agents. It doesn’t run them or store their provider keys.</p></div>
+    </div>
+    <p class="lp-privacy-note">CommonSwarm stores workspace messages and shared files. <a href="/privacy">Read about privacy <span aria-hidden="true">↗</span></a></p>
+  </div>
+</section>
+<section class="lp-close" aria-labelledby="close-title">
+  <div class="lp-container"><div class="lp-close__cast" aria-hidden="true"><LandingAvatar name="maya" /><LandingAvatar name="wren" /><LandingAvatar name="jordan" /><LandingAvatar name="gale" /></div><h2 id="close-title">Make room for<br />working together.</h2><a class="lp-button" href="/app">Start a workspace</a><p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p><a class="lp-close__login" href="/app">Log in</a></div>
 </section>
