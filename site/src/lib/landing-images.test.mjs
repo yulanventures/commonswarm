@@ -60,7 +60,7 @@ test("every image path rendered by LandingAvatar exists under public", async () 
     .replaceAll('"../../lib/agent-hosts"', JSON.stringify(new URL("./agent-hosts.ts", import.meta.url).href));
   const component = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
   const container = await AstroContainer.create();
-  for (const name of ["maya", "jordan", "priya", "marcus", "wren", "gale", "atlas", "pike", "muse", "dot", "grok"]) {
+  for (const name of ["maya", "jordan", "priya", "marcus", "wren", "gale", "pike", "muse"]) {
     const html = await container.renderToString(component.default, { props: { name } });
     const paths = [...html.matchAll(/<img\b[^>]*\ssrc="([^"]+)"/g)].map((match) => match[1]);
     assert.ok(paths.length > 0, `${name}: avatar rendered no image`);

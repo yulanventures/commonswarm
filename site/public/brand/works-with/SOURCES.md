@@ -47,3 +47,10 @@ overlaps the tile's lower-right corner, with its ring clear of the vendor mark.
 
 Full collection notes, including marks not used here, are in the brand working folder
 (`work/cs-brand/logos/SOURCES.md` on the design machine).
+
+## Homepage identities
+
+- `claude-official.svg`: exact official asset from https://claude.ai/favicon.svg.
+- `chatgpt-official.ico`: exact official asset from https://cdn.oaistatic.com/assets/favicon-eex17e9e.ico.
+- `grok.svg`: existing Grok asset.
+- `muse-character.png`: faithful crop of the official default character in https://introducing.muse.ai/_next/static/immutable/media/hero_blog.2ucsn55_1djkw.png, source 1200×575, crop x=529, y=184, width=131, height=134. No redraw or recoloring. Muse is shown as a preview illustration, not a claim of a hosted integration.
