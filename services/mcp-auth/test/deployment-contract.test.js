@@ -87,6 +87,11 @@ test("container is pinned, unprivileged, and starts the production server", asyn
   assert.match(dockerfile, /^USER 10001:10001$/mu);
   assert.match(dockerfile, /^CMD \["node", "src\/server\.js"\]$/mu);
   assert.doesNotMatch(dockerfile, /latest/u);
+  // Compose overrides USER: copied 0600/0700 files must be readable by any
+  // runtime uid, with no application writes, after every COPY has completed.
+  const normalize = dockerfile.indexOf("\nRUN chmod -R a=rX /app\n");
+  assert.ok(normalize > dockerfile.lastIndexOf("\nCOPY "), "normalize after the final COPY");
+  assert.ok(normalize < dockerfile.lastIndexOf("\nUSER "), "normalize before dropping privileges");
 });
 
 test("OAuth Compose requires the database hostname mapping and verify-full TLS", async () => {

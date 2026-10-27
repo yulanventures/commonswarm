@@ -24,6 +24,9 @@ COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/ma
 COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/admin-policy.generated.js ./src/admin-policy.generated.js
 COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/admin-authority.generated.js ./src/admin-authority.generated.js
 
+# Compose can override USER; ignore checkout umask and keep application bytes read-only.
+RUN chmod -R a=rX /app
+
 USER 10001:10001
 EXPOSE 3490
 CMD ["node", "src/server.js"]
