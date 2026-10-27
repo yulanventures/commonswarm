@@ -13,7 +13,7 @@ import {
   hostHookCheckDeadlineAt,
   processDeadlineDelayMs,
 } from "./cloud/agent-check-budget.js";
-import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile, readProfileCredential } from "./cloud/agent-profile.js";
+import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile, selectAgentWorkspace, readProfileCredential } from "./cloud/agent-profile.js";
 import { cloudTarget } from "./cloud/config.js";
 import { agentCredentialStore, credentialLineageKey } from "./cloud/agent-credential.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
@@ -41,7 +41,7 @@ check reads new directed messages without a listener; --force also performs a fr
 receive configure records the user's choice. Host hooks require the current session ID; inherited host variables are not trusted.
 Wake uses a Claude Code preview channel or the local Grok Bot gateway in this same session. It remains unverified until an idle canary is received.
 Turn mode uses a scoped host hook or a saved instruction. No background process renews credentials in turn mode.
-Agent commands also accept --profile instead of repeated credential and connection flags.`;
+Agent commands accept --profile with optional --workspace-id for one call; the saved workspace remains the default.`;
 }
 
 export async function writeOnboardingOutput(value: string): Promise<void> {
@@ -109,7 +109,7 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
     boundHostSessionId = (await readAgentProfile(profile, host)).host_session_id;
     const result = await receiveHookEvent(profile, host, event);
     if (!result.check) return;
-    await checkAgentMessages({ profilePath: profile, hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
+    await checkAgentMessages({ profilePath: profile, workspaceId:args.optional("workspace-id"), hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
       const text = renderAgentCheck(result);
       if (text) await writeOnboardingOutput(text);
     } });
@@ -269,13 +269,13 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
   } else await serveAgentChannel(options);
 }
 
-export const RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "url", "json"] as const;
+export const RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "url", "json", "workspace-id"] as const;
 
 export async function runResumeSnapshot(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:resume-profile");
   args.assertShape(RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS, 1);
   const path = privatePath(args.required("profile"));
-  const profile = await readAgentProfile(path, args.optional("host-session-id"));
+  const profile = selectAgentWorkspace(await readAgentProfile(path, args.optional("host-session-id")),args.optional("workspace-id"));
   if (args.optional("url") !== undefined && args.optional("url") !== profile.url) {
     throw new AgentSetupError("profile_target_mismatch", "The supplied URL differs from this profile's URL.");
   }

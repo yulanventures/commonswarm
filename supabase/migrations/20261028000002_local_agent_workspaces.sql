@@ -1033,14 +1033,14 @@ BEGIN
    INSERT INTO swarm.agent_execution_sessions(principal_id,workspace_id,session_id,lifecycle_state,expired_at)
    SELECT principal_id,p_workspace,gen_random_uuid(),'enabled',clock_timestamp() FROM swarm.agent_principals
    WHERE principal_id=p_principal AND managed_at IS NOT NULL
-   ON CONFLICT(principal_id,workspace_id) DO NOTHING;
+   ON CONFLICT(principal_id,workspace_id) DO UPDATE SET lifecycle_state='enabled' WHERE swarm.agent_execution_sessions.lifecycle_state='disabled';
    PERFORM set_config('cswarm.membership_removal','false',true);
  ELSE
    UPDATE swarm.agent_workspace_memberships SET revoked_at=clock_timestamp()
    WHERE principal_id=p_principal AND workspace_id=p_workspace AND revoked_at IS NULL;
    -- End only the removed target's proof, delivery, wake and content authority.
    PERFORM set_config('cswarm.membership_removal','true',true);
-   UPDATE swarm.agent_execution_sessions SET key_hash=NULL,expired_at=clock_timestamp(),generation=generation+1
+   UPDATE swarm.agent_execution_sessions SET key_hash=NULL,lifecycle_state='disabled',expired_at=clock_timestamp(),generation=generation+1
    WHERE principal_id=p_principal AND workspace_id=p_workspace;
    PERFORM set_config('cswarm.membership_removal','false',true);
    DELETE FROM swarm.agent_wake_leases WHERE principal_id=p_principal AND workspace_id=p_workspace;
@@ -1142,12 +1142,16 @@ BEGIN
  SELECT * INTO ctx FROM swarm.agent_delivery_read_context(p_hash,NULL);
  IF NOT FOUND OR ctx.is_revoked THEN RAISE EXCEPTION 'LOCAL_CREDENTIAL_DENIED' USING ERRCODE='42501',DETAIL='LOCAL_CREDENTIAL_DENIED'; END IF;
  SELECT coalesce(jsonb_agg(jsonb_build_object('workspace_id',am.workspace_id,'name',ws.name,'org_id',ws.org_id,'org_name',o.display_name,
-  'permissions',jsonb_build_object('scopes',t.scopes,'content_operations',coalesce(c.operations,ARRAY[]::text[]))) ORDER BY am.workspace_id),'[]'::jsonb)
+  'permissions',jsonb_build_object('scopes',t.scopes,'content_operations',ARRAY(SELECT op FROM unnest(coalesce(c.operations,ARRAY[]::text[])) op WHERE cr.content_role='editor' OR op='read'))) ORDER BY am.workspace_id),'[]'::jsonb)
  INTO result FROM swarm.agent_workspace_memberships am JOIN swarm.workspaces ws USING(workspace_id)
  JOIN swarm.organizations o ON o.id=ws.org_id JOIN swarm.agent_tokens t ON t.token_id=ctx.token_id
  LEFT JOIN swarm.local_content_approval_workspaces ap ON ap.renewal_grant_id=t.renewal_grant_id AND ap.workspace_id=am.workspace_id
  LEFT JOIN swarm.household_content_connections c ON c.connection_id=ap.token_id AND c.workspace_id=am.workspace_id
-   AND c.principal_id=ctx.principal_id AND c.revoked_at IS NULL
+   AND c.principal_id=ctx.principal_id AND c.grant_id=t.run_id AND c.renewal_grant_id=t.renewal_grant_id AND c.owner_user_id=ctx.owner_user_id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>clock_timestamp())
+   AND EXISTS(SELECT 1 FROM swarm.household_member_content_roles rights JOIN swarm.household_workspace_boundaries boundary USING(workspace_id)
+     WHERE rights.workspace_id=c.workspace_id AND rights.user_id=c.owner_user_id AND rights.revoked_at IS NULL
+     AND rights.content_consent_id=c.consent_receipt_id AND boundary.purpose=c.purpose AND (boundary.purpose='shared' OR boundary.owner_user_id=c.owner_user_id))
+ LEFT JOIN swarm.household_member_content_roles cr ON cr.workspace_id=am.workspace_id AND cr.user_id=ctx.owner_user_id AND cr.revoked_at IS NULL
  WHERE am.principal_id=ctx.principal_id AND swarm.local_agent_workspace_live(am.principal_id,am.workspace_id)
  AND swarm.admin_child_live(t.parent_admin_grant_id,am.workspace_id)
  AND EXISTS(SELECT 1 FROM swarm.agent_principals p WHERE p.principal_id=am.principal_id AND swarm.admin_child_live(p.parent_admin_grant_id,am.workspace_id));
@@ -1160,7 +1164,7 @@ GRANT EXECUTE ON FUNCTION swarm.agent_reachable_workspaces(bytea) TO swarm_read;
 -- only; ordinary mutations still require the target's execution session.
 CREATE TABLE swarm.agent_connection_sessions AS SELECT principal_id,session_id,generation,key_hash,expired_at
  FROM swarm.agent_execution_sessions s WHERE workspace_id=(SELECT workspace_id FROM swarm.agent_principals p WHERE p.principal_id=s.principal_id);
-ALTER TABLE swarm.agent_connection_sessions ADD PRIMARY KEY(principal_id);
+ALTER TABLE swarm.agent_connection_sessions ADD PRIMARY KEY(principal_id,session_id);
 ALTER TABLE swarm.agent_connection_sessions OWNER TO swarm_admin;
 ALTER TABLE swarm.agent_connection_sessions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY server_select ON swarm.agent_connection_sessions FOR SELECT TO swarm_command USING(true);
@@ -1168,9 +1172,9 @@ REVOKE ALL ON swarm.agent_connection_sessions FROM PUBLIC,anon,authenticated,swa
 GRANT SELECT ON swarm.agent_connection_sessions TO swarm_command;
 CREATE FUNCTION swarm.sync_agent_connection_session() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 BEGIN
- IF coalesce(current_setting('cswarm.membership_removal',true),'')='true' THEN RETURN NEW; END IF;
+ IF NEW.key_hash IS NULL OR coalesce(current_setting('cswarm.membership_removal',true),'')='true' THEN RETURN NEW; END IF;
  INSERT INTO swarm.agent_connection_sessions SELECT NEW.principal_id,NEW.session_id,NEW.generation,NEW.key_hash,NEW.expired_at
- ON CONFLICT(principal_id) DO UPDATE SET session_id=EXCLUDED.session_id,generation=EXCLUDED.generation,key_hash=EXCLUDED.key_hash,expired_at=EXCLUDED.expired_at;
+ ON CONFLICT(principal_id,session_id) DO UPDATE SET generation=EXCLUDED.generation,key_hash=EXCLUDED.key_hash,expired_at=EXCLUDED.expired_at;
  RETURN NEW;
 END $$;
 ALTER FUNCTION swarm.sync_agent_connection_session() OWNER TO swarm_admin;
@@ -1401,13 +1405,14 @@ CREATE FUNCTION swarm.activate_local_workspace_session(p_principal uuid,p_worksp
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE proof swarm.agent_connection_sessions%ROWTYPE;
 BEGIN
- SELECT * INTO proof FROM swarm.agent_connection_sessions WHERE principal_id=p_principal FOR SHARE;
+ SELECT * INTO proof FROM swarm.agent_connection_sessions WHERE principal_id=p_principal AND session_id=p_session FOR SHARE;
  IF NOT FOUND OR proof.session_id<>p_session OR proof.generation<>p_generation OR proof.key_hash IS DISTINCT FROM p_key
- OR proof.key_hash IS NULL OR proof.expired_at IS NULL OR proof.expired_at<=clock_timestamp()
+ OR proof.key_hash IS NULL
  OR NOT swarm.local_agent_workspace_live(p_principal,p_workspace) THEN RETURN false; END IF;
  UPDATE swarm.agent_execution_sessions SET session_id=proof.session_id,generation=proof.generation,key_hash=proof.key_hash,
-   expired_at=proof.expired_at,renewed_at=clock_timestamp(),updated_at=clock_timestamp()
- WHERE principal_id=p_principal AND workspace_id=p_workspace AND key_hash IS NULL AND lifecycle_state='enabled';
+   expired_at=clock_timestamp()+interval '120 seconds',renewed_at=clock_timestamp(),updated_at=clock_timestamp()
+ WHERE principal_id=p_principal AND workspace_id=p_workspace AND lifecycle_state='enabled'
+ AND (key_hash IS NULL OR (session_id=p_session AND generation=p_generation AND key_hash=p_key));
  RETURN FOUND;
 END $$;
 ALTER FUNCTION swarm.activate_local_workspace_session(uuid,uuid,uuid,bigint,bytea) OWNER TO swarm_admin;
@@ -1453,3 +1458,93 @@ BEGIN
     RAISE EXCEPTION 'ADMIN_PARENT_INACTIVE' USING ERRCODE='55000'; END IF;
   RETURN NEW;
 END $$;
+
+CREATE OR REPLACE FUNCTION swarm.revoke_local_residual_tokens(
+  p_workspace_id uuid,p_actor_id uuid,p_kind text,p_target_id uuid
+)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path=pg_catalog AS $fn$
+DECLARE
+  actor_role text;
+  target_owner uuid;
+  target_role text;
+  target_lineage uuid;
+  target_principal uuid;
+  principal_ids uuid[];
+  item record;
+  v_now timestamptz;
+BEGIN
+  IF p_workspace_id IS NULL OR p_actor_id IS NULL OR p_target_id IS NULL
+    OR p_kind IS NULL OR p_kind NOT IN ('remove_member','revoke_agent_principal','revoke_agent_token') THEN
+    RAISE EXCEPTION 'LOCAL_RESIDUAL_SELECTOR' USING ERRCODE='22023';
+  END IF;
+  -- Reacquisitions of phase W; the caller must not discover these locks here.
+  PERFORM w.workspace_id FROM swarm.workspaces w WHERE w.workspace_id=p_workspace_id FOR SHARE;
+  SELECT m.role INTO actor_role FROM swarm.memberships m WHERE m.workspace_id=p_workspace_id
+    AND m.user_id=p_actor_id AND m.revoked_at IS NULL FOR SHARE;
+  IF actor_role IS NULL OR NOT EXISTS (SELECT 1 FROM swarm.workspaces w
+    WHERE w.workspace_id=p_workspace_id AND w.archived_at IS NULL) THEN
+    RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501';
+  END IF;
+  IF p_kind='remove_member' THEN
+    target_owner:=p_target_id;
+    SELECT m.role INTO target_role FROM swarm.memberships m WHERE m.workspace_id=p_workspace_id AND m.user_id=p_target_id;
+    IF target_role IS NULL OR actor_role NOT IN ('owner','admin') OR
+      (actor_role='admin' AND target_role='owner') OR p_actor_id=p_target_id THEN
+      RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501';
+    END IF;
+    SELECT coalesce(array_agg(p.principal_id ORDER BY p.principal_id),ARRAY[]::uuid[]) INTO principal_ids
+      FROM swarm.agent_principals p WHERE p.workspace_id=p_workspace_id AND p.owner_user_id=target_owner AND p.transport='local';
+  ELSIF p_kind='revoke_agent_principal' THEN
+    SELECT p.owner_user_id INTO target_owner FROM swarm.agent_principals p
+      WHERE p.principal_id=p_target_id AND p.workspace_id=p_workspace_id AND p.transport='local';
+    principal_ids:=ARRAY[p_target_id];
+  ELSE
+    SELECT p.owner_user_id,t.lineage_id,t.principal_id INTO target_owner,target_lineage,target_principal
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+      WHERE t.token_id=p_target_id AND swarm.local_agent_workspace_live(p.principal_id,p_workspace_id) AND p.transport='local';
+    principal_ids:=ARRAY[target_principal];
+  END IF;
+  IF p_kind='revoke_agent_token' AND target_owner IS DISTINCT FROM p_actor_id THEN RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501'; END IF;
+  IF target_owner IS NULL OR (actor_role NOT IN ('owner','admin') AND target_owner<>p_actor_id) THEN
+    RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501';
+  END IF;
+  -- Live-bound tokens must go through grant revocation, never this shortcut.
+  IF EXISTS (SELECT 1 FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.principal_id=ANY(principal_ids) AND (p_kind<>'revoke_agent_token' OR t.lineage_id=target_lineage)
+      AND g.revoked_at IS NULL) THEN
+    RAISE EXCEPTION 'LOCAL_RESIDUAL_LIVE_GRANT' USING ERRCODE='42501';
+  END IF;
+  -- Parent fences, not child counts, define revocation. Current child keys are
+  -- streamed deterministically; no capped history array or partial commit.
+  INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+    SELECT DISTINCT 'lineage',t.lineage_id,p_actor_id
+    FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+    WHERE (p.workspace_id=p_workspace_id OR p_kind='revoke_agent_token') AND t.principal_id=ANY(principal_ids)
+      AND (p_kind<>'revoke_agent_token' OR t.lineage_id=target_lineage)
+      ON CONFLICT DO NOTHING;
+  FOR item IN SELECT t.token_id FROM swarm.agent_tokens t
+    JOIN swarm.agent_principals p USING(principal_id)
+    LEFT JOIN swarm.renewal_grants g USING(renewal_grant_id)
+    WHERE t.principal_id=ANY(principal_ids) AND (p.workspace_id=p_workspace_id OR p_kind='revoke_agent_token')
+      AND (p_kind<>'revoke_agent_token' OR t.lineage_id=target_lineage)
+      AND (g.revoked_at IS NOT NULL OR t.renewal_grant_id IS NULL)
+      AND t.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child
+        WHERE child.predecessor_token_id=t.token_id AND child.revoked_at IS NULL AND child.first_used_at IS NOT NULL)
+    ORDER BY (t.predecessor_token_id IS NOT NULL),t.issued_at,t.token_id
+  LOOP
+    PERFORM t.token_id FROM swarm.agent_tokens t WHERE t.token_id=item.token_id FOR UPDATE;
+    v_now:=clock_timestamp();
+    INSERT INTO swarm.revocation_tombstones(kind,target_id,created_by)
+      VALUES('token',item.token_id,p_actor_id) ON CONFLICT DO NOTHING;
+    UPDATE swarm.agent_tokens t SET revoked_at=v_now WHERE t.token_id=item.token_id AND t.revoked_at IS NULL;
+  END LOOP;
+  v_now:=clock_timestamp();
+  IF NOT EXISTS (SELECT 1 FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id)
+    WHERE m.workspace_id=p_workspace_id AND m.user_id=p_actor_id AND m.revoked_at IS NULL AND w.archived_at IS NULL
+      AND (m.role IN ('owner','admin') OR target_owner=p_actor_id)) THEN
+    RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501';
+  END IF;
+
+END
+$fn$;

@@ -63,9 +63,9 @@ test("read-only, elevated, owner and sample action gates are distinct", () => {
   const data = model(); const value = data.agents[2];
   for (const action of ["resume","new-key","remove-agent","turn-off-key","withdraw","remove-person","cancel-invite"]) assert.equal(peopleDialogCanAct(data, action, value.id), false);
   value.mayManage = true; value.liveKey = true; value.access = { until: null }; value.status = { kind: "paused", fix: { allowed: true } };
-  for (const action of ["resume","remove-agent","turn-off-key"]) assert.equal(peopleDialogCanAct(data, action, value.id), true);
+  for (const action of ["resume","remove-agent"]) assert.equal(peopleDialogCanAct(data, action, value.id), true);
   assert.equal(peopleDialogCanAct(data, "withdraw", value.id), false); assert.equal(peopleDialogCanAct(data, "new-key", value.id), false);
-  value.own = true; assert.equal(peopleDialogCanAct(data, "withdraw", value.id), true); assert.equal(peopleDialogCanAct(data, "new-key", value.id), true);
+  value.own = true; assert.equal(peopleDialogCanAct(data,"turn-off-key",value.id),true); assert.equal(peopleDialogCanAct(data, "withdraw", value.id), true); assert.equal(peopleDialogCanAct(data, "new-key", value.id), true);
   value.status.kind = "key-off"; value.liveKey = false; assert.equal(peopleDialogCanAct(data, "resume", value.id), false); assert.equal(peopleDialogCanAct(data, "turn-off-key", value.id), false);
   data.people[1].mayRemove = true; assert.equal(peopleDialogCanAct(data, "remove-person", "mei"), true);
   data.people[1].own = true; assert.equal(peopleDialogCanAct(data, "remove-person", "mei"), false);
@@ -212,4 +212,13 @@ test("withdraw copy for a hosted agent removes the stored approval and carries t
   assert.deepEqual(local.stays, ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."]);
   assert.equal(withdrawConfirmText("Muse", true), `Remove the stored Lists & docs approval for Muse? ${HOSTED_LISTS_NOTE}`);
   assert.equal(withdrawConfirmText("Muse", false), "Withdraw Lists & docs access for Muse? It can no longer see or change lists and docs here until you allow it again.");
+});
+
+test('local workspace removal is scoped and only an owner can disconnect the reusable local key',()=>{
+  const copy=peopleConfirmationCopy('remove-agent',{name:'Local',hosted:false});
+  assert.deepEqual(copy.stops,['Local will lose access to this workspace immediately.']);
+  const data=model();data.agents[0].liveKey=true;data.agents[0].mayManage=true;data.agents[0].hosted=false;data.agents[0].own=false;
+  assert.equal(peopleDialogCanAct(data,'remove-agent',data.agents[0].id),true);
+  assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),false);
+  data.agents[0].own=true;assert.equal(peopleDialogCanAct(data,'turn-off-key',data.agents[0].id),true);
 });

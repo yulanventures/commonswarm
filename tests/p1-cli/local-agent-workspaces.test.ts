@@ -65,3 +65,17 @@ test('checks and cached messages are isolated by workspace while sharing the sam
   assert.notEqual(agentWorkspaceStatePath(path,A,A),agentWorkspaceStatePath(path,A,B));
  } finally {if(previous===undefined)delete process.env.SWARM_AGENT_STATE_DIR;else process.env.SWARM_AGENT_STATE_DIR=previous;execFileSync('rm',['-rf',dir]);}
 });
+
+test('workspace events restore and remove local membership without altering credential metadata',async()=>{
+ const {reduceWorkspace,HUMAN_ONLY_COMMANDS,isAgentScopeDenylisted}=await import('../../src/protocol/index.js');
+ const envelope={workspace_id:B,stream_id:M,seq:1,event_id:M,command_id:'membership',schema_version:1,actor_user:U,actor_agent_principal:null,actor_run:null,occurred_at_server:1};
+ let state=reduceWorkspace(null,{...envelope,type:'WorkspaceCreated',payload:{workspace_id:B,name:'Sibling',created_by:U,created_at:1}});
+ const metadata={token_id:M,principal_id:P,run_id:U,task_id:M,epoch:0,scopes:['post_signal'],issued_at:1,expires_at:999,revoked_at:null};
+ state={...state,tokens:{[M]:metadata}};
+ state=reduceWorkspace(state,{...envelope,seq:2,type:'AgentAddedToWorkspace',payload:{principal_id:P,owner_user_id:U,name:'Local agent',model:null,created_at:1,transport:'local',turn_only:false}});
+ state=reduceWorkspace(state,{...envelope,seq:3,type:'AgentRemovedFromWorkspace',payload:{principal_id:P,revoked_at:3}});
+ assert.equal(state.principals[P]?.revoked_at,3);assert.deepEqual(state.tokens[M],metadata);
+ state=reduceWorkspace(state,{...envelope,seq:4,type:'AgentAddedToWorkspace',payload:{principal_id:P,owner_user_id:U,name:'Local agent',model:null,created_at:1,transport:'local',turn_only:false}});
+ assert.equal(state.principals[P]?.revoked_at,null);assert.deepEqual(state.tokens[M],metadata);
+ for(const kind of ['add_agent_to_workspace','remove_agent_from_workspace'] as const){assert.equal(HUMAN_ONLY_COMMANDS.has(kind),true);assert.equal(isAgentScopeDenylisted(kind),true);}
+});

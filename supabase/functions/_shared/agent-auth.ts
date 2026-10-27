@@ -284,11 +284,9 @@ export async function enforceAgentSessionProof(
   }
 
   await tx`SELECT principal_id FROM swarm.agent_execution_sessions WHERE principal_id=${args.principalId}::uuid AND (workspace_id=${args.workspaceId}::uuid OR ${args.connectionOnly===true}) ORDER BY workspace_id FOR SHARE`;
-  if (args.connectionOnly) await tx`SELECT principal_id FROM swarm.agent_connection_sessions WHERE principal_id=${args.principalId}::uuid FOR SHARE`;
+  if (args.connectionOnly) await tx`SELECT principal_id FROM swarm.agent_connection_sessions WHERE principal_id=${args.principalId}::uuid AND session_id=${args.proofParse.ok?args.proofParse.proof.session_id:null}::uuid FOR SHARE`;
   if (!args.connectionOnly && args.proofParse.ok) {
-    const [target]=await tx<{key_hash:Uint8Array|null}[]>`SELECT key_hash FROM swarm.agent_execution_sessions
-      WHERE principal_id=${args.principalId}::uuid AND workspace_id=${args.workspaceId}::uuid`;
-    if (target?.key_hash===null) await tx`SELECT swarm.activate_local_workspace_session(${args.principalId}::uuid,${args.workspaceId}::uuid,
+    await tx`SELECT swarm.activate_local_workspace_session(${args.principalId}::uuid,${args.workspaceId}::uuid,
       ${args.proofParse.proof.session_id}::uuid,${args.proofParse.proof.generation},${await hashSessionKey(args.proofParse.proof.key)})`;
   }
   const rows = await tx<{
@@ -301,9 +299,9 @@ export async function enforceAgentSessionProof(
       session_id,
       generation,
       key_hash,
-      (expired_at IS NOT NULL AND expired_at > clock_timestamp()) AS live
-    FROM (SELECT session_id,generation,key_hash,expired_at,workspace_id,principal_id FROM swarm.agent_execution_sessions
-      UNION ALL SELECT session_id,generation,key_hash,expired_at,${args.workspaceId}::uuid,principal_id FROM swarm.agent_connection_sessions WHERE ${args.connectionOnly===true}) proof
+      ((expired_at IS NOT NULL AND expired_at > clock_timestamp()) OR (connection_proof AND key_hash IS NOT NULL)) AS live
+    FROM (SELECT session_id,generation,key_hash,expired_at,workspace_id,principal_id,false AS connection_proof FROM swarm.agent_execution_sessions
+      UNION ALL SELECT session_id,generation,key_hash,expired_at,${args.workspaceId}::uuid,principal_id,true FROM swarm.agent_connection_sessions WHERE ${args.connectionOnly===true}) proof
     WHERE principal_id = ${args.principalId}::uuid
       AND (workspace_id = ${args.workspaceId}::uuid OR ${args.connectionOnly===true})
       AND (${args.connectionOnly!==true} OR session_id=${args.proofParse.ok ? args.proofParse.proof.session_id : null}::uuid)

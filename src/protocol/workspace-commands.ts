@@ -457,6 +457,7 @@ export function isAgentScopeDenylisted(scope: string): boolean {
   if (has('invite', 'invitation')) return true;
   if (has('membership', 'member', 'role', 'owner', 'ownership') && mutates) return true;
   if (has('repo', 'repository') && has('archive', 'map', 'remap')) return true;
+  if (words.has('workspace') && has('agent') && has('add','remove')) return true;
   if (words.has('workspace') && has('archive', 'create', 'delete')) return true;
   if (words.has('capability') && words.has('url') && has('create', 'issue', 'mint')) return true;
   if (words.has('discard')) return true;

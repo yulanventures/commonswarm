@@ -46,6 +46,11 @@ DO $test$ BEGIN
  OR NOT EXISTS(SELECT 1 FROM swarm.agent_execution_sessions WHERE principal_id='22000000-0000-4000-8000-000000000001' AND workspace_id='12000000-0000-4000-8000-000000000002' AND key_hash IS NOT NULL)
  THEN RAISE EXCEPTION 'origin session removal broke connection or sibling'; END IF;
 END $test$;
+-- Technical execution-lease expiry does not expire connection-key possession.
+UPDATE swarm.agent_execution_sessions SET expired_at=clock_timestamp()-interval '1 hour' WHERE principal_id='22000000-0000-4000-8000-000000000001' AND workspace_id='12000000-0000-4000-8000-000000000002';
+DO $test$ BEGIN
+ IF NOT swarm.activate_local_workspace_session('22000000-0000-4000-8000-000000000001','12000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001',1,decode(repeat('77',32),'hex')) THEN RAISE EXCEPTION 'expired technical lease required reconnection'; END IF;
+END $test$;
 -- The origin can close and its owner can leave without killing credential or renewal.
 UPDATE swarm.workspaces SET archived_at=clock_timestamp() WHERE workspace_id='12000000-0000-4000-8000-000000000001';
 UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id='12000000-0000-4000-8000-000000000001' AND user_id='02000000-0000-4000-8000-000000000001';
@@ -73,6 +78,25 @@ DO $test$ BEGIN
  PERFORM * FROM swarm.discover_local_credential_ids(decode(repeat('55',32),'hex'));
  RAISE EXCEPTION 'global token revocation admitted';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+END $test$;
+-- Global family withdrawal through a sibling is owner-only and remains terminal.
+DO $test$ BEGIN
+ BEGIN
+ UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by='02000000-0000-4000-8000-000000000001' WHERE renewal_grant_id='62000000-0000-4000-8000-000000000001';
+ PERFORM swarm.revoke_local_residual_tokens('12000000-0000-4000-8000-000000000002','02000000-0000-4000-8000-000000000002','revoke_agent_token','72000000-0000-4000-8000-000000000001');
+ RAISE EXCEPTION 'non-owner globally revoked sibling connection';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN
+ UPDATE swarm.renewal_grants SET revoked_at=clock_timestamp(),revoked_by='02000000-0000-4000-8000-000000000001' WHERE renewal_grant_id='62000000-0000-4000-8000-000000000001';
+ PERFORM swarm.revoke_local_residual_tokens('12000000-0000-4000-8000-000000000002','02000000-0000-4000-8000-000000000001','revoke_agent_token','72000000-0000-4000-8000-000000000001');
+ IF EXISTS(SELECT 1 FROM swarm.agent_tokens WHERE principal_id='22000000-0000-4000-8000-000000000001' AND revoked_at IS NULL) THEN RAISE EXCEPTION 'global owner revoke left a successor live'; END IF;
+ RAISE EXCEPTION 'rollback fixture revoke' USING ERRCODE='ZX123';
+ EXCEPTION WHEN SQLSTATE 'ZX123' THEN NULL; END;
+END $test$;
+-- Explicit execution release still fences this target until a fresh acquisition.
+UPDATE swarm.agent_execution_sessions SET lifecycle_state='disabled',key_hash=NULL WHERE principal_id='22000000-0000-4000-8000-000000000001' AND workspace_id='12000000-0000-4000-8000-000000000002';
+DO $test$ BEGIN
+ IF swarm.activate_local_workspace_session('22000000-0000-4000-8000-000000000001','12000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001',1,decode(repeat('77',32),'hex')) THEN RAISE EXCEPTION 'released target execution proof was revived'; END IF;
 END $test$;
 -- Target owner membership is mandatory even if the caller is target owner/admin.
 UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id='12000000-0000-4000-8000-000000000002' AND user_id='02000000-0000-4000-8000-000000000002';

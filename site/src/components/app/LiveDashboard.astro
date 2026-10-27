@@ -5303,6 +5303,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             for(const agent of choices) {
               const button=document.createElement('button'); button.type='button'; button.className='pd-page-secondary'; button.textContent=agent.name;
               button.addEventListener('click',async()=>{
+                if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id) return;
                 button.disabled=true; status.textContent='';
                 try {
                   await addAgentToWorkspace(value,uuid(),workspaceId,agent.id);

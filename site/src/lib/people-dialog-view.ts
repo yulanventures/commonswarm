@@ -108,7 +108,7 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialo
   if (action === "resume") return agent.mayManage && agent.status.kind === "paused" && agent.status.fix.allowed;
   if (action === "allow") return agent.own && agent.accessReadState === "succeeded" && !agent.access;
   if (action === "new-key" || action === "connected-apps") return agent.own;
-  if (action === "turn-off-key") return agent.mayManage && agent.liveKey;
+  if (action === "turn-off-key") return agent.liveKey && (agent.hosted ? agent.mayManage : agent.own);
   return action === "remove-agent" && agent.mayManage;
 }
 /** The `window.confirm` text of the withdraw button on the Lists & docs card. */

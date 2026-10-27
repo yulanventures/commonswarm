@@ -4836,7 +4836,7 @@ async function updateWorkspaceProjection(
           AND principal_id IN (
             SELECT principal_id
             FROM swarm.agent_principals
-            WHERE workspace_id = ${route.workspaceId}::uuid
+            WHERE workspace_id = ${route.workspaceId}::uuid OR swarm.local_agent_workspace_live(principal_id,${route.workspaceId}::uuid)
           )
 
       `;
@@ -5483,6 +5483,12 @@ async function changeAgentWorkspace(tx:Sql,body:RequestBody,auth:AuthContext,det
   if(!command || !exactKeys(command,['kind','principal_id']) || typeof command.principal_id!=='string' || !UUID_RE.test(command.principal_id)
     || typeof body.workspace_id!=='string' || !UUID_RE.test(body.workspace_id)
     || record(body.stream)?.kind!=='workspace' || !exactKeys(record(body.stream)!,['kind'])) return await refuse(400,'invalid_request');
+  if(typeof body.client_version!=='string') return await refuse(400,'invalid_request');
+  const [configuration]=await tx<{value:unknown}[]>`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const minimum=configuration?.value;
+  const version=typeof minimum==='string'?compareSemver(body.client_version,minimum):null;
+  if(version===null) return await refuse(400,'invalid_request');
+  if(version<0) return {status:426,body:{error:'upgrade_required',min_client_version:minimum}};
   const workspace=body.workspace_id,principal=command.principal_id;
   const [allowed]=await tx<{ok:boolean}[]>`SELECT swarm.local_agent_membership_allowed(${workspace}::uuid,${principal}::uuid,${auth.actor.user}::uuid,${add}) AS ok`;
   if(!allowed?.ok) return await refuse(403,'forbidden');
@@ -10072,11 +10078,11 @@ async function handleLocalConnectionExpiry(
   const [binding]=await tx<{workspace_id:string;principal_id:string;run_id:string;created_by:string}[]>`
     SELECT workspace_id,principal_id,run_id,created_by FROM swarm.renewal_grants
     WHERE renewal_grant_id=${command.grant_id}::uuid`;
-  if (!binding || binding.workspace_id!==body.workspace_id) return forbidden;
+  if (!binding || binding.created_by!==auth.actor.user || typeof body.workspace_id!=='string' || !UUID_RE.test(body.workspace_id) || !await localAgentWorkspaceLive(tx,binding.principal_id,body.workspace_id)) return forbidden;
   const [stream]=await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams
-    WHERE workspace_id=${binding.workspace_id}::uuid AND kind='workspace'`;
+    WHERE workspace_id=${body.workspace_id}::uuid AND kind='workspace'`;
   if (!stream) return forbidden;
-  const route:Route={workspaceId:binding.workspace_id,streamId:stream.stream_id,membershipRole:null,membershipRevokedAt:null};
+  const route:Route={workspaceId:body.workspace_id,streamId:stream.stream_id,membershipRole:null,membershipRevokedAt:null};
   await lockRegistrationStream(tx,route);
   const [grant]=await tx<{connection_expires_at:Date|null;connection_expired_at:Date|null}[]>`
     SELECT connection_expires_at,connection_expired_at FROM swarm.renewal_grants
@@ -10087,9 +10093,9 @@ async function handleLocalConnectionExpiry(
     FROM swarm.renewal_grants g JOIN swarm.agent_principals p USING(principal_id)
     JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=p.principal_id
     JOIN swarm.devices d ON d.device_id=r.device_id
-    JOIN swarm.workspaces w ON w.workspace_id=g.workspace_id
-    JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=${auth.actor.user}::uuid
-    WHERE g.renewal_grant_id=${command.grant_id}::uuid AND g.workspace_id=${body.workspace_id}::uuid
+    JOIN swarm.workspaces w ON w.workspace_id=${body.workspace_id as string}::uuid
+    JOIN swarm.memberships m ON m.workspace_id=${body.workspace_id as string}::uuid AND m.user_id=${auth.actor.user}::uuid
+    WHERE g.renewal_grant_id=${command.grant_id}::uuid AND swarm.local_agent_workspace_live(p.principal_id,${body.workspace_id}::uuid)
       AND g.created_by=${auth.actor.user}::uuid AND p.owner_user_id=${auth.actor.user}::uuid
       AND p.workspace_id=g.workspace_id AND p.transport='local' AND NOT p.turn_only
       AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
@@ -10098,7 +10104,7 @@ async function handleLocalConnectionExpiry(
       AND (g.kind='standing' OR g.horizon_expires_at>clock_timestamp() AND g.successors_used<g.max_successors)
       AND NOT g.suspension_active
       AND g.connection_expired_at IS NULL AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-      AND swarm.admin_child_live(p.parent_admin_grant_id,g.workspace_id)
+      AND swarm.admin_child_live(p.parent_admin_grant_id,${body.workspace_id as string}::uuid)
       AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
         WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id
           OR z.kind='principal' AND z.target_id=p.principal_id
@@ -11187,9 +11193,10 @@ async function handleTransaction(
           return ['revoke_agent_principal','set_agent_model'].includes(kind) ? 'business-refusal' : 'forbidden';
       }
       if (kind==='revoke_agent_token' && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id)) {
-        const [target]=await tx<{owner_user_id:string}[]>`SELECT p.owner_user_id FROM swarm.agent_tokens t
+        const [target]=await tx<{owner_user_id:string;transport:string}[]>`SELECT p.owner_user_id,p.transport FROM swarm.agent_tokens t
           JOIN swarm.agent_principals p USING(principal_id)
-          WHERE t.token_id=${rawLocal.token_id}::uuid AND p.workspace_id=${localWorkspace}::uuid`;
+          WHERE t.token_id=${rawLocal.token_id}::uuid AND (p.workspace_id=${localWorkspace}::uuid OR swarm.local_agent_workspace_live(p.principal_id,${localWorkspace}::uuid))`;
+        if (target?.transport==='local' && target.owner_user_id!==verifiedHuman.userId) return 'forbidden';
         if (!target || target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role))
           return 'business-refusal';
       }
@@ -11261,7 +11268,7 @@ async function handleTransaction(
     }
     // Existing to-do assignment is DB-owned metadata, reselected after each wait.
     const todoId=!actorOnlyRefusal && typeof args?.todo_id==='string' && UUID_RE.test(args.todo_id) ? args.todo_id:null;
-    if(expiryBinding && expiryBinding.workspace_id===localWorkspace) principalTargets.add(expiryBinding.principal_id);
+    if(expiryBinding) principalTargets.add(expiryBinding.principal_id);
     const tokenTargets=!actorOnlyRefusal && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id) ? [rawLocal.token_id]:[];
     // The Allow writer selects the exact connection, including retired tokens
     // absent from principal discovery. Reuse its nonlocking selector/refusal
@@ -11305,7 +11312,7 @@ async function handleTransaction(
       }
     } else {
       localState.localPlan = hostedSeat===null && (!HOSTED_MANAGEMENT_KINDS.has(kind) || localExpiry) ? await planLocalOperation(tx, {
-        ...(agentTokenHash ? {hash:agentTokenHash}:{}), memberMutation:['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal'].includes(kind), connectionOnly:kind===RENEW_AGENT_TOKEN_KIND, workspace:localWorkspace,actor:verifiedHuman?.userId,
+        ...(agentTokenHash ? {hash:agentTokenHash}:{}), memberMutation:['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','enable_agent_management','disable_agent_management'].includes(kind), connectionOnly:kind===RENEW_AGENT_TOKEN_KIND, workspace:localWorkspace,actor:verifiedHuman?.userId,
         household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
         streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
         workspaceMode: household || revocation || localExpiry || verifiedHuman
@@ -11315,7 +11322,7 @@ async function handleTransaction(
         memberTargets:removeUser ? [removeUser] : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
         principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
           : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
-        sessionMode:['acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
+        sessionMode:agentTokenHash!==null || ['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
         hostedMode:revocation ? 'update':'share',
         ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
       }) : null;
@@ -14767,6 +14774,7 @@ function sessionPrincipalId(body: RequestBody): string | null {
 async function reclaimUnsurfacedLeases(
   tx: Sql,
   principalId: string,
+  workspaceId: string | null = null,
 ): Promise<void> {
   // Queue-only recovery: unbind session/lease on every unsurfaced row,
   // including queued ACKs, and reopen queued rows so a new holder can claim
@@ -14800,7 +14808,7 @@ async function reclaimUnsurfacedLeases(
         ELSE ack_outcome
       END,
       updated_at = statement_timestamp()
-    WHERE recipient_agent_principal_id = ${principalId}::uuid
+    WHERE recipient_agent_principal_id = ${principalId}::uuid AND (${workspaceId}::uuid IS NULL OR workspace_id=${workspaceId}::uuid)
       AND surfaced_at IS NULL
       AND (
         acked_at IS NULL
@@ -14825,6 +14833,7 @@ async function lockHumanManagedPrincipal(
   tx: Sql,
   auth: AuthContext,
   principalId: string,
+  workspaceId: unknown,
 ): Promise<
   | {
     ok: true;
@@ -14834,7 +14843,7 @@ async function lockHumanManagedPrincipal(
   }
   | { ok: false; result: HttpResult }
 > {
-  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+  if (auth.credentialKind !== "user" || auth.actor.user === null || typeof workspaceId!=="string" || !UUID_RE.test(workspaceId)) {
     return { ok: false, result: { status: 403, body: { error: "forbidden" } } };
   }
   const rows = await tx<{
@@ -14845,18 +14854,18 @@ async function lockHumanManagedPrincipal(
     role: string;
   }[]>`
     SELECT
-      p.workspace_id,
+      ${workspaceId}::uuid AS workspace_id,
       p.owner_user_id,
       p.managed_at,
       p.transport,
       m.role
     FROM swarm.agent_principals AS p
     JOIN swarm.memberships AS m
-      ON m.workspace_id = p.workspace_id
+      ON m.workspace_id = ${workspaceId}::uuid
      AND m.user_id = ${auth.actor.user}::uuid
      AND m.revoked_at IS NULL
     WHERE p.principal_id = ${principalId}::uuid
-      AND p.revoked_at IS NULL
+      AND p.revoked_at IS NULL AND swarm.local_agent_workspace_live(p.principal_id,${workspaceId}::uuid)
     FOR UPDATE OF p
   `;
   const row = rows[0];
@@ -14889,8 +14898,10 @@ async function enableAgentManagement(
   if (principalId === null) {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  const locked = await lockHumanManagedPrincipal(tx, auth, principalId);
+  const locked = await lockHumanManagedPrincipal(tx, auth, principalId,body.workspace_id);
   if (!locked.ok) return locked.result;
+  const [owned]=await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${principalId}::uuid AND owner_user_id=${auth.actor.user}::uuid`;
+  if(!owned) return {status:403,body:{error:'forbidden'}};
   if (locked.managedAt !== null) {
     return sessionError("session_already_managed");
   }
@@ -14942,6 +14953,10 @@ async function enableAgentManagement(
       expired_at = statement_timestamp(),
       updated_at = statement_timestamp()
   `;
+  await tx`INSERT INTO swarm.agent_execution_sessions(principal_id,workspace_id,session_id,lifecycle_state,expired_at)
+    SELECT am.principal_id,am.workspace_id,gen_random_uuid(),'enabled',clock_timestamp()
+    FROM swarm.agent_workspace_memberships am WHERE am.principal_id=${principalId}::uuid AND am.revoked_at IS NULL
+    ON CONFLICT(principal_id,workspace_id) DO NOTHING`;
   await retireSessionUuid(tx, placeholder, principalId);
   return { status: 200, body: { ok: true, status: "accepted" } };
 }
@@ -14955,8 +14970,10 @@ async function disableAgentManagement(
   if (principalId === null) {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  const locked = await lockHumanManagedPrincipal(tx, auth, principalId);
+  const locked = await lockHumanManagedPrincipal(tx, auth, principalId,body.workspace_id);
   if (!locked.ok) return locked.result;
+  const [owned]=await tx`SELECT principal_id FROM swarm.agent_principals WHERE principal_id=${principalId}::uuid AND owner_user_id=${auth.actor.user}::uuid`;
+  if(!owned) return {status:403,body:{error:'forbidden'}};
   const sessions = await tx<{ session_id: string }[]>`
     SELECT session_id
     FROM swarm.agent_execution_sessions
@@ -15003,7 +15020,7 @@ async function recoverAgentSession(
   if (principalId === null) {
     return { status: 400, body: { error: "invalid_request" } };
   }
-  const locked = await lockHumanManagedPrincipal(tx, auth, principalId);
+  const locked = await lockHumanManagedPrincipal(tx, auth, principalId,body.workspace_id);
   if (!locked.ok) return locked.result;
   if (locked.managedAt === null) {
     return sessionError("session_not_managed");
@@ -15011,7 +15028,7 @@ async function recoverAgentSession(
   const sessions = await tx<{ session_id: string; generation: string | number }[]>`
     SELECT session_id, generation
     FROM swarm.agent_execution_sessions
-    WHERE principal_id = ${principalId}::uuid
+    WHERE principal_id = ${principalId}::uuid AND workspace_id=${locked.workspaceId}::uuid
     FOR UPDATE
   `;
   const current = sessions[0];
@@ -15023,12 +15040,13 @@ async function recoverAgentSession(
         generation = generation + 1,
         session_id = gen_random_uuid(),
         key_hash = NULL,
+        lifecycle_state = 'disabled',
         expired_at = statement_timestamp(),
         updated_at = statement_timestamp()
-      WHERE principal_id = ${principalId}::uuid
+      WHERE principal_id = ${principalId}::uuid AND workspace_id=${locked.workspaceId}::uuid
     `;
   }
-  await reclaimUnsurfacedLeases(tx, principalId);
+  await reclaimUnsurfacedLeases(tx, principalId,locked.workspaceId);
   return { status: 200, body: { ok: true, status: "accepted" } };
 }
 
@@ -15194,6 +15212,7 @@ async function acquireAgentSession(
     SET
       session_id = ${sessionId}::uuid,
       key_hash = ${keyHash},
+      lifecycle_state = 'enabled',
       provider = ${provider ?? null},
       host_label = ${hostLabel ?? null},
       host_session_ref = ${hostSessionRef ?? null},
@@ -15206,7 +15225,7 @@ async function acquireAgentSession(
     WHERE principal_id = ${principalId}::uuid AND workspace_id=${body.workspace_id as string}::uuid
     RETURNING generation
   `;
-  await reclaimUnsurfacedLeases(tx, principalId);
+  await reclaimUnsurfacedLeases(tx, principalId,body.workspace_id as string);
   const generation = Number(updated[0]?.generation);
   if (!Number.isSafeInteger(generation)) {
     return { status: 500, body: { error: "internal_error" } };
@@ -15305,6 +15324,7 @@ async function releaseAgentSession(
     SET
       expired_at = statement_timestamp(),
       key_hash = NULL,
+      lifecycle_state = 'disabled',
       updated_at = statement_timestamp()
     WHERE principal_id = ${principalId}::uuid AND workspace_id=${body.workspace_id as string}::uuid
       AND session_id = ${sessionProofParse.proof.session_id}::uuid
@@ -15313,7 +15333,7 @@ async function releaseAgentSession(
   if (updated.count === 0) {
     return sessionError("session_conflict");
   }
-  await reclaimUnsurfacedLeases(tx, principalId);
+  await reclaimUnsurfacedLeases(tx, principalId,body.workspace_id as string);
   return { status: 200, body: { ok: true, status: "accepted" } };
 }
 
