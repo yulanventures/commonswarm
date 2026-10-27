@@ -1733,7 +1733,8 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
   const oldRevoked = await hostedRows(old.body.seat_id);
   assert.equal(oldRevoked.length, 1);
-  for (const field of ["seat", "principal", "handle"]) assert.ok(oldRevoked[0]![field].revoked_at);
+  for (const field of ["seat", "handle"]) assert.ok(oldRevoked[0]![field].revoked_at);
+  assert.equal(oldRevoked[0]!.principal.revoked_at,null,"account identity survives target seat removal");
   const sameGrant = claimSeat(fixture, fixture.grantA, name);
   const reused = claimSeat(fixture, fixture.grantA, name);
   for (const field of ["seat_id", "principal_id", "handle"]) assert.equal(reused.body[field], sameGrant.body[field]);
@@ -1763,7 +1764,8 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   }
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
   const sameRevoked = await hostedRows(sameGrant.body.seat_id);
-  for (const field of ["seat", "principal", "handle"]) assert.ok(sameRevoked[0]![field].revoked_at);
+  for (const field of ["seat", "handle"]) assert.ok(sameRevoked[0]![field].revoked_at);
+  assert.equal(sameRevoked[0]!.principal.revoked_at,null);
   const [audit] = await sql<{ detail: string }[]>`
     SELECT detail FROM swarm.audit_log WHERE workspace_id = ${fixture.workspaceA}::uuid
       AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id DESC LIMIT 1
@@ -1929,7 +1931,8 @@ for (const otherConsent of ["live", "revoked", "archived", "membership-removed"]
     assert.equal(outcome.removed.body.status, "accepted");
     assert.equal(outcome.refused.status, 403, "pre-removal capability cannot reclaim");
     const rows = await hostedRows(old.body.seat_id);
-    for (const field of ["seat", "principal", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    for (const field of ["seat", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    assert.equal(rows[0]!.principal.revoked_at,null);
     await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
     for (const claimName of [name, `new-${randomUUID()}`]) {
       const result = runHostedHarness<HarnessResult>({ operation: "claim",
@@ -1943,7 +1946,7 @@ for (const otherConsent of ["live", "revoked", "archived", "membership-removed"]
     const tombstones = await sql<{ kind: string }[]>`SELECT kind FROM swarm.revocation_tombstones
       WHERE (kind = 'hosted_seat' AND target_id = ${String(old.body.seat_id)}::uuid)
         OR (kind = 'principal' AND target_id = ${String(old.body.principal_id)}::uuid) ORDER BY kind`;
-    assert.deepEqual(tombstones.map(row => row.kind), ["hosted_seat", "principal"]);
+    assert.deepEqual(tombstones.map(row => row.kind), ["hosted_seat"]);
     assert.deepEqual(await hostedRows(unrelated.body.seat_id), otherRows, "other identity history is unchanged");
     // Edge has committed; OAuth retirement has deliberately not run yet.
     const beforeRetirement = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
@@ -1955,8 +1958,8 @@ for (const otherConsent of ["live", "revoked", "archived", "membership-removed"]
     assert.equal(await providerActive(fixture.grantB), true, "independent family survives intermediate state");
     const control = claimSeat(fixture, fixture.grantB, `control-${randomUUID()}`);
     await assertSeatAccess(fixture, control, fixture.workspaceA, 200, fixture.grantB);
-    assert.equal(await providerActive(fixture.grantA), otherConsent === "live");
-    assert.equal(await providerRefresh(fixture), otherConsent === "live");
+    assert.equal(await providerActive(fixture.grantA), true,"dormant connection remains live");
+    assert.equal(await providerRefresh(fixture), true,"refresh does not grant a removed workspace");
     // Even successful refresh in a surviving workspace cannot regain A.
     const afterRefresh = runHostedHarness<HarnessResult>({ operation: "claim",
       claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, `refresh-${randomUUID()}`) });
@@ -1966,11 +1969,11 @@ for (const otherConsent of ["live", "revoked", "archived", "membership-removed"]
     assert.equal(grant?.state, "active", "OAuth retirement does not rewrite authority grants");
     const families = await sql`SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones
       WHERE grant_id = ${`provider-${fixture.grantA}`}`;
-    assert.equal(families.length, otherConsent === "live" ? 0 : 1);
+    assert.equal(families.length, 0);
     if (otherConsent !== "live") {
       const artifacts = await sql`SELECT 1 FROM commonswarm_oauth.provider_artifacts
         WHERE grant_id = ${`provider-${fixture.grantA}`}`;
-      assert.equal(artifacts.length, 0, "OAuth refresh physically retires this family");
+      assert.ok(artifacts.length > 0, "dormant refresh artifacts remain usable for explicit re-add");
     }
     assert.equal(await providerActive(fixture.grantB), true, "independent grant/family survives");
     if (otherConsent === "live") {
@@ -2010,19 +2013,19 @@ test("refresh admitted before removal cannot restore access when its successor i
   await sql`UPDATE swarm.hosted_mcp_grant_workspaces SET revoked_at = statement_timestamp()
     WHERE grant_id = ${fixture.grantA}::uuid AND workspace_id = ${fixture.workspaceB}::uuid`;
   let removalCommitted = false;
-  await assert.rejects(() => providerRefresh(fixture, { afterAdmission: async () => {
+  assert.equal(await providerRefresh(fixture, { afterAdmission: async () => {
     const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
       workspaceId: fixture.workspaceA,
       command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
     assert.equal(removed.body.status, "accepted");
     removalCommitted = true;
-  } }), { error: "invalid_grant" }, "bound retirement fence rejects the late successor upsert");
+  } }), true, "successor preserves the dormant connection without workspace authority");
   assert.equal(removalCommitted, true, "refresh was admitted before committed removal");
   await assertSeatAccess(fixture, old, fixture.workspaceA, 403);
   const refused = runHostedHarness<HarnessResult>({ operation: "claim",
     claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name) });
   assert.equal(refused.status, 403, "current consent gate denies the raced successor");
-  assert.equal(await providerRefresh(fixture), false, "next refresh retires the family");
+  assert.equal(await providerRefresh(fixture), true, "next refresh preserves dormant family continuity");
   assert.equal(await providerActive(fixture.grantB), true);
 });
 
@@ -2740,7 +2743,7 @@ test("member removal fences exact hosted consent and restoration cannot revive o
 });
 
 
-test("authorized admin routine removal closes hosted consent, handle and seat without retiring other workspace", { timeout: 180_000 }, async () => {
+test("authorized admin routine removal scopes hosted presence to the target identity and workspace", { timeout: 180_000 }, async () => {
   // Top-level tests in this file run serially. Redirect only this lifecycle to
   // the existing isolated fixture, whose real cutover cannot open the shared DB.
   const shared = { sql, oauthSql, databaseUrl: local.DB_URL, oauthDatabaseUrl, adminIssuerDatabaseUrl };
@@ -2775,22 +2778,22 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
       ownerUserId: f.owner, workspaceId: f.workspaceA, principalId: old.body.principal_id });
     assert.deepEqual(removed, { stage: "remove", status: 200 });
     const rows = await hostedRows(old.body.seat_id);
-    for (const field of ["principal", "seat", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    for (const field of ["seat", "handle"]) assert.ok(rows[0]![field].revoked_at);
+    assert.equal(rows[0]!.principal.revoked_at,null);
     const principalFence = await sql`SELECT kind FROM swarm.revocation_tombstones
       WHERE kind='principal' AND target_id=${String(old.body.principal_id)}::uuid`;
-    assert.deepEqual(principalFence.map(row => row.kind), ["principal"]);
+    assert.deepEqual(principalFence.map(row => row.kind), []);
     await assertSeatAccess(f, old, f.workspaceA, 403);
     const refusedClaim = runHostedHarness<HarnessResult>({ operation: "claim",
       claim: claimSpec(f,f.grantA,f.workspaceA,`admin-new-${randomUUID()}`) });
-    assert.equal(refusedClaim.status,403);
-    assert.equal(refusedClaim.body.error,"hosted_grant_forbidden");
-    await assertSeatAccess(f, sibling, f.workspaceA, 403);
+    assert.equal(refusedClaim.status,200,"another live identity retains original workspace approval");
+    await assertSeatAccess(f, sibling, f.workspaceA, 200);
     await assertSeatAccess(f, unrelatedGrant, f.workspaceA, 200, f.grantB);
     const [siblingFence] = await sql`SELECT hs.revoked_at IS NOT NULL AS seat,h.revoked_at IS NOT NULL AS handle,
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=hs.seat_id) AS tombstone
       FROM swarm.hosted_mcp_seats hs JOIN swarm.hosted_mcp_seat_handles h USING(seat_id)
       WHERE hs.seat_id=${String(sibling.body.seat_id)}::uuid`;
-    assert.deepEqual(siblingFence, { seat: true, handle: true, tombstone: true });
+    assert.deepEqual(siblingFence, { seat: false, handle: false, tombstone: false });
     await assertSeatAccess(f, other, f.workspaceB, 200);
     assert.deepEqual(await hostedRows(other.body.seat_id), otherBefore, "other workspace history survives admin removal");
     assert.equal(await providerActive(f.grantA), true);
@@ -2798,7 +2801,7 @@ test("authorized admin routine removal closes hosted consent, handle and seat wi
       EXISTS(SELECT 1 FROM swarm.revocation_tombstones t WHERE t.kind='hosted_seat' AND t.target_id=h.seat_id) AS tombstone
       FROM swarm.hosted_mcp_grant_workspaces c JOIN swarm.hosted_mcp_seat_handles h USING(grant_id,workspace_id)
       WHERE h.seat_id=${String(old.body.seat_id)}::uuid`;
-    assert.deepEqual(fence, { consent: true, handle: true, tombstone: true });
+    assert.deepEqual(fence, { consent: false, handle: true, tombstone: true });
   } finally {
     sql = shared.sql;
     oauthSql = shared.oauthSql;

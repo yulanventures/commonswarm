@@ -609,9 +609,14 @@ test("claim_seat advertises and accepts an omitted workspace_id beside an explic
   assert.equal((await omitted.json()).result.isError, undefined);
   const listed = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
   const claim = (await listed.json()).result.tools.find((tool: { name: string }) => tool.name === "claim_seat");
-  assert.deepEqual(claim.inputSchema.required, ["name", "request_id"]);
+  assert.deepEqual(claim.inputSchema.required, ["request_id"]);
+  assert.deepEqual(claim.inputSchema.anyOf,[{required:['name']},{required:['agent_id','workspace_id']}]);
+  const reusable={agent_id:verified.subject,workspace_id:verified.subject,request_id:'reuse_request_123'};
+  assert.deepEqual(validateHostedToolArguments('claim_seat',reusable),reusable);
+  assert.throws(()=>validateHostedToolArguments('claim_seat',{agent_id:verified.subject,request_id:'reuse_request_123'}));
+  assert.throws(()=>validateHostedToolArguments('claim_seat',{agent_id:'invalid',workspace_id:verified.subject,request_id:'reuse_request_123'}));
   assert.equal(claim.inputSchema.properties.workspace_id.type, "string");
-  assert.equal(claim.description, "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.");
+  assert.equal(claim.description, "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. To use an existing agent in a workspace a person added, pass agent_id and workspace_id. Omit workspace_id for the consented home workspace. Retry with the same request_id.");
 });
 
 test("claim_seat routes through the grant home and preserves explicit consent checks", async () => {

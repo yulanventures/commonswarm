@@ -775,7 +775,7 @@ export async function planLocalOperation(tx: Sql, options: {
           AND (${workspace}::uuid=ANY(g.selected_workspace_ids) OR EXISTS(
             SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds a WHERE a.grant_id=g.grant_id AND a.workspace_id=${workspace}::uuid)))
         OR (${options.memberMutation===true} AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_agents ga
-          WHERE ga.grant_id=g.grant_id AND ga.principal_id=ANY(${principals}::uuid[]))))
+          WHERE ga.grant_id=g.grant_id AND ga.principal_id=ANY(${principals}::uuid[])))
         OR g.grant_id=ANY(${sortedIds(hosted.map(h=>h.grant))}::uuid[])
       ORDER BY g.grant_id`).map(r=>r.grant_id) : [];
     if(hostedGrants.length) {

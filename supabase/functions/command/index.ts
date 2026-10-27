@@ -5500,6 +5500,8 @@ async function changeAgentWorkspace(tx:Sql,body:RequestBody,auth:AuthContext,det
     FROM swarm.idempotency_keys WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
   if(prior) {
     if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==stream.stream_id) return {status:409,body:{error:'command_id_conflict'}};
+    const [current]=await tx<{live:boolean}[]>`SELECT revoked_at IS NULL AS live FROM swarm.agent_workspace_memberships WHERE principal_id=${principal}::uuid AND workspace_id=${workspace}::uuid`;
+    if ((current?.live ?? false)!==add) return await refuse(403,'forbidden');
     await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'replayed',hash,detail});
     return replayResult(storedResponse(prior.response),kind);
   }
