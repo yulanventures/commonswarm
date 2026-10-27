@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 import {
   extractSafeDiagnostics,
   firstForbiddenDiagnosticKey,
@@ -285,13 +286,83 @@ test("the read function keeps browser CORS wired — preflight branch and respon
   assert.match(source, /withCommandCors\(request, response/);
 });
 
+function assertTransactionOpenings(name: "read" | "command", source: string): void {
+  // Parse every opening, including single quotes, unparenthesized arrows and
+  // options held in a constant. Counting only known-good spellings lets an
+  // additional transaction with different isolation silently escape the guard.
+  const file = ts.createSourceFile(`${name}.ts`, source, ts.ScriptTarget.Latest, true);
+  const inventory: string[] = [];
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.expression.getText(file) === "db" && node.expression.name.text === "begin") {
+      const callback = node.arguments.at(-1);
+      assert.ok(callback && ts.isArrowFunction(callback) && ts.isBlock(callback.body), `${name}: BEGIN callback`);
+      const body = callback.body.getText(file);
+      const parameter = callback.parameters[0]!.name.getText(file);
+      let isolation: string | undefined;
+      if (node.arguments.length === 2) {
+        const option = node.arguments[0]!;
+        if (ts.isStringLiteral(option)) isolation = option.text;
+        else {
+          assert.equal(option.getText(file), "HOSTED_TRANSACTION_ISOLATION");
+          const declaration = file.statements.flatMap(statement => ts.isVariableStatement(statement)
+            ? [...statement.declarationList.declarations] : [])
+            .find(declaration => declaration.name.getText(file) === "HOSTED_TRANSACTION_ISOLATION");
+          assert.ok(declaration?.initializer && ts.isStringLiteral(declaration.initializer));
+          isolation = declaration.initializer.text;
+        }
+        assert.equal(isolation, "isolation level read committed", `${name}: every explicit BEGIN isolation`);
+      } else assert.equal(node.arguments.length, 1);
+
+      // Failure-only audit transactions and the independent purge drain retain
+      // their default isolation. The worker delivery path arrived after folding
+      // and uses default isolation with folded setTransaction setup.
+      // None may hide an explicit SERIALIZABLE option.
+      const audit = callback.body.statements.length === 2
+        && /^await (?:recordAdminFailure|adminSecurityFailure)\(/.test(callback.body.statements[1]!.getText(file));
+      const drain = /await drainFilePurgeQueue\(/.test(body);
+      let owner: ts.Node | undefined = node.parent;
+      while (owner && !ts.isFunctionDeclaration(owner)) owner = owner.parent;
+      const worker = owner && ts.isFunctionDeclaration(owner) && owner.name?.text === "handleAdminWorkerCommand" && !audit;
+      if (audit || drain || worker) assert.equal(isolation, undefined, `${name}: default-isolation exception`);
+      else assert.equal(isolation, "isolation level read committed", `${name}: request BEGIN isolation`);
+      inventory.push(audit ? "audit" : drain ? "drain" : worker ? "worker" : "request");
+
+      if (name === "read") {
+        assert.match(body, /await operation\(tx\)/);
+      } else if (drain) {
+        assert.match(body, /set_config\('role', 'swarm_command', true\)/);
+        assert.match(body, /set_config\('search_path', 'swarm, pg_catalog', true\)/);
+      } else {
+        assert.ok(body.includes(`await setTransaction(${parameter})`)
+          || body.includes(`await adminDbRole(${parameter}, 'swarm_command')`),
+        `${name}: each BEGIN installs its transaction settings`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  assert.deepEqual(inventory.sort(), name === "read" ? ["request"]
+    : ["audit", "audit", "audit", "audit", "drain", "request", "request", "request", "request", "request", "worker"],
+  `${name}: all request, failure-audit, drain and worker transactions are accounted for`);
+
+  if (name === "read") {
+    // The read wrapper delegates setup to each operation callback.
+    const visitRead = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && node.expression.getText(file) === "withReadTransaction") {
+        const callback = node.arguments[0];
+        assert.ok(callback && ts.isArrowFunction(callback));
+        assert.match(callback.body.getText(file), /await setReadTransaction\(tx\)/);
+      }
+      ts.forEachChild(node, visitRead);
+    };
+    visitRead(file);
+  }
+}
+
 function assertRoundTripFold(readSource: string, commandSource: string): void {
-  assert.equal(
-    [...readSource.matchAll(
-      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
-    )].length,
-    1,
-  );
+  assertTransactionOpenings("read", readSource);
+  assertTransactionOpenings("command", commandSource);
   assert.match(
     readSource,
     /async function setReadTransaction[\s\S]{0,500}set_config\('role', 'swarm_read', true\)[\s\S]{0,200}set_config\('search_path', 'swarm_read, swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
@@ -300,16 +371,12 @@ function assertRoundTripFold(readSource: string, commandSource: string): void {
     readSource.includes("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
     false,
   );
-  assert.equal(
-    [...commandSource.matchAll(
-      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
-    )].length,
-    3,
-  );
   assert.match(
     commandSource,
     /async function setTransaction[\s\S]{0,500}set_config\('role', 'swarm_command', true\)[\s\S]{0,200}set_config\('search_path', 'swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
   );
+  const adminRole = readFileSync(join(process.cwd(), "supabase/functions/_shared/admin-oauth-db.ts"), "utf8");
+  assert.match(adminRole, /async function adminDbRole[\s\S]{0,250}set_config\('role', \$\{role\}, true\)[\s\S]{0,150}set_config\('search_path', 'pg_catalog', true\)[\s\S]{0,150}set_config\('lock_timeout', '5s', true\)/);
 }
 
 /** Every edge function: no transaction opens with a bare BEGIN followed by separate SET statements. */
@@ -372,6 +439,7 @@ test("round-trip fold controls reject each latency regression", () => {
     join(process.cwd(), "supabase/functions/command/index.ts"),
     "utf8",
   );
+  assertRoundTripFold(readSource, commandSource);
   const mutations = [
     {
       name: "read BEGIN options removed",
@@ -398,6 +466,40 @@ test("round-trip fold controls reject each latency regression", () => {
       ),
     },
     {
+      name: "admin command BEGIN options removed",
+      read: readSource,
+      command: commandSource.replace(
+        'db.begin("isolation level read committed", async tx =>',
+        "db.begin(async tx =>",
+      ),
+    },
+    {
+      name: "single-quoted admin OAuth BEGIN changed to SERIALIZABLE",
+      read: readSource,
+      command: commandSource.replace(
+        "db.begin('isolation level read committed', async tx =>",
+        "db.begin('isolation level serializable', async tx =>",
+      ),
+    },
+    {
+      name: "extra REPEATABLE READ opening",
+      read: readSource,
+      command: commandSource + '\n db.begin("isolation level repeatable read", async (tx) => { await setTransaction(tx); });',
+    },
+    {
+      name: "hosted isolation constant changed",
+      read: readSource,
+      command: commandSource.replace(
+        'const HOSTED_TRANSACTION_ISOLATION = "isolation level read committed"',
+        'const HOSTED_TRANSACTION_ISOLATION = "isolation level serializable"',
+      ),
+    },
+    {
+      name: "admin OAuth setup removed",
+      read: readSource,
+      command: commandSource.replace("await adminDbRole(tx, 'swarm_command');", "await Promise.resolve();"),
+    },
+    {
       name: "command search path removed",
       read: readSource,
       command: commandSource.replace(
@@ -407,6 +509,7 @@ test("round-trip fold controls reject each latency regression", () => {
     },
   ];
   for (const mutation of mutations) {
+    assert.ok(mutation.read !== readSource || mutation.command !== commandSource, `${mutation.name}: mutation must change the source`);
     assert.throws(
       () => assertRoundTripFold(mutation.read, mutation.command),
       assert.AssertionError,

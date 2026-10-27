@@ -91,9 +91,8 @@ test("both prompts require the mode choice and same-session proof, without retir
   }
 });
 
-test("file download stays in memory, can be cleared, and key lifetime is under settings", () => {
+test("file download stays in memory and can be cleared", () => {
   const source = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  assert.match(source, /<details class="ac__advanced">[\s\S]*data-field="ttl"[\s\S]*<\/details>/);
   assert.match(source, /data-action="download-connection"/);
   assert.match(source, /URL.revokeObjectURL/);
   assert.match(source, /#forget\(\) \{[\s\S]*this.#connection = null;[\s\S]*this.#filePrompt = null;/);

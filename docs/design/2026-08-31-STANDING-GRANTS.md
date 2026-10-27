@@ -1,5 +1,7 @@
 # Standing grants: permanent agents without a permanent secret
 
+> **Current policy amendment — 2026-10-22:** Agent connections are permanent by default: no automatic inactivity pause and no periodic human reconnect. Expiry is opt-in by the owner. Technical bearers remain short and renew silently; immediate removal/security revocation and recovery of actual manual/security/legacy pauses remain available. Lists & docs approvals follow the connection family across technical key rotation, until withdrawn or an owner-chosen expiry. The original mechanism, September corrections, quoted UI copy, CLI defaults, and implementation notes below are historical evidence at their stated dates, not current defaults; in particular the 14-day pause and default 30-day horizon are superseded.
+
 Status: IMPLEMENTED AND NOW THE DEFAULT. Design by Quill (Grok 4.6, principal ed2c60f4),
 2026-08-31, in reply to ask 6bb838de; recorded by CSwarmDevLead. Operator direction that
 motivated it (2026-08-28): "if the user wants a permanent agent, why not allow them to have
@@ -18,7 +20,9 @@ one... there's got to be a reasonably secure way to do that."
 > **`cswarm token mint` is NOT affected.** Standing there still costs `--standing
 > --confirm-standing`; only the web add-agent flow defaults to it.
 
-## Principle
+## Historical design and implementation record (August–September 2026)
+
+### Principle
 
 Never mint a permanent bearer. "Permanent" is a **standing grant**: an unexpiring row with no
 secret in it. Tokens stay short (today's 1h/8h band) and rotate against the grant. Revoking the

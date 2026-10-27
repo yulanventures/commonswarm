@@ -14,6 +14,7 @@
  * --test-concurrency=1 because each file owns the one local runtime).
  */
 import assert from "node:assert/strict";
+import { privateCommandFailureCapture } from "../support/admin-principal-lock-order-harness.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -41,6 +42,7 @@ interface LocalEnvironment {
 let local: LocalEnvironment;
 let sql: postgres.Sql;
 let admin: SupabaseClient;
+const commandDiagnostics = privateCommandFailureCapture("chat-signals-command");
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
 let envDir: string | undefined;
@@ -251,6 +253,7 @@ before(async () => {
   };
   functionProcess.stdout?.on("data", capture);
   functionProcess.stderr?.on("data", capture);
+  functionProcess.stderr?.on("data", commandDiagnostics.capture);
   /* Wait for OUR boot banner before the HTTP probe: at a file seam the previous
    * file's still-answering runtime satisfies the probe and every request 502s. */
   {
@@ -258,7 +261,7 @@ before(async () => {
     while (!functionLogs.includes("Serving functions on")) {
       if (Date.now() > bootDeadline) {
         throw new Error(
-          `functions serve never booted:\n${functionLogs.slice(-3000)}`,
+          "functions serve never booted; private command diagnostics retained",
         );
       }
       await delay(250);
@@ -270,27 +273,31 @@ before(async () => {
     timeoutMs: 30_000,
     sleep: (ms) => delay(ms),
     now: () => Date.now(),
-    diagnostics: () => `command function logs:\n${functionLogs.slice(-4000)}`,
+    diagnostics: () => "command readiness failed; private command diagnostics retained",
   });
   f = await chatFixture();
 });
 
 after(async () => {
-  if (functionProcess && functionProcess.exitCode === null) {
-    const exited = new Promise<boolean>((resolve) => {
-      functionProcess.once("close", () => resolve(true));
-    });
-    functionProcess.kill();
-    const stopped = await Promise.race([
-      exited,
-      delay(2_000).then(() => false),
-    ]);
-    if (!stopped && functionProcess.exitCode === null) {
-      functionProcess.kill("SIGKILL");
+  try {
+    commandDiagnostics.retain();
+  } finally {
+    if (functionProcess && functionProcess.exitCode === null) {
+      const exited = new Promise<boolean>((resolve) => {
+        functionProcess.once("close", () => resolve(true));
+      });
+      functionProcess.kill();
+      const stopped = await Promise.race([
+        exited,
+        delay(2_000).then(() => false),
+      ]);
+      if (!stopped && functionProcess.exitCode === null) {
+        functionProcess.kill("SIGKILL");
+      }
     }
+    await sql?.end({ timeout: 5 });
+    if (envDir) rmSync(envDir, { recursive: true, force: true });
   }
-  await sql?.end({ timeout: 5 });
-  if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
 async function send(

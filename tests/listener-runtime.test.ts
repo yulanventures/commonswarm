@@ -44,6 +44,8 @@ import {
   RenewalReauthorisationRequired,
   RenewalRetryError,
   RenewalRevoked,
+  RenewalSuspended,
+  RenewalUnsupported,
   RENEW_TIMEOUT_MS,
 } from "../src/cloud/renewal.js";
 import type { AgentCredentialRecord, AgentCredentialStore } from "../src/cloud/agent-credential.js";
@@ -55,6 +57,7 @@ import {
   CONFIRMED_CREDENTIAL_LOSS_CODES,
   isConfirmedCredentialHttpFailure,
   SIGNAL_READ_TIMEOUT_MS,
+  SIGNAL_FOLLOW_BACKOFF_MAX_MS,
   SignalHttpError,
   LocalCredentialSecretAbsentError,
   SignalTransportError,
@@ -6809,7 +6812,7 @@ test("generated renewal answer orderings keep a request floor and recover", { ti
   assert.equal(sequences, 736);
 });
 
-test("generated failing renewals and a healthy null-store listener stay rate bounded through expiry", { timeout: 30_000 }, async () => {
+test("generated renewal outages preserve retry pacing through expiry and recover; a null store blocks expired work", { timeout: 30_000 }, async () => {
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   const expiry = start + 120_000;
   const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
@@ -6818,7 +6821,13 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
   for (let code = 0; code < failures.length ** 3; code++) {
     let current = start;
     const requestTimes: number[] = [];
+    const requestCompletedTimes: number[] = [];
     let calls = 0;
+    let expiredCalls = 0;
+    let reads = 0;
+    const controller = new AbortController();
+    const answers = [failures[code % 4]!, failures[Math.floor(code / 4) % 4]!,
+      failures[Math.floor(code / 16) % 4]!];
     const session = await AgentCredentialSession.open({
       target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
       presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -6827,8 +6836,18 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
       fetcher: (async () => {
         requestTimes.push(current);
         current += 20; // Every request costs 20 ms, including failures.
-        assert.ok(++calls <= 130, `unbounded renewal sequence ${code}`);
-        const answer = failures[Math.min(calls - 1, 2)]!;
+        const completedAt = current;
+        requestCompletedTimes.push(completedAt);
+        calls++;
+        // Cached expiry cannot decide a permanent root's fate. Keep one failed
+        // exchange past it, then let the server authorize a durable successor.
+        if (completedAt >= expiry && ++expiredCalls === 2) {
+          return new Response(JSON.stringify({ status: "accepted", ok: true,
+            agent_token: "swm_agt_" + "B".repeat(43), token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            principal_id: PRINCIPAL_ID, run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            issued_at: new Date(current).toISOString(), expires_at: new Date(current + 60 * 60_000).toISOString() }), { status: 200 });
+        }
+        const answer = answers[Math.min(calls - 1, 2)]!;
         if (answer === "network") throw new TypeError("network unavailable");
         if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
         if (answer === "foreign") return new Response("<html>wrong edge</html>", { status: 401 });
@@ -6838,16 +6857,30 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
     const stop = await runListenerRuntime({
       target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
       principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
-      model: new FakeModel(), now: () => current,
+      model: new FakeModel(), signal: controller.signal, now: () => current,
+      readPage: async ({ token }) => {
+        reads++;
+        assert.equal(token, "swm_agt_" + "B".repeat(43));
+        controller.abort();
+        return page([]);
+      },
       onEvent: (event) => {
         if (event.type === "credential_check") {
           assert.ok(event.nextAttemptAt && Date.parse(event.nextAttemptAt) - Date.parse(event.ts) >= LISTENER_REQUEST_WAIT_FLOOR_MS);
         }
         if (event.type === "read_retry") assert.ok(event.delayMs >= LISTENER_REQUEST_WAIT_FLOOR_MS);
       },
-      sleep: async (ms) => { current += ms; },
+      sleep: async (ms) => {
+        assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+        current += ms;
+        // Harness safety only, not a production limit on recovery attempts.
+        if (calls > 130) controller.abort();
+      },
     });
-    assert.equal(stop.reason, "credential", `sequence ${code}`);
+    assert.equal(stop.reason, "cancelled", `sequence ${code}: ${stop.reason === "fatal" ? stop.error.message : stop.reason}`);
+    assert.ok(calls <= 130, `sequence ${code} failed to reach the scripted recovery`);
+    assert.equal(reads, 1, `sequence ${code} sent ordinary work before renewal`);
+    assert.equal(session.expiry, requestTimes.at(-1)! + 20 + 60 * 60_000);
     assert.ok(requestTimes.some((time) => time >= deadline && time < expiry), `sequence ${code} missed margin`);
     assert.ok(requestTimes.some((time) => time >= expiry), `sequence ${code} missed expiry`);
     for (let i = 1; i < requestTimes.length; i++) {
@@ -6856,7 +6889,10 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
     }
     assert.ok(requestTimes.filter((time) => time >= deadline && time < expiry).length <=
       Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
-    assert.equal(requestTimes.filter((time) => time >= expiry).length, 1);
+    // Classify at completion, the same clock reading used by the recovery
+    // script and runtime retry decision. A request can start before expiry
+    // and finish after it, but must still count as the first expired exchange.
+    assert.equal(requestCompletedTimes.filter((time) => time >= expiry).length, 2);
     sequences++;
   }
 
@@ -6883,9 +6919,13 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
     },
     sleep: async (ms) => { current += ms; },
   });
-  assert.equal(stop.reason, "cancelled");
+  assert.equal(stop.reason, "fatal");
+  assert.ok(stop.reason === "fatal" && stop.error instanceof RenewalUnsupported);
+  assert.equal(stop.error.message,
+    "The bearer has expired and no usable local renewal session is available; ordinary work was not sent.");
   assert.ok(reads.some((time) => time >= deadline && time < expiry));
-  assert.ok(reads.some((time) => time >= expiry));
+  assert.equal(reads.filter((time) => time >= expiry).length, 0);
+  assert.equal(reads.length, 4);
   for (let i = 1; i < reads.length; i++) {
     assert.equal(reads[i]! - reads[i - 1]!,
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, i - 1, LISTENER_IDLE_POLL_MAX_MS) + 20,
@@ -6893,6 +6933,159 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
   }
   assert.equal(reads.filter((time) => time >= deadline && time < expiry).length, 3);
   assert.equal(sequences, 64);
+});
+
+test("sustained post-expiry renewal outages respect both retry ceilings until cancelled", async (t) => {
+  for (const credentialSample of [false, true]) {
+    await t.test(credentialSample ? "credential sample followed by unknown outcomes" : "unknown outcomes only", async () => {
+      const expiry = Date.parse("2026-07-30T00:00:00.000Z");
+      let current = expiry + 1;
+      const requestTimes: number[] = [];
+      const sleeps: number[] = [];
+      const events: ListenerRuntimeEvent[] = [];
+      const controller = new AbortController();
+      const model = new FakeModel();
+      let ordinaryWork = 0;
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          requestTimes.push(current);
+          current += 20;
+          if (credentialSample && requestTimes.length === 1) {
+            return new Response('{"error":"unauthenticated"}', { status: 401 });
+          }
+          // No scripted recovery: unknown outcomes must keep retrying even
+          // beyond the confirmation span. Only the caller ends this outage.
+          throw new TypeError("network unavailable");
+        }) as typeof fetch,
+      });
+      const ceiling = credentialSample ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS : SIGNAL_FOLLOW_BACKOFF_MAX_MS;
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(), model,
+        signal: controller.signal, now: () => current, random: () => 1,
+        onEvent: (event) => events.push(event),
+        readPage: async () => { ordinaryWork++; return page([]); },
+        fetcher: (async () => { ordinaryWork++; throw new Error("unexpected ordinary request"); }) as typeof fetch,
+        sleep: async (ms) => {
+          assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS && ms <= ceiling,
+            `post-expiry retry delay ${ms}ms exceeded pacing bounds ending at ${ceiling}ms`);
+          sleeps.push(ms);
+          current += ms;
+          // This bounds the test, not the listener's recovery lifetime.
+          if (sleeps.length === 20) controller.abort();
+        },
+      });
+      assert.deepEqual(stop, { reason: "cancelled" });
+      assert.equal(requestTimes.length, 20);
+      assert.deepEqual(sleeps, credentialSample
+        ? Array(20).fill(CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS)
+        : [1_000, 1_000, 2_000, 4_000, 8_000, 16_000, ...Array(14).fill(SIGNAL_FOLLOW_BACKOFF_MAX_MS)]);
+      for (let i = 1; i < requestTimes.length; i++) {
+        assert.equal(requestTimes[i]! - requestTimes[i - 1]!, sleeps[i - 1]! + 20);
+      }
+      assert.equal(ordinaryWork, 0);
+      assert.equal(model.prompts.length, 0);
+      assert.equal(session.expiry, expiry);
+      const checks = events.filter((event) => event.type === "credential_check");
+      assert.equal(checks.length, credentialSample ? 20 : 0);
+      for (const check of checks) {
+        assert.equal(check.checks, 1, "unknown outcomes must not count as confirmed credential loss");
+        assert.equal(Date.parse(check.nextAttemptAt!) - Date.parse(check.ts), CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS);
+      }
+    });
+  }
+});
+
+test("terminal renewal wire refusals stop real sessions immediately after cached expiry", async (t) => {
+  const revokedMessage = "This agent credential is no longer accepted, and renewal cannot bring it back — that is deliberate: revoking a credential, a device, or a person's membership revokes everything descended from it. Ask whoever runs this workspace what was revoked and why, then get a new credential from them.";
+  const pausedSuffix = " It is not revoked and this agent is not gone. Next step: a workspace owner, an admin, or the member who added the agent can run cswarm grant resume for a resumable pause. A workspace owner must resolve any security restrictions before renewal can continue.";
+  const reauthorisationSuffix = [
+    "Nothing is lost or broken. Renewing forever without asking anyone is the thing this deliberately does not do, so a person confirms the agent should keep working.",
+    "Whoever set this agent up issues a new credential — in the browser on the connect page, or with:",
+    `  cswarm token mint --principal-id ${PRINCIPAL_ID} --run-id <a fresh uuid> --task-id <a fresh uuid> --epoch 0`,
+    "Pipe the JSON it prints to this agent the same way the first one was handed over. Everything already posted, and the work item itself, are untouched.",
+  ].join("\n");
+  const cases = [
+    ...["predecessor_revoked", "renewal_lineage_revoked", "renewal_grant_revoked",
+      "predecessor_not_found", "predecessor_not_owned"].map((reason) => ({
+      label: reason, reason, type: RenewalRevoked, code: reason, message: revokedMessage,
+    })),
+    { label: "security suspension", reason: "renewal_grant_suspended", type: RenewalSuspended,
+      code: "renewal_grant_suspended", message: "This renewal grant is paused, so CommonSwarm refused renewal." + pausedSuffix },
+    { label: "legacy idle suspension", reason: "renewal_idle_suspended", type: RenewalSuspended,
+      code: "renewal_idle_suspended", message: "This renewal grant has a legacy idle pause, so CommonSwarm refused renewal." + pausedSuffix },
+    { label: "server-confirmed predecessor expiry", reason: "predecessor_expired", type: RenewalRevoked,
+      code: "predecessor_expired", message: "This agent credential expired before it could renew itself. Ask whoever set this agent up for a new one; nothing that was already posted is affected." },
+    { label: "superseded without a stored successor", reason: "predecessor_superseded", type: RenewalRevoked,
+      code: "predecessor_superseded", message: "Another process renewed this agent credential, and this one no longer has a live copy. Run the command again; if it keeps happening, two agents are sharing one credential and each needs its own." },
+    // Standing defaults do not override a server decision for a bounded grant.
+    { label: "renewal_horizon_reached", reason: "renewal_horizon_reached", type: RenewalReauthorisationRequired,
+      reauthorisationReason: "horizon_reached",
+      message: `CommonSwarm stopped renewing the credential for agent principal ${PRINCIPAL_ID}: it reached the end of the window a person authorised it to keep renewing for.\n` + reauthorisationSuffix },
+    { label: "renewal_successors_exhausted", reason: "renewal_successors_exhausted", type: RenewalReauthorisationRequired,
+      reauthorisationReason: "grant_exhausted",
+      message: `CommonSwarm stopped renewing the credential for agent principal ${PRINCIPAL_ID}: it used every renewal that window allowed.\n` + reauthorisationSuffix },
+    // local_suspension_fence.sql (20261021000990), lines 39-44, maps an
+    // owner-selected connection_expires_at or connection_expired_at to this
+    // wire reason. There is no separate connection-expiry code to invent.
+    { label: "owner-selected connection expiry maps to grant revocation", reason: "renewal_grant_revoked",
+      type: RenewalRevoked, code: "renewal_grant_revoked", message: revokedMessage },
+  ];
+  for (const row of cases) {
+    await t.test(row.label, async () => {
+      const expiry = Date.parse("2026-07-30T00:00:00.000Z");
+      let current = expiry + 1;
+      let exchanges = 0;
+      let ordinaryWork = 0;
+      const sleeps: number[] = [];
+      const model = new FakeModel();
+      const controller = new AbortController();
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          exchanges++;
+          return new Response(JSON.stringify({ status: "rejected", reason: row.reason, principal_id: PRINCIPAL_ID }), { status: 200 });
+        }) as typeof fetch,
+      });
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(), model,
+        signal: controller.signal, now: () => current,
+        readPage: async () => { ordinaryWork++; return page([]); },
+        fetcher: (async () => { ordinaryWork++; throw new Error("unexpected ordinary request"); }) as typeof fetch,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          current += ms;
+          controller.abort(); // Make a regression to retry fail promptly.
+        },
+      });
+      assert.equal(stop.reason, "credential");
+      assert.ok(stop.reason === "credential");
+      assert.equal(stop.error.constructor, row.type);
+      assert.ok(stop.error instanceof row.type);
+      if ("reauthorisationReason" in row) {
+        assert.ok(stop.error instanceof RenewalReauthorisationRequired);
+        assert.equal(stop.error.reason, row.reauthorisationReason);
+        assert.equal(stop.error.principalId, PRINCIPAL_ID);
+      } else {
+        assert.ok("code" in stop.error);
+        assert.equal(stop.error.code, row.code);
+      }
+      assert.equal(stop.error.message, row.message);
+      assert.equal(exchanges, 1);
+      assert.deepEqual(sleeps, []);
+      assert.equal(ordinaryWork, 0);
+      assert.equal(model.prompts.length, 0);
+      assert.equal(current, expiry + 1);
+    });
+  }
 });
 
 test("generated confirmation windows stop only after the full span of confirmed answers", { timeout: 30_000 }, async () => {
@@ -6944,7 +7137,7 @@ test("renewal window stops only after confirmed samples span the full window", {
   assert.ok(current < start + 20 * 60_000);
 });
 
-test("expired predecessor stops on the next confirmed renewal answer", { timeout: 15_000 }, async () => {
+test("cached predecessor expiry preserves the full server-refusal confirmation window", { timeout: 15_000 }, async () => {
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   let current = start;
   const expiry = start + 90_000;
@@ -6964,11 +7157,23 @@ test("expired predecessor stops on the next confirmed renewal answer", { timeout
   });
   assert.equal(stop.reason, "credential");
   assert.ok(current >= expiry);
-  assert.ok(current < start + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
-  assert.ok(renewals >= 2);
+  assert.ok(stop.reason === "credential" && stop.error instanceof RenewalCredentialCheckError);
+  assert.equal(stop.error.code, "unauthenticated");
+  assert.ok(renewals >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
   const check = events.find((event) => event.type === "credential_check");
   assert.ok(check?.nextAttemptAt);
   assert.ok(Date.parse(check.nextAttemptAt) > Date.parse(check.ts));
+  const checks = events.filter((event) => event.type === "credential_check");
+  const lastCheck = checks.at(-1)!;
+  assert.equal(checks.length, renewals);
+  assert.equal(lastCheck.checks, renewals);
+  assert.equal(lastCheck.code, "unauthenticated");
+  assert.equal(lastCheck.edge, "command");
+  assert.equal(lastCheck.stopAt, new Date(current).toISOString());
+  assert.equal(lastCheck.nextAttemptAt, undefined);
+  const confirmationEnd = Date.parse(check.ts) + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS;
+  assert.ok(current >= confirmationEnd);
+  assert.ok(current < confirmationEnd + CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS + 1_000);
 });
 
 test("a read with the still-valid token clears a renewal credential sample", { timeout: 15_000 }, async () => {
@@ -7062,8 +7267,11 @@ test("renewal retry status names state and token expiry", { timeout: 15_000 }, a
     const retryStatus = observed as ListenerStatus | null;
     assert.equal(retryStatus?.lastErrorCode, "renewal_retry");
     assert.equal(retryStatus?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
-    assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*backoff of at least one second/);
-    assert.match(renderListenerStatus(retryStatus!), /Reads and claims pause.*stops and needs a new credential/);
+    assert.equal(renderListenerStatus(retryStatus!).split("\n")[1],
+      "Credential renewal is retrying. The current token expires at 2026-07-30T00:03:00.000Z. " +
+      "The listener will retry at 2026-07-30T00:00:01.000Z with backoff of at least one second. " +
+      "Reads and claims pause while renewal is unresolved because the successor may already have been issued. " +
+      "Technical expiry does not stop renewal retries. Confirmed removal, revocation or security policy ends access.");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -86,7 +86,8 @@ export function accessRefusalMessage(reason: unknown): string {
 }
 
 /**
- * Hosted approvals last until withdrawn; local approvals end with their key.
+ * Lists & docs approval belongs to the connection family and survives technical
+ * key rotation. It lasts until withdrawn unless the owner chooses an expiry.
  */
 export function approvalUntil(expiresAt: string | null | undefined, now = Date.now()): string {
   if (expiresAt === null) return "Allowed until you withdraw it.";

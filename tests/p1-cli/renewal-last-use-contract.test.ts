@@ -41,10 +41,14 @@ test("both use writers skip stale rows and catalog proof pins their bodies and a
 });
 
 test("SQL and served races are independent and served startup has the 60-second window", { timeout: 5_000 }, () => {
-  assert.match(serverTest, /test\("older SQL use with another device and source leaves the newer use intact"/);
+  // The permanence release renamed the SQL races: the blocked writer is now
+  // framed as a wrong run device, and the successor race takes a fresh
+  // post-wait clock. The blocked use still comes from another device and source.
+  assert.match(serverTest, /test\("a wrong run device cannot overwrite an authorized use after its grant wait"/);
+  assert.match(serverTest, /\$\{f\.tokenId\}::uuid, \$\{f\.otherDevice\}::uuid, 'older'\)/);
   assert.match(serverTest, /test\("served member read survives an older blocked use"/);
-  assert.match(serverTest, /test\("older successor use preserves newer fields while still spending capacity"/);
-  assert.match(serverTest, /const deadline = Date\.now\(\) \+ 60_000/);
+  assert.match(serverTest, /test\("successor use takes a fresh post-wait clock while still spending capacity"/);
+  assert.match(serverTest, /url: `\$\{local\.API_URL\}\/functions\/v1\/read`, fetcher: fetch, timeoutMs: 60_000/);
   assert.match(serverTest, /l\.relation = 'swarm\.renewal_grants'::regclass/);
   assert.match(serverTest, /pg_blocking_pids\(a\.pid\)/);
 });

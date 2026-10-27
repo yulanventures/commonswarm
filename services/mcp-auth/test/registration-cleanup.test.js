@@ -26,7 +26,9 @@ async function harness(t, { enabled = true, unavailable = false } = {}) {
   t.mock.method(Pool.prototype, "query", async (sql, values) => {
     queries.push(sql);
     if (down) throw DB_ERROR;
-    if (sql.includes("WHERE expires_at <= statement_timestamp()")) return { rowCount: 2, rows: [] };
+    // This transport fixture owns outage/retry/scheduling, not family retention.
+    // Real migrated PG tests own reconciliation and deletion counts.
+    if (sql.includes("SELECT client_id FROM commonswarm_oauth.registered_clients")) return { rowCount: 0, rows: [] };
     if (sql.startsWith("INSERT INTO commonswarm_oauth.registered_clients")) {
       clients.set(values[0], JSON.parse(values[1]));
       return { rowCount: 1, rows: [] };
@@ -134,7 +136,7 @@ test("working database supports startup, expiry cleanup, and registration", asyn
   const h = await harness(t);
   assert.equal(h.queries.length, 1);
   assert.deepEqual(h.logs, []);
-  assert.equal(await h.registrationStore.cleanup(), 2, "cleanup preserves the removed-row count");
+  assert.equal(await h.registrationStore.cleanup(), 0, "an empty store completes maintenance");
   await h.tick();
   assert.equal(h.queries.length, 3);
   assert.deepEqual(h.logs, []);

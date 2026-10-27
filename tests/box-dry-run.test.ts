@@ -3746,10 +3746,11 @@ function planBlock(file: string, step: string): Block {
   return block;
 }
 
-// Exercise only the file/list preflight before its first live database read.
-// Relocate the two source paths into owned temporary files; supply no database result.
+// Run list/selection preflights before their first database read. Full apply/verify
+// entry points use local recording stubs; no SQL, identity tool or service runs.
 function schemaListControl(run: (select: () => SpawnSyncReturns<string>, proof: string,
-  preflight: () => SpawnSyncReturns<string>) => void): void {
+  preflight: () => SpawnSyncReturns<string>,
+  entry: (step: "runbook-27" | "runbook-28") => SpawnSyncReturns<string>) => void): void {
   const prefix = "commonswarm-box-dry-run-schema-list-";
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), prefix));
   try {
@@ -3757,9 +3758,23 @@ function schemaListControl(run: (select: () => SpawnSyncReturns<string>, proof: 
     const migrations = join(temporary, "stack/supabase/migrations");
     mkdirSync(proof);
     mkdirSync(migrations, { recursive: true });
-    writeMode(join(proof, "window.env"), shellAssignments({ SHA: RELEASE_SHA }));
+    writeMode(join(proof, "window.env"), shellAssignments({ SHA: RELEASE_SHA, WINDOW_ID }));
     const session = join(temporary, "session.sh");
-    writeMode(session, shellAssignments({ PROOF_DIR: proof, STACK_RELEASE: join(temporary, "stack") }));
+    writeMode(join(proof, "calls.txt"), "");
+    writeMode(join(temporary, "run-db-tool.sh"), "#!/bin/bash\n"
+      + shellAssignments({ CONTROL_CALLS: join(proof, "calls.txt") })
+      + `printf 'identity\\n' >> "$CONTROL_CALLS"\n`, 0o700);
+    writeMode(session, shellAssignments({ PROOF_DIR: proof, STACK_RELEASE: join(temporary, "stack"),
+      APPLY_SQL: join(proof, "apply.sql"), MIGRATE: temporary }) + `
+release_psql() { printf 'write\\n' >> "$PROOF_DIR/calls.txt"; }
+release_psql_ro() {
+  printf 'read\\n' >> "$PROOF_DIR/calls.txt"
+  case "$*" in
+    *count*) printf '1\\n' ;;
+    *apply.sql*) printf 't\\n' ;;
+  esac
+}
+`);
     const versions = ["20261014000001", "20261014000002"];
     const files = versions.map((version, index) => `${version}_oauth_${index === 0 ? "session_binding" : "finish"}.sql`);
     writeMode(join(proof, "migration-files.txt"), files.map((file) => join(migrations, file)).join("\n") + "\n");
@@ -3785,7 +3800,16 @@ function schemaListControl(run: (select: () => SpawnSyncReturns<string>, proof: 
     assert.ok(guardStart > 0, "enumeration must check the signed list after producing pending versions");
     const preflight = () => spawnSync("/bin/bash", ["-c", "(\nset -euo pipefail\n" + enumeration.slice(guardStart)],
       { encoding: "utf8", env: explicitEnvironment({ PROOF_DIR: proof }), timeout: 10_000 });
-    run(select, proof, preflight);
+    const entry = (step: "runbook-27" | "runbook-28") => {
+      const source = planBlock(RUNBOOK, step).source
+        .replace('/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env', '${CONTROL_PROOF_DIR}/window.env')
+        .replace('/run/commonswarm-release-${SHA}-session.sh', '${CONTROL_SESSION}');
+      return spawnSync("/bin/bash", ["-c", source], { encoding: "utf8",
+        env: explicitEnvironment({ RELEASE_SHA, CONTROL_PROOF_DIR: proof, CONTROL_SESSION: session,
+          // Inherited values must never replace the durable approved inputs.
+          MIGRATION_VERSIONS: "20261014000002", MIGRATION_DEFERRED_VERSIONS: "20261014000001" }), timeout: 10_000 });
+    };
+    run(select, proof, preflight, entry);
   } finally { removeOwnedTemporary(temporary, prefix); }
 }
 
@@ -3831,6 +3855,69 @@ test("controls: schema pending list accepts two versions in order and preserves 
   });
 });
 
+test("controls: schema phased window applies nine versions and defers the exact newer suffix", () => {
+  schemaListControl((select, proof, preflight) => {
+    const applied = Array.from({ length: 9 }, (_, index) => `2026101900000${index + 1}`);
+    const deferred = ["20261025000001", "20261026000001"];
+    const pending = join(proof, "pending-versions.txt");
+    const inputs = join(proof, "item-resolved-inputs.env");
+    const current = join(proof, "current-migration.env");
+    const migrations = join(proof, "../stack/supabase/migrations");
+    const setInputs = (apply: string[], defer?: string[]) => writeMode(inputs, shellAssignments({
+      MIGRATION_VERSIONS: apply.join(" "),
+      ...(defer === undefined ? {} : { MIGRATION_DEFERRED_VERSIONS: defer.join(" ") }),
+    }));
+    // Deferred migrations remain in the complete archive inventory, without any
+    // proof files: this window must neither require their proofs nor select them.
+    writeMode(join(proof, "migration-files.txt"), [...applied, ...deferred]
+      .map(version => join(migrations, `${version}_phase.sql`)).join("\n") + "\n");
+    for (const version of [...applied, ...deferred]) writeMode(join(migrations, `${version}_phase.sql`), "-- fixture\n");
+    for (const version of applied) for (const suffix of ["catalog", "functional", "rollback", "rollback-catalog"]) {
+      writeMode(join(proof, `${version}-${suffix}.sql`), "-- fixture proof; never executed\n");
+    }
+    // The requested nine-applied / one-deferred phase.
+    writeMode(pending, [...applied, deferred[0]].join("\n") + "\n");
+    setInputs(applied, deferred.slice(0, 1));
+    assert.equal(preflight().status, 0);
+    for (const [index, version] of applied.entries()) {
+      if (index > 0) writeMode(current, shellAssignments({ SELECTION_WINDOW_ID: WINDOW_ID, VERSION: applied[index - 1]!, MIGRATION_VERIFIED: applied[index - 1]! }));
+      const selected = select();
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.match(readFileSync(current, "utf8"), new RegExp(`^VERSION=${version}$`, "m"));
+    }
+    writeMode(current, shellAssignments({ SELECTION_WINDOW_ID: WINDOW_ID, VERSION: applied.at(-1)!, MIGRATION_VERIFIED: applied.at(-1)! }));
+    const finished = readFileSync(current, "utf8");
+    assert.notEqual(select().status, 0, "deferred version cannot follow the last applied version");
+    assert.equal(readFileSync(current, "utf8"), finished);
+    // A second deferred entry makes reordering the signed suffix observable.
+    writeMode(pending, [...applied, ...deferred].join("\n") + "\n");
+    setInputs(applied, deferred);
+    assert.equal(preflight().status, 0);
+    for (const suffix of [undefined, [], deferred.slice(0, 1), [...deferred, "20261027000001"], [...deferred].reverse()]) {
+      setInputs(applied, suffix);
+      for (const run of [preflight, select]) {
+        const refused = run();
+        assert.equal(refused.status, 1, refused.stderr);
+        assert.match(refused.stderr, /STOP: pending versions differ from the signed ordered list/);
+      }
+      assert.equal(readFileSync(current, "utf8"), finished);
+    }
+    setInputs([], [...applied, ...deferred]);
+    assert.equal(preflight().status, 1, "the apply list must be non-empty");
+    assert.equal(select().status, 1);
+    // No-deferral windows preserve the original exact-list gate, with either
+    // an absent or an explicitly empty optional input.
+    writeMode(pending, applied.join("\n") + "\n");
+    unlinkSync(current);
+    for (const suffix of [undefined, []]) {
+      setInputs(applied, suffix);
+      assert.equal(preflight().status, 0);
+      assert.equal(select().status, 0);
+      assert.match(readFileSync(current, "utf8"), new RegExp(`^VERSION=${applied[0]}$`, "m"));
+    }
+  });
+});
+
 test("controls: schema pending list refuses extra missing or reordered versions before database access", () => {
   schemaListControl((select, proof, preflight) => {
     assert.equal(preflight().status, 0);
@@ -3862,6 +3949,70 @@ test("controls: schema pending list refuses extra missing or reordered versions 
     assert.equal(missingProof.status, 1, missingProof.stderr);
     assert.match(missingProof.stderr, /test -f .*rollback-catalog\.sql/);
     assert.equal(existsSync(current), false, "missing rollback proof must refuse before selection is persisted");
+  });
+});
+
+test("controls: schema direct apply and verify reject deferred stale or inconsistent durable selections before database access", () => {
+  schemaListControl((select, proof, _preflight, entry) => {
+    const current = join(proof, "current-migration.env");
+    const inputs = join(proof, "item-resolved-inputs.env");
+    const pending = join(proof, "pending-versions.txt");
+    const inventory = join(proof, "migration-files.txt");
+    const originalInventory = readFileSync(inventory, "utf8");
+    const calls = join(proof, "calls.txt");
+    const apply = "20261014000001", deferred = "20261014000002";
+    const selectedFile = `${apply}_oauth_session_binding.sql`;
+    const setSelection = (extra: Record<string, string> = {}) => writeMode(current, shellAssignments({
+      VERSION: apply, MIGRATION_FILE: selectedFile, SELECTION_WINDOW_ID: WINDOW_ID, ...extra,
+    }));
+    const reset = () => {
+      writeMode(inputs, shellAssignments({ MIGRATION_VERSIONS: apply, MIGRATION_DEFERRED_VERSIONS: deferred }));
+      writeMode(pending, `${apply}\n${deferred}\n`);
+      writeMode(inventory, originalInventory);
+      writeMode(calls, "");
+      setSelection();
+    };
+    const cases: Array<[string, () => void]> = [
+      ["deferred", () => setSelection({ VERSION: deferred, MIGRATION_FILE: `${deferred}_oauth_finish.sql` })],
+      ["prior window", () => setSelection({ SELECTION_WINDOW_ID: "20260927T010203Z" })],
+      ["missing binding", () => writeMode(current, shellAssignments({ VERSION: apply, MIGRATION_FILE: selectedFile }))],
+      ["wrong filename", () => setSelection({ MIGRATION_FILE: `${deferred}_oauth_finish.sql` })],
+      ["duplicate inventory", () => writeMode(inventory, originalInventory + originalInventory.split("\n")[0] + "\n")],
+      ["absent inventory", () => writeMode(inventory, originalInventory.split("\n").slice(1).join("\n"))],
+      ["missing suffix", () => writeMode(inputs, shellAssignments({ MIGRATION_VERSIONS: apply }))],
+      ["empty apply", () => writeMode(inputs, shellAssignments({ MIGRATION_VERSIONS: " \t", MIGRATION_DEFERRED_VERSIONS: `${apply} ${deferred}` }))],
+      ["reordered list", () => writeMode(pending, `${deferred}\n${apply}\n`)],
+      ["overlap", () => writeMode(inputs, shellAssignments({ MIGRATION_VERSIONS: apply, MIGRATION_DEFERRED_VERSIONS: `${apply} ${deferred}` }))],
+    ];
+    for (const [name, arrange] of cases) for (const step of ["runbook-27", "runbook-28"] as const) {
+      reset(); arrange();
+      const before = readFileSync(current, "utf8");
+      const result = entry(step);
+      assert.equal(result.status, 1, `${step} ${name}: ${result.stderr}`);
+      assert.equal(readFileSync(calls, "utf8"), "", `${step} ${name}: no database or identity call`);
+      assert.equal(readFileSync(current, "utf8"), before, `${step} ${name}: no completion write`);
+      assert.equal(existsSync(join(proof, "apply.sql")), false, `${step} ${name}: no SQL generated`);
+    }
+    reset();
+    assert.equal(entry("runbook-27").status, 0, "valid phased apply remains usable");
+    const phasedVerify = entry("runbook-28");
+    assert.equal(phasedVerify.status, 0, phasedVerify.stderr);
+    assert.match(readFileSync(current, "utf8"), new RegExp(`^MIGRATION_VERIFIED=${apply}$`, "m"));
+    // Preserve direct apply/verify with absent and explicitly empty deferrals.
+    for (const optional of [{}, { MIGRATION_DEFERRED_VERSIONS: "" }]) {
+      reset();
+      writeMode(inputs, shellAssignments({ MIGRATION_VERSIONS: `${apply} ${deferred}`, ...optional }));
+      unlinkSync(current);
+      const selected = select();
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.match(readFileSync(current, "utf8"), new RegExp(`^SELECTION_WINDOW_ID=${WINDOW_ID}$`, "m"));
+      const applied = entry("runbook-27");
+      assert.equal(applied.status, 0, applied.stderr);
+      const verified = entry("runbook-28");
+      assert.equal(verified.status, 0, verified.stderr);
+      assert.match(readFileSync(current, "utf8"), new RegExp(`^MIGRATION_VERIFIED=${apply}$`, "m"));
+      assert.match(readFileSync(calls, "utf8"), /write/);
+    }
   });
 });
 
@@ -5724,6 +5875,7 @@ test("controls: section 1 defaults absent migration mode to no and rejects contr
       ["empty lists with no", { NO_MIGRATIONS: "no" }, /test -n "\$MIGRATION_VERSIONS"/],
       ["empty functional list with no", { NO_MIGRATIONS: "no", MIGRATION_VERSIONS: "20260928000004" }, /test -n "\$FUNCTIONAL_VERSIONS"/],
       ["non-empty migration list with yes", { MIGRATION_VERSIONS: "20260928000004" }, /test -z "\$MIGRATION_VERSIONS"/],
+      ["non-empty deferred list with yes", { MIGRATION_DEFERRED_VERSIONS: "20261025000001" }, /test -z "\$\{MIGRATION_DEFERRED_VERSIONS:-\}"/],
       ["non-empty functional list with yes", { FUNCTIONAL_VERSIONS: "20260928000004" }, /test -z "\$FUNCTIONAL_VERSIONS"/],
       ["missing migration list with yes", {}, /MIGRATION_VERSIONS: resolved item input missing/],
       ["missing functional list with yes", {}, /FUNCTIONAL_VERSIONS: resolved item input missing/],
@@ -9653,13 +9805,13 @@ test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missi
     assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
     const positive = executeWholeBlock(consumer, fixture);
     // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
-    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:472). A nounset failure there
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:476). A nounset failure there
     // is a separate plan defect, after the input file and required values were read.
     // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
     if (positive.result === "failed") {
       assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
       assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
-      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:472; transfer succeeded, consumer still fails.");
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:476; transfer succeeded, consumer still fails.");
     } else {
       assert.equal(positive.result, "passed", positive.stderr);
     }

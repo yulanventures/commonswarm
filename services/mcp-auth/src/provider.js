@@ -69,6 +69,7 @@ export async function createMcpProvider({
       cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
     throw new TypeError("CIMD cache duration must have bounded min and max seconds");
   }
+  const hostedRefreshProofs = new WeakMap();
   const adminLifecycle = new AdminTokenLifecycle({ activeKid: activeSigningKid ?? jwks?.keys?.[0]?.kid });
   const policy = interactionPolicy.base();
   // A provider session can outlive the authenticated browser session. The
@@ -238,7 +239,15 @@ export async function createMcpProvider({
       authorization: "/authorize",
       jwks: "/jwks",
     },
-    rotateRefreshToken: true,
+    rotateRefreshToken: async (ctx) => {
+      const predecessor = ctx.oidc.entities.RefreshToken;
+      if (!adminTransactionContext(false)) {
+        const proof = await predecessor.adapter.proveHostedRefreshToken?.(
+          predecessor, ctx.oidc.client.clientId);
+        if (proof) hostedRefreshProofs.set(ctx, proof);
+      }
+      return true;
+    },
     scopes: CLIENT_SCOPES,
     extraClientMetadata: {
       properties: ["scope", "dpop_signing_alg"],
@@ -258,12 +267,38 @@ export async function createMcpProvider({
       AuthorizationCode: authorizationCodeTtlSeconds,
       Grant: refreshTokenTtlSeconds,
       Interaction: 10 * 60,
-      RefreshToken: (ctx) => Math.min(
-        adminTransactionContext(false)?.token ? Math.max(0, Math.floor(
-          (new Date(adminTransactionContext().token.binding.refresh_deadline).getTime() - Date.now()) / 1000)) : refreshTokenTtlSeconds,
-        refreshTokenTtlSeconds,
-        ctx?.oidc?.entities.RotatedRefreshToken?.remainingTTL ?? refreshTokenTtlSeconds,
-      ),
+      RefreshToken: (ctx) => {
+        const now = Date.now();
+        const rotated = ctx?.oidc?.entities.RotatedRefreshToken;
+        let ttl = refreshTokenTtlSeconds;
+        const proof = ctx && hostedRefreshProofs.get(ctx);
+        const provenHosted = !adminTransactionContext(false) && proof &&
+          proof.predecessor === rotated && proof.artifactId === rotated.jti &&
+          proof.family === rotated.grantId && proof.owner === rotated.accountId &&
+          proof.clientId === rotated.clientId && proof.clientId === ctx.oidc.client.clientId &&
+          proof.resource === (Array.isArray(rotated.resource) && rotated.resource.length === 1
+            ? rotated.resource[0] : rotated.resource);
+        // Only adapter proof for this exact predecessor can outlive its stale
+        // exp. Consume and upsert still enforce fresh canonical policy/CAS.
+        // Exp-less tokens must not call remainingTTL here (it recurses).
+        if (rotated && !provenHosted && Object.hasOwn(rotated, "exp")) {
+          if (!Number.isSafeInteger(rotated.exp) || rotated.exp <= 0) {
+            throw new errors.InvalidGrant("refresh token deadline is invalid");
+          }
+          ttl = Math.min(ttl, rotated.exp - Math.floor(now / 1000));
+        }
+        const adminToken = adminTransactionContext(false)?.token;
+        if (adminToken) {
+          ttl = Math.min(ttl, Math.floor(
+            (new Date(adminToken.binding.refresh_deadline).getTime() - now) / 1000));
+        }
+        // A deadline may elapse after validation. Never pass zero to the
+        // provider's positive-integer TTL validator or lose a finite bound.
+        if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+          throw new errors.InvalidGrant("refresh token has expired");
+        }
+        return ttl;
+      },
       Session: refreshTokenTtlSeconds,
     },
     extraTokenClaims: async (_ctx, token) => {

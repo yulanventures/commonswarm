@@ -616,3 +616,91 @@ test("the CI seed takes min_client_version from the migrations' own default", ()
   const contexts = harness.sqlLexicalContexts(sample);
   assert.deepEqual(["SELECT", "-- b", "-- c", "-- d"].map((part) => contexts[sample.indexOf(part)]), [0, 2, 2, 1]);
 });
+
+
+// Exercise the real parser/projector without Deno, SQL, or a test-only harness export.
+// The temporary module is the complete harness plus a test-local export of its boundary.
+test("child result capture retains cause safely across protocol rejection", async () => {
+  const { pathToFileURL } = await import("node:url");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "lock-capture-owner-"));
+  chmodSync(dir, 0o700);
+  const path = join(dir, "harness.mjs");
+  writeFileSync(path, readFileSync(new URL("../support/admin-principal-lock-order-harness.mjs", import.meta.url), "utf8")
+    + "\nexport { parseLockOrderResult };\n", {mode:0o600});
+  try {
+    const { parseLockOrderResult: parse } = await import(pathToFileURL(path).href);
+    const scenario = "local-allow-retired-parent-allow-first";
+    const secret = "postgresql://private-user:SECRET_PASSWORD@private-host/db?token=SECRET_TOKEN";
+    const base = {scenario, stage:"import", http_refused:0, error:secret, exception_kind:"TypeError",
+      sqlstate:"42501", pg_dependency_site:{source:"pg/lib/client.js", line:55},
+      exception_sites:[{source:"tests/support/admin-principal-lock-order-harness.mjs",line:1300,column:9}],
+      detect_cjs_arrived:true, message:secret, payload:{secret}};
+    const line = value => "LOCK_ORDER_RESULT " + JSON.stringify(value) + "\n";
+    const exit = {code:1,signal:null};
+    for (const [patch, reason] of [
+      [{}, "error_allowlist"], [{scenario:secret}, "scenario"], [{stage:secret}, "stage"],
+      [{http_refused:secret}, "http_refused"], [{error:{secret}}, "error_type"],
+    ]) {
+      const {diagnostic} = parse(line({...base,...patch}), false, scenario, exit);
+      assert.equal(diagnostic.error, "malformed_result");
+      assert.equal(diagnostic.exception_kind, "TypeError", "rejected child cause survives validation");
+      assert.equal(diagnostic.validation_reason, reason);
+      assert.equal(diagnostic.sqlstate, "42501");
+      assert.deepEqual(diagnostic.pg_dependency_site, {source:"pg/lib/client.js",line:55});
+      assert.deepEqual(diagnostic.exception_sites, base.exception_sites);
+      assert.equal(diagnostic.detect_cjs_arrived, true);
+      assert.equal(diagnostic.child_stage, reason === "stage" ? undefined : "import");
+      assert.equal(diagnostic.child_error, "UNKNOWN");
+      assert.ok(!JSON.stringify(diagnostic).includes("SECRET"));
+      assert.ok(!JSON.stringify(diagnostic).includes("private-"));
+    }
+    // Positive peer: existing accepted wire shape and false flag remain unchanged.
+    const valid = {scenario,stage:"complete",http_refused:0,detect_cjs_arrived:false};
+    const accepted = parse(line(valid), false, scenario, {code:0,signal:null}, "error: TypeError: ignored");
+    assert.deepEqual(accepted.result, valid);
+    assert.equal(accepted.diagnostic, undefined);
+    assert.equal(accepted.diagnostics.detect_cjs_arrived, false);
+    const sqlFailure = parse(line({...base,error:"42501",sqlstate:undefined}), false, scenario, exit);
+    assert.equal(sqlFailure.diagnostic.validation_reason, null);
+    assert.equal(sqlFailure.diagnostic.error, "42501");
+    assert.equal(sqlFailure.diagnostic.sqlstate, "42501");
+    assert.equal(sqlFailure.diagnostic.child_stage, "import");
+    assert.equal(sqlFailure.diagnostic.exception_kind, "TypeError");
+    // stderr cannot override an actual (even malformed) result.
+    const malformed = parse(line(base), false, scenario, exit, "error: ReferenceError: " + secret);
+    assert.equal(malformed.diagnostic.exception_kind, "TypeError");
+    const pre = parse("", false, scenario, exit, "error: Uncaught (in promise) ReferenceError: " + secret
+      + "\n    at run (file:///private/fixture/tests/support/admin-principal-lock-order-harness.mjs:12:3)"
+      + "\n    at connect (file:///private/cache/node_modules/pg/lib/client.js:7:2)"
+      + "\n    at " + secret);
+    assert.equal(pre.diagnostic.error, "missing_or_duplicate_result");
+    assert.equal(pre.diagnostic.validation_reason, "missing_or_duplicate_result");
+    assert.equal(pre.diagnostic.child_stage, "pre_result");
+    assert.equal(pre.diagnostic.exception_kind, "ReferenceError");
+    assert.deepEqual(pre.diagnostic.pg_dependency_site, {source:"pg/lib/client.js",line:7});
+    assert.deepEqual(pre.diagnostic.exception_sites, [{source:"tests/support/admin-principal-lock-order-harness.mjs",line:12,column:3}]);
+    assert.ok(!JSON.stringify(pre).includes("SECRET"));
+    assert.ok(!JSON.stringify(pre).includes("private/"));
+    for (const [text, oversized, reason] of [
+      ["LOCK_ORDER_RESULT {bad}",false,"json_parse"],
+      [line(valid)+line(valid),false,"missing_or_duplicate_result"],
+      [line(valid),true,"oversize_result"],
+      [line(null),false,"result_shape"],
+    ]) {
+      const {diagnostic} = parse(text, oversized, scenario, exit, secret);
+      assert.equal(diagnostic.validation_reason, reason);
+      assert.equal(diagnostic.stage, "process_failed");
+      assert.ok(!JSON.stringify(diagnostic).includes("SECRET"));
+    }
+    const poisoned = parse(line({...base,sqlstate:["42501"],pg_dependency_site:{source:["pg/lib/client.js"],line:1},
+      exception_kind:secret,detect_cjs_arrived:secret,exception_sites:[{source:secret,line:1,column:1}]}),false,scenario,exit);
+    assert.equal(poisoned.diagnostic.sqlstate, null);
+    assert.equal(poisoned.diagnostic.pg_dependency_site, undefined);
+    assert.equal(poisoned.diagnostic.exception_kind, undefined);
+    assert.equal(poisoned.diagnostic.detect_cjs_arrived, undefined);
+    assert.ok(!JSON.stringify(poisoned).includes("SECRET"));
+  } finally {
+    execFileSync("rm", ["-r", dir], {stdio:"ignore"});
+  }
+});

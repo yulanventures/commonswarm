@@ -24,6 +24,13 @@ const postgresStub = moduleUrl(`
       const text = strings.join("?").replace(/\\s+/gu, " ").trim();
       probe.queries.push({ text, values });
       if (text.includes("INSERT INTO swarm.users")) return [{ user_id: values[0], email: null }];
+      // Admission sees only this fixture human's workspace membership.
+      if (text === "SELECT m.role FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id) WHERE m.workspace_id=?::uuid AND m.user_id=?::uuid AND m.revoked_at IS NULL AND w.archived_at IS NULL") {
+        return values[0] === ${JSON.stringify(workspaceId)} && values[1] === ${JSON.stringify(userId)}
+          ? [{ role: "owner" }] : [];
+      }
+      // Shared command discovery also reads this fixture's empty streams relation.
+      if (text === "SELECT stream_id FROM swarm.streams WHERE workspace_id=?::uuid AND kind='workspace'") return [];
       // There is no grant in this database: the real handler must refuse it.
       if (text.includes("FROM swarm.hosted_mcp_grants")) return [];
       if (text.includes("set_config(")) return [];

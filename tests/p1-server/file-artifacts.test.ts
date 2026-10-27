@@ -33,6 +33,8 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
+let functionCliState: "starting" | "serving" | "exited" = "starting";
+let functionCliError = false;
 let envDir: string | undefined;
 
 function localEnvironment(): LocalEnvironment {
@@ -57,6 +59,7 @@ async function waitForFunctions(): Promise<void> {
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
       diagnostics: () => `${fn} function logs:\n${functionLogs.slice(-4000)}`,
+      cliState: () => functionCliState,
     });
   }
 }
@@ -226,11 +229,28 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  functionProcess.on("error", () => {
+    functionCliError = true;
+    functionCliState = "exited";
+  });
+  functionProcess.once("exit", () => { functionCliState = "exited"; });
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
+    if (functionCliState !== "exited" && functionLogs.includes("Serving functions on")) {
+      functionCliState = "serving";
+    }
   };
   functionProcess.stdout?.on("data", capture);
   functionProcess.stderr?.on("data", capture);
+  // Match H0's bounded CLI announcement barrier before probing either function.
+  const bootDeadline = Date.now() + 60_000;
+  while (true) {
+    if (functionCliError) throw new Error("functions serve startup failed: cli-error");
+    if (functionCliState === "exited") throw new Error("functions serve startup failed: cli-exited");
+    if (functionCliState === "serving") break;
+    if (Date.now() >= bootDeadline) throw new Error("functions serve startup failed: cli-start-timeout");
+    await delay(250);
+  }
   await waitForFunctions();
   f = await fileFixture();
 });

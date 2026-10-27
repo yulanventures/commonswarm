@@ -880,6 +880,7 @@ test("a future-dated incomplete watcher lock obeys one deadline", { timeout: 7_0
       return true;
     });
     assert.ok(Date.now() - start < 6_000);
+    assert.equal(await readFile(path, "utf8"), "{partial", "the retained lock is left untouched");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

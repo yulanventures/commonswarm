@@ -15,6 +15,14 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   const h = await finishFlowFixture(t), verifier = 'DUMMYVERIFIER-for-PKCE-0123456789abcdef0123456789';
   const state = 'DUMMYSTATE', callbackResponses = new Set(), issuedCodes = [];
   const completed = t.mock.method(h.provider, 'interactionFinished');
+  const pendingSnapshots = [];
+  const originalSave = h.provider.Grant.prototype.save;
+  t.mock.method(h.provider.Grant.prototype, 'save', async function (...args) {
+    const id = await originalSave.apply(this,args);
+    const row = (await h.pool.query("SELECT expires_at,payload FROM commonswarm_oauth.provider_artifacts WHERE model='Grant' AND payload->>'jti'=$1",[id])).rows[0];
+    pendingSnapshots.push(row);
+    return id;
+  });
   const view = async target => {
     for (let i = 0; i < 10; i++) { const res = await h.request(target);
       if (res.status === 200) return res;
@@ -54,13 +62,44 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
     assert.equal(await countCodes(), 1, 'provider persisted one code before client receipt');
     assert.equal((await fetch(location, { redirect: 'manual' })).status, 200); assert.equal(h.received.length, issuedCodes.length);
     assert.equal(h.received.at(-1).searchParams.get('code') === code, true); assert.equal(h.received.at(-1).searchParams.get('state') === state, true);
-    assert.equal((await redeem(code)).status, 200); const replay = await redeem(code);
+    const initial = await redeem(code); assert.equal(initial.status, 200);
+    let tokens = JSON.parse(initial.body);
+    assert.equal(typeof tokens.refresh_token,'string','real completed consent issues the first refresh credential');
+    const family = (await h.pool.query("SELECT payload->>'grantId' AS family FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND artifact_id_hash=$1",
+      [createHash('sha256').update(tokens.refresh_token).digest('base64url')])).rows[0].family;
+    // Old issued-at/initial-issued-at values exercise the dependency's actual
+    // rotation lifetime logic, without changing the browser or database clock.
+    await h.pool.query(`UPDATE commonswarm_oauth.provider_artifacts SET
+      payload=jsonb_set(jsonb_set(payload,'{iat}',to_jsonb(extract(epoch FROM clock_timestamp()-interval '40 days')::bigint)),
+        '{iiat}',to_jsonb(extract(epoch FROM clock_timestamp()-interval '40 days')::bigint))
+      WHERE grant_id=$1 AND model='RefreshToken'`,[family]);
+    for (let rotation=0; rotation<3; rotation++) {
+      const next = await h.request('/token',{ method: 'POST',headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_id: h.clientId,resource: h.resource,grant_type: 'refresh_token',refresh_token: tokens.refresh_token }).toString() });
+      assert.equal(next.status,200,'refresh after the old 30-day age, including the first rotation');
+      const rotated = JSON.parse(next.body);
+      assert.notEqual(rotated.refresh_token,tokens.refresh_token);
+      assert.equal(rotated.expires_in,300,'expires_in describes only the finite access token');
+      assert.equal(Object.hasOwn(rotated,'refresh_expires_in'),false);
+      tokens=rotated;
+    }
+    const rows = (await h.pool.query(`SELECT model,payload,expires_at FROM commonswarm_oauth.provider_artifacts
+      WHERE (model='Grant' AND payload->>'jti'=$1) OR (model='RefreshToken' AND grant_id=$1)`,[family])).rows;
+    assert.ok(rows.length>=5);
+    for (const row of rows) { assert.equal(row.expires_at,null); assert.equal(Object.hasOwn(row.payload,'exp'),false); }
+    const replay = await redeem(code);
     assert.equal(replay.status, 400); assert.equal(JSON.parse(replay.body).error, 'invalid_grant');
   };
   const chooser = await authorize();
   assertChooser(chooser);
   const signedIn = await h.signIn(chooser.path); assert.equal(signedIn.status, 303);
   const first = await consent(await view(signedIn.headers.get('location'))); assert.equal(first.status, 303);
+  assert.ok(pendingSnapshots[0].expires_at>new Date(),'initial unbound/pending Grant is finite');
+  assert.equal(typeof pendingSnapshots[0].payload.exp,'number');
+  const initialGrant = (await h.pool.query("SELECT payload,expires_at FROM commonswarm_oauth.provider_artifacts WHERE model='Grant'")).rows[0];
+  assert.equal(initialGrant.expires_at,null,'activation promotes the initial Grant before finish or code');
+  assert.equal(Object.hasOwn(initialGrant.payload,'exp'),false);
+  assert.equal((await h.provider.Grant.find(initialGrant.payload.jti)).exp,undefined,'the real provider reload sees the promoted Grant');
   const connectedPath = first.headers.get('location'); assert.equal(connectedPath.endsWith('/connected'), true);
   const page = await h.request(connectedPath); assert.equal(page.status, 200); assert.equal(page.body.includes('>Connected</h1>'), true);
   const finish = page.body.match(/id="finish-continue" href="([^"]+)"/u)?.[1]; assert.ok(finish);
@@ -111,6 +150,29 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   assert.equal(new URL(old.headers.get('location'), h.issuer).pathname.startsWith('/authorize/'), true);
   assert.equal((await h.pool.query('SELECT count(*)::int AS n FROM commonswarm_oauth.finish_records')).rows[0].n, 2);
   await receive(old.headers.get('location'));
+  // A real canonical removal between activation and provider promotion must
+  // produce the retry page, with no finish record or authorization code.
+  const adapter = h.provider.Grant.adapter, originalPromote = adapter.promoteHostedGrant;
+  const finishCount = (await h.pool.query('SELECT count(*)::int AS n FROM commonswarm_oauth.finish_records')).rows[0].n;
+  const removal = t.mock.method(adapter,'promoteHostedGrant',async function (id,binding) {
+    const c = await h.pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query("SELECT stream_id FROM swarm.streams WHERE workspace_id=$1 AND kind='workspace' FOR UPDATE",[h.workspace]);
+      await c.query("UPDATE swarm.hosted_mcp_grants SET state='revoked',revoked_at=coalesce(revoked_at,clock_timestamp()) WHERE grant_id=$1",[binding.hostedGrantId]);
+      await c.query('COMMIT');
+    } finally { await c.query('ROLLBACK').catch(() => {}); c.release(); }
+    return originalPromote.call(this,id,binding);
+  });
+  const codeCount = await countCodes();
+  const removed = await consent(await authorize());
+  assert.equal(removed.status,502); assert.equal(await countCodes(),codeCount);
+  const retryRemoved = await consent({ ...removed,path: removed.path.replace(/\/consent$/u,'') });
+  assert.equal(retryRemoved.status,409,'completed consent retry is a terminal conflict after removal');
+  assert.equal(retryRemoved.headers.has('location'),false,'removed consent cannot resume authorization');
+  assert.equal(await countCodes(),codeCount);
+  assert.equal((await h.pool.query('SELECT count(*)::int AS n FROM commonswarm_oauth.finish_records')).rows[0].n,finishCount);
+  removal.mock.restore();
   const observable = [...h.responses.flatMap(res => [res.body, JSON.stringify([...res.headers]
     .filter(([name]) => name !== 'location' || !callbackResponses.has(res)))]), ...h.logs].join('\n');
   assert.ok(observable.includes(saved.location), 'positive control: saved resume Location is observable');

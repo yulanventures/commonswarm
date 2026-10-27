@@ -10,7 +10,7 @@ import { releaseCatalogQuery } from '../support/release-catalog-query.js';
 function fixture() {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), foreign = randomUUID(), consent = randomUUID();
   const principal = randomUUID(), sibling = randomUUID(), grant = randomUUID(), connection = randomUUID();
-  const local = randomUUID(), device = randomUUID(), run = randomUUID(), credential = randomUUID();
+  const local = randomUUID(), device = randomUUID(), run = randomUUID(), credential = randomUUID(), family = randomUUID();
   const name = 'Synthetic hosted to-do agent', handle = `seat_${'L'.repeat(22)}`;
   const setup = `
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),('${other}','authenticated','authenticated','${other}@example.test');
@@ -35,13 +35,15 @@ function fixture() {
       VALUES ('${handle}','${connection}','${grant}','${workspace}','${principal}',clock_timestamp());
     INSERT INTO swarm.devices(device_id,user_id,label) VALUES ('${device}','${owner}','Synthetic device');
     INSERT INTO swarm.agent_runs(run_id,principal_id,device_id) VALUES ('${run}','${local}','${device}');
-    INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id)
-      VALUES ('${credential}','${local}','${run}','[]',decode(repeat('b',64),'hex'),clock_timestamp()+interval '1 hour','${randomUUID()}');
-    INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
-      VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}'),
-        ('${credential}','${run}','${workspace}','${local}','${owner}','shared',ARRAY['read','create','update'],'${consent}',clock_timestamp()+interval '1 hour',NULL);
+    INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,horizon_expires_at,bound_device_id,created_by)
+      VALUES ('${family}','${workspace}','${local}','${run}','standing',NULL,0,NULL,'${device}','${owner}');
+    INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,lineage_id,renewal_grant_id)
+      VALUES ('${credential}','${local}','${run}','[]',decode(repeat('b',64),'hex'),clock_timestamp()+interval '1 hour','${randomUUID()}','${family}');
+    INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id,renewal_grant_id)
+      VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}',NULL),
+        ('${credential}','${run}','${workspace}','${local}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,NULL,'${family}');
   `;
-  return { owner, other, workspace, foreign, principal, sibling, grant, connection, local, run, credential, handle, setup };
+  return { owner, other, workspace, foreign, principal, sibling, grant, connection, local, run, credential, family, handle, setup };
 }
 
 const harness = `
@@ -58,7 +60,7 @@ const originalBegin = api.db.begin.bind(api.db);
 try {
   await assert.rejects(originalBegin(async tx => {
     await tx.unsafe(input.schema); await tx.unsafe(input.setup);
-    // One top-level transaction, so a notice signal keeps the outer xmin.
+    // One top-level transaction carries the server-stamped notice creation proof.
     // RESET ROLE clears a transaction-local role at once. Handlers also set
     // other transaction-local settings, so each call restores those from the
     // fixture snapshot. The hosted pre-check uses this same wrapper. Auth,
@@ -395,9 +397,12 @@ try {
     assert.equal(assignedResult.body.notices.length,1); assert.equal(assignedResult.body.notices[0].status,'sent');
     assert.equal(await noticeSpend(),spendBefore+1,'the committed notice is metered');
     const signal=assignedResult.body.notices[0].signal_id;
-    const fresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+    // 20261022000992_signal_savepoint_creation_guard.sql:1-7 specifies
+    // top-level xid8 plus physical cluster identity, including SAVEPOINT inserts.
+    const fresh=await tx\x60SELECT creation_xact_id=pg_current_xact_id() AS same_transaction,
+      creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS same_cluster
       FROM swarm.signals WHERE id=\x24{signal}::uuid\x60;
-    assert.equal(fresh[0]!.fresh,true,'notice uses the normal directed-signal transaction');
+    assert.deepEqual(fresh[0],{same_transaction:true,same_cluster:true},'notice carries both server-stamped creation proofs');
     const deliveries=await tx\x60SELECT signal_id FROM swarm.signal_deliveries WHERE workspace_id=\x24{f.workspace}::uuid AND recipient_agent_principal_id=\x24{f.principal}::uuid\x60;
     assert.deepEqual(deliveries.map(r=>r.signal_id),[signal]);
     const replay=await call('todo_assign',assign,request);
@@ -418,7 +423,7 @@ try {
     });
     let commandDenial = 'completed';
     // ROLLBACK TO starts a new subtransaction and leaves the savepoint open.
-    // Release it before the next notice so that notice keeps the top-level xmin.
+    // Release it before the next notice; creation proof uses top-level xid8 and cluster identity.
     await tx.unsafe('SAVEPOINT command_denial');
     try {
       await tx.unsafe("SELECT set_config('role', 'swarm_command', true)");
@@ -433,9 +438,9 @@ try {
     await tx.unsafe('RELEASE SAVEPOINT command_denial');
     assert.equal(commandDenial, '42501', 'command role is refused the hosted read resolver');
     const [stillFresh] = await tx.unsafe<[{ fresh: boolean }]>(
-      "SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh FROM swarm.signals WHERE id=$1::uuid",
+      "SELECT creation_xact_id=pg_current_xact_id() AND creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS fresh FROM swarm.signals WHERE id=$1::uuid",
       [signal]);
-    assert.equal(stillFresh!.fresh, true, 'resolver probe leaves the notice on the top-level transaction');
+    assert.equal(stillFresh!.fresh, true, 'resolver probe retains both server-stamped notice creation proofs');
     const queue=await call('todo_queue'); assert.equal(queue.status,200); assert.equal(queue.body.status,'ok');
     assert.equal(queue.body.queue.status.work,'idle');
     assert.equal(queue.body.queue.status.facts.connection,'live');
@@ -460,18 +465,27 @@ try {
       return result.body.connections.find((row: Record<string,unknown>)=>row.connection_id===f.credential);
     };
     const listedLocal=await localListing();
+    // 0e3552a4: local listing enumerates exact durable families and resolves
+    // effective access; the earlier "uncomputed" response was retired.
+    assert.ok(listedLocal,'the family-bound local connection is listed');
+    assert.equal(listedLocal.renewal_grant_id,f.family);
     assert.deepEqual(listedLocal.approval.operations,['read','create','update'],'real local approval remains visible');
-    assert.equal(listedLocal.effective_access,null,'listing does not infer canonical local liveness');
-    assert.equal(listedLocal.effective_access_reason,'local_credential_liveness_not_computed');
+    assert.deepEqual(listedLocal.effective_access,{source:'explicit',operations:['read','create','update'],restricted:false,restrictions:[]});
+    const localApproval=async()=>tx\x60SELECT to_jsonb(c) AS row FROM swarm.household_content_connections c WHERE connection_id=\x24{f.credential}::uuid\x60;
+    const approvalBeforeTombstone=await localApproval();
     await tx.unsafe('SAVEPOINT local_listing_tombstone');
     await isolate(async sql=>{
       await sql\x60INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES('run',\x24{f.run}::uuid)\x60;
       const tombstoned=await localListing();
-      assert.deepEqual(tombstoned.approval,listedLocal.approval,'tombstone never fabricates or removes human approval');
-      assert.equal(tombstoned.effective_access,null,'uncomputed stays truthful when canonical local path would refuse');
+      assert.equal(tombstoned,undefined,'the canonical listing excludes a tombstoned run');
+      assert.deepEqual(await localApproval(),approvalBeforeTombstone,'tombstone never fabricates or removes human approval');
+      assert.deepEqual(await asCommand(sql=>surface.executeHouseholdSurface(sql,f.workspace,localIdentity,crypto.randomUUID(),
+        {kind:'household_tool',tool:'todo_list',arguments:{seat:'seat_0000000000000000000000',scope:'open'}},yes)),
+        {status:'refused',reason:'workspace_access_refused'},'tombstone also fences the actual local content consumer');
     });
     await tx.unsafe('ROLLBACK TO SAVEPOINT local_listing_tombstone');
     await tx.unsafe('RELEASE SAVEPOINT local_listing_tombstone');
+    assert.deepEqual(await localListing(),listedLocal,'rolling back the tombstone restores the live listing');
     const humanCommands=[
       {kind:'household_todo_answer',todo_id:done.todo_id,offer_id:crypto.randomUUID(),answer:'accept'},
       {kind:'household_todo_steer',todo_id:done.todo_id,base_version:done.version,action:{kind:'start_now'}},
@@ -490,9 +504,10 @@ try {
     assert.equal(offeredResult.body.notices.length,1); assert.equal(offeredResult.body.notices[0].status,'sent');
     const offeredSignal=offeredResult.body.notices[0].signal_id;
     assert.notEqual(offeredSignal, signal);
-    const offeredFresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+    const offeredFresh=await tx\x60SELECT creation_xact_id=pg_current_xact_id() AND
+      creation_system_identifier=(SELECT system_identifier FROM pg_catalog.pg_control_system()) AS fresh
       FROM swarm.signals WHERE id=\x24{offeredSignal}::uuid\x60;
-    assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe uses the top-level transaction');
+    assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe carries both server-stamped creation proofs');
     const answered=committed(await human(envelope({kind:'household_todo_answer',todo_id:offered.todo_id,offer_id:offered.offer.offer_id,answer:'accept'})));
     assert.equal(answered.assignee.id,f.sibling); assert.equal(answered.offer,null);
     const acceptedId=crypto.randomUUID();

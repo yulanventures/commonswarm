@@ -738,7 +738,10 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
     ts.forEachChild(node, visitRenewal);
   };
   visitRenewal(renewalSource);
-  assert.ok(localRenewalCodes.size >= 8);
+  // Malformed successors now raise the uncoded RenewalMalformedResponseError in
+  // both modes, and a bare HTTP 401/403 no longer invents a local revocation, so
+  // only these literal codes remain; every server reason flows through the union.
+  assert.deepEqual([...localRenewalCodes].sort(), ["predecessor_superseded", "upgrade_required"]);
   for (const code of localRenewalCodes) assert.ok(MCP_ERROR_SENTENCES[code], `missing local renewal sentence for ${code}`);
   for (const code of unionCodes("SessionContextErrorCode")) {
     assert.equal(mapMcpError(new SessionContextError(code as ConstructorParameters<typeof SessionContextError>[0], "hidden" )).code, "session_context_invalid");

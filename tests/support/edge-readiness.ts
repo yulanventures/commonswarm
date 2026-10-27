@@ -99,66 +99,226 @@ export function readinessVerdict(status: number, body: string): ReadinessVerdict
 /** A decided refusal the gate stopped on, carrying its evidence rather than re-deriving it. */
 export class ReadinessRefused extends Error {
   override name = "ReadinessRefused";
-  constructor(readonly status: number, readonly body: string) {
+  constructor(readonly status: number, readonly body: string, readonly diagnostics = "") {
     super(
-      `the readiness probe was refused with HTTP ${status}: ${body.slice(0, 300)}. ` +
-        `That is a decided answer, not a cold runtime, so the gate stopped instead of waiting it out.`,
+      `the readiness probe was refused with HTTP ${status} (identity=${publicResponseIdentity(body)}). ` +
+        `That is a decided answer, not a cold runtime, so the gate stopped instead of waiting it out.\n${diagnostics}`,
     );
+    // Preserve programmatic access without printing arbitrary bodies in error inspection.
+    Object.defineProperty(this, "body", { enumerable: false });
+  }
+}
+
+export type FunctionCliState = "starting" | "serving" | "exited" | "error";
+
+export interface FunctionCliObserver {
+  (): FunctionCliState;
+  /** Aborts synchronously when the owned process exits or fails. */
+  readonly stopped?: AbortSignal;
+}
+
+/** Observe our own CLI, retaining the announcement even after its logs are truncated. */
+export function observeFunctionCli(child: import("node:child_process").ChildProcess): FunctionCliObserver {
+  let state: FunctionCliState = child.exitCode !== null || child.signalCode !== null ? "exited" : "starting";
+  const stopped = new AbortController();
+  if (state === "exited") stopped.abort();
+  const announcement = "Serving functions on";
+  for (const stream of [child.stdout, child.stderr]) {
+    let tail = "";
+    stream?.on("data", (chunk: Buffer) => {
+      const text = tail + chunk.toString("utf8");
+      if (state === "starting" && text.includes(announcement)) state = "serving";
+      tail = text.slice(-(announcement.length - 1));
+    });
+  }
+  child.once("error", () => { state = "error"; stopped.abort(); });
+  child.once("exit", () => { if (state !== "error") state = "exited"; stopped.abort(); });
+  return Object.assign(() => state, { stopped: stopped.signal });
+}
+
+export class ReadinessLifecycleError extends Error {
+  override name = "ReadinessLifecycleError";
+  constructor(readonly category: "cli-error" | "cli-exited" | "cli-start-timeout", diagnostics: string) {
+    super(`functions serve startup failed: ${category}\n${diagnostics}`);
   }
 }
 
 export interface ReadinessOptions {
   url: string;
   fetcher: typeof fetch;
-  /** Milliseconds to keep probing before giving up loudly. */
+  /** Shared deadline for the CLI announcement and function probes. */
   timeoutMs: number;
-  sleep: (ms: number) => Promise<void>;
+  /** Custom sleeps should honor cancellation; older callbacks remain safely observed. */
+  sleep: (ms: number, value?: undefined, options?: { signal?: AbortSignal }) => Promise<void>;
   now: () => number;
-  /** Included in the failure message so a timeout is diagnosable. */
+  /** Called on refusal and timeout; only bounded, known safe categories are retained. */
   diagnostics?: () => string;
+  /** Owned process state, independent of logs which can be truncated or unavailable. */
+  cliState?: FunctionCliObserver;
+}
+
+function observedCliState(options: ReadinessOptions): FunctionCliState | undefined {
+  try { return options.cliState?.(); }
+  catch { return undefined; } // An unavailable observer preserves HTTP-only readiness.
+}
+
+/** A public identity is evidence of a response shape, never proof of its origin. */
+function publicResponseIdentity(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && Object.keys(parsed).length === 1 &&
+      parsed.message === "An unexpected error occurred") return "unexpected-error-message";
+  } catch { /* Arbitrary bodies are retained on the refusal, never interpolated in logs. */ }
+  return "unclassified";
+}
+
+function readinessDiagnostics(options: ReadinessOptions): { logs: string; cli: string } {
+  let logs = "diagnostics unavailable";
+  let cli = "starting";
+  try {
+    const captured = (options.diagnostics?.() ?? "").slice(-8000);
+    logs = [...new Set(captured.match(
+      /Serving functions on|Setting up Edge Functions runtime|(?:TypeError|SyntaxError|ReferenceError|RangeError|PostgresError)|supabase\/functions\/[A-Za-z0-9_/-]+\.[cm]?[jt]s:\d+(?::\d+)?/g,
+    ) ?? [])].slice(0, 16).map((item) => item.slice(0, 100)).join("\n");
+    if (logs.includes("Serving functions on")) cli = "serving";
+  } catch { /* Diagnostics cannot replace the decided refusal or timeout. */ }
+  cli = observedCliState(options) ?? cli;
+  return { logs, cli };
+}
+
+/** Never echo an arbitrary URL, query, or path segment into a failure report. */
+function probedFunction(url: string): string {
+  try {
+    const path = new URL(url).pathname;
+    return path.match(/^\/functions\/v1\/(command|read|capability|activity|h0(?:\/poll|\/ack)?|mcp|admin)$/)?.[1] ?? "unknown";
+  } catch { return "unknown"; }
 }
 
 /**
  * Probe until the function itself answers, or fail loudly.
  *
- * Two distinct failures, deliberately different sentences: a decided refusal throws
+ * When CLI state is available, wait for its serving announcement within the same deadline.
+ * A CLI error/exit fails with its lifecycle category; it cannot become a transport retry.
+ * A 500 observed while the CLI is still starting waits for that announcement too. Once
+ * serving (or without a state observer), HTTP decisions retain their existing meaning.
+ * A decided refusal throws
  * `ReadinessRefused` on FIRST sighting, and a runtime that never comes up throws a timeout
  * naming the last thing seen. Neither returns — a gate that gave up quietly would hand the
  * suite the cold runtime it exists to wait for, and the resulting 502 would look like a
  * defect in whatever ran next.
  */
 export async function awaitFunctionRunning(options: ReadinessOptions): Promise<void> {
-  const deadline = options.now() + options.timeoutMs;
+  const started = options.now();
+  const deadline = started + options.timeoutMs;
+  let attempt = 0;
   let lastSeen = "no response";
-  while (options.now() < deadline) {
+  const lifecycleFailure = (category: ReadinessLifecycleError["category"]): never => {
+    const { logs, cli } = readinessDiagnostics(options);
+    throw new ReadinessLifecycleError(category,
+      `function=${probedFunction(options.url)} attempt=${attempt} ` +
+      `elapsedMs=${Math.max(0, options.now() - started)} cli=${cli}\n${logs}`);
+  };
+  const checkCli = () => {
+    const state = observedCliState(options);
+    if (state === "exited") lifecycleFailure("cli-exited");
+    if (state === "error") lifecycleFailure("cli-error");
+    return state;
+  };
+  const cancellation = new AbortController();
+  const timedOut = new Error("readiness deadline reached");
+  const stopForCli = () => {
+    try { checkCli(); }
+    catch (error) { cancellation.abort(error); }
+  };
+  const cliStopped = options.cliState?.stopped;
+  cliStopped?.addEventListener("abort", stopForCli, { once: true });
+  if (cliStopped?.aborted) stopForCli();
+  const deadlineTimer = setTimeout(() => cancellation.abort(timedOut), Math.max(0, deadline - options.now()));
+  // Legacy state callbacks have no event source. Keep observing them during HTTP waits too.
+  const cliTimer = options.cliState && !cliStopped ? setInterval(stopForCli, 200) : undefined;
+  const checkDeadline = () => {
+    if (options.now() >= deadline && !cancellation.signal.aborted) cancellation.abort(timedOut);
+    cancellation.signal.throwIfAborted();
+  };
+  const waitFor = async <T>(operation: () => Promise<T>): Promise<T> => {
+    checkDeadline();
+    let onAbort!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(cancellation.signal.reason);
+      cancellation.signal.addEventListener("abort", onAbort, { once: true });
+    });
     try {
-      const response = await options.fetcher(options.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ command_id: "healthcheck" }),
-      });
-      const body = await response.text();
-      const verdict = readinessVerdict(response.status, body);
-      if (verdict.kind === "running") return;
-      /* Thrown on sight, before any further probe can run. That ordering is what makes "a
-       * decided answer is never erased" structural: there is no later response, because
-       * there is no later request. */
-      if (verdict.kind === "refused") {
-        throw new ReadinessRefused(verdict.status, verdict.body);
-      }
-      lastSeen = verdict.detail;
-    } catch (error) {
-      // A refusal must not be caught by the transport handler and demoted to "keep waiting".
-      if (error instanceof ReadinessRefused) throw error;
-      lastSeen = `transport: ${(error as Error).message}`;
+      // Both branches have rejection handlers, including a late rejection from a custom
+      // transport/sleep that ignores abort. Native fetch cancels its request and body.
+      const result = await Promise.race([interrupted, Promise.resolve().then(() => {
+        checkDeadline();
+        return operation();
+      })]);
+      checkDeadline();
+      return result;
+    } finally {
+      cancellation.signal.removeEventListener("abort", onAbort);
     }
-    await options.sleep(200);
+  };
+  const pause = () => waitFor(() => options.sleep(
+    Math.min(200, Math.max(0, deadline - options.now())), undefined, { signal: cancellation.signal },
+  ));
+  try {
+    while (options.now() < deadline) {
+      if (checkCli() === "starting") {
+        lastSeen = "waiting for CLI serving announcement";
+        await pause();
+        continue;
+      }
+      attempt += 1;
+      try {
+        const response = await waitFor(() => options.fetcher(options.url, {
+          signal: cancellation.signal,
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ command_id: "healthcheck" }),
+        }));
+        const body = await waitFor(() => response.text());
+        const cli = checkCli();
+        if (response.status === 500 && cli === "starting") {
+          lastSeen = "HTTP 500 while waiting for CLI serving announcement";
+          await pause();
+          continue;
+        }
+        const verdict = readinessVerdict(response.status, body);
+        if (verdict.kind === "running") return;
+        /* Thrown on sight, before any further probe can run. That ordering is what makes "a
+         * decided answer is never erased" structural: there is no later response, because
+         * there is no later request. */
+        if (verdict.kind === "refused") {
+          const { logs, cli } = readinessDiagnostics(options);
+          // No trusted origin marker is available here. Even the exact public message and
+          // a proxy's Server header cannot distinguish a gateway error from a proxied one.
+          const diagnostics = `function=${probedFunction(options.url)} attempt=${attempt} ` +
+            `elapsedMs=${Math.max(0, options.now() - started)} cli=${cli} ` +
+            `status=${verdict.status} origin=unknown identity=${publicResponseIdentity(verdict.body)}\n${logs}`;
+          throw new ReadinessRefused(verdict.status, verdict.body, diagnostics);
+        }
+        lastSeen = verdict.detail;
+      } catch (error) {
+        // A refusal must not be caught by the transport handler and demoted to "keep waiting".
+        if (error === timedOut || error instanceof ReadinessRefused || error instanceof ReadinessLifecycleError) throw error;
+        checkCli();
+        lastSeen = "transport error";
+      }
+      await pause();
+    }
+  } catch (error) {
+    if (error !== timedOut) throw error;
+  } finally {
+    clearTimeout(deadlineTimer);
+    clearInterval(cliTimer);
+    cliStopped?.removeEventListener("abort", stopForCli);
+    cancellation.abort();
   }
-  throw new Error(
-    `command function never reported running (last: ${lastSeen})\n${
-      options.diagnostics?.() ?? ""
-    }`,
-  );
+  if (checkCli() === "starting") lifecycleFailure("cli-start-timeout");
+  const { logs } = readinessDiagnostics(options);
+  throw new Error(`command function never reported running (last: ${lastSeen})\n${logs}`);
 }
 
 /* ------------------------------------------------------------------------- *

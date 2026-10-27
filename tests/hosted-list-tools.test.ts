@@ -21,11 +21,14 @@ function query(sql: string, values: any[]): Row[] {
   const ws = values.find(value => value === wa || value === wb);
   if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
   if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+  // Hosted seats have no local bearer or renewal family.
+  if (sql.includes('FROM swarm.discover_local_target_ids(')) return [];
+  if (sql.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return [];
   // Match catalog/restriction/legacy queries before their nested seat references.
   if (sql.includes('FROM swarm.household_hosted_content_restrictions r')) return [];
   if (sql.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection, grant_id: grant, owner_user_id: owner }];
   if (sql.includes('SELECT c.*,') && sql.includes('FROM swarm.household_content_connections c')) return [{
-    workspace_id: ws, owner_user_id: owner, principal_id: principal, connection_id: connection, grant_id: grant, hosted_grant_id: grant,
+    workspace_id: ws, owner_user_id: owner, principal_id: principal, connection_id: connection, grant_id: grant, hosted_grant_id: grant, renewal_grant_id: null,
     operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: denied === 'connection_access_refused' ? at : null, expires_at: null, closed_replaced: false }];
   if (sql.includes('provider_family_active')) return [{ active: provider }];
   if (sql.includes('hosted_mcp_seat_handles')) {
@@ -35,7 +38,7 @@ function query(sql: string, values: any[]): Row[] {
     handle: values[1], workspace_id: seats[values[1]], stream_id: id(7), owner_user_id: owner, principal_id: principal, name: 'Synthetic' }] : [];
   if (sql.includes('min_client_version')) return [{ value: '0.1.0' }];
   if (sql.includes('SELECT m.role, m.revoked_at')) return [{ role: 'owner', revoked_at: null }];
-  if (sql.includes('FROM swarm.streams') && sql.includes("kind = 'workspace'")) return [{ stream_id: id(7) }];
+  if (sql.includes('FROM swarm.streams') && /kind\s*=\s*'workspace'/.test(sql)) return [{ stream_id: id(7) }];
   if (sql.includes('revocation_tombstones')) return [];
   if (sql.includes('archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
   if (sql.includes('purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: owner }];
@@ -43,9 +46,9 @@ function query(sql: string, values: any[]): Row[] {
   if (sql.includes('revoked_at FROM swarm.agent_principals')) return [{ revoked_at: null }];
   if (sql.includes('household_member_content_roles')) return [{ revoked_at: denied === 'workspace_access_refused' ? at : null,
     content_role: 'editor', content_consent_id: denied === 'content_consent_required' ? null : id(8) }];
-  if (sql.includes('household_content_connections')) return [{ connection_id: connection, grant_id: grant, hosted_grant_id: grant,
+  if (sql.includes('household_content_connections')) return [{ connection_id: connection, grant_id: grant, hosted_grant_id: grant, renewal_grant_id: null,
     operations: ['read', 'create', 'update'], purpose: 'shared', revoked_at: denied === 'connection_access_refused' ? at : null, expires_at: null }];
-  if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
+  if (sql.includes('FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null, connection_expires_at: null, connection_expired_at: null }];
   if (sql.includes('hosted_mcp_grant_workspaces') || sql.includes('hosted_mcp_seats')) return [{ revoked_at: null }];
   if (sql.includes('AS now')) return [{ now: at }];
   if (sql.includes('SELECT projection')) return projections.has(ws) ? [{ projection: projections.get(ws) }] : [];
@@ -83,7 +86,7 @@ async function productionEntry() {
     plugins: [{ name: 'synthetic-ports', setup(builder) {
       builder.onResolve({ filter: /^npm:/ }, args => ({ path: args.path, namespace: 'synthetic' }));
       builder.onLoad({ filter: /.*/, namespace: 'synthetic' }, args => ({ loader: 'js', contents: args.path.startsWith('npm:postgres')
-        ? 'export default function(){const sql=(p,...v)=>Array.isArray(p)&&Object.hasOwn(p,"raw")?globalThis.__h4Query(p.join("?"),v):{record:p};sql.begin=async(...a)=>a.at(-1)(sql);sql.json=v=>v;sql.unsafe=(q,v)=>globalThis.__h4Query(q,v??[]);return sql;}'
+        ? 'export default function(){const sql=(p,...v)=>Array.isArray(p)&&Object.hasOwn(p,"raw")?globalThis.__h4Query(p.join("?"),v):{record:p};sql.begin=async(...a)=>a.at(-1)(sql);sql.savepoint=async f=>f(sql);sql.json=v=>v;sql.unsafe=(q,v)=>globalThis.__h4Query(q,v??[]);return sql;}'
         : args.path.startsWith('npm:@supabase/supabase-js') ? 'export function createClient(){return{auth:{}}}' : 'throw new Error("Unexpected dependency");' }));
     } }],
   });

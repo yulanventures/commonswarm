@@ -309,12 +309,18 @@ Immediately after `1-apply-release-directories` has derived and persisted the
 window identity, and before any database, service, timer, symlink, or Caddy
 mutation, Anvil runs `runbook-03` on the box to create the copy-back manifest.
 Set `KIND_LIST` to the same approved surfaces used by the apply block,
-list every pending migration version, and list the subset whose functional
-proof produces a `.txt` file during this window. An absent `NO_MIGRATIONS` in
-the durable inputs means `no`; both version lists must be non-empty. For a stack-only image
+list the migration versions applied in this window, and list the subset whose
+functional proof produces a `.txt` file. For a phased window, also declare the
+ordered `MIGRATION_DEFERRED_VERSIONS` in `item-resolved-inputs.env` on both hosts
+and sign it in the schedule exactly like `MIGRATION_VERSIONS`. The complete
+pending inventory must equal the apply list followed by the deferred list.
+An unset or empty deferred list preserves the unphased behavior. An absent
+`NO_MIGRATIONS` in the durable inputs means `no`; both required version lists
+must be non-empty. For a stack-only image
 release, use `KIND_LIST='stack'`, `NO_MIGRATIONS=yes`, `MIGRATION_VERSIONS=''`,
-and `FUNCTIONAL_VERSIONS=''` in the durable `item-resolved-inputs.env` on both
-hosts. Both lists must be present and empty with `yes`; a missing version list,
+`MIGRATION_DEFERRED_VERSIONS=''`, and `FUNCTIONAL_VERSIONS=''` in the durable
+`item-resolved-inputs.env` on both hosts. Both required lists must be present and empty with `yes`, and the optional
+deferred list must be empty; a missing version list,
 any present switch value other than `yes` or `no`, or a non-empty list with `yes`
 stops the block. An inherited shell switch is ignored. Its copy-back manifest
 then contains no migration entries. Set the five named switches
@@ -354,7 +360,7 @@ initial manifest is built only from the explicit arrays below, never from
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  unset NO_MIGRATIONS
+  unset NO_MIGRATIONS MIGRATION_DEFERRED_VERSIONS
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${KIND_LIST:?resolved item input missing}"
   : "${H0_LEDGER_BACKFILL:?resolved item input missing}"
@@ -366,7 +372,7 @@ initial manifest is built only from the explicit arrays below, never from
   : "${MIGRATION_VERSIONS?resolved item input missing}"
   : "${FUNCTIONAL_VERSIONS?resolved item input missing}"
   case "$NO_MIGRATIONS" in
-    yes) test -z "$MIGRATION_VERSIONS"; test -z "$FUNCTIONAL_VERSIONS" ;;
+    yes) test -z "$MIGRATION_VERSIONS"; test -z "${MIGRATION_DEFERRED_VERSIONS:-}"; test -z "$FUNCTIONAL_VERSIONS" ;;
     no) test -n "$MIGRATION_VERSIONS"; test -n "$FUNCTIONAL_VERSIONS" ;;
     *) false ;;
   esac
@@ -1760,12 +1766,20 @@ forward correction. Do not remove ledger rows ad hoc.
 List every file from `supabase/migrations/*.sql` in bytewise filename order and
 compare it with the ledger. A version that already has a ledger row is applied
 and is skipped; the ledger's known failure is missing rows, never extra rows.
-For each version with NO ledger row, CSwarmDevLead must supply
-`$PROOF_DIR/<version>-catalog.sql`. Declare the fixed ordered `MIGRATION_VERSIONS`
-list in the release packet's `item-resolved-inputs.env` and sign that same list
-in the schedule. Each version needs its own functional proof, named guarded
-rollback reserve, `<version>-rollback.sql`, and `<version>-rollback-catalog.sql`.
-The pending list must match exactly: no more, no fewer, in the same order.
+Declare the non-empty ordered apply list `MIGRATION_VERSIONS` in the release
+packet's `item-resolved-inputs.env` on both hosts and sign that same list in the
+schedule. An optional ordered, space-separated `MIGRATION_DEFERRED_VERSIONS`
+list names pending versions reserved for a later window; declare it in the same
+durable inputs and sign its exact value in the schedule just like the apply list.
+Unset or empty means no deferrals. The computed pending list must equal
+`MIGRATION_VERSIONS` followed by `MIGRATION_DEFERRED_VERSIONS` exactly: no more,
+no fewer, in the same order. Thus the apply list is a non-empty prefix of the
+complete pending inventory. Only apply-list versions run in this window and
+need all four proof files: `<version>-catalog.sql`, `<version>-functional.sql`,
+`<version>-rollback.sql`, and `<version>-rollback-catalog.sql`, including a named
+guarded rollback reserve. Keep every migration in the exact-SHA archive and
+all migration checksums, including deferred files. Never fabricate ledger rows
+or omit archive files to make a phase pass.
 The catalog proof must be a read-only, error-safe catalog
 query returning exactly one unaligned value: `t` only when that migration's real
 catalog/data postcondition is complete, otherwise `f`. A generic catalog query
@@ -1908,10 +1922,13 @@ proceed merely because the service command returned.
 )
 ```
 
-3. Run once, before the first apply. Each pending version needs four proof files:
+3. Run once, before the first apply. Each apply-list version needs four proof files:
    `<version>-catalog.sql`, `<version>-functional.sql`, `<version>-rollback.sql`,
    and `<version>-rollback-catalog.sql`, plus a decision. Any pending version older
    than the newest ledger row stops until CSwarmDevLead explains it (Ledger backfill).
+   The explanation must also state why this phase applies its older prefix while
+   deferring newer pending versions, and identify the later window for them.
+   A deferral never substitutes for the explanation or any ledger/catalog stop.
 
 ```sh
 # step: runbook-24
@@ -1931,9 +1948,11 @@ proceed merely because the service command returned.
   sed -E 's#.*/##; s/_.*//' "$PROOF_DIR/migration-files.txt" | LC_ALL=C sort \
     | comm -23 - "$PROOF_DIR/ledger-before.txt" | tee "$PROOF_DIR/pending-versions.txt"
   unset MIGRATION_VERSIONS
+  unset MIGRATION_DEFERRED_VERSIONS
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${MIGRATION_VERSIONS:?resolved item input missing}"
-  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d'); then
+  test -n "$(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d')"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d'); then
     printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
   fi
   while IFS= read -r VERSION || [ -n "$VERSION" ]; do
@@ -1942,7 +1961,7 @@ proceed merely because the service command returned.
     for SUFFIX in catalog functional rollback rollback-catalog; do
       test -f "$PROOF_DIR/${VERSION}-${SUFFIX}.sql"
     done
-  done <"$PROOF_DIR/pending-versions.txt"
+  done < <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d')
 )
 ```
 
@@ -1971,7 +1990,10 @@ proceed merely because the service command returned.
    in order. The block selects the first version or the one after the last
    successfully verified version, and generates `MIGRATION_FILE` from
    `migration-files.txt`; never type a migration filename by hand. It persists
-   the pair for the apply and verify blocks.
+   the pair and current window ID for the apply and verify blocks. Both blocks
+   reload the durable lists and revalidate the selection before any database call.
+   A selection from an earlier window must be removed and selected again through
+   `runbook-26` under the newly approved window.
 
 ```sh
 # step: runbook-26
@@ -1986,20 +2008,25 @@ proceed merely because the service command returned.
   test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   unset MIGRATION_VERSIONS
+  unset MIGRATION_DEFERRED_VERSIONS
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${MIGRATION_VERSIONS:?resolved item input missing}"
-  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d'); then
+  test -n "$(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d')"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d'); then
     printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
   fi
-  MIGRATION_VERIFIED='' VERSION=''
+  : "${WINDOW_ID:?current window id required}"
+  CURRENT_WINDOW_ID="$WINDOW_ID"
+  MIGRATION_VERIFIED='' VERSION='' SELECTION_WINDOW_ID=''
   if [ -f "$PROOF_DIR/current-migration.env" ]; then
     . "$PROOF_DIR/current-migration.env"
+    test "$SELECTION_WINDOW_ID" = "$CURRENT_WINDOW_ID"
     test -z "$MIGRATION_VERIFIED" || test "$MIGRATION_VERIFIED" = "$VERSION"
   fi
-  [ -z "$MIGRATION_VERIFIED" ] && [ -n "$VERSION" ] || VERSION="$(awk -v completed="$MIGRATION_VERIFIED" 'completed == "" || previous == completed { print; exit } { previous=$0 }' "$PROOF_DIR/pending-versions.txt")"
+  [ -z "$MIGRATION_VERIFIED" ] && [ -n "$VERSION" ] || VERSION="$(awk -v completed="$MIGRATION_VERIFIED" 'completed == "" || previous == completed { print; exit } { previous=$0 }' <(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d'))"
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
-  grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
+  printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d' | grep -Fx "$VERSION"
   MIGRATION_MATCHES=()
   while IFS= read -r MIGRATION_MATCH || [ -n "$MIGRATION_MATCH" ]; do
     test -n "$MIGRATION_MATCH" && MIGRATION_MATCHES[${#MIGRATION_MATCHES[@]}]="$MIGRATION_MATCH"
@@ -2014,6 +2041,7 @@ proceed merely because the service command returned.
   test -f "$PROOF_DIR/${VERSION}-rollback.sql"
   test -f "$PROOF_DIR/${VERSION}-rollback-catalog.sql"
   {
+    printf 'SELECTION_WINDOW_ID=%q\n' "$CURRENT_WINDOW_ID"
     printf 'VERSION=%q\n' "$VERSION"
     printf 'MIGRATION_FILE=%q\n' "$MIGRATION_FILE"
   } >"$PROOF_DIR/current-migration.env"
@@ -2079,9 +2107,34 @@ missing, false, or malformed values. Any failure rolls the transaction back.
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
+  unset MIGRATION_VERSIONS
+  unset MIGRATION_DEFERRED_VERSIONS
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${MIGRATION_VERSIONS:?resolved item input missing}"
+  test -n "$(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d')"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d'); then
+    printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
+  fi
+  : "${WINDOW_ID:?current window id required}"
+  CURRENT_WINDOW_ID="$WINDOW_ID"
+  unset VERSION MIGRATION_FILE SELECTION_WINDOW_ID
   . "$PROOF_DIR/current-migration.env"
-  test -n "$VERSION"
-  test -n "$MIGRATION_FILE"
+  test "${SELECTION_WINDOW_ID:-}" = "$CURRENT_WINDOW_ID"
+  case "$VERSION" in (*[!0-9]*|'') false ;; esac
+  test "${#VERSION}" -eq 14
+  printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d' | grep -Fx "$VERSION"
+  if printf '%s\n' "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d' | grep -Fxq "$VERSION"; then
+    printf 'STOP: selected version is deferred.\n' >&2; exit 1
+  fi
+  MIGRATION_MATCHES=()
+  while IFS= read -r MIGRATION_MATCH || [ -n "$MIGRATION_MATCH" ]; do
+    test -n "$MIGRATION_MATCH" && MIGRATION_MATCHES[${#MIGRATION_MATCHES[@]}]="$MIGRATION_MATCH"
+  done < <(
+    sed -E 's#.*/##' "$PROOF_DIR/migration-files.txt" | awk -v prefix="${VERSION}_" 'index($0, prefix) == 1'
+  )
+  test "${#MIGRATION_MATCHES[@]}" -eq 1
+  test "$MIGRATION_FILE" = "${MIGRATION_MATCHES[0]}"
+  test -f "$STACK_RELEASE/supabase/migrations/$MIGRATION_FILE"
   cat >"$APPLY_SQL" <<SQL
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -2150,7 +2203,34 @@ transaction.
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
+  unset MIGRATION_VERSIONS
+  unset MIGRATION_DEFERRED_VERSIONS
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${MIGRATION_VERSIONS:?resolved item input missing}"
+  test -n "$(printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d')"
+  if ! cmp -s "$PROOF_DIR/pending-versions.txt" <(printf '%s\n' "$MIGRATION_VERSIONS" "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d'); then
+    printf 'STOP: pending versions differ from the signed ordered list.\n' >&2; exit 1
+  fi
+  : "${WINDOW_ID:?current window id required}"
+  CURRENT_WINDOW_ID="$WINDOW_ID"
+  unset VERSION MIGRATION_FILE SELECTION_WINDOW_ID
   . "$PROOF_DIR/current-migration.env"
+  test "${SELECTION_WINDOW_ID:-}" = "$CURRENT_WINDOW_ID"
+  case "$VERSION" in (*[!0-9]*|'') false ;; esac
+  test "${#VERSION}" -eq 14
+  printf '%s\n' "$MIGRATION_VERSIONS" | tr ' \t' '\n' | sed '/^$/d' | grep -Fx "$VERSION"
+  if printf '%s\n' "${MIGRATION_DEFERRED_VERSIONS:-}" | tr ' \t' '\n' | sed '/^$/d' | grep -Fxq "$VERSION"; then
+    printf 'STOP: selected version is deferred.\n' >&2; exit 1
+  fi
+  MIGRATION_MATCHES=()
+  while IFS= read -r MIGRATION_MATCH || [ -n "$MIGRATION_MATCH" ]; do
+    test -n "$MIGRATION_MATCH" && MIGRATION_MATCHES[${#MIGRATION_MATCHES[@]}]="$MIGRATION_MATCH"
+  done < <(
+    sed -E 's#.*/##' "$PROOF_DIR/migration-files.txt" | awk -v prefix="${VERSION}_" 'index($0, prefix) == 1'
+  )
+  test "${#MIGRATION_MATCHES[@]}" -eq 1
+  test "$MIGRATION_FILE" = "${MIGRATION_MATCHES[0]}"
+  test -f "$STACK_RELEASE/supabase/migrations/$MIGRATION_FILE"
   LEDGER_AFTER="$(release_psql_ro -Atq --command \
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '$VERSION';")"
   cat >"$APPLY_SQL" <<SQL

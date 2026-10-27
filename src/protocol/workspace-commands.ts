@@ -1348,17 +1348,15 @@ export function decideWorkspace(
       if (grant.revoked_at !== null) {
         return domain(ctx, cmd.kind, 'renewal_grant_revoked', 'renewal grant is revoked');
       }
-      /* THE DAY COUNT IS BUILT FROM THE CONSTANT, not typed into the sentence.
-         It mirrors the interval in swarm.prepare_renewal_grant, and a sentence
-         that states an enforced number has to move when the number does.
-         The remedy is named too: this refusal reaches an agent that can do
-         nothing about it, so the detail has to say who can. */
+      /* Compatibility refusal for a legacy paused grant. Connections do not
+         pause automatically for inactivity under the current policy. Keep the
+         existing human recovery route without guessing why a grant is paused. */
       if (facts.grant_preflight_code === 'renewal_idle_suspended') {
         return domain(
           ctx,
           cmd.kind,
           'renewal_idle_suspended',
-          `standing grant went ${RENEWAL_IDLE_PAUSE_DAYS} days without use and is now paused; `
+          'standing grant is paused; '
             + 'it is not revoked, and a workspace owner or admin, or the member who owns this agent, can resume it',
         );
       }

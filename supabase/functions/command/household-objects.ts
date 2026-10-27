@@ -5,7 +5,7 @@
  * Lock order is workspace, membership/content rights, stream, artifact rows.
  */
 import type postgres from 'postgres';
-import { assertHouseholdContentServiceReady, loadHouseholdContentAccess } from './household-content-access.ts';
+import { loadHouseholdContentAccess } from './household-content-access.ts';
 import type {
   HouseholdAttribution, HouseholdBlob, HouseholdContent, HouseholdObjectState,
   HouseholdRevision, HouseholdRevisionRef,
@@ -65,11 +65,11 @@ export function createHouseholdObjectStore(dependencies: {
   async function access(tx: Sql, workspaceId: string, identity: HouseholdIdentity): Promise<{ facts: HouseholdAccessFacts; now: number } | null> {
     if (!await recheckCredential(tx, identity)) return null;
     const result = await loadHouseholdContentAccess(tx, workspaceId, identity);
-    // Workspace/storage waits may outlast a credential. Revalidate the verified
-    // capability after acquiring durable locks as well as at every existing call.
-    const live = await recheckCredential(tx, identity);
-    await assertHouseholdContentServiceReady(tx);
-    return live ? result : null;
+    // Resolve the verified capability after all durable access-row waits.
+    // Reload the same facts afterwards so a credential wait cannot leave an
+    // earlier policy clock in the authority returned to Storage or the caller.
+    if (!result || !await recheckCredential(tx, identity)) return null;
+    return await loadHouseholdContentAccess(tx, workspaceId, identity);
   }
 
   async function state(tx: Sql, workspaceId: string, create: boolean): Promise<HouseholdObjectState> {
@@ -125,6 +125,12 @@ export function createHouseholdObjectStore(dependencies: {
     const digest = await transfers.householdSha256(new TextEncoder().encode(transfers.householdCanonical({ command: command.kind === 'reserve_household_upload' ? { ...command, expires_at: 0 } : command,
       proposal: proposal ? { content: proposal.content, sha256: proposalDigest } : null })));
     const current = await state(tx, workspaceId, true);
+    // state() can wait after access(). Refuse before replay, content reads or
+    // staging bytes, even when a SHARE-locked grant stayed unchanged as time ran.
+    const stateAccess = await access(tx, workspaceId, identity);
+    if (!stateAccess || core.householdAccessRefusal(stateAccess.facts, workspaceId, operation(command), stateAccess.now)) {
+      throw new transfers.HouseholdTransferError('access_refused');
+    }
     const previous = current.receipts[JSON.stringify([identity.principal_id ?? identity.user_id, requestId])];
     if (previous) {
       const replayed = previous.request_digest === digest;
@@ -136,6 +142,10 @@ export function createHouseholdObjectStore(dependencies: {
     if (command.kind !== 'commit_household_upload' && command.kind !== 'release_household_upload') {
       identityAttempts = await rate(tx, `file:create:${identity.principal_id ? 'agent' : 'user'}:${(identity.principal_id ?? identity.user_id).toLowerCase()}`, core.HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT);
       workspaceAttempts = await rate(tx, `file:create:ws:${workspaceId.toLowerCase()}`, core.HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT);
+    }
+    const preparedAccess = await access(tx, workspaceId, identity);
+    if (!preparedAccess || core.householdAccessRefusal(preparedAccess.facts, workspaceId, operation(command), preparedAccess.now)) {
+      throw new transfers.HouseholdTransferError('access_refused');
     }
     const contents: HouseholdVerifiedContent[] = [];
     const base = baseOf(command);
@@ -151,7 +161,7 @@ export function createHouseholdObjectStore(dependencies: {
       const owner: HouseholdAttribution = { ...actor(identity), connection_id: identity.connection?.connection_id ?? null, grant_id: identity.connection?.grant_id ?? null };
       if (reservation && reservation.owner.user_id === owner.user_id && reservation.owner.principal_id === owner.principal_id
         && reservation.owner.connection_id === owner.connection_id && reservation.owner.grant_id === owner.grant_id
-        && command.operation === (reservation.base ? 'update' : 'create') && reservation.expires_at > initialAccess!.now) {
+        && command.operation === (reservation.base ? 'update' : 'create') && reservation.expires_at > preparedAccess.now) {
         const [registered] = await tx`SELECT storage_path FROM swarm.household_object_artifacts WHERE workspace_id=${workspaceId}::uuid
           AND object_id=${reservation.object_id} AND reservation_id=${reservation.reservation_id} AND state='reserved'`;
         if (!registered || registered.storage_path !== reservation.proposed.storage_key) throw new transfers.HouseholdTransferError('bytes_mismatch');
@@ -178,7 +188,7 @@ export function createHouseholdObjectStore(dependencies: {
         WHERE v.workspace_id=${workspaceId}::uuid AND NOT f.household_managed AND v.state IN ('pending','live','retired')) AS bytes,
       (SELECT count(*)::text FROM swarm.files WHERE workspace_id=${workspaceId}::uuid AND purged_at IS NULL) AS names`;
     const usage = core.householdObjectUsage(current);
-    const ctx = { access: initialAccess!.facts, now: initialAccess!.now, command_id: requestId, request_digest: digest,
+    const ctx = { access: preparedAccess.facts, now: preparedAccess.now, command_id: requestId, request_digest: digest,
       seq: current.last_seq + 1, event_id: crypto.randomUUID(), revision_token: crypto.randomUUID().replaceAll('-', ''), draft_id: crypto.randomUUID(),
       other_storage_bytes: Number(legacy!.bytes), other_object_count: Math.max(0, Number(legacy!.names) - usage.object_count),
       identity_write_attempts: identityAttempts, workspace_write_attempts: workspaceAttempts, contents, prepared };

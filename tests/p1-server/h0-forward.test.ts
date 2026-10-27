@@ -1,5 +1,6 @@
 /** Served H0 forwarding through the local command edge and local PostgreSQL only. */
 import assert from "node:assert/strict";
+import { privateCommandFailureCapture } from "../support/admin-principal-lock-order-harness.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -20,6 +21,7 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let ownerJwt: string;
 let workspace: string;
+const commandDiagnostics = privateCommandFailureCapture("hzero-forward-command");
 let processHandle: ReturnType<typeof spawn> | undefined;
 let envDir: string | undefined;
 let functionReady = false;
@@ -113,6 +115,7 @@ before(async () => {
   let ready = "";
   processHandle.stdout?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
   processHandle.stderr?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
+  processHandle.stderr?.on("data", commandDiagnostics.capture);
   const deadline = Date.now() + 60_000;
   while (!ready.includes("Serving functions on")) {
     if (Date.now() > deadline) throw new Error("local functions did not start");
@@ -161,14 +164,18 @@ before(async () => {
 });
 
 after(async () => {
-  if (processHandle && processHandle.exitCode === null) {
-    const exited = new Promise<void>((resolve) => { processHandle?.once("close", () => resolve()); });
-    processHandle.kill();
-    await Promise.race([exited, delay(2_000)]);
-    if (processHandle.exitCode === null) processHandle.kill("SIGKILL");
+  try {
+    commandDiagnostics.retain();
+  } finally {
+    if (processHandle && processHandle.exitCode === null) {
+      const exited = new Promise<void>((resolve) => { processHandle?.once("close", () => resolve()); });
+      processHandle.kill();
+      await Promise.race([exited, delay(2_000)]);
+      if (processHandle.exitCode === null) processHandle.kill("SIGKILL");
+    }
+    await sql?.end({ timeout: 5 });
+    if (envDir) rmSync(envDir, { recursive: true, force: true });
   }
-  await sql?.end({ timeout: 5 });
-  if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
 test("register retries one attempt on one seat, a new attempt takes another, and revocation refuses", { timeout: 80_000 }, async () => {
@@ -180,8 +187,8 @@ test("register retries one attempt on one seat, a new attempt takes another, and
   assert.equal(retry.principalId, first.principalId);
   assert.notEqual(retry.token, first.token, "unused token recovery must replace its secret");
   const replaced = await h0("note", { body: "replaced token must be refused" }, first.token);
-  assert.equal(replaced.status, 403);
-  assert.equal(replaced.body.error, "forbidden");
+  assert.equal(replaced.status, 401);
+  assert.deepEqual(replaced.body, { error: "unauthenticated" });
   signalId(await h0("note", { body: "live recovered token" }, retry.token));
   const usedRetry = await h0("register", {
     joinCredential: join.secret, attemptId: attempt, name: "First",
@@ -317,3 +324,49 @@ test("three seats: ask, poll, ack and reply complete through H0", { timeout: 80_
   assert.equal(askerPoll.status, 200);
   assert.ok((askerPoll.body.deliveries as Array<{ signal: { id: string } }>).some((item) => item.signal.id === reply));
 });
+
+// The forward transport owns discovery failures before command dispatch.
+// Existing successful forwarding cannot detect a denied routing-hint lookup.
+for (const denial of ["revoked", "removed", "elapsed"] as const) {
+  const expectedStatus = denial === "elapsed" ? 401 : 403;
+  test(`known ${denial} local credential returns authoritative ${expectedStatus} through H0`, { timeout: 40_000 }, async () => {
+    const isolated = randomUUID();
+    const [creator] = await sql<{ created_by: string }[]>`
+      SELECT created_by FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid`;
+    assert.ok(creator);
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+        VALUES (${isolated}::uuid, 'Denied H0 forwarding', ${creator.created_by}::uuid)`;
+      await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+        VALUES (${isolated}::uuid, ${creator.created_by}::uuid, 'owner')`;
+      await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind)
+        VALUES (${randomUUID()}::uuid, ${isolated}::uuid, 'workspace')`;
+    });
+    const minted = await post("command", {
+      command_id: randomUUID(), client_version: "0.1.0", workspace_id: isolated,
+      stream: { kind: "workspace" }, command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 4 },
+    }, ownerJwt);
+    assert.equal(minted.status, 200);
+    const seat = await register(String(minted.body.join_credential));
+    signalId(await h0("note", { body: "current credential control" }, seat.token));
+    if (denial === "revoked") {
+      await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp()
+        WHERE principal_id = ${seat.principalId}::uuid`;
+    } else if (denial === "removed") {
+      await sql`UPDATE swarm.memberships SET revoked_at = clock_timestamp()
+        WHERE workspace_id = ${isolated}::uuid AND user_id = ${creator.created_by}::uuid`;
+    } else {
+      const changed = await sql`UPDATE swarm.renewal_grants SET connection_expires_at = clock_timestamp() - interval '1 second'
+        WHERE principal_id = ${seat.principalId}::uuid RETURNING renewal_grant_id`;
+      assert.equal(changed.length, 1);
+    }
+    const counts = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.signals
+      WHERE from_principal = ${seat.principalId}::uuid`)[0]!.n;
+    const before = await counts();
+    const denied = await h0("note", { body: "denied credential" }, seat.token);
+    assert.equal(denied.status, expectedStatus, JSON.stringify(denied.body));
+    assert.deepEqual(denied.body, { error: denial === "elapsed" ? "unauthenticated" : "forbidden" });
+    assertHeaders(denied);
+    assert.equal(await counts(), before, "denial appended no signal");
+  });
+}

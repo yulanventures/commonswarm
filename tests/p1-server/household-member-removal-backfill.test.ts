@@ -1,4 +1,5 @@
 /** CI only. Real DDL and invitation/store boundaries; every write rolls back. */
+import { installedApprovalFamilyAcl, historicalApprovalFamilyAcl } from '../support/historical-household-acl.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
@@ -82,6 +83,8 @@ test('historical and schema-to-edge removals are repaired idempotently, preserve
   try {
     await assert.rejects(db.begin(async tx => {
       await tx.unsafe(emptyApplicationSchema());
+      await tx.unsafe(installedApprovalFamilyAcl);
+      await tx.unsafe(historicalApprovalFamilyAcl);
       await tx.unsafe('ALTER SCHEMA swarm RENAME TO absent_swarm;');
       assert.deepEqual(await counts(tx), expectedCounts(0));
       await tx.unsafe('ALTER SCHEMA absent_swarm RENAME TO swarm;');

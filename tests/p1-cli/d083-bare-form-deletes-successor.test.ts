@@ -84,14 +84,17 @@ test("D-083: a genuinely DIFFERENT lineage is still deleted — the fix is not a
    * Both sides name an id here, and they differ. */
   const spy = spyStore(record({ rootTokenId: "99999999-9999-4999-8999-999999999999" }));
 
-  await AgentCredentialSession.open({
+  /* The permanence release fails closed here: a record that names a different lineage is
+   * refused outright, so nothing foreign is adopted and nothing is silently deleted either.
+   * The check still bites; it just no longer destroys state it cannot vouch for. */
+  await assert.rejects(AgentCredentialSession.open({
     presented: presented(ROOT_ID),
     store: spy.store,
     now: () => Date.now(),
     warn: () => undefined,
-  } as never);
+  } as never), /stored renewal state belongs to a different credential lineage/);
 
-  assert.equal(spy.deleted(), true, "a foreign lineage was kept");
+  assert.equal(spy.deleted(), false, "a refused foreign lineage is not deleted");
 });
 
 test("D-083: matching ids are still adopted, so the fix does not break the normal path", async () => {

@@ -12,11 +12,25 @@ const { approveHouseholdConnection: approve, withdrawHouseholdConnection: withdr
 const owner = randomUUID(), workspace = randomUUID(), principal = randomUUID();
 const identity = { user_id: owner, principal_id: null, run_id: null, connection: null };
 const connection = { kind: 'hosted', connection_id: randomUUID(), grant_id: randomUUID(), principal_id: principal, operations: ['read'] };
+const family = randomUUID(), device = randomUUID();
+const now = '2099-01-01T00:00:00.000Z';
 const yes = async () => true;
-function facts(role = 'editor', localExpiry?: string) {
+function facts(role = 'editor', localExpiry?: string, tokenOverrides: Record<string, unknown> = {}) {
   const restrictions = new Map<string, Record<string, unknown>>();
-  const tx = Object.assign(async (sql: TemplateStringsArray, ...values: unknown[]) => {
-    const query = sql.join('?');
+  const approvals: Record<string, unknown>[] = [], familySelections: unknown[][] = [];
+  const consent = randomUUID();
+  const binding = { token_id: connection.connection_id, predecessor_token_id: null, renewal_grant_id: family,
+    principal_id: principal, run_id: connection.grant_id, device_id: device, owner_user_id: owner,
+    workspace_id: workspace, lineage_id: randomUUID(), token_parent_admin_grant_id: null, principal_parent_admin_grant_id: null };
+  const read = (query: string, values: unknown[]): Record<string, unknown>[] => {
+    if (query.includes('FROM swarm.discover_local_target_ids')) return localExpiry ? [binding] : [];
+    if (query.startsWith('SELECT clock_timestamp()')) return [{ now }];
+    if (query.includes('FROM swarm.agent_execution_sessions')) return [];
+    if (query.startsWith('SELECT user_id FROM swarm.users')) return [{ user_id: owner }];
+    if (query.startsWith('SELECT workspace_id FROM swarm.workspaces')) return [{ workspace_id: workspace }];
+    if (query.startsWith('SELECT run_id FROM swarm.agent_runs')) return [{ run_id: connection.grant_id }];
+    if (query.startsWith('SELECT device_id FROM swarm.devices')) return [{ device_id: device }];
+    if (query.startsWith('SELECT renewal_grant_id FROM swarm.renewal_grants')) return [{ renewal_grant_id: family }];
     if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
     if (query.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
     // No retired seats exist in this fixture, so the exact replacement set is empty.
@@ -34,19 +48,36 @@ function facts(role = 'editor', localExpiry?: string) {
     }
     if (query.startsWith('SELECT archived_at')) return [{ archived_at: null }];
     if (query.includes('FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
-    if (query.includes('FROM swarm.household_workspace_boundaries')) return [{ purpose: 'shared', owner_user_id: null }];
-    if (query.includes('FROM swarm.household_member_content_roles')) return [{ content_role: role, content_consent_id: randomUUID(), revoked_at: null }];
+    if (query.includes('FROM swarm.household_workspace_boundaries')) return [{ workspace_id: workspace, purpose: 'shared', owner_user_id: null }];
+    if (query.includes('FROM swarm.household_member_content_roles')) return [{ content_role: role, content_consent_id: consent, revoked_at: null }];
     if (query.includes('FROM swarm.household_content_connections')) return [];
     if (query.includes('FROM swarm.streams')) return [{ stream_id: randomUUID() }];
     if (query.includes('FROM swarm.idempotency_keys')) return [];
     if (query.includes('FROM swarm.agent_principals')) return [{ principal_id: principal, revoked_at: null }];
-    if (query.includes('FROM swarm.agent_tokens')) return localExpiry ? [{ expires_at: localExpiry }] : [];
-    if (query.includes('FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection.connection_id, grant_id: connection.grant_id }];
-    if (query.startsWith('SELECT set_config') || query.startsWith('INSERT INTO swarm.household_content_connections')
+    if (query.includes('FROM swarm.agent_tokens')) return localExpiry ? [{ token_id: connection.connection_id,
+      renewal_grant_id: family, connection_expires_at: null, connection_expired_at: null,
+      expires_at: localExpiry, revoked_at: null, surrender_only: false, ended_at: null,
+      device_revoked_at: null, family_revoked_at: null, suspension_active: false,
+      bound_device_id: device, device_id: device, ...tokenOverrides }] : [];
+    if (query.includes('FROM swarm.hosted_mcp_seats')) return [{ seat_id: connection.connection_id,
+      grant_id: connection.grant_id, connection_expires_at: null, connection_expired_at: null }];
+    if (query.startsWith('INSERT INTO swarm.household_content_connections')) {
+      const keys = ['connection_id', 'grant_id', 'workspace_id', 'principal_id', 'owner_user_id', 'purpose',
+        'operations', 'consent_receipt_id', 'expires_at', 'hosted_grant_id', 'renewal_grant_id'];
+      approvals.push(Object.fromEntries(keys.map((key, index) => [key, values[index]]))); return [];
+    }
+    if (query.startsWith('UPDATE swarm.renewal_grants')) { familySelections.push(values); return []; }
+    if (query.startsWith('INSERT INTO swarm.audit_log')) return [];
+    if (query.startsWith('SELECT set_config')
       || query.startsWith('INSERT INTO swarm.idempotency_keys') || query.startsWith('UPDATE swarm.household_content_connections')) return [];
-    throw new Error('unexpected database boundary');
-  }, { json: (value: unknown) => value });
-  return tx;
+    throw new Error(`unexpected database boundary: ${query}`);
+  };
+  const tx = (sql: TemplateStringsArray, ...values: unknown[]) => {
+    const rows = read(sql.join('?').trim().replace(/\s+/g, ' '), values);
+    return Object.assign(Promise.resolve(rows), { cursor: async function* () { yield rows; } });
+  };
+  return Object.assign(tx, { json: (value: unknown) => value, approvals, familySelections, consent,
+    savepoint: async (callback: (sp: typeof tx) => Promise<unknown>) => callback(tx) });
 }
 
 test('approval validates exact command and connection keys and operations with valid controls', async () => {
@@ -86,11 +117,22 @@ test('withdraw validates its exact command keys and both commands require a chec
 });
 
 
-test('local approval retains the checked token expiry and refuses unavailable tokens', async () => {
+test('local approval binds the checked renewal family without a technical expiry and refuses unavailable tokens', async () => {
   const expires = '2100-01-01T00:00:00.000Z';
   const input = { kind: 'household_approve_connection', connection: { ...connection, kind: 'local' } };
-  assert.deepEqual(await approve(facts('editor', expires), workspace, identity, randomUUID(), input, yes),
-    { status: 'committed', operations: ['read'], expires_at: expires });
-  assert.deepEqual(await approve(facts(), workspace, identity, randomUUID(), input, yes),
-    { status: 'refused', reason: 'connection_access_refused' });
+  const tx = facts('editor', expires);
+  assert.deepEqual(await approve(tx, workspace, identity, randomUUID(), input, yes),
+    { status: 'committed', operations: ['read'], expires_at: null });
+  // The bearer still needs to be live at Allow. Its rotation deadline must not
+  // become an approval deadline; the canonical family carries the policy.
+  assert.deepEqual(tx.approvals, [{ connection_id: connection.connection_id, grant_id: connection.grant_id,
+    workspace_id: workspace, principal_id: principal, owner_user_id: owner, purpose: 'shared',
+    operations: ['read'], consent_receipt_id: tx.consent, expires_at: null, hosted_grant_id: null, renewal_grant_id: family }]);
+  assert.deepEqual(tx.familySelections, [[connection.connection_id, family, workspace, principal, connection.grant_id, owner]]);
+  for (const unavailable of [facts(), facts('editor', now), facts('editor', expires, { revoked_at: now })]) {
+    assert.deepEqual(await approve(unavailable, workspace, identity, randomUUID(), input, yes),
+      { status: 'refused', reason: 'connection_access_refused' });
+    assert.deepEqual(unavailable.approvals, []);
+    assert.deepEqual(unavailable.familySelections, []);
+  }
 });

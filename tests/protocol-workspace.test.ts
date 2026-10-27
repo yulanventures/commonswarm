@@ -1908,7 +1908,9 @@ describe('agent session proof exemption', () => {
     );
     assert.match(
       fenceSrc,
-      /expired_at IS NOT NULL AND expired_at > statement_timestamp\(\)/,
+      // Authorization follows lock waits, so use the current clock rather than
+      // the statement's start time. NULL still fails closed as a dead session.
+      /expired_at IS NOT NULL AND expired_at > clock_timestamp\(\)/,
     );
     assert.match(
       fenceSrc,

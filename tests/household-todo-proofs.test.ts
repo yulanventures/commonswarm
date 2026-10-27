@@ -25,13 +25,23 @@ const measuredBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.
 // response budget. The real adapter owns both. SQL/ACLs stay in the CI suite.
 function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, operations: readonly string[] = ['read', 'create', 'update']) {
   const connection = { connection_id: id(6), grant_id: id(7), workspace_id: workspace, principal_id: principal, owner_user_id: user,
-    hosted_grant_id: agent.transport === 'local' ? null : id(7), operations: ['read', 'create', 'update'],
+    hosted_grant_id: agent.transport === 'local' ? null : id(7), renewal_grant_id: agent.transport === 'local' ? id(8) : null, operations: ['read', 'create', 'update'],
     consent_receipt_id: id(5), purpose: 'shared', revoked_at: null,
-    expires_at: agent.transport === 'local' ? '2026-10-05T13:00:00.000Z' : null };
+    expires_at: null };
   const tx = (async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const sql = parts.join('?');
     if (sql.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
     if (sql.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
+    // Discovery and nullable policy fields mirror the permanent family schema.
+    // Hosted seats have no local token; local approvals bind to their family.
+    if (sql.includes('FROM swarm.discover_local_target_ids(')) return agent.transport === 'local' ? [{
+      token_id: id(6), renewal_grant_id: id(8), principal_id: principal, run_id: id(7), device_id: id(9),
+      owner_user_id: user, workspace_id: workspace, lineage_id: id(10),
+      token_parent_admin_grant_id: null, principal_parent_admin_grant_id: null }] : [];
+    if (sql.includes('SELECT t.renewal_grant_id,t.lineage_id,t.run_id')) return agent.transport === 'local'
+      ? [{ renewal_grant_id: id(8), lineage_id: id(10), run_id: id(7) }] : [];
+    if (/^\s*SELECT (?:g\.\*|revoked_at,connection_expires_at,connection_expired_at)\s+FROM swarm\.renewal_grants/.test(sql)) return [{ renewal_grant_id: id(8), revoked_at: null,
+      connection_expires_at: null, connection_expired_at: null, local_content_approval_token_id: id(6) }];
     if (sql.includes('SELECT role, revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
     if (sql.includes('SELECT s.owner_user_id,s.seat_id AS connection_id')) {
       const local = agent.transport === 'local';
@@ -44,7 +54,7 @@ function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, operati
     if (sql.includes("set_config('role'")) return [];
     if (sql.includes('SELECT EXISTS(SELECT 1 FROM swarm.resolve_hosted_seat_read_authorization')) return [{ live: agent.revoked_at == null && agent.hosted_live !== false }];
     if (sql.includes('SELECT revoked_at FROM swarm.agent_principals')) return [{ revoked_at: agent.revoked_at ?? null }];
-    if (sql.includes('SELECT * FROM swarm.household_content_connections')) return [connection];
+    if (sql.includes('SELECT c.* FROM swarm.household_content_connections c')) return [connection];
     if (sql.includes('SELECT seat_id,grant_id,owner_user_id FROM swarm.hosted_mcp_seats')) return agent.transport === 'local' ? []
       : [{ seat_id: id(6), grant_id: id(7), owner_user_id: user }];
     if (sql.includes('SELECT c.*,') && sql.includes('FROM swarm.household_content_connections c')) return [{ ...connection, closed_replaced: false }];
@@ -52,7 +62,7 @@ function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, operati
       grant_id: id(7), workspace_id: workspace, owner_user_id: user, principal_id: principal,
       operations: [...operations], origin: operations.length ? 'human_allow' : 'human_withdraw',
       closed_target_replacements: [], changed_at: at, changed_by: user, closed_replaced: false }];
-    if (sql.includes('SELECT state,revoked_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null }];
+    if (sql.includes('SELECT state,revoked_at,connection_expires_at,connection_expired_at FROM swarm.hosted_mcp_grants')) return [{ state: 'active', revoked_at: null, connection_expires_at: null, connection_expired_at: null }];
     if (sql.includes('SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces')
       || sql.includes('SELECT revoked_at FROM swarm.hosted_mcp_seats')) return [{ revoked_at: null }];
     if (sql.includes('SELECT archived_at FROM swarm.workspaces')) return [{ archived_at: null }];

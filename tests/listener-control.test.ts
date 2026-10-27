@@ -79,6 +79,7 @@ import {
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
+import type { AgentCredentialRecord } from "../src/cloud/agent-credential.js";
 import { cloudTarget } from "../src/cloud/config.js";
 import { ListenerCapabilityError } from "../src/listener/runtime.js";
 import {
@@ -1519,12 +1520,15 @@ test("a sustained supervisor restart that begins before renewal is due ends at t
     const runs: number[] = [];
     const waits: Array<{ startedAt: number; ms: number }> = [];
     const renewalTimes: number[] = [];
+    // Renewal verifies durable intent before HTTP, so this store must retain writes.
+    let credentialRecord: AgentCredentialRecord | null = null;
     const session = await AgentCredentialSession.open({
       target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: randomUUID(),
       presented: { token: "swm_agt_" + "A".repeat(43), tokenId: randomUUID(),
         principalId: randomUUID(), runId: randomUUID(), expiresAt: expiry },
-      store: { location: "memory://restart-renewal", read: async () => null,
-        write: async () => {}, delete: async () => {},
+      store: { location: "memory://restart-renewal", read: async () => credentialRecord,
+        write: async (next) => { credentialRecord = next; },
+        delete: async () => { credentialRecord = null; },
         withLock: async <T>(work: () => Promise<T>): Promise<T> => work() },
       listenerMode: true, now: () => current, warn: () => {},
       fetcher: (async () => {
@@ -1847,7 +1851,7 @@ test("credential and claim status use the answering edge and current retry state
   });
   assert.match(readBeforeRenewal, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
   assert.doesNotMatch(readBeforeRenewal, /retrying renewal/);
-  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
+  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; ordinary work pauses after technical expiry while renewal retries/);
   assert.doesNotMatch(expiring, /transient answer extends/);
   const stopped = renderListenerStatus({
     ...statusFor(target, "failed"),
