@@ -3145,20 +3145,22 @@ export async function browserDeliveryReceipts(
  * an empty set rather than an error: no one can probe whether a workspace id exists.
  * archived_at is filtered here because an archived workspace is not somewhere you can work.
  */
-export async function myWorkspaces(): Promise<{ id: string; name: string }[]> {
+export async function myWorkspaces(): Promise<{ id: string; name: string; orgId: string; orgName: string }[]> {
   const c = client();
   if (!c) throw new NoDeployment();
-  const workspaces: { id: string; name: string }[] = [];
+  const workspaces: { id: string; name: string; orgId: string; orgName: string }[] = [];
   const pageSize = 50;
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await readWithDeadline("your workspaces", signal => c
-      .schema("swarm_read").from("workspaces").select("workspace_id,name,archived_at")
+      .schema("swarm_read").from("workspaces").select("workspace_id,name,archived_at,org_id,org_display_name")
       .is("archived_at", null).order("name", { ascending: true }).order("workspace_id", { ascending: true })
       .range(offset, offset + pageSize - 1).abortSignal(signal));
     if (error) throw new Error(error.message);
     const page = data ?? [];
     workspaces.push(...page.map(row => ({ id: String(row.workspace_id ?? ""),
-      name: String(row.name ?? row.workspace_id ?? "") })).filter(workspace => workspace.id.length > 0));
+      name: String(row.name ?? row.workspace_id ?? ""),
+      orgId: String(row.org_id ?? row.workspace_id ?? ""),
+      orgName: String(row.org_display_name ?? row.name ?? "") })).filter(workspace => workspace.id.length > 0));
     if (page.length < pageSize) return workspaces;
   }
 }

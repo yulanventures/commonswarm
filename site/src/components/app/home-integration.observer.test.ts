@@ -7,7 +7,7 @@ import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client'
 import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
+import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
@@ -17,6 +17,8 @@ import { todoView } from '../../lib/home-todo';
 import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
+import { buildOrganizationMenu, organizationMenuItems } from '../../lib/home-shell';
+import { connectionPolicyState } from '../../lib/standing-grants';
 import { homeStructureKey } from '../../lib/home-focus';
 import { createListsChrome } from '../../lib/lists-chrome';
 import { assignOptions, tagOptions, personNames } from '../../lib/home-pickers';
@@ -736,7 +738,7 @@ test('People Allow lands from settled access, continues after consent, and retir
       ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm],
       ['[data-household-agent-list]', list], ['[data-household-agent-empty]', empty],
       ['[data-household-purpose]:checked', purpose], ['[data-household-role]:checked', role]]);
-    const context = createContext({ document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead,
+    const context = createContext({ document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
       peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage,
@@ -1527,9 +1529,9 @@ test('accepted agent removals leave every current surface immediately and after 
     let tick!: () => void, finishRoster!: (rows: unknown) => void, finishOverview!: (overview: HomeOverview) => void;
     let finishReload!: () => void;
     const commands: string[] = [];
-    const context = createContext({ ...agentStatusFunctions, classifyAgentPresence, agentPresenceLine, wakePathMark,
+    const context = createContext({ ...agentStatusFunctions, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, connectionPolicyState, classifyAgentPresence, agentPresenceLine, wakePathMark,
       identityDisplayLabel, isTaggable, removedAgentLabel, peopleDialogCanAct, mapHomePeople, homeRailPeople, mapHomeRail,
-      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, routeHref, assignOptions, tagOptions,
+      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, buildOrganizationMenu, organizationMenuItems, routeHref, assignOptions, tagOptions,
       one: (selector: string) => selector === '[data-home-rail-slot]' ? slot : null,
       document: { visibilityState: 'visible', createElement: (tag: string) => new RailNode(tag) },
       window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },
@@ -1547,6 +1549,7 @@ test('accepted agent removals leave every current surface immediately and after 
     });
     runInContext(`
       let session={user:{id:'viewer'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false;
+      let selectedOrgId=null;
       let homeRoute={view:'people',workspaceId:'W'}, workspaces=[{id:'W',name:'Home'}], agents=${JSON.stringify(reloaded ? [control] : [...targets, control])};
       let members=[{userId:'viewer',name:'Viewer',role:'owner'},{userId:'live-person',name:'Live person',role:'member'}];
       let people=new Map(members.map(member=>[member.userId,member.name])), accessStatuses=[], homeWorkClaims=[];

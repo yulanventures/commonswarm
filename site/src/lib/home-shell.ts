@@ -56,12 +56,65 @@ export interface ShellCallbacks {
 export interface AccountMenuState {
   /** Who is signed in, as the account menu already says it ("Your account" until known). */
   signedInAs: string;
+  organizations?: OrganizationMenuItem[];
   /** The theme switch's current label ("Theme: System"), or null when the page has no theme switch. */
   theme: string | null;
   connectedApps: boolean;
   signOut: boolean;
 }
-export type AccountMenuAction = "theme" | "connected-apps" | "sign-out";
+export type AccountMenuAction = "theme" | "connected-apps" | "sign-out" | { kind: "organization"; workspaceId: string };
+
+export interface OrganizationMenuItem {
+  id: string;
+  name: string;
+  workspaceId: string;
+  current: boolean;
+}
+
+/** Organizations come only from workspaces the viewer can already read. */
+export function organizationMenuItems(
+  workspaces: readonly { id: string; name: string; archived: boolean; orgId?: string; orgName?: string }[],
+  workspaceId: string,
+  selectedOrgId?: string | null,
+): OrganizationMenuItem[] {
+  const live = workspaces.filter(workspace => !workspace.archived);
+  const current = live.find(workspace => workspace.id === workspaceId);
+  const currentOrg = current ? current.orgId ?? current.id : selectedOrgId;
+  const groups = new Map<string, OrganizationMenuItem>();
+  for (const workspace of live) {
+    const id = workspace.orgId ?? workspace.id;
+    const prior = groups.get(id);
+    if (!prior) groups.set(id, { id, name: workspace.orgName ?? workspace.name,
+      workspaceId: workspace.id, current: false });
+    if (workspace.id === workspaceId) groups.get(id)!.workspaceId = workspace.id;
+  }
+  const items = [...groups.values()];
+  const selected = items.find(item => item.id === currentOrg) ?? items[0];
+  if (selected) selected.current = true;
+  return items;
+}
+
+/** Shared by the rail menu and the phone's existing menu button. */
+export function buildOrganizationMenu(doc: Document, items: readonly OrganizationMenuItem[], select: (workspaceId: string) => void): HTMLElement {
+  const group = node(doc, "div", "hm-menu__group dashboard__org-menu");
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Organizations");
+  for (const item of items) {
+    const button = node(doc, "button", "hm-menu__item dashboard__org-menu-item");
+    button.type = "button";
+    button.setAttribute("role", "menuitemradio");
+    button.setAttribute("aria-checked", String(item.current));
+    const mark = node(doc, "span", "dashboard__org-mark", Array.from(item.name.trim())[0]?.toLocaleUpperCase() ?? "O");
+    mark.setAttribute("aria-hidden", "true");
+    const name = node(doc, "span", "dashboard__org-menu-name", item.name);
+    const check = node(doc, "span", "dashboard__org-check", item.current ? "✓" : "");
+    check.setAttribute("aria-hidden", "true");
+    button.append(mark, name, check);
+    button.addEventListener("click", () => select(item.workspaceId));
+    group.append(button);
+  }
+  return group;
+}
 
 export type FeedFilterValue = "all" | "broadcast" | "direct-to-you";
 export interface FeedMenuState {
@@ -187,7 +240,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   menu.setAttribute("aria-labelledby", trigger.id);
   menu.hidden = true;
   trigger.setAttribute("aria-controls", menu.id);
-  const items: HTMLButtonElement[] = [];
+  const items: HTMLElement[] = [];
   const staticItems: HTMLButtonElement[] = [];
   const close = (focusTrigger: boolean) => {
     menu.hidden = true;
@@ -199,13 +252,21 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
   const feedEntries: HTMLElement[] = [];
   /* THE ACCOUNT ENTRIES (phone bar only) follow the workspace doors after a rule, rebuilt on every open the same way. */
   const accountEntries: HTMLElement[] = [];
-  const accountButtons: HTMLButtonElement[] = [];
+  const accountButtons: HTMLElement[] = [];
   const syncAccountEntries = () => {
     for (const entry of accountEntries.splice(0)) entry.remove();
     accountButtons.splice(0);
     const state = options.account ? callbacks.account?.() ?? null : null;
     if (!state || !callbacks.accountAction) return;
     const built: HTMLElement[] = [];
+    if (state.organizations?.length) {
+      const orgs = node(doc, "li", "hm-menu__entry"); orgs.setAttribute("role", "none");
+      const group = buildOrganizationMenu(doc, state.organizations, workspaceId => {
+        close(true); callbacks.accountAction?.({ kind: "organization", workspaceId });
+      });
+      for (const button of group.querySelectorAll("button")) { button.tabIndex = -1; accountButtons.push(button); }
+      orgs.append(group); built.push(orgs);
+    }
     const rule = node(doc, "li", "hm-menu__separator"); rule.setAttribute("role", "separator"); built.push(rule);
     const who = node(doc, "li", "hm-menu__account", state.signedInAs);
     who.setAttribute("role", "presentation");
@@ -221,6 +282,10 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     if (state.theme) entry(state.theme, "theme", "menuTheme");
     if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
     if (state.signOut) entry("Sign out", "sign-out", "menuSignOut");
+    const home = node(doc, "li", "hm-menu__entry"); home.setAttribute("role", "none");
+    const homeLink = node(doc, "a", "hm-menu__item", "CommonSwarm home");
+    homeLink.href = "/"; homeLink.setAttribute("role", "menuitem"); homeLink.tabIndex = -1;
+    home.append(homeLink); built.push(home); accountButtons.push(homeLink);
     menu.append(...built); accountEntries.push(...built);
   };
   const syncFeedEntries = () => {

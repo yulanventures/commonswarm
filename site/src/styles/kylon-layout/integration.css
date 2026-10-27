@@ -94,3 +94,28 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card { grid-template-columns: minmax(0, 1fr); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card-capsules { max-inline-size: 100%; }
 }
+
+/* The live organization switcher spans the two navigation columns. */
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] { grid-template-rows: 56px minmax(0, 1fr); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account {
+    grid-column: 1 / 3; grid-row: 1; margin: 0; padding: 6px 12px;
+    border-block-end: 1px solid var(--cs-line); border-inline-end: 1px solid var(--cs-line);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail { grid-column: 1; grid-row: 2; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { grid-column: 2; grid-row: 2; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-workspace { grid-column: 3; grid-row: 1 / 3; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-brand { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger {
+    display: flex; align-items: center; gap: 10px; inline-size: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger .dashboard__org-mark { display: grid; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { display: block; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger > svg { flex: none; inline-size: 14px; block-size: 14px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger > svg > path:not(.cs-org-switcher-chevron) { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-menu { position: absolute; inset: calc(100% + 8px) auto auto 0; inline-size: min(280px, calc(100vw - 24px)); max-block-size: calc(100dvh - 80px); }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account,
+  .cs-org-switcher-chevron { display: none; }
+}
