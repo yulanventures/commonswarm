@@ -61,7 +61,7 @@ Root installation, after independent review and contention coordination:
 1. Use a clean checkout of the reviewed controller SHA on **pe-ci-1**. As root,
    run `bash deploy/ci/provision.sh --sha <reviewed-controller-SHA>`. It refuses
    another hostname, dirty source, active PE runner workers or an existing install.
-   It builds isolated Node 22.23.3, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
+   It builds isolated Node 22.23.4, Deno 2.2.3, Supabase 2.118.0, Caddy 2.11.4,
    Playwright 1.63.0 and PG17 tools. Debian Python 3.11.2 remains the default
    `python3`, with apt jsonschema 4.10.3. Archive tests can select the separate
    `python3.12` runtime from the digest-pinned official `3.12-slim-bookworm`

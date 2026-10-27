@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const hash = data => createHash('sha256').update(data).digest('hex');
 const fileHash = p => hash(read(p));
 const check = (condition, label) => { if (!condition) throw Error(label); };
-const image = 'node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c';
+const image = 'node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d';
 const keys = ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_ANON_KEY', 'PUBLIC_H0_LINK_JOIN'];
 function config(value, h0) {
   check(value && typeof value === 'object' && !Array.isArray(value), 'public JSON object required');
