@@ -285,6 +285,21 @@ export function reduceWorkspace(
       };
       break;
     }
+    case 'AgentAddedToWorkspace': {
+      const p=req<AgentPrincipalCreated>(env.payload,['principal_id','owner_user_id','name','created_at'],env.type,env.seq);
+      const existing=s.principals[p.principal_id];
+      if (existing && existing.owner_user_id!==p.owner_user_id) throw new StreamIntegrityError(`agent ownership changed at seq ${env.seq}`);
+      if(p.transport!=='local' || p.turn_only!==false) throw new StreamIntegrityError(`non-local workspace addition at seq ${env.seq}`);
+      next={...s,principals:{...s.principals,[p.principal_id]:{...p,model:p.model??null,transport:'local',turn_only:false,revoked_at:null}}};
+      break;
+    }
+    case 'AgentRemovedFromWorkspace': {
+      const p=req<AgentPrincipalRevoked>(env.payload,['principal_id','revoked_at'],env.type,env.seq);
+      const existing=s.principals[p.principal_id];
+      // Idempotent removal of an absent membership is a truthful audit receipt.
+      next=existing?{...s,principals:{...s.principals,[p.principal_id]:{...existing,revoked_at:p.revoked_at}}}:s;
+      break;
+    }
     case 'AgentPrincipalCreated': {
       const p = req<AgentPrincipalCreated>(
         env.payload,

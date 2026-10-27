@@ -134,7 +134,7 @@ ${dbAssert(`SELECT local_content_approval_token_id='${token}' FROM swarm.renewal
 ${refuses(`UPDATE swarm.renewal_grants SET local_content_approval_token_id=NULL WHERE renewal_grant_id='${grant}'`, '23514')}
 `;
 
-  runSql(`
+  runSql(repoSql("deploy/release-proofs/agents/20261028000002-rollback.sql") + `
 -- The clone carries the 20261019000010 and 20261021000990 bodies on top of 00007,
 -- so the 00007 catalog cannot be true on it. Bring the touched objects to the
 -- exact post-00007 state first: the reserve removes every later body together

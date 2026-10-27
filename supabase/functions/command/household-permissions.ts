@@ -1,3 +1,4 @@
+import { localAgentWorkspaceLive } from '../_shared/agent-auth.ts';
 /** Explicit human confirmation. Administration alone never grants content rights.
  * No default rights are provisioned when a workspace, member or seat is created. */
 import type postgres from 'postgres';
@@ -63,7 +64,7 @@ async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdI
     const target = plan?.snapshot.bindings.find(row => row.token_id === connection.connection_id);
     if (!plan?.locked || !target?.renewal_grant_id || target.run_id !== connection.grant_id
       || target.principal_id !== connection.principal_id || target.owner_user_id !== actor.user_id
-      || target.workspace_id !== workspaceId) return { allowed: false as const, expires_at: null, renewal_grant_id: null };
+      || !await localAgentWorkspaceLive(tx,target.principal_id,workspaceId)) return { allowed: false as const, expires_at: null, renewal_grant_id: null };
     const [token] = await tx`SELECT t.token_id,g.renewal_grant_id,g.connection_expires_at,g.connection_expired_at,
         t.expires_at,t.revoked_at,t.surrender_only,r.ended_at,d.revoked_at AS device_revoked_at,
         g.revoked_at AS family_revoked_at,g.suspension_active,
@@ -71,7 +72,7 @@ async function checkedConnection(tx: Sql, workspaceId: string, actor: HouseholdI
       FROM swarm.agent_tokens t JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
       JOIN swarm.devices d USING(device_id)
       JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
-        AND g.run_id=t.run_id AND g.principal_id=t.principal_id AND g.workspace_id=${workspaceId}::uuid
+        AND g.run_id=t.run_id AND g.principal_id=t.principal_id
         AND g.created_by=${actor.user_id}::uuid
       WHERE t.token_id=${connection.connection_id}::uuid AND t.run_id=${connection.grant_id}::uuid
         AND t.principal_id=${connection.principal_id}::uuid AND g.renewal_grant_id=${target.renewal_grant_id}::uuid
@@ -138,11 +139,7 @@ async function writeConnection(tx: Sql, workspaceId: string, actor: HouseholdIde
       VALUES (${connection.connection_id}::uuid,${connection.grant_id}::uuid,${workspaceId}::uuid,${connection.principal_id}::uuid,
         ${actor.user_id}::uuid,${purpose},${connection.operations}::text[],${consent}::uuid,${approvalExpiry},${connection.kind === 'hosted' ? connection.grant_id : null}::uuid,${family}::uuid)`;
   }
-  if (connection.kind === 'local') await tx`UPDATE swarm.renewal_grants
-    SET local_content_approval_token_id=${connection.connection_id}::uuid
-    WHERE renewal_grant_id=${family}::uuid AND workspace_id=${workspaceId}::uuid
-      AND principal_id=${connection.principal_id}::uuid AND run_id=${connection.grant_id}::uuid
-      AND created_by=${actor.user_id}::uuid`;
+  if (connection.kind === 'local') await tx`SELECT swarm.set_local_workspace_approval(${family}::uuid,${workspaceId}::uuid,${connection.connection_id}::uuid)`;
   // A second Allow on the same technical bearer updates the same primary key.
   // Preserve the previous decision's exact permission/receipt in append-only
   // audit before returning success; no old decision vanishes on re-Allow/widen.
@@ -235,7 +232,7 @@ export async function withdrawHouseholdConnection(tx: Sql, workspaceId: string, 
   if (!context) return refused('workspace_access_refused');
   const request = await requestContext(tx, workspaceId, actor, requestId, input);
   if (request.response) return request.response;
-  const [principal] = await tx`SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid
+  const [principal] = await tx`SELECT principal_id FROM swarm.agent_principals WHERE (workspace_id=${workspaceId}::uuid AND transport='hosted_mcp' OR swarm.local_agent_workspace_live(principal_id,${workspaceId}::uuid))
     AND principal_id=${input.principal_id}::uuid AND owner_user_id=${actor.user_id}::uuid FOR SHARE`;
   if (!principal) return refused('connection_access_refused');
   await tx`SELECT connection_id FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid

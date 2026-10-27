@@ -56,3 +56,9 @@ export function buildAccountAgents(doc: Document, agents: readonly AccountAgent[
   }
   return list;
 }
+
+export function addableLocalAgents(agents:readonly AccountAgent[],workspaceId:string,orgId:string):AccountAgent[] {
+  return agents.filter(agent=>agent.transport==='local' && agent.revokedAt===null
+    && !agent.workspaces.some(w=>w.id===workspaceId && w.revokedAt===null)
+    && agent.workspaces.some(w=>w.orgId===orgId && w.archivedAt===null && (w.revokedAt===null || w.id===workspaceId)));
+}

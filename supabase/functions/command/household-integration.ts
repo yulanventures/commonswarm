@@ -90,12 +90,12 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     // content resolver below alone decides whether a bearer can act now.
     const local = await tx`SELECT DISTINCT ON (g.renewal_grant_id) 'local' AS kind,
         t.token_id AS connection_id,t.run_id AS grant_id,t.principal_id,p.name,t.lineage_id,
-        g.renewal_grant_id,g.local_content_approval_token_id,g.connection_expires_at,g.connection_expired_at
+        g.renewal_grant_id,(SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) AS local_content_approval_token_id,g.connection_expires_at,g.connection_expired_at
       FROM swarm.renewal_grants g JOIN swarm.agent_principals p ON p.principal_id=g.principal_id
       JOIN swarm.agent_runs r ON r.run_id=g.run_id AND r.principal_id=g.principal_id
       JOIN swarm.devices d ON d.device_id=r.device_id
       JOIN swarm.agent_tokens t ON t.renewal_grant_id=g.renewal_grant_id AND t.run_id=g.run_id AND t.principal_id=g.principal_id
-      WHERE g.workspace_id=${workspaceId}::uuid AND g.created_by=${identity.user_id}::uuid
+      WHERE swarm.local_agent_workspace_live(g.principal_id,${workspaceId}::uuid) AND g.created_by=${identity.user_id}::uuid
         AND p.workspace_id=g.workspace_id AND p.owner_user_id=g.created_by AND p.transport='local'
         AND g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
         AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
@@ -119,9 +119,9 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
         AND (c.renewal_grant_id IS NULL OR (c.hosted_grant_id IS NULL AND EXISTS(
           SELECT 1 FROM swarm.agent_tokens original JOIN swarm.renewal_grants g ON g.renewal_grant_id=original.renewal_grant_id
           WHERE original.token_id=c.connection_id AND original.run_id=c.grant_id AND original.principal_id=c.principal_id
-            AND g.renewal_grant_id=c.renewal_grant_id AND g.workspace_id=c.workspace_id AND g.created_by=c.owner_user_id
+            AND g.renewal_grant_id=c.renewal_grant_id AND g.created_by=c.owner_user_id
             AND g.run_id=c.grant_id AND g.principal_id=c.principal_id
-            AND (g.local_content_approval_token_id IS NULL OR g.local_content_approval_token_id=c.connection_id))))`;
+            AND ((SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) IS NULL OR (SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid)=c.connection_id))))`;
     const approvalFor = (row: Record<string, unknown>) => {
       const approval = approvals.find(c => c.grant_id === row.grant_id && c.principal_id === row.principal_id
         && (row.kind === 'local' ? ((c.renewal_grant_id === row.renewal_grant_id && c.lineage_id === row.lineage_id)

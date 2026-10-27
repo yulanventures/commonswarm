@@ -1047,7 +1047,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { buildAccountAgents } from "../../lib/account-agents";
+  import { buildAccountAgents, addableLocalAgents } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -1151,6 +1151,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     signOut,
     removeWorkspaceMember,
     revokeAgentPrincipal,
+    addAgentToWorkspace,
     setAgentModel,
     subscribeAgentActivity,
     subscribeWorkspaceSignals,
@@ -5284,6 +5285,35 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           invite: () => { void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => openInvite("channel")); },
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
+      const actions=list.querySelector<HTMLElement>('.pd-page-actions');
+      if(actions && session && !sampleMode) {
+        const add=document.createElement('button'); add.type='button'; add.className='pd-page-primary'; add.textContent='Add your agents';
+        const picker=document.createElement('section'); picker.hidden=true; picker.setAttribute('aria-label','Add your agents');
+        const status=document.createElement('p'); status.setAttribute('role','status'); picker.append(status);
+        actions.prepend(add); actions.after(picker);
+        add.addEventListener('click',async()=>{
+          if(!session || !activeWorkspaceId) return;
+          const value=session,workspaceId=activeWorkspaceId;
+          add.disabled=true; picker.hidden=false; status.textContent='Loading…';
+          try {
+            const choices=addableLocalAgents(await myAccountAgents(),workspaceId,workspace.orgId);
+            if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id || !picker.isConnected) return;
+            status.textContent=choices.length?'':'No agents to add.';
+            picker.replaceChildren(status);
+            for(const agent of choices) {
+              const button=document.createElement('button'); button.type='button'; button.className='pd-page-secondary'; button.textContent=agent.name;
+              button.addEventListener('click',async()=>{
+                button.disabled=true; status.textContent='';
+                try {
+                  await addAgentToWorkspace(value,uuid(),workspaceId,agent.id);
+                  if(activeWorkspaceId===workspaceId && session?.user.id===value.user.id) await reloadPeopleDialog(workspaceId,agent.id,`${agent.name} added.`);
+                } catch(error) { status.textContent=readableError(error); button.disabled=false; }
+              }); picker.append(button);
+            }
+          } catch(error) { status.textContent=readableError(error); }
+          finally { add.disabled=false; }
+        });
+      }
       if (peopleDialogState.selected?.type === "agent") mountRenewalEndDate(detail, peopleDialogState.selected.id);
       restoreConnectionDateFocus(detail, endDateFocus);
       // A removal or role change that needs a fresh sign-in shows its block under the page header.

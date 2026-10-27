@@ -41,7 +41,7 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     invite.addEventListener("click", () => nav.invite?.()); actions.append(invite);
   }
   if (nav.addAgentHref && !model.sample) {
-    const add = make("a", "pd-page-secondary", "Add an agent"); add.href = nav.addAgentHref;
+    const add = make("a", "pd-page-secondary", "Connect new agent"); add.href = nav.addAgentHref;
     add.dataset.peoplePageAddAgent = ""; add.dataset.pdFocus = "page-add-agent";
     if (nav.navigate) add.addEventListener("click", event => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -56,7 +56,7 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     ["Agent", "belongs to the person who added it. They, an owner or an admin can remove it."]]) {
     const entry = make("div", ""); entry.append(make("dt", "", term), make("dd", "", text)); definitions.append(entry);
   }
-  help.append(definitions, make("p", "pd-page-note", "Removing a person or an agent cannot be undone. Their history stays here."));
+  help.append(definitions, make("p", "pd-page-note", "Removed local agents can be added again. Their history stays here."));
   const footer = make("footer", "pd-context-footer"); footer.append(help);
   if (nav.workspacesHref) {
     const switcher = make("a", "pd-page-back", "Switch workspace"); switcher.href = nav.workspacesHref; switcher.dataset.pdFocus = "page-workspaces";

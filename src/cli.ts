@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import {bindSessionProof} from './cloud/session-proof.js';
+import {agentWorkspaces} from './cloud/agent-workspaces.js';
 
 import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
 import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
@@ -19,7 +21,7 @@ import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
 import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
-import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
+import { AgentSetupError, listAgentProfiles, privatePath, readAgentProfile, readProfileCredential, openProfileCredential, profileTarget, selectAgentWorkspace, agentWorkspaceStatePath, profileSessionContext } from "./cloud/agent-profile.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
@@ -706,6 +708,8 @@ export class Arguments {
   private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
   expandedProfilePath?: string;
+  expandedProfileHomeWorkspace?: string;
+  expandedProfileConnectionContextPath?: string;
   expandedProfileHostSessionId?: string;
   constructor(values: string[]) {
     let positionalOnly = false;
@@ -817,14 +821,18 @@ export class Arguments {
       throw new AgentSetupError("profile_command_invalid", `--profile is supported by: ${AGENT_PROFILE_COMMANDS.join(", ")}.`);
     }
     if (profileMode === "native") return;
-    const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key", "workspace-id"].filter(flag => this.has(flag));
+    const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key"].filter(flag => this.has(flag));
     if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", `Do not combine --profile with ${conflicts.map(flag => `--${flag}`).join(", ")}.`);
     const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
-    this.expandedProfilePath = path;
+    const selectedProfile=selectAgentWorkspace(profile,this.optional("workspace-id"));
+    this.expandedProfileHomeWorkspace=profile.workspace_id;
+    this.expandedProfilePath = agentWorkspaceStatePath(path,profile.workspace_id,selectedProfile.workspace_id);
     this.expandedProfileHostSessionId = this.optional("host-session-id");
     if (this.has("host-session-id") && hostSessionId === "drop") {
-      const selected = await profileSessionContext(profile, this.required("host-session-id"));
+      const selected = await profileSessionContext(selectedProfile, this.required("host-session-id"));
+      const fallback=selected ?? (selectedProfile.workspace_id!==profile.workspace_id ? await profileSessionContext(profile,this.required('host-session-id')) : null);
+      if(!selected && fallback) this.expandedProfileConnectionContextPath=fallback.path;
       if (selected) {
         const explicit = this.optional("session-context");
         if (explicit !== undefined && resolve(explicit) !== resolve(selected.path)) throw new AgentSetupError("profile_session_conflict", "The supplied session context does not belong to this profile's host session.");
@@ -833,7 +841,7 @@ export class Arguments {
       this.flags.delete("host-session-id");
     }
     this.flags.delete("profile");
-    for (const [flag, value] of [["agent-token-file", profile.credential_file], ["url", profile.url], ["anon-key", profile.anon_key], ["workspace-id", profile.workspace_id]]) this.push(flag!, value!);
+    for (const [flag, value] of [["agent-token-file", profile.credential_file], ["url", profile.url], ["anon-key", profile.anon_key], ["workspace-id", selectedProfile.workspace_id]]) if (!this.has(flag!)) this.push(flag!, value!);
   }
 
   assertShape(
@@ -1807,10 +1815,17 @@ async function profileIdentity(
     : { email: null, workspaceId: null };
 }
 
-export const RUN_WORKSPACES_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json"] as const;
+export const RUN_WORKSPACES_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json", "profile", "host-session-id"] as const;
 
 async function runWorkspaces(args: Arguments): Promise<void> {
   args.assertShape(RUN_WORKSPACES_1_ACCEPTED_FLAGS, 1);
+  if(args.has('profile')) {
+    const profile=await readAgentProfile(args.required('profile'),args.optional('host-session-id'));
+    const managed=await profileSessionContext(profile,args.optional('host-session-id'));
+    const data=await agentWorkspaces(profile,bindSessionProof(fetch,managed?sessionProofOf(managed.context):null));
+    if(args.has('json')) printJson(data); else for(const row of data.workspaces) process.stdout.write(`${row.workspace_id}  ${row.name}\n`);
+    return;
+  }
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud, human.fetcher);
@@ -3320,7 +3335,7 @@ async function commandWorkspaceAndCredential(
         tokenPrincipalId: agent.principalId,
         tokenFile: args.optional("agent-token-file"),
         fetcher: fetch,
-        openSession: (bound) => agentSession(cloud, override, agent, bound),
+        openSession: (bound) => agentSession(cloud, args.expandedProfileHomeWorkspace ?? override, agent, bound),
       });
       return {
         selectedWorkspace: override,
@@ -3336,7 +3351,9 @@ async function commandWorkspaceAndCredential(
     // credential that is about to expire is replaced without the person watching ever
     // seeing a failure. Every caller below reads `bearer` as a plain string; the session
     // is what decided which string that is.
-    const session = await agentSession(cloud, override, agent);
+    const connectionContext=args.expandedProfileConnectionContextPath ? await readSessionContext(args.expandedProfileConnectionContextPath) : null;
+    const profileFetcher=bindSessionProof(fetch,connectionContext ? sessionProofOf(connectionContext) : null);
+    const session = await agentSession(cloud, args.expandedProfileHomeWorkspace ?? override, agent,profileFetcher);
     const bearer = await session.bearer();
     return {
       selectedWorkspace: override,
@@ -3344,7 +3361,7 @@ async function commandWorkspaceAndCredential(
       kind: "agent",
       agent,
       session,
-      fetcher: fetch,
+      fetcher: profileFetcher,
     };
   }
   const human = await dualAuthHumanCredential(args, cloud);
@@ -10381,7 +10398,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
-  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
+  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List reachable workspaces.", mutates: false, flags: RUN_WORKSPACES_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: RUN_NEW_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "provider", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),

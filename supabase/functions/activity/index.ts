@@ -111,7 +111,7 @@ async function handle(request: Request): Promise<Response> {
         set_config('lock_timeout', '5s', true)
     `;
 
-    const plan=await planLocalOperation(tx,{hash:tokenHash});
+    const plan=await planLocalOperation(tx,{hash:tokenHash,workspace:frame.workspaceId});
     if(plan) await lockLocalAuthPlan(tx,plan);
     const agent = plan ? await loadAgentCredential(tx, tokenHash, plan) : null;
     if (agent === null) return json(401, { error: "unauthenticated" });

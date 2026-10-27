@@ -121,3 +121,13 @@ export function capMcpResult(value: object): object {
   // A bounded, explicit answer is safer than cutting JSON or silently hiding rows.
   return { truncated: true, message: "Result exceeds the MCP byte cap. Narrow the request." };
 }
+
+/** Stdio's per-call selector is removed before the shared (also hosted) tool validator. */
+export function stdioWorkspaceArguments(value:unknown):{workspaceId?:string;arguments:Record<string,unknown>} {
+  if(!value || typeof value!=='object' || Array.isArray(value)) throw new Error('Expected an object of tool arguments.');
+  const {workspace_id,...args}=value as Record<string,unknown>;
+  if(workspace_id!==undefined && (typeof workspace_id!=='string' || !ONBOARDING_UUID.test(workspace_id))) throw new Error('Invalid argument: workspace_id.');
+  return {arguments:args,...(workspace_id===undefined?{}:{workspaceId:(workspace_id as string).toLowerCase()})};
+}
+export const STDIO_MCP_TOOLS=[...MCP_TOOLS.map(tool=>({...tool,inputSchema:{...tool.inputSchema,
+  properties:{...tool.inputSchema.properties,workspace_id:uuid}}})),{name:"workspaces",description:"List workspaces reachable by this agent connection.",inputSchema:schema({})}];

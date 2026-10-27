@@ -122,7 +122,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       return { outcome, events: [], notices: replayed ? stored.notices : [], replayed };
     }
     const members = await tx`SELECT user_id,workspace_id,revoked_at,role FROM swarm.memberships WHERE workspace_id=${workspaceId}::uuid`;
-    const agents = await tx`SELECT principal_id,workspace_id,owner_user_id,revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid`;
+    const agents = await tx`SELECT p.principal_id,am.workspace_id,p.owner_user_id,coalesce(p.revoked_at,am.revoked_at) AS revoked_at FROM swarm.agent_principals p JOIN swarm.agent_workspace_memberships am USING(principal_id,owner_user_id) WHERE am.workspace_id=${workspaceId}::uuid`;
     const [objects] = await tx`SELECT projection FROM swarm.household_object_streams WHERE workspace_id=${workspaceId}::uuid`;
     const projection = objects?.projection as { objects?: Record<string, { object_id: string; kind: 'list' | 'doc' | 'file' }> } | undefined;
     const identityAttempts = await rate(tx, `todo:${identity.principal_id ? 'agent' : 'user'}:${principal.toLowerCase()}`, core.TODO_IDENTITY_WRITE_HOURLY_LIMIT);
@@ -198,7 +198,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       JOIN swarm.agent_tokens original ON original.token_id=c.connection_id AND original.run_id=c.grant_id
         AND original.principal_id=c.principal_id
       LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=c.renewal_grant_id
-        AND g.workspace_id=c.workspace_id AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
+        AND g.principal_id=c.principal_id AND g.run_id=c.grant_id AND g.created_by=c.owner_user_id
       JOIN swarm.agent_tokens t ON t.run_id=c.grant_id AND t.principal_id=c.principal_id
         AND (c.renewal_grant_id IS NULL AND t.token_id=c.connection_id
           OR t.renewal_grant_id=c.renewal_grant_id AND t.lineage_id=original.lineage_id)
@@ -208,7 +208,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         AND (c.renewal_grant_id IS NULL OR g.renewal_grant_id IS NOT NULL
           AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
           AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
-          AND (g.local_content_approval_token_id IS NULL OR g.local_content_approval_token_id=c.connection_id))
+          AND ((SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid) IS NULL OR (SELECT ap.token_id FROM swarm.local_content_approval_workspaces ap WHERE ap.renewal_grant_id=g.renewal_grant_id AND ap.workspace_id=${workspaceId}::uuid)=c.connection_id))
         AND swarm.admin_child_live(t.parent_admin_grant_id,${workspaceId}::uuid)
         AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
         AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z
@@ -338,7 +338,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
-      FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
+      FROM swarm.agent_principals p WHERE (p.workspace_id=${workspaceId}::uuid AND p.transport='hosted_mcp' OR swarm.local_agent_workspace_live(p.principal_id,${workspaceId}::uuid)) AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(
       (SELECT max(last_command_at) FROM swarm.agent_presence WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),

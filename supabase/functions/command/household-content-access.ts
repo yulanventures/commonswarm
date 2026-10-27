@@ -51,7 +51,7 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
   let credential: HouseholdAccessFacts['credential'] = { kind: 'human' };
   if (identity.principal_id !== null) {
     if (!identity.connection) return null;
-    const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE workspace_id=${workspaceId}::uuid AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
+    const [principal] = await tx`SELECT revoked_at FROM swarm.agent_principals WHERE (workspace_id=${workspaceId}::uuid AND transport='hosted_mcp' OR swarm.local_agent_workspace_live(principal_id,${workspaceId}::uuid)) AND principal_id=${identity.principal_id}::uuid AND owner_user_id=${identity.user_id}::uuid FOR SHARE`;
     if (!principal || principal.revoked_at !== null) return null;
     const [presented] = await tx`SELECT t.renewal_grant_id,t.lineage_id,t.run_id
       FROM swarm.agent_tokens t JOIN swarm.agent_runs run ON run.run_id=t.run_id AND run.principal_id=t.principal_id
@@ -66,10 +66,12 @@ export async function loadHouseholdContentAccess(tx: Sql, workspaceId: string, i
         AND t.token_id=${identity.connection.connection_id}::uuid
         AND t.principal_id=${identity.principal_id}::uuid AND t.run_id=${identity.connection.grant_id}::uuid`;
     const [localFamily] = presented?.renewal_grant_id ? await tx`SELECT g.* FROM swarm.renewal_grants g
-      WHERE g.renewal_grant_id=${presented.renewal_grant_id}::uuid AND g.workspace_id=${workspaceId}::uuid
+      WHERE g.renewal_grant_id=${presented.renewal_grant_id}::uuid
         AND g.principal_id=${identity.principal_id}::uuid AND g.run_id=${identity.connection.grant_id}::uuid
         AND g.created_by=${identity.user_id}::uuid` : [];
-    const latestAllow=localFamily?.local_content_approval_token_id ?? null;
+    const [approval]=localFamily ? await tx`SELECT token_id FROM swarm.local_content_approval_workspaces
+      WHERE renewal_grant_id=${localFamily.renewal_grant_id}::uuid AND workspace_id=${workspaceId}::uuid` : [];
+    const latestAllow=approval?.token_id ?? (localFamily?.workspace_id===workspaceId ? localFamily.local_content_approval_token_id : null) ?? null;
     const connections = await tx`SELECT c.* FROM swarm.household_content_connections c
       WHERE c.workspace_id=${workspaceId}::uuid AND c.grant_id=${identity.connection.grant_id}::uuid
         AND c.principal_id=${identity.principal_id}::uuid AND c.owner_user_id=${identity.user_id}::uuid

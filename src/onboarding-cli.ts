@@ -181,7 +181,7 @@ export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
   await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
 }
 
-export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook", "workspace-id"] as const;
 export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"] as const;
 export const CHECK_MESSAGE_REFUSED_FLAGS = ["full"] as const;
 
@@ -196,7 +196,7 @@ export async function runCheckMessage(args: OnboardingArguments): Promise<void> 
   recordDispatch("runOnboardingCommand:check-message");
   args.assertShape(CHECK_FLAGS, 1);
   if (CHECK_MESSAGE_REFUSED_FLAGS.some(flag => args.has(flag))) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
-  const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
+  const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"),args.optional("workspace-id"));
   await output({ source: "local_preview_cache", message });
 }
 
@@ -205,7 +205,7 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
   args.assertShape(CHECK_FLAGS, 1);
   if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
   await checkAgentMessages({
-    profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
+    profilePath: args.required("profile"), workspaceId:args.optional("workspace-id"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
     present: async result => args.has("json") ? output(result) : writeOnboardingOutput(renderAgentCheck(result)),
   });
 }

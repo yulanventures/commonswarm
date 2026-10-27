@@ -13,7 +13,7 @@ import {
 } from "./storage.js";
 import {
   AgentSetupError, ONBOARDING_UUID, openProfileCredential, privatePath,
-  profileTarget, profileSessionContext, readAgentProfile, type AgentProfile,
+  profileTarget, profileSessionContext, profileWorkspaceSession, readAgentProfile, selectAgentWorkspace, agentWorkspaceStatePath, type AgentProfile,
 } from "./agent-profile.js";
 import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
@@ -187,6 +187,7 @@ async function readCheckState(path: string): Promise<CheckState> {
 
 export async function checkAgentMessages(options: {
   profilePath: string;
+  workspaceId?: string;
   hostSessionId?: string;
   full?: boolean;
   fetcher?: typeof fetch;
@@ -197,9 +198,11 @@ export async function checkAgentMessages(options: {
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
-  const askTurnGeneration = await startHandledAskTurn(profilePath, options.hostSessionId);
-  const profile = await readAgentProfile(profilePath, options.hostSessionId);
-  const path = checkStatePath(profilePath, options.hostSessionId);
+  const homeProfile = await readAgentProfile(profilePath, options.hostSessionId);
+  const profile=selectAgentWorkspace(homeProfile,options.workspaceId);
+  const stateProfilePath=agentWorkspaceStatePath(profilePath,homeProfile.workspace_id,profile.workspace_id);
+  const askTurnGeneration = await startHandledAskTurn(stateProfilePath, options.hostSessionId);
+  const path = checkStatePath(stateProfilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
   const deadlineMs = Math.min(startedAt + timeoutMs, options.deadlineAtMs ?? Number.POSITIVE_INFINITY);
   try {
@@ -208,13 +211,13 @@ export async function checkAgentMessages(options: {
       let ackAfterCommit: (() => Promise<void>) | undefined;
       let presenceAbort: AbortController | undefined;
       const result = await withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
-        const managed = await profileSessionContext(profile, options.hostSessionId);
+        const managed = await profileWorkspaceSession(homeProfile,profile, options.hostSessionId);
         const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
-        const credential = await openProfileCredential(profile, fetcher);
+        const credential = await openProfileCredential(homeProfile, fetcher);
         const token = await credential.bearer();
         const target = profileTarget(profile);
         try {
-          if (await reservePresenceTouch(profilePath, profile.principal_id)) {
+          if (await reservePresenceTouch(stateProfilePath, profile.principal_id)) {
             presenceAbort = new AbortController();
             const touchSignal = presenceAbort.signal;
             const touchFetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
@@ -268,7 +271,7 @@ export async function checkAgentMessages(options: {
             attachment_count: row.attachments?.length ?? 0, created_at: row.created_at,
             ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}),
             ...(body.length < row.body.length ? {
-              full_text_command: `cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} --message-id ${row.id}`,
+              full_text_command: `cswarm check --profile ${shellQuote(profilePath)} --workspace-id ${profile.workspace_id}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} --message-id ${row.id}`,
             } : {}),
           });
           presented.push(row);
@@ -282,7 +285,7 @@ export async function checkAgentMessages(options: {
           checked: true, cached: false, messages, has_more: hasMore,
           workspace_id: profile.workspace_id,
           workspace_name: rawName == null || rawName.trim() === "" ? null : rawName,
-          next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
+          next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)} --workspace-id ${profile.workspace_id}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
         };
         if (signal.aborted) throw checkTimeoutError();
         // Save the full bodies before showing a preview with its retrieval command. Failure
@@ -297,7 +300,7 @@ export async function checkAgentMessages(options: {
           const visible = lastVisibleId === undefined
             ? presented
             : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1);
-          await mergeHandledAsks(profilePath, options.hostSessionId, askTurnGeneration,
+          await mergeHandledAsks(stateProfilePath, options.hostSessionId, askTurnGeneration,
             visible.filter(row => row.kind === "ask").map(row => row.id));
         };
         const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
@@ -422,11 +425,12 @@ export async function checkAgentMessages(options: {
   }
 }
 
-export async function cachedAgentMessage(profilePath: string, signalId: string, hostSessionId?: string): Promise<SignalRecord> {
+export async function cachedAgentMessage(profilePath: string, signalId: string, hostSessionId?: string, workspaceId?:string): Promise<SignalRecord> {
   profilePath = privatePath(profilePath);
-  const profile = await readAgentProfile(profilePath, hostSessionId);
+  const homeProfile = await readAgentProfile(profilePath, hostSessionId);
+  const profile=selectAgentWorkspace(homeProfile,workspaceId);
   if (!ONBOARDING_UUID.test(signalId)) throw new AgentSetupError("message_id_invalid", "Use the full signal ID from the check result.");
-  const state = await readCheckState(checkStatePath(profilePath, hostSessionId));
+  const state = await readCheckState(checkStatePath(agentWorkspaceStatePath(profilePath,homeProfile.workspace_id,profile.workspace_id), hostSessionId));
   const row = state.messages.find(row => row.id === signalId.toLowerCase());
   if (!row || row.workspace_id !== profile.workspace_id || !signalAddressesAgent(row, profile.principal_id)) {
     throw new AgentSetupError("message_not_cached", "That message is no longer in the local preview cache. Read the workspace inbox for the original.");

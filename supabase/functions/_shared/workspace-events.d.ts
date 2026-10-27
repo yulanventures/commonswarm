@@ -6,7 +6,7 @@ export type WorkspaceRole = 'owner' | 'admin' | 'member';
 export declare const WORKSPACE_ROLES: readonly WorkspaceRole[];
 export type AgentTransport = 'local' | 'hosted_mcp';
 export declare const AGENT_TRANSPORTS: readonly AgentTransport[];
-export type WorkspaceEventType = AdminRoutineEventType | 'WorkspaceCreated' | 'WorkspaceArchived' | 'MemberInvited' | 'InvitationRevoked' | 'InvitationAccepted' | 'MemberJoined' | 'MemberRemoved' | 'MemberRoleChanged' | 'AgentPrincipalCreated' | 'AgentPrincipalRevoked' | 'AgentModelDeclared' | 'FeedbackSubmitted' | 'AgentTokenMinted' | 'AgentTokenRevoked' | 'HostedMcpGrantBegun' | 'HostedMcpWorkspaceConsented' | 'HostedMcpGrantActivated' | 'HostedMcpGrantRevoked' | 'HostedMcpSeatClaimed' | 'HostedMcpSeatRevoked' | 'CommandRejected';
+export type WorkspaceEventType = AdminRoutineEventType | 'WorkspaceCreated' | 'WorkspaceArchived' | 'MemberInvited' | 'InvitationRevoked' | 'InvitationAccepted' | 'MemberJoined' | 'MemberRemoved' | 'MemberRoleChanged' | 'AgentAddedToWorkspace' | 'AgentRemovedFromWorkspace' | 'AgentPrincipalCreated' | 'AgentPrincipalRevoked' | 'AgentModelDeclared' | 'FeedbackSubmitted' | 'AgentTokenMinted' | 'AgentTokenRevoked' | 'HostedMcpGrantBegun' | 'HostedMcpWorkspaceConsented' | 'HostedMcpGrantActivated' | 'HostedMcpGrantRevoked' | 'HostedMcpSeatClaimed' | 'HostedMcpSeatRevoked' | 'CommandRejected';
 export declare const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[];
 export type WorkspaceEventEnvelope<P = unknown> = EventEnvelope<P, WorkspaceEventType>;
 export interface WorkspaceRecord {
