@@ -44,6 +44,12 @@
   --cs-icon-size: 20px;
   --cs-header: 64px;
   --cs-list-width: 340px;
+  /* Navigation uses the resolved theme surfaces and the junction-C accent. */
+  --cs-rail-width: 260px;
+  --cs-rail-bg: var(--cs-subtle);
+  --cs-rail-hover: var(--cs-selected);
+  --cs-rail-accent: #ba3d23;
+  --cs-rail-on-accent: #ffffff;
   --cs-detail-width: 320px;
   --cs-content-width: 800px;
   --cs-motion: 140ms;

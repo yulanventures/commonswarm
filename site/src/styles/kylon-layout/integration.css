@@ -32,9 +32,6 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail { padding: 0; 
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__brand { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-ws-nav { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__catch-up { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspaces > .hm-rail__heading {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
-}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__people:has(.hm-rail__people-list:empty) { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-rail :is(a, button):focus-visible { outline-offset: 1px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: 45%; gap: 12px; }
@@ -118,4 +115,117 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account,
   .cs-org-switcher-chevron { display: none; }
+}
+
+/* One organization rail: workspaces read like channels; existing app doors follow. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] :is(.cs-org-context, .cs-org-rail, .cs-org-rail-account) {
+  background: var(--cs-rail-bg);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-identity-slot { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__org-mark { background: var(--cs-selected); color: var(--cs-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { padding: 8px; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail {
+  --home-rail-bg: var(--cs-rail-bg);
+  --home-rail-raised: var(--cs-rail-hover);
+  --home-rail-current: var(--cs-rail-accent);
+  --home-rail-current-ink: var(--cs-rail-on-accent);
+  --home-count: var(--cs-rail-accent);
+  --home-on-count: var(--cs-rail-on-accent);
+  gap: 16px; font-size: 15px; background: var(--cs-rail-bg);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: none; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace-list { gap: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__section-head { min-block-size: 36px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__heading {
+  padding: 0 10px; color: var(--cs-secondary); font-size: 15px; font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new {
+  inline-size: 28px; min-block-size: 28px; border-radius: 5px; box-shadow: none; color: var(--cs-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new .hm-rail__icon { color: inherit; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__link, .hm-rail__more, .hm-rail__person, .hm-rail__agent) {
+  min-block-size: 30px; padding-inline: 10px; border-radius: 5px; gap: 8px; font-size: 15px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__name { font-size: 15px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace[data-rail-attention] { color: var(--cs-ink); font-weight: 700; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-current="page"] {
+  background: var(--cs-rail-accent); color: var(--cs-rail-on-accent); font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-current="page"] .hm-rail__badge {
+  background: var(--cs-rail-on-accent); color: var(--cs-rail-accent);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__badge { min-inline-size: 20px; block-size: 20px; padding-inline: 5px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__agent { margin-block: 0; padding-inline-start: 30px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__agent::before { inset-block: 0; border-radius: 5px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-products { align-items: stretch; gap: 0; inline-size: 100%; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product {
+  justify-content: start; inline-size: 100%; min-block-size: 30px; padding: 4px 10px; gap: 8px; font-size: 15px; border-radius: 5px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product:hover { background: var(--cs-rail-hover); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product-label {
+  position: static; inline-size: auto; block-size: auto; overflow: hidden; clip-path: none; text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-icon { inline-size: 18px; block-size: 18px; }
+
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] {
+    grid-template-columns: var(--cs-rail-width) minmax(0, 1fr);
+    grid-template-rows: 56px auto minmax(0, 1fr);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account {
+    grid-column: 1; padding: 6px 8px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking {
+    grid-column: 1; grid-row: 2; min-block-size: min-content; overflow: hidden;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context { display: block; block-size: auto; max-block-size: calc(100dvh - 340px); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body { flex: 0 1 auto; max-block-size: calc(100dvh - 356px); overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-frame__rail-content, .hm-rail) { block-size: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__people { flex: none; min-block-size: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__people-list { max-block-size: 180px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace-list { max-block-size: 240px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail {
+    grid-column: 1; grid-row: 3; align-items: stretch; gap: 12px; padding: 8px;
+    border-block-start: 1px solid var(--cs-line); overflow-y: auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-rail-products { inline-size: 100%; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-workspace { grid-column: 2; grid-row: 1 / 4; }
+  /* A quiet, decorative brand signature uses the shipped junction-C asset. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail::after {
+    content: ""; flex: none; inline-size: 24px; block-size: 24px; margin: auto 10px 4px;
+    background: var(--cs-secondary); mask: image-set("/brand/mark.svg" 1x) center / contain no-repeat;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger:hover { background: var(--cs-rail-hover); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { flex: 1; font-size: 16px; font-weight: 700; }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { position: relative; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context::after {
+    content: ""; flex: none; inline-size: 24px; block-size: 24px; margin: 0 14px 4px;
+    background: var(--cs-secondary); mask: image-set("/brand/mark.svg" 1x) center / contain no-repeat;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll { gap: 16px; padding: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body { order: 1; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products { order: 2; border-block-start: 1px solid var(--cs-line); padding-block-start: 8px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products .cs-org-products { display: flex; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__link, .hm-rail__more, .hm-rail__person, .hm-rail__agent, .cs-org-product) { min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new { inline-size: 44px; min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account {
+    order: -1; justify-content: start; inline-size: calc(100% - 44px); border: 0; padding: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-heading { position: absolute; inset: 8px 8px auto auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-heading h2 {
+    position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger {
+    display: flex; align-items: center; gap: 10px; inline-size: 100%; padding: 6px; border: 0; border-radius: 6px; background: transparent;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger .dashboard__org-mark { display: grid; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger-brand {
+    display: block; flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg { inline-size: 14px; block-size: 14px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg > path:not(.cs-org-switcher-chevron) { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .cs-org-switcher-chevron { display: block; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: calc(100% + 8px) auto auto 0; max-block-size: calc(100dvh - 80px); }
 }
