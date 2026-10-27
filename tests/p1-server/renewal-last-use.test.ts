@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import postgres from "postgres";
 import { createClient } from "@supabase/supabase-js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
 interface LocalEnvironment { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string }
 interface Fixture {
@@ -242,21 +242,17 @@ test("served member read survives an older blocked use", { timeout: 90_000 }, as
       XDG_STATE_HOME: join(temp, "state"), SWARM_ENV: "test" },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
+  const cliState = observeFunctionCli(child);
   const capture = (chunk: Buffer) => { logs = (logs + chunk.toString()).slice(-20_000); };
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
   let responsePromise: Promise<{ response?: Response; error?: unknown }> | undefined;
   try {
     const f = await seed(sql);
-    const deadline = Date.now() + 60_000;
-    while (!logs.includes("Serving functions on")) {
-      assert.ok(Date.now() < deadline, `read edge did not boot: ${logs.slice(-2000)}`);
-      await delay(50);
-    }
     await awaitFunctionRunning({
-      url: `${local.API_URL}/functions/v1/read`, fetcher: fetch, timeoutMs: 10_000,
-      sleep: (ms) => delay(ms), now: () => Date.now(),
-      diagnostics: () => `read edge: ${logs.slice(-2000)}`,
+      url: `${local.API_URL}/functions/v1/read`, fetcher: fetch, timeoutMs: 60_000,
+      sleep: delay, now: () => Date.now(),
+      diagnostics: () => `read edge: ${logs.slice(-2000)}`, cliState,
     });
     let bStamp: Date | null = null;
     await bSql.begin(async (b) => {
@@ -586,12 +582,13 @@ test("long rotation history renews and reads; unrelated workspace history cannot
   const child=spawn("supabase",["functions","serve","--no-verify-jwt","--env-file",envFile],{
     cwd:process.cwd(),env:{...process.env,SWARM_ENV:"test",XDG_STATE_HOME:join(temp,"state")},
     detached:true,stdio:["ignore","pipe","pipe"]});
+  const cliState=observeFunctionCli(child);
   let logs="";child.stdout?.on("data",chunk=>{logs=(logs+chunk).slice(-20_000);});child.stderr?.on("data",chunk=>{logs=(logs+chunk).slice(-20_000);});
   const admin=createClient(local.API_URL,local.SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
   try {
     for(const name of ['command','read']) await awaitFunctionRunning({
       url:`${local.API_URL}/functions/v1/${name}`,fetcher:fetch,timeoutMs:60_000,
-      sleep:ms=>delay(ms),now:()=>Date.now(),diagnostics:()=>"history fixture edge readiness",
+      sleep:delay,now:()=>Date.now(),diagnostics:()=>logs,cliState,
     });
     const makeHuman=async()=>{
       const email=`history-${randomUUID()}@example.test`,password=`H-${randomBytes(24).toString("base64url")}!`;
