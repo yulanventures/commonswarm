@@ -13749,6 +13749,12 @@ async function handleTransaction(
   }).catch((error: unknown): HttpResult => {
     // postgres.js rejects begin only after rollback: no authority/content,
     // idempotency, presence, audit or notice effects survive this refusal.
+    // Discovery rejects malformed target/family bindings before authorization.
+    // Only this owned code/detail pair is a refusal; never expose which binding
+    // failed, retry it, or turn unrelated invalid-parameter errors into denials.
+    const failure = record(error);
+    if (failure?.code === '22023' && failure.detail === 'LOCAL_DISCOVERY_BINDING')
+      return {status:403,body:{error:'forbidden'}};
     if (error instanceof LocalCredentialDenied
       && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
       return {status:403,body:{error:'delivery_unavailable'}};

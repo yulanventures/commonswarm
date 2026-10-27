@@ -826,11 +826,22 @@ try {
     // (household-object-policy.ts:66-67). Keep this scoped to the read fixtures.
     await observer`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
       VALUES(${readWorkspace}::uuid,${owner}::uuid,'reader',${id()}::uuid,clock_timestamp())`;
-    const queueFor=async (principal,workspace=readWorkspace)=>{
-      const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
-        workspace_id:workspace,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
-          arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
-        {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
+    const queueFor=async (principal,workspace=readWorkspace,variant=null)=>{
+      const bindingRefusal=['unused-wrong-creator','unused-foreign-device','unused-wrong-family'].includes(variant);
+      let result;
+      try {
+        result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
+          workspace_id:workspace,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
+            arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
+          {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
+      } catch(error) {
+        // Revised Round 6 ruling: F's trusted entry rethrows this exact refusal.
+        // No HTTP response or diagnostic is fabricated at this boundary.
+        if(variant!=='unused-wrong-creator' || out.source?.commit!==ACTIVE_FLOOR_SOURCES.F.commit
+          || error?.code!=='22023' || error?.detail!=='LOCAL_DISCOVERY_BINDING') throw error;
+        return {bindingException:true};
+      }
+      if(bindingRefusal) return result;
       if(result.status!==200 || !result.body.queue?.status?.facts) throw Object.assign(new Error('queue boundary'),{code:'QUEUE_READ_CONTROL'});
       return result.body.queue.status.facts.connection;
     };
@@ -882,15 +893,36 @@ try {
       const overview=await overviewAs(owner);
       const home=overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
         .find(agent=>agent.principal_id===fixture.principal)?.status.facts.connection;
+      // Round 6 ruling: current/H must return only a generic 403. Only the
+      // immutable F command's wrong-creator control expects its exact trusted-
+      // entry exception, with no access/success or write, including diagnostics. Derive
+      // command generation from the source identity, never the read generation.
+      const bindingRefusal=['unused-wrong-creator','unused-foreign-device','unused-wrong-family'].includes(variant);
+      const beforeQueue=bindingRefusal ? await snapshot():null;
       atControl(`current-proof-${variant}/queue`,'household_tool/todo_queue through handleHostedManagementCommand');
-      const queue=await queueFor(fixture.principal);
+      const queue=await queueFor(fixture.principal,readWorkspace,variant);
+      const historicalBindingControl=variant==='unused-wrong-creator'
+        && out.source?.commit===ACTIVE_FLOOR_SOURCES.F.commit;
+      const queueRefused=bindingRefusal && (historicalBindingControl ? queue.bindingException===true
+        : queue.status===403 && JSON.stringify(queue.body)===JSON.stringify({error:'forbidden'}));
+      if(bindingRefusal) {
+        check(`current-proof-${variant}-queue-generic-refusal`,queueRefused);
+        const afterQueue=await snapshot(),effects=diff(beforeQueue,afterQueue);
+        const unchanged=Object.keys(effects.counts).length===0 && effects.content_changed.length===0;
+        check(`current-proof-${variant}-queue-no-write`,unchanged);
+        check(`current-proof-${variant}-queue-no-diagnostic`,Object.hasOwn(beforeQueue.counts,'swarm.command_failures')
+          && Object.hasOwn(beforeQueue.hashes,'swarm.command_failures')
+          && beforeQueue.counts['swarm.command_failures']===afterQueue.counts['swarm.command_failures']
+          && beforeQueue.hashes['swarm.command_failures']===afterQueue.hashes['swarm.command_failures']);
+      }
       atControl(`current-proof-${variant}/virgin`,'SELECT first_used_at FROM swarm.agent_tokens');
       if(unused && variant!=='live-bootstrap') {
         const [afterRead]=await observer`SELECT first_used_at FROM swarm.agent_tokens WHERE token_id=${fixture.t0}::uuid`;
         check(`current-proof-${variant}-virgin`,beforeRead.first_used_at===null && beforeRead.predecessor_token_id===null
           && !beforeRead.unexpired && afterRead.first_used_at===null);
       }
-      check(`current-proof-${variant}-home-and-queue`,home!==undefined && queue!==undefined && (home==='live')===expected && (queue==='live')===expected);
+      check(`current-proof-${variant}-home-and-queue`,home!==undefined && queue!==undefined && (home==='live')===expected
+        && (bindingRefusal ? queueRefused:(queue==='live')===expected));
     }
     atControl('converted-read-model/fixture','INSERT converted read-model fixture');
 

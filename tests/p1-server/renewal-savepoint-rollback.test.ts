@@ -118,6 +118,10 @@ for(const mode of ['real_read','permanence'] as const) test(`renewal ${mode}: ro
         assert.ok(result.checks?.some(check=>check.name===`unused-root-parent-${slot}-${policy}` && check.ok),
           `${slot}/${policy}: real parent gate required`);
       for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device','unused-unbound','unused-future-bound','unused-future-unbound','unused-terminal','unused-elapsed','unused-timeboxed','unused-no-family','unused-wrong-creator','unused-foreign-device','unused-wrong-family','unused-token-tombstone','unused-family-tombstone']) {
+        if(['unused-wrong-creator','unused-foreign-device','unused-wrong-family'].includes(variant))
+          for(const proof of ['queue-generic-refusal','queue-no-write','queue-no-diagnostic'])
+            assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-${proof}` && check.ok),
+              `${variant}: binding refusal requires the exact generation outcome, no access/success and no write, including diagnostics`);
         if(variant.startsWith('unused-') || ['expired-unused','mismatched-device'].includes(variant))
           assert.ok(result.checks?.some(check=>check.name===`current-proof-${variant}-virgin` && check.ok),
             `${variant}: expired virgin root must remain unused after read projection`);
