@@ -72,6 +72,16 @@ export interface OrganizationMenuItem {
   current: boolean;
 }
 
+/** The rail lists readable workspaces in the selected organization. */
+export function organizationWorkspaces<
+  T extends { id: string; archived: boolean; orgId?: string },
+>(workspaces: readonly T[], orgId: string | null): T[] {
+  return workspaces.filter((workspace) =>
+    !workspace.archived &&
+    (orgId === null || (workspace.orgId ?? workspace.id) === orgId)
+  );
+}
+
 /** Organizations come only from workspaces the viewer can already read. */
 export function organizationMenuItems(
   workspaces: readonly { id: string; name: string; archived: boolean; orgId?: string; orgName?: string }[],

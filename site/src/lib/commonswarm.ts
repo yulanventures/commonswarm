@@ -1733,6 +1733,7 @@ export async function fileDownloadUrl(
 }
 
 export interface CreatedWorkspace {
+  orgId?: string;
   workspaceId: string;
   streamId: string;
   name: string;
@@ -1767,16 +1768,19 @@ export async function createWorkspace(
   commandId: string,
   workspaceId: string,
   name: string,
+  orgId?: string,
 ): Promise<CreatedWorkspace> {
   const { status, body } = await postCommand(session, commandId, {
     kind: "create_workspace",
     workspace_id: workspaceId,
     name,
+    ...(orgId ? { org_id: orgId } : {}),
   });
 
   if (status === 200) {
     return {
       workspaceId: String(body.workspace_id ?? workspaceId),
+      orgId: typeof body.org_id === "string" ? body.org_id : orgId,
       streamId: String(body.stream_id ?? ""),
       name,
     };
@@ -3130,6 +3134,53 @@ export async function browserDeliveryReceipts(
     receipts,
     ...(broadcastRoster === undefined ? {} : { broadcastRoster }),
   };
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  role: "owner" | "admin" | "member" | "guest";
+}
+export async function myOrganizations(): Promise<Organization[]> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const organizations: Organization[] = [];
+  for (let offset = 0;; offset += 50) {
+    const { data, error } = await readWithDeadline(
+      "your organizations",
+      (signal) =>
+        api.schema("swarm_read").from("organizations")
+          .select("id,display_name,role").order("display_name").order("id")
+          .range(offset, offset + 49).abortSignal(signal),
+    );
+    if (error) throw new Error(error.message);
+    const page = data ?? [];
+    organizations.push(
+      ...page.map((row) => ({
+        id: String(row.id),
+        name: String(row.display_name),
+        role: row.role as Organization["role"],
+      })),
+    );
+    if (page.length < 50) return organizations;
+  }
+}
+export async function moveWorkspaceToOrg(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  orgId: string,
+): Promise<void> {
+  const { status, body } = await postCommand(session, commandId, {
+    kind: "move_workspace_to_org",
+    org_id: orgId,
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 200 && body.ok === true) return;
+  throw new Error(
+    status === 403
+      ? "Only a workspace owner who manages both organizations can move this workspace."
+      : "The move was not confirmed. Retry to check.",
+  );
 }
 
 /** Owner-filtered account directory; no agent credentials or workspace selection required. */

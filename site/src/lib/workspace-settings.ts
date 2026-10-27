@@ -4,6 +4,8 @@ export interface WorkspaceSettingsOptions {
   memberCount: number;
   agentCount: number;
   canClose: boolean;
+  moveDestinations?: readonly { id: string; name: string }[];
+  onMove?(orgId: string): Promise<void>;
   onCopy(): Promise<void>;
   onClose(): Promise<void>;
 }
@@ -29,9 +31,9 @@ export function renderWorkspaceSettings(
 
   const counts = document.createElement("p");
   counts.className = "dashboard__workspace-settings-counts";
-  counts.textContent = `${countLabel(options.memberCount, "person", "people")} · ${
-    countLabel(options.agentCount, "agent", "agents")
-  }`;
+  counts.textContent = `${
+    countLabel(options.memberCount, "person", "people")
+  } · ${countLabel(options.agentCount, "agent", "agents")}`;
 
   const identity = document.createElement("div");
   identity.className = "dashboard__workspace-identity";
@@ -82,7 +84,10 @@ export function renderWorkspaceSettings(
   input.autocomplete = "off";
   input.spellcheck = false;
   input.dataset.workspaceCloseConfirm = "";
-  input.setAttribute("aria-label", `Type ${options.name} to confirm workspace close`);
+  input.setAttribute(
+    "aria-label",
+    `Type ${options.name} to confirm workspace close`,
+  );
   const button = document.createElement("button");
   button.type = "submit";
   button.className = "dashboard__danger-button";
@@ -116,7 +121,9 @@ export function renderWorkspaceSettings(
     try {
       await options.onClose();
     } catch (error) {
-      status.textContent = error instanceof Error ? error.message : "Workspace close failed.";
+      status.textContent = error instanceof Error
+        ? error.message
+        : "Workspace close failed.";
       status.hidden = false;
       input.disabled = false;
       button.removeAttribute("aria-busy");
@@ -129,6 +136,64 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
-  root.replaceChildren(heading, counts, identity, danger);
+  root.replaceChildren(heading, counts, identity);
+  if (options.moveDestinations?.length && options.onMove) {
+    const form = document.createElement("form");
+    form.className = "dashboard__workspace-move";
+    form.dataset.workspaceMoveForm = "";
+    const label = document.createElement("label");
+    label.textContent = "Move to organization";
+    const picker = document.createElement("select");
+    picker.dataset.workspaceMoveDestination = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select organization";
+    picker.append(placeholder);
+    for (const destination of options.moveDestinations) {
+      const option = document.createElement("option");
+      option.value = destination.id;
+      option.textContent = destination.name;
+      picker.append(option);
+    }
+    label.append(picker);
+    const move = document.createElement("button");
+    move.type = "submit";
+    move.className = "dashboard__text-button";
+    move.textContent = "Move";
+    move.disabled = true;
+    const error = document.createElement("p");
+    error.className = "dashboard__form-error";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    let busy = false;
+    picker.addEventListener("change", () => {
+      move.disabled = busy || !picker.value;
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy || !picker.value) return;
+      busy = true;
+      move.disabled = true;
+      picker.disabled = true;
+      move.setAttribute("aria-busy", "true");
+      error.hidden = true;
+      try {
+        await options.onMove!(picker.value);
+      } catch (reason) {
+        error.textContent = reason instanceof Error
+          ? reason.message
+          : "Workspace move failed.";
+        error.hidden = false;
+      } finally {
+        busy = false;
+        picker.disabled = false;
+        move.disabled = !picker.value;
+        move.removeAttribute("aria-busy");
+      }
+    });
+    form.append(label, move, error);
+    root.append(form);
+  }
+  root.append(danger);
   return { confirmInput: input, closeButton: button };
 }

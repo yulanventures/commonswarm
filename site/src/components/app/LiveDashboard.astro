@@ -1040,7 +1040,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    buildOrganizationMenu, organizationMenuItems, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
+    buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
@@ -1112,6 +1112,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     archiveWorkspace,
     client,
     createWorkspace,
+    myOrganizations, moveWorkspaceToOrg, type Organization,
     changeWorkspaceRole,
     currentSession,
     authReturnError,
@@ -1345,6 +1346,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** Optional only for intents saved before purpose was asked at creation. */
     purpose?: HouseholdPurpose;
     permissionsCommandId?: string;
+    orgId?: string;
   }
 
   interface SignalCursor {
@@ -1403,6 +1405,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let connectedAppsGeneration = 0;
     let accountAgentsGeneration = 0;
     let workspaces: Workspace[] = [];
+    let moveOrganizations: Organization[] = [];
     let selectedOrgId: string | null = null;
     let homeRoute: HomeRoute = { view: "catchup" };
     let homeNavigation = 0;
@@ -2117,6 +2120,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           workspaceId: parsed.workspaceId,
           commandId: parsed.commandId,
           name: parsed.name,
+          ...(typeof parsed.orgId === "string" ? { orgId: parsed.orgId } : {}),
           ...(parsed.purpose === "shared" || parsed.purpose === "personal"
             ? { purpose: parsed.purpose, permissionsCommandId: typeof parsed.permissionsCommandId === "string" ? parsed.permissionsCommandId : undefined }
             : {}),
@@ -4557,8 +4561,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!slot) return;
       /* One rail on every route: everyone in every workspace the overview read, with the workspace in view
          read first so its own measured states win (home-map homeRailPeople). */
-      const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople());
-      const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
+      const orgWorkspaces=organizationWorkspaces(workspaces,selectedOrgId);
+      const orgWorkspaceIds=new Set(orgWorkspaces.map(workspace=>workspace.id));
+      const railPeople = homeRailPeople(catchUpData.filter(entry=>orgWorkspaceIds.has(entry.workspace.id)), homeRoute.view === "catchup" ? null : currentHomePeople());
+      const vm = mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
       /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
          follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
       const draftName = homeRoute.view === "new" ? one<HTMLInputElement>("[data-panel=create] #dashboard-workspace-name")?.value ?? null : null;
@@ -5406,6 +5412,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
       if (!dialog || dialog.open) return;
       dialog.showModal();
+      const workspace=workspaces.find(item=>item.id===activeWorkspaceId);
+      if(session && !sampleMode && workspace) {
+        const userId=session.user.id;
+        moveOrganizations=[];
+        renderWorkspaceSettingsPanel(workspace);
+        void myOrganizations().then(orgs=>{
+          if(session?.user.id!==userId || activeWorkspaceId!==workspace.id || !dialog.open) return;
+          moveOrganizations=orgs;
+          renderWorkspaceSettingsPanel(workspace);
+        }).catch(()=>{ /* Existing settings remain usable during a failed org read. */ });
+      }
       for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
         trigger.setAttribute("aria-expanded", "true");
       }
@@ -7382,6 +7399,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       void loadConnectedAppsDialog();
     };
 
+    const workspaceMoveCommands=new Map<string,string>();
+
     const loadAccountAgentsDialog = async (): Promise<void> => {
       const generation = ++accountAgentsGeneration;
       const ownerId = session?.user.id;
@@ -7418,6 +7437,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         memberCount: members.length,
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
+        moveDestinations: !sampleMode && me?.role === "owner" && moveOrganizations.some(org=>org.id===workspace.orgId && (org.role==="owner" || org.role==="admin"))
+          ? moveOrganizations.filter(org=>org.id!==workspace.orgId && (org.role==="owner" || org.role==="admin")) : [],
+        onMove: async orgId=>{
+          if(!session || sampleMode) return;
+          // Keep the same command ID for a retry after an uncertain response.
+          const key=`${workspace.id}:${orgId}`;
+          const commandId=workspaceMoveCommands.get(key) ?? uuid();
+          workspaceMoveCommands.set(key,commandId);
+          await moveWorkspaceToOrg(session,commandId,workspace.id,orgId);
+          workspaces=await workspaceMemberships();
+          selectedOrgId=orgId;
+          closeWorkspaceDetailsDialog();
+          await openWorkspace(workspace.id,true);
+          workspaceMoveCommands.delete(key);
+        },
         onCopy: async () => {
           await navigator.clipboard.writeText(workspace.id);
         },
@@ -9154,15 +9188,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const existing = workspaces.find((workspace) => workspace.id === intent.workspaceId);
         let madeWorkspace: Workspace;
         if (existing) {
-          madeWorkspace = { id: existing.id, name: existing.name, archived: false };
+          madeWorkspace = { ...existing, archived: false };
         } else {
           const made = await createWorkspace(
             value,
             intent.commandId,
             intent.workspaceId,
             intent.name,
+            intent.orgId,
           );
-          madeWorkspace = { id: made.workspaceId, name: made.name, archived: false };
+          madeWorkspace = { id: made.workspaceId, name: made.name, archived: false, orgId: made.orgId,
+            orgName: workspaces.find(workspace=>workspace.orgId===made.orgId)?.orgName ?? made.name };
         }
         if (!isCurrent()) return;
         const permissions = await recordCreatePermissions(value, intent);
@@ -9743,12 +9779,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         return;
       }
       const savedIntent = readCreateIntent(session.user.id);
-      const intent: CreateIntent = savedIntent?.name === name && savedIntent.purpose === purpose
+      const intent: CreateIntent = savedIntent?.name === name && savedIntent.purpose === purpose && savedIntent.orgId === (selectedOrgId ?? undefined)
         ? savedIntent
         : {
             workspaceId: uuid(),
             commandId: uuid(),
             permissionsCommandId: uuid(),
+            ...(selectedOrgId ? { orgId: selectedOrgId } : {}),
             name,
             purpose,
           };

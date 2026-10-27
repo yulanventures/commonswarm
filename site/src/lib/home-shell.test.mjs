@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOrganizationMenu, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { buildOrganizationMenu, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -118,4 +118,14 @@ test("organization menu renders safe names and the checked choice, and sends wor
   assert.equal(menu.children[1].children[2].textContent, "✓");
   menu.children[0].listeners.click();
   assert.deepEqual(selected, ["space-one"], "an org selects its readable workspace through the caller");
+});
+
+test("organization rail keeps siblings and excludes other and archived workspaces after a move",()=>{
+  const a={id:"a",orgId:"one",archived:false};
+  const b={id:"b",orgId:"one",archived:false};
+  const c={id:"c",orgId:"two",archived:false};
+  const closed={id:"closed",orgId:"one",archived:true};
+  assert.deepEqual(organizationWorkspaces([a,b,c,closed],"one"),[a,b]);
+  assert.deepEqual(organizationWorkspaces([a,{...b,orgId:"two"},c,closed],"two"),[{...b,orgId:"two"},c]);
+  assert.deepEqual(organizationWorkspaces([{id:"sample",archived:false}],"sample"),[{id:"sample",archived:false}]);
 });

@@ -69,6 +69,7 @@ type ConnectCommand =
   | { kind: "accept_invitation"; token: string }
   | { kind: "remove_member"; user_id: string }
   | { kind: "archive_workspace" }
+  | { kind: "move_workspace_to_org"; org_id: string }
   | { kind: "create_agent_principal"; name: string; model?: string }
   | { kind: "revoke_agent_principal"; principal_id: string }
   | {
@@ -930,6 +931,7 @@ async function createWorkspace(
   token: string,
   workspaceId: string,
   name = "self-serve workspace",
+  orgId?: string,
 ): Promise<CommandResponse> {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
@@ -940,7 +942,7 @@ async function createWorkspace(
     body: JSON.stringify({
       command_id: commandId("createworkspace"),
       client_version: "0.1.0",
-      command: { kind: "create_workspace", workspace_id: workspaceId, name },
+      command: { kind: "create_workspace", workspace_id: workspaceId, name, ...(orgId ? {org_id:orgId} : {}) },
     }),
   });
   const text = await response.text();
@@ -3314,6 +3316,74 @@ test("self-serve creates an owned workspace with a workspace stream", async () =
     assert.equal(streams[0]?.kind, "workspace");
     assert.equal(streams[0]?.head_seq, "0");
   });
+});
+
+test("create-in-org admits live non-guests without promoting workspace owners",async()=>{
+  const f=await fixture();
+  const createdId=randomUUID();
+  const result=await createWorkspace(f.ua2Jwt,createdId,"Sibling",f.workspaceA);
+  assert.equal(result.status,200,result.text);
+  assert.equal(result.body.org_id,f.workspaceA);
+  const [row]=await sql`SELECT w.org_id,m.role FROM swarm.workspaces w JOIN swarm.org_memberships m ON m.org_id=w.org_id
+    WHERE w.workspace_id=${createdId}::uuid AND m.principal_id=${f.ua2}::uuid AND m.principal_kind='user'`;
+  assert.equal(row?.org_id,f.workspaceA);
+  assert.equal(row?.role,"member","workspace owner is still an org member");
+  const members=await sql`SELECT user_id,role FROM swarm.memberships WHERE workspace_id=${createdId}::uuid`;
+  assert.deepEqual(members.map(row=>[row.user_id,row.role]),[[f.ua2,"owner"]]);
+  for(const role of ["guest","member"] as const) {
+    await sql`UPDATE swarm.org_memberships SET role=${role},revoked_at=${role==="member"?new Date():null}
+      WHERE org_id=${f.workspaceA}::uuid AND principal_id=${f.ua2}::uuid`;
+    const deniedId=randomUUID();
+    const denied=await createWorkspace(f.ua2Jwt,deniedId,"Refused",f.workspaceA);
+    assert.equal(denied.status,403,denied.text);
+    assert.equal((await sql`SELECT 1 FROM swarm.workspaces WHERE workspace_id=${deniedId}::uuid`).length,0);
+  }
+  assert.equal((await createWorkspace(f.ubJwt,randomUUID(),"Stranger",f.workspaceA)).status,403);
+  assert.equal((await createWorkspace(f.agentToken,randomUUID(),"Agent",f.workspaceA)).status,403);
+});
+
+test("workspace move preserves content and agent connection, and replays one audit receipt",async()=>{
+  const f=await fixture();
+  const command={kind:"move_workspace_to_org" as const,org_id:f.workspaceB};
+  assert.equal((await issueConnect(f,f.uaJwt,command)).status,403,"destination authority required");
+  await sql`INSERT INTO swarm.org_memberships(org_id,principal_kind,principal_id,role)
+    VALUES(${f.workspaceB}::uuid,'user',${f.ua}::uuid,'admin'),(${f.workspaceB}::uuid,'user',${f.ua2}::uuid,'admin')`;
+  await sql`UPDATE swarm.org_memberships SET role='admin' WHERE org_id=${f.workspaceA}::uuid AND principal_id=${f.ua2}::uuid`;
+  assert.equal((await issueConnect(f,f.ua2Jwt,command)).status,403,"org admin lacks workspace ownership");
+  assert.equal((await issueConnect(f,f.agentToken,command)).status,403,"agents cannot move workspaces");
+  const before=await issueSignal(f,f.agentToken,{kind:"post_signal",signal_kind:"working-on",body:"Before move",to_user_id:null,about:null});
+  assert.equal(before.status,200,before.text);
+  const memberships=await sql`SELECT * FROM swarm.memberships WHERE workspace_id=${f.workspaceA}::uuid ORDER BY user_id`;
+  const tokens=await sql`SELECT * FROM swarm.agent_tokens WHERE principal_id=${f.agentPrincipal}::uuid ORDER BY token_id`;
+  const signals=await sql`SELECT * FROM swarm.signals WHERE workspace_id=${f.workspaceA}::uuid ORDER BY id`;
+  const id=commandId("orgmove");
+  const moved=await issueConnect(f,f.uaJwt,command,id);
+  assert.equal(moved.status,200,moved.text);
+  assert.equal(moved.body.from_org_id,f.workspaceA);
+  assert.equal(moved.body.org_id,f.workspaceB);
+  assert.equal(moved.body.workspace_id,f.workspaceA);
+  assert.deepEqual(await sql`SELECT * FROM swarm.memberships WHERE workspace_id=${f.workspaceA}::uuid ORDER BY user_id`,memberships);
+  assert.deepEqual(await sql`SELECT * FROM swarm.agent_tokens WHERE principal_id=${f.agentPrincipal}::uuid ORDER BY token_id`,tokens);
+  assert.deepEqual(await sql`SELECT * FROM swarm.signals WHERE workspace_id=${f.workspaceA}::uuid ORDER BY id`,signals);
+  const replay=await issueConnect(f,f.uaJwt,command,id);
+  assert.equal(replay.status,200,replay.text);
+  assert.deepEqual(replay.body,moved.body);
+  assert.equal((await issueConnect(f,f.uaJwt,{...command,org_id:f.workspaceA},id)).status,409);
+  const [receipt]=await sql`SELECT count(*)::int AS n FROM swarm.idempotency_keys
+    WHERE principal_kind='user' AND principal_id=${f.ua} AND command_id=${id}`;
+  assert.equal(receipt?.n,1);
+  const audit=await sql`SELECT outcome FROM swarm.audit_log WHERE command_kind='move_workspace_to_org'
+    AND workspace_id=${f.workspaceA}::uuid AND outcome IN('accepted','replayed') ORDER BY audit_id`;
+  assert.equal(audit.filter(row=>row.outcome==="accepted").length,1);
+  assert.equal(audit.filter(row=>row.outcome==="replayed").length,1);
+  const [source]=await sql`SELECT archived_at FROM swarm.organizations WHERE id=${f.workspaceA}::uuid`;
+  assert.ok(source?.archived_at);
+  const after=await issueSignal(f,f.agentToken,{kind:"post_signal",signal_kind:"working-on",body:"After move",to_user_id:null,about:null});
+  assert.equal(after.status,200,after.text);
+  const readable=await humanSignalRead(f.uaJwt,f.workspaceA);
+  assert.equal(readable.status,200);
+  const rows=readable.body.rows as {id:string}[];
+  assert.ok(rows.some(row=>row.id===(before.body.signal as {id:string}).id));
 });
 
 test("self-serve is capped per identity and closed to agent credentials", async () => {
