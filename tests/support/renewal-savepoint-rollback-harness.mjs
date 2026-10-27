@@ -808,6 +808,11 @@ try {
     // standing grants' NULL horizon/max are also enforced by the real schema.
     await observer`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
       VALUES(${readWorkspace}::uuid,'shared') ON CONFLICT DO NOTHING`;
+    // The human queue reader needs its own explicit content consent. Workspace
+    // ownership and the agent's renewal authority do not supply content rights
+    // (household-object-policy.ts:66-67). Keep this scoped to the read fixtures.
+    await observer`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+      VALUES(${readWorkspace}::uuid,${owner}::uuid,'reader',${id()}::uuid,clock_timestamp())`;
     const queueFor=async (principal,workspace=readWorkspace)=>{
       const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
         workspace_id:workspace,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
@@ -914,6 +919,8 @@ try {
     check('converted unused root ordinary expired read denies',[401,403].includes((await convertedRead()).status));
     await observer`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose)
       VALUES(${convertedWorkspace}::uuid,'shared')`;
+    await observer`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+      VALUES(${convertedWorkspace}::uuid,${owner}::uuid,'reader',${id()}::uuid,clock_timestamp())`;
     const convertedVirginStatus=async()=>{
       const overview=await overviewAs(owner);
       return overview.workspaces.find(w=>w.workspace_id===convertedWorkspace)?.people.flatMap(person=>person.agents)
