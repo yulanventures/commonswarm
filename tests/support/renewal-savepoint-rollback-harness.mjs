@@ -835,9 +835,9 @@ try {
             arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
           {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
       } catch(error) {
-        // Revised Round 6 ruling: F's trusted entry rethrows this exact refusal.
+        // Round 6 extension: F's trusted entry rethrows for these three bindings.
         // No HTTP response or diagnostic is fabricated at this boundary.
-        if(variant!=='unused-wrong-creator' || out.source?.commit!==ACTIVE_FLOOR_SOURCES.F.commit
+        if(!bindingRefusal || out.source?.commit!==ACTIVE_FLOOR_SOURCES.F.commit
           || error?.code!=='22023' || error?.detail!=='LOCAL_DISCOVERY_BINDING') throw error;
         return {bindingException:true};
       }
@@ -847,6 +847,9 @@ try {
     };
     const wrongDevice=id();
     await observer`INSERT INTO swarm.devices(device_id,user_id,label) VALUES(${wrongDevice}::uuid,${owner}::uuid,'Mismatched read fixture')`;
+    // Keep the second family in this workspace so both grant FKs are valid.
+    // The negative control is the token's different principal/run, not tenancy.
+    const readOtherFamily=await readSeat('truth-other-family',false);
     for(const variant of ['live-bootstrap','expired-unused','expired-used','pending','retired-history','predecessor-tombstone','elapsed','revoked','mismatched-device','unused-unbound','unused-future-bound','unused-future-unbound','unused-terminal','unused-elapsed','unused-timeboxed','unused-no-family','unused-wrong-creator','unused-foreign-device','unused-wrong-family','unused-token-tombstone','unused-family-tombstone']) {
       atControl(`current-proof-${variant}/fixture`,'INSERT devices, principal, run, renewal_grant and root token');
       const unused=variant.startsWith('unused-') || ['live-bootstrap','expired-unused','mismatched-device'].includes(variant);
@@ -855,7 +858,7 @@ try {
         variant==='mismatched-device' ? wrongDevice:unbound ? null:undefined,
         variant==='unused-timeboxed' ? 'timeboxed':variant==='unused-no-family' ? 'no-family':'standing',
         variant==='unused-wrong-creator' ? {creator:outsider}:variant==='unused-foreign-device' ? {deviceOwner:outsider}:
-          variant==='unused-wrong-family' ? {familyPrincipal:otherFamily.principal,familyRun:otherFamily.run}:{});
+          variant==='unused-wrong-family' ? {familyPrincipal:readOtherFamily.principal,familyRun:readOtherFamily.run}:{});
       atControl(`current-proof-${variant}/binding`,'SELECT bound_device_id FROM swarm.renewal_grants');
       const [binding]=await observer`SELECT bound_device_id FROM swarm.renewal_grants WHERE renewal_grant_id=${fixture.grant}::uuid`;
       check(`current-proof-${variant}-binding`,binding.bound_device_id===(variant==='mismatched-device'?wrongDevice:unbound ? null:fixture.device));
@@ -894,14 +897,14 @@ try {
       const home=overview.workspaces.find(w=>w.workspace_id===readWorkspace)?.people.flatMap(person=>person.agents)
         .find(agent=>agent.principal_id===fixture.principal)?.status.facts.connection;
       // Round 6 ruling: current/H must return only a generic 403. Only the
-      // immutable F command's wrong-creator control expects its exact trusted-
+      // immutable F command's three binding controls expect its exact trusted-
       // entry exception, with no access/success or write, including diagnostics. Derive
       // command generation from the source identity, never the read generation.
       const bindingRefusal=['unused-wrong-creator','unused-foreign-device','unused-wrong-family'].includes(variant);
       const beforeQueue=bindingRefusal ? await snapshot():null;
       atControl(`current-proof-${variant}/queue`,'household_tool/todo_queue through handleHostedManagementCommand');
       const queue=await queueFor(fixture.principal,readWorkspace,variant);
-      const historicalBindingControl=variant==='unused-wrong-creator'
+      const historicalBindingControl=bindingRefusal
         && out.source?.commit===ACTIVE_FLOOR_SOURCES.F.commit;
       const queueRefused=bindingRefusal && (historicalBindingControl ? queue.bindingException===true
         : queue.status===403 && JSON.stringify(queue.body)===JSON.stringify({error:'forbidden'}));
@@ -957,6 +960,8 @@ try {
       await tx`INSERT INTO swarm.events(workspace_id,stream_id,seq,event_id,command_id,type,schema_version,actor_user,payload)
         VALUES(${convertedWorkspace}::uuid,${convertedStream}::uuid,1,${id()}::uuid,${id()},'AgentTokenMinted',1,
           ${owner}::uuid,${tx.json({token_id:convertedToken})}::jsonb)`;
+      // The provenance event occupies seq 1; runtime renewal appends after it.
+      await tx`UPDATE swarm.streams SET head_seq=1 WHERE stream_id=${convertedStream}::uuid`;
       await tx`SET LOCAL ROLE swarm_admin`;
       await tx`UPDATE swarm.renewal_grants SET kind='standing',max_successors=NULL,horizon_expires_at=NULL
         WHERE renewal_grant_id=${convertedGrant}::uuid`;
