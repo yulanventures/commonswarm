@@ -31,6 +31,10 @@ function facts(role = 'editor', localExpiry?: string, tokenOverrides: Record<str
     if (query.startsWith('SELECT run_id FROM swarm.agent_runs')) return [{ run_id: connection.grant_id }];
     if (query.startsWith('SELECT device_id FROM swarm.devices')) return [{ device_id: device }];
     if (query.startsWith('SELECT renewal_grant_id FROM swarm.renewal_grants')) return [{ renewal_grant_id: family }];
+    if (query.startsWith('SELECT principal_id FROM swarm.agent_workspace_memberships'))
+      return values[0] === workspace && values[1] === principal ? [{ principal_id: principal }] : [];
+    if (query.startsWith('SELECT swarm.local_agent_workspace_live('))
+      return [{ ok: values[0] === principal && values[1] === workspace }];
     if (query.startsWith('LOCK TABLE swarm.household_content_connections IN ACCESS SHARE MODE')) return [];
     if (query.includes('FROM pg_catalog.pg_policy')) return [{ present: false }];
     // No retired seats exist in this fixture, so the exact replacement set is empty.
@@ -66,7 +70,7 @@ function facts(role = 'editor', localExpiry?: string, tokenOverrides: Record<str
         'operations', 'consent_receipt_id', 'expires_at', 'hosted_grant_id', 'renewal_grant_id'];
       approvals.push(Object.fromEntries(keys.map((key, index) => [key, values[index]]))); return [];
     }
-    if (query.startsWith('UPDATE swarm.renewal_grants')) { familySelections.push(values); return []; }
+    if (query.startsWith('SELECT swarm.set_local_workspace_approval(')) { familySelections.push(values); return []; }
     if (query.startsWith('INSERT INTO swarm.audit_log')) return [];
     if (query.startsWith('SELECT set_config')
       || query.startsWith('INSERT INTO swarm.idempotency_keys') || query.startsWith('UPDATE swarm.household_content_connections')) return [];
@@ -128,7 +132,7 @@ test('local approval binds the checked renewal family without a technical expiry
   assert.deepEqual(tx.approvals, [{ connection_id: connection.connection_id, grant_id: connection.grant_id,
     workspace_id: workspace, principal_id: principal, owner_user_id: owner, purpose: 'shared',
     operations: ['read'], consent_receipt_id: tx.consent, expires_at: null, hosted_grant_id: null, renewal_grant_id: family }]);
-  assert.deepEqual(tx.familySelections, [[connection.connection_id, family, workspace, principal, connection.grant_id, owner]]);
+  assert.deepEqual(tx.familySelections, [[family, workspace, connection.connection_id]]);
   for (const unavailable of [facts(), facts('editor', now), facts('editor', expires, { revoked_at: now })]) {
     assert.deepEqual(await approve(unavailable, workspace, identity, randomUUID(), input, yes),
       { status: 'refused', reason: 'connection_access_refused' });
