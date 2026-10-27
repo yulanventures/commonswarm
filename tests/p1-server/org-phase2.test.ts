@@ -7,7 +7,8 @@ const migration=()=>repoSql('supabase/migrations/20261027000002_organizations_ph
 const proof=(suffix:string,alias:string)=>`DO $check$ BEGIN IF NOT (${releaseCatalogQuery(repoSql(`${root}-${suffix}.sql`),alias).trim().replace(/;$/,'')})
  THEN RAISE EXCEPTION 'organization phase 2 ${suffix}'; END IF; END $check$;`;
 test('organization roles survive siblings; create admission and moves preserve workspace authority',()=>{
-  runSql(repoSql('deploy/release-proofs/agents/20261028000001-rollback.sql')
+  runSql(repoSql('deploy/release-proofs/agents/20261028000002-rollback.sql')
+    + repoSql('deploy/release-proofs/agents/20261028000001-rollback.sql')
     +repoSql(`${root}-rollback.sql`)
     +repoSql('deploy/release-proofs/org/20261027000001-rollback.sql')
     +repoSql('tests/fixtures/org-phase1-before.sql')
