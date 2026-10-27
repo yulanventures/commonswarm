@@ -188,10 +188,11 @@ jobs:
           # 20260905000010 ran on hosted Supabase as postgres, whose path had no auth, so
           # its pg_get_viewdef self-check expects "auth.uid()". With auth on the path the
           # text prints "uid()" and the check raises (run 38311299225). Pin the PG default
-          # "$user", public so that check passes; the CLI 2.118.0 migrate path (node-postgres)
-          # honours PGOPTIONS, a Go-path CLI would not.
-          # Scope PGOPTIONS to migration up; seeding/tests keep their normal paths.
-          PGOPTIONS='-c search_path="$user",public' supabase migration up --db-url postgresql://supabase_admin@127.0.0.1:54322/postgres
+          # "$user", public so that check passes; psql honours PGOPTIONS.
+          # Scope PGOPTIONS to migrations; seeding/tests keep their normal paths.
+          # Apply each file and its CLI-compatible ledger row in one transaction,
+          # matching the box and allowing the organizations/account-agents LOCKs.
+          PGOPTIONS='-c search_path="$user",public' bash scripts/ci/apply-migrations.sh
           # Box PG 17.6, HezLead read-only check 2026-10-12: postgres is a member of
           # swarm_admin, swarm_command, swarm_read, swarm_capability; each row has
           # admin_option=true, inherit_option=true, set_option=true. Match CI explicitly.
