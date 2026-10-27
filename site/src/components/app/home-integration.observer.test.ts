@@ -18,6 +18,7 @@ import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
 import { buildOrganizationMenu, organizationMenuItems } from '../../lib/home-shell';
+import { buildAccountAgents } from '../../lib/account-agents';
 import { connectionPolicyState } from '../../lib/standing-grants';
 import { homeStructureKey } from '../../lib/home-focus';
 import { createListsChrome } from '../../lib/lists-chrome';
@@ -117,6 +118,8 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
   test(`auth reload restores navigation from ${view} during pending boot on ${nextUserId ? 'account change' : 'sign-out'}`, async () => {
     class SessionNode extends RowNode {
       hidden = false;
+      open = true;
+      close() { this.open = false; }
       get parentElement() { return this.parent; }
       prepend(node: SessionNode) { node.remove(); node.parent = this; this.children.unshift(node); }
       toggleAttribute(name: string, enabled: boolean) {
@@ -125,9 +128,12 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     }
     const frame = new SessionNode('div'), main = new SessionNode('main'), rail = new SessionNode('nav');
     const account = new SessionNode('div'), pane = new SessionNode('section');
+    const directory = new SessionNode('dialog'), agentList = new SessionNode('div'), agentStatus = new SessionNode('p');
+    agentList.append(new SessionNode('h3')); agentStatus.textContent = 'Loading agents…';
     frame.append(rail, main); rail.append(account); main.append(pane); pane.append(new SessionNode('h1'));
     const nodes = new Map<string, SessionNode>([['.hm-frame', frame], ['.hm-frame__main', main],
-      ['.hm-frame__rail', rail], ['[data-user-menu-root]', account], ['[data-home-route-pane]', pane]]);
+      ['.hm-frame__rail', rail], ['[data-user-menu-root]', account], ['[data-home-route-pane]', pane],
+      ['[data-account-agents-dialog]', directory], ['[data-account-agents-list]', agentList], ['[data-account-agents-status]', agentStatus]]);
     const microtasks: (() => void)[] = [];
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
@@ -147,7 +153,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       let workspaces=[{id:'W',name:'Home'}], activeWorkspaceId='W';
       let listsAllowLanding=null;
       let renderedAuthUserId='tom', requestVersion=1, authReloadQueued=false, authRecoveryActive=false, bootInFlight=null, bootAgain=false;
-      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0, connectionSettingsGeneration=0;
+      let catchUpGeneration=0, railOverviewGeneration=0, connectedAppsGeneration=0, accountAgentsGeneration=0, connectionSettingsGeneration=0;
       const connectionDateDrafts=new Map();
       let homeWorkspaceGeneration=0, homeWorkspaceRead=0, homeDetailGeneration=0;
       let connectFocusObserver=null, humanSeenObserver=null, signalExpiryTimer;
@@ -187,6 +193,9 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       assert.equal(runInContext('bootAgain', context), true, 'reload defers behind the pending boot');
       assert.equal(boots, 1, 'no new boot can restore navigation yet');
       assert.equal(pane.children.length, 0, 'the old workspace detail is removed');
+      assert.equal(directory.open, false, 'account change closes the owned-agent directory');
+      assert.equal(agentList.children.length, 0, 'prior account agent rows are cleared before boot');
+      assert.equal(runInContext('accountAgentsGeneration', context), 1, 'old directory reads are retired');
       assert.equal(frame.getAttribute('data-home-standalone'), null, 'navigation is restored before the boot settles');
       assert.equal(account.parentElement, rail, 'the same account node returns to the workspace rail');
       assert.equal(account.hidden, false, 'account access is visible and can receive keyboard focus');
@@ -1627,4 +1636,54 @@ test('accepted agent removals leave every current surface immediately and after 
     reloaded.finishOverview(makeOverview(false)); await pending;
     assert.equal(runInContext('catchUpData.length', reloaded.context), 0, 'a late overview cannot cross a workspace/viewer switch');
   }
+});
+
+test('account directory loads current owned agents, reports errors for retry, and discards stale reads', async () => {
+  const code = await dashboardFunctions(['loadAccountAgentsDialog']);
+  const agent = { id: 'a', name: 'Owned agent', model: 'GPT', transport: 'local', revokedAt: null, workspaces: [] };
+  for (const outcome of ['success', 'error', 'account switch', 'sign out', 'close', 'new read', 'sample']) {
+    const list = new RowNode('div');
+    const status = { textContent: '', hidden: true }, retry = { hidden: true }, dialog = { open: true };
+    const nodes = new Map<string, unknown>([['[data-account-agents-list]', list], ['[data-account-agents-status]', status],
+      ['[data-account-agents-retry]', retry], ['[data-account-agents-dialog]', dialog]]);
+    let finish!: (agents: unknown[]) => void, fail!: (error: Error) => void;
+    const pending = new Promise<unknown[]>((resolve, reject) => { finish = resolve; fail = reject; });
+    const context = createContext({ one: (selector: string) => nodes.get(selector),
+      document: { createElement: (tag: string) => new RowNode(tag) }, buildAccountAgents,
+      myAccountAgents: () => pending, readableError: (error: Error) => error.message });
+    runInContext("let accountAgentsGeneration=0, session={user:{id:'owner'}}, sampleMode=false;", context);
+    runInContext(code, context);
+    const loading = runInContext('loadAccountAgentsDialog()', context) as Promise<void>;
+    assert.equal(status.textContent, 'Loading agents…');
+    assert.equal(retry.hidden, true);
+    if (outcome === 'account switch') runInContext("session={user:{id:'other'}}", context);
+    if (outcome === 'sign out') runInContext('session=null', context);
+    if (outcome === 'new read') runInContext('++accountAgentsGeneration', context);
+    if (outcome === 'sample') runInContext('sampleMode=true', context);
+    if (outcome === 'close') dialog.open = false;
+    if (outcome === 'error') fail(new Error('Read unavailable'));
+    else finish([agent]);
+    await loading;
+    if (outcome === 'success') {
+      assert.equal(list.querySelector('h3')?.textContent, 'Owned agent');
+      assert.equal(status.hidden, true);
+    } else if (outcome === 'error') {
+      assert.equal(status.textContent, 'Read unavailable');
+      assert.equal(retry.hidden, false);
+      assert.equal(list.children.length, 0);
+    } else assert.equal(list.children.length, 0, `${outcome}: the old read cannot publish account data`);
+  }
+});
+
+test('phone account menu exposes Your agents for a signed-in person and dispatches its existing account door', async () => {
+  let opened = 0;
+  const context = createContext({ one: (selector: string) => selector === '[data-account-agents-open]'
+    ? { click() { opened++; } } : null, organizationMenuItems });
+  runInContext("let sampleMode=false, session={user:{id:'owner'}}, workspaces=[], activeWorkspaceId='', selectedOrgId=null;", context);
+  runInContext(await dashboardFunctions(['accountMenuState', 'accountMenuAction']), context);
+  assert.equal(runInContext('accountMenuState().yourAgents', context), true);
+  runInContext("accountMenuAction('your-agents')", context);
+  assert.equal(opened, 1);
+  runInContext('sampleMode=true', context);
+  assert.equal(runInContext('accountMenuState()', context), null);
 });
