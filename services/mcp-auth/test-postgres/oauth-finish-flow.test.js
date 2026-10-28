@@ -93,6 +93,15 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   const chooser = await authorize();
   assertChooser(chooser);
   const signedIn = await h.signIn(chooser.path); assert.equal(signedIn.status, 303);
+  const browserExpiry = (await h.runtime.query(`SELECT expires_at, to_jsonb(browser)->>'expires_at' AS json_expiry
+    FROM commonswarm_oauth.browser_sessions AS browser WHERE user_id IS NOT NULL AND invalidated_at IS NULL`)).rows;
+  assert.equal(browserExpiry.length, 1);
+  assert.equal(browserExpiry[0].expires_at, Infinity);
+  assert.equal(browserExpiry[0].json_expiry, 'infinity');
+  const browserCookie = signedIn.headers.getSetCookie().find(value => value.startsWith('__Host-cswarm-oauth='));
+  assert.ok(browserCookie);
+  assert.ok(browserCookie.endsWith('; Max-Age=34560000'));
+
   const first = await consent(await view(signedIn.headers.get('location'))); assert.equal(first.status, 303);
   assert.ok(pendingSnapshots[0].expires_at>new Date(),'initial unbound/pending Grant is finite');
   assert.equal(typeof pendingSnapshots[0].payload.exp,'number');
@@ -101,6 +110,11 @@ test('CI only: first connect, durable finish replay, one redemption, reuse, logo
   assert.equal(Object.hasOwn(initialGrant.payload,'exp'),false);
   assert.equal((await h.provider.Grant.find(initialGrant.payload.jti)).exp,undefined,'the real provider reload sees the promoted Grant');
   const connectedPath = first.headers.get('location'); assert.equal(connectedPath.endsWith('/connected'), true);
+  const finishExpiry = (await h.runtime.query(`SELECT expires_at, expires_at <= statement_timestamp()+interval '2 minutes' AS bounded
+    FROM commonswarm_oauth.finish_records WHERE interaction_uid=$1`, [connectedPath.split('/')[2]])).rows[0];
+  assert.ok(finishExpiry.expires_at instanceof Date, 'LEAST keeps finish expiry finite over an infinite browser deadline');
+  assert.equal(finishExpiry.bounded, true);
+
   const page = await h.request(connectedPath); assert.equal(page.status, 200); assert.equal(page.body.includes('>Connected</h1>'), true);
   const finish = page.body.match(/id="finish-continue" href="([^"]+)"/u)?.[1]; assert.ok(finish);
   const finishPath = page.body.match(/data-finish-path="([^"]+)"/u)?.[1]; assert.equal(finishPath, finish);
