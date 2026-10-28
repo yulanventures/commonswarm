@@ -9,10 +9,10 @@ import sharp from "sharp";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const TILE = "#FAF8F3";
+const TILE = "#F8F7F3";
 const mark = `<g transform="translate(4 4) scale(.75)">
-    <path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/>
-    <rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/>
+    <path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/>
+    <rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#65518B"/>
   </g>`;
 
 const svg = (size, body) =>

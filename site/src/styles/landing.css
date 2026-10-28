@@ -1,23 +1,24 @@
 /* Homepage only. Editable product illustrations use live text, no screenshot assets or external requests. */
 :root:has(main .lp-home) {
-  --lp-paper: #f8f6ef;
-  --lp-ink: #292c25;
-  --lp-muted: #64675d;
-  --lp-line: #ddded3;
-  --lp-accent: #ba3d23;
-  --lp-surface: #fffefa;
-  --lp-sage: #e9ecdf;
-  --lp-peach: #f2e4d6;
-  --lp-blue: #e4e9ed;
-  --lp-shadow: 42 44 32;
+  --lp-paper: #f8f7f3;
+  --lp-ink: #2c2c42;
+  --lp-muted: #636275;
+  --lp-line: #dcdbe3;
+  --lp-accent: #65518b;
+  --lp-surface: #ffffff;
+  --lp-sage: #ebe5f4;
+  --lp-peach: #f7e9dc;
+  --lp-blue: #e5eee2;
+  --lp-shadow: 44 44 66;
   --bg: var(--lp-paper);
   --elev-0: var(--lp-paper);
   --elev-1: var(--lp-surface);
   --text: var(--lp-ink);
   --text-muted: var(--lp-muted);
   --accent: var(--lp-accent);
-  --accent-hover: #9e321d;
-  --accent-bright: #9e321d;
+  --focus: #57427d;
+  --accent-hover: #57427d;
+  --accent-bright: #57427d;
   color-scheme: light;
   background: var(--lp-paper);
 }
@@ -25,7 +26,7 @@
 :root:has(main .lp-home) .hdr { background: color-mix(in srgb, var(--lp-paper) 95%, transparent); border-bottom: 1px solid var(--lp-line); backdrop-filter: blur(14px); }
 :root:has(main .lp-home) .hdr__inner { max-width: 1248px; min-height: 82px; }
 :root:has(main .lp-home) .hdr__cta, :root:has(main .lp-home) .mnav__cta { background: var(--lp-accent); color: #fffaf2; border-color: var(--lp-accent); box-shadow: none; }
-:root:has(main .lp-home) .hdr__cta:hover { background: #9e321d; }
+:root:has(main .lp-home) .hdr__cta:hover { background: #57427d; }
 :root:has(main .lp-home) .hdr__progress { display: none; }
 :root:has(main .lp-home) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
 :root:has(main .lp-home) .ft__blurb { display: none; }
@@ -38,7 +39,7 @@
 .lp-home button { font: inherit; cursor: pointer; }
 /* Inherited theme colors must change together; disable the global link color fade here. */
 .lp-home a { color: inherit; transition-property: transform; }
-.lp-home :is(a,button,input,[tabindex]):focus-visible { outline: 3px solid var(--lp-accent); outline-offset: 5px; }
+.lp-home :is(a,button,input,[tabindex]):focus-visible { outline: 3px solid var(--focus); outline-offset: 5px; }
 .lp-home [hidden] { display: none !important; }
 .lp-container { width: min(1184px, calc(100% - 80px)); margin-inline: auto; }
 .lp-hero { padding: 72px 0 0; }
@@ -47,7 +48,7 @@
 .lp-lede { margin: 26px auto 0 !important; font-size: 19px; line-height: 1.6; color: var(--lp-muted); max-width: 650px; }
 .lp-actions { display: flex; align-items: center; justify-content: center; gap: 28px; margin-top: 27px; }
 .lp-button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; padding: 13px 23px; border: 1px solid var(--lp-accent); border-radius: 7px; background: var(--lp-accent); color: #fffaf2 !important; font-weight: 650; font-size: 16px; text-decoration: none; transition: transform .18s; }
-.lp-button:hover { background: #9e321d; border-color: #9e321d; transform: translateY(-2px); }
+.lp-button:hover { background: #57427d; border-color: #57427d; transform: translateY(-2px); }
 .lp-text-link { display: inline-flex; align-items: center; gap: 16px; min-height: 44px; font-weight: 600; font-size: 15px; text-decoration: none; }
 .lp-text-link span { font-size: 22px; transition: transform .18s; }
 .lp-text-link:hover { text-decoration: underline; text-underline-offset: 5px; }
@@ -158,7 +159,7 @@
 .lp-paper-sub { margin-top: 6px !important; font-size: 11px; color: var(--lp-muted); }
 .lp-shopping { margin-top: 22px !important; }
 .lp-shopping label { display: flex; align-items: center; gap: 13px; min-height: 52px; border-bottom: 1px solid var(--lp-line); font-size: 14px; cursor: pointer; }
-.lp-shopping input { appearance: auto; width: 18px; height: 18px; accent-color: #626b42; cursor: pointer; }
+.lp-shopping input { appearance: auto; width: 18px; height: 18px; accent-color: #65518b; cursor: pointer; }
 .lp-shopping label > span { display: flex; justify-content: space-between; flex: 1; align-items: center; gap: 5px; }
 .lp-shopping small { color: var(--lp-muted); font-size: 11px; }
 .lp-shopping input:checked + span { text-decoration: line-through; color: var(--lp-muted); }
@@ -177,17 +178,17 @@
 .lp-handoff-file > span:last-child { margin-left: auto; }
 .lp-connections { background: var(--lp-ink); color: var(--lp-paper); }
 .lp-connections h2 { color: var(--lp-paper); }
-.lp-home .lp-connections a:focus-visible { outline-color: #f8f6ef; }
+.lp-home .lp-connections a:focus-visible { outline-color: #f8f7f3; }
 .lp-connections__inner { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 100px; }
-.lp-connections__inner > div > p { margin-top: 23px; font-size: 16px; color: #d5d8ca; max-width: 420px; }
-.lp-connection-options > a { display: flex; align-items: center; gap: 20px; padding: 25px 0; text-decoration: none; border-bottom: 1px solid #62675a; }
+.lp-connections__inner > div > p { margin-top: 23px; font-size: 16px; color: #ded9e6; max-width: 420px; }
+.lp-connection-options > a { display: flex; align-items: center; gap: 20px; padding: 25px 0; text-decoration: none; border-bottom: 1px solid #756d7f; }
 .lp-connection-options > a:hover strong { text-decoration: underline; text-underline-offset: 5px; }
-.lp-connection-symbol { display: grid; place-items: center; width: 52px; height: 52px; flex: 0 0 52px; border-radius: 12px; font-size: 35px; background: #e6b99e; color: #412d20; }
+.lp-connection-symbol { display: grid; place-items: center; width: 52px; height: 52px; flex: 0 0 52px; border-radius: 12px; font-size: 35px; background: #ebe5f4; color: #2c2c42; }
 .lp-connection-symbol--claude { background: #fff; }
 .lp-connection-symbol--claude img { width: 32px; height: 32px; object-fit: contain; }
-.lp-connection-symbol--computer { background: #d1d8bd; font-size: 29px; }
+.lp-connection-symbol--computer { background: #e5eee2; font-size: 29px; }
 .lp-connection-options strong { color: inherit; display: block; font-size: 17px; font-weight: 500; }
-.lp-connection-options small { display: block; font-size: 12px; margin-top: 5px; color: #d5d8ca; }
+.lp-connection-options small { display: block; font-size: 12px; margin-top: 5px; color: #ded9e6; }
 .lp-connection-options > a > span:last-child { margin-left: auto; font-size: 24px; }
 .lp-boundaries { border-bottom: 1px solid var(--lp-line); }
 .lp-boundaries h2 { text-align: center; }
@@ -326,36 +327,36 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:has(main .lp-home):not([data-theme="light"]) {
-    --lp-paper: #20231e; --lp-ink: #f0f0e6; --lp-muted: #b8bcae; --lp-line: #4c5144; --lp-accent: #ed957a;
-    --lp-surface: #2b2f27; --lp-sage: #343b2c; --lp-peach: #46392d; --lp-blue: #303a3e; --lp-shadow: 0 0 0;
-    --accent-hover: #f4b09b; --accent-bright: #f4b09b;
+    --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
+    --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
+    --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
     color-scheme: dark;
   }
   :root:has(main .lp-home):not([data-theme="light"]) .lp-button,
   :root:has(main .lp-home):not([data-theme="light"]) .hdr__cta,
-  :root:has(main .lp-home):not([data-theme="light"]) .mnav__cta { color: #28251e !important; }
+  :root:has(main .lp-home):not([data-theme="light"]) .mnav__cta { color: #292137 !important; }
   :root:has(main .lp-home):not([data-theme="light"]) .hdr__cta:hover,
   :root:has(main .lp-home):not([data-theme="light"]) .mnav__cta:hover,
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-button:hover { background: #f4b09b; border-color: #f4b09b; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections { background: #151912; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections :is(h2,p,a) { color: #f0f0e6; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-shopping input { accent-color: #c7d5a0; }
+  :root:has(main .lp-home):not([data-theme="light"]) .lp-button:hover { background: #decff5; border-color: #decff5; }
+  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections { background: #18151f; }
+  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
+  :root:has(main .lp-home):not([data-theme="light"]) .lp-shopping input { accent-color: #cdb9ee; }
 }
   :root[data-theme="dark"]:has(main .lp-home) {
-    --lp-paper: #20231e; --lp-ink: #f0f0e6; --lp-muted: #b8bcae; --lp-line: #4c5144; --lp-accent: #ed957a;
-    --lp-surface: #2b2f27; --lp-sage: #343b2c; --lp-peach: #46392d; --lp-blue: #303a3e; --lp-shadow: 0 0 0;
-    --accent-hover: #f4b09b; --accent-bright: #f4b09b;
+    --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
+    --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
+    --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
     color-scheme: dark;
   }
   :root[data-theme="dark"]:has(main .lp-home) .lp-button,
   :root[data-theme="dark"]:has(main .lp-home) .hdr__cta,
-  :root[data-theme="dark"]:has(main .lp-home) .mnav__cta { color: #28251e !important; }
+  :root[data-theme="dark"]:has(main .lp-home) .mnav__cta { color: #292137 !important; }
   :root[data-theme="dark"]:has(main .lp-home) .hdr__cta:hover,
   :root[data-theme="dark"]:has(main .lp-home) .mnav__cta:hover,
-  :root[data-theme="dark"]:has(main .lp-home) .lp-button:hover { background: #f4b09b; border-color: #f4b09b; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-connections { background: #151912; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-connections :is(h2,p,a) { color: #f0f0e6; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-shopping input { accent-color: #c7d5a0; }
+  :root[data-theme="dark"]:has(main .lp-home) .lp-button:hover { background: #decff5; border-color: #decff5; }
+  :root[data-theme="dark"]:has(main .lp-home) .lp-connections { background: #18151f; }
+  :root[data-theme="dark"]:has(main .lp-home) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
+  :root[data-theme="dark"]:has(main .lp-home) .lp-shopping input { accent-color: #cdb9ee; }
 
 @media (prefers-reduced-motion: reduce) {
   :root:has(main .lp-home) { scroll-behavior: auto; }
