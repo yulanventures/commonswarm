@@ -12,10 +12,12 @@ import {
   proposeTodoFailureSkill,
   keepWorkspaceSkillSuggestion,
   dismissWorkspaceSkillSuggestion,
+  formatWorkspaceSkillSuggestion,
   formatWorkspaceSkillSummary,
   formatWorkspaceSkillView,
+  WORKSPACE_SKILL_TRUST_WARNING,
 } from '../src/protocol/workspace-skills.js';
-import { STDIO_MCP_TOOLS, validateSkillMcpArguments } from '../src/mcp/tools.js';
+import { STDIO_MCP_TOOLS, validateSkillMcpArguments, withSkillTrustWarning } from '../src/mcp/tools.js';
 
 const T0 = Date.UTC(2026, 9, 28, 12, 0, 0);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -179,14 +181,17 @@ test('suggestions from reopened or failed todos support owner Keep and Dismiss w
     const view = formatWorkspaceSkillView(kept.skill, T0 + 3000);
     assert.equal(view.skill_id, 'skill-from-sug-3');
     assert.match(view.title, /Checklist: Verify migration checksums/);
+    assert.equal(view.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
   }
 });
 
-test('MCP stdio tools advertise skills_list and skills_read and validate arguments strictly', () => {
+test('MCP stdio tools advertise skills_list and skills_read with untrusted-content warnings and validate arguments strictly', () => {
   const listTool = STDIO_MCP_TOOLS.find((t) => t.name === 'skills_list');
   const readTool = STDIO_MCP_TOOLS.find((t) => t.name === 'skills_read');
   assert.ok(listTool);
   assert.ok(readTool);
+  assert.ok(listTool.description.includes(WORKSPACE_SKILL_TRUST_WARNING));
+  assert.ok(readTool.description.includes(WORKSPACE_SKILL_TRUST_WARNING));
   assert.deepEqual(validateSkillMcpArguments('skills_list', {}), {});
   assert.throws(() => validateSkillMcpArguments('skills_list', { extra: 'no' }), /Unknown argument/);
   assert.throws(() => validateSkillMcpArguments('skills_read', {}), /Missing argument/);
@@ -194,4 +199,31 @@ test('MCP stdio tools advertise skills_list and skills_read and validate argumen
     validateSkillMcpArguments('skills_read', { title: '  Deploy checklist  ' }),
     { title: 'Deploy checklist' },
   );
+
+  const state = proposeTodoFailureSkill(emptyWorkspaceSkillsState(), {
+    suggestion_id: 'sug-warn',
+    todo_id: 'todo-999',
+    todo_title: 'Check edge deployment',
+    failure_note: 'Verify health endpoint.',
+    reason: 'todo_failed',
+    now: T0,
+  });
+  const formattedSug = formatWorkspaceSkillSuggestion(state.suggestions[0]!);
+  assert.equal(formattedSug.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
+
+  const wrappedList = withSkillTrustWarning({
+    status: 'ok',
+    skills: [{ skill_id: 's1', title: 'Skill 1' }],
+    suggestions: [{ suggestion_id: 'sug-1', title: 'Suggestion 1' }],
+  });
+  assert.equal(wrappedList.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
+  assert.equal((wrappedList.skills as Array<Record<string, unknown>>)[0]!.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
+  assert.equal((wrappedList.suggestions as Array<Record<string, unknown>>)[0]!.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
+
+  const wrappedRead = withSkillTrustWarning({
+    status: 'ok',
+    skill: { skill_id: 's1', title: 'Skill 1', body: 'Body' },
+  });
+  assert.equal(wrappedRead.trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
+  assert.equal((wrappedRead.skill as Record<string, unknown>).trust_warning, WORKSPACE_SKILL_TRUST_WARNING);
 });

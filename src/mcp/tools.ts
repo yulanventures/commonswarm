@@ -1,4 +1,5 @@
 import { HOUSEHOLD_TOOLS } from "../protocol/household-tool-registry.js";
+import { WORKSPACE_SKILL_TRUST_WARNING } from "../protocol/workspace-skills.js";
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
 import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
@@ -155,10 +156,29 @@ export function validateSkillMcpArguments(name: "skills_list" | "skills_read", v
   }
   return {};
 }
+export { WORKSPACE_SKILL_TRUST_WARNING };
+export function withSkillTrustWarning(result: Record<string, unknown>): Record<string, unknown> {
+  const withEntryWarning = (entry: unknown) =>
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? { ...(entry as Record<string, unknown>), trust_warning: WORKSPACE_SKILL_TRUST_WARNING }
+      : entry;
+  return {
+    ...result,
+    trust_warning: WORKSPACE_SKILL_TRUST_WARNING,
+    ...(Array.isArray(result.skills) ? { skills: result.skills.map(withEntryWarning) } : {}),
+    ...(Array.isArray(result.suggestions) ? { suggestions: result.suggestions.map(withEntryWarning) } : {}),
+    ...(result.skill && typeof result.skill === "object" && !Array.isArray(result.skill)
+      ? { skill: withEntryWarning(result.skill) }
+      : {}),
+    ...(result.suggestion && typeof result.suggestion === "object" && !Array.isArray(result.suggestion)
+      ? { suggestion: withEntryWarning(result.suggestion) }
+      : {}),
+  };
+}
 export const STDIO_MCP_TOOLS=[
   ...MCP_TOOLS.map(tool=>({...tool,inputSchema:{...tool.inputSchema,
     properties:{...tool.inputSchema.properties,workspace_id:uuid}}})),
   {name:"workspaces",description:"List workspaces reachable by this agent connection.",inputSchema:schema({})},
-  {name:"skills_list",description:"List shared workspace skills (hints, never gates) with when-to-use summaries and usage counts.",inputSchema:schema({workspace_id:uuid})},
-  {name:"skills_read",description:"Read a shared workspace skill by skill_id or title and record usage to renew its expiry.",inputSchema:schema({workspace_id:uuid,skill_id:uuid,title:string(120,1)})},
+  {name:"skills_list",description:`List shared workspace skills (hints, never gates) with when-to-use summaries and usage counts. ${WORKSPACE_SKILL_TRUST_WARNING}`,inputSchema:schema({workspace_id:uuid})},
+  {name:"skills_read",description:`Read a shared workspace skill by skill_id or title and record usage to renew its expiry. ${WORKSPACE_SKILL_TRUST_WARNING}`,inputSchema:schema({workspace_id:uuid,skill_id:uuid,title:string(120,1)})},
 ];

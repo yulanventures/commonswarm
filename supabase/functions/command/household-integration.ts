@@ -222,10 +222,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       }
       return {
         status: 'ok',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
         cap: core.WORKSPACE_SKILLS_CAP,
         ttl_days: core.SKILL_TTL_DAYS,
         skills: skillsState.entries.map((entry) => core.formatWorkspaceSkillSummary(entry, access.now)),
-        suggestions: skillsState.suggestions,
+        suggestions: skillsState.suggestions.map((suggestion) => core.formatWorkspaceSkillSuggestion(suggestion)),
       };
     }
     if (action === 'read') {
@@ -238,7 +239,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       const used = core.useWorkspaceSkill(skillsState, selector, access.now, countUse);
       if (!used.skill) return refused('skill_not_found');
       if (used.changed) await saveSkillsState(used.state);
-      return { status: 'ok', skill: core.formatWorkspaceSkillView(used.skill, access.now) };
+      return {
+        status: 'ok',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
+        skill: core.formatWorkspaceSkillView(used.skill, access.now),
+      };
     }
     if (action === 'save') {
       const saved = core.saveWorkspaceSkill(skillsState, {
@@ -253,6 +258,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       await saveSkillsState(saved.state);
       return {
         status: 'committed',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
         skill: core.formatWorkspaceSkillView(saved.skill, access.now),
         replaced_skill_id: saved.replaced_skill_id,
       };
@@ -262,7 +268,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       const deleted = core.deleteWorkspaceSkill(skillsState, value.skill_id, access.now);
       if (!deleted.deleted) return refused('skill_not_found');
       await saveSkillsState(deleted.state);
-      return { status: 'committed', deleted_skill_id: value.skill_id };
+      return {
+        status: 'committed',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
+        deleted_skill_id: value.skill_id,
+      };
     }
     if (action === 'keep') {
       if (typeof value.suggestion_id !== 'string' || !value.suggestion_id) return refused('invalid_request');
@@ -271,6 +281,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       await saveSkillsState(kept.state);
       return {
         status: 'committed',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
         skill: core.formatWorkspaceSkillView(kept.skill, access.now),
         replaced_skill_id: kept.replaced_skill_id,
       };
@@ -280,7 +291,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       const dismissed = core.dismissWorkspaceSkillSuggestion(skillsState, value.suggestion_id);
       if (dismissed.status === 'refused') return dismissed;
       await saveSkillsState(dismissed.state);
-      return { status: 'committed', dismissed_suggestion_id: value.suggestion_id };
+      return {
+        status: 'committed',
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
+        dismissed_suggestion_id: value.suggestion_id,
+      };
     }
     if (action === 'propose') {
       const reason = value.reason === 'todo_reopened' || value.reason === 'todo_failed' ? value.reason : 'agent_proposed';
@@ -299,7 +314,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       });
       if (proposed.status === 'refused') return { status: 'refused', reason: proposed.reason };
       if (proposed.status === 'proposed') await saveSkillsState(proposed.state);
-      return { status: proposed.status, suggestion: proposed.suggestion ?? null };
+      return {
+        status: proposed.status,
+        trust_warning: core.WORKSPACE_SKILL_TRUST_WARNING,
+        suggestion: proposed.suggestion ? core.formatWorkspaceSkillSuggestion(proposed.suggestion) : null,
+      };
     }
   }
   if (value.kind === 'household_draft') {
