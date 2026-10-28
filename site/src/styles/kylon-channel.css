@@ -116,3 +116,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame:not([data-channel-details-a
 live-dashboard.dashboard[data-kylon-shell] [data-roster-open][data-pending-access]::after {
   content: ""; inline-size: 7px; block-size: 7px; border-radius: 50%; background: var(--cs-rail-accent, #ba3d23); margin-inline-start: 6px;
 }
+/* The Details control also owns visibility between phone and wide desktop widths. */
+@media (width > 52rem) and (width < 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-active]:not([data-channel-details-collapsed]):not(:has(> .hm-frame__profile:not([hidden]))) > .hm-frame__side { display: block; }
+}

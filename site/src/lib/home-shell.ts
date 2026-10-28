@@ -441,6 +441,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
     const people = node(doc, "button", "hm-ws-header__people");
     people.type = "button"; people.setAttribute("aria-label", "People & agents");
     people.append(memberStack(doc, vm));
+    people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
     people.dataset.rosterOpen = "";
     people.addEventListener("click", () => callbacks.openPeople());
     actions.append(people);
@@ -528,6 +529,7 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
     people.append(node(doc, "span", "hm-sr", capsuleSubline(vm.people)));
   }
   people.append(memberStack(doc, vm));
+  people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
   bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
   if (doors.menu) {
     const menu = buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true });
