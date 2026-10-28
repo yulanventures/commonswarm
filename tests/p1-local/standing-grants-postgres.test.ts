@@ -6,7 +6,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import postgres from "postgres";
 
@@ -288,14 +287,21 @@ test("standing and timeboxed renewal rules hold on real Postgres", async () => {
             ${deviceId}::uuid
           ) AS code
         `;
-        assert.equal(idleCode?.code, "renewal_idle_suspended");
+        assert.equal(idleCode?.code, null, "idle time never pauses a standing grant");
         const [idleRow] = await tx<{ suspended_at: Date | null }[]>`
           SELECT suspended_at FROM swarm.renewal_grants
           WHERE renewal_grant_id = ${idle.grantId}::uuid
         `;
-        assert.ok(idleRow?.suspended_at instanceof Date);
+        assert.equal(idleRow?.suspended_at, null);
+        await insertSuccessor(idle, 1);
 
         const bound = await seed("standing");
+        // Move the run to a live device so the device-binding fence is reached
+        // after the current run/device authority check.
+        await tx`
+          UPDATE swarm.agent_runs SET device_id = ${foreignDeviceId}::uuid
+          WHERE run_id = ${bound.runId}::uuid
+        `;
         const [boundCode] = await tx<{ code: string | null }[]>`
           SELECT swarm.prepare_renewal_grant(
             ${bound.grantId}::uuid,
@@ -405,31 +411,8 @@ test("standing and timeboxed renewal rules hold on real Postgres", async () => {
   }
 });
 
-/**
- * ★ AN IDLE PAUSE IS RECOVERABLE; A REVOCATION IS NOT.
- *
- * THE MIGRATION IS APPLIED INSIDE THIS TRANSACTION and rolled back with the
- * fixture. That is deliberate: it measures the artifact rather than its name —
- * the file this repository will ship is the file whose behaviour is asserted
- * below — and it does not require the shared local database to be reset, which
- * would destroy another lane's slot.
- *
- * EVERY ASSERTION HERE FAILS AGAINST THE PRE-MIGRATION SCHEMA, and not
- * incidentally. Before 20260904000001 there was no swarm.resume_renewal_grant at
- * all, and swarm.renewal_grants_spend_or_revoke_only() raised
- * SWARM_RENEWAL_GRANT_UNSUSPEND on every un-suspend, so a standing grant that
- * went 14 days without use was dead for good. Run this test with the migration
- * skipped and the first resume errors with "function
- * swarm.resume_renewal_grant(uuid, uuid, uuid) does not exist".
- */
-test("an idle-paused standing grant is resumable by its owner and a revoked one never is", async () => {
-  const migration = await readFile(
-    new URL(
-      "../../supabase/migrations/20260904000001_standing_grant_resume.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  );
+/** Explicit security suspension remains recoverable; revocation does not. */
+test("an explicitly suspended standing grant is resumable by its owner and a revoked one never is", async () => {
   const sql = postgres(databaseUrl(), { max: 1 });
   const ownerId = randomUUID();
   const strangerId = randomUUID();
@@ -457,8 +440,6 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
   try {
     await assert.rejects(
       sql.begin(async (tx) => {
-        await tx.unsafe(migration);
-
         await seedUser(tx, ownerId, "Grant owner");
         await seedUser(tx, strangerId, "Stranger");
         await seedUser(tx, adminId, "Workspace admin");
@@ -529,45 +510,16 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
           return fixture;
         };
 
-        /**
-         * Fixture time travel: put the whole grant `days` into the past.
-         *
-         * THE TRIGGER IS TURNED OFF FOR THIS, and the reason is itself a result.
-         * Ageing a grant that has already been resumed means moving resumed_at
-         * backwards, and swarm.renewal_grants_spend_or_revoke_only() refuses
-         * that with SWARM_RENEWAL_RESUME_REWOUND — correctly, because a resume
-         * is forward-only. Migration 20260728000004 disables the same trigger
-         * for the same kind of backfill. This shifts a clock and asserts
-         * nothing; every assertion below runs with the trigger back on.
-         *
-         * suspended_at is aged one day FURTHER than resumed_at so the pair keeps
-         * its real order. Aged together, resumed_at <= suspended_at and the
-         * generated suspension_active would read true again — which would test
-         * arithmetic on the fixture instead of the idle rule.
-         */
-        const goIdle = async (fixture: Fixture, days: number) => {
-          await tx.unsafe("RESET ROLE");
-          await tx.unsafe(
-            "ALTER TABLE swarm.renewal_grants DISABLE TRIGGER renewal_grants_spend_or_revoke_only",
-          );
+        // Seed an explicit suspension, not the removed automatic idle pause.
+        // Keep the last-use time old to prove resume never restarts an idle timer.
+        const suspend = async (fixture: Fixture) => {
           await tx`
             UPDATE swarm.renewal_grants
-            SET last_used_at = statement_timestamp() - make_interval(days => ${days}),
+            SET last_used_at = statement_timestamp() - interval '20 days',
                 last_used_device_id = ${deviceId}::uuid,
-                suspended_at = CASE
-                  WHEN suspended_at IS NULL THEN NULL
-                  ELSE statement_timestamp() - make_interval(days => ${days + 1})
-                END,
-                resumed_at = CASE
-                  WHEN resumed_at IS NULL THEN NULL
-                  ELSE statement_timestamp() - make_interval(days => ${days})
-                END
+                suspended_at = clock_timestamp()
             WHERE renewal_grant_id = ${fixture.grantId}::uuid
           `;
-          await tx.unsafe(
-            "ALTER TABLE swarm.renewal_grants ENABLE TRIGGER renewal_grants_spend_or_revoke_only",
-          );
-          await tx.unsafe("SET LOCAL ROLE swarm_command");
         };
 
         const preflight = async (fixture: Fixture): Promise<string | null> => {
@@ -594,14 +546,14 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
 
         await tx.unsafe("SET LOCAL ROLE swarm_command");
 
-        // ─── 1. The pause still happens, and it is still fail-closed. ───────
+        // Explicit suspension is fail-closed until an authorized person resumes it.
         const parked = await seedStanding();
         assert.equal(await preflight(parked), null, "a fresh standing grant renews");
-        await goIdle(parked, 20);
+        await suspend(parked);
         assert.equal(
           await preflight(parked),
-          "renewal_idle_suspended",
-          "20 idle days must still pause a standing grant",
+          "renewal_grant_suspended",
+          "explicit suspension must refuse renewal",
         );
         assert.equal(
           await preflight(parked),
@@ -626,17 +578,13 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
           "the member who owns the principal may resume its grant",
         );
 
-        /* ★ THE ASSERTION THIS WHOLE MIGRATION EXISTS FOR. Before it, this line
-           read "renewal_grant_suspended" forever. */
         assert.equal(
           await preflight(parked),
           null,
           "after a resume the grant must renew again",
         );
 
-        /* ★ AND THE IDLE CLOCK RESTARTED. last_used_at is still 20 days old, so
-           a resume that only cleared the flag would be re-paused by the very
-           next preflight — a fix that looked like a fix and was a loop. */
+        // Resuming preserves the suspension history and does not require activity.
         const afterResume = await tx<{
           suspended_at: Date | null;
           resumed_at: Date | null;
@@ -656,7 +604,7 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
         );
         assert.ok(
           Date.now() - Number(afterResume[0]?.last_used_at) > 19 * 86_400_000,
-          "the fixture must still be idle, or the clock-restart assertion proves nothing",
+          "resuming must not rewrite the last-use history",
         );
 
         // ─── 3. Resume is not idempotent-by-accident and not free. ──────────
@@ -671,9 +619,9 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
           "an admin gets the same answer, so the gate is not what refused it",
         );
 
-        // ─── 4. A second lapse pauses again, and an admin can lift it. ──────
-        await goIdle(parked, 20);
-        assert.equal(await preflight(parked), "renewal_idle_suspended");
+        // A later explicit suspension can also be lifted by a workspace admin.
+        await suspend(parked);
+        assert.equal(await preflight(parked), "renewal_grant_suspended");
         assert.equal(await resume(parked, adminId), null, "an admin may resume");
         const twice = await tx<{ resume_count: number }[]>`
           SELECT resume_count FROM swarm.renewal_grants
@@ -683,8 +631,8 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
 
         // ─── 5. REVOKED IS FOREVER, at three independent fences. ────────────
         const killed = await seedStanding();
-        await goIdle(killed, 20);
-        assert.equal(await preflight(killed), "renewal_idle_suspended");
+        await suspend(killed);
+        assert.equal(await preflight(killed), "renewal_grant_suspended");
         await tx`
           UPDATE swarm.renewal_grants
           SET revoked_at = statement_timestamp(), revoked_by = ${ownerId}::uuid
@@ -714,8 +662,8 @@ test("an idle-paused standing grant is resumable by its owner and a revoked one 
         /* Fence three: clearing the pause outright is refused exactly as before,
            so the suspension record cannot be laundered into a resume. */
         const stillPaused = await seedStanding();
-        await goIdle(stillPaused, 20);
-        assert.equal(await preflight(stillPaused), "renewal_idle_suspended");
+        await suspend(stillPaused);
+        assert.equal(await preflight(stillPaused), "renewal_grant_suspended");
         await assert.rejects(
           tx.savepoint(async (sp) => {
             await sp`

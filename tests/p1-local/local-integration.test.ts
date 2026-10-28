@@ -26,7 +26,7 @@ import {
   ThinCommandClient,
 } from "../../src/cloud/command-client.js";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli, type FunctionCliObserver } from "../support/edge-readiness.js";
 import {
   decodeInviteLink,
   encodeInviteLink,
@@ -53,6 +53,7 @@ interface LocalEnvironment {
 let local: LocalEnvironment;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
+let functionCliState: FunctionCliObserver;
 let functionLogs = "";
 let functionEnvDirectory = "";
 
@@ -123,6 +124,7 @@ async function ready(): Promise<void> {
       timeoutMs: 30_000,
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
+      cliState: functionCliState,
       diagnostics: () => `${name} function logs:\n${functionLogs.slice(-4000)}`,
     });
   }
@@ -385,6 +387,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  functionCliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
