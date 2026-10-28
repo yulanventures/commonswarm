@@ -137,6 +137,7 @@ export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "aut
   line.dataset.authorKind = isAgentAuthor(author) ? "agent" : "person";
   line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size, badge: true }) : personAvatar(doc, author, size));
   const name = node(doc, "span", "hm-author__name", authorLabel(author)); name.title = authorLabel(author); line.append(name);
+  if (isAgentAuthor(author)) line.append(node(doc, "span", "hm-author__agent", "Agent"));
   if (!isAgentAuthor(author) && author.you) line.append(node(doc, "span", "hm-author__you", "you"));
   const time = node(doc, "time", "hm-author__when", signal.when);
   if (Number.isFinite(Date.parse(signal.createdAt))) time.dateTime = signal.createdAt;
@@ -155,4 +156,25 @@ export function buildStreamExtras(doc: Document, extras: StreamExtrasVM, onActio
     box.append(list);
   }
   return box;
+}
+
+/** Group only adjacent messages in the same conversation and five-minute window.
+ * Keep the complete author line in the accessibility tree and the timestamp in the gutter. */
+type GroupableSignal = { from: string; fromKind: string; channelId?: string | null; threadRootId?: string | null; kind: string;
+  to: string | null; toAgent: string | null; createdAt: string };
+export function continuesStreamGroup(signal: GroupableSignal, previous: GroupableSignal | null): boolean {
+  if (!previous || signal.from !== previous.from || signal.fromKind !== previous.fromKind ||
+      signal.channelId !== previous.channelId || signal.threadRootId !== previous.threadRootId || signal.to !== previous.to || signal.toAgent !== previous.toAgent ||
+      signal.kind !== previous.kind || dayKey(signal.createdAt) !== dayKey(previous.createdAt)) return false;
+  const gap = Date.parse(signal.createdAt) - Date.parse(previous.createdAt);
+  return Number.isFinite(gap) && gap >= 0 && gap < 5 * 60_000;
+}
+export function groupStreamMessage(row: HTMLElement, signal: GroupableSignal, previous: GroupableSignal | null): void {
+  if (!continuesStreamGroup(signal, previous)) return;
+  row.dataset.streamGrouped = "";
+  const time = row.querySelector<HTMLTimeElement>(".hm-author__when");
+  if (time) {
+    const gutter = time.cloneNode(true) as HTMLElement; gutter.classList.add("hm-message-time");
+    gutter.setAttribute("aria-hidden", "true"); row.append(gutter);
+  }
 }

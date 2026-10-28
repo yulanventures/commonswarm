@@ -61,7 +61,6 @@ test("the header control is one stack button that opens the People & agents page
   assert.match(dashboard, /navigateHome\(\{ view: "people", workspaceId \}, "push"\)/);
   assert.match(shell, /"People & agents"/);
   assert.match(shell, /people.addEventListener\("click", \(\) => callbacks.openPeople\(\)\)/);
-  assert.match(shell, /compactCapsules\(doc, vm.people, 2\)/);
   assert.match(shell, /buildPhoneTopBar/);
   assert.doesNotMatch(dashboard, /aria-controls", "dashboard-roster-dialog"/);
   assert.match(dashboard, /if \(homeRoute.view === "people"\) button.setAttribute\("aria-current", "page"\)/);
@@ -75,7 +74,6 @@ test("pending access keeps the header management door reachable before the first
   assert.match(dashboard, /buildPhoneTopBar\(document, vm, callbacks\)/);
   const header = dashboard.slice(dashboard.indexOf("const renderHeaderRoster ="), dashboard.indexOf("const renderDialogRoster ="));
   assert.match(header, /pendingTotal[^\n]*pending access/);
-  assert.match(header, /button.textContent = `People & agents\$\{pendingTotal \? ` · \$\{pendingTotal\} pending` : ""\}`/);
   assert.match(header, /all<HTMLButtonElement>\("\[data-roster-open\]"\)/);
   const pending = dashboard.slice(dashboard.indexOf("const renderPendingAccess ="), dashboard.indexOf("const signalPage ="));
   assert.match(pending, /renderHeaderRoster\(total\);/);

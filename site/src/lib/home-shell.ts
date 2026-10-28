@@ -4,9 +4,9 @@
 // data-workspace-settings-item, data-admin-access-open, data-channel-*) are kept so the page wiring
 // can find them.
 import { ALL_SIGNALS_SLUG, channelLabel } from "./channels";
-import { capsule } from "./home-primitives";
+import { personAvatar, agentOrb } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
-import type { CapsuleVM, Id } from "./home-types";
+import type { AgentVM, CapsuleVM, Id } from "./home-types";
 
 export type WorkspacePane = "chat" | "todos" | "lists" | "files" | "people";
 export type WorkspaceMenuItem = "wiki" | "settings" | "admin-access";
@@ -18,6 +18,7 @@ export interface WorkspaceShellVM {
   name: string;
   /** Everyone in the workspace with their agents (any order; the shell puts you first). */
   people: CapsuleVM[];
+  otherAgents?: AgentVM[];
   pane: WorkspacePane;
   /** The current route owns its main heading; workspace identity is context. */
   contextTitle?: boolean;
@@ -230,10 +231,23 @@ function title(doc: Document, text: string, id: string, className: string, conte
   return heading;
 }
 
-function compactCapsules(doc: Document, people: readonly CapsuleVM[], limit: number): HTMLElement {
-  const stack = node(doc, "span", "hm-capsule-stack");
-  for (const group of orderCapsules(people).slice(0, limit)) stack.append(capsule(doc, group, { compact: true }));
+/** Avatars and a measured member count share the People & agents door. */
+function memberStack(doc: Document, vm: WorkspaceShellVM): HTMLElement {
+  const stack = node(doc, "span", "hm-member-stack");
+  const members = orderCapsules(vm.people).flatMap(group => [group.person, ...group.agents]);
+  members.push(...(vm.otherAgents ?? []));
+  const faces = node(doc, "span", "hm-member-stack__faces"); faces.setAttribute("aria-hidden", "true");
+  for (const member of members.slice(0, 3)) faces.append("state" in member
+    ? agentOrb(doc, member, { size: 26, badge: false }) : personAvatar(doc, member, 24));
+  stack.append(faces, node(doc, "span", "hm-member-stack__count", String(members.length)));
   return stack;
+}
+
+function detailsButton(doc: Document): HTMLButtonElement {
+  const button = node(doc, "button", "hm-details-toggle", "Details"); button.type = "button";
+  button.dataset.channelDetailsToggle = "";
+  button.setAttribute("aria-expanded", "false"); button.setAttribute("aria-controls", "cs-channel-details");
+  return button;
 }
 
 /** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access and history. */
@@ -419,19 +433,20 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   const header = node(doc, "header", "hm-ws-header");
   header.dataset.homeWorkspaceHeader = vm.workspaceId;
   const copy = node(doc, "div", "hm-ws-header__copy");
-  copy.append(title(doc, vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), node(doc, "p", "hm-ws-header__subline", capsuleSubline(vm.people)));
+  const channel = vm.pane === "chat" && !vm.contextTitle;
+  copy.append(title(doc, channel ? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true));
   const actions = node(doc, "div", "hm-ws-header__actions");
-  const faces = compactCapsules(doc, vm.people, 2);
-  faces.setAttribute("aria-hidden", "true");
-  actions.append(faces);
   const doors = shellDoors(vm);
   if (doors.people) {
-    const people = node(doc, "button", "hm-ws-header__people", "People & agents");
-    people.type = "button";
+    const people = node(doc, "button", "hm-ws-header__people");
+    people.type = "button"; people.setAttribute("aria-label", "People & agents");
+    people.append(memberStack(doc, vm));
+    people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
     people.dataset.rosterOpen = "";
     people.addEventListener("click", () => callbacks.openPeople());
     actions.append(people);
   }
+  if (channel) actions.append(detailsButton(doc));
   if (doors.menu) actions.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-ws"));
   header.append(copy, actions);
   return header;
@@ -501,12 +516,10 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   back.dataset.homeBack = "";
   back.append(chevron(doc), node(doc, "span", "hm-sr", "Workspaces"));
   const doors = shellDoors(vm);
-  const faces = compactCapsules(doc, vm.people, 2);
-  faces.setAttribute("aria-hidden", "true");
   let people: HTMLElement;
   if (doors.people) {
     const button = node(doc, "button", "hm-phone-bar__people");
-    button.type = "button";
+    button.type = "button"; button.dataset.rosterOpen = "";
     button.setAttribute("aria-label", `People & agents: ${capsuleSubline(vm.people)}`);
     button.addEventListener("click", () => callbacks.openPeople());
     people = button;
@@ -515,10 +528,13 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
     people = node(doc, "span", "hm-phone-bar__people hm-phone-bar__people--static");
     people.append(node(doc, "span", "hm-sr", capsuleSubline(vm.people)));
   }
-  people.append(faces);
-  bar.append(back, title(doc, vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
+  people.append(memberStack(doc, vm));
+  people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
+  bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
   if (doors.menu) {
-    bar.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true }));
+    const menu = buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true });
+    if (vm.pane === "chat" && !vm.contextTitle) menu.prepend(people, detailsButton(doc));
+    bar.append(menu);
     /* This ⋯ carries the account entries, so the page's own phone account control stands down (integration.css). */
     if (callbacks.accountAction && callbacks.account?.()) bar.dataset.homeAccountMenu = "";
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { askExcerpt, authorLabel, dayDividerLabel, dayKey, deriveStreamExtras, groupByDay, isOpenAskToViewer, streamAskCard, streamFileCard, streamTodoCard, todoIdFromAbout } from "./home-stream.ts";
+import { askExcerpt, authorLabel, continuesStreamGroup, dayDividerLabel, dayKey, deriveStreamExtras, groupByDay, isOpenAskToViewer, streamAskCard, streamFileCard, streamTodoCard, todoIdFromAbout } from "./home-stream.ts";
 
 const NOW = Date.parse("2026-10-05T15:00:00Z");
 const ID = "3f2b8c1e-5d4a-4b6f-9a7e-1c2d3e4f5a6b";
@@ -118,4 +118,17 @@ test("cards under a message carry no picture, even when the sender and the assig
   assert.equal(extras.todo.who, null);
   assert.equal(extras.todo.meta, "Nikki · in Doing", "the to-do's own line still names who has it");
   assert.equal(todos.get(ID).who, person, "the shared to-do model is not changed");
+});
+
+
+test("consecutive messages group only within the same sender, audience, day and five minutes", () => {
+  const previous = { from: "tom", fromKind: "user", channelId: null, to: null, toAgent: null, kind: "note", createdAt: "2026-10-28T10:12:00Z" };
+  const next = { ...previous, createdAt: "2026-10-28T10:13:00Z" };
+  assert.equal(continuesStreamGroup(next, previous), true);
+  assert.equal(continuesStreamGroup(next, null), false);
+  for (const changed of [
+    { from: "maya" }, { fromKind: "agent" }, { threadRootId: "another-thread" }, { channelId: "design" }, { to: "maya" }, { toAgent: "claude" }, { kind: "ask" },
+    { createdAt: "2026-10-28T10:17:00Z" }, { createdAt: "2026-10-28T10:11:00Z" }, { createdAt: "invalid" },
+    { createdAt: "2026-10-29T10:13:00Z" },
+  ]) assert.equal(continuesStreamGroup({ ...next, ...changed }, previous), false, JSON.stringify(changed));
 });

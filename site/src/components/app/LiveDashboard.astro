@@ -1060,7 +1060,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
   import { tagOptionRow, tagOptions, personNames } from "../../lib/home-pickers";
   import { buildSideCards, type SideObjectsVM } from "../../lib/home-side-cards";
-  import { buildAuthorLine, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
+  import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
@@ -4604,12 +4604,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki" || homeRoute.view === "lists", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki" || homeRoute.view === "lists", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true } };
-      const composerName = `Message ${workspace.name}`;
+      const composerName = `Message #${workspace.name}`;
       const composerLabel = one<HTMLElement>("[data-composer-label]");
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
@@ -4909,7 +4909,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       renderHomeShell();
       for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
         button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
-        if (button.classList.contains("hm-ws-header__people")) button.textContent = `People & agents${pendingTotal ? ` · ${pendingTotal} pending` : ""}`;
+        button.toggleAttribute("data-pending-access", pendingTotal > 0);
+        button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
       }
     };
 
@@ -6584,10 +6585,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          row of its own rather than disappearing with it. */
       const groups = groupSignalThreads([...visibleSignals].reverse());
       const byRoot = new Map(groups.map(group => [group.root.id, group]));
+      let previousRoot: Signal | null = null;
       for (const entry of groupByDay(groups.map(group => group.root), now, navigator.language)) {
         if (entry.type === "divider") { list.append(buildDayDivider(document, entry.label, entry.key)); continue; }
         const group = byRoot.get(entry.item.id)!;
-        list.append(buildMessageRow(group.root, group.root.threadRootId !== null));
+        const messageRow = buildMessageRow(group.root, group.root.threadRootId !== null);
+        groupStreamMessage(messageRow, group.root, previousRoot);
+        list.append(messageRow);
+        previousRoot = group.replies.length ? null : group.root;
         if (group.replies.length === 0) continue;
         const expanded = expandedThreadIds.has(group.root.id);
         const thread = document.createElement("li");
@@ -6597,7 +6602,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         replies.className = "dashboard__thread-replies";
         replies.id = `dashboard-thread-${group.root.id}`;
         replies.hidden = !expanded;
-        for (const reply of group.replies) replies.append(buildMessageRow(reply, true));
+        let previousReply: Signal | null = null;
+        for (const reply of group.replies) {
+          const replyRow = buildMessageRow(reply, true);
+          groupStreamMessage(replyRow, reply, previousReply); replies.append(replyRow); previousReply = reply;
+        }
         /* THE COUNT IS THE CONTROL. It opens the replies IN PLACE — no drawer, no navigation,
            and no second copy of the message — so a reader who opens a thread keeps the rows
            around it on screen. */
@@ -8783,7 +8792,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "Message…";
+        input.placeholder = `Message #${workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name ?? "workspace"}`;
         input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
