@@ -288,12 +288,13 @@ export async function enforceAgentSessionProof(
     return { ok: true };
   }
 
+  const parsedProof = args.proofParse.ok ? args.proofParse.proof : null;
   const existing = await tx<{ key_hash: Uint8Array | ArrayBuffer | string | null; generation: string | number | bigint; retired: boolean }[]>`SELECT key_hash, generation,
-    EXISTS(SELECT 1 FROM swarm.retired_agent_sessions r WHERE r.principal_id=agent_execution_sessions.principal_id AND r.session_id=${args.proofParse.ok ? args.proofParse.proof.session_id : null}::uuid) AS retired
+    EXISTS(SELECT 1 FROM swarm.retired_agent_sessions r WHERE r.principal_id=agent_execution_sessions.principal_id AND r.session_id=${parsedProof ? parsedProof.session_id : null}::uuid) AS retired
     FROM swarm.agent_execution_sessions WHERE principal_id=${args.principalId}::uuid AND (workspace_id=${args.workspaceId}::uuid OR ${args.connectionOnly===true}) ORDER BY workspace_id FOR SHARE`;
-  if (!args.connectionOnly && args.proofParse.ok && existing.some((r) => r.key_hash === null && !r.retired && Number(r.generation) <= args.proofParse.proof.generation)) {
+  if (!args.connectionOnly && parsedProof && existing.some((r) => r.key_hash === null && !r.retired && Number(r.generation) <= parsedProof.generation)) {
     await tx`SELECT swarm.activate_local_workspace_session(${args.principalId}::uuid,${args.workspaceId}::uuid,
-      ${args.proofParse.proof.session_id}::uuid,${args.proofParse.proof.generation},${await hashSessionKey(args.proofParse.proof.key)})`;
+      ${parsedProof.session_id}::uuid,${parsedProof.generation},${await hashSessionKey(parsedProof.key)})`;
   }
   const rows = await tx<{
     session_id: string;
