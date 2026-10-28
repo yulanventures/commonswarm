@@ -232,6 +232,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
 .destination-line{padding-left:26px}
 .destination-return{order:-1;position:relative;margin-bottom:2px;font-size:15px;font-weight:600;color:var(--ink)}
 .destination-return::before{content:"→";content:"→"/"";position:absolute;left:2px;top:-1px;font-weight:700}
+.card.admin-stack button{border:1px solid var(--primary-fg)}
 .actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px;padding-top:18px;border-top:1px solid var(--hair)}
 .actions button{min-height:52px;padding:0 30px;border:1px solid #2C2C42;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);font:inherit;font-size:17px;font-weight:700;cursor:pointer}
 .actions button:hover{background:var(--primary-hover)}

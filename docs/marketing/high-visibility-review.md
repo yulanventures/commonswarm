@@ -13,3 +13,5 @@ Lead QA inspected homepage widths 390, 768, 820, 1024 and 1440px with no overflo
 The own-brand SVG and PNG icons and social card are reproducible from editable source and generators in `site/public/brand/`, `site/scripts/brand-icons.mjs` and `site/scripts/og-card.mjs`. No new raster artwork was generated; official vendor assets were unchanged.
 
 Six auth states in light and dark passed actual body-text contrast and accessible-name checks. Auth source outside `CONSENT_STYLES` was byte-identical to baseline; own SVG and Wordmark geometry matched baseline, and no vendor paths changed.
+
+Independent review identified a low-contrast admin consent button boundary. The shared auth styles now give the admin button a deep-plum border while preserving its markup and behavior. Lead verified both rendered admin buttons in light and dark: 1px solid `rgb(44, 44, 66)` borders, with gold background and plum text; before the fix the border was zero.
