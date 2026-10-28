@@ -41,7 +41,30 @@ const hostedHelpers = [
 // Keep its exact signature and grantability literal; no OAuth/issuer allowance.
 const literal = JSON.stringify([
   ...allowlist.map((entry: unknown[]) => entry.slice(0, 5)),
+  ['swarm_command', 'COLUMN', 'swarm.agent_workspace_memberships.principal_id', 'UPDATE', false],
+  ['swarm_command', 'COLUMN', 'swarm.hosted_mcp_agent_workspace_adds.revoked_at', 'UPDATE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.activate_local_workspace_session(uuid,uuid,uuid,bigint,bytea)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.bind_hosted_agent(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.change_hosted_agent_membership(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.change_local_agent_membership(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.hosted_agent_membership_allowed(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.hosted_binding_eligible(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.hosted_grant_workspace_ids(uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.local_agent_membership_allowed(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.local_agent_workspace_live(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.local_parent_connection_live(uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.move_workspace_to_org(uuid,uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.org_allows_workspace_create(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.remove_hosted_agents_for_member(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.remove_local_agents_for_member(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.revoke_hosted_seat_membership(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.set_local_workspace_approval(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.hosted_mcp_agent_workspace_adds', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.hosted_mcp_grant_agents', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.local_content_approval_workspaces', 'SELECT', false],
 ]).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.

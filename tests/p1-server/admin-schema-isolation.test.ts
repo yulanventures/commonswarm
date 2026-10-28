@@ -13,6 +13,7 @@ test('admin-schema-isolation: non-superuser CREATEROLE upgrade 01 through 05 and
   const roleGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$roles\$[\s\S]*?END \$roles\$;/)![0];
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), provider = randomUUID();
   runSql(`
+${repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')}
 ${upgradeVersions.map(v => sqlPhase(`initial-catalog-${v}`, catalog(v))).join('\n')}
 ${[...upgradeVersions].reverse().map(v => sqlPhase(`initial-reserve-${v}`, repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false))).join('\n')}
 \\warn admin-schema-phase: constrained-role-setup

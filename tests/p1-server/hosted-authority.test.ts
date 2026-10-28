@@ -1249,6 +1249,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     await tx.unsafe(emptySchema);
     const [emptyRestrictions] = await tx`SELECT count(*)::int AS n FROM swarm.household_hosted_content_restrictions`;
     assert.equal(emptyRestrictions!.n, 0, "historical inverse runs only on an empty restriction fixture");
+    for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
+      await tx.unsafe(repoSql(`supabase/agents-reserve/${version}-rollback.sql`));
+    }
     // 00006 retains this table on rollback. Its one grant-workspace FK must
     // leave only this empty, transaction-rolled-back historical HM drill.
     const newerFks = await tx<{ name: string; columns: string[]; targets: string[] }[]>`
@@ -1265,9 +1268,6 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     assert.deepEqual(newerFk.columns, ['grant_id','workspace_id','owner_user_id']);
     assert.deepEqual(newerFk.targets, newerFk.columns);
     await tx`ALTER TABLE swarm.household_hosted_content_restrictions DROP CONSTRAINT ${tx(newerFk.name)}`;
-    for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
-      await tx.unsafe(repoSql(`supabase/agents-reserve/${version}-rollback.sql`));
-    }
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
     }

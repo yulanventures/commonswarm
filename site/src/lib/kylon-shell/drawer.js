@@ -35,7 +35,7 @@ export function connectDrawer(parts, callbacks = {}) {
     move(dialog, context, 'open'); opened = true; position('open');
     try { dialog.showModal(); }
     catch (error) { finish('unavailable'); throw error; }
-    for (const element of [rail, workspace, parking]) { previousInert.set(element, element.inert); element.inert = true; }
+    for (const element of [...root.children].filter(node => node !== dialog)) { previousInert.set(element, element.inert); element.inert = true; }
     opener.setAttribute('aria-expanded', 'true'); closeButton.focus(); callbacks.onOpen?.(); return true;
   }
   function change() { if (!media.matches && opened) close('resize'); position('resize'); }

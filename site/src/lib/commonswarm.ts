@@ -410,6 +410,11 @@ export function client(): SupabaseClient | null {
       lock: typeof navigator !== "undefined" && navigator.locks ? navigatorLock : processLock,
     },
   });
+  // 2.111.0 also defaults PostgREST GET queries to 3 exponential-backoff retries (1s/2s/4s);
+  // keep single-attempt reads so readWithDeadline and explicit UI retry controls own recovery.
+  if ((cached as unknown as { rest?: { retry?: boolean } }).rest) {
+    (cached as unknown as { rest: { retry: boolean } }).rest.retry = false;
+  }
   cached.auth.onAuthStateChange((event) => {
     if (event === "SIGNED_OUT") { deadSession = false; removalSnapshot = null; refreshRetryAfter = 0; }
     else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") deadSession = false;

@@ -1256,6 +1256,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     grantRiskBadge,
     connectionPolicyCopy,
     connectionPolicyState,
+    renewalGrantEnded,
     type ConnectionPolicy,
   } from "../../lib/standing-grants";
   import { renderFileList, type DisplayFile } from "../../lib/file-list";
@@ -2054,6 +2055,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (error instanceof EmailNotVerified) return error.message;
       if (error instanceof EmailDomainNotAccepted) return error.message;
       if (error instanceof ClientTooOld) return error.message;
+      if (error instanceof ConnectionExpiryRefused) return error.message;
+      if (error instanceof CommandOutcomeUnknown) return error.message;
       if (error instanceof SignupRefused) return error.detail;
       if (error instanceof NoDeployment) {
         return "This saved page is not connected to CommonSwarm.";
@@ -5041,9 +5044,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           return;
         }
         if (writeError instanceof ConnectionExpiryRefused) {
-          state.busy = false; state.needsCheck = false; state.notice = readableError(writeError);
+          state.busy = false; state.needsCheck = false; state.notice = writeError.message;
           if (section.isConnected) { update(); (state.enabled ? date : toggle).focus({ preventScroll: true }); }
-          else refreshConnectionDateViews();
+          else { refreshConnectionDateViews(); Array.from(app.querySelectorAll<HTMLElement>("[data-connection-end-date]")).find(element => element.dataset.connectionEndDate === options.key)?.querySelector<HTMLElement>(`[data-end-date-field="${state.enabled ? "value" : "toggle"}"]`)?.focus({ preventScroll: true }); }
           return;
         }
         try {
@@ -5053,9 +5056,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             (desired === null ? fresh.policy.connectionExpiresAt === null : Date.parse(fresh.policy.connectionExpiresAt ?? "") === Date.parse(desired));
           state.needsCheck = false;
           if (confirmed) { state.dirty = false; state.notice = desired === null ? "End date is off." : "End date saved."; }
-          else state.notice = writeError === null ? "The end date was not confirmed. Review the saved connection settings before saving again." : readableError(writeError);
+          else state.notice = writeError === null ? "The end date was not confirmed. Review the saved connection settings before saving again." : writeError instanceof Error ? writeError.message : readableError(writeError);
         } catch { state.needsCheck = true; state.notice = "The result is unknown. Check the saved end date before saving again."; }
-        finally { state.busy = false; if (options.isCurrent()) { if (section.isConnected) { update(); (state.needsCheck ? check : toggle).focus({ preventScroll: true }); } else refreshConnectionDateViews(); } }
+        finally { state.busy = false; if (options.isCurrent()) { if (section.isConnected) { update(); (state.needsCheck ? check : toggle).focus({ preventScroll: true }); } else { refreshConnectionDateViews(); Array.from(app.querySelectorAll<HTMLElement>("[data-connection-end-date]")).find(element => element.dataset.connectionEndDate === options.key)?.querySelector<HTMLElement>(`[data-end-date-field="${state.needsCheck ? "check" : "toggle"}"]`)?.focus({ preventScroll: true }); } } }
       });
       update(); return section;
     };
@@ -5082,7 +5085,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         isCurrent, current: () => {
           const canonical = agents.find(row => row.principalId === principalId && row.ownerUserId === ownerId);
           const current = canonical ? homeConnectionAccess(canonical, workspaceId, accessStatuses.filter(row => row.grantId === grantId)) : undefined;
-          return current && canonical ? { policy: homeConnectionPolicy(canonical), live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
+          const policy = canonical ? homeConnectionPolicy(canonical) : {};
+          return current && canonical ? { policy: connectionPolicyState(policy, true) === "unknown" && renewalGrantEnded(current) ? current : policy, live: renewalConnectionLive(current), owner: current.ownerUserId === ownerId &&
             agents.some(row => row.principalId === principalId && row.ownerUserId === ownerId) } : null;
         }, reread: async () => {
           const [rows, overview] = await Promise.all([agentAccessStatuses(workspaceId), homeOverview()]);
@@ -6999,7 +7003,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             wakeRosterRefreshInFlight = true;
             void roster(workspaceId).then(nextAgents => {
               if (workspaceId !== activeWorkspaceId || version !== requestVersion) return;
-              agents = nextAgents;
+              agents = nextAgents.map(next => { const prev = agents.find(row => row.principalId === next.principalId && row.ownerUserId === next.ownerUserId); return prev?.work && !next.work ? { ...next, work: prev.work } : next; });
               renderRoster();
             }).catch(() => undefined).finally(() => { wakeRosterRefreshInFlight = false; });
           }
@@ -7763,6 +7767,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const nextRemovedOwners = await removedOwnersRead;
         if (version !== requestVersion) return;
         agents = nextAgents;
+        wakeRosterLastFetchedAt = Date.now();
         homePeopleReadState = "ready";
         removedAgents = nextRemovedAgents;
         removedAgentOwners = nextRemovedOwners;

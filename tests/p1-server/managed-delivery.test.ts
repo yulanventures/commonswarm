@@ -1312,6 +1312,9 @@ test("HM reviewed rollback and rollback catalog execute together transactionally
 
   // Release proofs write the admin-owned ledger, as they do on the box.
   await releaseSql.begin(async (tx) => {
+    for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
+      await tx.unsafe(readFileSync(new URL(`../agents/${version}-rollback.sql`, HM_PROOF_DIR), "utf8"));
+    }
     await tx.unsafe(inverseSql);
     const [proved] = await tx.unsafe<{ rollback_ok: boolean }[]>(rollbackCatalog);
     assert.equal(proved?.rollback_ok, true);

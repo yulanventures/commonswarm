@@ -75,8 +75,9 @@ test('00009 reserve restores the audit trigger function from its last definer be
 });
 
 test('00009 catalog, functional and rollback proofs hold, the reserve restores the 00006 body and the migration reapplies', () => {
-  // The clone already carries the 00009 body; no later migration replaces it.
+  // The clone already carries the 00009 body; roll back newer migrations that replace it first.
   runSql(`
+${repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')}
 ${snapshot('installed', [AUDIT])}
 ${dbAssert(`${auditTrigger} AND ${tolerant}`, 'tolerant audit body bound before rollback')}
 ${proof('catalog', true)}

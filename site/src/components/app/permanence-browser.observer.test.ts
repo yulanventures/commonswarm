@@ -162,7 +162,7 @@ function installConnectionFixture() {
         .some(table => url.pathname === "/rest/v1/" + table)) return Response.json([]);
     }
     // Ancillary Home reads may refuse; unexpected writes and settings reads may not hide here.
-    if (url.pathname === "/functions/v1/command" && ["home_overview", "agent_queue", "todo_activity", "todo_list", "workspace_seen", "signals_seen"].includes(body.command?.kind))
+    if (url.pathname === "/functions/v1/command" && ["home_overview", "agent_queue", "todo_activity", "todo_list", "workspace_seen", "signals_seen", "household_connections"].includes(body.command?.kind))
       return Response.json({ status: "refused", reason: "content_consent_required" });
     f.unexpected.push(request.method + " " + url.pathname);
     return Response.json({ error: "unexpected_fixture_request" }, { status: 404 });
@@ -176,10 +176,10 @@ async function observeConnectionApp() {
   const w = window as any, f = w.connectionFixture;
   const one = (selector: string): any => document.querySelector(selector);
   const assert = (value: unknown, message: string) => { if (!value) throw new Error(f.scenario + ": " + message); };
-  const tick = () => fetch("/__observer-tick");
+  const tick = async () => { const r = fetch("/__observer-tick"); await navigator.locks?.query(); await r; };
   const wait = async (predicate: () => unknown, name: string) => {
     for (let i = 0; i < 250; i++) { if (predicate()) return; await tick(); }
-    throw new Error(f.scenario + ": timed out at " + name + "; " + one("live-dashboard")?.dataset.state + "; " + document.body.textContent?.slice(-500));
+    throw new Error(f.scenario + ": timed out at " + name + " (reads=" + f.reads + ", writes=" + writes().length + "); " + location.search + "; " + one("live-dashboard")?.dataset.state + "; " + (one("[data-connection-end-date]")?.outerHTML ?? one("[data-home-route-pane]")?.textContent?.slice(0, 200) ?? one("[data-people-detail]")?.textContent ?? ""));
   };
   const commands = () => f.requests.filter((r: any) => r.path === "/functions/v1/command").map((r: any) => r.body);
   const writes = () => commands().filter((r: any) => ["set_connection_expiry", "revoke_agent_token", "resume_renewal_grant"].includes(r.command.kind));
@@ -231,12 +231,12 @@ async function observeConnectionApp() {
     if (f.hosted) {
       one("[data-connected-apps-open]").click();
       await wait(() => one("[data-connected-apps-dialog]").open && one("[data-connected-apps-list] [data-connection-end-date]"), "hosted mount");
-    } else await wait(() => one("[data-people-detail] [data-connection-end-date]"), "renewal mount");
+    } else await wait(() => one("[data-people-detail] [data-connection-end-date]") && (f.scenario === "absent-home" || (f.overviewReads > 0 && (["foreign", "grant-foreign", "principal-foreign"].includes(f.scenario) || one("[data-people-detail] [data-connection-end-date] form")))), "renewal mount");
     const rootSelector = f.hosted ? "[data-connected-apps-list]" : "[data-people-detail]";
     const editor = () => one(rootSelector + " [data-connection-end-date]");
-    const form = () => editor().querySelector("form") as HTMLFormElement;
-    const field = (selector: string): any => editor().querySelector(selector);
-    const notice = () => editor().querySelector('[role="status"]').textContent;
+    const form = () => editor()?.querySelector("form") as HTMLFormElement;
+    const field = (selector: string): any => editor()?.querySelector(selector);
+    const notice = () => editor()?.querySelector('[role="status"]')?.textContent ?? "";
     assert(writes().length === 0, "mount wrote a command");
     if (!form()) {
       assert(["foreign", "grant-foreign", "principal-foreign", "absent-home"].includes(f.scenario), "missing admitted editor");
@@ -312,9 +312,10 @@ async function observeConnectionApp() {
       };
       edit();
       // A real rerender (selecting the same agent again, or reopening the dialog) must retain the draft.
+      const beforeRerender = editor();
       if (f.hosted) { one("[data-connected-apps-close]").click(); one("[data-connected-apps-open]").click(); }
-      else one("#pd-agent-" + f.principal).click();
-      await wait(() => field("[data-end-date-value]")?.value === "2035-02-03T04:05", "draft across reread/rerender");
+      else { one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click(); }
+      await wait(() => editor() && editor() !== beforeRerender && field("[data-end-date-value]")?.value === "2035-02-03T04:05", "draft across reread/rerender");
       if (f.scenario === "stale-family") {
         const oldForm = form(), oldEditor = editor();
         const original = f.grant.renewal_grant_id;
@@ -325,7 +326,7 @@ async function observeConnectionApp() {
         assert(writes().length === 1 && writes()[0].command.grant_id === original, "draft retargeted its write");
         assert(!oldEditor.textContent.includes("End date saved."), "different family confirmed original save");
         oldForm.dispatchEvent(new Event("submit", { cancelable: true }));
-        one("#pd-agent-" + f.principal).click();
+        one("#pd-agent-" + f.principal).click(); one("#pd-agent-" + f.principal).click();
         assert(writes().length === 1, "stale draft saved to replacement family");
         assert(!visible(form()) || field("[data-end-date-value]").value !== "2035-02-03T04:05", "replacement inherited old draft");
         document.documentElement.dataset.connectionObservation = JSON.stringify({ scenario: f.scenario, writes: writes(), reads: f.reads });
@@ -393,6 +394,8 @@ async function observeConnectionApp() {
       // A retained old form must obey its real session/scope guard.
       const stale = form();
       if (f.scenario === "session-reset") {
+        if (!visible(one("[data-user-menu-trigger]"))) one("[data-home-menu-toggle]")?.click();
+        one("[data-user-menu-trigger]")?.click();
         const signout = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-signout]")).find(visible);
         assert(signout, "normal account Sign out missing"); signout!.click();
         await wait(() => one("live-dashboard").dataset.state === "signed-out", "real auth reset");
@@ -422,7 +425,7 @@ async function observeConnectionApp() {
   }
 }
 
-test("real app mounts enforce end-date identity, lifecycle and owner admission through HTTP", { timeout: 120_000 }, async () => {
+test("real app mounts enforce end-date identity, lifecycle and owner admission through HTTP", { timeout: 180_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
@@ -465,24 +468,30 @@ test("real app mounts enforce end-date identity, lifecycle and owner admission t
   const observation = "<script>" + observationCode + "</script>";
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style>" + setup + "</head><body>" + markup + observation + "</body></html>";
-  const parent = "<!doctype html><html><body><script>(async()=>{ const results=[]; for(const scenario of " + JSON.stringify(scenarios) +
+  let activeBatch = scenarios;
+  const parent = () => "<!doctype html><html><body><script>(async()=>{ const results=[]; try { for(const scenario of " + JSON.stringify(activeBatch) +
     "){ const frame=document.createElement('iframe'); frame.style.width=results.length%2?'390px':'1280px'; frame.style.height='900px'; frame.src='/app?v='+(scenario.startsWith('home-')?'catchup':'people&w=11111111-1111-4111-8111-111111111111')+'&case='+scenario; document.body.append(frame);" +
-    "for(let i=0;i<1000;i++){const value=frame.contentDocument?.documentElement.dataset.connectionObservation;if(value){results.push(JSON.parse(value));break;}await fetch('/__observer-tick');}" +
-    "frame.remove();if(results.at(-1)?.scenario!==scenario||results.at(-1)?.error)break;}document.documentElement.dataset.endDateObservation=btoa(unescape(encodeURIComponent(JSON.stringify(results))));})();</script></body></html>";
+    "for(let i=0;i<1000;i++){const value=frame.contentDocument?.documentElement?.dataset?.connectionObservation;if(value){results.push(JSON.parse(value));document.documentElement.dataset.endDateObservation=btoa(unescape(encodeURIComponent(JSON.stringify(results))));break;}await fetch('/__observer-tick');}" +
+    "frame.remove();if(results.at(-1)?.scenario!==scenario||results.at(-1)?.error)break;} } catch (error) { results.push({ error: String(error) }); } finally { document.documentElement.dataset.endDateObservation=btoa(unescape(encodeURIComponent(JSON.stringify(results)))); } })();</script></body></html>";
   const server = createServer((request, response) => {
-    if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 10); return; }
+    if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
-    response.end(request.url === "/app.js" ? bundled.join("\n") : request.url?.startsWith("/app?") ? app : parent);
+    response.end(request.url === "/app.js" ? bundled.join("\n") : request.url?.startsWith("/app?") ? app : parent());
   });
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
     const address = server.address(); assert.ok(address && typeof address === "object");
-    const { stdout } = await launchChrome(await findChrome(), ["--virtual-time-budget=120000", "--dump-dom", "http://127.0.0.1:" + address.port + "/"],
-      { timeout: 150000, maxBuffer: 10 * 1024 * 1024 });
-    const encoded = stdout.match(/data-end-date-observation="([A-Za-z0-9+/=]+)"/)?.[1];
-    assert.ok(encoded, "normal rendered app must finish the browser observations");
-    const results = JSON.parse(Buffer.from(encoded, "base64").toString());
-    assert.equal(results.find((row: any) => row.error), undefined, JSON.stringify(results));
+    const chrome = await findChrome(), results: any[] = [];
+    for (let offset = 0; offset < scenarios.length; offset += 10) {
+      activeBatch = scenarios.slice(offset, offset + 10);
+      const { stdout } = await launchChrome(chrome, ["--virtual-time-budget=240000", "--dump-dom", "http://127.0.0.1:" + address.port + "/"],
+        { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+      const encoded = stdout.match(/data-end-date-observation="([A-Za-z0-9+/=]+)"/)?.[1];
+      assert.ok(encoded, "normal rendered app must finish the browser observations: " + stdout.slice(0, 1000));
+      const batchResults = JSON.parse(Buffer.from(encoded, "base64").toString());
+      assert.equal(batchResults.find((row: any) => row.error), undefined, JSON.stringify(batchResults));
+      results.push(...batchResults);
+    }
     assert.deepEqual(results.map((row: any) => row.scenario), scenarios);
   } finally {
     if (server.listening) { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

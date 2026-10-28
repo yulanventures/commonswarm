@@ -65,6 +65,7 @@ test('20261019000003 enforces the connection fence, its rollback restores the pr
   const hostedGrant = (grant: string, expired: string) =>
     `('${grant}','provider-${grant}','${owner}','${ws}','${client}','https://mcp.commonswarm.com/mcp',ARRAY['${ws}']::uuid[],${digest},'interaction-${grant}','active',statement_timestamp(),statement_timestamp(),${expired})`;
   const fixture = `
+${repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')}
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Enforcement owner');
 INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${ws}','Enforcement','${owner}');

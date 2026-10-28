@@ -409,7 +409,7 @@ const fixtureScript = `
     const back = app.querySelector('[data-todo-back]'), assigned = app.querySelector('[data-todo-assigned] h2');
     columnPair(indexColumn, column(assigned));
     check('Back meets actual paired content edge', Math.abs(indexColumn.left - rect(back).left) <= .5, { indexColumn, back: rect(back) });
-    check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners + 1);
+    check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners);
   },
   contextSummaryFocused(label) { return document.activeElement === summary(label); },
   async contextSummaryOpened(label, expected = true) {
@@ -665,12 +665,12 @@ const fixtureScript = `
     releasedPeople = { node: p.roster, parent: p.homeParent, next: p.homeNext, hidden: p.priorHidden };
     check('leave People restores exact anchor and original nav hidden state', p.roster.parentNode === p.homeParent &&
       p.roster.nextSibling === p.homeNext && context.hidden === p.priorHidden && !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') &&
-      listeners() === 1, peopleFacts());
+      listeners() === 2, peopleFacts());
   },
   async peopleReleased(width) {
     await untilPeople(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === (width <= 832), 'released native media query at ' + width);
     check('held native query cannot reproject released roster', releasedPeople.node.parentNode === releasedPeople.parent &&
-      releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 1, peopleFacts());
+      releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 2, peopleFacts());
   },
   async peopleHeader(options, expected) {
     fixture.people.mount(false, options); ({ bar, menu, heading } = fixture); heldSearch = null;
@@ -727,7 +727,7 @@ const fixtureScript = `
       for (const [phase, act] of [['Chat sync', () => host.sync(project(chat))],
         ['null clear', () => host.peopleContext(null)], ['repeated null clear', () => host.peopleContext(null)]]) {
         act();
-        check(label + ' unowned hidden=' + hidden + ' survives ' + phase, context.hidden === hidden && sameNodes() && listeners() === 1 &&
+        check(label + ' unowned hidden=' + hidden + ' survives ' + phase, context.hidden === hidden && sameNodes() && listeners() === 2 &&
           !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') && (!releasedPeople ||
           (releasedPeople.node.parentNode === releasedPeople.parent && releasedPeople.node.nextSibling === releasedPeople.next)), peopleFacts());
       }

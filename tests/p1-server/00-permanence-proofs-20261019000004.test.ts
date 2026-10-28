@@ -51,6 +51,7 @@ test('20261019000004 serializes a client, its rollback removes only the lock and
   const binding = (grant: string, clientId: string) =>
     `('provider-${grant}','https://mcp.commonswarm.com/mcp','hosted_mcp','${owner}','${clientId}','${grant}','${grant}')`;
   const fixture = `
+${repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')}
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Stream lock owner');
 INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${ws}','Locked','${owner}'),('${streamlessWs}','Streamless','${owner}');

@@ -137,6 +137,8 @@ async function startProvider(clientId, beforeConsume, database = pool, { permane
       await database.query("DELETE FROM swarm.streams WHERE stream_id=$1", [stream]);
       await database.query("DELETE FROM swarm.memberships WHERE workspace_id=$1 AND user_id=$2", [workspace, owner]);
       await database.query("DELETE FROM swarm.workspaces WHERE workspace_id=$1", [workspace]);
+      await database.query("DELETE FROM swarm.org_memberships WHERE user_id=$1", [owner]);
+      await database.query("DELETE FROM swarm.organizations WHERE created_by=$1", [owner]);
       await database.query("DELETE FROM swarm.users WHERE user_id=$1", [owner]);
       await database.query("DELETE FROM auth.users WHERE id=$1", [owner]);
     },
