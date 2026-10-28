@@ -122,7 +122,7 @@ const CONSENT_STYLES = `:root{
   --canvas:#F8F7F3;--card:#FFFFFF;--soft:#EBE5F4;--soft-strong:#DED5EA;--hair:#DCDBE3;--border:#DCDBE3;--lip:#DCDBE3;
   --ink:#2C2C42;--muted:#636275;--accent:#65518B;
   --primary-bg:#65518B;--primary-fg:#FFFAF2;--primary-hover:#57427D;--link:#2C2C42;--focus:#57427D;
-  --tile-bg:#F7E9DC;--tile-line:#65518B;--tile-ink:#2C2C42;--avatar:#65518B;
+  --tile-bg:#F7E9DC;--tile-line:#65518B;--tile-ink:#2C2C42;--avatar:#65518B;--avatar-fg:#FFFFFF;
   --warn-bg:#F7E9DC;--warn-line:#C47A3A;--warn-ink:#5E3300;--warn-icon:#8A4B00;
   --danger:#8C2A14;--danger-bg:#FBE4D5;--danger-line:#E9B79B;
   --pill-dot:#FFFAF2;
@@ -133,7 +133,7 @@ const CONSENT_STYLES = `:root{
   --canvas:#201D29;--card:#302B3A;--soft:#3D354B;--soft-strong:#494157;--hair:#575063;--border:#575063;--lip:#18151F;
   --ink:#F4F1FA;--muted:#C8C1D3;--accent:#CDB9EE;
   --primary-bg:#CDB9EE;--primary-fg:#292137;--primary-hover:#DECFF5;--link:#CDB9EE;--focus:#CDB9EE;
-  --tile-bg:#443931;--tile-line:#CDB9EE;--tile-ink:#F4F1FA;--avatar:#CDB9EE;
+  --tile-bg:#443931;--tile-line:#CDB9EE;--tile-ink:#F4F1FA;--avatar:#CDB9EE;--avatar-fg:#292137;
   --warn-bg:#443931;--warn-line:#CDB9EE;--warn-ink:#F7E9DC;--warn-icon:#CDB9EE;
   --danger:#FFB4A0;--danger-bg:#3A1D14;--danger-line:#7A3420;
   --pill-dot:#292137;
@@ -175,7 +175,7 @@ svg{flex:none}
 .unverified-warning svg{color:var(--warn-icon);margin-top:2px}
 .unverified-warning strong{overflow-wrap:anywhere}
 .account{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 10px 10px 10px;border-radius:16px;background:var(--soft);border:1px solid var(--hair)}
-.avatar{position:relative;width:40px;height:40px;border-radius:50%;background:var(--avatar);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex:none}
+.avatar{position:relative;width:40px;height:40px;border-radius:50%;background:var(--avatar);color:var(--avatar-fg);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex:none}
 .provider-badge{position:absolute;right:-3px;bottom:-3px;width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#FFFFFF;color:#17231C;box-shadow:0 0 0 2px var(--soft)}
 .provider-github{background:#17231C;color:#FFFFFF}
 .account-text{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;font-size:15px;line-height:1.35}
