@@ -1,3 +1,4 @@
+import { createChannelDetails } from "./channel-details";
 import { createOrgShell } from "./shell.js";
 import { createPeopleContext } from "./people-context";
 import { createTodoContext } from "./todo-context";
@@ -22,6 +23,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   let phoneHeading: { node: HTMLElement; parent: HTMLElement } | null = null;
   let menuDock: HTMLElement | null = null;
   const icons = new Map<string, SVGSVGElement>();
+  const channelDetails = createChannelDetails(app);
   const todoContext = createTodoContext(app, () => shell);
   const peopleContext = createPeopleContext(app, () => shell, context);
   const wikiContext = createWikiContext(app, () => shell);
@@ -30,6 +32,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     if (phoneHeading) { phoneHeading.parent.append(phoneHeading.node); phoneHeading = null; }
   };
   const restore = () => {
+    channelDetails.destroy();
     wikiContext.clear();
     todoContext.clear();
     peopleContext.clear();
@@ -69,11 +72,14 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     phoneMenu?.node.querySelector(".hm-menu__trigger")?.setAttribute("aria-expanded", "false");
     restoreMenu();
     if (node) { phoneMenu = { node, parent: node.parentElement! }; menuDock.append(node); }
+    channelDetails.sync();
     if (heading) { phoneHeading = { node: heading, parent: heading.parentElement! }; headingDock.replaceChildren(heading); }
   };
 
   return {
     sync(vm: Projection) {
+      const channel = vm.enabled && vm.navigation.some(item => item.id === "chat" && item.current);
+      if (!channel) channelDetails.set(false);
       if (!vm.wiki) wikiContext.clear();
       if (!vm.todo) todoContext.clear();
       if (!vm.people) peopleContext.clear();
@@ -103,6 +109,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
           chevron.setAttribute("d", "M6 9l6 6 6-6"); accountIcon.append(chevron);
         }
       }
+      channelDetails.set(channel);
       todoContext.set(vm.todo === true);
       wikiContext.set(vm.wiki === true);
       // Data/route changes update existing slots; time-only refreshes keep keyboard focus intact.
@@ -125,7 +132,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     replaceHeader(replace: () => void) {
       const active = doc.activeElement;
       const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneHeading?.node ? "heading" : null;
-      todoContext.refresh(() => wikiContext.refresh(replace)); syncMenu();
+      todoContext.refresh(() => wikiContext.refresh(replace)); syncMenu(); channelDetails.sync();
       if (!owned || (doc.activeElement !== doc.body && doc.activeElement !== active)) return;
       const target = owned === "menu" ? phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__trigger") : phoneHeading?.node;
       if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });

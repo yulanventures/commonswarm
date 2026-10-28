@@ -240,8 +240,16 @@ export function buildSharedCard(doc: Document, vm: SideCardsVM): HTMLElement {
 /** The right column in the order of UI-SPEC 3.3: To-dos, Lists, Files, What’s shared here, Wiki (ruling 4: one entry row, not a card). */
 export function buildSideCards(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement {
   const column = node(doc, "div", "hm-side"); column.dataset.homeSide = ""; if (vm.sample) column.dataset.sample = "true";
+  const heading = node(doc, "div", "hm-details-heading");
+  const title = node(doc, "h2", "", "Details");
+  const close = node(doc, "button", "hm-details-close", "×"); close.type = "button";
+  close.dataset.channelDetailsClose = ""; close.setAttribute("aria-label", "Close details");
+  heading.append(title, close); column.append(heading);
   const todos = buildTodosCard(doc, vm, callbacks); if (todos) column.append(todos);
-  column.append(...buildObjectsCards(doc, vm, callbacks), buildSharedCard(doc, vm));
+  column.append(...buildObjectsCards(doc, vm, callbacks));
+  const sharing = node(doc, "details", "hm-details-sharing");
+  sharing.append(node(doc, "summary", "", "Sharing"), buildSharedCard(doc, vm));
+  column.append(sharing);
   const wiki = node(doc, "div", "hm-side-entry"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); wiki.firstElementChild?.append(chevron(doc)); column.append(wiki);
   return column;
 }

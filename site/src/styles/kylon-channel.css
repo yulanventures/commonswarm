@@ -1,0 +1,118 @@
+/* Channel chrome follows the shipped organization rail and member panel. */
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header {
+  min-block-size: 56px; padding: 6px 20px; gap: 8px; flex-wrap: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__copy { flex: 1; }
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__title { font-size: 18px; line-height: 1.4; letter-spacing: -.3px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__actions { gap: 8px; flex-wrap: nowrap; }
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-ws-header__people, .hm-details-close) {
+  display: inline-flex; align-items: center; justify-content: center; min-block-size: 36px;
+  padding: 4px 10px; border: 1px solid var(--k-shell-line); border-radius: 6px;
+  color: var(--k-shell-ink); background: transparent; box-shadow: none; font: 500 13px var(--k-shell-font); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-ws-header__people, .hm-details-close):hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-toggle[aria-expanded="true"] { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] .hm-member-stack { display: inline-flex; align-items: center; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces { display: inline-flex; align-items: center; padding-inline-start: 4px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces > * {
+  flex: none; inline-size: 24px; block-size: 24px; margin-inline-start: -4px; border-radius: 5px;
+  box-shadow: 0 0 0 2px var(--k-shell-surface); font-size: 10px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed { max-inline-size: none; padding-block: 12px 20px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
+  position: relative; padding: 8px 20px 4px; grid-template-columns: 36px minmax(0, 1fr); gap: 10px; border-radius: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:hover,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:focus-within { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar { inline-size: 36px; block-size: 36px; border-radius: 7px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 15px; font-weight: 700; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown { font-size: 15px; line-height: 1.5; }
+live-dashboard.dashboard[data-kylon-shell] .hm-author__agent {
+  align-self: center; padding: 0 4px; border-radius: 3px; background: var(--k-shell-selected); color: var(--k-shell-secondary); font-size: 11px; line-height: 17px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] { padding-block-start: 2px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] > .dashboard__message-avatar { visibility: hidden; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author {
+  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
+  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 10px var(--k-shell-font); color: var(--k-shell-secondary); visibility: hidden;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { visibility: visible; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools {
+  position: absolute; inset: -12px 16px auto auto; z-index: 3; display: flex; align-items: center;
+  padding: 3px; border: 1px solid var(--k-shell-line); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
+  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer { padding: 12px 20px 16px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-input { min-block-size: 86px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-input::before { background: var(--k-shell-surface); box-shadow: inset 0 0 0 1px var(--k-shell-control); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+  padding: 10px 12px 44px; min-block-size: 78px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-attach { inset-inline: 8px auto; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within, :hover):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-attach { inset-inline: 8px auto; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--cs-rail-accent, #ba3d23); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: color-mix(in srgb, var(--cs-rail-accent, #ba3d23) 85%, #000); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-collapsed] { grid-template-columns: minmax(0, 1fr); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-channel-details-collapsed] > .hm-frame__side { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-frame__side {
+  background: var(--k-shell-surface); border-color: var(--k-shell-line); color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.cs-org-shell, .cs-details-sheet) .hm-side { padding: 0 16px 16px; gap: 0; font-family: var(--k-shell-font); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-heading { display: flex; align-items: center; justify-content: space-between; min-block-size: 56px; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-heading h2 { margin: 0; font: 700 15px var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-close { inline-size: 36px; padding: 0; border: 0; font-size: 22px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-card {
+  padding: 12px 0; border: 0; border-block-start: 1px solid var(--k-shell-line); border-radius: 0; box-shadow: none; background: transparent; color: inherit;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-card__title { font: 600 14px var(--k-shell-font); margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side :is(.hm-todo-row__title, .hm-object-title) { font-size: 14px; font-weight: 400; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side :is(.hm-todo-row__sub, .hm-object-meta, .hm-side-card__empty) { font-size: 12px; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-object-card { min-block-size: 40px; border-radius: 4px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-todo-row { min-block-size: 44px; padding-block: 0; border-color: var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] .hm-side :is(.hm-todo-row__text, .hm-side-card__title-link) { min-block-size: 32px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-list__item { border: 0; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing { order: 1; border-block-start: 1px solid var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing summary { padding-block: 12px; font-size: 14px; cursor: pointer; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing .hm-side-card { border: 0; padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing .hm-side-card__title { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing .hm-side-card::before { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-sharing .hm-side-card__line { font-size: 13px; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] .hm-side-entry { border-block-start: 1px solid var(--k-shell-line); padding-block: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-side-entry > .hm-side-link { padding-inline: 0; font: 600 14px var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet { padding: 0; border: 1px solid var(--k-shell-line); background: var(--k-shell-surface); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet::backdrop { background: #10151080; }
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-close, .hm-details-sharing summary):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-kylon-workspace-menu > .hm-menu { display: flex; align-items: center; gap: 2px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar__people { color: var(--k-shell-ink); margin: 0; max-inline-size: 60px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces > :nth-child(n + 2) { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-close) { min-block-size: 44px; min-inline-size: 44px; padding-inline: 6px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-phone-bar__title { font-size: 16px; line-height: 22px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message { padding-inline: 12px; gap: 10px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea { font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet[open] { position: fixed; inset: auto 0 0; margin: 0; inline-size: 100%; max-inline-size: none; max-block-size: 88dvh; border-radius: 16px 16px 0 0; overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet > .hm-frame__side { display: block; border: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-side :is(a, summary) { min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { inset-inline-end: 8px; }
+}
+@media (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
+    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none;
+  }
+}
+
+/* A grouped author remains reachable with a visible identity control on keyboard focus. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author:focus-within {
+  position: static; inline-size: auto; block-size: auto; overflow: visible; clip-path: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .hm-frame:not([data-channel-details-active]) .hm-details-heading { display: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-roster-open][data-pending-access]::after {
+  content: ""; inline-size: 7px; block-size: 7px; border-radius: 50%; background: var(--cs-rail-accent, #ba3d23); margin-inline-start: 6px;
+}
