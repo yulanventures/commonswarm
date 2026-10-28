@@ -638,7 +638,7 @@ async function isolatedDatabaseTarget(binding, docker, issuance, historical = fa
 
 /** Catalog equality covers the actual source definitions, not an invented schema.
  * OIDs are deliberately resolved to names because a fresh database allocates new OIDs. */
-async function historicalCatalog(sql) {
+export async function historicalCatalog(sql) {
   const schemas = HISTORICAL_SCHEMAS;
   // Compare effective grants, including grant options, rather than aclitem ordering,
   // grantor provenance or explicit-default vs NULL storage. The same rule applies
@@ -696,7 +696,10 @@ async function historicalCatalog(sql) {
         WHERE n.nspname=ANY(${schemas}::text[]) AND NOT t.tgisinternal
       UNION ALL SELECT 'policy',n.nspname||'.'||c.relname||'.'||p.polname,
         jsonb_build_array(p.polpermissive,p.polcmd,
-          (SELECT array_agg(CASE WHEN r=0 THEN 'PUBLIC' ELSE pg_get_userbyid(r) END ORDER BY r) FROM unnest(p.polroles) r),
+          -- Tag the PUBLIC pseudo-role separately, as effectiveAcl does for grantees.
+          (SELECT jsonb_agg(jsonb_build_array(is_public,role_name) ORDER BY is_public,role_name)
+            FROM (SELECT r=0 AS is_public, CASE WHEN r=0 THEN NULL ELSE pg_get_userbyid(r) END AS role_name
+              FROM unnest(p.polroles) r) roles),
           pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid))
         FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname=ANY(${schemas}::text[])
