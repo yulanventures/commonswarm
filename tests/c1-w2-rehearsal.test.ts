@@ -41,6 +41,49 @@ const PG = (): string => {
   return PG_FOUND!;
 };
 
+test('lock-order restored catalog distinguishes PUBLIC from a role named "PUBLIC"', { skip: skipDb }, async (t) => {
+  const pg = PG();
+  // A short socket directory keeps this offline, including on macOS with a long TMPDIR.
+  const directory = mkdtempSync(join(realpathSync('/tmp'), 'c1-policy-catalog-'));
+  const data = join(directory, 'data');
+  const pgRun = (tool: string, args: string[]) => {
+    const result = spawnSync(join(pg, tool), args, { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, `${tool}: ${result.error ?? result.stderr}`);
+  };
+  try {
+    pgRun('initdb', ['-D', data, '-U', 'catalog_test', '--auth=trust', '--no-locale']);
+    pgRun('pg_ctl', ['-D', data, '-l', join(directory, 'postgres.log'), '-o',
+      `-c listen_addresses='' -c unix_socket_directories='${directory}'`, '-w', 'start']);
+    const { default: postgres } = await import('postgres');
+    const { historicalCatalog } = await import(new URL('./support/admin-principal-lock-order-harness.mjs', import.meta.url).href) as {
+      historicalCatalog(sql: ReturnType<typeof postgres>): Promise<string>;
+    };
+    const sql = postgres({ host: directory, port: 5432, user: 'catalog_test', database: 'postgres', ssl: false, max: 1 });
+    try {
+      await sql`CREATE ROLE "PUBLIC"`;
+      await sql`CREATE TABLE public.policy_role_test (id integer)`;
+      await sql`ALTER TABLE public.policy_role_test ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE POLICY policy_role_test ON public.policy_role_test TO PUBLIC USING (true)`;
+      const universal = await historicalCatalog(sql);
+      await sql`ALTER POLICY policy_role_test ON public.policy_role_test TO "PUBLIC"`;
+      const named = await historicalCatalog(sql);
+      await sql`ALTER POLICY policy_role_test ON public.policy_role_test TO PUBLIC`;
+      const universalAgain = await historicalCatalog(sql);
+
+      await t.test('PUBLIC to role "PUBLIC" changes the inventory', () => assert.notEqual(named, universal));
+      await t.test('role "PUBLIC" to PUBLIC changes the inventory', () => assert.notEqual(universalAgain, named));
+      assert.equal(universalAgain, universal, 'returning to the original policy restores catalog equality');
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  } finally {
+    // Retain the directory if stopping PostgreSQL fails; never delete under a live server.
+    if (existsSync(join(data, 'postmaster.pid'))) pgRun('pg_ctl', ['-D', data, '-m', 'fast', '-w', 'stop']);
+    const cleanup = spawnSync('rm', ['-rf', directory], { encoding: 'utf8' });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  }
+});
+
 test('c1 W2 rehearsal: the script is Bash 3.2 syntax and never puts a heredoc inside a command substitution', () => {
   const syntax = spawnSync('/bin/bash', ['-n', script], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
