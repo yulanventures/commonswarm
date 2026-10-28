@@ -3086,7 +3086,7 @@ test("hosted context explains all four HTTP tools, default claim, replay and two
   assert.equal(ownerResults[0]!.body.handle, ownerResults[4]!.body.handle, "same request receipt replays");
   const roster = ownerResults.find(row => row.name === "members")!.body;
   for (const member of roster.members as Array<Record<string, unknown>>) assert.equal(Object.hasOwn(member, "email"), false);
-  const workspaceB = contextHttp(fixture, { calls: [{ name: "claim_seat", workspace_id: fixture.workspaceB },
+  const workspaceB = contextHttp(fixture, { name: "workspace-b-context-seat", calls: [{ name: "claim_seat", workspace_id: fixture.workspaceB },
     { name: "whoami" }, { name: "members" }, { name: "check" }] });
   workspaceB.forEach(row => assertContext(row, fixture, undefined, false, fixture.workspaceB));
   const otherResults = contextHttp(fixture, { grantId: fixture.grantB, ownerUserId: fixture.other, name: "other-context-seat" });
