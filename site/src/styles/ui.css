@@ -1013,3 +1013,7 @@ textarea.ui-field__control {
   border-radius: var(--radius-lg);
   box-shadow: none;
 }
+
+/* Public header calls to action retain their own primary role across themes. */
+.hdr .hdr__cta, .mnav__cta { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; box-shadow: none; }
+.hdr .hdr__cta:hover, .mnav__cta:hover { background: #f3c72f; color: #2c2c42; border-color: #2c2c42; }

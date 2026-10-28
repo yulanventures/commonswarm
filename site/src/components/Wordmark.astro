@@ -28,7 +28,7 @@ const sized = typeof markSize === "number";
 >
   <svg class="wm__mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
     <path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="currentColor" stroke-width="4.8" stroke-linecap="round"></path>
-    <rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="var(--wm-junction, #65518B)"></rect>
+    <rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="var(--wm-junction, #E45B36)"></rect>
   </svg>
   {!markOnly && <span class="wm__word">CommonSwarm</span>}
 </Tag>
@@ -64,11 +64,6 @@ const sized = typeof markSize === "number";
   }
 
   .wm--marketing { min-block-size: 44px; }
-
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme="light"])) .wm { --wm-junction: #cdb9ee; }
-  }
-  :global(:root[data-theme="dark"]) .wm { --wm-junction: #cdb9ee; }
 
   .wm__word {
     white-space: nowrap;

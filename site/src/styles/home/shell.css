@@ -376,3 +376,11 @@
 @media (width > 52rem) {
   .hm-frame__rail .dashboard__user-trigger .dashboard__org-mark { display: grid; }
 }
+
+/* Signed-out gateway primary only; workspace controls retain their own palette. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__button--primary:not(:disabled) {
+  background: #ffd84d; color: #2c2c42; border-color: #2c2c42;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__button--primary:hover:not(:disabled) {
+  background: #f3c72f; color: #2c2c42; border-color: #2c2c42;
+}
