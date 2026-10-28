@@ -12,7 +12,7 @@ import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
 import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'] as const;
+export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity', 'household_skills'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
@@ -172,6 +172,135 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
     if (denied) return refused(denied);
     return { status: 'ok', content_role: access.facts.member!.content_role,
       operations: core.HOUSEHOLD_CONTENT_OPERATIONS.filter(op => !core.householdAccessRefusal(access.facts, workspaceId, op, access.now)) };
+  }
+  if (value.kind === 'household_skills') {
+    const action = typeof value.action === 'string' ? value.action : 'list';
+    if (!['list', 'read', 'save', 'delete', 'keep', 'dismiss', 'propose'].includes(action)) {
+      return refused('invalid_request');
+    }
+    if (['save', 'delete', 'keep', 'dismiss'].includes(action) && identity.principal_id !== null) {
+      return refused('human_confirmation_required');
+    }
+    const access = await store.access(tx, workspaceId, identity);
+    if (!access) return missingAccess();
+    const requiredOp = ['save', 'delete', 'keep', 'dismiss'].includes(action) ? 'update' : 'read';
+    const denied = core.householdAccessRefusal(access.facts, workspaceId, requiredOp, access.now);
+    if (denied) return refused(denied);
+    const currentObjState = await store.state(tx, workspaceId, action !== 'list');
+    const rawProjection = currentObjState as unknown as Record<string, unknown>;
+    let skillsState = core.normalizeWorkspaceSkillsState(rawProjection.workspace_skills);
+    const saveSkillsState = async (nextSkills: ReturnType<typeof core.emptyWorkspaceSkillsState>) => {
+      const ensured = await store.state(tx, workspaceId, true) as unknown as Record<string, unknown>;
+      const updatedProjection = { ...ensured, workspace_skills: nextSkills };
+      await tx`UPDATE swarm.household_object_streams SET projection=${tx.json(updatedProjection as unknown as postgres.JSONValue)} WHERE workspace_id=${workspaceId}::uuid`;
+    };
+    if (action === 'list') {
+      const candidateTodos = await tx`
+        SELECT t.todo_id, t.title, t.notes, t.state, t.version, t.gate_kind, t.gate_note
+        FROM swarm.household_todos t
+        WHERE t.workspace_id = ${workspaceId}::uuid
+          AND (t.gate_kind = 'hold' OR (t.state = 'open' AND t.version > 1))
+        ORDER BY t.state_at DESC
+        LIMIT 5
+      `;
+      let nextSkills = core.tidyWorkspaceSkills(skillsState, access.now);
+      for (const row of candidateTodos) {
+        const reason = row.gate_kind === 'hold' ? 'todo_failed' : 'todo_reopened';
+        nextSkills = core.proposeTodoFailureSkill(nextSkills, {
+          suggestion_id: crypto.randomUUID(),
+          todo_id: String(row.todo_id),
+          todo_title: String(row.title ?? ''),
+          todo_notes: row.notes == null ? null : String(row.notes),
+          failure_note: row.gate_note == null ? null : String(row.gate_note),
+          reason,
+          now: access.now,
+        });
+      }
+      if (nextSkills.entries.length !== skillsState.entries.length || nextSkills.suggestions.length !== skillsState.suggestions.length) {
+        await saveSkillsState(nextSkills);
+        skillsState = nextSkills;
+      }
+      return {
+        status: 'ok',
+        cap: core.WORKSPACE_SKILLS_CAP,
+        ttl_days: core.SKILL_TTL_DAYS,
+        skills: skillsState.entries.map((entry) => core.formatWorkspaceSkillSummary(entry, access.now)),
+        suggestions: skillsState.suggestions,
+      };
+    }
+    if (action === 'read') {
+      const selector = {
+        skill_id: typeof value.skill_id === 'string' ? value.skill_id : undefined,
+        title: typeof value.title === 'string' ? value.title : undefined,
+      };
+      if (!selector.skill_id && !selector.title) return refused('invalid_request');
+      const countUse = value.count_use !== false;
+      const used = core.useWorkspaceSkill(skillsState, selector, access.now, countUse);
+      if (!used.skill) return refused('skill_not_found');
+      if (used.changed) await saveSkillsState(used.state);
+      return { status: 'ok', skill: core.formatWorkspaceSkillView(used.skill, access.now) };
+    }
+    if (action === 'save') {
+      const saved = core.saveWorkspaceSkill(skillsState, {
+        skill_id: typeof value.skill_id === 'string' ? value.skill_id : undefined,
+        new_id: crypto.randomUUID(),
+        title: value.title,
+        when_to_use: value.when_to_use,
+        body: value.body,
+        now: access.now,
+      });
+      if (saved.status === 'refused') return saved;
+      await saveSkillsState(saved.state);
+      return {
+        status: 'committed',
+        skill: core.formatWorkspaceSkillView(saved.skill, access.now),
+        replaced_skill_id: saved.replaced_skill_id,
+      };
+    }
+    if (action === 'delete') {
+      if (typeof value.skill_id !== 'string' || !value.skill_id) return refused('invalid_request');
+      const deleted = core.deleteWorkspaceSkill(skillsState, value.skill_id, access.now);
+      if (!deleted.deleted) return refused('skill_not_found');
+      await saveSkillsState(deleted.state);
+      return { status: 'committed', deleted_skill_id: value.skill_id };
+    }
+    if (action === 'keep') {
+      if (typeof value.suggestion_id !== 'string' || !value.suggestion_id) return refused('invalid_request');
+      const kept = core.keepWorkspaceSkillSuggestion(skillsState, value.suggestion_id, crypto.randomUUID(), access.now);
+      if (kept.status === 'refused') return kept;
+      await saveSkillsState(kept.state);
+      return {
+        status: 'committed',
+        skill: core.formatWorkspaceSkillView(kept.skill, access.now),
+        replaced_skill_id: kept.replaced_skill_id,
+      };
+    }
+    if (action === 'dismiss') {
+      if (typeof value.suggestion_id !== 'string' || !value.suggestion_id) return refused('invalid_request');
+      const dismissed = core.dismissWorkspaceSkillSuggestion(skillsState, value.suggestion_id);
+      if (dismissed.status === 'refused') return dismissed;
+      await saveSkillsState(dismissed.state);
+      return { status: 'committed', dismissed_suggestion_id: value.suggestion_id };
+    }
+    if (action === 'propose') {
+      const reason = value.reason === 'todo_reopened' || value.reason === 'todo_failed' ? value.reason : 'agent_proposed';
+      const sourceKey = typeof value.source_key === 'string' && value.source_key.trim()
+        ? value.source_key.trim()
+        : `${reason}:${typeof value.title === 'string' ? value.title.trim().toLowerCase() : ''}`;
+      const proposed = core.proposeWorkspaceSkillSuggestion(skillsState, {
+        suggestion_id: crypto.randomUUID(),
+        source_key: sourceKey,
+        todo_id: typeof value.todo_id === 'string' ? value.todo_id : null,
+        reason,
+        title: typeof value.title === 'string' ? value.title : '',
+        when_to_use: typeof value.when_to_use === 'string' ? value.when_to_use : '',
+        body: typeof value.body === 'string' ? value.body : '',
+        now: access.now,
+      });
+      if (proposed.status === 'refused') return { status: 'refused', reason: proposed.reason };
+      if (proposed.status === 'proposed') await saveSkillsState(proposed.state);
+      return { status: proposed.status, suggestion: proposed.suggestion ?? null };
+    }
   }
   if (value.kind === 'household_draft') {
     if (typeof value.draft_id !== 'string' || value.draft_id.length > 255) return refused('invalid_request');
