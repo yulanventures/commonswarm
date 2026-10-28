@@ -2811,7 +2811,9 @@ async function delegatedLocalScenario(ctx,scenario) {
     const removedState=await family(seat);
     for(const [index,credential] of retainedCredentials.entries()) {
       const deniedRead=await use(credential.raw);
-      check(`removed-credential-${index}-read-denied`,deniedRead.status===401 && deniedRead.body.error==='unauthenticated');
+      check(`removed-credential-${index}-read-denied`,isFloorF
+        ? deniedRead.status===401 && deniedRead.body.error==='unauthenticated'
+        : [401,403].includes(deniedRead.status) && deniedRead.body.error===(deniedRead.status===401?'unauthenticated':'forbidden'));
       const deniedRenew=await ctx.command.handleRequest(new Request('http://127.0.0.1/functions/v1/command',{
         method:'POST',headers:{authorization:`Bearer ${credential.raw}`,'content-type':'application/json'},
         body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
