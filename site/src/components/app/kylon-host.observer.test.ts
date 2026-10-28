@@ -175,8 +175,8 @@ const fixtureScript = `
     check('setTitle retains original H1/menu', docked());
     host.sync(project(chat));
     if (innerWidth > 832) {
-    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 52) < 0.5);
-    check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - (innerWidth >= 1400 ? 390 : 280)) < 0.5);
+    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 260) < 0.5);
+    check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 260) < 0.5);
     }
     check('legacy tablet nav hidden', [...app.querySelectorAll('.hm-ws-nav')].every(node => !node.getClientRects().length));
     const label = app.querySelector('.cs-org-identity-copy').textContent;

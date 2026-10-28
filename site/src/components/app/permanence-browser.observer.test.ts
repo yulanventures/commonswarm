@@ -149,7 +149,7 @@ function installConnectionFixture() {
             agents: [{ principal_id: principal, name: "Synthetic assistant", status, queue: null }] }],
           needs_you: { asks: [], assigned: [], waiting: [] } }] });
       }
-      if (url.pathname === "/rest/v1/workspaces") return Response.json([{ workspace_id: workspace, name: "Home", archived_at: null }, { workspace_id: otherWorkspace, name: "Trip", archived_at: null }]);
+      if (url.pathname === "/rest/v1/workspaces") return Response.json([{ workspace_id: workspace, org_id: workspace, name: "Home", archived_at: null }, { workspace_id: otherWorkspace, org_id: workspace, name: "Trip", archived_at: null }]);
       if (url.pathname === "/rest/v1/member_profiles") return Response.json([
         { user_id: owner, display_name: "Synthetic owner", role: scenario === "foreign" ? "member" : "owner" },
         { user_id: foreign, display_name: "Other owner", role: "member" }]);
@@ -468,7 +468,7 @@ test("real app mounts enforce end-date identity, lifecycle and owner admission t
   const parent = "<!doctype html><html><body><script>(async()=>{ const results=[]; for(const scenario of " + JSON.stringify(scenarios) +
     "){ const frame=document.createElement('iframe'); frame.style.width=results.length%2?'390px':'1280px'; frame.style.height='900px'; frame.src='/app?v='+(scenario.startsWith('home-')?'catchup':'people&w=11111111-1111-4111-8111-111111111111')+'&case='+scenario; document.body.append(frame);" +
     "for(let i=0;i<1000;i++){const value=frame.contentDocument?.documentElement.dataset.connectionObservation;if(value){results.push(JSON.parse(value));break;}await fetch('/__observer-tick');}" +
-    "frame.remove();if(results.at(-1)?.scenario!==scenario||results.at(-1)?.error)break;}document.documentElement.dataset.endDateObservation=btoa(JSON.stringify(results));})();</script></body></html>";
+    "frame.remove();if(results.at(-1)?.scenario!==scenario||results.at(-1)?.error)break;}document.documentElement.dataset.endDateObservation=btoa(unescape(encodeURIComponent(JSON.stringify(results))));})();</script></body></html>";
   const server = createServer((request, response) => {
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 10); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });

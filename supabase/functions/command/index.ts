@@ -5533,8 +5533,7 @@ async function changeAgentWorkspace(tx:Sql,body:RequestBody,auth:AuthContext,det
     type:add?'AgentAddedToWorkspace':'AgentRemovedFromWorkspace',schema_version:1,actor_user:auth.actor.user,actor_agent_principal:null,actor_run:null,
     occurred_at_server:occurredAt,payload:add?{principal_id:principal,owner_user_id:agent.owner_user_id,name:agent.name,model:agent.model,created_at:new Date(agent.created_at).getTime(),transport:agent.transport,turn_only:agent.turn_only}:{principal_id:principal,revoked_at:occurredAt}}]);
   await tx`UPDATE swarm.streams SET head_seq=head_seq+1 WHERE stream_id=${stream.stream_id}::uuid`;
-  const response={ok:true,event_ids:[eventId],principal_id:principal,workspace_id:workspace};
-  await beforeStep(13);
+  const response={ok:true,event_ids:[eventId],principal_id:principal,workspace_id:workspace}; await beforeStep(13);
   await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
     VALUES('user',${auth.actor.user},${body.command_id},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response)})`;
   await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,detail});
