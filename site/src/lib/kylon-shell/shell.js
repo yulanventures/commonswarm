@@ -36,6 +36,7 @@ export function createOrgShell(doc, options = {}) {
     for (const item of items) {
       const el = node(doc, item.href ? 'a' : 'button', 'cs-org-product');
       if (item.href) el.href = item.href; else { el.type = 'button'; el.disabled = typeof item.onActivate !== 'function'; }
+      if (item.id) el.dataset.kylonId = String(item.id);
       el.title = item.label; if (item.current) el.setAttribute('aria-current', 'page');
       if (item.iconNode) mount(el, item.iconNode, 'navigation');
       else { const initial = node(doc, 'span', '', item.label.slice(0, 1)); initial.setAttribute('aria-hidden', 'true'); el.append(initial); }
