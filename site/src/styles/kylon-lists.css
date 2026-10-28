@@ -67,6 +67,13 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__
 live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view button:disabled { color: var(--k-shell-secondary); background: var(--k-shell-subtle); border-color: var(--k-shell-control); opacity: 1; cursor: default; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(p,.hh-eyebrow) { margin: 0 0 4px; color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); letter-spacing: 0; text-transform: none; }
+/* Group existing header facts without changing their reading order or type. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-inline-size: 0; margin-block-end: 4px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) > :is(p,h2) {
+  min-inline-size: 0; max-inline-size: 100%; margin: 0; overflow-wrap: anywhere;
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-status { min-block-size: 0; padding-block: 8px; border-color: var(--k-shell-line); color: var(--k-shell-secondary); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(nav,article,.hh-comparison > section) { min-inline-size: 0; overflow-wrap: anywhere; }
 /* Keep the complete index as quiet navigation; selection and focus have separate cues. */
