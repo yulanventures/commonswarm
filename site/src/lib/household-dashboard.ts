@@ -1,5 +1,6 @@
-import { createHouseholdObjectsController, mountHouseholdObjects, type HouseholdActions,
+import { createHouseholdObjectsController, mountHouseholdObjects, householdCanUpdate, type HouseholdActions,
   type HouseholdVersionView, type HouseholdWorkspaceView, type HouseholdConflictView } from './household-objects-view';
+import { mountWorkspaceSkills } from './workspace-skills-view';
 import type { HouseholdOutcome } from '../../../src/protocol/household-object-events';
 type Call = (command: Record<string, unknown>, requestId: string) => Promise<Record<string, unknown>>;
 import { HOUSEHOLD_LOCAL_SEAT } from '../../../src/protocol/household-tool-registry';
@@ -91,7 +92,13 @@ export function createHouseholdDashboard(root: HTMLElement) {
             return { revisions: (result.revisions as Record<string, unknown>[]).map(version), next_cursor: result.next_offset === null ? null : String(result.next_offset) };
           },
         };
-        if (active === generation) unmount = mountHouseholdObjects(root, createHouseholdObjectsController(workspace, actions));
+        if (active === generation) {
+          const unmountObjects = mountHouseholdObjects(root, createHouseholdObjectsController(workspace, actions));
+          const unmountSkills = root.parentElement && root.ownerDocument
+            ? mountWorkspaceSkills(root.parentElement, root, householdCanUpdate(workspace), call)
+            : undefined;
+          unmount = () => { unmountSkills?.(); unmountObjects(); };
+        }
       } catch { say('Shared objects could not be loaded. Open this view again to retry.'); }
     },
   };

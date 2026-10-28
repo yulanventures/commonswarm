@@ -22,3 +22,4 @@ export * from './household-invitations.js';
 
 export * from './household-todos.js';
 export * from './household-todo-policy.js';
+export * from './workspace-skills.js';

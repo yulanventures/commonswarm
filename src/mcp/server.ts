@@ -13,7 +13,7 @@ import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js
 import { readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { signalDuration } from "../cloud/signal-duration.js";
-import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments } from "./tools.js";
+import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments } from "./tools.js";
 import { mapMcpError } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
 import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
@@ -23,7 +23,7 @@ import { ASK_PARENT_CONTEXT_SENTENCE, defaultAskParent } from "../cloud/ask-chai
 import { validateHouseholdToolArguments, HouseholdToolInputError } from "../protocol/household-tool-registry.js";
 import { HOUSEHOLD_MCP_TOOLS, createHouseholdMcpTools } from "./household-tools.js";
 import { HouseholdObjectClient } from "../cloud/household-objects.js";
-import { createHouseholdHttpTransport } from "../cloud/household-http.js";
+import { createHouseholdHttpTransport, callHouseholdSkills } from "../cloud/household-http.js";
 
 export { mapMcpError } from "./errors.js";
 
@@ -128,6 +128,23 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
       if(Object.keys(selected.arguments).length) throw new McpError(ErrorCode.InvalidParams,'Unknown argument.');
       const managed=await profileWorkspaceSession(homeProfile,profile,options.hostSessionId);
       return {content:[{type:'text',text:JSON.stringify(capMcpResult(await agentWorkspaces(homeProfile,bindSessionProof(fetch,managed?sessionProofOf(managed.context):null))))}]};
+    }
+    if(request.params.name==='skills_list' || request.params.name==='skills_read') {
+      let skillArgs: ReturnType<typeof validateSkillMcpArguments>;
+      try { skillArgs = validateSkillMcpArguments(request.params.name, selected.arguments); }
+      catch(error) { throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : 'Invalid arguments.'); }
+      const auth = await authenticated();
+      const result = await callHouseholdSkills({
+        target: profileTarget(profile),
+        workspaceId: profile.workspace_id,
+        credential: auth.token,
+        fetcher: auth.fetcher,
+        command: request.params.name === 'skills_list'
+          ? { action: 'list' }
+          : { action: 'read', ...skillArgs, count_use: true },
+        signal: extra.signal,
+      });
+      return { isError: result.status === 'refused', content: [{ type: 'text', text: JSON.stringify(capMcpResult(result)) }] };
     }
     if (HOUSEHOLD_MCP_TOOLS.some(row => row.name === request.params.name)) {
       try { validateHouseholdToolArguments(request.params.name, selected.arguments); }
