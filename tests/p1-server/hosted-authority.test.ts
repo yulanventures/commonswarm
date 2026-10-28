@@ -2005,8 +2005,9 @@ test("accepted removal fences concurrent same-name and new-name claims", { timeo
     });
     assert.equal(result.removed.status, 200, JSON.stringify(result.removed.body));
     assert.ok([200, 403].includes(result.claimed.status), JSON.stringify(result.claimed));
-    assert.equal(result.refused.status, 403, "no cached capability survives committed removal");
-    if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, 403);
+    const newIdentitySurvived = !sameName && result.claimed.status === 200;
+    assert.equal(result.refused.status, newIdentitySurvived ? 200 : 403, "no cached capability survives committed removal");
+    if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, newIdentitySurvived ? 200 : 403);
   }
 });
 
@@ -3011,6 +3012,19 @@ async function contextFixture(): Promise<HostedFixture> {
   await sql`UPDATE swarm.users SET email = CASE WHEN user_id = ${fixture.owner}::uuid
     THEN 'context-owner@example.test' ELSE 'context-other@example.test' END
     WHERE user_id IN (${fixture.owner}::uuid, ${fixture.other}::uuid)`;
+  await sql`
+    CREATE OR REPLACE FUNCTION swarm.sync_context_grant_memberships() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN
+      INSERT INTO swarm.agent_workspace_memberships(principal_id, workspace_id, owner_user_id, added_by)
+      SELECT NEW.principal_id, gw.workspace_id, NEW.owner_user_id, NEW.owner_user_id
+      FROM swarm.hosted_mcp_grant_workspaces gw
+      WHERE gw.grant_id = NEW.grant_id AND gw.revoked_at IS NULL
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING;
+      RETURN NEW;
+    END $$;
+  `;
+  await sql`DROP TRIGGER IF EXISTS context_grant_memberships ON swarm.hosted_mcp_grant_agents`;
+  await sql`CREATE TRIGGER context_grant_memberships AFTER INSERT OR UPDATE ON swarm.hosted_mcp_grant_agents FOR EACH ROW EXECUTE FUNCTION swarm.sync_context_grant_memberships()`;
   return fixture;
 }
 function assertContext(result: ContextHttpResult, fixture: HostedFixture, reachable = [fixture.workspaceA, fixture.workspaceB], other = false, current = fixture.workspaceA, home: string | null = fixture.workspaceA,

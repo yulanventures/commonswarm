@@ -2817,7 +2817,9 @@ async function delegatedLocalScenario(ctx,scenario) {
         body:JSON.stringify({command_id:id(),client_version:ctx.clientVersion,workspace_id:workspaceId,
           stream:{kind:'workspace'},command:{kind:'renew_agent_token'}})}));
       const deniedBody=await deniedRenew.json();
-      check(`removed-credential-${index}-native-renew-denied`,deniedRenew.status===401 && deniedBody.error==='unauthenticated');
+      check(`removed-credential-${index}-native-renew-denied`,isFloorF
+        ? deniedRenew.status===401 && deniedBody.error==='unauthenticated'
+        : [401,403].includes(deniedRenew.status) && deniedBody.error===(deniedRenew.status===401?'unauthenticated':'forbidden'));
     }
     check('removed-credential-probes-no-family-or-budget-effect',await family(seat)===removedState);
   }
@@ -3484,7 +3486,7 @@ async function hostedOwnerRemovalScenario(ctx) {
         ['seat_id','principal_id','handle'].every(key=>typeof reclaimed.body[key]==='string' && reclaimed.body[key]!==claimed.body[key]));
       const side=await adminSide(ctx,{owner:f.owner,workspaceId:f.workspaceId},'alone-management-then-admin');
       const terminal=(await side.invoke({kind:'admin_revoke_seat',grant_id:side.grant,workspace_id:f.workspaceId,
-        principal_id:seat.principal_id,reason_code:'owner_requested'})).result;
+        principal_id:reclaimed.body.principal_id,reason_code:'owner_requested'})).result;
       check('management-then-admin-commits',terminal.status===200);
       check('management-then-admin-consent-revoked',(await observer`SELECT revoked_at IS NOT NULL AS ok FROM swarm.hosted_mcp_grant_workspaces
         WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);

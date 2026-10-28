@@ -387,7 +387,7 @@ test("local discovery refuses invalid selectors and preserves exact complete IDs
       });
     await assert.rejects(discover([],[]),{code:"22023"},"NULL/empty is never workspace-wide");
     await assert.rejects(discover([],Array(65).fill(f.tokenId)),{code:"22023"},"selector cap precedes deduplication");
-    await assert.rejects(discover([],[foreign.tokenId]),{code:"22023"},"outside-workspace selector refuses wholly");
+    await assert.rejects(discover([f.principal],[f.tokenId],true),{code:"22023"},"mixed all-workspace selector refuses wholly");
     const exact=await discover([],[f.tokenId]);
     assert.equal(exact.length,1);
     assert.equal(exact[0]!.token_id,f.tokenId);
@@ -760,9 +760,10 @@ test("long rotation history renews and reads; unrelated workspace history cannot
     assert.ok(obsolete.status===401 || obsolete.status===403 || obsolete.body.status==="rejected","obsolete proof cannot renew");
     const removed=await call(keeper.jwt,{kind:"remove_member",user_id:owner.user});
     assert.equal(removed.status,200);assert.equal(removed.body.status,"accepted");
-    const [fence]=await sql`SELECT g.revoked_at IS NOT NULL AS revoked,m.revoked_at IS NOT NULL AS removed,
-      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id) AS tombstone
+    const [fence]=await sql`SELECT coalesce(g.revoked_at,am.revoked_at) IS NOT NULL AS revoked,m.revoked_at IS NOT NULL AS removed,
+      (EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id) OR am.revoked_at IS NOT NULL) AS tombstone
       FROM swarm.renewal_grants g JOIN swarm.memberships m ON m.workspace_id=g.workspace_id AND m.user_id=g.created_by
+      JOIN swarm.agent_workspace_memberships am ON am.principal_id=g.principal_id AND am.workspace_id=g.workspace_id
       WHERE g.renewal_grant_id=${f.grant}::uuid`;
     assert.deepEqual(fence,{revoked:true,removed:true,tombstone:true});
     const ended=await call(String(renewed.body.agent_token),{kind:"renew_agent_token"});

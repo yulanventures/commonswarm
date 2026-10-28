@@ -253,7 +253,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const familyIds=[...new Set(planned.flatMap(r=>r.renewal_grant_id ? [r.renewal_grant_id]:[]))];
     const [clock] = await tx`SELECT clock_timestamp() AS now`;
     now = new Date(clock!.now as string).getTime();
-    const [agent] = await tx`SELECT p.*,${workspaceId}::uuid AS workspace_id,
+    const [agent] = await tx`SELECT p.*,coalesce(p.revoked_at,am.revoked_at) AS revoked_at,${workspaceId}::uuid AS workspace_id,
       EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
       EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_grants g USING(grant_id)
         WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
@@ -337,7 +337,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
         (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.token_id=ANY(${tokenIds}::uuid[]) AND t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
-      FROM swarm.agent_principals p WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=p.principal_id AND am.workspace_id=${workspaceId}::uuid AND am.revoked_at IS NULL) AND p.principal_id=${principalId}::uuid`;
+      FROM swarm.agent_principals p JOIN swarm.agent_workspace_memberships am ON am.principal_id=p.principal_id AND am.workspace_id=${workspaceId}::uuid WHERE p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
     const [activity] = await tx`SELECT greatest(
       (SELECT max(last_command_at) FROM swarm.agent_presence WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),

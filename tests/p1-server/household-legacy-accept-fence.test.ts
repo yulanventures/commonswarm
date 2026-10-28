@@ -131,7 +131,7 @@ test('a household boundary committed after the first check is visible before con
       await db`DELETE FROM swarm.invitations WHERE workspace_id=${workspace}::uuid`;
       await db`DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id=${workspace}::uuid`;
       await db`DELETE FROM swarm.workspaces WHERE workspace_id=${workspace}::uuid`;
-      await db`DELETE FROM swarm.org_memberships WHERE user_id=${user}::uuid`;
+      await db`DELETE FROM swarm.org_memberships WHERE principal_id=${user}::uuid`;
       await db`DELETE FROM swarm.organizations WHERE created_by=${user}::uuid`;
       await db`DELETE FROM swarm.users WHERE user_id=${user}::uuid`;
       await db`DELETE FROM auth.users WHERE id=${user}::uuid`;

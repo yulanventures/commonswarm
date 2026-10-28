@@ -326,11 +326,12 @@ test("forced failure after seat creation still runs the full finally cleanup", {
   }[]>`
     SELECT s.revoked_at IS NOT NULL AS seat_revoked,
       h.revoked_at IS NOT NULL AS handle_revoked,
-      p.revoked_at IS NOT NULL AS principal_revoked,
+      coalesce(p.revoked_at, am.revoked_at) IS NOT NULL AS principal_revoked,
       g.revoked_at IS NOT NULL AND g.state = 'revoked' AS grant_revoked
     FROM swarm.hosted_mcp_seats s
     JOIN swarm.hosted_mcp_seat_handles h ON h.seat_id = s.seat_id
     JOIN swarm.agent_principals p ON p.principal_id = s.principal_id
+    LEFT JOIN swarm.agent_workspace_memberships am ON am.principal_id = p.principal_id AND am.workspace_id = s.workspace_id
     JOIN swarm.hosted_mcp_grants g ON g.grant_id = s.grant_id
     WHERE s.seat_id = ${seatId}::uuid
   `;
