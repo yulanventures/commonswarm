@@ -7,6 +7,7 @@ import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS } from "../../lib/household-access";
 import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
 import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
@@ -303,7 +304,7 @@ function dialogConnectionsFixture() {
     accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
     peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
-    workspaces: [{id:"workspace",name:"Home"}], agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded,
+    workspaces: [{id:"workspace",name:"Home"}], homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded,
     agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
     formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
     householdScope: () => ({ workspaceId: ctx.activeWorkspaceId, session: ctx.session }),
@@ -355,9 +356,10 @@ test("dialog connection facts stay unknown until a successful owner-scoped read,
 
 test("server-confirmed key loss offers removal and a new key but no turn-off alternative", () => {
   const f = dialogConnectionsFixture();
-  const grant = { principalId: "principal", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z", revokedAt: null, grantRevokedAt: null, lastUsedAt: null };
+  const grantId = "11111111-1111-4111-8111-111111111111", tokenId = "22222222-2222-4222-8222-222222222222";
+  const grant = { workspaceId: "workspace", principalId: "principal", ownerUserId: "person", grantId, tokenId, grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z", revokedAt: null, grantRevokedAt: null, lastUsedAt: null };
   f.ctx.accessStatuses = [grant];
-  f.ctx.agents[0].work = { facts: { connection: "key_ended" } };
+  f.ctx.agents[0].work = { facts: { connection: "key_ended", renewal_grant_id: grantId, token_id: tokenId } };
   const ended = f.model();
   assert.equal(ended.agents[0].status.kind, "key-ended");
   assert.equal(ended.agents[0].liveKey, false, "Remove confirmation uses liveKey for its alternative");
@@ -526,7 +528,7 @@ test("the real creation submit blocks a missing purpose, then reuses only matchi
   let choice: string | undefined, saved: any = null, id = 0, focus = "", error = "";
   const creations: any[] = [];
   const ctx = {
-    session, requestVersion: 1, activeCreate: null,
+    session, requestVersion: 1, activeCreate: null, selectedOrgId: null,
     one: (selector: string) => selector === "[data-create-form]" ? { addEventListener: (_event: string, callback: any) => { handler = callback; } }
       : selector === "#dashboard-workspace-name" ? { value: "Home" }
       : selector === "[data-create-purpose]:checked" ? choice ? { value: choice } : undefined

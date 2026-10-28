@@ -1211,7 +1211,8 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
             'swarm.hosted_mcp_seats'::regclass,
             'swarm.hosted_mcp_seat_handles'::regclass
           ])
-          AND pg_get_constraintdef(oid) LIKE '%grant_id%workspace_id%'
+          AND (pg_get_constraintdef(oid) LIKE '%grant_id%workspace_id%'
+            OR pg_get_constraintdef(oid) LIKE '%grant_id%principal_id%owner_user_id%')
       ) AS composites_ok,
       (
         SELECT pg_get_constraintdef(oid) LIKE '%join%hosted_grant%hosted_seat%'
@@ -1264,6 +1265,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     assert.deepEqual(newerFk.columns, ['grant_id','workspace_id','owner_user_id']);
     assert.deepEqual(newerFk.targets, newerFk.columns);
     await tx`ALTER TABLE swarm.household_hosted_content_restrictions DROP CONSTRAINT ${tx(newerFk.name)}`;
+    for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
+      await tx.unsafe(repoSql(`supabase/agents-reserve/${version}-rollback.sql`));
+    }
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
     }
@@ -2170,8 +2174,10 @@ test("concurrent claims of a revoked name yield exactly one new live identity", 
       assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
     }
     const principals = await sql<{ principal_id: string; revoked_at: Date | null }[]>`
-      SELECT principal_id, revoked_at FROM swarm.agent_principals
-      WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
+      SELECT p.principal_id, coalesce(p.revoked_at, am.revoked_at) AS revoked_at
+      FROM swarm.agent_principals p
+      JOIN swarm.agent_workspace_memberships am USING (principal_id, workspace_id)
+      WHERE p.workspace_id = ${fixture.workspaceA}::uuid AND p.name = ${name}
     `;
     assert.equal(principals.length, 2);
     const live = principals.filter(row => row.revoked_at === null);

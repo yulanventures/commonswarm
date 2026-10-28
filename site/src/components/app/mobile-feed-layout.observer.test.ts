@@ -174,7 +174,7 @@ const frameScript = (
     doc.querySelector("[data-user-menu-trigger]").click();
     await settle();
     const menuBox = doc.querySelector("[data-user-menu]").getBoundingClientRect();
-    const menuItems = [...doc.querySelector("[data-user-menu]").children].map((item) => ({
+    const menuItems = [...doc.querySelector("[data-user-menu]").children].filter((item) => item.getClientRects().length > 0).map((item) => ({
       label: (item.textContent || "").trim().slice(0, 20),
       top: item.getBoundingClientRect().top,
       bottom: item.getBoundingClientRect().bottom,

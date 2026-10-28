@@ -78,6 +78,7 @@
 /* Space.dc.html: a 1.5px ink outline pill, padding 0 18px. The edge is the lane's inset stroke (primitives.css: a 1.5px
    border paints 1px in Chromium), so the padding adds the 1.5px back (18 + 1.5) and the outer size stays the canvas's. */
 .hm-ws-header__people,
+.hm-details-toggle,
 .hm-menu__trigger {
   display: inline-grid;
   place-items: center;
@@ -96,6 +97,7 @@
 }
 
 .hm-ws-header__people:hover,
+.hm-details-toggle:hover,
 .hm-menu__trigger:hover { background: var(--home-soft); }
 
 .hm-menu__trigger { padding: 0; font-size: var(--t-lg); line-height: 1; }

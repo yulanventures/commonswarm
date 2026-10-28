@@ -10,8 +10,26 @@ export function createChannelDetails(app: HTMLElement) {
   const anchor = doc.createComment("Workspace details");
   let mounted = false, expanded = true, enabled = false, opener: HTMLElement | null = null;
   const triggers = () => app.querySelectorAll<HTMLElement>("[data-channel-details-toggle]");
+  const decorate = () => {
+    const column = side?.querySelector<HTMLElement>(".hm-side");
+    if (!column) return;
+    if (!column.querySelector(".hm-details-heading")) {
+      const heading = doc.createElement("div"); heading.className = "hm-details-heading";
+      const title = doc.createElement("h2"); title.textContent = "Details";
+      const closeBtn = doc.createElement("button"); closeBtn.className = "hm-details-close"; closeBtn.type = "button";
+      closeBtn.textContent = "×"; closeBtn.dataset.channelDetailsClose = ""; closeBtn.setAttribute("aria-label", "Close details");
+      heading.append(title, closeBtn); column.prepend(heading);
+    }
+    const shared = column.querySelector<HTMLElement>('[data-side-card="shared"]');
+    if (shared && !shared.closest(".hm-details-sharing")) {
+      const sharing = doc.createElement("details"); sharing.className = "hm-details-sharing";
+      const summary = doc.createElement("summary"); summary.textContent = "Sharing";
+      shared.replaceWith(sharing); sharing.append(summary, shared);
+    }
+  };
   const sync = () => {
     if (!frame || !side || !mounted) return;
+    decorate();
     frame.toggleAttribute("data-channel-details-collapsed", !enabled || media.matches || !expanded);
     for (const trigger of triggers()) {
       trigger.setAttribute("aria-expanded", String(enabled && (media.matches ? dialog.open : expanded)));

@@ -64,10 +64,19 @@ export async function prepareAdminRoutine(
     >`SELECT * FROM swarm.memberships WHERE workspace_id=${command.workspace_id}::uuid ORDER BY user_id`;
     const principals = await tx<
       Record<string, unknown>[]
-    >`SELECT * FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid ORDER BY principal_id`;
+    >`SELECT p.*, coalesce(p.revoked_at, CASE WHEN p.workspace_id = ${command.workspace_id}::uuid THEN NULL ELSE am.revoked_at END) AS effective_revoked_at
+      FROM swarm.agent_principals p
+      LEFT JOIN swarm.agent_workspace_memberships am
+        ON am.principal_id = p.principal_id AND am.workspace_id = ${command.workspace_id}::uuid
+      WHERE p.workspace_id = ${command.workspace_id}::uuid OR am.workspace_id = ${command.workspace_id}::uuid
+      ORDER BY p.principal_id`;
     const tokens = await tx<
       Record<string, unknown>[]
-    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id) WHERE p.workspace_id=${command.workspace_id}::uuid
+    >`SELECT t.* FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+      WHERE (p.workspace_id=${command.workspace_id}::uuid OR EXISTS(
+        SELECT 1 FROM swarm.agent_workspace_memberships am
+        WHERE am.principal_id=p.principal_id AND am.workspace_id=${command.workspace_id}::uuid
+      ))
       AND t.token_id=${'predecessor_credential_id' in command ? command.predecessor_credential_id
         : 'credential_id' in command ? command.credential_id:null}::uuid`;
     const stamp = (v: unknown): number | null =>
@@ -96,7 +105,7 @@ export async function prepareAdminRoutine(
           transport: p.transport as "local" | "hosted_mcp",
           turn_only: p.turn_only === true,
           created_at: stamp(p.created_at)!,
-          revoked_at: stamp(p.revoked_at),
+          revoked_at: stamp(p.effective_revoked_at ?? p.revoked_at),
         }]),
       ),
       tokens: Object.fromEntries(tokens.map((t) => [String(t.token_id), {
@@ -310,7 +319,7 @@ export async function revokeHostedWorkspaceApproval(
     SELECT g.grant_id FROM swarm.hosted_mcp_grants g
     WHERE (${owner}::uuid IS NOT NULL AND g.owner_user_id = ${owner}::uuid
       AND (${workspaceId}::uuid = ANY(g.selected_workspace_ids) OR EXISTS(
-        SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds a WHERE a.grant_id=g.grant_id AND a.workspace_id=${workspaceId}::uuid))))
+        SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds a WHERE a.grant_id=g.grant_id AND a.workspace_id=${workspaceId}::uuid)))
       OR EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats hs
         WHERE hs.grant_id = g.grant_id AND hs.workspace_id = ${workspaceId}::uuid
           AND hs.principal_id = ${principal}::uuid)

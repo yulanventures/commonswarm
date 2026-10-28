@@ -81,7 +81,7 @@ test("LiveDashboard uses the observed roster normalizer and renderer", () => {
   );
   assert.match(
     dashboard,
-    /const vm = mapHomeRail\(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts\)/,
+    /const vm = mapHomeRail\((?:workspaces|orgWorkspaces), homeRoute, railPeople, sampleMode, homeOverviewCounts\)/,
   );
   assert.match(dashboard, /buildHomeRail\(document, vm,/);
 });

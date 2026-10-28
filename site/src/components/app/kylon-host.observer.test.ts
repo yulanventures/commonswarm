@@ -906,7 +906,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     // native CDP search/caret and actual responsive/drawer events, no replacement adapter.
     if (width === 1471) for (const hidden of [false, true]) {
       await evaluate(`window.hostObserver.peopleStart(${hidden})`);
-      await key("Tab");
+      for (let step = 0; step < 4; step++) await key("Tab");
       await send("Input.insertText", { text: "Invented" });
       await evaluate("window.hostObserver.peopleTyped()");
       await key("ArrowLeft"); await key("ArrowLeft"); await key("ArrowLeft", true);

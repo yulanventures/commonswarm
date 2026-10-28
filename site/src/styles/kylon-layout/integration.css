@@ -229,3 +229,5 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .cs-org-switcher-chevron { display: block; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: calc(100% + 8px) auto auto 0; max-block-size: calc(100dvh - 80px); }
 }
+live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty,
+live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty + .hm-menu__separator { display: none; }

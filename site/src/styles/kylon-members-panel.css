@@ -91,7 +91,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-choice-add 
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty { display: none; }
 @media (max-width: 52rem) {
-  live-dashboard.dashboard[data-kylon-shell] [data-people-page] { max-inline-size: none; margin: 0; padding: 8px 0 24px; border: 0; border-radius: 0; box-shadow: none; min-block-size: calc(100dvh - 100px); }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page] { max-inline-size: none; margin: 0; padding: 8px 0 24px; border: 0; border-radius: 0; box-shadow: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-search { font-size: 16px; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-person-head,.pd-agent) { gap: 0 4px; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-role { font-size: 12px; }

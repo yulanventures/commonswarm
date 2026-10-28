@@ -57,7 +57,7 @@ test("the built rail has one permanent workspace-list mount and keeps the accoun
 });
 test("the list renders membership workspaces, marks the current one, and creates at the bottom", () => {
   assert.match(dashboard, /await myWorkspaces\(\)/);
-  assert.match(dashboard, /mapHomeRail\(workspaces, homeRoute/);
+  assert.match(dashboard, /mapHomeRail\((?:workspaces|orgWorkspaces), homeRoute/);
   assert.match(rail, /for \(const \{ workspace, overflow, hidden \} of rows\)/);
   assert.match(rail, /row.setAttribute\("aria-current", "page"\)/);
   assert.match(rail, /workspace.name/);

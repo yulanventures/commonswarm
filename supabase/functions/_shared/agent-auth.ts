@@ -283,9 +283,8 @@ export async function enforceAgentSessionProof(
     return { ok: true };
   }
 
-  await tx`SELECT principal_id FROM swarm.agent_execution_sessions WHERE principal_id=${args.principalId}::uuid AND (workspace_id=${args.workspaceId}::uuid OR ${args.connectionOnly===true}) ORDER BY workspace_id FOR SHARE`;
-  if (args.connectionOnly) await tx`SELECT principal_id FROM swarm.agent_connection_sessions WHERE principal_id=${args.principalId}::uuid AND session_id=${args.proofParse.ok?args.proofParse.proof.session_id:null}::uuid FOR SHARE`;
-  if (!args.connectionOnly && args.proofParse.ok) {
+  const existing = await tx<{ key_hash: Uint8Array | ArrayBuffer | string | null }[]>`SELECT key_hash FROM swarm.agent_execution_sessions WHERE principal_id=${args.principalId}::uuid AND (workspace_id=${args.workspaceId}::uuid OR ${args.connectionOnly===true}) ORDER BY workspace_id FOR SHARE`;
+  if (!args.connectionOnly && args.proofParse.ok && existing.some((r) => r.key_hash === null)) {
     await tx`SELECT swarm.activate_local_workspace_session(${args.principalId}::uuid,${args.workspaceId}::uuid,
       ${args.proofParse.proof.session_id}::uuid,${args.proofParse.proof.generation},${await hashSessionKey(args.proofParse.proof.key)})`;
   }

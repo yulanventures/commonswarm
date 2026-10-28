@@ -8792,7 +8792,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = `Message #${workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name ?? "workspace"}`;
+        input.placeholder = "Message…";
         input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }

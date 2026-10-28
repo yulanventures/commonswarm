@@ -116,7 +116,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
   const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
   const fixtureScript = `
     import { buildHomeRail } from './src/lib/home-rail';
-    import { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell';
+    import { buildOrganizationMenu, buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav, organizationMenuItems, organizationWorkspaces } from './src/lib/home-shell';
     import { renderCatchUp as buildCatchUp } from './src/lib/home-catchup';
     import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from './src/lib/home-focus';
     import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, homeRailPeople } from './src/lib/home-map';

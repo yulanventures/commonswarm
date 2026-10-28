@@ -92,8 +92,8 @@ async function withReadTransaction<T>(
     const result=await operation(tx);
     if(proof && result instanceof Response) {
       if(result.status>=400 && !decidedReadRefusals.has(result)) throw new LocalReadRefused(result);
-      const current=await tx<{is_revoked:boolean}[]>`SELECT is_revoked FROM swarm.agent_delivery_read_context(${proof.hash},${proof.workspace}::uuid)`;
-      if(!current[0] || current[0].is_revoked) throw new LocalReadRefused(json(403,{error:'forbidden'}));
+      const current=await tx<{is_revoked:boolean;principal_workspace_id:string}[]>`SELECT is_revoked,principal_workspace_id FROM swarm.agent_delivery_read_context(${proof.hash},${proof.workspace}::uuid)`;
+      if(!current[0] || (current[0].is_revoked && current[0].principal_workspace_id===proof.workspace)) throw new LocalReadRefused(json(403,{error:'forbidden'}));
     }
     return result;
   })) as unknown as T; }
@@ -612,7 +612,7 @@ async function handle(
       return json(401, { error: "unauthenticated" });
     }
     setPhase("membership");
-    if (agent.is_revoked) {
+    if (agent.is_revoked && body.workspace_id === agent.principal_workspace_id) {
       return json(403, { error: "forbidden" });
     }
 

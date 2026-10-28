@@ -1082,7 +1082,7 @@ export async function resumeRenewalGrant(
   if (status === 200 && body.status === "accepted") return;
   // Current server returns only error=forbidden; the detailed reason stays in its audit.
   const reason = body.reason ?? body.error;
-  const copy = reason === "forbidden"
+  const copy = status === 403 && reason === "forbidden"
     ? "This key cannot be resumed with your current access. Nothing was changed."
     : "Resume was not confirmed. Reload to check this key before trying again.";
   throw new Error(copy);

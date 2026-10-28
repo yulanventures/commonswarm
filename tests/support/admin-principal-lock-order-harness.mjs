@@ -775,13 +775,19 @@ async function seedHistoricalInitial(sql, initial = null) {
       VALUES(${f.owner}::uuid,'Synthetic historical owner',${created})`;
     await sql`INSERT INTO swarm.devices(device_id,user_id,label,created_at)
       VALUES(${f.device}::uuid,${f.owner}::uuid,'Synthetic historical device',${created})`;
-    await sql`INSERT INTO swarm.workspaces(workspace_id,name,created_by,created_at)
-      VALUES(${f.workspace}::uuid,'Synthetic historical workspace',${f.owner}::uuid,${created})`;
+    await sql`INSERT INTO swarm.organizations(id,slug,display_name,created_by,created_at,updated_at)
+      VALUES(${f.workspace}::uuid,${`synthetic-${f.workspace.replaceAll('-','')}`},'Synthetic historical workspace',${f.owner}::uuid,${created},${created})`;
+    await sql`INSERT INTO swarm.workspaces(workspace_id,name,created_by,created_at,org_id)
+      VALUES(${f.workspace}::uuid,'Synthetic historical workspace',${f.owner}::uuid,${created},${f.workspace}::uuid)`;
     await sql`INSERT INTO swarm.memberships(workspace_id,user_id,role,joined_at)
       VALUES(${f.workspace}::uuid,${f.owner}::uuid,'owner',${created})`;
+    await sql`INSERT INTO swarm.org_memberships(org_id,principal_kind,principal_id,role,created_at)
+      VALUES(${f.workspace}::uuid,'user',${f.owner}::uuid,'owner',${created})`;
     await sql`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${f.stream}::uuid,${f.workspace}::uuid,'workspace')`;
     await sql`INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,created_at)
       VALUES(${f.principal}::uuid,${f.workspace}::uuid,${f.owner}::uuid,${kind},${created})`;
+    await sql`INSERT INTO swarm.agent_workspace_memberships(principal_id,workspace_id,owner_user_id,added_by,added_at)
+      VALUES(${f.principal}::uuid,${f.workspace}::uuid,${f.owner}::uuid,${f.owner}::uuid,${created})`;
     await sql`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id,started_at)
       VALUES(${f.run}::uuid,${f.principal}::uuid,${f.device}::uuid,${created})`;
     await sql`INSERT INTO swarm.renewal_grants(renewal_grant_id,workspace_id,principal_id,run_id,created_by,created_at,
@@ -974,6 +980,15 @@ export async function assertActiveFloorCatalog(sql) {
       expected.set(`${match[1]}(${types})`,{body:match[5],definer:/SECURITY DEFINER/iu.test(match[3]),language:/LANGUAGE\s+(sql|plpgsql)\b/iu.exec(match[3])?.[1].toLowerCase(),volatility:/IMMUTABLE/iu.test(match[3])?'i':/STABLE/iu.test(match[3])?'s':'v'});count++;
     }
     if(count===0 || count!==[...text.matchAll(/^CREATE(?: OR REPLACE)? FUNCTION\b/gimu)].length) throw new Error('active_catalog_source_unreadable');
+  }
+  for (const file of ['20261028000002_local_agent_workspaces.sql','20261028000003_hosted_agent_workspaces.sql']) {
+    const text = readFileSync(join(REPO_ROOT,'supabase/migrations',file),'utf8');
+    const pattern = /CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)([\s\S]*?)\bAS\s+(\$[a-z_]*\$)([\s\S]*?)\4\s*;/giu;
+    for (const match of text.matchAll(pattern)) {
+      const args=match[2].trim() ? match[2].split(',').map(arg=>arg.trim().split(/\s+/u)[1]) : [];
+      const sig=`${match[1]}(${args.join(',')})`;
+      if (expected.has(sig)) expected.set(sig,{body:match[5],definer:/SECURITY DEFINER/iu.test(match[3]),language:/LANGUAGE\s+(sql|plpgsql)\b/iu.exec(match[3])?.[1].toLowerCase(),volatility:/IMMUTABLE/iu.test(match[3])?'i':/STABLE/iu.test(match[3])?'s':'v'});
+    }
   }
   const catalogRoles=['anon','authenticated','swarm_read','swarm_command','swarm_capability',
     'commonswarm_oauth_runtime','commonswarm_admin_issuer','commonswarm_admin_release',
@@ -2772,16 +2787,19 @@ async function delegatedLocalScenario(ctx,scenario) {
     keeper.identity.interactiveAuthAtSeconds=Number((await observer`SELECT extract(epoch FROM clock_timestamp()) AS seconds`)[0].seconds);
     const removed=await manage(ctx,keeper,workspaceId,{kind:'remove_member',user_id:owner.userId});
     check('human-removal-through-real-command',removed.status===200 && removed.body.status==='accepted',()=>({status:removed.status,code:removed.body?.error,accepted:removed.body?.status==='accepted'}));
-    const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,g.revoked_at IS NOT NULL AS revoked,
-      EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id) AS renewal_tombstone,
-      (SELECT count(*) FROM swarm.agent_tokens t WHERE t.token_id=ANY(${frontierIds}::uuid[])
-        AND t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NOT NULL)=${frontierIds.length} AS frontier_revoked,
-      NOT EXISTS(SELECT 1 FROM unnest(${lineages}::uuid[]) AS l(lineage_id)
-        WHERE NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=l.lineage_id)) AS lineage_tombstones,
-      NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
+    const isFloorF = out.source?.commit === ACTIVE_FLOOR_SOURCES.F.commit;
+    const [terminal]=await observer`SELECT m.revoked_at IS NOT NULL AS removed,
+      ${isFloorF ? observer`g.revoked_at IS NOT NULL` : observer`am.revoked_at IS NOT NULL`} AS revoked,
+      ${isFloorF ? observer`EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='renewal_grant' AND z.target_id=g.renewal_grant_id)` : observer`g.revoked_at IS NULL`} AS renewal_tombstone,
+      ${isFloorF ? observer`(SELECT count(*) FROM swarm.agent_tokens t WHERE t.token_id=ANY(${frontierIds}::uuid[])
+        AND t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NOT NULL)=${frontierIds.length}` : observer`NOT swarm.local_agent_workspace_live(am.principal_id,m.workspace_id)`} AS frontier_revoked,
+      ${isFloorF ? observer`NOT EXISTS(SELECT 1 FROM unnest(${lineages}::uuid[]) AS l(lineage_id)
+        WHERE NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='lineage' AND z.target_id=l.lineage_id))` : observer`am.revoked_at IS NOT NULL`} AS lineage_tombstones,
+      ${isFloorF ? observer`NOT EXISTS(SELECT 1 FROM swarm.agent_tokens t WHERE t.renewal_grant_id=g.renewal_grant_id AND t.revoked_at IS NULL
         AND (t.expires_at>clock_timestamp() OR NOT EXISTS(SELECT 1 FROM swarm.agent_tokens child
-          WHERE child.predecessor_token_id=t.token_id AND child.first_used_at IS NOT NULL))) AS only_expired_handed_over_history
+          WHERE child.predecessor_token_id=t.token_id AND child.first_used_at IS NOT NULL)))` : observer`NOT swarm.local_agent_workspace_live(am.principal_id,m.workspace_id)`} AS only_expired_handed_over_history
       FROM swarm.memberships m JOIN swarm.renewal_grants g ON g.workspace_id=m.workspace_id
+      JOIN swarm.agent_workspace_memberships am ON am.principal_id=g.principal_id AND am.workspace_id=m.workspace_id
       WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=${owner.userId}::uuid AND g.renewal_grant_id=${seat.grant}::uuid`;
     check('membership-and-hidden-parent-family-atomic',terminal.removed && terminal.revoked
       && terminal.renewal_tombstone && frontierIds.length>0 && terminal.frontier_revoked,
@@ -2977,7 +2995,7 @@ async function localAllowRetiredParentScenario(ctx,scenario) {
     const capability={kind:'token',owner:owner.userId,proof:await admitAdminProof(pool,await proof(nonce))};
     const res=response();let access,claims,refresh;
     const setup=await coordinator.run(res,async()=>{
-      await codeArtifact.upsert(code,{grantId:candidate.provider_grant_id,clientId:candidate.client_id,jkt:candidate.jkt,
+      await codeArtifact.upsert(code,{grantId:candidate.provider_grant_id,accountId:candidate.owner_user_id,clientId:candidate.client_id,jkt:candidate.jkt,
         resource:candidate.resource,iat:Math.floor(Date.now()/1000)},120);
       const unit=await lifecycle.prepareToken({binding:candidate,model:'AuthorizationCode',hash:codeHash,consumed_at:null},
         {resource:candidate.resource,client_id:candidate.client_id});
@@ -2988,7 +3006,7 @@ async function localAllowRetiredParentScenario(ctx,scenario) {
         jti:id(),iat:now,exp:now+adminTokenLifetime(unit.binding,now)};
       access=await oauth.sign({typ:'at+jwt',alg:'ES256',kid},claims,signing.privateKey);
       await lifecycle.recordToken({access_token:access,token_type:'DPoP'});
-      await artifact.upsert(predecessor,{grantId:candidate.provider_grant_id,clientId:candidate.client_id,jkt:candidate.jkt,
+      await artifact.upsert(predecessor,{grantId:candidate.provider_grant_id,accountId:candidate.owner_user_id,clientId:candidate.client_id,jkt:candidate.jkt,
         resource:candidate.resource,scope:unit.lineage.scope_names.join(' '),rotations:unit.lineage.generation,iat:now},
         Math.floor((new Date(unit.binding.refresh_deadline).getTime()-Date.now())/1000));
       refresh={binding:unit.binding,generation:unit.lineage.generation,lineageId:unit.lineage.credential_lineage_id};
@@ -3036,7 +3054,7 @@ async function localAllowRetiredParentScenario(ctx,scenario) {
           jti:id(),iat:now,exp:now+adminTokenLifetime(unit.binding,now)};
         const access=await oauth.sign({typ:'at+jwt',alg:'ES256',kid},claims,admin.issuerFixture.signing.privateKey);
         await lifecycle.recordToken({access_token:access,token_type:'DPoP'});
-        await artifact.upsert(id(),{grantId:candidate.provider_grant_id,clientId:candidate.client_id,jkt:candidate.jkt,
+        await artifact.upsert(id(),{grantId:candidate.provider_grant_id,accountId:candidate.owner_user_id,clientId:candidate.client_id,jkt:candidate.jkt,
           resource:candidate.resource,scope:unit.lineage.scope_names.join(' '),rotations:unit.lineage.generation,iat:now},
           Math.floor((new Date(unit.binding.refresh_deadline).getTime()-Date.now())/1000));
         if(rollback) throw Object.assign(new Error('fixture rollback'),{code:'V17_ROLLBACK'});
@@ -3457,8 +3475,10 @@ async function hostedOwnerRemovalScenario(ctx) {
       check('management-alone-consent-live',(await observer`SELECT revoked_at IS NULL AS ok FROM swarm.hosted_mcp_grant_workspaces
         WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);
       check('management-alone-seat-handle-principal-closed',(await observer`SELECT hs.revoked_at IS NOT NULL
-        AND p.revoked_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
-        FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id) WHERE hs.seat_id=${claimed.body.seat_id}::uuid`)[0]?.ok===true);
+        AND coalesce(p.revoked_at,am.revoked_at) IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
+        FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+        JOIN swarm.agent_workspace_memberships am ON am.principal_id=hs.principal_id AND am.workspace_id=hs.workspace_id
+        WHERE hs.seat_id=${claimed.body.seat_id}::uuid`)[0]?.ok===true);
       const reclaimed=await freshClaim();
       check('management-alone-same-grant-new-request-reclaim',reclaimed.status===200 &&
         ['seat_id','principal_id','handle'].every(key=>typeof reclaimed.body[key]==='string' && reclaimed.body[key]!==claimed.body[key]));
@@ -3491,8 +3511,9 @@ async function hostedOwnerRemovalScenario(ctx) {
     // Rollback at the existing transaction boundary, then prove actual authority remains.
     if(isManagement) {
       const state=async()=>JSON.stringify({
-        seats:await observer`SELECT hs.revoked_at,p.revoked_at AS principal_revoked_at,h.revoked_at AS handle_revoked_at
+        seats:await observer`SELECT hs.revoked_at,coalesce(p.revoked_at,am.revoked_at) AS principal_revoked_at,h.revoked_at AS handle_revoked_at
           FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+          JOIN swarm.agent_workspace_memberships am ON am.principal_id=hs.principal_id AND am.workspace_id=hs.workspace_id
           JOIN swarm.hosted_mcp_seat_handles h USING(seat_id) WHERE hs.seat_id=${prior.body.seat_id}::uuid ORDER BY h.handle`,
         consent:await observer`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces
           WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`,
@@ -3546,8 +3567,10 @@ async function hostedOwnerRemovalScenario(ctx) {
         WHERE grant_id=${f.grantId}::uuid AND workspace_id=${f.workspaceId}::uuid`)[0]?.ok===true);
     }
     if(prior) check(`${order}-seat-handle-principal-closed`,(await observer`SELECT hs.revoked_at IS NOT NULL
-      AND p.revoked_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
-      FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id) WHERE hs.seat_id=${prior.body.seat_id}::uuid`)[0]?.ok===true);
+      AND coalesce(p.revoked_at,am.revoked_at) IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.hosted_mcp_seat_handles h WHERE h.seat_id=hs.seat_id AND h.revoked_at IS NULL) AS ok
+      FROM swarm.hosted_mcp_seats hs JOIN swarm.agent_principals p USING(principal_id)
+      JOIN swarm.agent_workspace_memberships am ON am.principal_id=hs.principal_id AND am.workspace_id=hs.workspace_id
+      WHERE hs.seat_id=${prior.body.seat_id}::uuid`)[0]?.ok===true);
     check(`${order}-terminal-claim-denial`,(await f.claim()).status===403);
     check(`${order}-fresh-terminal-claim-denial`,(await ctx.command.handleHostedCommand({...f.body,command_id:id()},f.capability)).status===403);
   }

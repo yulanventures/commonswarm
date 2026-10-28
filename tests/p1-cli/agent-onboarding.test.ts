@@ -499,7 +499,7 @@ test("CLI setup and profile feed work against an HTTP fixture without exposing s
     assert.equal(feed.code, 0, feed.stderr);
     assert.match(feed.stdout, /message 1/);
     assert.equal((run.stdout + run.stderr + feed.stdout + feed.stderr).includes(TOKEN), false);
-    const conflict = await cli(["feed", "--profile", profile, "--workspace-id", WS]);
+    const conflict = await cli(["feed", "--profile", profile, "--url", "https://api.commonswarm.com"]);
     assert.equal(conflict.code, 1);
     assert.match(conflict.stderr, /Do not combine/);
     const malformed = await cli(["setup", "--connection-file", "/does-not-exist/private/file", "--host-session-id", "manual", "--json"]);

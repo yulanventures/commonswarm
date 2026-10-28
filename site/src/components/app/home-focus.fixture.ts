@@ -20,7 +20,7 @@ export async function focusFixture() {
     let now = Date.parse('2026-10-05T12:00:00Z'); Date.now = () => now;
     const session = {user:{id:'tom'}}, sampleMode = false, accountName = () => 'Tom';
     let workspaces = [{id:'W',name:'Home'},{id:'X',name:'Trip'}];
-    let homeRoute = {view:'chat',workspaceId:'W'}, activeWorkspaceId = 'W', requestVersion = 1;
+    let homeRoute = {view:'chat',workspaceId:'W'}, activeWorkspaceId = 'W', selectedOrgId = null, requestVersion = 1;
     let members = [{userId:'tom',name:'Tom',role:'owner'}];
     // The fixture starts with a loaded roster, so renderRoster can reconcile its overview snapshot.
     const homePeopleReadState = 'ready';

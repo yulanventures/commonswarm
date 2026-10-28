@@ -8,7 +8,8 @@ import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 // Authoring gate: these cases reach the real app's boot, roster, owner admission,
 // mounts, refresh and reset through rendered DOM/events. Only HTTP responses are
@@ -157,7 +158,7 @@ function installConnectionFixture() {
           model: null, transport: hosted ? "hosted_mcp" : "local", turn_only: hosted, owner_user_id: ["foreign", "principal-foreign"].includes(scenario) ? foreign : owner,
           revoked_at: null, workspace_id: workspace, created_at: before }]);
       if (url.pathname === "/rest/v1/hosted_mcp_connections") { await policyRead("hosted"); return Response.json([f.connection]); }
-      if (["agent_presence", "agent_wake_path", "pending_invitations", "files", "channels", "signals", "hosted_mcp_seats", "my_devices"]
+      if (["organizations", "account_agents", "agent_presence", "agent_wake_path", "pending_invitations", "files", "channels", "signals", "hosted_mcp_seats", "my_devices"]
         .some(table => url.pathname === "/rest/v1/" + table)) return Response.json([]);
     }
     // Ancillary Home reads may refuse; unexpected writes and settings reads may not hide here.
@@ -421,7 +422,7 @@ async function observeConnectionApp() {
   }
 }
 
-browserTest("real app mounts enforce end-date identity, lifecycle and owner admission through HTTP", { timeout: 180000, skip: process.platform === "darwin" }, async () => {
+test("real app mounts enforce end-date identity, lifecycle and owner admission through HTTP", { timeout: 120_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
