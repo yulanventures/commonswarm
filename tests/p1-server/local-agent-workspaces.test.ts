@@ -3,15 +3,22 @@ import { test } from 'node:test';
 import { runSql,repoSql,dbAssert,refuses } from '../support/admin-schema-db.js';
 import {releaseCatalogQuery} from '../support/release-catalog-query.js';
 const proofRoot='deploy/release-proofs/agents/20261028000002';
+const forwardRoot='deploy/release-proofs/agents/20261028000005';
 const catalogProof=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${proofRoot}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'local agent migration catalog');
+const forwardCatalogProof=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${forwardRoot}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'local agent forward migration catalog');
 
 test('local account credential survives sibling membership, origin loss and dormant restoration; tenancy and revocation stay fenced',()=>{
-  runSql(repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-functional.sql`)+repoSql('tests/fixtures/account-agents-before.sql')+repoSql('tests/fixtures/local-agent-workspaces.sql')+refuses(repoSql(`${proofRoot}-rollback.sql`),'55000'));
+  runSql(repoSql(`${forwardRoot}-rollback.sql`)+repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-functional.sql`)+repoSql('tests/fixtures/account-agents-before.sql')+repoSql('tests/fixtures/local-agent-workspaces.sql')+refuses(repoSql(`${proofRoot}-rollback.sql`),'55000'));
 });
 
 test('local agent migration reserve restores prior authority and safely reapplies',()=>{
- runSql(repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-rollback.sql`)+catalogProof(true)
+ runSql(repoSql(`${forwardRoot}-rollback.sql`)+repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')+catalogProof()+repoSql(`${proofRoot}-rollback.sql`)+catalogProof(true)
   +repoSql('supabase/migrations/20261028000002_local_agent_workspaces.sql')+catalogProof());
+});
+
+test('forward migration 20261028000005 catalog, rollback and reapply',()=>{
+ runSql(forwardCatalogProof()+repoSql(`${forwardRoot}-rollback.sql`)+forwardCatalogProof(true)
+  +repoSql('supabase/migrations/20261028000005_agent_workspace_auth_fixes.sql')+forwardCatalogProof()+repoSql(`${forwardRoot}-functional.sql`));
 });
 
 import assert from 'node:assert/strict';
@@ -56,6 +63,10 @@ test('command/activity shared auth gates use target membership; origin loss and 
   await operation(B);await assert.rejects(()=>operation(A),LocalCredentialDenied);
   await isolated.db`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_hash=${hash}`;
   await operation(A,true);
+  await membership(false);
+  await assert.rejects(()=>operation(B),LocalCredentialDenied);
+  await operation(A,true);
+  await membership(true);
   await isolated.db`INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES('family','82000000-0000-4000-8000-000000000001')`;
   await assert.rejects(()=>operation(A,true),LocalCredentialDenied);
  } finally {await isolated.close();}

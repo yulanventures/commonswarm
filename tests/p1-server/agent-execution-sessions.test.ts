@@ -481,6 +481,16 @@ test("expiry then recovery increments generation", async () => {
     SET expired_at = statement_timestamp() - interval '1 second'
     WHERE principal_id = ${agent.principalId}::uuid
   `;
+  const autoRefreshed = await runCmd(agent.token, noteBody(), {
+    headers: proofHeaders(sessionId, generation, key),
+  });
+  assert.equal(autoRefreshed.status, 200, JSON.stringify(autoRefreshed.body));
+  await sql`
+    UPDATE swarm.agent_execution_sessions
+    SET expired_at = statement_timestamp() - interval '1 second',
+        lifecycle_state = 'disabled'
+    WHERE principal_id = ${agent.principalId}::uuid
+  `;
   const expiredWrite = await runCmd(agent.token, noteBody(), {
     headers: proofHeaders(sessionId, generation, key),
   });

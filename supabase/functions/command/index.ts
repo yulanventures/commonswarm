@@ -13937,11 +13937,6 @@ async function handleTransaction(
           AND swarm.local_parent_connection_live(p.parent_admin_grant_id)
           AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
           AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes)
-          AND EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am
-            WHERE am.principal_id=p.principal_id
-              AND swarm.local_agent_workspace_live(p.principal_id,am.workspace_id)
-              AND swarm.admin_child_live(t.parent_admin_grant_id,am.workspace_id)
-              AND swarm.admin_child_live(p.parent_admin_grant_id,am.workspace_id))
           AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE (z.kind,z.target_id) IN
             (('token',t.token_id),('principal',p.principal_id),('run',r.run_id),('device',d.device_id),
              ('renewal_grant',g.renewal_grant_id),('membership',p.owner_user_id),('lineage',t.lineage_id),('family',t.lineage_id)))`;
@@ -13959,7 +13954,7 @@ async function handleTransaction(
       && !['release_agent_session','revoke_agent_token','revoke_agent_principal'].includes(kind)) {
       const currentSession=await enforceAgentSessionProof(tx,{
         principalId:localState.authenticatedAgent.principal_id,workspaceId:localState.authenticatedAgent.principal_workspace_id,
-        proofParse:sessionProofParse,managedAt:localState.authenticatedAgent.managed_at,connectionOnly:kind===RENEW_AGENT_TOKEN_KIND,
+        proofParse:sessionProofParse,managedAt:localState.authenticatedAgent.managed_at,connectionOnly:kind===RENEW_AGENT_TOKEN_KIND,recheckOnly:true,
       });
       if(!currentSession.ok) throw new LocalCommandRefused({
         status:currentSession.status,body:{error:currentSession.error},
@@ -13987,7 +13982,7 @@ async function handleTransaction(
     }
     if (localState.authenticatedAgent && !isAgentSessionProofExempt(kind) && !['acquire_agent_session','release_agent_session'].includes(kind)) {
       const finalSession=await enforceAgentSessionProof(tx,{principalId:localState.authenticatedAgent.principal_id,
-        workspaceId:localState.authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse,connectionOnly:kind===RENEW_AGENT_TOKEN_KIND});
+        workspaceId:localState.authenticatedAgent.principal_workspace_id,proofParse:sessionProofParse,connectionOnly:kind===RENEW_AGENT_TOKEN_KIND,recheckOnly:true});
       if(!finalSession.ok) throw new LocalCommandRefused({status:finalSession.status,body:{error:finalSession.error}});
     }
     return result;

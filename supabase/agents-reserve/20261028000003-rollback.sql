@@ -1004,8 +1004,6 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS hosted_mcp_seats_seed_grant_agent ON swarm.hosted_mcp_seats;
-DROP FUNCTION IF EXISTS swarm.ensure_hosted_grant_agent();
 DROP INDEX swarm.hosted_mcp_seats_agent_live;
 ALTER TABLE swarm.hosted_mcp_seats DROP CONSTRAINT hosted_mcp_seats_grant_id_principal_id_owner_user_id_fkey;
 ALTER TABLE swarm.hosted_mcp_seats DROP CONSTRAINT hosted_mcp_seats_principal_id_workspace_id_owner_user_id_fkey;
