@@ -1,5 +1,7 @@
 # Homepage implementation and review
 
+Current direction, 2026-10-28: [Work and palette review](work-and-palette-review.md) records the RidgeHQ palette and client-work examples that update the October 27 snapshot below.
+
 Branch: `design/marketing-shared-context-20261027`, based on `17c98aea`.
 Preview: http://127.0.0.1:4327/ (Astro's production preview, port 4327).
 
