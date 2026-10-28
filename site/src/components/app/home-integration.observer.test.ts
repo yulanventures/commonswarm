@@ -17,7 +17,7 @@ import { todoView } from '../../lib/home-todo';
 import { todosPane } from '../../lib/home-todo-list';
 import { homeRailPeople, mapHomeRail, initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, catchUpDetailFromOverview } from '../../lib/home-map';
 import { buildHomeRail } from '../../lib/home-rail';
-import { buildOrganizationMenu, organizationMenuItems } from '../../lib/home-shell';
+import { buildOrganizationMenu, organizationMenuItems, organizationWorkspaces } from '../../lib/home-shell';
 import { buildAccountAgents } from '../../lib/account-agents';
 import { connectionPolicyState } from '../../lib/standing-grants';
 import { homeStructureKey } from '../../lib/home-focus';
@@ -1540,7 +1540,7 @@ test('accepted agent removals leave every current surface immediately and after 
     const commands: string[] = [];
     const context = createContext({ ...agentStatusFunctions, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, connectionPolicyState, classifyAgentPresence, agentPresenceLine, wakePathMark,
       identityDisplayLabel, isTaggable, removedAgentLabel, peopleDialogCanAct, mapHomePeople, homeRailPeople, mapHomeRail,
-      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, buildOrganizationMenu, organizationMenuItems, routeHref, assignOptions, tagOptions,
+      initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, routeHref, assignOptions, tagOptions,
       one: (selector: string) => selector === '[data-home-rail-slot]' ? slot : null,
       document: { visibilityState: 'visible', createElement: (tag: string) => new RailNode(tag) },
       window: { setInterval: (fn: () => void) => { tick = fn; return 1; } },

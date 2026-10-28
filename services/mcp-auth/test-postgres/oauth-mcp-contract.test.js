@@ -673,6 +673,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           // observes inactive, then waits behind the real adapter family fence.
           await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
             WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+          await pool.query(`UPDATE swarm.hosted_mcp_grants SET connection_expires_at = statement_timestamp() - interval '1 minute'
+            WHERE provider_grant_id = $1`, [family]);
           const inactive = await running.pool.query(
             'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);
           assert.equal(inactive.rows[0]?.active, false, 'race starts with no usable workspace');
@@ -694,6 +696,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
             assert.ok(waiting, 'inactive refresh reached the provider-family advisory fence');
             await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
               WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+            await pool.query(`UPDATE swarm.hosted_mcp_grants SET connection_expires_at = NULL
+              WHERE provider_grant_id = $1`, [family]);
             const consent = await pool.query(`SELECT revoked_at FROM swarm.hosted_mcp_grant_workspaces
               WHERE grant_id = (SELECT grant_id FROM swarm.hosted_mcp_grants WHERE provider_grant_id = $1)
                 AND workspace_id = $2`, [family, workspaces[1]]);
@@ -722,6 +726,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           assert.match(seat.handle, /^seat_/u);
           await pool.query(`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
             WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+          await pool.query(`UPDATE swarm.hosted_mcp_grants SET connection_expires_at = statement_timestamp() - interval '1 minute'
+            WHERE provider_grant_id = $1`, [family]);
           const beforeRetirement = await pool.query(`SELECT count(*)::int AS n
             FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1`, [family]);
           assert.equal(beforeRetirement.rows[0].n, 0, 'authority consent removal has not retired provider artifacts');
@@ -734,6 +740,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           assert.equal(await exactGrantCount(), 0, 'retirement deletes the exact model/id Grant despite its NULL grant_id');
           await pool.query(`UPDATE swarm.memberships SET revoked_at = NULL
             WHERE workspace_id = $1 AND user_id = $2`, [workspaces[1], owner]);
+          await pool.query(`UPDATE swarm.hosted_mcp_grants SET connection_expires_at = NULL
+            WHERE provider_grant_id = $1`, [family]);
           await refusedRefresh(latest.refresh_token, {}, 'invalid_grant');
           const terminal = await running.pool.query(
             'SELECT active FROM commonswarm_oauth.resolve_hosted_grant_status($1)', [family]);

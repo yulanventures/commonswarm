@@ -116,7 +116,7 @@ test("hosted tools/list bytes match the approved baseline through both actual ca
   try {
     const baseline = join(temp, "baseline");
     mkdirSync(baseline);
-    const archive = execFileSync("git", ["archive", "f57cd98ab54256f90533f69c558a49a2c3f1167d",
+    const archive = execFileSync("git", ["archive", "5ccc1bd057f703c9ff58892adb0ca61a12871485",
       "supabase/functions/mcp", "supabase/functions/_shared"], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
     execFileSync("tar", ["-x", "-C", baseline], { input: archive });
     const runner = join(temp, "catalog.ts");

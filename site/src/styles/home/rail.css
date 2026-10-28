@@ -39,7 +39,7 @@
 .hm-rail__mark { position: relative; flex: none; inline-size: 26px; block-size: 26px; }
 .hm-rail__mark::before, .hm-rail__mark::after { content: ""; position: absolute; inset: 0; mask-position: center; mask-repeat: no-repeat; mask-size: contain; }
 .hm-rail__mark::before { background: var(--home-rail-strong); mask-image: image-set("/brand/mark.svg" 1x); }
-.hm-rail__mark::after { background: var(--cs-rail-accent, #BA3D23); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='18.35' y='11.4' width='9.2' height='9.2' rx='2.35'/%3E%3C/svg%3E"); }
+.hm-rail__mark::after { background: var(--home-count); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='18.35' y='11.4' width='9.2' height='9.2' rx='2.35'/%3E%3C/svg%3E"); }
 
 .hm-rail__nav {
   display: flex;

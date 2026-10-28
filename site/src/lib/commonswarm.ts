@@ -410,6 +410,11 @@ export function client(): SupabaseClient | null {
       lock: typeof navigator !== "undefined" && navigator.locks ? navigatorLock : processLock,
     },
   });
+  // 2.111.0 also defaults PostgREST GET queries to 3 exponential-backoff retries (1s/2s/4s);
+  // keep single-attempt reads so readWithDeadline and explicit UI retry controls own recovery.
+  if ((cached as unknown as { rest?: { retry?: boolean } }).rest) {
+    (cached as unknown as { rest: { retry: boolean } }).rest.retry = false;
+  }
   cached.auth.onAuthStateChange((event) => {
     if (event === "SIGNED_OUT") { deadSession = false; removalSnapshot = null; refreshRetryAfter = 0; }
     else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") deadSession = false;
@@ -1082,7 +1087,7 @@ export async function resumeRenewalGrant(
   if (status === 200 && body.status === "accepted") return;
   // Current server returns only error=forbidden; the detailed reason stays in its audit.
   const reason = body.reason ?? body.error;
-  const copy = reason === "forbidden"
+  const copy = status === 403 && reason === "forbidden"
     ? "This key cannot be resumed with your current access. Nothing was changed."
     : "Resume was not confirmed. Reload to check this key before trying again.";
   throw new Error(copy);

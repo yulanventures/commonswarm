@@ -79,7 +79,7 @@ export function organizationWorkspaces<
 >(workspaces: readonly T[], orgId: string | null): T[] {
   return workspaces.filter((workspace) =>
     !workspace.archived &&
-    (orgId === null || (workspace.orgId ?? workspace.id) === orgId)
+    (orgId === null || !workspace.orgId || workspace.orgId === orgId)
   );
 }
 
@@ -446,7 +446,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
     people.addEventListener("click", () => callbacks.openPeople());
     actions.append(people);
   }
-  if (channel) actions.append(detailsButton(doc));
+  if (doors.people && channel) actions.append(detailsButton(doc));
   if (doors.menu) actions.append(buildWorkspaceMenu(doc, vm, callbacks, "hm-ws"));
   header.append(copy, actions);
   return header;

@@ -135,7 +135,7 @@
         "kind": "none"
       },
       "http_status": 400,
-      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-5\",\"error\":{\"code\":-32602,\"message\":\"Unknown tool argument. Use only: workspace_id, name, request_id.\"}}"
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":\"in-5\",\"error\":{\"code\":-32602,\"message\":\"Unknown tool argument. Use only: workspace_id, agent_id, name, request_id.\"}}"
     },
     {
       "label": "whoami invalid seat",

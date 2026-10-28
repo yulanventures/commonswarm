@@ -1115,14 +1115,18 @@ test("parsed-argument functions between lookup and handler are allowlisted", { t
         throw new AgentSetupError("profile_command_invalid", \`--profile is supported by: \${AGENT_PROFILE_COMMANDS.join(", ")}.\`);
       }
       if (profileMode === "native") return;
-      const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key", "workspace-id"].filter(flag => this.has(flag));
+      const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key"].filter(flag => this.has(flag));
       if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", \`Do not combine --profile with \${conflicts.map(flag => \`--\${flag}\`).join(", ")}.\`);
       const profile = await readAgentProfile(path, this.optional("host-session-id"));
       await readProfileCredential(profile);
-      this.expandedProfilePath = path;
+      const selectedProfile = selectAgentWorkspace(profile, this.optional("workspace-id"));
+      this.expandedProfileHomeWorkspace = profile.workspace_id;
+      this.expandedProfilePath = agentWorkspaceStatePath(path, profile.workspace_id, selectedProfile.workspace_id);
       this.expandedProfileHostSessionId = this.optional("host-session-id");
       if (this.has("host-session-id") && hostSessionId === "drop") {
-        const selected = await profileSessionContext(profile, this.required("host-session-id"));
+        const selected = await profileSessionContext(selectedProfile, this.required("host-session-id"));
+        const fallback = selected ?? (selectedProfile.workspace_id !== profile.workspace_id ? await profileSessionContext(profile, this.required('host-session-id')) : null);
+        if (!selected && fallback) this.expandedProfileConnectionContextPath = fallback.path;
         if (selected) {
           const explicit = this.optional("session-context");
           if (explicit !== undefined && resolve(explicit) !== resolve(selected.path)) throw new AgentSetupError("profile_session_conflict", "The supplied session context does not belong to this profile's host session.");
@@ -1131,7 +1135,7 @@ test("parsed-argument functions between lookup and handler are allowlisted", { t
         this.flags.delete("host-session-id");
       }
       this.flags.delete("profile");
-      for (const [flag, value] of [["agent-token-file", profile.credential_file], ["url", profile.url], ["anon-key", profile.anon_key], ["workspace-id", profile.workspace_id]]) this.push(flag!, value!);
+      for (const [flag, value] of [["agent-token-file", profile.credential_file], ["url", profile.url], ["anon-key", profile.anon_key], ["workspace-id", selectedProfile.workspace_id]]) if (!this.has(flag!)) this.push(flag!, value!);
     }
   `, "Arguments.expandAgentProfile");
   // Every table handler runs through traced(); a lookup or branch here would dispatch outside the table.

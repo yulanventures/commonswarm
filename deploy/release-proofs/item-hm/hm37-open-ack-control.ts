@@ -710,8 +710,9 @@ async function cleanup(
           WHERE seat_id = ${journal.seatId}::uuid), ${journal.seatId === null}) AS seat_revoked,
         COALESCE((SELECT revoked_at IS NOT NULL FROM swarm.hosted_mcp_seat_handles
           WHERE seat_id = ${journal.seatId}::uuid), ${journal.seatId === null}) AS handle_revoked,
-        COALESCE((SELECT revoked_at IS NOT NULL FROM swarm.agent_principals
-          WHERE principal_id = ${journal.principalId}::uuid), ${journal.principalId === null}) AS principal_revoked,
+        COALESCE((SELECT coalesce(p.revoked_at, am.revoked_at) IS NOT NULL FROM swarm.agent_principals p
+          LEFT JOIN swarm.agent_workspace_memberships am ON am.principal_id = p.principal_id AND am.workspace_id = p.workspace_id
+          WHERE p.principal_id = ${journal.principalId}::uuid), ${journal.principalId === null}) AS principal_revoked,
         COALESCE((SELECT state = 'revoked' AND revoked_at IS NOT NULL FROM swarm.hosted_mcp_grants
           WHERE grant_id = ${journal.grantId}::uuid), ${!journal.grantCreated}) AS grant_revoked,
         (SELECT count(*)::int FROM swarm.agent_tokens

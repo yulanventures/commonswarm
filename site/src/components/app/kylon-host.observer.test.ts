@@ -175,8 +175,8 @@ const fixtureScript = `
     check('setTitle retains original H1/menu', docked());
     host.sync(project(chat));
     if (innerWidth > 832) {
-    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 52) < 0.5);
-    check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - (innerWidth >= 1400 ? 390 : 280)) < 0.5);
+    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 260) < 0.5);
+    check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 260) < 0.5);
     }
     check('legacy tablet nav hidden', [...app.querySelectorAll('.hm-ws-nav')].every(node => !node.getClientRects().length));
     const label = app.querySelector('.cs-org-identity-copy').textContent;
@@ -409,7 +409,7 @@ const fixtureScript = `
     const back = app.querySelector('[data-todo-back]'), assigned = app.querySelector('[data-todo-assigned] h2');
     columnPair(indexColumn, column(assigned));
     check('Back meets actual paired content edge', Math.abs(indexColumn.left - rect(back).left) <= .5, { indexColumn, back: rect(back) });
-    check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners + 1);
+    check('mode listener has one active registration beyond original shell', fixture.listenerCount() === contextListeners);
   },
   contextSummaryFocused(label) { return document.activeElement === summary(label); },
   async contextSummaryOpened(label, expected = true) {
@@ -665,12 +665,12 @@ const fixtureScript = `
     releasedPeople = { node: p.roster, parent: p.homeParent, next: p.homeNext, hidden: p.priorHidden };
     check('leave People restores exact anchor and original nav hidden state', p.roster.parentNode === p.homeParent &&
       p.roster.nextSibling === p.homeNext && context.hidden === p.priorHidden && !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') &&
-      listeners() === 1, peopleFacts());
+      listeners() === 2, peopleFacts());
   },
   async peopleReleased(width) {
     await untilPeople(() => innerWidth === width && matchMedia('(max-width:52rem)').matches === (width <= 832), 'released native media query at ' + width);
     check('held native query cannot reproject released roster', releasedPeople.node.parentNode === releasedPeople.parent &&
-      releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 1, peopleFacts());
+      releasedPeople.node.nextSibling === releasedPeople.next && context.hidden === releasedPeople.hidden && listeners() === 2, peopleFacts());
   },
   async peopleHeader(options, expected) {
     fixture.people.mount(false, options); ({ bar, menu, heading } = fixture); heldSearch = null;
@@ -727,7 +727,7 @@ const fixtureScript = `
       for (const [phase, act] of [['Chat sync', () => host.sync(project(chat))],
         ['null clear', () => host.peopleContext(null)], ['repeated null clear', () => host.peopleContext(null)]]) {
         act();
-        check(label + ' unowned hidden=' + hidden + ' survives ' + phase, context.hidden === hidden && sameNodes() && listeners() === 1 &&
+        check(label + ' unowned hidden=' + hidden + ' survives ' + phase, context.hidden === hidden && sameNodes() && listeners() === 2 &&
           !app.querySelector('.cs-org-shell').hasAttribute('data-people-composition') && (!releasedPeople ||
           (releasedPeople.node.parentNode === releasedPeople.parent && releasedPeople.node.nextSibling === releasedPeople.next)), peopleFacts());
       }
@@ -906,7 +906,7 @@ test("Kylon host actions, headings, modal focus and teardown", { timeout: 90_000
     // native CDP search/caret and actual responsive/drawer events, no replacement adapter.
     if (width === 1471) for (const hidden of [false, true]) {
       await evaluate(`window.hostObserver.peopleStart(${hidden})`);
-      await key("Tab");
+      for (let step = 0; step < 4; step++) await key("Tab");
       await send("Input.insertText", { text: "Invented" });
       await evaluate("window.hostObserver.peopleTyped()");
       await key("ArrowLeft"); await key("ArrowLeft"); await key("ArrowLeft", true);

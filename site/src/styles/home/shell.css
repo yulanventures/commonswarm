@@ -78,6 +78,7 @@
 /* Space.dc.html: a 1.5px ink outline pill, padding 0 18px. The edge is the lane's inset stroke (primitives.css: a 1.5px
    border paints 1px in Chromium), so the padding adds the 1.5px back (18 + 1.5) and the outer size stays the canvas's. */
 .hm-ws-header__people,
+.hm-details-toggle,
 .hm-menu__trigger {
   display: inline-grid;
   place-items: center;
@@ -96,6 +97,7 @@
 }
 
 .hm-ws-header__people:hover,
+.hm-details-toggle:hover,
 .hm-menu__trigger:hover { background: var(--home-soft); }
 
 .hm-menu__trigger { padding: 0; font-size: var(--t-lg); line-height: 1; }
@@ -255,14 +257,19 @@
   overflow-wrap: anywhere;
 }
 
+.hm-phone-bar:not(:has(> .hm-phone-bar__people)) { grid-template-columns: 44px minmax(0, 1fr) auto; }
+.hm-phone-bar > .hm-menu { display: flex; align-items: center; gap: 2px; }
+.hm-member-stack, .hm-member-stack__faces { display: inline-flex; align-items: center; gap: 4px; }
+.hm-phone-bar .hm-details-toggle,
 .hm-phone-bar .hm-menu__trigger { border: 0; box-shadow: none; background: transparent; color: var(--home-rail-strong); }
+.hm-phone-bar .hm-details-toggle { padding: 0 6px; }
 /* With the account entries the phone menu can be taller than a small screen: it scrolls inside the space under the bar. */
 .hm-phone-bar .hm-menu__list { max-block-size: calc(100dvh - 120px); overflow-y: auto; }
-.hm-phone-bar :is(.hm-phone-bar__back, .hm-phone-bar__people, .hm-menu__trigger):hover { background: var(--home-rail-raised); }
+.hm-phone-bar :is(.hm-phone-bar__back, .hm-phone-bar__people, .hm-details-toggle, .hm-menu__trigger):hover { background: var(--home-rail-raised); }
 
 @media (width <= 24rem) {
-  .hm-phone-bar__people { margin-inline-end: 0; }
-  .hm-phone-bar__people .hm-capsule-stack > :nth-child(n + 2) { display: none; }
+  .hm-phone-bar__people { max-inline-size: 60px; margin-inline-end: 0; }
+  .hm-phone-bar__people :is(.hm-capsule-stack, .hm-member-stack__faces) > :nth-child(n + 2) { display: none; }
 }
 
 /* Workspace sections: phone bottom nav and tablet tab row. Links with aria-current, not ARIA tabs. */

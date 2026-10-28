@@ -76,8 +76,10 @@ test('00008 reserve restores the cascade from its last definer before 00008', ()
 });
 
 test('00008 catalog, functional and rollback proofs hold, the reserve restores the previous cascade and the migration reapplies', () => {
-  // The clone already carries the 00008 bodies; no later migration replaces them.
+  // The clone already carries the 00008 bodies; roll back newer migrations that replace them first.
   runSql(`
+${repoSql('deploy/release-proofs/agents/20261028000003-rollback.sql')}
+${repoSql('deploy/release-proofs/agents/20261028000002-rollback.sql')}
 ${snapshot('installed', ALL)}
 ${dbAssert(`${cascadeTrigger} AND (SELECT prosecdef FROM pg_proc WHERE oid='${CASCADE}'::regprocedure)`, 'cascade is bound and runs as definer before rollback')}
 ${proof('catalog', true)}

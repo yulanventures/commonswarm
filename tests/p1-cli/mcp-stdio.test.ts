@@ -21,7 +21,7 @@ import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/clou
 import { mapMcpError, readMcpPutFile, sendWithDeferredCommit } from "../../src/mcp/server.js";
 import { FileCommandRefused, FileTransportError } from "../../src/cloud/files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
-import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
+import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, STDIO_MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
 import { Arguments } from "../../src/cli.js";
 import { replaceHandledAsks } from "../../src/cloud/ask-chain-context.js";
 
@@ -30,7 +30,7 @@ const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OWNER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const TOKEN = `swm_agt_${"C".repeat(43)}`;
-const DENIED = ["profile", "host-session-id", "session-context", "agent-token-file", "agent-token-stdin", "url", "anon-key", "force-file-store", "workspace-id", "body-file", "body-stdin", "attach", "json", "wait", "follow", "notify", "ndjson", "hook", "force", "out"];
+const DENIED = ["profile", "host-session-id", "session-context", "agent-token-file", "agent-token-stdin", "url", "anon-key", "force-file-store", "body-file", "body-stdin", "attach", "json", "wait", "follow", "notify", "ndjson", "hook", "force", "out"];
 function assertDenySchemas(tools: Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>) {
   for (const tool of tools) for (const bad of DENIED) for (const key of [bad, bad.replaceAll("-", "_")]) {
     assert.ok(!Object.hasOwn(tool.inputSchema.properties ?? {}, key), `${tool.name} advertised ${key}`);
@@ -261,7 +261,7 @@ test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeou
   const f = await fixture();
   try {
     const listed = (await f.client.listTools()).tools;
-    assert.deepEqual(listed.map(tool => tool.name), MCP_TOOLS.map(tool => tool.name));
+    assert.deepEqual(listed.map(tool => tool.name), STDIO_MCP_TOOLS.map(tool => tool.name));
     assertDenySchemas(listed);
     // Mutation control: adding one credential flag to an advertised schema trips the gate.
     const mutated = [{ name: listed[0].name, inputSchema: { properties: { ...listed[0].inputSchema.properties, profile: { type: "string" } } } }];

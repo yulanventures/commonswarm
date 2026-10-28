@@ -462,12 +462,12 @@ BEGIN
   -- This definer owns agent_tokens and bypasses its RLS policies. Check the
   -- parent directly before first-use stamping, supersession or private reads.
   -- admin_child_live locks the grant so a committed revoke/narrow wins.
-  SELECT t.parent_admin_grant_id, t.scopes, p.workspace_id
-  INTO v_parent_admin_grant_id, v_worker_scopes, v_parent_workspace_id
+  SELECT t.parent_admin_grant_id, t.scopes, p.workspace_id, p.principal_id
+  INTO v_parent_admin_grant_id, v_worker_scopes, v_parent_workspace_id, v_principal_id
   FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING (principal_id)
   WHERE t.token_hash = p_token_hash;
   IF NOT FOUND OR NOT swarm.local_parent_connection_live(v_parent_admin_grant_id)
-    OR NOT swarm.admin_child_live(v_parent_admin_grant_id,coalesce(p_workspace_id,v_parent_workspace_id))
+    OR NOT swarm.admin_child_live(v_parent_admin_grant_id,CASE WHEN p_workspace_id IS NOT NULL AND EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=v_principal_id AND am.workspace_id=p_workspace_id) THEN p_workspace_id ELSE v_parent_workspace_id END)
     OR NOT swarm.admin_child_scopes_live(v_parent_admin_grant_id, v_worker_scopes) THEN
     RETURN;
   END IF;
@@ -519,7 +519,7 @@ BEGIN
   IF NOT EXISTS(SELECT 1 FROM swarm.agent_principals p WHERE p.principal_id=v_principal_id
       AND p.transport='local' AND NOT p.turn_only
       AND swarm.local_parent_connection_live(p.parent_admin_grant_id)
-      AND swarm.admin_child_live(p.parent_admin_grant_id,coalesce(p_workspace_id,p.workspace_id))
+      AND swarm.admin_child_live(p.parent_admin_grant_id,CASE WHEN p_workspace_id IS NOT NULL AND EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=p.principal_id AND am.workspace_id=p_workspace_id) THEN p_workspace_id ELSE p.workspace_id END)
       AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,v_worker_scopes))
     OR EXISTS(SELECT 1 FROM swarm.agent_tokens t JOIN swarm.renewal_grants g USING(renewal_grant_id)
       WHERE t.token_id=v_token_id AND (g.revoked_at IS NOT NULL OR g.suspension_active OR g.connection_expired_at IS NOT NULL
@@ -536,45 +536,53 @@ BEGIN
     AND m.user_id = v_owner_user_id
   LIMIT 1;
 
-  IF NOT FOUND AND p_workspace_id IS NOT NULL THEN
-    v_revoked := true;
-  ELSIF (p_workspace_id IS NOT NULL AND (NOT swarm.local_agent_workspace_live(v_principal_id,p_workspace_id) OR v_membership_revoked_at IS NOT NULL))
-     OR v_token_revoked_at IS NOT NULL
+  v_ids := ARRAY[
+    v_token_id,
+    v_principal_id,
+    v_run_id,
+    v_device_id,
+    v_owner_user_id,
+    v_lineage_id
+  ];
+  IF v_token_revoked_at IS NOT NULL
      OR v_principal_revoked_at IS NOT NULL
      OR v_run_ended_at IS NOT NULL
      OR v_device_revoked_at IS NOT NULL
      OR v_surrender_only
+     OR EXISTS (
+       SELECT 1
+       FROM swarm.revocation_tombstones AS rt
+       WHERE rt.target_id = ANY (v_ids)
+         AND (
+           (rt.kind = 'token' AND rt.target_id = v_token_id)
+           OR (rt.kind = 'principal' AND rt.target_id = v_principal_id)
+           OR (rt.kind = 'run' AND rt.target_id = v_run_id)
+           OR (rt.kind = 'device' AND rt.target_id = v_device_id)
+           OR (rt.kind = 'membership' AND rt.target_id = v_owner_user_id)
+           OR (rt.kind = 'lineage' AND rt.target_id = v_lineage_id)
+           OR (rt.kind = 'family' AND rt.target_id = v_lineage_id)
+         )
+     )
   THEN
     v_revoked := true;
+    principal_workspace_id := p_workspace_id;
+  ELSIF p_workspace_id IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=v_principal_id AND am.workspace_id=p_workspace_id)
+    AND swarm.local_agent_workspace_live(v_principal_id,v_principal_workspace_id)
+  THEN
+    v_revoked := true;
+    principal_workspace_id := v_principal_workspace_id;
+  ELSIF p_workspace_id IS NOT NULL
+    AND (NOT swarm.local_agent_workspace_live(v_principal_id,p_workspace_id) OR v_membership_revoked_at IS NOT NULL)
+  THEN
+    v_revoked := true;
+    principal_workspace_id := p_workspace_id;
   ELSE
-    v_ids := ARRAY[
-      v_token_id,
-      v_principal_id,
-      v_run_id,
-      v_device_id,
-      v_owner_user_id,
-      v_lineage_id
-    ];
-    IF EXISTS (
-      SELECT 1
-      FROM swarm.revocation_tombstones AS rt
-      WHERE rt.target_id = ANY (v_ids)
-        AND (
-          (rt.kind = 'token' AND rt.target_id = v_token_id)
-          OR (rt.kind = 'principal' AND rt.target_id = v_principal_id)
-          OR (rt.kind = 'run' AND rt.target_id = v_run_id)
-          OR (rt.kind = 'device' AND rt.target_id = v_device_id)
-          OR (rt.kind = 'membership' AND rt.target_id = v_owner_user_id)
-          OR (rt.kind = 'lineage' AND rt.target_id = v_lineage_id)
-          OR (rt.kind = 'family' AND rt.target_id = v_lineage_id)
-        )
-    ) THEN
-      v_revoked := true;
-    END IF;
+    principal_workspace_id := p_workspace_id;
   END IF;
 
   -- No-row/denied authentication never stamps or supersedes anything.
-  IF v_revoked THEN v_first_use:=false;
+  IF v_revoked AND principal_workspace_id IS NOT DISTINCT FROM p_workspace_id THEN v_first_use:=false;
   ELSIF v_first_use THEN
     UPDATE swarm.agent_tokens t SET first_used_at=local_now WHERE t.token_id=v_token_id AND t.first_used_at IS NULL;
     UPDATE swarm.agent_tokens pred SET expires_at=local_now
@@ -601,7 +609,6 @@ BEGIN
   token_id := v_token_id;
   principal_id := v_principal_id;
   owner_user_id := v_owner_user_id;
-  principal_workspace_id := p_workspace_id;
   run_id := v_run_id;
   device_id := v_device_id;
   first_use := v_first_use;
@@ -1502,10 +1509,10 @@ BEGIN
   ELSE
     SELECT p.owner_user_id,t.lineage_id,t.principal_id INTO target_owner,target_lineage,target_principal
       FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
-      WHERE t.token_id=p_target_id AND swarm.local_agent_workspace_live(p.principal_id,p_workspace_id) AND p.transport='local';
+      WHERE t.token_id=p_target_id AND (p.workspace_id=p_workspace_id OR swarm.local_agent_workspace_live(p.principal_id,p_workspace_id)) AND p.transport='local'
+        AND (p.workspace_id=p_workspace_id OR p.owner_user_id=p_actor_id);
     principal_ids:=ARRAY[target_principal];
   END IF;
-  IF p_kind='revoke_agent_token' AND target_owner IS DISTINCT FROM p_actor_id THEN RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501'; END IF;
   IF target_owner IS NULL OR (actor_role NOT IN ('owner','admin') AND target_owner<>p_actor_id) THEN
     RAISE EXCEPTION 'LOCAL_RESIDUAL_FORBIDDEN' USING ERRCODE='42501';
   END IF;

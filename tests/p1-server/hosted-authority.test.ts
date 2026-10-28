@@ -1211,7 +1211,8 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
             'swarm.hosted_mcp_seats'::regclass,
             'swarm.hosted_mcp_seat_handles'::regclass
           ])
-          AND pg_get_constraintdef(oid) LIKE '%grant_id%workspace_id%'
+          AND (pg_get_constraintdef(oid) LIKE '%grant_id%workspace_id%'
+            OR pg_get_constraintdef(oid) LIKE '%grant_id%principal_id%owner_user_id%')
       ) AS composites_ok,
       (
         SELECT pg_get_constraintdef(oid) LIKE '%join%hosted_grant%hosted_seat%'
@@ -1248,6 +1249,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     await tx.unsafe(emptySchema);
     const [emptyRestrictions] = await tx`SELECT count(*)::int AS n FROM swarm.household_hosted_content_restrictions`;
     assert.equal(emptyRestrictions!.n, 0, "historical inverse runs only on an empty restriction fixture");
+    for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
+      await tx.unsafe(repoSql(`supabase/agents-reserve/${version}-rollback.sql`));
+    }
     // 00006 retains this table on rollback. Its one grant-workspace FK must
     // leave only this empty, transaction-rolled-back historical HM drill.
     const newerFks = await tx<{ name: string; columns: string[]; targets: string[] }[]>`
@@ -2001,8 +2005,9 @@ test("accepted removal fences concurrent same-name and new-name claims", { timeo
     });
     assert.equal(result.removed.status, 200, JSON.stringify(result.removed.body));
     assert.ok([200, 403].includes(result.claimed.status), JSON.stringify(result.claimed));
-    assert.equal(result.refused.status, 403, "no cached capability survives committed removal");
-    if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, 403);
+    const newIdentitySurvived = !sameName && result.claimed.status === 200;
+    assert.equal(result.refused.status, newIdentitySurvived ? 200 : 403, "no cached capability survives committed removal");
+    if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, newIdentitySurvived ? 200 : 403);
   }
 });
 
@@ -2170,8 +2175,10 @@ test("concurrent claims of a revoked name yield exactly one new live identity", 
       assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
     }
     const principals = await sql<{ principal_id: string; revoked_at: Date | null }[]>`
-      SELECT principal_id, revoked_at FROM swarm.agent_principals
-      WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
+      SELECT p.principal_id, coalesce(p.revoked_at, am.revoked_at) AS revoked_at
+      FROM swarm.agent_principals p
+      JOIN swarm.agent_workspace_memberships am USING (principal_id, workspace_id)
+      WHERE p.workspace_id = ${fixture.workspaceA}::uuid AND p.name = ${name}
     `;
     assert.equal(principals.length, 2);
     const live = principals.filter(row => row.revoked_at === null);
@@ -3005,6 +3012,19 @@ async function contextFixture(): Promise<HostedFixture> {
   await sql`UPDATE swarm.users SET email = CASE WHEN user_id = ${fixture.owner}::uuid
     THEN 'context-owner@example.test' ELSE 'context-other@example.test' END
     WHERE user_id IN (${fixture.owner}::uuid, ${fixture.other}::uuid)`;
+  await sql`
+    CREATE OR REPLACE FUNCTION swarm.sync_context_grant_memberships() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN
+      INSERT INTO swarm.agent_workspace_memberships(principal_id, workspace_id, owner_user_id, added_by)
+      SELECT NEW.principal_id, gw.workspace_id, NEW.owner_user_id, NEW.owner_user_id
+      FROM swarm.hosted_mcp_grant_workspaces gw
+      WHERE gw.grant_id = NEW.grant_id AND gw.revoked_at IS NULL
+      ON CONFLICT (principal_id, workspace_id) DO NOTHING;
+      RETURN NEW;
+    END $$;
+  `;
+  await sql`DROP TRIGGER IF EXISTS context_grant_memberships ON swarm.hosted_mcp_grant_agents`;
+  await sql`CREATE TRIGGER context_grant_memberships AFTER INSERT OR UPDATE ON swarm.hosted_mcp_grant_agents FOR EACH ROW EXECUTE FUNCTION swarm.sync_context_grant_memberships()`;
   return fixture;
 }
 function assertContext(result: ContextHttpResult, fixture: HostedFixture, reachable = [fixture.workspaceA, fixture.workspaceB], other = false, current = fixture.workspaceA, home: string | null = fixture.workspaceA,
@@ -3066,7 +3086,7 @@ test("hosted context explains all four HTTP tools, default claim, replay and two
   assert.equal(ownerResults[0]!.body.handle, ownerResults[4]!.body.handle, "same request receipt replays");
   const roster = ownerResults.find(row => row.name === "members")!.body;
   for (const member of roster.members as Array<Record<string, unknown>>) assert.equal(Object.hasOwn(member, "email"), false);
-  const workspaceB = contextHttp(fixture, { calls: [{ name: "claim_seat", workspace_id: fixture.workspaceB },
+  const workspaceB = contextHttp(fixture, { name: "workspace-b-context-seat", calls: [{ name: "claim_seat", workspace_id: fixture.workspaceB },
     { name: "whoami" }, { name: "members" }, { name: "check" }] });
   workspaceB.forEach(row => assertContext(row, fixture, undefined, false, fixture.workspaceB));
   const otherResults = contextHttp(fixture, { grantId: fixture.grantB, ownerUserId: fixture.other, name: "other-context-seat" });

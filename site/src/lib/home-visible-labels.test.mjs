@@ -370,5 +370,5 @@ test("Catch up suffixes two own agents that were unique inside different workspa
   assert.deepEqual(joined.groups[0].agents.map(agent => agent.nestedLabel), ["Claude · 3dab8f40", "Claude · 9c0e1a22"]);
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const body = dashboard.slice(dashboard.indexOf("const renderHomeRail"), dashboard.indexOf("const renderHomeShell"));
-  assert.match(body, /homeRailPeople\(catchUpData,/);
+  assert.match(body, /homeRailPeople\(catchUpData(?:\.filter\(.+?\))?,/);
 });

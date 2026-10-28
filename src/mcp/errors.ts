@@ -55,6 +55,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   check_page_order_invalid: entry("The message page is out of order.", RETRY),
   check_timeout: entry("The message check timed out; the inbox state is unknown.", RETRY),
   message_id_invalid: entry("The message_id argument is invalid.", FIX),
+  workspace_id_invalid: entry("The workspace_id argument is invalid.", FIX),
   message_not_cached: entry("That message is absent from the local cache.", FIX),
   host_session_required: entry("This agent requires its current host session.", RESTART_SESSION),
   setup_host_session_required: entry("Setup needs this session's ID or an intentional manual choice.", PERSON),

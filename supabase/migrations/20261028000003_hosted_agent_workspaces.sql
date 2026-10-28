@@ -36,6 +36,17 @@ ALTER TABLE swarm.hosted_mcp_seats DROP CONSTRAINT hosted_mcp_seats_principal_id
 ALTER TABLE swarm.hosted_mcp_seats ADD FOREIGN KEY(grant_id,principal_id,owner_user_id) REFERENCES swarm.hosted_mcp_grant_agents(grant_id,principal_id,owner_user_id);
 ALTER TABLE swarm.hosted_mcp_seats ADD FOREIGN KEY(principal_id,workspace_id,owner_user_id) REFERENCES swarm.agent_workspace_memberships(principal_id,workspace_id,owner_user_id);
 CREATE UNIQUE INDEX hosted_mcp_seats_agent_live ON swarm.hosted_mcp_seats(grant_id,workspace_id,principal_id) WHERE revoked_at IS NULL;
+CREATE FUNCTION swarm.ensure_hosted_grant_agent() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM swarm.agent_principals p WHERE p.principal_id=NEW.principal_id AND p.workspace_id=NEW.workspace_id AND p.owner_user_id=NEW.owner_user_id AND p.transport='hosted_mcp')
+   AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grants g WHERE g.grant_id=NEW.grant_id AND g.owner_user_id=NEW.owner_user_id) THEN
+  INSERT INTO swarm.hosted_mcp_grant_agents(grant_id,principal_id,owner_user_id) VALUES(NEW.grant_id,NEW.principal_id,NEW.owner_user_id) ON CONFLICT DO NOTHING;
+ END IF;
+ RETURN NEW;
+END $$;
+ALTER FUNCTION swarm.ensure_hosted_grant_agent() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.ensure_hosted_grant_agent() FROM PUBLIC,anon,authenticated,swarm_read,swarm_command;
+CREATE TRIGGER hosted_mcp_seats_seed_grant_agent BEFORE INSERT ON swarm.hosted_mcp_seats FOR EACH ROW EXECUTE FUNCTION swarm.ensure_hosted_grant_agent();
 
 CREATE FUNCTION swarm.hosted_binding_eligible(p_grant uuid,p_workspace uuid,p_principal uuid DEFAULT NULL)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
