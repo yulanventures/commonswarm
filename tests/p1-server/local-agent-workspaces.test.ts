@@ -63,6 +63,10 @@ test('command/activity shared auth gates use target membership; origin loss and 
   await operation(B);await assert.rejects(()=>operation(A),LocalCredentialDenied);
   await isolated.db`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_hash=${hash}`;
   await operation(A,true);
+  await membership(false);
+  await assert.rejects(()=>operation(B),LocalCredentialDenied);
+  await operation(A,true);
+  await membership(true);
   await isolated.db`INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES('family','82000000-0000-4000-8000-000000000001')`;
   await assert.rejects(()=>operation(A,true),LocalCredentialDenied);
  } finally {await isolated.close();}

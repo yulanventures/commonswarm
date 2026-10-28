@@ -766,8 +766,10 @@ test("long rotation history renews and reads; unrelated workspace history cannot
       JOIN swarm.agent_workspace_memberships am ON am.principal_id=g.principal_id AND am.workspace_id=g.workspace_id
       WHERE g.renewal_grant_id=${f.grant}::uuid`;
     assert.deepEqual(fence,{revoked:true,removed:true,tombstone:true});
-    const ended=await call(String(renewed.body.agent_token),{kind:"renew_agent_token"});
-    assert.ok(ended.status===401 || ended.status===403,"removed connection cannot return");
+    const ended=await content(String(renewed.body.agent_token));
+    assert.ok(ended.status===401 || ended.status===403,"removed workspace membership cannot operate in that workspace");
+    const dormant=await call(String(renewed.body.agent_token),{kind:"renew_agent_token"});
+    assert.equal(dormant.status,200,"dormant connection with zero live workspaces still renews");
     const [intact]=await sql`SELECT revoked_at FROM swarm.renewal_grants WHERE renewal_grant_id=${unrelated.grant}::uuid`;
     assert.equal(intact!.revoked_at,null,"unrelated over-cap history remains untouched");
     assert.ok(last);
