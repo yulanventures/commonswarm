@@ -111,7 +111,7 @@ test("neither interaction parser treats the submit guard filename as a UID, incl
     store: { requireSession: async () => ({}) },
   };
   const request = { method: "GET", headers: { cookie: "__Host-cswarm-oauth=browser-session-long-enough" } };
-  const response = {};
+  const response = { setHeader() {} };
   for (const make of [createInteractionHandler, createAdminInteractionHandler]) {
     const handler = make(options);
     // Positive control: an ordinary UID really reaches provider lookup.

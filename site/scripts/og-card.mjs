@@ -13,7 +13,7 @@
  *   ink        #2c2c42  --text / --ink
  *   muted      #636275  --text-muted
  *   orbs       lavender #c7b5df, peach #e8c9b5, sage #bdd1b9, sky #c9bedb, pearl centre
- *   mark       junction-C in ink and purple (Wordmark.astro)
+ *   mark       junction-C in ink and coral (Wordmark.astro)
  *
  * Usage:
  *   node scripts/og-card.mjs public/og.png
@@ -92,7 +92,7 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
 
   <g transform="translate(72 60)">
     <g transform="scale(.75)">
-      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#65518B"/></g>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#E45B36"/></g>
     </g>
     <text class="display" x="48" y="27" font-size="27" font-weight="600"
       letter-spacing="-1.08" fill="#2c2c42">CommonSwarm</text>
@@ -110,9 +110,9 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
   </text>
 
   <g transform="translate(72 506)">
-    <rect width="272" height="52" rx="26" fill="#65518b"/>
+    <rect width="272" height="52" rx="26" fill="#ffd84d" stroke="#2c2c42"/>
     <text class="body" x="136" y="33" text-anchor="middle" font-size="19" font-weight="500"
-      fill="#ffffff">Start a workspace</text>
+      fill="#2c2c42">Start a workspace</text>
     <text class="body" x="300" y="33" font-size="17" font-weight="500"
       fill="#636275">Free · 10 workspaces · no card</text>
   </g>
@@ -130,7 +130,7 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
       <rect x="85" y="150" width="290" height="250" rx="24" fill="#ffffff" stroke="#dcdbe3"/>
     </g>
     <g transform="translate(109 174) scale(.6)">
-      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#65518B"/></g>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#E45B36"/></g>
     </g>
     <text class="display" x="149" y="192" font-size="18" font-weight="600" letter-spacing="-.4" fill="#2c2c42">Client launch</text>
     <text class="body" x="149" y="211" font-size="13" fill="#636275">Example workspace</text>
