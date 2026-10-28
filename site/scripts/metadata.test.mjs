@@ -18,9 +18,9 @@ const distDir = join(siteDir, "dist");
  * from the page again without a test failing. */
 const currentHomeTitle = "CommonSwarm: Put your agents on the same page";
 const currentHomeDescription =
-  "A shared workspace for you, your people and your agents. Make plans, share messages, lists and files, and keep home and work moving together.";
+  "A shared workspace for your team and agents. Discuss projects, share messages, lists and files, and move work forward together.";
 const currentOgHeadline = "Put your agents on the same page.";
-const currentOgMechanism = "Make plans, share the details and move things along.";
+const currentOgMechanism = "Share messages, files and notes about home and work.";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
 const routes = [

@@ -8,6 +8,9 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view {
 live-dashboard[data-kylon-shell] .dashboard__objects-view > * {
   box-sizing: border-box; inline-size: 100%; max-inline-size: 720px; min-inline-size: 0; margin-inline: auto;
 }
+live-dashboard[data-kylon-shell] .dashboard__objects-view > .household-objects {
+  max-inline-size: 1040px;
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hm-pane-title {
   margin-block: 0; color: inherit; font: 600 20px/1.35 var(--k-shell-font); letter-spacing: -.3px;
 }
@@ -70,7 +73,15 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > h
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-status { min-block-size: 0; padding-block: 8px; border-color: var(--k-shell-line); color: var(--k-shell-secondary); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(nav,article,.hh-comparison > section) { min-inline-size: 0; overflow-wrap: anywhere; }
 /* Keep the complete index as quiet navigation; selection and focus have separate cues. */
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout { gap: 16px; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout {
+  position: relative;
+  grid-template-columns: min(var(--cs-lists-nav-width, 220px), 45%) minmax(0, 1fr);
+  gap: 24px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout > nav {
+  padding-inline-end: 12px;
+  border-inline-end: 1px solid var(--k-shell-line);
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav ul {
   display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,10rem),1fr)); gap: 2px;
 }
@@ -112,9 +123,11 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(button,a,input,sel
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label):has(input:focus-visible) { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label) input:focus-visible { outline: none; box-shadow: none; }
 @media (width <= 70rem) {
-  live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.hh-layout,.hh-comparison) { grid-template-columns: minmax(0,1fr); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-comparison { grid-template-columns: minmax(0,1fr); }
 }
 @media (width <= 52rem) {
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout { grid-template-columns: minmax(0,1fr); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout > nav { padding-inline-end: 0; border-inline-end: 0; }
   live-dashboard[data-kylon-shell] .dashboard__objects-view { padding: 20px 24px 32px; gap: 20px; }
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(textarea,input:not([type=radio],[type=checkbox]),select) { font-size: 16px; }
 }

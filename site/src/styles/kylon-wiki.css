@@ -214,9 +214,57 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
   padding: 8px; border: 1px solid var(--k-shell-line); border-radius: 6px;
   background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-wiki-composition]) .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
+    position: relative;
+    grid-template-columns: min(var(--cs-wiki-index-width, 260px), 45%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    align-content: stretch;
+    block-size: 100%;
+    padding: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-wiki-composition]) .dashboard__brain-view > .dashboard__brain-index {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 16px 12px;
+    border-inline-end: 1px solid var(--k-shell-line);
+    block-size: 100%;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-wiki-composition]) .dashboard__brain-view > :is(.dashboard__brain-selection-prompt, .dashboard__brain-topic) {
+    grid-column: 2;
+    grid-row: 1;
+    padding: 24px 32px;
+    overflow-y: auto;
+    block-size: 100%;
+  }
+}
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__channel-body > .dashboard__brain-view:not([hidden]) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     padding: 20px 16px;
+    overflow: hidden;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view > .dashboard__brain-index {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0;
+    max-block-size: none;
+    overflow: auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view > :is(.dashboard__brain-topic, .dashboard__brain-selection-prompt) {
+    box-sizing: border-box;
+    grid-column: 1;
+    grid-row: 1;
+    inline-size: 100%;
+    max-inline-size: none;
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view[data-brain-selection="document"] > .dashboard__brain-index,
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt {
+    display: none;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view .dashboard__brain-topic .dashboard__brain-back {
     display: inline-flex; align-items: center; justify-content: center;

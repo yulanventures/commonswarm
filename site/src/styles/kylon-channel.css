@@ -1,6 +1,15 @@
 /* Channel chrome follows the shipped organization rail and member panel. */
 live-dashboard.dashboard[data-kylon-shell] .hm-ws-header {
-  min-block-size: 56px; padding: 6px 20px; gap: 8px; flex-wrap: nowrap;
+  min-block-size: 46px; padding: 4px 20px; gap: 8px; flex-wrap: nowrap; border-block-end: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header [data-menu-item="wiki"] { display: none; }
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-todo-composition], [data-wiki-composition], [data-people-composition]) .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header {
+    display: flex;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-todo-composition], [data-wiki-composition], [data-people-composition]) .hm-frame[data-home-standalone] .hm-frame__main > [data-home-workspace-shell] {
+    display: block;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__copy { flex: 1; }
 live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__title { font-size: 18px; line-height: 1.4; letter-spacing: -.3px; }
