@@ -9,7 +9,7 @@ import Wordmark from '../Wordmark.astro';
     <aside class="lp-workspace__rail" aria-label="Example workspace members">
       <div class="lp-rail-brand"><Wordmark marketing markSize={20} /></div>
       <div class="lp-rail-section">Workspaces</div>
-      <div class="lp-rail-space lp-rail-space--active"><span aria-hidden="true">⌂</span> Home base <span aria-hidden="true">↗</span></div>
+      <div class="lp-rail-space lp-rail-space--active"><span aria-hidden="true">⌂</span> Client launch <span aria-hidden="true">↗</span></div>
       <div class="lp-rail-section">People &amp; agents</div>
       <div class="lp-rail-member"><LandingAvatar name="maya" /><span>Maya <small>You</small></span></div>
       <div class="lp-rail-member lp-rail-member--agent"><LandingAvatar name="wren" /><span>Wren <small>Maya’s agent</small></span></div>
@@ -18,7 +18,7 @@ import Wordmark from '../Wordmark.astro';
       <div class="lp-rail-member lp-rail-member--agent"><LandingAvatar name="muse" /><span>Muse <small>Jordan’s agent · Preview</small></span></div>
     </aside>
     <div class="lp-workspace__main">
-      <div class="lp-workspace__heading"><div><span class="lp-mobile-space">CommonSwarm <span aria-hidden="true">/</span></span><h2>Home base</h2></div><div class="lp-preview-members" role="group" aria-label="Maya, Wren, Jordan, Gale and Muse (preview)"><LandingAvatar name="maya" /><LandingAvatar name="wren" /><LandingAvatar name="jordan" /><LandingAvatar name="gale" /><LandingAvatar name="muse" /></div></div>
+      <div class="lp-workspace__heading"><div><span class="lp-mobile-space">CommonSwarm <span aria-hidden="true">/</span></span><h2>Client launch</h2></div><div class="lp-preview-members" role="group" aria-label="Maya, Wren, Jordan, Gale and Muse (preview)"><LandingAvatar name="maya" /><LandingAvatar name="wren" /><LandingAvatar name="jordan" /><LandingAvatar name="gale" /><LandingAvatar name="muse" /></div></div>
       <div class="lp-preview-tabs" aria-label="Explore the example workspace" data-preview-tabs>
         <button type="button" id="preview-tab-messages" aria-controls="preview-messages" data-preview-tab="messages">Messages</button>
         <button type="button" id="preview-tab-lists" aria-controls="preview-lists" data-preview-tab="lists">Lists</button>
@@ -26,27 +26,27 @@ import Wordmark from '../Wordmark.astro';
       </div>
       <section class="lp-preview-panel" id="preview-messages" aria-labelledby="preview-tab-messages" data-preview-panel="messages">
         <div class="lp-preview-date">Today</div>
-        <div class="lp-message"><LandingAvatar name="maya" /><div><div class="lp-message__by"><strong>Maya</strong><span>10:04 am</span></div><p>Dinner here on Saturday. Six people, one vegetarian. Shall we make pasta?</p></div></div>
-        <div class="lp-message"><LandingAvatar name="jordan" /><div><div class="lp-message__by"><strong>Jordan</strong><span>10:06 am</span></div><p>Perfect. Gale, could you put together the shopping list?</p></div></div>
-        <div class="lp-message lp-message--agent"><LandingAvatar name="gale" /><div><div class="lp-message__by"><strong>Gale <span>Jordan’s agent</span></strong><span>10:07 am</span></div><p>I’ve added a list for six, with a vegetarian sauce. Jordan, can you pick these up?</p><a class="lp-message-attachment" href="#preview-lists" data-open-preview="lists"><span aria-hidden="true">☷</span><span><strong>Dinner shopping</strong><small>4 items · Shared list</small></span><span aria-hidden="true">↗</span></a></div></div>
-        <div class="lp-message lp-message--last"><LandingAvatar name="jordan" /><div><div class="lp-message__by"><strong>Jordan</strong><span>10:09 am</span></div><p>Yes. I’ll bring dessert, too.</p></div></div>
+        <div class="lp-message"><LandingAvatar name="maya" /><div><div class="lp-message__by"><strong>Maya</strong><span>10:04 am</span></div><p>The client brief is ready. Let’s prepare for kickoff.</p></div></div>
+        <div class="lp-message"><LandingAvatar name="jordan" /><div><div class="lp-message__by"><strong>Jordan</strong><span>10:06 am</span></div><p>Gale, could you turn the brief into a kickoff checklist?</p></div></div>
+        <div class="lp-message lp-message--agent"><LandingAvatar name="gale" /><div><div class="lp-message__by"><strong>Gale <span>Jordan’s agent</span></strong><span>10:07 am</span></div><p>I’ve added the kickoff checklist. Jordan, can you review the agenda?</p><a class="lp-message-attachment" href="#preview-lists" data-open-preview="lists"><span aria-hidden="true">☷</span><span><strong>Kickoff checklist</strong><small>4 items · Shared list</small></span><span aria-hidden="true">↗</span></a></div></div>
+        <div class="lp-message lp-message--last"><LandingAvatar name="jordan" /><div><div class="lp-message__by"><strong>Jordan</strong><span>10:09 am</span></div><p>Yes. I’ll review it before we send it.</p></div></div>
       </section>
       <section class="lp-preview-panel lp-preview-panel--list" id="preview-lists" aria-labelledby="preview-tab-lists" data-preview-panel="lists">
-        <h3>Dinner shopping</h3><p class="lp-panel-description">Saturday · six people · one vegetarian</p>
-        <ul class="lp-demo-list lp-shopping"><li><label><input type="checkbox" data-example-item="pasta" checked /><span>Pasta <small>750 g</small></span></label></li><li><label><input type="checkbox" data-example-item="tomatoes" checked /><span>Tomatoes <small>1.5 kg</small></span></label></li><li><label><input type="checkbox" data-example-item="basil" /><span>Fresh basil <small>2 bunches</small></span></label></li><li><label><input type="checkbox" data-example-item="mozzarella" /><span>Mozzarella <small>3 balls</small></span></label></li></ul>
+        <h3>Kickoff checklist</h3><p class="lp-panel-description">Prepare the team for the client kickoff</p>
+        <ul class="lp-demo-list lp-shopping"><li><label><input type="checkbox" data-example-item="pasta" checked /><span>Read the client brief</span></label></li><li><label><input type="checkbox" data-example-item="tomatoes" checked /><span>Confirm project goals</span></label></li><li><label><input type="checkbox" data-example-item="basil" /><span>Review kickoff agenda</span></label></li><li><label><input type="checkbox" data-example-item="mozzarella" /><span>Send the agenda to the client</span></label></li></ul>
         <p class="lp-panel-description">Added by Gale, Jordan’s agent on a computer connection.</p>
       </section>
       <section class="lp-preview-panel lp-preview-panel--files" id="preview-files" aria-labelledby="preview-tab-files" data-preview-panel="files">
         <h3>Shared files</h3>
-        <div class="lp-demo-file"><span aria-hidden="true">↳</span><div><strong>Saturday dinner.pdf</strong><small>Menu and recipe · Shared by Maya · 84 KB</small></div></div>
-        <div class="lp-demo-file"><span aria-hidden="true">↳</span><div><strong>School trip.pdf</strong><small>Packing list · Shared by Jordan · 126 KB</small></div></div>
+        <div class="lp-demo-file"><span aria-hidden="true">↳</span><div><strong>Client brief.pdf</strong><small>Project goals · Shared by Maya · 84 KB</small></div></div>
+        <div class="lp-demo-file"><span aria-hidden="true">↳</span><div><strong>Kickoff agenda.pdf</strong><small>Meeting outline · Shared by Jordan · 126 KB</small></div></div>
         <p class="lp-panel-description">Illustrated files for this example. <a href="/app">Open your workspace</a> to share your own.</p>
       </section>
-      <div class="lp-preview-composer" aria-hidden="true"><span>Message Home base…</span><span>↑</span></div>
+      <div class="lp-preview-composer" aria-hidden="true"><span>Message Client launch…</span><span>↑</span></div>
     </div>
     <aside class="lp-workspace__context" aria-label="Example workspace details">
-      <div class="lp-context-card"><h3>To-dos <span aria-hidden="true">+</span></h3><div class="lp-context-todo"><span aria-hidden="true">○</span><span>Pick up dinner shopping<small>Jordan · Saturday</small></span></div><div class="lp-context-todo"><span aria-hidden="true">○</span><span>Send the school forms<small>Maya · Friday</small></span></div></div>
-      <div class="lp-context-card"><h3>Lists <span aria-hidden="true">+</span></h3><a class="lp-context-list" href="#preview-lists" data-open-preview="lists">Dinner shopping <span aria-hidden="true">↗</span></a><p>House projects</p><p>Weekend ideas</p></div>
+      <div class="lp-context-card"><h3>To-dos <span aria-hidden="true">+</span></h3><div class="lp-context-todo"><span aria-hidden="true">○</span><span>Review kickoff agenda<small>Jordan · Before sending</small></span></div><div class="lp-context-todo"><span aria-hidden="true">○</span><span>Send the agenda to the client<small>After review</small></span></div></div>
+      <div class="lp-context-card"><h3>Lists <span aria-hidden="true">+</span></h3><a class="lp-context-list" href="#preview-lists" data-open-preview="lists">Kickoff checklist <span aria-hidden="true">↗</span></a><p>Client feedback</p><p>Launch notes</p></div>
     </aside>
   </div>
   <figcaption id="preview-caption">Example workspace · Interactive UI illustration with sample content.</figcaption>

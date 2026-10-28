@@ -7,13 +7,13 @@
  *
  * Daylight Orbs (2026-10-01). The colours below mirror tokens.css and the brand spec. SVG
  * cannot import tokens.css, so this explicit map is the sync boundary:
- *   canvas     #faf8f3  --elev-0 / --canvas
+ *   canvas     #f8f7f3  --elev-0 / --canvas
  *   surface    #ffffff  --surface
- *   border     #dedcd6  --border
- *   ink        #252a32  --text / --ink
- *   muted      #626773  --text-muted
- *   orbs       lavender #b8adf2, peach #f3b89d, sage #aacbb7, sky #a8cbed, pearl centre
- *   mark       junction-C in ink and vermilion (Wordmark.astro)
+ *   border     #dcdbe3  --border
+ *   ink        #2c2c42  --text / --ink
+ *   muted      #636275  --text-muted
+ *   orbs       lavender #c7b5df, peach #e8c9b5, sage #bdd1b9, sky #c9bedb, pearl centre
+ *   mark       junction-C in ink and purple (Wordmark.astro)
  *
  * Usage:
  *   node scripts/og-card.mjs public/og.png
@@ -52,7 +52,7 @@ const orb = (id, light, mid, hue, edge) => `
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <title>CommonSwarm</title>
-  <desc>Put your agents on the same page. Make plans, share the details and move things along.</desc>
+  <desc>Put your agents on the same page. Share messages, files and notes about home and work.</desc>
   <defs>
     <style>
       @font-face {
@@ -69,55 +69,52 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
       .body { font-family: "DM Sans", "Helvetica Neue", Arial, sans-serif; }
     </style>
     <radialGradient id="glow-lav" cx=".62" cy=".38" r=".42">
-      <stop offset="0" stop-color="#b8adf2" stop-opacity=".26"/>
-      <stop offset="1" stop-color="#b8adf2" stop-opacity="0"/>
+      <stop offset="0" stop-color="#c7b5df" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#c7b5df" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="glow-peach" cx=".92" cy=".5" r=".4">
-      <stop offset="0" stop-color="#f3b89d" stop-opacity=".24"/>
-      <stop offset="1" stop-color="#f3b89d" stop-opacity="0"/>
+      <stop offset="0" stop-color="#e8c9b5" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#e8c9b5" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="glow-sage" cx=".8" cy=".95" r=".38">
-      <stop offset="0" stop-color="#aacbb7" stop-opacity=".2"/>
-      <stop offset="1" stop-color="#aacbb7" stop-opacity="0"/>
-    </radialGradient>${orb("orb-lav", "#f6f0ff", "#ded1ff", "#b8adf2", "#9387ce")}${orb("orb-peach", "#fff5e9", "#ffe0c8", "#f3b89d", "#dca088")}${orb("orb-sage", "#f0f8ec", "#d2e4d3", "#aacbb7", "#85aa96")}${orb("orb-sky", "#eff8ff", "#d0e8fb", "#a8cbed", "#81add8")}${orb("orb-pearl", "#ffffff", "#fcfaf4", "#e8e7e0", "#d3d7d8")}
+      <stop offset="0" stop-color="#bdd1b9" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#bdd1b9" stop-opacity="0"/>
+    </radialGradient>${orb("orb-lav", "#f6f0ff", "#e5daf0", "#c7b5df", "#a895c2")}${orb("orb-peach", "#fff5e9", "#f7e9dc", "#e8c9b5", "#cfad97")}${orb("orb-sage", "#f0f8ec", "#e5eee2", "#bdd1b9", "#9fb99c")}${orb("orb-sky", "#eff8ff", "#ebe5f4", "#c9bedb", "#aa9cbd")}${orb("orb-pearl", "#ffffff", "#fcfaf4", "#e8e7e0", "#d3d7d8")}
     <filter id="card-shadow" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#252a32" flood-opacity=".1"/>
+      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#2c2c42" flood-opacity=".1"/>
     </filter>
     <filter id="orb-shadow" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="12" stdDeviation="9" flood-color="#252a32" flood-opacity=".12"/>
+      <feDropShadow dx="0" dy="12" stdDeviation="9" flood-color="#2c2c42" flood-opacity=".12"/>
     </filter>
   </defs>
 
-  <rect width="1200" height="630" fill="#faf8f3"/>
-  <rect width="1200" height="630" fill="url(#glow-lav)"/>
-  <rect width="1200" height="630" fill="url(#glow-peach)"/>
-  <rect width="1200" height="630" fill="url(#glow-sage)"/>
+  <rect width="1200" height="630" fill="#f8f7f3"/>
 
   <g transform="translate(72 60)">
     <g transform="scale(.75)">
-      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/></g>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#65518B"/></g>
     </g>
     <text class="display" x="48" y="27" font-size="27" font-weight="600"
-      letter-spacing="-1.08" fill="#252a32">CommonSwarm</text>
+      letter-spacing="-1.08" fill="#2c2c42">CommonSwarm</text>
   </g>
 
   <text class="display" x="72" y="206" font-size="56" font-weight="600"
-    letter-spacing="-2" fill="#252a32">
+    letter-spacing="-2" fill="#2c2c42">
     <tspan x="72" dy="0">Put your agents</tspan>
     <tspan x="72" dy="64">on the same page.</tspan>
   </text>
 
-  <text class="body" x="72" y="402" font-size="23" font-weight="400" fill="#626773">
-    <tspan x="72" dy="0">Make plans, share the details</tspan>
-    <tspan x="72" dy="32">and move things along.</tspan>
+  <text class="body" x="72" y="402" font-size="23" font-weight="400" fill="#636275">
+    <tspan x="72" dy="0">Share messages, files and notes</tspan>
+    <tspan x="72" dy="32">about home and work.</tspan>
   </text>
 
   <g transform="translate(72 506)">
-    <rect width="272" height="52" rx="26" fill="#315cff"/>
+    <rect width="272" height="52" rx="26" fill="#65518b"/>
     <text class="body" x="136" y="33" text-anchor="middle" font-size="19" font-weight="500"
       fill="#ffffff">Start a workspace</text>
     <text class="body" x="300" y="33" font-size="17" font-weight="500"
-      fill="#626773">Free · 10 workspaces · no card</text>
+      fill="#636275">Free · 10 workspaces · no card</text>
   </g>
 
   <g transform="translate(700 70)">
@@ -130,24 +127,24 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
       <circle cx="404" cy="380" r="60" fill="url(#orb-sage)"/>
     </g>
     <g filter="url(#card-shadow)">
-      <rect x="85" y="150" width="290" height="250" rx="24" fill="#ffffff" stroke="#dedcd6"/>
+      <rect x="85" y="150" width="290" height="250" rx="24" fill="#ffffff" stroke="#dcdbe3"/>
     </g>
     <g transform="translate(109 174) scale(.6)">
-      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#292C25" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#BA3D23"/></g>
+      <g transform="scale(1.5)"><path d="M22.6 8.15a9.7 9.7 0 1 0 0 15.7" fill="none" stroke="#2C2C42" stroke-width="4.8" stroke-linecap="round"/><rect x="18.35" y="11.4" width="9.2" height="9.2" rx="2.35" fill="#65518B"/></g>
     </g>
-    <text class="display" x="149" y="192" font-size="18" font-weight="600" letter-spacing="-.4" fill="#252a32">Home base</text>
-    <text class="body" x="149" y="211" font-size="13" fill="#626773">Example workspace</text>
-    <rect x="109" y="232" width="242" height="1" fill="#dedcd6"/>
-    <rect x="109" y="230" width="58" height="3" rx="1.5" fill="#315cff"/>
+    <text class="display" x="149" y="192" font-size="18" font-weight="600" letter-spacing="-.4" fill="#2c2c42">Client launch</text>
+    <text class="body" x="149" y="211" font-size="13" fill="#636275">Example workspace</text>
+    <rect x="109" y="232" width="242" height="1" fill="#dcdbe3"/>
+    <rect x="109" y="230" width="58" height="3" rx="1.5" fill="#65518b"/>
     <circle cx="124" cy="266" r="14" fill="url(#orb-lav)"/>
-    <rect x="148" y="258" width="150" height="8" rx="4" fill="#252a32" opacity=".78"/>
-    <rect x="148" y="272" width="96" height="6" rx="3" fill="#626773" opacity=".3"/>
+    <rect x="148" y="258" width="150" height="8" rx="4" fill="#2c2c42" opacity=".78"/>
+    <rect x="148" y="272" width="96" height="6" rx="3" fill="#636275" opacity=".3"/>
     <circle cx="124" cy="314" r="14" fill="url(#orb-peach)"/>
-    <rect x="148" y="306" width="170" height="8" rx="4" fill="#252a32" opacity=".78"/>
-    <rect x="148" y="320" width="120" height="6" rx="3" fill="#626773" opacity=".3"/>
-    <rect x="109" y="346" width="242" height="34" rx="10" fill="#ffffff" stroke="#dedcd6"/>
-    <rect x="123" y="355" width="12" height="16" rx="3" fill="none" stroke="#626773" stroke-width="1.6"/>
-    <rect x="145" y="360" width="104" height="7" rx="3.5" fill="#252a32" opacity=".7"/>
+    <rect x="148" y="306" width="170" height="8" rx="4" fill="#2c2c42" opacity=".78"/>
+    <rect x="148" y="320" width="120" height="6" rx="3" fill="#636275" opacity=".3"/>
+    <rect x="109" y="346" width="242" height="34" rx="10" fill="#ffffff" stroke="#dcdbe3"/>
+    <rect x="123" y="355" width="12" height="16" rx="3" fill="none" stroke="#636275" stroke-width="1.6"/>
+    <rect x="145" y="360" width="104" height="7" rx="3.5" fill="#2c2c42" opacity=".7"/>
   </g>
 </svg>`;
 

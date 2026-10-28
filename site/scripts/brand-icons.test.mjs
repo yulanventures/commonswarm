@@ -27,10 +27,7 @@ async function load(icon) {
   };
   return { data, info, px };
 }
-const near = (got, hex) => {
-  const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-  return want.every((v, i) => Math.abs(got[i] - v) <= 3);
-};
+const near = (got, want) => want.slice(0, 3).every((v, i) => Math.abs(got[i] - v) <= 3);
 
 for (const icon of icons) {
   test(`${icon.name} shows the current mark`, async () => {
@@ -38,24 +35,27 @@ for (const icon of icons) {
     assert.equal(info.width, icon.size);
     assert.equal(info.height, icon.size);
     const { data } = await load(icon);
+    const tile = px(icon.size * 0.15, icon.size * 0.15);
+    assert.equal(tile[3], 255, "tile is opaque");
     let colored = 0;
     for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] > 0 && !near([data[i], data[i + 1], data[i + 2]], "#FAF8F3")) colored++;
+      if (data[i + 3] > 0 && !near([data[i], data[i + 1], data[i + 2]], tile)) colored++;
     }
     assert.ok(colored > icon.size * icon.size * 0.02, "mark is visible on the tile");
     const corner = px(0, 0);
     if (icon.corner === "clear") assert.equal(corner[3], 0);
-    else assert.ok(near(corner, "#FAF8F3") && corner[3] === 255, `corner ${corner}`);
+    else assert.ok(near(corner, tile) && corner[3] === 255, `corner ${corner}`);
   });
 }
 
 test("maskable icon keeps the whole mark inside the safe zone", async () => {
-  const { info, data } = await load(icons[2]);
+  const { info, data, px } = await load(icons[2]);
+  const tile = px(0, 0);
   let far = 0;
   for (let y = 0; y < info.height; y++) {
     for (let x = 0; x < info.width; x++) {
       const i = (y * info.width + x) * 4;
-      if (near([data[i], data[i + 1], data[i + 2]], "#FAF8F3")) continue;
+      if (near([data[i], data[i + 1], data[i + 2]], tile)) continue;
       far = Math.max(far, Math.hypot(x + 0.5 - 256, y + 0.5 - 256));
     }
   }
