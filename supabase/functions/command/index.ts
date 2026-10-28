@@ -11523,12 +11523,8 @@ async function handleTransaction(
       return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
     // Legacy local workspace removal now withdraws membership, preserving the connection.
     if (kind === "revoke_agent_principal" && auth.credentialKind === "user" && typeof rawLocal?.principal_id === "string") {
-      const [principal]=await tx<{transport:string;workspace_id:string;member:boolean}[]>`SELECT transport,workspace_id,
-        EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${body.workspace_id}::uuid AND am.revoked_at IS NULL) AS member
-        FROM swarm.agent_principals WHERE principal_id=${rawLocal.principal_id}::uuid`;
-      if ((principal?.transport === "hosted_mcp" && (principal.workspace_id === body.workspace_id || principal.member))
-        || (principal?.transport === "local" && principal.workspace_id !== body.workspace_id && principal.member))
-        return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
+      const [principal]=await tx<{transport:string;workspace_id:string;member:boolean}[]>`SELECT transport,workspace_id,EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${body.workspace_id}::uuid AND am.revoked_at IS NULL) AS member FROM swarm.agent_principals WHERE principal_id=${rawLocal.principal_id}::uuid`;
+      if ((principal?.transport === "hosted_mcp" && (principal.workspace_id === body.workspace_id || principal.member)) || (principal?.transport === "local" && principal.workspace_id !== body.workspace_id && principal.member)) return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
     }
 
     // The move handler locks both organizations and checks live workspace ownership.
