@@ -1685,6 +1685,7 @@ function logCommandFailure(
   reason: string,
   detail?: string,
   dbCode?: string | null,
+  count?: number,
 ): void {
   console.error(JSON.stringify({
     event,
@@ -1693,7 +1694,25 @@ function logCommandFailure(
     reason,
     ...(detail === undefined ? {} : { detail: stripControls(detail) }),
     ...(typeof dbCode === "string" && dbCode.length === 5 && /^[A-Z0-9]{5}$/.test(dbCode) ? { db_code: dbCode } : {}),
+    ...(count === undefined ? {} : { count }),
   }));
+}
+
+const LOCAL_DISCOVERY_BINDING_LOG_INTERVAL_MS = 60_000;
+let localDiscoveryBindingRefusals = 0;
+let nextLocalDiscoveryBindingLogAt = -Infinity;
+
+function logLocalDiscoveryBindingRefusal(): void {
+  // Cumulative per-isolate counter: suppressed refusals remain in the next
+  // sample. Fixed labels, constant memory, no timer or diagnostic DB write.
+  localDiscoveryBindingRefusals++;
+  const now = performance.now();
+  if (now < nextLocalDiscoveryBindingLogAt) return;
+  nextLocalDiscoveryBindingLogAt = now + LOCAL_DISCOVERY_BINDING_LOG_INTERVAL_MS;
+  logCommandFailure(
+    "command_request_failure", "local_discovery", "authz",
+    "local_discovery_binding", undefined, "22023", localDiscoveryBindingRefusals,
+  );
 }
 
 function exactKeys(
@@ -13974,8 +13993,10 @@ async function handleTransaction(
     // Only this owned code/detail pair is a refusal; never expose which binding
     // failed, retry it, or turn unrelated invalid-parameter errors into denials.
     const failure = record(error);
-    if (failure?.code === '22023' && failure.detail === 'LOCAL_DISCOVERY_BINDING')
+    if (failure?.code === '22023' && failure.detail === 'LOCAL_DISCOVERY_BINDING') {
+      logLocalDiscoveryBindingRefusal();
       return {status:403,body:{error:'forbidden'}};
+    }
     if (error instanceof LocalCredentialDenied
       && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
       return {status:403,body:{error:'delivery_unavailable'}};
