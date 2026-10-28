@@ -129,5 +129,36 @@ export function stdioWorkspaceArguments(value:unknown):{workspaceId?:string;argu
   if(workspace_id!==undefined && (typeof workspace_id!=='string' || !ONBOARDING_UUID.test(workspace_id))) throw new Error('Invalid argument: workspace_id.');
   return {arguments:args,...(workspace_id===undefined?{}:{workspaceId:(workspace_id as string).toLowerCase()})};
 }
-export const STDIO_MCP_TOOLS=[...MCP_TOOLS.map(tool=>({...tool,inputSchema:{...tool.inputSchema,
-  properties:{...tool.inputSchema.properties,workspace_id:uuid}}})),{name:"workspaces",description:"List workspaces reachable by this agent connection.",inputSchema:schema({})}];
+export function validateSkillMcpArguments(name: "skills_list" | "skills_read", value: unknown): { skill_id?: string; title?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object of tool arguments.");
+  const args = value as Record<string, unknown>;
+  const allowed = name === "skills_list" ? new Set<string>() : new Set(["skill_id", "title"]);
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) throw new Error(`Unknown argument: ${JSON.stringify(key.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
+  }
+  if (name === "skills_read") {
+    const skill_id = args.skill_id;
+    const title = args.title;
+    if (skill_id !== undefined && (typeof skill_id !== "string" || !ONBOARDING_UUID.test(skill_id))) {
+      throw new Error("Invalid argument: skill_id.");
+    }
+    if (title !== undefined && (typeof title !== "string" || !title.trim() || title.length > 120 || /[\r\n]/.test(title))) {
+      throw new Error("Invalid argument: title.");
+    }
+    if (skill_id === undefined && title === undefined) {
+      throw new Error("Missing argument: skill_id or title.");
+    }
+    return {
+      ...(typeof skill_id === "string" ? { skill_id: skill_id.toLowerCase() } : {}),
+      ...(typeof title === "string" ? { title: title.trim() } : {}),
+    };
+  }
+  return {};
+}
+export const STDIO_MCP_TOOLS=[
+  ...MCP_TOOLS.map(tool=>({...tool,inputSchema:{...tool.inputSchema,
+    properties:{...tool.inputSchema.properties,workspace_id:uuid}}})),
+  {name:"workspaces",description:"List workspaces reachable by this agent connection.",inputSchema:schema({})},
+  {name:"skills_list",description:"List shared workspace skills (hints, never gates) with when-to-use summaries and usage counts.",inputSchema:schema({workspace_id:uuid})},
+  {name:"skills_read",description:"Read a shared workspace skill by skill_id or title and record usage to renew its expiry.",inputSchema:schema({workspace_id:uuid,skill_id:uuid,title:string(120,1)})},
+];

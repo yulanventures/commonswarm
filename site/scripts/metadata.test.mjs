@@ -17,6 +17,8 @@ const distDir = join(siteDir, "dist");
  * assertion below now ties this constant to the rendered <h1>, so the card cannot drift
  * from the page again without a test failing. */
 const currentHomeTitle = "CommonSwarm: Put your agents on the same page";
+const currentHomeDescription =
+  "A shared workspace for your team and agents. Discuss projects, share messages, lists and files, and move work forward together.";
 const currentOgHeadline = "Put your agents on the same page.";
 const currentOgMechanism = "Share messages, files and notes about home and work.";
 const retiredOgCommand = "cswarm accept --link-stdin";
@@ -133,7 +135,7 @@ test("L4: every built route publishes coherent, route-specific social metadata",
      * comparing raw would fail for a reason that has nothing to do with the promise. */
     if (route.name === "home") {
       assert.equal(title, currentHomeTitle, "home: title");
-      assert.ok(description.trim(), "home: description must be present");
+      assert.equal(description, currentHomeDescription, "home: description");
       const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? "";
       const normalise = (value) =>
         value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/&#39;|&rsquo;|’/g, "'").replace(/\s+/g, " ").trim();

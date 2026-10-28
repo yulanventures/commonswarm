@@ -5348,6 +5348,275 @@ function reduceTodoEvents(initial, events) {
   }
   return state;
 }
+
+// src/protocol/workspace-skills.ts
+var WORKSPACE_SKILLS_CAP = 20;
+var SKILL_SUGGESTIONS_CAP = 10;
+var SKILL_DISMISSED_KEYS_CAP = 100;
+var SKILL_TITLE_MAX = 120;
+var SKILL_WHEN_TO_USE_MAX = 200;
+var SKILL_BODY_MAX = 1500;
+var SKILL_TTL_DAYS = 60;
+var SKILL_TTL_MS = SKILL_TTL_DAYS * 24 * 60 * 60 * 1e3;
+var SKILL_UNUSED_ARCHIVE_DAYS = 14;
+var SKILL_UNUSED_ARCHIVE_MS = SKILL_UNUSED_ARCHIVE_DAYS * 24 * 60 * 60 * 1e3;
+function emptyWorkspaceSkillsState() {
+  return { entries: [], suggestions: [], dismissed_keys: [] };
+}
+function normalizeWorkspaceSkillsState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyWorkspaceSkillsState();
+  const data = raw;
+  const entries = [];
+  if (Array.isArray(data.entries)) {
+    for (const item of data.entries) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const r = item;
+      if (typeof r.skill_id === "string" && typeof r.title === "string" && typeof r.when_to_use === "string" && typeof r.body === "string" && typeof r.use_count === "number" && typeof r.created_at === "number" && typeof r.updated_at === "number" && typeof r.expires_at === "number") {
+        entries.push({
+          skill_id: r.skill_id,
+          title: r.title,
+          when_to_use: r.when_to_use,
+          body: r.body,
+          use_count: r.use_count,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+          last_used_at: typeof r.last_used_at === "number" ? r.last_used_at : null,
+          expires_at: r.expires_at
+        });
+      }
+    }
+  }
+  const suggestions = [];
+  if (Array.isArray(data.suggestions)) {
+    for (const item of data.suggestions) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const r = item;
+      if (typeof r.suggestion_id === "string" && typeof r.source_key === "string" && typeof r.title === "string" && typeof r.when_to_use === "string" && typeof r.body === "string" && typeof r.created_at === "number" && (r.reason === "todo_reopened" || r.reason === "todo_failed" || r.reason === "agent_proposed")) {
+        suggestions.push({
+          suggestion_id: r.suggestion_id,
+          source_key: r.source_key,
+          todo_id: typeof r.todo_id === "string" ? r.todo_id : null,
+          reason: r.reason,
+          title: r.title,
+          when_to_use: r.when_to_use,
+          body: r.body,
+          created_at: r.created_at
+        });
+      }
+    }
+  }
+  const dismissed_keys = Array.isArray(data.dismissed_keys) ? data.dismissed_keys.filter((k) => typeof k === "string") : [];
+  return { entries, suggestions, dismissed_keys };
+}
+var HANDLE_OR_EMAIL_RE = /(?:^|[\s(])@[A-Za-z0-9_.-]+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+function hasGeneralSkillWording(text3) {
+  return !HANDLE_OR_EMAIL_RE.test(text3);
+}
+function validateSkillFields(input) {
+  if (typeof input.title !== "string") return { ok: false, reason: "skill_title_invalid" };
+  const title = input.title.trim();
+  if (!title || title.length > SKILL_TITLE_MAX || /[\r\n]/.test(title)) {
+    return { ok: false, reason: "skill_title_invalid" };
+  }
+  if (typeof input.when_to_use !== "string") return { ok: false, reason: "skill_when_to_use_invalid" };
+  const when_to_use = input.when_to_use.trim();
+  if (!when_to_use || when_to_use.length > SKILL_WHEN_TO_USE_MAX || /[\r\n]/.test(when_to_use)) {
+    return { ok: false, reason: "skill_when_to_use_invalid" };
+  }
+  if (typeof input.body !== "string") return { ok: false, reason: "skill_body_invalid" };
+  const body = input.body.trim();
+  if (!body || body.length > SKILL_BODY_MAX) {
+    return { ok: false, reason: "skill_body_invalid" };
+  }
+  if (!hasGeneralSkillWording(title) || !hasGeneralSkillWording(when_to_use) || !hasGeneralSkillWording(body)) {
+    return { ok: false, reason: "skill_wording_not_general" };
+  }
+  return { ok: true, title, when_to_use, body };
+}
+function tidyWorkspaceSkills(state, now) {
+  const entries = state.entries.filter((entry) => {
+    if (entry.expires_at <= now) return false;
+    if (entry.use_count === 0 && now - entry.created_at >= SKILL_UNUSED_ARCHIVE_MS) return false;
+    return true;
+  });
+  if (entries.length === state.entries.length) return state;
+  return { ...state, entries };
+}
+function leastUsedEntry(entries) {
+  return [...entries].sort((a, b) => a.use_count - b.use_count || (a.last_used_at ?? a.created_at) - (b.last_used_at ?? b.created_at) || a.created_at - b.created_at || a.skill_id.localeCompare(b.skill_id))[0];
+}
+function saveWorkspaceSkill(state, input) {
+  const checked = validateSkillFields(input);
+  if (!checked.ok) return { status: "refused", reason: checked.reason };
+  const tidied = tidyWorkspaceSkills(state, input.now);
+  const existingIndex = tidied.entries.findIndex((entry) => input.skill_id ? entry.skill_id === input.skill_id : entry.title.toLowerCase() === checked.title.toLowerCase());
+  if (existingIndex >= 0) {
+    const previous = tidied.entries[existingIndex];
+    const updated = {
+      ...previous,
+      title: checked.title,
+      when_to_use: checked.when_to_use,
+      body: checked.body,
+      updated_at: input.now,
+      expires_at: Math.max(previous.expires_at, input.now + SKILL_TTL_MS)
+    };
+    const nextEntries = [...tidied.entries];
+    nextEntries[existingIndex] = updated;
+    return {
+      status: "committed",
+      state: { ...tidied, entries: nextEntries },
+      skill: updated,
+      replaced_skill_id: null
+    };
+  }
+  let working = [...tidied.entries];
+  let replaced_skill_id = null;
+  if (working.length >= WORKSPACE_SKILLS_CAP) {
+    const victim = leastUsedEntry(working);
+    replaced_skill_id = victim.skill_id;
+    working = working.filter((entry) => entry.skill_id !== victim.skill_id);
+  }
+  const created = {
+    skill_id: input.new_id,
+    title: checked.title,
+    when_to_use: checked.when_to_use,
+    body: checked.body,
+    use_count: 0,
+    created_at: input.now,
+    updated_at: input.now,
+    last_used_at: null,
+    expires_at: input.now + SKILL_TTL_MS
+  };
+  working.push(created);
+  return {
+    status: "committed",
+    state: { ...tidied, entries: working },
+    skill: created,
+    replaced_skill_id
+  };
+}
+function useWorkspaceSkill(state, selector, now, countUse = true) {
+  const tidied = tidyWorkspaceSkills(state, now);
+  const index = tidied.entries.findIndex((entry) => selector.skill_id ? entry.skill_id === selector.skill_id : selector.title ? entry.title.toLowerCase() === selector.title.trim().toLowerCase() : false);
+  if (index < 0) {
+    return { state: tidied, skill: null, changed: tidied.entries.length !== state.entries.length };
+  }
+  const current = tidied.entries[index];
+  if (!countUse) {
+    return { state: tidied, skill: current, changed: tidied.entries.length !== state.entries.length };
+  }
+  const updated = {
+    ...current,
+    use_count: current.use_count + 1,
+    last_used_at: now,
+    expires_at: now + SKILL_TTL_MS
+  };
+  const entries = [...tidied.entries];
+  entries[index] = updated;
+  return { state: { ...tidied, entries }, skill: updated, changed: true };
+}
+function deleteWorkspaceSkill(state, skillId, now) {
+  const tidied = tidyWorkspaceSkills(state, now);
+  const entries = tidied.entries.filter((entry) => entry.skill_id !== skillId);
+  const deleted = entries.length !== tidied.entries.length;
+  return { state: deleted ? { ...tidied, entries } : tidied, deleted };
+}
+function scrubHandles(text3) {
+  return text3.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "teammate").replace(/(?:^|[\s(])@[A-Za-z0-9_.-]+/g, " teammate").replace(/\s+/g, " ").trim();
+}
+function proposeWorkspaceSkillSuggestion(state, input) {
+  const checked = validateSkillFields(input);
+  if (!checked.ok) return { status: "refused", state, reason: checked.reason };
+  const key2 = input.source_key.trim();
+  if (!key2 || state.dismissed_keys.includes(key2) || state.suggestions.some((s) => s.source_key === key2)) {
+    return { status: "skipped", state };
+  }
+  const suggestion = {
+    suggestion_id: input.suggestion_id,
+    source_key: key2,
+    todo_id: input.todo_id ?? null,
+    reason: input.reason,
+    title: checked.title,
+    when_to_use: checked.when_to_use,
+    body: checked.body,
+    created_at: input.now
+  };
+  const suggestions = [...state.suggestions, suggestion].slice(-SKILL_SUGGESTIONS_CAP);
+  return { status: "proposed", state: { ...state, suggestions }, suggestion };
+}
+function proposeTodoFailureSkill(state, input) {
+  const cleanTitle = scrubHandles(input.todo_title).replace(/[\r\n]+/g, " ").slice(0, 80).trim() || "workspace task";
+  const cleanNote = scrubHandles(input.failure_note || input.todo_notes || "").slice(0, 800).trim();
+  const source_key = `${input.reason}:${input.todo_id}:${cleanTitle.toLowerCase()}`;
+  const title = `Checklist: ${cleanTitle}`.slice(0, SKILL_TITLE_MAX);
+  const when_to_use = `When handling tasks related to ${cleanTitle}`.slice(0, SKILL_WHEN_TO_USE_MAX);
+  const body = cleanNote ? `Verify before marking complete:
+- ${cleanNote}
+- Confirm the expected result in the workspace before closing the task.` : `Verify all completion criteria for "${cleanTitle}" before marking the task done.`;
+  const result = proposeWorkspaceSkillSuggestion(state, {
+    suggestion_id: input.suggestion_id,
+    source_key,
+    todo_id: input.todo_id,
+    reason: input.reason,
+    title,
+    when_to_use,
+    body: body.slice(0, SKILL_BODY_MAX),
+    now: input.now
+  });
+  return result.state;
+}
+function keepWorkspaceSkillSuggestion(state, suggestionId, newSkillId, now) {
+  const suggestion = state.suggestions.find((item) => item.suggestion_id === suggestionId);
+  if (!suggestion) return { status: "refused", reason: "suggestion_not_found" };
+  const withoutSuggestion = {
+    ...state,
+    suggestions: state.suggestions.filter((item) => item.suggestion_id !== suggestionId)
+  };
+  return saveWorkspaceSkill(withoutSuggestion, {
+    new_id: newSkillId,
+    title: suggestion.title,
+    when_to_use: suggestion.when_to_use,
+    body: suggestion.body,
+    now
+  });
+}
+function dismissWorkspaceSkillSuggestion(state, suggestionId) {
+  const suggestion = state.suggestions.find((item) => item.suggestion_id === suggestionId);
+  if (!suggestion) return { status: "refused", reason: "suggestion_not_found" };
+  const dismissed_keys = state.dismissed_keys.includes(suggestion.source_key) ? state.dismissed_keys : [...state.dismissed_keys, suggestion.source_key].slice(-SKILL_DISMISSED_KEYS_CAP);
+  return {
+    status: "committed",
+    state: {
+      ...state,
+      suggestions: state.suggestions.filter((item) => item.suggestion_id !== suggestionId),
+      dismissed_keys
+    }
+  };
+}
+function formatWorkspaceSkillSummary(skill, now) {
+  const anchor = skill.last_used_at ?? skill.created_at;
+  const unused_days = Math.max(0, Math.floor((now - anchor) / (24 * 60 * 60 * 1e3)));
+  return {
+    skill_id: skill.skill_id,
+    title: skill.title,
+    when_to_use: skill.when_to_use,
+    use_count: skill.use_count,
+    unused_days,
+    used_label: `used ${skill.use_count} ${skill.use_count === 1 ? "time" : "times"}`,
+    unused_label: `unused for ${unused_days} ${unused_days === 1 ? "day" : "days"}`,
+    stale_removal_candidate: unused_days >= 14 || skill.use_count === 0 && unused_days >= 7,
+    last_used_at: skill.last_used_at === null ? null : new Date(skill.last_used_at).toISOString(),
+    expires_at: new Date(skill.expires_at).toISOString(),
+    updated_at: new Date(skill.updated_at).toISOString()
+  };
+}
+function formatWorkspaceSkillView(skill, now) {
+  return {
+    ...formatWorkspaceSkillSummary(skill, now),
+    body: skill.body,
+    created_at: new Date(skill.created_at).toISOString()
+  };
+}
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -5423,6 +5692,15 @@ export {
   RENEWAL_IDLE_PAUSE_DAYS,
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
   SCHEMA_VERSION,
+  SKILL_BODY_MAX,
+  SKILL_DISMISSED_KEYS_CAP,
+  SKILL_SUGGESTIONS_CAP,
+  SKILL_TITLE_MAX,
+  SKILL_TTL_DAYS,
+  SKILL_TTL_MS,
+  SKILL_UNUSED_ARCHIVE_DAYS,
+  SKILL_UNUSED_ARCHIVE_MS,
+  SKILL_WHEN_TO_USE_MAX,
   StreamIntegrityError,
   TODO_COMMENT_LIMIT,
   TODO_DEFAULT_ACCEPTS_FROM,
@@ -5442,6 +5720,7 @@ export {
   UpcastError,
   WORKSPACE_EVENT_TYPES,
   WORKSPACE_ROLES,
+  WORKSPACE_SKILLS_CAP,
   WORK_RECENT_MS,
   adminAccountWithDurableGrants,
   adminAvailabilityDigest,
@@ -5475,13 +5754,19 @@ export {
   decideHumanInvite,
   decideTodo,
   decideWorkspace,
+  deleteWorkspaceSkill,
+  dismissWorkspaceSkillSuggestion,
   emptyAdminAccount,
   emptyAdminRoutine,
   emptyHouseholdObjectState,
   emptyHouseholdTodoState,
+  emptyWorkspaceSkillsState,
   evaluateGate,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
+  formatWorkspaceSkillSummary,
+  formatWorkspaceSkillView,
+  hasGeneralSkillWording,
   hostedCheckMillisecondTimestamp,
   hostedSeatNameValid,
   householdAccessRefusal,
@@ -5493,15 +5778,19 @@ export {
   isAgentScopeDenylisted,
   isBrainFileArtifactName,
   isFileVersionPrecondition,
+  keepWorkspaceSkillSuggestion,
   leaseLive,
   legacyHouseholdAcceptRefusal,
   legacyRemovalRejoinRefusal,
+  normalizeWorkspaceSkillsState,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   parseAdminClientApprovalCommand,
   parseAdminRoutineCommand,
   parseHumanInviteCommand,
   planFileVersionWindow,
+  proposeTodoFailureSkill,
+  proposeWorkspaceSkillSuggestion,
   publicHostedCommandForbidden,
   readHouseholdObjects,
   reduceAdminAuthority,
@@ -5517,10 +5806,14 @@ export {
   reduceWorkspaceStream,
   registerUpcaster,
   requestHash,
+  saveWorkspaceSkill,
+  tidyWorkspaceSkills,
   todoNoticeAbout,
   upcastEnvelope,
   upcastPayload,
+  useWorkspaceSkill,
   validateHostedTodoListToolArguments,
   validateHouseholdHumanCommand,
-  validateHouseholdToolArguments
+  validateHouseholdToolArguments,
+  validateSkillFields
 };

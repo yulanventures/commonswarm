@@ -175,8 +175,30 @@ const fixtureScript = `
     check('setTitle retains original H1/menu', docked());
     host.sync(project(chat));
     if (innerWidth > 832) {
-    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - 260) < 0.5);
+    check('52px product rail', Math.abs(app.querySelector('.cs-org-rail').getBoundingClientRect().width - frame.querySelector('.hm-frame__main').getBoundingClientRect().width) < 1);
+    check('header precedes section tabs in DOM order', slot.nextSibling === app.querySelector('.cs-org-rail'));
     check('responsive context width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 260) < 0.5);
+    host.suspend(); host.sync(project(chat)); renderHeader();
+    const railResizer = app.querySelector('[data-resizer="rail"]'), sideResizer = app.querySelector('[data-resizer="side"]');
+    railResizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    check('rail resizer widens sidebar after suspend/remount and persists', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 276) < 0.5 && localStorage.getItem('cs-divider-width:rail') === '276',
+      { width: app.querySelector('.cs-org-context-parking').getBoundingClientRect().width, stored: localStorage.getItem('cs-divider-width:rail'), max: railResizer.getAttribute('aria-valuemax'), now: railResizer.getAttribute('aria-valuenow'), hostWidth: app.querySelector('.cs-org-shell').clientWidth });
+    railResizer.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    check('rail resizer dblclick resets default width', Math.abs(app.querySelector('.cs-org-context-parking').getBoundingClientRect().width - 260) < 0.5 && !localStorage.getItem('cs-divider-width:rail'));
+    sideResizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    check('side resizer widens right panel', sideResizer.getAttribute('aria-valuenow') === '304');
+    sideResizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    check('side resizer clamps against available frame width', Number(sideResizer.getAttribute('aria-valuenow')) <= frame.clientWidth - 260);
+    sideResizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    check('side resizer Enter resets default width', sideResizer.getAttribute('aria-valuenow') === '288');
+    const hhHost = document.createElement('div'); hhHost.className = 'household-objects';
+    hhHost.innerHTML = '<div class="hh-layout"><nav></nav><article></article></div>';
+    frame.append(hhHost); await settle();
+    check('lists resizer attaches and survives innerHTML replacement', !!hhHost.querySelector('[data-resizer="lists"]'));
+    hhHost.innerHTML = '<div class="hh-layout"><nav></nav><article>Updated</article></div>';
+    await settle();
+    check('lists resizer reattaches after innerHTML re-render', !!hhHost.querySelector('[data-resizer="lists"]'));
+    hhHost.remove(); await settle();
     }
     check('legacy tablet nav hidden', [...app.querySelectorAll('.hm-ws-nav')].every(node => !node.getClientRects().length));
     const label = app.querySelector('.cs-org-identity-copy').textContent;

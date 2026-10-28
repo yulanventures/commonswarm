@@ -981,7 +981,7 @@ export async function assertActiveFloorCatalog(sql) {
     }
     if(count===0 || count!==[...text.matchAll(/^CREATE(?: OR REPLACE)? FUNCTION\b/gimu)].length) throw new Error('active_catalog_source_unreadable');
   }
-  for (const file of ['20261028000002_local_agent_workspaces.sql','20261028000003_hosted_agent_workspaces.sql']) {
+  for (const file of ['20261028000002_local_agent_workspaces.sql','20261028000003_hosted_agent_workspaces.sql','20261028000005_agent_workspace_auth_fixes.sql']) {
     const text = readFileSync(join(REPO_ROOT,'supabase/migrations',file),'utf8');
     const pattern = /CREATE(?: OR REPLACE)? FUNCTION\s+([a-z_]+\.[a-z_]+)\s*\(([^)]*)\)([\s\S]*?)\bAS\s+(\$[a-z_]*\$)([\s\S]*?)\4\s*;/giu;
     for (const match of text.matchAll(pattern)) {

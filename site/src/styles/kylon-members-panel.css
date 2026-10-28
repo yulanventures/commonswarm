@@ -6,12 +6,26 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page] {
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-page-side { display: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-side { display: block; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-context { gap: 0; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail [data-people-context] > :is(.pd-page-main,.pd-context-footer),
-live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters,.pd-agent-picker),
-live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-back { display: none; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-title-row h1 {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-people-composition]) [data-people-page].has-detail {
+    position: relative; display: grid; grid-template-columns: min(var(--cs-people-list-width, 340px), 50%) minmax(0, 1fr);
+    max-inline-size: 1080px; padding: 0; gap: 0; align-items: start;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-people-composition]) [data-people-page].has-detail > [data-people-context] {
+    padding: 20px; border-inline-end: 1px solid var(--k-shell-line);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell:not([data-people-composition]) [data-people-page].has-detail > .pd-page-side {
+    padding: 20px 24px; min-inline-size: 0;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-context { gap: 0; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail [data-people-context] > :is(.pd-page-main,.pd-context-footer),
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters,.pd-agent-picker),
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-back { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-title-row h1 {
+    position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] { gap: 16px; font-size: 15px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-head { gap: 12px; }

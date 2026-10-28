@@ -135,11 +135,6 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       AND swarm.local_parent_connection_live(p.parent_admin_grant_id)
       AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
       AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes)
-      AND EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am
-        WHERE am.principal_id=p.principal_id
-          AND swarm.local_agent_workspace_live(p.principal_id,am.workspace_id)
-          AND swarm.admin_child_live(t.parent_admin_grant_id,am.workspace_id)
-          AND swarm.admin_child_live(p.parent_admin_grant_id,am.workspace_id))
       AND (g.renewal_grant_id IS NULL OR (g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
         AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
         AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)
@@ -265,6 +260,7 @@ export async function enforceAgentSessionProof(
     proofParse: AgentSessionProofParse;
     managedAt?: Date | string | null;
     connectionOnly?: boolean;
+    recheckOnly?: boolean;
   },
 ): Promise<AgentSessionFenceResult> {
   const principals = await tx<{
@@ -289,10 +285,12 @@ export async function enforceAgentSessionProof(
   }
 
   const parsedProof = args.proofParse.ok ? args.proofParse.proof : null;
-  const existing = await tx<{ key_hash: Uint8Array | ArrayBuffer | string | null; generation: string | number | bigint; retired: boolean }[]>`SELECT key_hash, generation,
+  const existing = await tx<{ key_hash: Uint8Array | ArrayBuffer | string | null; generation: string | number | bigint; live: boolean; retired: boolean }[]>`SELECT key_hash, generation,
+    (expired_at IS NOT NULL AND expired_at > clock_timestamp()) AS live,
     EXISTS(SELECT 1 FROM swarm.retired_agent_sessions r WHERE r.principal_id=agent_execution_sessions.principal_id AND r.session_id=${parsedProof ? parsedProof.session_id : null}::uuid) AS retired
     FROM swarm.agent_execution_sessions WHERE principal_id=${args.principalId}::uuid AND (workspace_id=${args.workspaceId}::uuid OR ${args.connectionOnly===true}) ORDER BY workspace_id FOR SHARE`;
-  if (!args.connectionOnly && parsedProof && existing.some((r) => r.key_hash === null && !r.retired && Number(r.generation) <= parsedProof.generation)) {
+  if (args.connectionOnly) await tx`SELECT principal_id FROM swarm.agent_connection_sessions WHERE principal_id=${args.principalId}::uuid AND session_id=${parsedProof ? parsedProof.session_id : null}::uuid FOR SHARE`;
+  if (!args.connectionOnly && !args.recheckOnly && parsedProof && existing.some((r) => (r.key_hash === null || !r.live) && !r.retired && Number(r.generation) <= parsedProof.generation)) {
     await tx`SELECT swarm.activate_local_workspace_session(${args.principalId}::uuid,${args.workspaceId}::uuid,
       ${parsedProof.session_id}::uuid,${parsedProof.generation},${await hashSessionKey(parsedProof.key)})`;
   }

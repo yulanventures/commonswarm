@@ -1,6 +1,7 @@
 import { createChannelDetails } from "./channel-details";
 import { createOrgShell } from "./shell.js";
 import { createPeopleContext } from "./people-context";
+import { createShellResizers } from "./resizers";
 import { createTodoContext } from "./todo-context";
 import { createWikiContext } from "./wiki-context";
 
@@ -12,6 +13,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   const doc = app.ownerDocument;
   const frame = app.querySelector<HTMLElement>(".hm-frame");
   const context = app.querySelector<HTMLElement>("[data-home-rail-slot]");
+  const workspaceShell = app.querySelector<HTMLElement>("[data-home-workspace-shell]");
   const account = app.querySelector<HTMLElement>("[data-user-menu-root]");
   const accountIcon = account?.querySelector(".dashboard__user-trigger > svg");
   const accountPath = accountIcon?.querySelector("path");
@@ -27,16 +29,35 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   const todoContext = createTodoContext(app, () => shell);
   const peopleContext = createPeopleContext(app, () => shell, context);
   const wikiContext = createWikiContext(app, () => shell);
+  const resizers = createShellResizers(app, () => shell?.root ?? null);
+  const syncRailPlacement = (legacyRail = false) => {
+    if (!shell) return;
+    const rail = shell.slots.rail as HTMLElement;
+    if (legacyRail || !workspaceShell?.parentElement) {
+      const parking = shell.root.querySelector(":scope > .cs-org-context-parking");
+      if (rail.parentElement !== shell.root) {
+        if (parking) shell.root.insertBefore(rail, parking);
+        else shell.root.prepend(rail);
+      }
+      return;
+    }
+    if (workspaceShell.nextSibling !== rail) {
+      workspaceShell.after(rail);
+    }
+  };
   const restoreMenu = () => {
     if (phoneMenu) { phoneMenu.parent.append(phoneMenu.node); phoneMenu = null; }
     if (phoneHeading) { phoneHeading.parent.append(phoneHeading.node); phoneHeading = null; }
   };
-  const restore = () => {
+  const restore = (finalDestroy = false) => {
     channelDetails.destroy();
     wikiContext.clear();
     todoContext.clear();
     peopleContext.clear();
+    if (finalDestroy) resizers.destroy();
+    else resizers.suspend();
     restoreMenu();
+    syncRailPlacement(true);
     accountIcon?.querySelector(".cs-org-switcher-chevron")?.remove();
     if (accountIcon && originalIcon.viewBox != null) accountIcon.setAttribute("viewBox", originalIcon.viewBox);
     if (accountPath && originalIcon.path != null) accountPath.setAttribute("d", originalIcon.path);
@@ -62,6 +83,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   };
   const syncMenu = (active = true) => {
     if (!menuDock) return;
+    resizers.sync();
     if (!active) { restoreMenu(); shell!.setTitle(title); return; }
     const node = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-menu") ?? phoneMenu?.node;
     const heading = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-phone-bar__title") ?? phoneHeading?.node;
@@ -109,9 +131,11 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
           chevron.setAttribute("d", "M6 9l6 6 6-6"); accountIcon.append(chevron);
         }
       }
+      syncRailPlacement(vm.todo === true || vm.wiki === true);
       channelDetails.set(channel);
       todoContext.set(vm.todo === true);
       wikiContext.set(vm.wiki === true);
+      resizers.sync();
       // Data/route changes update existing slots; time-only refreshes keep keyboard focus intact.
       const next = JSON.stringify([vm.title, vm.workspaceName, vm.navigation]);
       if (next === key) return;
@@ -128,7 +152,10 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     },
     syncMenu,
     refreshTodoContext: (replace: () => void) => todoContext.refresh(() => wikiContext.refresh(replace)),
-    peopleContext: peopleContext.set,
+    peopleContext(roster: HTMLElement | null) {
+      peopleContext.set(roster);
+      resizers.sync();
+    },
     replaceHeader(replace: () => void) {
       const active = doc.activeElement;
       const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneHeading?.node ? "heading" : null;

@@ -58,3 +58,39 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
     },
   };
 }
+
+export async function callHouseholdSkills(options: {
+  target: CloudTarget;
+  workspaceId: string;
+  credential: string;
+  fetcher?: typeof fetch;
+  command: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<Record<string, unknown>> {
+  const fetcher = options.fetcher ?? fetch;
+  const response = await fetcher(commandEndpoint(options.target), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${options.credential}`,
+      apikey: options.target.anonKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(withClientBuild({
+      command_id: randomUUID(),
+      client_version: CLIENT_PROTOCOL_VERSION,
+      workspace_id: options.workspaceId,
+      stream: { kind: 'workspace' },
+      command: { kind: 'household_skills', ...options.command },
+    })),
+    signal: options.signal,
+  });
+  if (response.status >= 500) throw new ServerError(response.status);
+  if (!response.ok) {
+    let body: unknown;
+    try { body = await response.json(); } catch { /* ignore */ }
+    const data = body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+    const code = data.reason ?? data.error ?? data.code;
+    return { status: 'refused', reason: typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'request_refused' };
+  }
+  return await response.json() as Record<string, unknown>;
+}

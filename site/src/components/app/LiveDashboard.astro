@@ -1796,7 +1796,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        surface move focus. One gate per surface: panels and the auth form present
        independently, so a signed-in boot does not pre-consume the auth form's skip. */
     const layout = createKylonHost(app, href => navigateHomeHref(href));
-    const syncVisibleShell = (): void => layout.sync(projectHomeLayout(app.dataset.state, homeRoute, workspaces, sampleMode));
+    const syncVisibleShell = (): void => layout.sync({ ...projectHomeLayout(app.dataset.state, homeRoute, workspaces, sampleMode), people: false, todo: false, wiki: false });
     const panelBootFocus = new BootFocusGate();
     const authBootFocus = new BootFocusGate();
 
@@ -4607,7 +4607,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view === "people" || homeRoute.view === "wiki" || homeRoute.view === "lists", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
+        people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
