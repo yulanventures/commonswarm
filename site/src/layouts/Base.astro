@@ -153,6 +153,19 @@ const {
 const origin = (Astro.site ?? new URL(FALLBACK_ORIGIN)).origin;
 const canonical = new URL(path, origin).href;
 const ogImageUrl = new URL(ogImage, origin).href;
+const isHome = path === "/";
+const isAppShell = path === "/app" || path === "/invite";
+const fontPreloads = isHome
+  ? ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/dm-sans-latin.woff2"]
+  : isAppShell
+    ? ["/fonts/inter-latin.woff2", "/fonts/jetbrains-mono-latin.woff2"]
+    : path === "/download"
+      ? [
+          "/fonts/bricolage-grotesque-latin.woff2",
+          "/fonts/instrument-sans-latin.woff2",
+          "/fonts/jetbrains-mono-latin.woff2",
+        ]
+      : ["/fonts/bricolage-grotesque-latin.woff2", "/fonts/instrument-sans-latin.woff2"];
 
 /* Alt text describes the CARD, and the card is a picture of a sentence — so this string and
  * public/og.png have to be redrawn together. The card is generated from scripts/og-card.mjs;
@@ -181,7 +194,11 @@ const ogImageAlt =
 ---
 
 <!doctype html>
-<html lang="en">
+<html
+  lang="en"
+  data-home={isHome ? "" : undefined}
+  data-marketing={!isAppShell ? "" : undefined}
+>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -209,27 +226,11 @@ const ogImageAlt =
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
 
-    <link
-      rel="preload"
-      href="/fonts/dm-sans-latin.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
-    <link
-      rel="preload"
-      href="/fonts/plus-jakarta-sans-latin.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
-    <link
-      rel="preload"
-      href="/fonts/jetbrains-mono-latin.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
+    {
+      fontPreloads.map((href) => (
+        <link rel="preload" href={href} as="font" type="font/woff2" crossorigin />
+      ))
+    }
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="CommonSwarm" />

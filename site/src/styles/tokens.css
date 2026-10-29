@@ -255,9 +255,9 @@
   /* ======================================================================
      6. TYPE — mode-independent; retuned to the Daylight Orbs scale 2026-10-01
      ====================================================================== */
-  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  --font-sans: "DM Sans", "DM Sans Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, sans-serif;
-  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 
   /* A 1.25 minor third through the reading sizes, opening to ~1.45 across the
@@ -646,8 +646,8 @@
 
   /* Type. The families are self-hosted (global.css @font-face); the existing site
      fonts follow as fallback. Bricolage uses its optical-size axis (auto). */
-  --home-font-display: "Bricolage Grotesque", "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --home-font-body: "Instrument Sans", "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  --home-font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --home-font-body: "Instrument Sans", "Instrument Sans Fallback", "DM Sans", "DM Sans Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, sans-serif;
 
   /* HOME CANVAS — dark values. Neutral charcoal, same roles and AA pairs. */
@@ -1116,7 +1116,7 @@
  * their labels and a two-tone focus ring. Dark values are stored once and mapped
  * for both OS preference and explicit theme selection.
  */
-:root:has([data-marketing], .seo-page) {
+:root:is([data-marketing], :has([data-marketing], .seo-page)) {
   /* Reading hierarchy: body 16/26, contents 14/20, sections 24/30, titles 48/34. */
   --marketing-reading-line: 1.625;
   --marketing-contents-line: 1.25rem;
@@ -1153,8 +1153,8 @@
   --surface-2: var(--elev-3);
   --surface-3: var(--elev-4);
   --surface-soft: var(--elev-1);
-  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans", "Instrument Sans Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", ui-sans-serif, system-ui, sans-serif;
   --radius: 16px;
   --radius-lg: 24px;
   --radius-xl: 28px;
@@ -1190,7 +1190,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):has([data-marketing], .seo-page) {
+  :root:not([data-theme="light"]):is([data-marketing], :has([data-marketing], .seo-page)) {
     --elev-0: var(--d-marketing-elev-0);
     --elev-1: var(--d-marketing-elev-1);
     --elev-2: var(--d-marketing-elev-2);
@@ -1217,7 +1217,7 @@
   }
 }
 
-:root[data-theme="dark"]:has([data-marketing], .seo-page) {
+:root[data-theme="dark"]:is([data-marketing], :has([data-marketing], .seo-page)) {
   --elev-0: var(--d-marketing-elev-0);
   --elev-1: var(--d-marketing-elev-1);
   --elev-2: var(--d-marketing-elev-2);
