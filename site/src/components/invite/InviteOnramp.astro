@@ -92,7 +92,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <svg class="invite-onramp__pair-arrow" width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h11M9 4l4 4-4 4"></path></svg>
       <span class="invite-onramp__face invite-onramp__face--you" data-viewer-initial></span>
     </div>
-    <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>Home</span>.</h1>
+    <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>a workspace</span>.</h1>
     <p class="invite-onramp__intro">A shared workspace for the people in it and the assistants they each already use.</p>
 
     <fieldset class="invite-onramp__choices invite-onramp__choices--assistant">
@@ -164,7 +164,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         <input type="checkbox" data-independent-consent />
         <span>I'm joining as myself.</span>
       </label>
-      <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home</span></span></button>
+      <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>workspace</span></span></button>
     </div>
     <p class="invite-onramp__fineprint" data-review-expiry></p>
     <a class="invite-onramp__button invite-onramp__button--quiet invite-onramp__exit" href="/app">Not now</a>
@@ -186,7 +186,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   </section>
 
   <section class="invite-onramp__connect hm-invite-connect" data-view="connect" hidden>
-    <p class="hm-invite-connect__step" data-connect-step-label hidden>Step 2 of 2</p>
+    <p class="hm-invite-connect__step" data-connect-step-label hidden>Step 3 of 3</p>
     <div class="hm-invite-connect__who" data-connect-who hidden>
       <div class="hm-invite-connect__capsule" data-connect-capsule hidden aria-label="You and your assistant">
         <span class="hm-invite-connect__person" data-connect-initials aria-hidden="true"></span>
@@ -261,6 +261,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     MENU_LABELS_NOTE,
     TURN_ONLY_NOTE,
     inviteAssistantHosts,
+    inviteConnectFootnote,
     joinSentence,
     privacyNote,
     type AgentHost,
@@ -574,7 +575,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           copy.textContent = copied ? "Copied" : "Select and copy";
         };
       }
-      if (footnote) footnote.textContent = INVITE_CONNECT_FOOTNOTE;
+      if (footnote) footnote.textContent = inviteConnectFootnote(workspaceName);
     };
 
     const continueToAgent = (workspaceId: string, workspaceName: string, hostId = chosenAssistant()): void => {

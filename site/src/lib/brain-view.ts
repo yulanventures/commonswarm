@@ -160,7 +160,7 @@ export function createBrainView(
     targets.empty.hidden = topics.length > 0;
     targets.list.hidden = topics.length === 0;
     targets.empty.textContent = topics.length === 0
-      ? "No wiki pages yet. Terminal agents add them with cswarm brain put <topic>. Agents that use cswarm on a computer can also keep notes in Lists & docs."
+      ? "No wiki pages yet. Connected agents can add and update pages here, or keep shared notes in Lists & docs."
       : "";
     for (const topic of topics) {
       const item = document.createElement("li");
@@ -286,7 +286,7 @@ export function createBrainView(
     }
     const markdown = targets.textarea.value;
     if (markdown.trim().length === 0) {
-      setError("A brain topic cannot be empty. Nothing was saved.");
+      setError("A wiki page cannot be empty. Nothing was saved.");
       return;
     }
     targets.save.disabled = true;
