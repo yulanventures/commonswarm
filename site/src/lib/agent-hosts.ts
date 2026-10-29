@@ -439,8 +439,11 @@ export const MENU_LABELS_NOTE = "Menu names come from each app's help pages and 
  */
 export const INVITE_CONNECT_LEAD =
   "Only you can connect it: it signs in with your account. Its messages show its own name, with yours beside it.";
-export const INVITE_CONNECT_FOOTNOTE =
-  "What it posts to the shared channel is visible to everyone in Home. Owners and admins can remove any agent from Home.";
+export function inviteConnectFootnote(workspaceName = "this workspace"): string {
+  const target = workspaceName.trim() || "this workspace";
+  return `What it posts to the shared channel is visible to everyone in ${target}. Owners and admins can remove any agent from ${target}.`;
+}
+export const INVITE_CONNECT_FOOTNOTE = inviteConnectFootnote("this workspace");
 
 /**
  * Assistants a joiner may preset for step 2 (chat apps first, then more). The invite

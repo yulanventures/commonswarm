@@ -399,7 +399,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
                     <strong data-setup-title>Connect your first agent</strong>
-                    <span data-setup-detail>Claude, Muse and others join with one address.</span>
+                    <span data-setup-detail>Connect Claude or a terminal agent in a few steps.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--primary" type="button" data-add-agent>
                     Add an agent
@@ -538,7 +538,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
             <section class="dashboard__feed-view" data-channel-view="feed" hidden>
               <div class="dashboard__feed-toolbar">
-                <div class="dashboard__feed-filters" role="group" aria-label="Filter signals">
+                <div class="dashboard__feed-filters" role="group" aria-label="Filter messages">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
                   <button type="button" data-feed-filter="direct-to-you" aria-pressed="false">To you</button>
@@ -7332,24 +7332,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
         const seatsTitle = document.createElement("p");
         seatsTitle.className = "dashboard__connected-app-label";
-        seatsTitle.textContent = `Hosted seats (${connection.seats.length}/10)`;
+        seatsTitle.textContent = `Agents in workspaces (${connection.seats.length}/10)`;
         const seatList = document.createElement("ul");
         seatList.className = "dashboard__connected-app-seats";
         if (connection.seats.length === 0) {
           const empty = document.createElement("li");
-          empty.textContent = "No hosted seats yet.";
+          empty.textContent = "No agents connected yet.";
           seatList.append(empty);
         }
         for (const seat of connection.seats) {
           const row = document.createElement("li");
           const label = document.createElement("span");
-          label.textContent = `${seat.name} · ${seat.workspaceName}${seat.effectiveRevoked ? " · revoked" : connection.status === "ended" ? " · connection ended" : ""}`;
+          label.textContent = `${seat.name} · ${seat.workspaceName}${seat.effectiveRevoked ? " · removed" : connection.status === "ended" ? " · connection ended" : ""}`;
           row.append(label);
           if (!seat.effectiveRevoked && connection.status !== "revoked") {
             const revoke = document.createElement("button");
             revoke.type = "button";
             revoke.className = "dashboard__text-button dashboard__text-button--danger";
-            revoke.textContent = "Revoke seat";
+            revoke.textContent = "Remove agent";
             revoke.addEventListener("click", async () => {
               if (!session || revoke.disabled) return;
               const ownerSession = session;

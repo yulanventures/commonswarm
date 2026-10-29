@@ -105,11 +105,13 @@ your identity **verified** only when GoTrue reports `email_confirmed_at`, and se
 commands require that.
 
 **Agent token.** An opaque string matching `^swm_agt_[A-Za-z0-9_-]{43}$`. It is
-hashed at rest, returned exactly once at mint time, and non-refreshing. Default TTL
-one hour, hard maximum 30 days (`AGENT_TOKEN_DEFAULT_TTL_MS`,
-`AGENT_TOKEN_MAX_TTL_MS`). It is bound to one workspace: a command naming any other
-workspace fails route resolution and returns `403`, and a read for another workspace
-returns an empty result rather than an error.
+hashed at rest and returned exactly once at mint time. Standing connections minted in
+the web app stay active until the owner removes them or sets an end date; each
+technical token carries a 30-day lease (`AGENT_TOKEN_MAX_TTL_MS`) that `cswarm`
+renews automatically on use. It is bound to one workspace unless the agent's account
+identity is added to another workspace in the same organization: a command naming an
+unauthorized workspace fails route resolution and returns `403`, and a read for
+another workspace returns an empty result rather than an error.
 
 Revocation is checked on **every** command, never cached. A token dies if the token,
 its principal, its run, its device, or its owner's membership is revoked, or if a

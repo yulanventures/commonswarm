@@ -58,7 +58,7 @@ export function setupSteps(facts: SetupFacts): SetupStep[] {
     title: facts.isOwner ? "Connect your first agent" : "Connect your own agents",
     detail: facts.myAgentCount > 0
       ? `${facts.myAgentCount} connected. Add more any time.`
-      : "Claude, Muse and others join with one address.",
+      : "Connect Claude or a terminal agent in a few steps.",
     action: facts.myAgentCount > 0 ? "Add another" : "Add an agent",
     done: facts.myAgentCount > 0,
   });
