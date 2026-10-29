@@ -12,10 +12,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-new-workspace {
   --home-field-border: var(--k-shell-control);
   --home-focus: var(--k-shell-focus);
   --home-focus-ring: var(--k-shell-ring);
-  /* This gateway is outside .cs-ui; read the defined shell pair, not --cs-accent. */
-  --home-accent: var(--k-shell-focus);
-  --home-accent-hover: var(--k-shell-focus);
-  --home-accent-ink: var(--k-shell-surface);
+  /* This gateway is outside .cs-ui; read the canonical shell accent pair. */
+  --home-accent: var(--k-shell-accent);
+  --home-accent-hover: var(--k-shell-accent-hover);
+  --home-accent-ink: var(--k-shell-accent-ink);
   --home-rail-bg: var(--k-shell-subtle);
   --home-rail-strong: var(--k-shell-ink);
   --home-rail-soft: var(--k-shell-secondary);

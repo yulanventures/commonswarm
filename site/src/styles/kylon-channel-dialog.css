@@ -6,7 +6,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] {
   color: var(--k-shell-ink);
   background: var(--k-shell-surface);
   border-color: var(--k-shell-line);
-  border-radius: 12px;
+  border-radius: var(--k-shell-dialog-radius, 16px);
   box-shadow: var(--k-shell-shadow);
   font: 13px/1.6 var(--k-shell-font);
   color-scheme: var(--k-shell-scheme);
@@ -134,15 +134,15 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
   border-style: dashed;
   cursor: wait;
 }
-/* Match the existing Send action pair; warning and Archive colors stay native. */
+/* Match the canonical shell primary action pair; warning and Archive colors stay native. */
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form .dashboard__button--primary {
-  color: #fff;
-  background: #697344;
-  border-color: #697344;
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
+  border-color: var(--k-shell-accent);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form .dashboard__button--primary:hover:not(:disabled) {
-  background: #535d33;
-  border-color: #535d33;
+  background: var(--k-shell-accent-hover);
+  border-color: var(--k-shell-accent-hover);
 }
 @media not (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(button, input):focus-visible {

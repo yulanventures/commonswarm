@@ -9,7 +9,7 @@ live-dashboard [data-account-agents-dialog] {
   background: var(--k-shell-surface, var(--surface));
   color: var(--k-shell-ink, var(--text));
   border: 1px solid var(--k-shell-line, var(--border));
-  border-radius: 12px;
+  border-radius: var(--k-shell-dialog-radius, 16px);
   box-shadow: var(--k-shell-shadow);
   font: 13px/1.6 var(--k-shell-font, inherit);
 }

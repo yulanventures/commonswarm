@@ -6,7 +6,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] {
   color: var(--k-shell-ink);
   background: var(--k-shell-surface);
   border: 1px solid var(--k-shell-line);
-  border-radius: 12px;
+  border-radius: var(--k-shell-dialog-radius, 16px);
   box-shadow: var(--k-shell-shadow);
   font-family: var(--k-shell-font);
   color-scheme: var(--k-shell-scheme);

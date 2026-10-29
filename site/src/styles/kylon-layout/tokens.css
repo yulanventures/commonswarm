@@ -75,6 +75,9 @@
   --cs-muted: var(--k-shell-muted, #716b60);
   --cs-line: var(--k-shell-line, #e9e7e2);
   --cs-control: var(--k-shell-control, #7e887c);
+  --cs-accent: var(--k-shell-accent, #697344);
+  --cs-accent-hover: var(--k-shell-accent-hover, #535d33);
+  --cs-on-accent: var(--k-shell-accent-ink, #ffffff);
   --cs-focus: var(--k-shell-focus, #586339);
   --cs-shadow-popover: var(--k-shell-shadow, 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d);
   --cs-scheme: var(--k-shell-scheme, light);
