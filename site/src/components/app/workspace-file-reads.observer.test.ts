@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { readRecoveryFixture } from "./workspace-file-reads.fixture.js";
 
-browserTest("real read owners recover Files and a timed-out Wiki version", { timeout: 30_000 }, async () => {
+test("real read owners recover Files and a timed-out Wiki version", { timeout: 30_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "commonswarm-read-recovery-"));
   try {
     const file = join(dir, "index.html");
