@@ -21,7 +21,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] [dat
   margin: 0;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: 0;
@@ -37,4 +37,194 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-empty"] [dat
   font-weight: 400;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+/* Workspace-error gateway, setup checklist, and feed pending/error states (D13, D14). */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] {
+  --accent: var(--k-shell-accent);
+  --accent-bright: var(--k-shell-accent-hover);
+  --accent-ink: var(--k-shell-accent-ink);
+  --accent-dim: var(--k-shell-selected);
+  --text: var(--k-shell-ink);
+  --text-muted: var(--k-shell-secondary);
+  --elev-1: var(--k-shell-surface);
+  --elev-2: var(--k-shell-surface);
+  --border-interactive: var(--k-shell-control);
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__gateway-mark {
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 16px;
+  letter-spacing: -0.3px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__eyebrow {
+  color: var(--k-shell-secondary);
+  font: 500 13px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] h1 {
+  max-inline-size: none;
+  color: var(--k-shell-ink);
+  font: 600 24px/1.35 var(--k-shell-font);
+  letter-spacing: -0.5px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__gateway-copy > p:last-child {
+  color: var(--k-shell-secondary);
+  font: 400 14px/1.55 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__button {
+  min-block-size: 44px;
+  padding: 10px 16px;
+  border-radius: var(--k-shell-radius);
+  font: 500 14px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: none;
+  transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__button--primary {
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
+  border-color: var(--k-shell-accent);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__button--primary:hover:not(:disabled) {
+  background: var(--k-shell-accent-hover);
+  border-color: var(--k-shell-accent-hover);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] {
+  --accent: var(--k-shell-accent);
+  --accent-bright: var(--k-shell-accent-hover);
+  --accent-ink: var(--k-shell-accent-ink);
+  --accent-dim: var(--k-shell-selected);
+  --text: var(--k-shell-ink);
+  --text-muted: var(--k-shell-secondary);
+  --surface: var(--k-shell-surface);
+  --surface-2: var(--k-shell-subtle);
+  --elev-2: var(--k-shell-subtle);
+  --border: var(--k-shell-line);
+  --border-strong: var(--k-shell-control);
+  --border-interactive: var(--k-shell-control);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__eyebrow {
+  color: var(--k-shell-secondary);
+  font: 500 13px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] h2 {
+  color: var(--k-shell-ink);
+  font: 600 20px/1.35 var(--k-shell-font);
+  letter-spacing: -0.3px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-progress {
+  color: var(--k-shell-secondary);
+  font: 400 13px/1.5 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step {
+  border-radius: var(--k-shell-row-radius);
+  box-shadow: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-copy strong {
+  color: var(--k-shell-ink);
+  font: 600 14px/1.5 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-copy span {
+  color: var(--k-shell-secondary);
+  font: 400 13px/1.5 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step .dashboard__button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px 12px;
+  border-radius: var(--k-shell-radius);
+  font: 500 13px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: none;
+  transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step .dashboard__button--primary {
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
+  border: 1px solid var(--k-shell-accent);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step .dashboard__button--primary:hover:not(:disabled) {
+  background: var(--k-shell-accent-hover);
+  border-color: var(--k-shell-accent-hover);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step .dashboard__button--secondary {
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  border: 1px solid var(--k-shell-control);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-setup-checklist] .dashboard__setup-step .dashboard__button--secondary:hover:not(:disabled) {
+  background: var(--k-shell-hover);
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-view="feed-pending"], [data-channel-view="feed-error"]) {
+  --accent: var(--k-shell-accent);
+  --accent-bright: var(--k-shell-accent-hover);
+  --accent-dim: var(--k-shell-selected);
+  --text: var(--k-shell-ink);
+  --text-muted: var(--k-shell-secondary);
+  --border-strong: var(--k-shell-line);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-view="feed-pending"], [data-channel-view="feed-error"]) h2 {
+  color: var(--k-shell-ink);
+  font: 600 16px/1.4 var(--k-shell-font);
+  letter-spacing: 0;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-view="feed-pending"], [data-channel-view="feed-error"]) p {
+  color: var(--k-shell-secondary);
+  font: 400 14px/1.55 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-error"] .dashboard__button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: var(--k-shell-radius);
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  font: 500 13px/1.5 var(--k-shell-font);
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: none;
+  transform: none;
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-view="feed-error"] .dashboard__button:hover:not(:disabled) {
+  background: var(--k-shell-hover);
 }

@@ -143,16 +143,16 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic .dashboard__b
   background: var(--k-shell-selected);
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic [data-brain-save] {
-  color: var(--cs-on-accent, #fff);
-  border-color: var(--cs-accent, #697344);
-  background: var(--cs-accent, #697344);
+  color: var(--cs-on-accent, var(--k-shell-accent-ink));
+  border-color: var(--cs-accent, var(--k-shell-accent));
+  background: var(--cs-accent, var(--k-shell-accent));
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic button:not(:disabled):hover {
   background: var(--k-shell-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-topic [data-brain-save]:not(:disabled):hover {
-  border-color: var(--cs-accent-hover, #535d33);
-  background: var(--cs-accent-hover, #535d33);
+  border-color: var(--cs-accent-hover, var(--k-shell-accent-hover));
+  background: var(--cs-accent-hover, var(--k-shell-accent-hover));
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view :is(.dashboard__brain-markdown, .dashboard__brain-raw, .dashboard__brain-form, .dashboard__brain-history) {
   max-inline-size: 100%; min-inline-size: 0;

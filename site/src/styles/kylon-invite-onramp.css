@@ -23,9 +23,9 @@ invite-onramp[data-kylon-onramp] {
   --home-rail-soft: var(--k-shell-secondary);
   --home-rail-muted: var(--k-shell-muted);
   --home-rail-divider: var(--k-shell-line);
-  --home-accent: #697344;
-  --home-accent-hover: #535d33;
-  --home-accent-ink: #ffffff;
+  --home-accent: var(--k-shell-accent);
+  --home-accent-hover: var(--k-shell-accent-hover);
+  --home-accent-ink: var(--k-shell-accent-ink);
   --home-accent-text: var(--k-shell-selection-edge);
   --home-focus: var(--k-shell-focus);
   --home-focus-ring: var(--k-shell-ring);

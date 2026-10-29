@@ -17,6 +17,9 @@ invite-onramp[data-kylon-onramp] {
   /* Slightly darker than draft --cs-control: also clears 3:1 on selected rows. */
   --k-shell-control: #7e887c;
   --k-shell-selection-edge: #697344;
+  --k-shell-accent: #697344;
+  --k-shell-accent-hover: #535d33;
+  --k-shell-accent-ink: #ffffff;
   --k-shell-focus: #176548;
   --k-shell-ring: 0 0 0 2px var(--k-shell-surface), 0 0 0 4px var(--k-shell-focus);
   --k-shell-shadow: 0 12px 40px #1d2b1f24, 0 2px 6px #1d2b1f0d;
@@ -24,6 +27,7 @@ invite-onramp[data-kylon-onramp] {
   --k-shell-radius: 6px;
   --k-shell-row-radius: 8px;
   --k-shell-menu-radius: 10px;
+  --k-shell-dialog-radius: 16px;
   --k-shell-motion: 140ms;
   --k-shell-ease: ease-out;
   --k-shell-scheme: light;

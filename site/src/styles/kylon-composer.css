@@ -95,19 +95,19 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send {
   font-family: var(--k-shell-font);
   font-size: 12px;
   font-weight: 500;
-  /* Original CommonSwarm primary pair from DESIGN-SYSTEM v0.3; independent
-     of delivery/status colors. Neither shell-accent token exists. */
-  color: #ffffff;
-  background: #697344;
+  /* Canonical CommonSwarm primary pair from --k-shell-accent*; independent
+     of delivery/status colors. */
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
   box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) {
-  color: #ffffff;
-  background: #535d33;
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:disabled,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send[data-state="posting"] {
-  color: #ffffff;
+  color: var(--k-shell-accent-ink);
   opacity: 1;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send-icon {

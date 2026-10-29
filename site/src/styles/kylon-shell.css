@@ -189,6 +189,15 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu-account {
   font-size: 12px;
 }
 
+live-dashboard.dashboard[data-kylon-shell] .hm-menu__group-label {
+  color: var(--k-shell-secondary);
+  font-family: var(--k-shell-font);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 live-dashboard.dashboard[data-kylon-shell] .hm-channel-menu__trigger {
   border-radius: var(--k-shell-radius);
   color: var(--k-shell-ink);

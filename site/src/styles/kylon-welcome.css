@@ -1,9 +1,9 @@
 /* Signed-out welcome only. Existing auth states, provider order and action variants
    remain owned by the dashboard. No reference assets, extra steps or motion. */
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] {
-  --accent: #697344;
-  --accent-bright: #535d33;
-  --accent-ink: #fff;
+  --accent: var(--k-shell-accent);
+  --accent-bright: var(--k-shell-accent-hover);
+  --accent-ink: var(--k-shell-accent-ink);
   --accent-dim: var(--k-shell-selected);
   --text: var(--k-shell-ink);
   --text-muted: var(--k-shell-secondary);
@@ -21,7 +21,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   background: var(--k-shell-subtle);
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.55;
 }
 
@@ -34,7 +34,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   min-block-size: 44px;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
-  font-size: 18px;
+  font-size: 16px;
   letter-spacing: -0.3px;
 }
 
@@ -46,7 +46,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   max-inline-size: none;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
-  font-size: 32px;
+  font-size: 24px;
   font-weight: 600;
   line-height: 1.25;
   letter-spacing: -0.5px;
@@ -56,7 +56,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   max-inline-size: 52ch;
   margin: 0;
   color: var(--k-shell-secondary);
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.6;
 }
 
@@ -217,7 +217,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   }
 
   live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] h1 {
-    font-size: 28px;
+    font-size: 24px;
   }
 }
 

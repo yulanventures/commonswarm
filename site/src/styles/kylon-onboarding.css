@@ -16,9 +16,9 @@ live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__invite-view, .dashboa
   --home-ink-faint: var(--k-shell-control);
   --home-focus: var(--k-shell-focus);
   --home-focus-ring: var(--k-shell-ring);
-  --home-accent: var(--k-shell-ink);
-  --home-accent-hover: var(--k-shell-secondary);
-  --home-accent-ink: var(--k-shell-surface);
+  --home-accent: var(--k-shell-accent);
+  --home-accent-hover: var(--k-shell-accent-hover);
+  --home-accent-ink: var(--k-shell-accent-ink);
   --home-link-hover: var(--k-shell-ink);
   min-inline-size: 0;
   color: var(--k-shell-ink);
@@ -140,10 +140,10 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__b
   min-block-size: 44px;
   max-inline-size: 100%;
   padding: 10px 16px;
-  border-color: var(--k-shell-ink);
+  border-color: var(--k-shell-accent);
   border-radius: var(--k-shell-radius);
-  color: var(--k-shell-surface);
-  background: var(--k-shell-ink);
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
   font-size: 14px;
   font-weight: 500;
   line-height: 1.5;
@@ -156,8 +156,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__b
 }
 
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__button:hover:not(:disabled) {
-  border-color: var(--k-shell-secondary);
-  background: var(--k-shell-secondary);
+  border-color: var(--k-shell-accent-hover);
+  background: var(--k-shell-accent-hover);
   transform: none;
 }
 

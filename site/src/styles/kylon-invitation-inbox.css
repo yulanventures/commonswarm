@@ -68,7 +68,7 @@ human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations_
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__choice:has(input:focus-visible) { box-shadow: none; }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__choice strong { font-weight: 500; }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__choice small { color: var(--k-shell-secondary); font: 400 13px/20px var(--k-shell-font); }
-human-invitation-inbox[data-kylon-invite][data-kylon-invite] :is(.human-invitations__choice, .human-invitations__consent) input { accent-color: #697344; }
+human-invitation-inbox[data-kylon-invite][data-kylon-invite] :is(.human-invitations__choice, .human-invitations__consent) input { accent-color: var(--k-shell-accent); }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__consent {
   min-block-size: 44px;
   gap: 12px;
@@ -90,15 +90,15 @@ human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations_
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button {
   min-block-size: 44px;
   padding: 10px 16px;
-  color: #fff;
-  background: #697344;
-  border-color: #697344;
+  color: var(--k-shell-accent-ink);
+  background: var(--k-shell-accent);
+  border-color: var(--k-shell-accent);
   border-radius: 6px;
   font: 500 13px/20px var(--k-shell-font);
   letter-spacing: 0;
   white-space: normal;
 }
-human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button:hover:not(:disabled) { color: #fff; background: #535d33; border-color: #535d33; }
+human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button:hover:not(:disabled) { color: var(--k-shell-accent-ink); background: var(--k-shell-accent-hover); border-color: var(--k-shell-accent-hover); }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button--quiet { color: var(--k-shell-ink); background: var(--k-shell-surface); border-color: var(--k-shell-control); }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button--quiet:hover:not(:disabled) { color: var(--k-shell-ink); background: var(--k-shell-hover); border-color: var(--k-shell-control); }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__button:disabled { color: var(--k-shell-secondary); background: var(--k-shell-subtle); border-color: var(--k-shell-line); }

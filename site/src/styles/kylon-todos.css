@@ -76,11 +76,11 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos,
   background: var(--k-shell-surface); color: var(--k-shell-ink);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) .hm-todo-save {
-  border-color: var(--cs-accent, #697344); background: var(--cs-accent, #697344);
-  color: var(--cs-on-accent, #ffffff);
+  border-color: var(--cs-accent, var(--k-shell-accent)); background: var(--cs-accent, var(--k-shell-accent));
+  color: var(--cs-on-accent, var(--k-shell-accent-ink));
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) .hm-todo-save:not(:disabled):hover {
-  border-color: var(--cs-accent-hover, #535d33); background: var(--cs-accent-hover, #535d33);
+  border-color: var(--cs-accent-hover, var(--k-shell-accent-hover)); background: var(--cs-accent-hover, var(--k-shell-accent-hover));
 }
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todos .hm-todos-filter-button {
   border: 0; padding-inline: 12px; background: transparent; color: var(--k-shell-ink); box-shadow: none;
