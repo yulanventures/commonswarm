@@ -195,6 +195,8 @@ before(async () => {
     diagnostics: () => `command function logs:\n${functionLogs.slice(-4000)}`,
   });
   f = await declareFixture();
+  const rem = 3_600_000 - (Date.now() % 3_600_000);
+  if (rem < 15_000) await delay(rem + 500);
 });
 
 after(async () => {

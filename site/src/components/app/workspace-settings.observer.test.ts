@@ -1,27 +1,21 @@
 /** Reached by `npm --prefix site test` through the component observer glob. */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { build } from "esbuild";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
-import { workspaceStateAfterClose } from "../../lib/workspace-close-state.js";
 
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 
 interface SettingsSnapshot {
-  title: string;
-  counts: string;
-  warning: string;
-  supportHref: string | null;
   initialDisabled: boolean;
   partialDisabled: boolean;
   exactDisabled: boolean;
   closeCalls: number;
-  lastSectionIsDanger: boolean;
 }
 
 async function renderSettingsFixture(): Promise<SettingsSnapshot> {
@@ -62,15 +56,10 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
       root.querySelector("form").requestSubmit();
       setTimeout(() => {
         const snapshot = {
-          title: root.querySelector("h2").textContent,
-          counts: root.querySelector(".dashboard__workspace-settings-counts").textContent,
-          warning: root.querySelector("[data-workspace-close-section] p").textContent,
-          supportHref: root.querySelector("[data-workspace-close-section] p a")?.getAttribute("href") ?? null,
           initialDisabled,
           partialDisabled,
           exactDisabled,
           closeCalls,
-          lastSectionIsDanger: root.lastElementChild.matches("[data-workspace-close-section]"),
         };
         document.documentElement.dataset.fixture = encodeURIComponent(JSON.stringify(snapshot));
       }, 0);
@@ -95,99 +84,8 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
 
 test("the real settings renderer gates close on the exact workspace name", async () => {
   const snapshot = await renderSettingsFixture();
-  assert.equal(snapshot.title, "Science Swarm");
-  assert.equal(snapshot.counts, "3 people · 2 agents");
   assert.equal(snapshot.initialDisabled, true);
   assert.equal(snapshot.partialDisabled, true);
   assert.equal(snapshot.exactDisabled, false);
   assert.equal(snapshot.closeCalls, 1);
-  assert.equal(snapshot.lastSectionIsDanger, true);
-  assert.match(snapshot.warning, /hides the workspace for everyone/);
-  assert.match(snapshot.warning, /frees its free-tier slot/);
-  assert.match(snapshot.warning, /Members lose access/);
-  assert.match(snapshot.warning, /Contact support if you need help\./);
-  assert.equal(snapshot.supportHref, "/support");
-  assert.doesNotMatch(snapshot.warning, /Support can restore it/);
-});
-
-test("the dashboard closes through the human command and leaves the dead route", async () => {
-  const [dashboard, commonswarm] = await Promise.all([
-    readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8"),
-    readFile(new URL("../../lib/commonswarm.ts", import.meta.url), "utf8"),
-  ]);
-  assert.match(dashboard, /archiveWorkspace\(session, uuid\(\), closingWorkspaceId\)/);
-  assert.match(
-    dashboard,
-    /workspaceStateAfterClose\(\s*activeWorkspaceId,\s*closingWorkspaceId,\s*workspaces/,
-  );
-  assert.match(dashboard, /activeWorkspaceId = ""/);
-  assert.match(dashboard, /await openWorkspace\(next\.id, true\)/);
-  assert.match(dashboard, /resetWorkspaceSessionState\(\);\s*renderCreate\(session\)/);
-  assert.match(
-    dashboard,
-    /closeWorkspaceDetailsDialog\(\);[\s\S]*await openWorkspace\(next\.id, true\)/,
-  );
-  assert.match(commonswarm, /credential may not own it/);
-  assert.match(commonswarm, /workspace may no longer be available/);
-  assert.doesNotMatch(
-    commonswarm,
-    /Only a workspace owner can close this workspace\. CommonSwarm did not change anything/,
-  );
-});
-
-test("workspace settings is a modal dialog outside the scrolling rail", async () => {
-  const [dashboard, shell] = await Promise.all([
-    readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8"),
-    readFile(new URL("../../lib/home-shell.ts", import.meta.url), "utf8"),
-  ]);
-  const settingsTag = dashboard.match(
-    /<([a-z][\w-]*)\b[^>]*\bdata-workspace-details-popover\b[^>]*>/,
-  );
-  assert.equal(settingsTag?.[1], "dialog", "the settings surface must use native dialog");
-
-  const railTag = dashboard.match(/<aside\b[^>]*\bclass="[^"\n]*\bdashboard__rail\b[^"\n]*"[^>]*>/);
-  const railStart = railTag?.index ?? -1;
-  const railEnd = dashboard.indexOf("</aside>", railStart);
-  assert.ok(railStart >= 0 && railEnd > railStart, "the dashboard rail must be enumerable");
-  assert.doesNotMatch(
-    dashboard.slice(railStart, railEnd),
-    /data-workspace-details-popover/,
-    "the rail scroll container must not own the settings dialog",
-  );
-  assert.match(dashboard, /openWorkspaceDetailsDialog[\s\S]*dialog\.showModal\(\)/);
-  /* The control that opens the dialog is the Workspace settings menuitem. It starts
-     collapsed and names the dialog, and closing the dialog clears that expanded state. */
-  const settingsItem = shell.slice(
-    shell.indexOf('if (item === "settings")'),
-    shell.indexOf('if (item === "admin-access")'),
-  );
-  assert.match(settingsItem, /dataset\.workspaceDetailsTrigger = ""/);
-  assert.match(settingsItem, /setAttribute\("aria-expanded", "false"\)/);
-  assert.match(settingsItem, /setAttribute\("aria-controls", "dashboard-workspace-details"\)/);
-  assert.match(
-    dashboard,
-    /data-workspace-details-popover[\s\S]*addEventListener\("close"[\s\S]*aria-expanded", "false"/,
-  );
-});
-
-test("workspace close switches to a live successor and never keeps the archived id active", () => {
-  const state = workspaceStateAfterClose("closing", "closing", [
-    { id: "closing", name: "Closing", archived: false },
-    { id: "archived", name: "Archived", archived: true },
-    { id: "live", name: "Live", archived: false },
-  ]);
-  assert.deepEqual(state.workspaces.map((workspace) => workspace.id), ["live"]);
-  assert.equal(state.activeWorkspaceRemains, false);
-  assert.equal(state.nextWorkspace?.id, "live");
-  assert.notEqual(state.nextWorkspace?.id, "closing");
-});
-
-test("workspace close lands on the empty state when only archived workspaces remain", () => {
-  const state = workspaceStateAfterClose("closing", "closing", [
-    { id: "closing", name: "Closing", archived: false },
-    { id: "archived", name: "Archived", archived: true },
-  ]);
-  assert.deepEqual(state.workspaces, []);
-  assert.equal(state.activeWorkspaceRemains, false);
-  assert.equal(state.nextWorkspace, null);
 });

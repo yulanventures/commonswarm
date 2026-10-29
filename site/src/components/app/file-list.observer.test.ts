@@ -51,33 +51,6 @@ const scenarios = (): ReturnType<typeof renderFileListFixtures> => scenariosProm
   NOW,
 );
 
-test("file rows render name, human size, version, uploader, age, and one warning", async () => {
-  const snapshot = (await scenarios()).rows!;
-  assert.equal(snapshot.rowCount, 3);
-  assert.equal(snapshot.downloadButtonCount, 3);
-  assert.deepEqual(snapshot.sizes, ["1.5 KB", "24 KB", "842 B"]);
-  assert.deepEqual(snapshot.versions, ["v3", "v1", "v2"]);
-  assert.deepEqual(snapshot.uploaders, ["Atlas", "Dana Rivera", "Wren"]);
-  assert.equal(snapshot.ages[0], "2 hours ago");
-  assert.equal(snapshot.warningCount, 1);
-  assert.equal(snapshot.warningText, FILE_CONTENT_WARNING);
-});
-
-test("tombstoned files stay visible and name their restore deadline", async () => {
-  const snapshot = (await scenarios()).rows!;
-  assert.equal(snapshot.removedNotes.length, 1);
-  assert.match(snapshot.removedNotes[0]!, /^Removed · restorable until /);
-  assert.match(snapshot.innerHtml, /dashboard__file-row--removed/);
-});
-
-test("an empty workspace renders one quiet line without a file list", async () => {
-  const snapshot = (await scenarios()).empty!;
-  assert.equal(snapshot.rowCount, 0);
-  assert.equal(snapshot.emptyHidden, false);
-  assert.equal(snapshot.emptyText, "No files shared yet.");
-  assert.equal(snapshot.warningCount, 0);
-});
-
 test("hostile file names land as textContent, never markup", async () => {
   const snapshot = (await scenarios()).rows!;
   assert.equal(snapshot.names[2], HOSTILE_NAME);

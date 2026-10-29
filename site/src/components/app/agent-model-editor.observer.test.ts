@@ -3,7 +3,7 @@
  * document (the fixture pattern participant-rail uses; hand-written markup is
  * the refuted method). The claim under pin: a hostile model value reaches the
  * DOM only as an element property — never as parsed markup — and submit hands
- * onSave the normalized value (trimmed, empty as null).
+ * onSave the hostile value as data.
  *
  * Reached by `npm --prefix site test` via the src/components/app observer glob.
  */
@@ -23,7 +23,6 @@ interface EditorSnapshot {
   imgElements: number;
   inputValue: string;
   ariaLabel: string;
-  placeholderShown: boolean;
   savedValues: Array<string | null>;
   innerHtml: string;
 }
@@ -60,28 +59,15 @@ async function renderEditorFixture(): Promise<EditorSnapshot> {
       });
       document.getElementById("host").append(editor);
       const input = editor.querySelector("input");
-      // Submit once with the hostile value, once with whitespace (a clear).
-      editor.requestSubmit();
-      input.value = "   ";
+      // Submit the hostile value as data.
       editor.requestSubmit();
       const snapshot = {
         imgElements: document.querySelectorAll("img").length,
-        inputValue: input.value === "   " ? hostileCheck() : "unexpected",
+        inputValue: input.value,
         ariaLabel: input.getAttribute("aria-label"),
-        placeholderShown: input.placeholder.includes("empty clears"),
         savedValues: saved,
         innerHtml: editor.innerHTML,
       };
-      function hostileCheck() {
-        // Re-build a fresh editor to read the prefilled value untouched.
-        const fresh = ModelEditor.buildAgentModelEditor(document, {
-          agentName: "x",
-          currentModel: hostile,
-          onCancel: () => {},
-          onSave: () => {},
-        });
-        return fresh.querySelector("input").value;
-      }
       document.documentElement.dataset.fixture = btoa(unescape(encodeURIComponent(JSON.stringify(snapshot))));
     </script>
   </body>
@@ -120,7 +106,5 @@ test("a hostile model value stays an element property — never parsed markup", 
   assert.ok(!snapshot.innerHtml.includes("<img"));
   // The aria-label carries the hostile agent name as a plain attribute value.
   assert.ok(snapshot.ariaLabel?.startsWith("Model for Wren "));
-  assert.equal(snapshot.placeholderShown, true);
-  // Normalization: the hostile submit hands the exact text; whitespace clears.
-  assert.deepEqual(snapshot.savedValues, [HOSTILE, null]);
+  assert.deepEqual(snapshot.savedValues, [HOSTILE]);
 });

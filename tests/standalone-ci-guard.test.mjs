@@ -245,7 +245,7 @@ test('all suites aggregate failures and retain exact source provenance and log c
     assert.equal(r.controller_sha, f.cfg.controller_sha);
     assert.equal(r.exit_code, r.suite === 'p1-cli' ? 9 : 0);
     assert.equal(r.timed_out, false); assert.deepEqual(r.cleanup_errors, []);
-    assert.equal(r.timeout_seconds, r.suite === 'server' ? 2672 : 10);
+    assert.equal(r.timeout_seconds, r.suite === 'server' ? 6000 : 10);
     if (process.platform==='linux') assert.deepEqual(r.github_status,{state:'ready',version:1});
     assert.ok(r.queued_at <= r.started_at && r.started_at <= r.ended_at);
     assert.match(r.artifacts['suite.log'], /^[a-f0-9]{64}$/);

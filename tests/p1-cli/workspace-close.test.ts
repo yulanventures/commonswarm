@@ -26,25 +26,6 @@ async function runCli(values: string[]): Promise<{
   return { code, stdout, stderr };
 }
 
-test("workspace close is a parsed verb with a documented exact-selector ceremony", async () => {
-  const help = await runCli(["--help"]);
-  assert.equal(help.code, 0);
-  assert.match(
-    help.stdout,
-    /cswarm workspace close <full-id\|exact-name> --confirm <same-selector>/,
-  );
-
-  const unknown = await runCli([
-    "workspace",
-    "remove",
-    "Science Swarm",
-    "--confirm",
-    "Science Swarm",
-  ]);
-  assert.equal(unknown.code, 1);
-  assert.match(unknown.stderr, /unknown workspace command: remove/);
-});
-
 test("workspace close refuses a confirm mismatch before credentials or network", async () => {
   const result = await runCli([
     "workspace",

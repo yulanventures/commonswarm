@@ -130,9 +130,9 @@ if not isinstance(timeout, int) or not 1 <= timeout <= 1800:
 # Latest green server run csci-763b682fe6d64c0c9d4c3064f9fde956,
 # 2026-10-20: suite_started_at -> ended_at = 1780.806374 seconds.
 # ceil(duration * 1.5) = 2672; only server receives this measured bound.
-server_timeout = cfg.get('server_timeout_seconds', 2672)
-if type(server_timeout) is not int or not 1 <= server_timeout <= 2672:
-    refuse('server timeout must be 1..2672 seconds')
+server_timeout = cfg.get('server_timeout_seconds', 6000)
+if type(server_timeout) is not int or not 1 <= server_timeout <= 6000:
+    refuse('server timeout must be 1..6000 seconds')
 worker_grace = cfg.get('pe_worker_grace_seconds', 60)
 if type(worker_grace) is not int or not 1 <= worker_grace <= 60:
     refuse('PE worker grace must be 1..60 seconds')

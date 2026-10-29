@@ -22,7 +22,7 @@ import {
 } from "../../src/cloud/session-wire.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 import { WAKE_STALE_MS } from "../../src/cloud/idle-poll.js";
-import { localClusterAdminUrl } from "../support/admin-schema-db.js";
+import { emptyApplicationSchema, localClusterAdminUrl } from "../support/admin-schema-db.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -1311,7 +1311,9 @@ test("HM reviewed rollback and rollback catalog execute together transactionally
   const inverseSql = rollback.slice(sqlStart, sqlEnd);
 
   // Release proofs write the admin-owned ledger, as they do on the box.
+  const emptySchema = emptyApplicationSchema();
   await releaseSql.begin(async (tx) => {
+    await tx.unsafe(emptySchema);
     for (const version of ["20261028000003", "20261028000002", "20261028000001"]) {
       await tx.unsafe(readFileSync(new URL(`../agents/${version}-rollback.sql`, HM_PROOF_DIR), "utf8"));
     }

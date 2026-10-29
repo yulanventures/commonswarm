@@ -2933,7 +2933,7 @@ async function localAllowRetiredParentScenario(ctx,scenario) {
   const principal=created.body.principal_id;
   // Target came through openLockOrderTarget's Docker/TLS binding, unchanged.
   // Never alter a role/password/membership or reset session authorization.
-  const {createRequire}=await import('node:module');
+  const {createRequire}=await import('node:module');globalThis.Buffer??=(await import('node:buffer')).Buffer;
   const require=createRequire(new URL('../../services/mcp-auth/package.json',import.meta.url));
   const {Client}=require('pg');
   const {AdminTransactionCoordinator,scopedAdminPool}=await import('../../services/mcp-auth/src/admin-transaction.js');

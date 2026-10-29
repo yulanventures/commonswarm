@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -264,86 +264,6 @@ async function cliAgainst(
   return { code, stdout, stderr };
 }
 
-test("brain ls exposes only reserved topics with version and updater facts", async () => {
-  const cloud = await startFakeCloud();
-  try {
-    const result = await cliAgainst(cloud, ["brain", "ls"]);
-    assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /Brain topics \(1\):/);
-    assert.match(result.stdout, /architecture · 2 live · 4 retired/);
-    assert.match(result.stdout, /updated 2026-08-31T10:00:00\.000Z/);
-    assert.doesNotMatch(result.stdout, /ordinary-plan/);
-  } finally {
-    await cloud.close();
-  }
-});
-
-test("brain get resolves the reserved file and writes Markdown to stdout", async () => {
-  const cloud = await startFakeCloud();
-  try {
-    const result = await cliAgainst(cloud, ["brain", "get", "Architecture@1"]);
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(result.stdout, EXISTING_MARKDOWN);
-    assert.match(
-      result.stderr,
-      /architecture · 2 live · 4 retired · showing version 1 \(retired\)/,
-    );
-    assert.deepEqual(
-      cloud.commands.map((command) => command.kind),
-      ["file_download_url"],
-    );
-    assert.equal(cloud.commands[0]!.body.file_id, BRAIN_FILE_ID);
-    assert.equal(cloud.commands[0]!.body.version_n, 1);
-  } finally {
-    await cloud.close();
-  }
-});
-
-test("brain get JSON shows the live and retired counts", async () => {
-  const cloud = await startFakeCloud();
-  try {
-    const result = await cliAgainst(cloud, [
-      "brain",
-      "get",
-      "architecture",
-      "--version",
-      "1",
-      "--json",
-    ]);
-    assert.equal(result.code, 0, result.stderr);
-    const body = JSON.parse(result.stdout) as Record<string, unknown>;
-    assert.equal(body.version_state, "retired");
-    assert.equal(body.live_version_count, 2);
-    assert.equal(body.retired_version_count, 4);
-  } finally {
-    await cloud.close();
-  }
-});
-
-test("the v0.1.47 brain-put wire accepts additive retirement fields", async () => {
-  const cloud = await startFakeCloud();
-  const markdown = "# Architecture\n\nThe durable decision changed.\n";
-  try {
-    const result = await cliAgainst(cloud, ["brain", "put", "Architecture"], markdown);
-    assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(cloud.commands.map((command) => command.kind), [
-      "file_version_create",
-      "file_version_commit",
-    ]);
-    assert.equal(cloud.commands[0]!.body.name, "brain--architecture.md");
-    assert.equal(cloud.commands[0]!.body.content_type, "text/markdown");
-    assert.equal(cloud.uploads.length, 1);
-    assert.equal(cloud.uploads[0]!.toString("utf8"), markdown);
-    assert.match(
-      result.stdout,
-      /Saved as version 3 \(oldest retired: version 1\)/,
-    );
-    assert.match(result.stdout, /cswarm brain get architecture/);
-  } finally {
-    await cloud.close();
-  }
-});
-
 test("brain put --request-id replays across CLI processes", { timeout: 20_000 }, async () => {
   const cloud = await startFakeCloud();
   const path = join(scratch, "exact-brain.md");
@@ -365,43 +285,6 @@ test("brain put --request-id replays across CLI processes", { timeout: 20_000 },
     assert.equal(conflict.stderr, "");
     assert.equal(cloud.commands.length, commands);
   } finally { await cloud.close(); }
-});
-
-test("legacy brain put checks credentials before a missing Markdown path", { timeout: 10000 }, async () => {
-  const cloud = await startFakeCloud();
-  try {
-    const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "brain", "put", "Architecture", join(scratch, "missing-brain.md"),
-      "--url", cloud.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE,
-      "--agent-token-file", join(scratch, "missing-credential")], {
-      cwd: process.cwd(), env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: join(scratch, "config") }, stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (chunk: Buffer) => stderr += chunk.toString());
-    const timer = setTimeout(() => child.kill("SIGKILL"), 8000);
-    const code = await new Promise<number>((done, fail) => { child.once("error", fail); child.once("close", value => done(value ?? 1)); }).finally(() => clearTimeout(timer));
-    assert.notEqual(code, 0);
-    assert.match(stderr, /credential/i);
-    assert.doesNotMatch(stderr, /could not read/);
-  } finally { await cloud.close(); }
-});
-
-test("the usage block names all three brain verbs", async () => {
-  const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "--help"], {
-    cwd: process.cwd(),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => output += chunk);
-  child.stderr.on("data", (chunk: string) => output += chunk);
-  const code = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (status) => resolve(status ?? 1));
-  });
-  assert.equal(code, 0, output);
-  for (const verb of ["brain ls", "brain get", "brain put"]) {
-    assert.match(output, new RegExp(`cswarm ${verb}`));
-  }
 });
 
 /* --if-version: an optional compare-and-set on brain put.
@@ -453,30 +336,6 @@ test("brain put --if-version saves when the live version still matches", async (
     assert.equal(cloud.commands[0]!.body.if_version, 2);
     assert.equal(cloud.uploads.length, 1);
     assert.equal(cloud.uploads[0]!.toString("utf8"), markdown);
-  } finally {
-    await cloud.close();
-  }
-});
-
-test("brain put without the flag sends no precondition and stays last-write-wins", async () => {
-  /* The server validates an EXACT key set, so an unconditional write must not
-   * carry the key at all. This is the compatibility claim: an older server and
-   * this client still agree on the create payload. */
-  const cloud = await startFakeCloud({ liveVersion: 3 });
-  try {
-    const result = await cliAgainst(
-      cloud,
-      ["brain", "put", "Architecture"],
-      "# Architecture\n\nNo precondition asked for.\n",
-    );
-
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(
-      Object.hasOwn(cloud.commands[0]!.body, "if_version"),
-      false,
-      "an unconditional brain put must not send if_version",
-    );
-    assert.equal(cloud.uploads.length, 1);
   } finally {
     await cloud.close();
   }

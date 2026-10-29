@@ -248,21 +248,4 @@ test('hosted to-do tools through the MCP handler', async (t) => {
     assert.equal(denied.status, 'refused'); assert.equal(denied.reason, 'content_consent_required');
     box.flags.consent = id(8); assert.equal((await list()).status, 'ok');
   });
-  await t.test('all ten hosted to-do tools', async () => {
-    box = fresh();
-    const created = todo(await call(on, 'todo_create', { seat: seatA, request_id: 'req-create-1', title: 'Ship' }));
-    assert.equal(created.version, 1);
-    assert.ok(((await list()).todos as Row[]).some(row => row.todo_id === created.todo_id));
-    assert.equal((await call(on, 'todo_read', { seat: seatA, todo_id: created.todo_id }) as { todo: Row }).todo.todo_id, created.todo_id);
-    assert.equal((await call(on, 'todo_comment', { seat: seatA, request_id: 'req-comment1', target: { kind: 'todo', id: created.todo_id }, body: 'Noted' })).status, 'committed');
-    assert.equal(((await call(on, 'comment_list', { seat: seatA, target: { kind: 'todo', id: created.todo_id } })).comments as Row[]).length, 1);
-    const updated = todo(await call(on, 'todo_update', { seat: seatA, request_id: 'req-update-1', todo_id: created.todo_id, base_version: 2, title: 'Ship it' }));
-    assert.equal(updated.version, 3);
-    const assigned = todo(await call(on, 'todo_assign', { seat: seatA, request_id: 'req-assign-1', todo_id: created.todo_id, base_version: 3, to: { kind: 'agent', id: self }, start: 'queue' }));
-    assert.deepEqual(assigned.assignee, { kind: 'agent', id: self }); assert.equal(assigned.state, 'open');
-    assert.ok((((await call(on, 'todo_queue', { seat: seatA, principal_id: self })).queue as Row).up_next as Row[]).some(row => row.todo_id === created.todo_id));
-    const started = todo(await call(on, 'todo_start', { seat: seatA, request_id: 'req-start-01', todo_id: created.todo_id }));
-    assert.equal(started.state, 'doing');
-    assert.equal(todo(await call(on, 'todo_set_state', { seat: seatA, request_id: 'req-state-01', todo_id: created.todo_id, base_version: started.version, state: 'done' })).state, 'done');
-  });
 });

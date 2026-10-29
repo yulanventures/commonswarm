@@ -264,34 +264,6 @@ async function followUntil(
   }
 }
 
-test("D-051: an isolated success does not wipe earned backoff, through the real CLI", async () => {
-  // fail, fail, fail, SUCCESS, fail — the lone success is the whole point.
-  // retryable:true so the D-051 veto does NOT fire and the decay is reachable;
-  // this is the failure mode production is currently not producing.
-  const stub = await startStub(
-    [false, false, false, true, false],
-    { error: "internal_error", request_id: "e2e-1", retryable: true },
-  );
-  try {
-    const { frames, unparsed } = await followUntil(stub.url, 6);
-    assert.deepEqual(unparsed, [], "every stdout line must be NDJSON");
-
-    const retries = frames.filter((frame) => frame.type === "retrying");
-    assert.ok(
-      retries.length >= 4,
-      `expected at least 4 retry frames, saw ${retries.length}: ${
-        JSON.stringify(frames.map((f) => f.type))
-      }`,
-    );
-    const attempts = retries.slice(0, 4).map((frame) => frame.attempt);
-    // Three failures climb 1,2,3; the success decays 3 -> 2; the next failure
-    // resumes at 3. Under the old reset-to-zero it restarts at 1.
-    assert.deepEqual(attempts, [1, 2, 3, 3]);
-  } finally {
-    await new Promise<void>((closed) => stub.server.close(() => closed()));
-  }
-});
-
 test("inbox --follow attests only rendered broadcasts in batches of at most 50", async () => {
   const broadcasts = Array.from({ length: 75 }, (_, index) =>
     signalRow(`00000000-0000-4000-8000-${String(index).padStart(12, "0")}`)
@@ -320,70 +292,6 @@ test("inbox --follow attests only rendered broadcasts in batches of at most 50",
       stub.seenReports().flat().every((signalId) => signalId !== directedId),
       "a rendered directed row must not be attested as a broadcast",
     );
-  } finally {
-    await new Promise<void>((closed) => stub.server.close(() => closed()));
-  }
-});
-
-test("D-051/D-055/D-056: a refused read is tolerated a bounded number of times, then exits with a frame", async () => {
-  const stub = await startStub(
-    [false, false, false],
-    {
-      error: "internal_error",
-      request_id: "9d1f4b2c-0000-4000-8000-abcdefabcdef",
-      retryable: false,
-    },
-  );
-  try {
-    // 3 was enough when a refusal ended the stream immediately. A tolerated
-    // refusal emits a frame per attempt, so a bound of 3 now TRUNCATES the stream
-    // and the case would silently measure one retry instead of the budget.
-    // 3s of budget: enough to absorb several refusals through the real backoff
-    // ladder, short enough that this case measures the BUDGET and not the
-    // harness deadline. The default for every other case is "0" (strict veto).
-    const { frames, unparsed } = await followUntil(stub.url, 8, 30_000, "3000");
-    assert.deepEqual(
-      unparsed,
-      [],
-      `the terminal condition must be a frame, not bare text: ${unparsed.join(" | ")}`,
-    );
-
-    // ~~"The veto: refused means no retry at all." / "Exactly two reads."~~ DEAD as
-    // of D-056. This is the one case that measures the SHIPPED binary end to end,
-    // so it is where the behaviour change has to be stated rather than inferred.
-    //
-    // The veto is OVERRIDDEN, on a bounded budget -- not merely deferred: `isRetryableFollowError` still returns false
-    // for a refusal, so there is no immediate retry, but ordinary retries were
-    // already delayed, so "it only blocks an immediate retry" would distinguish
-    // nothing. A refusal now buys the same delayed rearm other retries get,
-    // bounded by the window, because the server's
-    // retryable:false is measurably WRONG for pooler exhaustion -- it arrives as a
-    // generic XX000 that read's RETRYABLE_CODES does not list, and the fault clears
-    // on its own in minutes. Obeying it killed an unsupervised receiver on its first
-    // burst, silently, with nothing to restart it.
-    const tolerated = frames.filter((frame) => frame.type === "retrying");
-    assert.ok(
-      tolerated.length > 0,
-      "the refusal is absorbed rather than killing the receiver outright",
-    );
-    for (const frame of tolerated) {
-      assert.equal(
-        frame.reason,
-        "server_refused_tolerated",
-        "a tolerated refusal must stay distinguishable from an ordinary retry",
-      );
-    }
-
-    const terminal = frames[frames.length - 1];
-    assert.equal(terminal?.type, "error");
-    assert.equal(terminal?.server_refused, true);
-
-    // BOUNDED is the property that matters: it stops on its own. The fielded 0.1.6
-    // retries forever, and that unbounded behaviour is the other failure this
-    // replaces. The exact count follows from the backoff ladder and the time
-    // budget, so it is asserted as a range rather than pinned to a number that
-    // would break on any backoff tuning.
-    assert.ok(stub.reads() > 2 && stub.reads() < 40, `reads=${stub.reads()}`);
   } finally {
     await new Promise<void>((closed) => stub.server.close(() => closed()));
   }

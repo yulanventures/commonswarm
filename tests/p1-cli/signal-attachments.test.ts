@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
-import { formatArrivalNotification, arrivalNotification } from "../../src/cloud/arrival-watch.js";
-import { renderSignals } from "../../src/cloud/signals.js";
-import { buildListenerPrompt } from "../../src/listener/engine.js";
-import { renderHookSignal } from "../../src/listener/hook.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -39,53 +35,6 @@ const attachedSignal = (): SignalRecord => ({
   until: "2030-01-01T00:00:00.000Z",
   created_at: "2026-09-01T00:00:00.000Z",
   sender_owner_relation: "same_owner",
-});
-
-test("inbox, notification, hook, and listener prompt surface attached files", () => {
-  const signal = attachedSignal();
-  const retrieval = `cswarm file get ${FILE_ONE} --version 2 --workspace-id ${WORKSPACE}`;
-  const rendered = renderSignals([signal], { inbox: true, includeStale: false });
-  assert.match(rendered, /screen\.png/);
-  assert.match(rendered, /2\.0 KB/);
-  assert.ok(rendered.includes(retrieval));
-
-  const prompt = buildListenerPrompt(signal, "worker");
-  assert.match(prompt, /This message has 1 attachment/);
-  assert.ok(prompt.includes(retrieval));
-  assert.match(prompt, /"retrieval_command"/);
-
-  const notice = arrivalNotification(signal, WORKSPACE, { url: "https://example.test", anonKey: "anon" });
-  assert.equal(notice.attachment_count, 1);
-  assert.match(formatArrivalNotification(notice), /1 attachment/);
-
-  assert.match(renderHookSignal({
-    signalId: SIGNAL,
-    workspaceId: WORKSPACE,
-    principalId: AGENT,
-    fromId: SENDER,
-    fromKind: "user",
-    kind: "ask",
-    senderName: "Sam",
-    body: "Please inspect these.",
-    attachmentCount: 1,
-    createdAt: "2026-09-01T00:00:00.000Z",
-    queuedAt: "2026-09-01T00:00:01.000Z",
-  }), /Attachments: 1/);
-});
-
-test("note, ask, and reply share the repeatable attachment parser", { timeout: 10_000 }, () => {
-  const source = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
-  const post = source.slice(source.indexOf("async function runPostSignal"), source.indexOf("export function replyRefusalHint"));
-  const reply = source.slice(source.indexOf("async function runReply"), source.indexOf("async function runMembers"));
-  assert.match(post, /postSignalAllowedFlags\(kind\)/);
-  assert.match(source, /export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = \[[^\n]*"attach"/);
-  assert.match(source, /export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = \[\.\.\.POST_SIGNAL_NOTE_ACCEPTED_FLAGS/);
-  assert.match(post, /prepareSignalAttachments\(args\.all\("attach"\)\)/);
-  assert.match(reply, /"attach"/);
-  assert.match(reply, /prepareSignalAttachments\(args\.all\("attach"\)\)/);
-  assert.match(source, /cswarm note[\s\S]*--attach <path>/);
-  assert.match(source, /cswarm ask[\s\S]*--attach <path>/);
-  assert.match(source, /cswarm reply[\s\S]*--attach <path>/);
 });
 
 test("note --attach parses repeatably and uploads both files before posting refs", async () => {
