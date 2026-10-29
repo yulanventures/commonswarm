@@ -891,7 +891,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     aria-labelledby="dashboard-workspace-details-title"
   >
     <header class="dashboard__workspace-details-dialog-head">
-      <p id="dashboard-workspace-details-title">Workspace settings</p>
+      <h2 id="dashboard-workspace-details-title">Workspace settings</h2>
       <button
         class="dashboard__icon-button"
         type="button"
@@ -3553,6 +3553,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!status) return;
       status.textContent = message;
       status.dataset.state = state;
+      status.setAttribute("role", state === "error" ? "alert" : "status");
+      status.setAttribute("aria-live", state === "error" ? "assertive" : "polite");
       if (feedback) feedback.hidden = message === "";
     };
 

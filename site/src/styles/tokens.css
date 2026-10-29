@@ -631,6 +631,10 @@
   --home-danger-ink: #ffffff;
   --home-danger-hover: #9e3425; /* Destructive hover: --home-danger-ink 7.07:1; edge vs --home-card 6.58:1. */
   --home-focus: #2471a8; /* Focus edge vs card: Light: --home-card 4.89:1, --home-soft 4.63:1, --home-rail-bg 4.49:1, --home-attention 4.55:1 */
+  --home-brand-junction: #e45b36;
+  --home-onramp-cta-bg: #ffd84d;
+  --home-onramp-cta-hover: #f3c72f;
+  --home-onramp-cta-ink: #2c2c42;
   --home-color-scheme: light;
   --home-popover-shadow: 0 6px 18px rgba(30, 42, 51, 0.12); /* Floating popover only; neutral ink shadow. */
   --home-card-shadow: 0 0 0 var(--home-card-lip); /* No visible card shadow; composes with focus shadows. */

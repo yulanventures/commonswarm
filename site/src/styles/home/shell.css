@@ -378,9 +378,9 @@
 }
 
 /* Signed-out gateway primary only; workspace controls retain their own palette. */
-live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__button--primary:not(:disabled) {
-  background: #ffd84d; color: #2c2c42; border-color: #2c2c42;
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__button--primary):not(:disabled) {
+  background: var(--home-onramp-cta-bg); color: var(--home-onramp-cta-ink); border-color: var(--home-onramp-cta-ink);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__button--primary:hover:not(:disabled) {
-  background: #f3c72f; color: #2c2c42; border-color: #2c2c42;
+live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(.dashboard__button--primary):hover:not(:disabled) {
+  background: var(--home-onramp-cta-hover); color: var(--home-onramp-cta-ink); border-color: var(--home-onramp-cta-ink);
 }

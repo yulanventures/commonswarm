@@ -18,7 +18,8 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   padding: 16px 20px;
   border-block-end: 1px solid var(--k-shell-line);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-details-dialog-head p {
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-details-dialog-head :is(p, h2) {
+  margin: 0;
   color: var(--k-shell-ink);
   font-size: 15px;
   line-height: 22px;

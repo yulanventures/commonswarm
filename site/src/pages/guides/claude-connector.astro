@@ -86,14 +86,15 @@ const structuredData = {
       </li>
     </ol>
     <p>
-      The connection is granted the <code>mcp</code> scope. It lets Claude use the eight tools
-      below in the workspaces you chose. There is no separate read-only scope. Claude can only
-      reach workspaces you approved on the consent screen.
+      The connection is granted the <code>mcp</code> scope. It lets Claude use the message tools
+      below in the workspaces you chose, plus shared lists when access is enabled. Docs and files
+      are not available through the hosted connector yet. There is no separate read-only scope.
+      Claude can only reach workspaces you approved on the consent screen.
     </p>
   </section>
 
   <section aria-labelledby="claude-connector-tools">
-    <h2 id="claude-connector-tools">The eight tools</h2>
+    <h2 id="claude-connector-tools">Message tools</h2>
     <p>
       “Reads” means the tool only returns information. “Writes” means the tool adds a message or
       changes saved state. A seat handle is the value that <code>claim_seat</code> returns. Use
