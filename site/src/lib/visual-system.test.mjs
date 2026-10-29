@@ -57,3 +57,22 @@ test("dialogs use 16px radius, menu group labels are sentence-cased, and welcome
   const lists = await readFile(new URL("../styles/kylon-lists.css", import.meta.url), "utf8");
   assert.doesNotMatch(lists, /10px\/1/u);
 });
+
+test("homepage preloads Bricolage Grotesque and DM Sans, sets root attributes early, and avoids font-display swap snap", async () => {
+  const base = await readFile(new URL("../layouts/Base.astro", import.meta.url), "utf8");
+  assert.match(base, /isHome\s*\?\s*\["\/fonts\/bricolage-grotesque-latin\.woff2",\s*"\/fonts\/dm-sans-latin\.woff2"\]/u);
+  assert.match(base, /data-home=\{isHome \? "" : undefined\}/u);
+  assert.match(base, /data-marketing=\{!isAppShell \? "" : undefined\}/u);
+
+  const globalCss = await readFile(new URL("../styles/global.css", import.meta.url), "utf8");
+  assert.doesNotMatch(globalCss, /font-display:\s*swap;/u);
+  assert.match(globalCss, /font-family:\s*"Bricolage Grotesque";[\s\S]*?font-display:\s*block;/u);
+  assert.match(globalCss, /font-family:\s*"DM Sans";[\s\S]*?font-display:\s*block;/u);
+  assert.match(globalCss, /font-family:\s*"Bricolage Grotesque Fallback";/u);
+  assert.match(globalCss, /font-family:\s*"DM Sans Fallback";/u);
+
+  const landingCss = await readFile(new URL("../styles/landing.css", import.meta.url), "utf8");
+  assert.match(landingCss, /:root:is\(\[data-home\],\s*:has\(main \.lp-home\)\)/u);
+  assert.match(landingCss, /--font-display:\s*"Bricolage Grotesque",\s*"Bricolage Grotesque Fallback"/u);
+  assert.match(landingCss, /\.lp-home\s+:is\(h1,h2,h3\)\s*\{\s*font-family:\s*var\(--font-display\);/u);
+});

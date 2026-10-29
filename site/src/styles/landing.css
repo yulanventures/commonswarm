@@ -1,5 +1,5 @@
 /* Homepage only. Editable product illustrations use live text, no screenshot assets or external requests. */
-:root:has(main .lp-home) {
+:root:is([data-home], :has(main .lp-home)) {
   --lp-paper: #f8f7f3;
   --lp-ink: #2c2c42;
   --lp-muted: #636275;
@@ -19,22 +19,25 @@
   --focus: #57427d;
   --accent-hover: #57427d;
   --accent-bright: #57427d;
+  --font-sans: "DM Sans", "DM Sans Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  --font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", ui-sans-serif, system-ui, -apple-system, sans-serif;
   color-scheme: light;
   background: var(--lp-paper);
 }
-:root:has(main .lp-home) body { background: var(--lp-paper); color: var(--lp-ink); }
-:root:has(main .lp-home) .hdr { background: color-mix(in srgb, var(--lp-paper) 95%, transparent); border-bottom: 1px solid var(--lp-line); backdrop-filter: blur(14px); }
-:root:has(main .lp-home) .hdr__inner { max-width: 1248px; min-height: 82px; }
-:root:has(main .lp-home) .hdr__cta, :root:has(main .lp-home) .mnav__cta { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; box-shadow: none; }
-:root:has(main .lp-home) :is(.hdr__cta,.mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
-:root:has(main .lp-home) .hdr__progress { display: none; }
-:root:has(main .lp-home) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
-:root:has(main .lp-home) .ft__blurb { display: none; }
-.lp-home { font-family: "DM Sans", sans-serif; line-height: 1.5; }
+:root:is([data-home], :has(main .lp-home)) body { background: var(--lp-paper); color: var(--lp-ink); }
+:root:is([data-home], :has(main .lp-home)) .hdr { background: color-mix(in srgb, var(--lp-paper) 95%, transparent); border-bottom: 1px solid var(--lp-line); backdrop-filter: blur(14px); }
+:root:is([data-home], :has(main .lp-home)) .hdr__inner { max-width: 1248px; min-height: 82px; }
+:root:is([data-home], :has(main .lp-home)) .hdr__cta, :root:is([data-home], :has(main .lp-home)) .mnav__cta { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; box-shadow: none; }
+:root:is([data-home], :has(main .lp-home)) :is(.hdr__cta,.mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
+:root:is([data-home], :has(main .lp-home)) .hdr__progress { display: none; }
+:root:is([data-home], :has(main .lp-home)) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
+:root:is([data-home], :has(main .lp-home)) .ft__blurb { display: none; }
+.lp-home { font-family: var(--font-sans); line-height: 1.5; }
 .lp-home *, .lp-home *::before, .lp-home *::after { box-sizing: border-box; }
 .lp-home :is(h1,h2,h3,h4,p,figure) { margin: 0; }
 .lp-home :is(h1,h2,h3,h4) { color: var(--lp-ink); }
-.lp-home :is(h1,h2,h3) { font-family: "Bricolage Grotesque", sans-serif; font-weight: 650; letter-spacing: -.045em; }
+.lp-home :is(h1,h2,h3) { font-family: var(--font-display); font-weight: 650; letter-spacing: -.045em; }
 .lp-home :is(ul,ol) { list-style: none; padding: 0; margin: 0; }
 .lp-home button { font: inherit; cursor: pointer; }
 /* Inherited theme colors must change together; disable the global link color fade here. */
@@ -78,7 +81,7 @@
 .lp-rail-member--agent { margin-left: 22px; }
 .lp-workspace__main { padding: 24px 27px 20px; min-width: 0; display: flex; flex-direction: column; }
 .lp-workspace__heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.lp-workspace__heading h2 { font-family: "DM Sans", sans-serif; font-size: 25px; letter-spacing: -.7px; font-weight: 700; }
+.lp-workspace__heading h2 { font-family: var(--font-sans); font-size: 25px; letter-spacing: -.7px; font-weight: 700; }
 .lp-preview-members { display: flex; }
 .lp-preview-members .lp-av { --avatar: 25px; margin-left: -5px; }
 .lp-mobile-space { display: none; }
@@ -106,7 +109,7 @@
 .lp-preview-composer > span:last-child { display: grid; place-items: center; width: 26px; height: 26px; color: var(--lp-surface); background: var(--lp-ink); border-radius: 5px; font-size: 20px; }
 .lp-workspace__context { border-left: 1px solid var(--lp-line); padding: 24px 18px; }
 .lp-context-card { background: color-mix(in srgb, var(--lp-sage) 48%, var(--lp-surface)); padding: 14px; border-radius: 7px; margin-bottom: 18px; }
-.lp-context-card h3 { font: 650 13px/1.5 "DM Sans", sans-serif; letter-spacing: -.2px; display: flex; justify-content: space-between; margin-bottom: 10px; }
+.lp-context-card h3 { font: 650 13px/1.5 var(--font-sans); letter-spacing: -.2px; display: flex; justify-content: space-between; margin-bottom: 10px; }
 .lp-context-todo { display: flex; gap: 8px; font-size: 11px; padding: 10px 0; border-top: 1px solid var(--lp-line); }
 .lp-context-todo > span:first-child { font-size: 20px; line-height: 1; }
 .lp-context-todo small { display: block; font-size: 9px; margin-top: 3px; color: var(--lp-muted); }
@@ -155,7 +158,7 @@
 .lp-list-paper { background: var(--lp-surface); padding: 25px 27px; border: 1px solid var(--lp-line); border-radius: 8px; transform: rotate(2deg); box-shadow: 0 16px 25px -15px rgb(var(--lp-shadow) / .25); }
 .lp-paper-top { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--lp-muted); padding-bottom: 20px; }
 .lp-paper-top span span { margin: 0 8px; }
-.lp-list-paper h4 { font: 650 25px/1.3 "DM Sans", sans-serif; letter-spacing: -.7px; }
+.lp-list-paper h4 { font: 650 25px/1.3 var(--font-sans); letter-spacing: -.7px; }
 .lp-paper-sub { margin-top: 6px !important; font-size: 11px; color: var(--lp-muted); }
 .lp-shopping { margin-top: 22px !important; }
 .lp-shopping label { display: flex; align-items: center; gap: 13px; min-height: 52px; border-bottom: 1px solid var(--lp-line); font-size: 14px; cursor: pointer; }
@@ -258,7 +261,7 @@
   .lp-connection-options > a { gap: 14px; }
 }
 @media (max-width: 620px) {
-  :root:has(main .lp-home) .hdr__inner { min-height: 66px; }
+  :root:is([data-home], :has(main .lp-home)) .hdr__inner { min-height: 66px; }
   .lp-container { width: calc(100% - 36px); }
   .lp-hero { padding-top: 47px; }
   .lp-hero h1 { font-size: clamp(36px, 10.5vw, 62px); letter-spacing: -.045em; }
@@ -326,40 +329,40 @@
   .lp-close h2 { font-size: clamp(37px, 10.8vw, 44px); }
 }
 @media (prefers-color-scheme: dark) {
-  :root:has(main .lp-home):not([data-theme="light"]) {
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) {
     --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
     --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
     --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
     color-scheme: dark;
   }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-button,
-  :root:has(main .lp-home):not([data-theme="light"]) .hdr__cta,
-  :root:has(main .lp-home):not([data-theme="light"]) .mnav__cta { color: #2c2c42 !important; }
-  :root:has(main .lp-home):not([data-theme="light"]) .hdr__cta:hover,
-  :root:has(main .lp-home):not([data-theme="light"]) .mnav__cta:hover,
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections { background: #18151f; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
-  :root:has(main .lp-home):not([data-theme="light"]) .lp-shopping input { accent-color: #cdb9ee; }
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-button,
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .hdr__cta,
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .mnav__cta { color: #2c2c42 !important; }
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .hdr__cta:hover,
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .mnav__cta:hover,
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-connections { background: #18151f; }
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
+  :root:is([data-home], :has(main .lp-home)):not([data-theme="light"]) .lp-shopping input { accent-color: #cdb9ee; }
 }
-  :root[data-theme="dark"]:has(main .lp-home) {
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) {
     --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
     --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
     --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
     color-scheme: dark;
   }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-button,
-  :root[data-theme="dark"]:has(main .lp-home) .hdr__cta,
-  :root[data-theme="dark"]:has(main .lp-home) .mnav__cta { color: #2c2c42 !important; }
-  :root[data-theme="dark"]:has(main .lp-home) .hdr__cta:hover,
-  :root[data-theme="dark"]:has(main .lp-home) .mnav__cta:hover,
-  :root[data-theme="dark"]:has(main .lp-home) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-connections { background: #18151f; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
-  :root[data-theme="dark"]:has(main .lp-home) .lp-shopping input { accent-color: #cdb9ee; }
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-button,
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .hdr__cta,
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .mnav__cta { color: #2c2c42 !important; }
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .hdr__cta:hover,
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .mnav__cta:hover,
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-button:hover { background: #f3c72f; border-color: #2c2c42; }
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-connections { background: #18151f; }
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-connections :is(h2,p,a) { color: #f4f1fa; }
+  :root[data-theme="dark"]:is([data-home], :has(main .lp-home)) .lp-shopping input { accent-color: #cdb9ee; }
 
 @media (prefers-reduced-motion: reduce) {
-  :root:has(main .lp-home) { scroll-behavior: auto; }
+  :root:is([data-home], :has(main .lp-home)) { scroll-behavior: auto; }
   .lp-home *, .lp-home *::before, .lp-home *::after { animation: none !important; transition: none !important; }
 }
 
