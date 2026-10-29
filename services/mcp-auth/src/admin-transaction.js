@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { AdminOAuthError, oauthErrorResponse } from "./admin-oauth-error.js";

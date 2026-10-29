@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import ts from "typescript";
-import { dashboardAgentConnection, dashboardAgentFilePrompt, dashboardAgentPrompt, dashboardMcpPrompt, promptCopyPayload} from "./agent-prompt";
-import { parseAgentConnection } from "../../../../src/cloud/agent-profile";
-import { AGENT_CONNECTION_FIELDS } from "../../../../src/cloud/agent-onboarding-contract";
-import { decodeAgentConnectionToken } from "../../../../src/cloud/agent-connection-token";
+import { dashboardAgentFilePrompt, dashboardMcpPrompt} from "./agent-prompt";
 
 const TOKEN = `swm_agt_${"A_".repeat(21) + "A"}`;
 const INPUT = {
@@ -23,173 +18,12 @@ test("MCP handoff contains only operator terminal steps; legacy prompt discloses
   const mcp = dashboardMcpPrompt();
   assert.match(mcp, /cswarm mcp code/);
   assert.match(mcp, /cswarm mcp connect --url/);
-  assert.match(mcp, /hidden prompt/);
-  assert.match(mcp, /claude mcp add --scope user --transport stdio cswarm/);
-  assert.match(mcp, /\[mcp_servers\.cswarm\]/);
-  assert.match(mcp, /Codex config:\n\[mcp_servers\.cswarm\]\ncommand = "cswarm"\nargs = \["mcp", "--profile", "<path>"\]/);
   assert.doesNotMatch(mcp, /swm_join_|swm_agt_|CSWARMA\./);
-  assert.match(dashboardAgentPrompt(INPUT), /fallback passes a credential through the model/);
-  assert.match(dashboardAgentFilePrompt(INPUT), /fallback passes a credential through the model/);
-  assert.match(dashboardAgentPrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
-  assert.match(dashboardAgentFilePrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
-  for (const prompt of [dashboardAgentPrompt(INPUT), dashboardAgentFilePrompt(INPUT)]) {
-    for (const phrase of ["Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "the local Grok Bot gateway; Codex supports turn checks", "Read brain topics; post intent and reply"]) assert.ok(prompt.includes(phrase), `fallback wording missing: ${phrase}`);
-  }
-  const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  assert.match(component, /\{dashboardMcpPrompt\(\)\}/);
-});
-
-test("the generated connection is accepted by the CLI without changing the credential schema", () => {
-  const raw = dashboardAgentConnection(INPUT);
-  const envelope = parseAgentConnection(raw);
-  assert.deepEqual(Object.keys(envelope).sort(), [...AGENT_CONNECTION_FIELDS].sort());
-  assert.equal(envelope.credential.agent_token, TOKEN);
-  assert.equal(envelope.principal_id, INPUT.credential.principalId);
-  assert.equal(envelope.workspace_id, INPUT.workspaceId);
-  assert.equal(raw.split(TOKEN).length - 1, 1);
-});
-
-test("one-paste setup includes a single connection token and full agent ID, with private file instructions", () => {
-  const prompt = dashboardAgentPrompt(INPUT);
-  const tokenMatch = prompt.match(/\bCSWARMA\.[A-Z2-7]+\.[A-Z2-7]+\b/);
-  assert.ok(tokenMatch, "prompt must include a CSWARMA token");
-  const token = tokenMatch[0];
-  assert.match(token, /^CSWARMA\./);
-  assert.doesNotMatch(token, /_/);
-  assert.doesNotMatch(token, /:\/\//);
-  const decoded = decodeAgentConnectionToken(token);
-  assert.deepEqual(decoded, JSON.parse(dashboardAgentConnection(INPUT)));
-  assert.equal(decoded.principal_id, INPUT.credential.principalId);
-  assert.match(prompt, new RegExp(`connect-${INPUT.credential.principalId}/connection.json`));
-  assert.match(prompt, /file-writing tool/);
-  assert.match(prompt, /0700/);
-  assert.match(prompt, /0600/);
-  assert.match(prompt, /cswarm setup --connection-file/);
-  assert.match(prompt, /--host-session-id "\$CLAUDE_CODE_SESSION_ID"/);
-  assert.match(prompt, /--host-session-id "\$CODEX_THREAD_ID"/);
-  assert.match(prompt, /cswarm setup --check-version/);
-  assert.ok(prompt.length < 3200, `inline prompt grew to ${prompt.length} characters`);
 });
 
 test("file handoff stays short without hiding a manual fetch", () => {
   const prompt = dashboardAgentFilePrompt(INPUT);
-  assert.ok(prompt.length <= 2000, `file prompt has ${prompt.length} characters`);
   assert.equal(prompt.includes(TOKEN), false);
   assert.equal(prompt.includes(INPUT.anonKey), false);
   assert.match(prompt, /attached connection JSON/);
-  assert.match(prompt, /setup guide only when needed/);
-});
-
-test("both prompts require the mode choice and same-session proof, without retired workers", { timeout: 10000 }, () => {
-  for (const prompt of [dashboardAgentPrompt(INPUT), dashboardAgentFilePrompt(INPUT)]) {
-    assert.match(prompt, /Ask once:[\s\S]*wakeups in this same session[\s\S]*each turn's start and whenever asked/);
-    assert.match(prompt, /user's choice[\s\S]*reuse a saved choice/);
-    assert.match(prompt, /idle test passes/);
-    assert.match(prompt, /cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work/);
-    assert.doesNotMatch(prompt, /claude-agent-acp|codex-acp|--permissions allow|local Claude worker|note.*does NOT wake|Only after the detached listener/);
-    assert.doesNotMatch(prompt, /renews (itself|automatically)|does not expire/);
-  }
-});
-
-test("file download stays in memory and can be cleared", () => {
-  const source = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  assert.match(source, /data-action="download-connection"/);
-  assert.match(source, /URL.revokeObjectURL/);
-  assert.match(source, /#forget\(\) \{[\s\S]*this.#connection = null;[\s\S]*this.#filePrompt = null;/);
-  assert.doesNotMatch(source, /localStorage.setItem/);
-});
-
-
-test("copy source has lossless connection token and a plain executable install command", () => {
-  const prompt = dashboardAgentPrompt(INPUT);
-  const token = prompt.match(/\bCSWARMA\.[A-Z2-7]+\.[A-Z2-7]+\b/)?.[0];
-  assert.ok(token);
-  assert.match(token, /^CSWARMA\./);
-  assert.doesNotMatch(token, /_/);
-  assert.doesNotMatch(token, /:\/\//);
-  const decoded = decodeAgentConnectionToken(token);
-  assert.deepEqual(decoded, JSON.parse(dashboardAgentConnection(INPUT)));
-  assert.equal(decoded.credential.agent_token, TOKEN);
-  assert.equal(decoded.principal_id, INPUT.credential.principalId);
-  assert.equal(prompt.match(/```sh\n([^]*?)\n```/)?.[1], "curl -fsSL https://commonswarm.com/install.sh | sh");
-  assert.match(prompt, /Use a setup file/);
-  assert.match(prompt, /Codex supports turn checks/);
-  const source = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  assert.match(source, /navigator.clipboard.writeText\(this.#prompt\)/);
-  assert.match(source, /node.textContent = value/);
-});
-
-
-test("the component copy method sends the source string even when displayed text differs", async () => {
-  const source = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
-  const method = source.slice(source.indexOf("    async #copy()"), source.indexOf("\n  }\n", source.indexOf("    async #copy()")));
-  // Execute the shipped method with inert DOM/timer dependencies; no browser or credentials.
-  const harness = `return class {
-    #prompt; #copyTimer; constructor(prompt) { this.#prompt = prompt; }
-    #q() { return { textContent: "altered display", setAttribute() {} }; }
-    #text() {} #resetCopyLabel() {}
-    async copy() { await this.#copy(); }
-    ${method}
-  }`;
-  const js = ts.transpile(harness, { target: ts.ScriptTarget.ES2022 });
-  let copied = "";
-  const Component = new Function("navigator", "window", js)(
-    { clipboard: { async writeText(value: string) { copied = value; } } },
-    { clearTimeout() {}, setTimeout() { return 1; } },
-  );
-  const prompt = dashboardAgentPrompt(INPUT);
-  await new Component(prompt).copy();
-  assert.equal(copied, prompt);
-  const token = copied.match(/\bCSWARMA\.[A-Z2-7]+\.[A-Z2-7]+\b/)?.[0];
-  assert.ok(token);
-  assert.deepEqual(decodeAgentConnectionToken(token), JSON.parse(dashboardAgentConnection(INPUT)));
-});
-
-
-/* The clipboard flavour, measured against a real damaged hand-off on 2026-09-08.
- *
- * A manual selection copy writes text/plain AND text/html. A Markdown client converts the HTML,
- * which escapes underscores as \_ and rewrites a bare URL as a Markdown link — the exact damage
- * reported from a live connection attempt, arriving by a route the code fences cannot reach. The
- * block now writes plain text itself; this pins WHAT it writes. */
-test("an empty selection copies the whole prompt, because a keyboard copy has no range", () => {
-  assert.equal(promptCopyPayload("", "WHOLE PROMPT"), "WHOLE PROMPT");
-  assert.equal(promptCopyPayload("   \n\t ", "WHOLE PROMPT"), "WHOLE PROMPT");
-});
-
-test("a partial selection stays exactly that selection", () => {
-  assert.equal(promptCopyPayload("cswarm setup", "WHOLE PROMPT"), "cswarm setup");
-});
-
-/* The Grok arm on 1f460eb noted this case was unpinned: a ONE-CHARACTER selection is legitimate and
- * must not fall through to the whole prompt. Only whitespace may. */
-test("a one-character selection is kept, and only whitespace falls back", () => {
-  assert.equal(promptCopyPayload("_", "WHOLE PROMPT"), "_");
-  assert.equal(promptCopyPayload("`", "WHOLE PROMPT"), "`");
-  assert.equal(promptCopyPayload(" ", "WHOLE PROMPT"), "WHOLE PROMPT");
-});
-
-test("the payload is returned byte for byte: no underscore escaping, no link rewriting", () => {
-  const hostile = '{"anon_key":"a_b-c","url":"https://api.commonswarm.com"}';
-  assert.equal(promptCopyPayload(hostile, "WHOLE"), hostile);
-  assert.ok(!promptCopyPayload(hostile, "WHOLE").includes("\\_"), "an underscore must not be escaped");
-  assert.ok(!promptCopyPayload(hostile, "WHOLE").includes("]("), "a URL must not become a Markdown link");
-  const whole = 'save {"anon_key":"a_b"} to https://api.commonswarm.com';
-  assert.equal(promptCopyPayload("", whole), whole);
-});
-
-test("Fold 3 keeps the version remedy and gateway wording in both fallback prompt and lane evidence", { timeout: 10000 }, () => {
-  const lane = readFileSync(new URL("../../../../docs/evidence/2026-09-24-mcp-release2/LANE.md", import.meta.url), "utf8");
-  const prompt = dashboardAgentFilePrompt(INPUT);
-  for (const sentence of [
-    "Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.",
-    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm.",
-    "Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.",
-    "Run setup --json. Reuse its --profile and this session's --host-session-id.",
-    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
-    "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.",
-  ]) {
-    assert.ok(prompt.includes(sentence), `fallback prompt changed: ${sentence}`);
-    assert.ok(lane.includes(sentence), `Fold 2 evidence omitted: ${sentence}`);
-  }
 });

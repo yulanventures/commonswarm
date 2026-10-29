@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { calculateJwkThumbprint, compactVerify, decodeProtectedHeader, importJWK } from "jose";
 import { adminTransactionContext, AdminTransactionError } from "./admin-transaction.js";

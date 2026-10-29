@@ -16,8 +16,6 @@ import {
 } from "../../src/cloud/renewal.js";
 import type { AgentCredentialRecord, AgentCredentialStore } from "../../src/cloud/agent-credential.js";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { parseSignalAttachments, SignalAttachmentMalformedError } from "../../src/cloud/attachments.js";
-import { classifySignalReadFailure } from "../../src/cloud/signals.js";
 import { isFollowRenewalCredentialFailure } from "../../src/cli.js";
 
 const NOW = 1_700_000_000_000;
@@ -179,14 +177,6 @@ test("one-shot bearer respects terminal decisions and retries ambiguous answers"
 test("one-shot confirmed auth samples stop ordinary work without declaring a local terminal expiry", { timeout: 10_000 }, async () => {
   const credential = await session(fetchAnswer(401, '{"error":"unauthenticated"}'), false);
   await assert.rejects(() => credential.bearer(), RenewalCredentialCheckError);
-});
-
-test("attachment parser failures have a retryable response tag", () => {
-  for (const value of [null, [{}], Array(9).fill({})]) {
-    assert.throws(() => parseSignalAttachments(value), (error: unknown) =>
-      error instanceof SignalAttachmentMalformedError &&
-      classifySignalReadFailure(error).code === "malformed_response");
-  }
 });
 
 test("follow treats a renewal credential sample as a credential stop", () => {

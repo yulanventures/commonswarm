@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { adminProofAdmitted } from "./admin-dpop.js";
 import { randomUUID, createHash } from "node:crypto";
 import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount, adminRatePolicy, adminAccountWithDurableGrants } from "./admin-authority.generated.js";

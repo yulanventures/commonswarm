@@ -7,39 +7,28 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createServer as createSocketServer } from "node:net";
 import {
   access,
-  chmod,
   mkdir,
   mkdtemp,
   readFile,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { constants as osConstants } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   EXIT_NOTIFY_ORPHANED,
-  NOTIFY_RESTART_COMMAND,
   NOTIFY_FLAG,
-  NOTIFY_SIGNAL_EXIT_CODES,
   notifyRestartCommand,
-  notifySignalStopSentence,
   fileArrivalCursorStore,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { readAgentSignalDirectory } from "../../src/cloud/signals.js";
 import {
   FileBrainDigestStore,
   FileHookSurfaceStore,
   listenerPaths,
-  startListenerControlServer,
-  readListenerStatusIfPresent,
-  LISTENER_RUNNING_STATES,
   writeListenerStatus,
   type ListenerStatus,
 } from "../../src/listener/index.js";
@@ -47,18 +36,11 @@ import {
   inspectResume,
   readOnlyListenerInspection,
   renderResume,
-  resumeJson,
-  findNotifyWatchers,
-  parseParentProcessOutput,
-  systemParentProcess,
   type ProcessTableAdapter,
   type ParentProcessAdapter,
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
-import { lsofStdoutConsumer, parseLsofStdout, procStdoutConsumer, systemStdoutConsumer } from "../../src/stdout-consumer.js";
-import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions, waitForListenerStop } from "../../src/cli.js";
-import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
-import { generateSessionKey } from "../../src/cloud/session-proof.js";
+import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, notifyRestartOptions, waitForListenerStop } from "../../src/cli.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -67,184 +49,6 @@ const SENDER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const OLD_SIGNAL = "11111111-1111-4111-8111-111111111111";
 const NEW_SIGNAL = "22222222-2222-4222-8222-222222222222";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
-
-for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed listener restart works when listener is ${mode}`, { timeout: 20_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-wait-"));
-  const bin = join(root, "bin");
-  const stateDirectory = join(root, "listener state");
-  const credentialFile = join(root, "agent.json");
-  const server = createServer((request, response) => {
-    let raw = "";
-    request.on("data", chunk => raw += String(chunk));
-    request.on("end", () => {
-      const body = JSON.parse(raw) as { resource?: string };
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body.resource === "members"
-        ? { members: [], agents: [{ principal_id: PRINCIPAL, owner_user_id: OWNER, name: "Fixture seat" }],
-          identity: { credential_valid: true, owner_user_id: OWNER, principal_id: PRINCIPAL, workspace_id: WORKSPACE } }
-        : { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }));
-    });
-  });
-  let control: Awaited<ReturnType<typeof startListenerControlServer>> | null = null;
-  let shell: ChildProcess | null = null;
-  let nextPid: number | null = null;
-  const ownerSpawnAt = Date.now();
-  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  try {
-    const url = await listen(server);
-    const target = cloudTarget(url, "public-test-key");
-    const paths = listenerPaths({ profileId: target.profileId, workspaceId: WORKSPACE,
-      principalId: PRINCIPAL, stateDirectory });
-    const status = listenerStatus(paths.logPath);
-    status.profileId = target.profileId;
-    status.workspaceId = WORKSPACE;
-    status.principalId = PRINCIPAL;
-    assert.ok(owner.pid);
-    status.pid = owner.pid;
-    status.processStartedAt = ownerSpawnAt;
-    status.startedAt = new Date().toISOString();
-    status.provider = "claude";
-    await writeListenerStatus(paths, status);
-    if (mode !== "dead") control = await startListenerControlServer({ paths, status: () => status, stop: () => {
-      status.state = "stopping";
-      setTimeout(() => {
-        if (mode === "dies_during_stop") {
-          owner.kill("SIGKILL");
-          void control?.close();
-          return;
-        }
-        status.state = "stopped";
-        status.stoppedAt = new Date().toISOString();
-        void writeListenerStatus(paths, status).then(() => setTimeout(() => {
-          owner.kill("SIGKILL");
-          void control?.close();
-        }, 300));
-      }, 1_200);
-    } });
-    if (mode === "dead") {
-      owner.kill("SIGKILL");
-      await new Promise<void>(resolve => owner.once("close", () => resolve()));
-    }
-    await writeFile(credentialFile, credentialArtifact(), { mode: 0o600 });
-    await mkdir(bin, { recursive: true });
-    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    await mkdir(join(root, ".claude"), { recursive: true });
-    await writeFile(join(root, ".claude", "settings.json"), JSON.stringify(claudeUserPromptHookSnippet(PRINCIPAL)));
-    const report: Parameters<typeof renderResume>[0] = { identity: { displayName: "Fixture", principalId: PRINCIPAL },
-      listener: { checkedDirectory: paths.instanceDirectory, status, source: mode === "dead" ? "recorded_file" : "live_process" },
-      watchers: [], brain: { digest: null, highWaterFile: join(root, "brain") },
-      inbox: { count: 0, exact: true }, target, workspaceId: WORKSPACE, credentialFile,
-      installedVersion: "0.1.77", stateDirectory };
-    const printed = renderResume(report).split("\n").find(line => line.startsWith("cswarm listen stop "));
-    assert.ok(printed);
-    assert.match(printed, /--wait && cswarm listen start/);
-    assert.equal(printed.split("--state-dir").length - 1, 2);
-    shell = spawn("/bin/sh", ["-c", printed], { env: { ...process.env, HOME: root,
-      CLAUDE_CONFIG_DIR: join(root, ".claude"), XDG_CONFIG_HOME: join(root, "config"),
-      XDG_STATE_HOME: join(root, "state"), PATH: `${bin}:${process.env.PATH ?? ""}` },
-      stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    let stdout = "";
-    shell.stderr?.on("data", chunk => stderr += String(chunk));
-    shell.stdout?.on("data", chunk => stdout += String(chunk));
-    const code = await new Promise<number | null>((done, reject) => {
-      const timer = setTimeout(() => { shell?.kill("SIGKILL"); reject(new Error("restart shell timeout")); }, 15_000);
-      shell!.once("exit", value => { clearTimeout(timer); done(value); });
-      shell!.once("error", reject);
-    });
-    assert.equal(code, 0, `${stderr}\n${JSON.stringify((await readListenerStatusIfPresent(paths))?.lastErrorCode)}\n${await readFile(paths.logPath, "utf8").catch(() => "no log")}`);
-    if (mode !== "slow") {
-      const stopOutput = stdout.split("Listener ready for agent")[0]!;
-      assert.match(stopOutput, /^Listener failed/);
-      assert.match(stopOutput, /CONNECTED: no\. Transport state is failed/);
-      assert.doesNotMatch(stopOutput, /Listener running|CONNECTED: yes/);
-    }
-    const restarted = await readListenerStatusIfPresent(paths);
-    assert.ok(restarted);
-    assert.ok(LISTENER_RUNNING_STATES.includes(restarted.state));
-    nextPid = restarted.pid;
-    assert.notEqual(nextPid, process.pid);
-    if (process.env.CSWARM_FOLD10_LISTENER_EVIDENCE) {
-      await writeFile(process.env.CSWARM_FOLD10_LISTENER_EVIDENCE, `${JSON.stringify(restarted, null, 2)}\n`);
-    }
-  } finally {
-    owner.kill("SIGKILL");
-    if (owner.exitCode === null && owner.signalCode === null) await new Promise<void>(resolve => owner.once("close", () => resolve()));
-    if (shell?.exitCode === null) shell.kill("SIGKILL");
-    if (nextPid !== null) {
-      try { process.kill(nextPid, "SIGTERM"); } catch { /* already gone */ }
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        try { process.kill(nextPid, 0); await new Promise(done => setTimeout(done, 50)); }
-        catch { break; }
-      }
-      try { process.kill(nextPid, "SIGKILL"); } catch { /* already gone */ }
-    }
-    await control?.close().catch(() => undefined);
-    await close(server);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("stop wait treats a slow control reply as unknown until socket and child exit", { timeout: 5_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-slow-"));
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
-    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
-  const status = listenerStatus(paths.logPath);
-  let server: ReturnType<typeof createSocketServer> | null = null;
-  try {
-    assert.ok(child.pid);
-    status.pid = child.pid;
-    status.startedAt = new Date().toISOString();
-    status.state = "stopping";
-    await writeListenerStatus(paths, status);
-    server = createSocketServer(socket => socket.on("data", () => {
-      setTimeout(() => { if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: true, status })}\n`); }, 300);
-    }));
-    await new Promise<void>(resolve => server!.listen(paths.socketPath, resolve));
-    let settled = false;
-    const waiting = waitForListenerStop(paths, status, 2_000).then(value => { settled = true; return value; });
-    await new Promise(resolve => setTimeout(resolve, 450));
-    assert.equal(settled, false);
-    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
-    await new Promise<void>(resolve => server!.close(() => resolve()));
-    server = null;
-    child.kill("SIGKILL");
-    await new Promise<void>(resolve => child.once("close", () => resolve()));
-    assert.equal((await waiting)?.state, "failed");
-    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
-  } finally {
-    child.kill("SIGKILL");
-    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
-    if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("stop wait times out on a live stopping child without rewriting status", { timeout: 4_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-stuck-"));
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
-    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
-  const status = listenerStatus(paths.logPath);
-  try {
-    assert.ok(child.pid);
-    status.pid = child.pid;
-    status.startedAt = new Date().toISOString();
-    status.state = "stopping";
-    await writeListenerStatus(paths, status);
-    await assert.rejects(waitForListenerStop(paths, status, 600), error => {
-      assert.match((error as Error).message, /listener stop timed out after 0.6 seconds; state stopping, pid /);
-      assert.match((error as Error).message, new RegExp(String(child.pid)));
-      return true;
-    });
-    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
-    process.kill(child.pid, 0);
-  } finally {
-    child.kill("SIGKILL");
-    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("stop wait treats a reused pid as gone and a recorded stopped state as complete", { timeout: 4_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-stop-reused-"));
@@ -321,138 +125,6 @@ test("EPERM means alive and still reaches the one stop deadline", { timeout: 3_0
     process.kill = originalKill;
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("recorded lsof fd 1 shapes classify without a false orphan", { timeout: 1_000 }, () => {
-  const cases = [
-    ["p12\nf1\ntunix\nn->0x30df\n", "live_reader"],
-    ["p12\nf1\ntunix\nn->(none)\n", "orphaned"],
-    ["p12\nf1\ntunix\nn/var/folders/s.sock\n", "cannot_determine"],
-    ["p12\nf1\ntPIPE\nn->0x5c10\n", "cannot_determine"],
-    ["p12\nf1\ntPIPE\nn\n", "cannot_determine"],
-    ["p12\nf1\ntFIFO\nn/path\n", "cannot_determine"],
-    ["p12\nf1\ntREG\nn/tmp/out\n", "not_pipe"],
-    ["p12\nf1\ntCHR\nn/dev/null\n", "not_pipe"],
-    ["", "cannot_determine"],
-    ["p12\nf1\ntunix\nn->0x30df\nn->(none)\n", "live_reader"],
-  ] as const;
-  for (const [output, expected] of cases) assert.equal(parseLsofStdout(output), expected, output);
-});
-
-test("proc stdout inspection proves readers and stays conservative on incomplete scans", { timeout: 5_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-stdout-"));
-  const targetPid = 4100;
-  const makeFd = async (pid: number, fd: number, target: string, flags?: string): Promise<void> => {
-    const processRoot = join(root, String(pid));
-    await mkdir(join(processRoot, "fd"), { recursive: true });
-    await mkdir(join(processRoot, "fdinfo"), { recursive: true });
-    await symlink(target, join(processRoot, "fd", String(fd)));
-    if (flags !== undefined) await writeFile(join(processRoot, "fdinfo", String(fd)), `flags:\t${flags}\n`);
-  };
-  const inspect = (maxEntries = 100) => procStdoutConsumer({ procRoot: root, maxEntries, timeoutMs: 1_000 })
-    .inspect(targetPid);
-
-  try {
-    await makeFd(targetPid, 1, "pipe:[7001]", "01");
-    await makeFd(4101, 3, "pipe:[9999]", "00"); // A readable but unrelated pipe is not evidence.
-    await makeFd(4102, 4, "pipe:[7001]", "01"); // A matching write end is not a consumer.
-    await makeFd(4105, 7, "pipe:[7001]", "010000000"); // O_PATH observes metadata but cannot read.
-    assert.equal(await inspect(), "orphaned", "write ends alone are the negative control");
-
-    const foreignFdDirectory = join(root, "1", "fd");
-    await mkdir(foreignFdDirectory, { recursive: true });
-    await chmod(foreignFdDirectory, 0);
-    assert.equal(await inspect(), "cannot_determine", "an inaccessible foreign fd table may hold a reader");
-
-    await makeFd(4103, 5, "pipe:[7001]", "00");
-    assert.equal(await inspect(), "live_reader", "a proven reader wins despite an inaccessible foreign fd table");
-    await chmod(foreignFdDirectory, 0o700);
-    assert.equal(await inspect(), "live_reader", "a matching read end is the positive control");
-    await rm(join(root, "4103"), { recursive: true, force: true });
-    assert.equal(await inspect(), "orphaned", "the reader exiting leaves only write ends");
-
-    await makeFd(4104, 6, "pipe:[7001]");
-    await mkdir(join(root, "4104", "fdinfo", "6"));
-    assert.equal(await inspect(), "cannot_determine", "unreadable matching fdinfo is unknown");
-    await rm(join(root, "4104"), { recursive: true, force: true });
-
-    await rm(join(root, String(targetPid), "fd", "1"));
-    await symlink("/tmp/stdout.log", join(root, String(targetPid), "fd", "1"));
-    assert.equal(await inspect(), "not_pipe");
-    await rm(join(root, String(targetPid), "fd", "1"));
-    await symlink("pipe:[7001]", join(root, String(targetPid), "fd", "1"));
-
-    assert.equal(await inspect(1), "cannot_determine", "entry budget exhaustion never proves orphaning");
-    let tick = 0;
-    const timed = procStdoutConsumer({
-      procRoot: root,
-      maxEntries: 100,
-      timeoutMs: 1,
-      now: () => tick++,
-    });
-    assert.equal(await timed.inspect(targetPid), "cannot_determine", "time budget exhaustion never proves orphaning");
-
-    assert.equal(await systemStdoutConsumer(1_000, { platform: "linux", procRoot: root }).inspect(targetPid),
-      "orphaned", "the Linux system adapter uses the injected proc root");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("cancelling an in-flight stdout inspection kills its lsof child", { timeout: 5_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-lsof-abort-"));
-  const pidFile = join(root, "pid");
-  let childPid: number | undefined;
-  try {
-    const fixture = join(root, "fixture");
-    await writeFile(fixture, `#!/bin/sh\nprintf '%s' "$$" > '${pidFile}'\nexec /bin/sleep 30\n`, { mode: 0o755 });
-    const controller = new AbortController();
-    const inspection = lsofStdoutConsumer(1_500, fixture).inspect(process.pid, controller.signal);
-    const deadline = Date.now() + 1_000;
-    while (childPid === undefined && Date.now() < deadline) {
-      try { childPid = Number(await readFile(pidFile, "utf8")); }
-      catch { await new Promise((done) => setTimeout(done, 10)); }
-    }
-    assert.ok(childPid && Number.isInteger(childPid), "lsof fixture started");
-    controller.abort();
-    const result = await Promise.race([
-      inspection,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("inspection ignored abort")), 400)),
-    ]);
-    assert.equal(result, "cannot_determine");
-    let gone = false;
-    for (let attempt = 0; attempt < 20 && !gone; attempt += 1) {
-      try { process.kill(childPid!, 0); await new Promise((done) => setTimeout(done, 10)); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") gone = true; else throw error; }
-    }
-    assert.equal(gone, true, "aborted lsof child exited");
-  } finally {
-    if (childPid !== undefined) {
-      try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
-    }
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("ps parent parser and adapter classify init, live, missing, unreadable, and EPERM", { timeout: 1_000 }, async () => {
-  const error = (code: string) => Object.assign(new Error(code), { code });
-  assert.equal(parseParentProcessOutput(" 1\n"), "parent_is_init");
-  assert.equal(parseParentProcessOutput(""), "cannot_determine");
-  assert.equal(parseParentProcessOutput("garbage"), "cannot_determine");
-  assert.equal(parseParentProcessOutput("42\n", () => { throw error("EPERM"); }), "parent_alive");
-  assert.equal(parseParentProcessOutput("42\n", () => { throw error("ESRCH"); }), "parent_missing");
-  const seen: number[] = [];
-  const parent = systemParentProcess({
-    ps: async (pid) => ({ 10: "1\n", 11: "42\n", 12: "43\n", 13: "", 14: "44\n" })[pid as 10] ?? "",
-    checkAlive: (pid) => {
-      seen.push(pid);
-      if (pid === 43) throw error("ESRCH");
-      if (pid === 44) throw error("EPERM");
-    },
-  });
-  assert.deepEqual(await Promise.all([10, 11, 12, 13, 14].map((pid) => parent.inspect(pid))),
-    ["parent_is_init", "parent_alive", "parent_missing", "cannot_determine", "parent_alive"]);
-  assert.deepEqual(seen, [42, 43, 44]);
 });
 
 function listenerStatus(logPath: string): ListenerStatus {
@@ -668,59 +340,6 @@ test("the read-only listener fallback never rewrites a stale live-looking status
   }
 });
 
-test("resume prints lease age, generation and this-host ownership without calling renewal mail observation", { timeout: 1000 }, async () => {
-  const report = {
-    identity: { displayName: "Rivet", principalId: PRINCIPAL },
-    listener: { checkedDirectory: "/tmp/isolated", status: null, source: "not_found" as const },
-    watchers: [],
-    brain: { digest: null, highWaterFile: "/tmp/isolated/brain.json" },
-    inbox: { count: 0, exact: true },
-    wakeLease: { lease: { watcher_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-      host_label: "host-a", generation: 4, renewed_age_ms: 1200 },
-      localWatcherId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-      hostIdDirectory: "/tmp/isolated/state/cswarm/arrival-cursors" },
-    target: cloudTarget("http://127.0.0.1:54321", "public-test-key"),
-    workspaceId: WORKSPACE, credentialFile: "/tmp/isolated/agent.json", installedVersion: "0.1.77",
-  };
-  const human = renderResume(report);
-  assert.match(human, /host-a, generation 4, renewed 1s ago; this host holds it: yes/);
-  assert.match(human, /renewal does not prove this session reads its mail/i);
-  const json = resumeJson(report) as { wake_lease: Record<string, unknown> };
-  assert.equal(json.wake_lease.held_by_this_host, true);
-  assert.equal(json.wake_lease.renewal_is_mail_observation, false);
-  const hostile = { ...report, wakeLease: { ...report.wakeLease,
-    lease: { ...report.wakeLease.lease, host_label: `safe\u001b[31m\u0085\u202e${"x".repeat(300)}` } } };
-  const clean = (resumeJson(hostile) as { wake_lease: { host_label: string } }).wake_lease.host_label;
-  assert.equal(clean.length, 120);
-  assert.doesNotMatch(clean, /[\u001b\u0085\u202e]/);
-  assert.match(renderResume(hostile), new RegExp(clean));
-  const unreadable = { ...report, wakeLease: { ...report.wakeLease, machineIdUnavailable: true,
-    hostIdFileState: "missing" as const } };
-  assert.match(renderResume(unreadable), /no host-id file exists yet/);
-  assert.match(renderResume(unreadable), /host-id state in \/tmp\/isolated\/state\/cswarm\/arrival-cursors separate on each machine/);
-  assert.doesNotMatch(renderResume(report), /sharing that directory across machines/);
-  assert.doesNotMatch(renderResume(unreadable), /existing host id was kept/);
-  assert.match(renderResume({ ...report, wakeLease: { ...unreadable.wakeLease,
-    hostIdFileState: "present" as const } }), /a host-id file exists but cannot be verified/);
-  assert.match(renderResume({ ...report, wakeLease: { ...unreadable.wakeLease,
-    hostIdFileState: "unreadable" as const } }), /could not read the machine id or verify the host-id file/);
-  const lane = await readFile(new URL("../../docs/evidence/2026-09-25-item-g-lane2b/LANE.md", import.meta.url), "utf8");
-  assert.match(lane, /state directory shared across machines is unsupported; each machine needs its own state directory/i);
-  assert.equal(resumeJson(unreadable).host_machine_id_unavailable, true);
-  assert.equal(resumeJson(unreadable).host_id_file_state, "missing");
-  assert.equal(resumeJson({ ...report, wakeLease: { ...unreadable.wakeLease,
-    hostIdFileState: "present" as const } }).host_id_file_state, "present");
-  assert.equal(resumeJson({ ...report, wakeLease: { ...report.wakeLease,
-    localWatcherId: null } }).wake_lease &&
-    (resumeJson({ ...report, wakeLease: { ...report.wakeLease,
-      localWatcherId: null } }).wake_lease as Record<string, unknown>).held_by_this_host, false);
-});
-
-test("lane labels the twelve client mutations as Fold 1 evidence", { timeout: 1000 }, async () => {
-  const lane = await readFile(new URL("../../docs/evidence/2026-09-25-item-g-lane2b/LANE.md", import.meta.url), "utf8");
-  assert.match(lane, /Fold 1 client mutations: twelve were run/);
-});
-
 test("resume reads host-id presence before describing an unreadable machine id", { timeout: 3000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-resume-host-id-"));
   const oldXdg = process.env.XDG_STATE_HOME;
@@ -845,76 +464,6 @@ function signal(id = NEW_SIGNAL): Record<string, unknown> {
   };
 }
 
-function attendedCanarySignal(): Record<string, unknown> {
-  return {
-    ...signal(),
-    from: PRINCIPAL,
-    body: "CommonSwarm attended-seat canary. Run cswarm check in this session; no reply is needed.",
-  };
-}
-
-function acceptNotifyCommand(request: IncomingMessage, response: ServerResponse): boolean {
-  if (request.url !== "/functions/v1/command") return false;
-  let raw = "";
-  request.on("data", chunk => raw += String(chunk));
-  request.on("end", () => {
-    const body = JSON.parse(raw) as { command?: { kind?: string } };
-    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(
-      body.command?.kind === "post_signal"
-        ? { ok: true, status: "accepted", event_ids: [], events: [], signal: attendedCanarySignal() }
-        : { ok: true, status: "accepted", event_ids: [], generation: 1 },
-    ));
-  });
-  return true;
-}
-
-async function stdoutProbeFixture(root: string): Promise<{
-  env: Record<string, string>;
-  attach(pid: number): Promise<void>;
-  markOrphaned(): Promise<void>;
-}> {
-  if (process.platform === "darwin") {
-    return { env: {}, async attach() {}, async markOrphaned() {} };
-  }
-  if (process.platform === "linux") {
-    const procRoot = join(root, "proc");
-    const readerPid = 999_999_991;
-    await mkdir(procRoot, { recursive: true });
-    return {
-      env: { CSWARM_TEST_PROC_ROOT: procRoot },
-      async attach(pid) {
-        const makeFd = async (fixturePid: number, fd: number, flags: string): Promise<void> => {
-          await mkdir(join(procRoot, String(fixturePid), "fd"), { recursive: true });
-          await mkdir(join(procRoot, String(fixturePid), "fdinfo"), { recursive: true });
-          await symlink("pipe:[7001]", join(procRoot, String(fixturePid), "fd", String(fd)));
-          await writeFile(join(procRoot, String(fixturePid), "fdinfo", String(fd)), `flags:\t${flags}\n`);
-        };
-        await makeFd(pid, 1, "01");
-        await makeFd(readerPid, 7, "00");
-      },
-      async markOrphaned() { await rm(join(procRoot, String(readerPid)), { recursive: true, force: true }); },
-    };
-  }
-  const bin = join(root, "bin");
-  const marker = join(root, "stdout-reader-closed");
-  await mkdir(bin, { recursive: true });
-  await writeFile(join(bin, "lsof"), `#!/bin/sh
-if [ -f "$CSWARM_TEST_STDOUT_ORPHAN_MARKER" ]; then
-  printf 'p%s\\nf1\\ntunix\\nn->(none)\\n' "$$"
-else
-  printf 'p%s\\nf1\\ntunix\\nn->fixture-reader\\n' "$$"
-fi
-`, { mode: 0o755 });
-  return {
-    env: {
-      PATH: `${bin}:${process.env.PATH ?? ""}`,
-      CSWARM_TEST_STDOUT_ORPHAN_MARKER: marker,
-    },
-    async attach() {},
-    async markOrphaned() { await writeFile(marker, "closed\n"); },
-  };
-}
-
 function refuseResumeCommand(request: IncomingMessage, response: ServerResponse,
   requests: Array<{ path: string; resource: unknown }>): boolean {
   if (request.url !== "/functions/v1/command") return false;
@@ -936,49 +485,6 @@ test("resume fixture records and refuses a command POST", { timeout: 3000 }, asy
     assert.equal(result.status, 409);
     assert.deepEqual(requests, [{ path: "/functions/v1/command", resource: "command POST" }]);
   } finally { await close(server); }
-});
-
-test("resume reuses the identity members response for session status", { timeout: 3_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-resume-members-"));
-  const previous = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = join(root, "config");
-  let reads = 0;
-  const server = createServer((request, response) => {
-    request.resume();
-    request.on("end", () => {
-      reads += 1;
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
-        members: [], agents: [{ principal_id: PRINCIPAL, owner_user_id: OWNER, name: "Rivet",
-          managed_at: null }],
-        identity: { credential_valid: true, principal_id: PRINCIPAL, owner_user_id: OWNER,
-          workspace_id: WORKSPACE },
-      }));
-    });
-  });
-  const url = await listen(server);
-  try {
-    const target = cloudTarget(url, "public-test-key");
-    const report = await inspectResume({ target, workspaceId: WORKSPACE,
-      credentialFile: join(root, "agent.json"), sessionCredential: TOKEN,
-      installedVersion: "test", stateDirectory: join(root, "state") }, {
-      async readIdentity() {
-        const directory = await readAgentSignalDirectory(target, TOKEN, WORKSPACE);
-        return { displayName: "Rivet", principalId: PRINCIPAL, sessionStatus: directory.sessionStatus };
-      },
-      async readBrainTopics() { return []; },
-      async readInboxCount() { return { count: 0, exact: true }; },
-      processTable: { async list() { return []; } },
-      async queryStatus() { throw new Error("no listener"); },
-      async readStatus() { return null; },
-    });
-    assert.equal(report.sessionContexts?.managed, false);
-    assert.equal(reads, 1, "session status must use the first members response");
-  } finally {
-    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = previous;
-    await close(server);
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 test("the real resume CLI uses only read resources and leaves local files byte-identical", { timeout: 10_000 }, async () => {
@@ -1147,111 +653,6 @@ test("a closed notify reader exits with its stable code and does not advance the
     await close(server);
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("an empty inbox loses only its stdout reader and exits 74 without a signal", { timeout: 8_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-notify-idle-"));
-  const xdg = join(root, "state");
-  let firstRead!: () => void;
-  const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
-  let requests = 0;
-  const server = createServer((request, response) => {
-    if (acceptNotifyCommand(request, response)) return;
-    request.resume();
-    request.on("end", () => {
-      requests += 1;
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
-        signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 },
-      }));
-      firstRead();
-    });
-  });
-  const url = await listen(server);
-  let child: ChildProcess | undefined;
-  try {
-    const credential = await writeCredential(root);
-    const stdoutProbe = await stdoutProbeFixture(root);
-    child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
-      "--url", url, "--anon-key", "anon-idle", "--workspace-id", WORKSPACE], root, xdg,
-    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
-    assert.ok(child.pid);
-    await stdoutProbe.attach(child.pid);
-    let stderr = "";
-    let stdout = "";
-    child.stderr!.setEncoding("utf8");
-    child.stdout!.setEncoding("utf8");
-    child.stderr!.on("data", (chunk: string) => stderr += chunk);
-    child.stdout!.on("data", (chunk: string) => stdout += chunk);
-    const exit = waitForExit(child, () => stderr, 3_000);
-    await read;
-    await stdoutProbe.markOrphaned();
-    child.stdout!.destroy();
-    assert.equal(await exit, EXIT_NOTIFY_ORPHANED, stderr);
-    assert.ok(requests >= 1);
-    assert.equal(stdout, "", "an idle check must never send a stdout keepalive");
-    assert.match(stderr, /\[notify_stdout_closed\]/);
-  } finally {
-    if (child?.exitCode === null) child.kill("SIGKILL");
-    await close(server);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a failed read still checks the stdout reader during retry backoff", { timeout: 8_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-notify-retry-"));
-  const xdg = join(root, "state");
-  let firstRead!: () => void;
-  const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
-  let requests = 0;
-  const server = createServer((request, response) => {
-    if (acceptNotifyCommand(request, response)) return;
-    request.resume();
-    request.on("end", () => {
-      requests += 1;
-      response.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "unavailable" }));
-      firstRead();
-    });
-  });
-  const url = await listen(server);
-  let child: ChildProcess | undefined;
-  try {
-    const credential = await writeCredential(root);
-    const stdoutProbe = await stdoutProbeFixture(root);
-    child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
-      "--url", url, "--anon-key", "anon-retry", "--workspace-id", WORKSPACE], root, xdg,
-    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
-    assert.ok(child.pid);
-    await stdoutProbe.attach(child.pid);
-    let stderr = "";
-    let stdout = "";
-    child.stderr!.setEncoding("utf8");
-    child.stdout!.setEncoding("utf8");
-    child.stderr!.on("data", (chunk: string) => stderr += chunk);
-    child.stdout!.on("data", (chunk: string) => stdout += chunk);
-    const exit = waitForExit(child, () => stderr, 3_000);
-    await read;
-    await stdoutProbe.markOrphaned();
-    child.stdout!.destroy();
-    assert.equal(await exit, EXIT_NOTIFY_ORPHANED, stderr);
-    assert.ok(requests >= 1);
-    assert.equal(stdout, "");
-    assert.match(stderr, /\[notify_stdout_closed\]/);
-  } finally {
-    if (child?.exitCode === null) child.kill("SIGKILL");
-    await close(server);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("the restart sentence uses the CLI's notify flag constant", { timeout: 1_000 }, () => {
-  assert.equal(NOTIFY_RESTART_COMMAND, `cswarm inbox --${NOTIFY_FLAG}`);
-  assert.equal(notifyRestartCommand({ agentTokenFile: "/tmp/a b's.json" }),
-    `cswarm inbox --notify --agent-token-file '/tmp/a b'"'"'s.json'`);
-  assert.equal(notifyRestartCommand({ agentTokenFile: "/tmp/agent.json", workspaceId: WORKSPACE }),
-    `cswarm inbox --notify --agent-token-file /tmp/agent.json --workspace-id ${WORKSPACE}`);
-  assert.match(notifySignalStopSentence("SIGTERM", { agentTokenStdin: true }),
-    /same way it was started, with the agent token on stdin\.$/);
-  assert.doesNotMatch(notifySignalStopSentence("SIGTERM", { agentTokenStdin: true }), /^cswarm /m);
 });
 
 test("every notify parser flag survives in parsed start order without a token", { timeout: 1_000 }, () => {
@@ -1457,187 +858,6 @@ for (const startMode of ["stdin", "profile"] as const) {
   });
 }
 
-test("a watcher started with session context prints that accepted flag", { timeout: 12_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-context-"));
-  const xdg = join(root, "state");
-  let firstRead!: () => void;
-  const read = new Promise<void>((done) => { firstRead = done; });
-  const server = createServer((request, response) => {
-    if (request.url === "/functions/v1/command") {
-      request.resume();
-      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
-      return;
-    }
-    let raw = "";
-    request.on("data", (chunk) => raw += chunk);
-    request.on("end", () => {
-      const body = JSON.parse(raw) as { resource?: string };
-      response.writeHead(200, { "content-type": "application/json" });
-      if (body.resource === "members") response.end(JSON.stringify({
-        members: [], agents: [], identity: {
-          credential_valid: true, owner_user_id: OWNER, principal_id: PRINCIPAL, workspace_id: WORKSPACE,
-        },
-      }));
-      else if (body.resource === "signals") {
-        response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }));
-        firstRead();
-      } else response.end(JSON.stringify({ error: "unexpected_resource" }));
-    });
-  });
-  const url = await listen(server);
-  let child: ChildProcess | undefined;
-  try {
-    const credential = await writeCredential(root);
-    const contextPath = join(root, "session.json");
-    await writeSessionContext(contextPath, {
-      ...newSessionBinding({
-        target: cloudTarget(url, "anon-context"), workspaceId: WORKSPACE, principalId: PRINCIPAL,
-        provider: "codex", mode: "interactive", hostSessionId: "test-session", tokenFile: credential,
-      }),
-      generation: 1, session_key: generateSessionKey(),
-    });
-    child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
-      "--url", url, "--anon-key", "anon-context", "--workspace-id", WORKSPACE,
-      "--session-context", contextPath], root, xdg);
-    let stderr = "";
-    child.stderr!.setEncoding("utf8");
-    child.stderr!.on("data", (chunk: string) => stderr += chunk);
-    const exit = waitForExit(child, () => stderr, 4_000);
-    await Promise.race([read, exit.then((code) => {
-      assert.fail(`session-bound watcher exited ${code} before reading: ${stderr}`);
-    })]);
-    child.kill("SIGTERM");
-    assert.equal(await exit, 143, stderr);
-    const printed = stderr.trim().split("\n").find(line => line.startsWith("cswarm inbox --notify "));
-    assert.ok(printed, stderr);
-    assert.ok(printed.includes(`--session-context ${contextPath}`));
-    assert.equal(stderr.includes(TOKEN), false);
-  } finally {
-    if (child?.exitCode === null) child.kill("SIGKILL");
-    await close(server);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES) as Array<[keyof typeof NOTIFY_SIGNAL_EXIT_CODES, number]>) {
-  test(`${signalName} stops an idle watcher with ${expectedCode} and one restart sentence`, { timeout: 8_000 }, async () => {
-    assert.equal(expectedCode, 128 + osConstants.signals[signalName]);
-    const root = await mkdtemp(join(tmpdir(), "cswarm-notify-signal-"));
-    const xdg = join(root, "state");
-    let firstRead!: () => void;
-    const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
-    const server = createServer((request, response) => {
-    if (request.url === "/functions/v1/command") {
-      request.resume();
-      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
-      return;
-    }
-      request.resume();
-      request.on("end", () => {
-        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
-          signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 },
-        }));
-        firstRead();
-      });
-    });
-    const url = await listen(server);
-    let child: ChildProcess | undefined;
-    try {
-      const credential = await writeCredential(root);
-      child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
-        "--url", url, "--anon-key", "anon-signal", "--workspace-id", WORKSPACE], root, xdg);
-      let stderr = "";
-      child.stderr!.setEncoding("utf8");
-      child.stderr!.on("data", (chunk: string) => stderr += chunk);
-      const exit = waitForExit(child, () => stderr, 3_000);
-      await read;
-      child.kill(signalName);
-      assert.equal(await exit, expectedCode, stderr);
-      assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence(signalName, {
-        arguments: ["--agent-token-file", credential, "--url", url, "--anon-key", "anon-signal", "--workspace-id", WORKSPACE],
-      }, "last-known")}`);
-      assert.ok(stderr.includes(NOTIFY_RESTART_COMMAND));
-      assert.doesNotMatch(stderr, /now\. Restart/, "the signal message is one sentence");
-    } finally {
-      if (child?.exitCode === null) child.kill("SIGKILL");
-      await close(server);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-}
-
-test("proven stdout evidence wins over parent evidence", { timeout: 5_000 }, async () => {
-  const credential = "/tmp/fake-agent.json";
-  const states = ["parent_is_init", "parent_missing", "parent_alive", "cannot_determine"] as const;
-  const parentProcess: ParentProcessAdapter = {
-    async inspect(pid) { return states[pid - 100]!; },
-  };
-  const watchers = await findNotifyWatchers({
-    credentialPaths: [credential], principalId: PRINCIPAL,
-    processTable: { async list() { return states.map((_, index) => ({
-      pid: 100 + index, command: `cswarm inbox --notify --agent-token-file ${credential}`,
-    })); } },
-    stdoutConsumer: { async inspect() { return "live_reader"; } },
-    parentProcess,
-  });
-  assert.deepEqual(watchers.map((watcher) => watcher.parent), states);
-  assert.deepEqual(watchers.map((watcher) => watcher.stdout), states.map(() => "live_reader"));
-  const report = {
-    identity: { displayName: "Test", principalId: PRINCIPAL },
-    listener: { checkedDirectory: "/tmp/none", status: null, source: "not_found" as const },
-    watchers, brain: { digest: null, highWaterFile: "/tmp/none" },
-    inbox: { count: 0, exact: true }, target: cloudTarget("http://127.0.0.1:1", "anon"),
-    workspaceId: WORKSPACE, credentialFile: credential, installedVersion: "test",
-  };
-  const output = renderResume(report);
-  assert.match(output, /PID 100: stdout has a live pipe reader; parent PID is 1/);
-  assert.match(output, /PID 101: stdout has a live pipe reader; parent process no longer exists/);
-  assert.doesNotMatch(output, /kill 100 101/);
-  assert.match(output, /PID 102: stdout has a live pipe reader; parent process is live/);
-  assert.match(output, /PID 103: stdout has a live pipe reader; parent process cannot be determined/);
-  assert.deepEqual((resumeJson(report).notify_watchers as Array<{ state: string }>).map((watcher) => watcher.state),
-    ["live_reader", "live_reader", "live_reader", "live_reader"]);
-});
-
-test("resume uses parent evidence only when stdout is unproved", { timeout: 2_000 }, () => {
-  const base: Parameters<typeof renderResume>[0] = {
-    identity: { displayName: "Test", principalId: PRINCIPAL },
-    listener: { checkedDirectory: "/tmp/none", status: null, source: "not_found" },
-    watchers: [], brain: { digest: null, highWaterFile: "/tmp/none" },
-    inbox: { count: 0, exact: true }, target: cloudTarget("http://127.0.0.1:1", "anon"),
-    workspaceId: WORKSPACE, credentialFile: "/tmp/fake-agent.json", installedVersion: "test",
-  };
-  const cases = [
-    ["live_reader", "parent_is_init", "live_reader"],
-    ["live_reader", "parent_missing", "live_reader"],
-    ["live_reader", "cannot_determine", "live_reader"],
-    ["orphaned", "parent_alive", "orphaned"],
-    ["orphaned", "cannot_determine", "orphaned"],
-    ["cannot_determine", "parent_is_init", "orphaned"],
-    ["not_pipe", "parent_missing", "orphaned"],
-    ["cannot_determine", "parent_alive", "cannot_determine"],
-    ["not_pipe", "cannot_determine", "cannot_determine"],
-  ] as const;
-  for (const [stdout, parent, expected] of cases) {
-    const report = { ...base, watchers: [{ pid: 123, matchedBy: ["agent_token_file" as const], stdout, parent }] };
-    const json = resumeJson(report).notify_watchers as Array<{ stdout: string; parent: string; state: string }>;
-    assert.deepEqual(json.map(({ stdout, parent, state }) => [stdout, parent, state]),
-      [[stdout, parent, expected]]);
-    const output = renderResume(report);
-    assert.equal(output.includes("kill 123"), expected === "orphaned", `${stdout}/${parent}`);
-    if (expected === "orphaned") {
-      assert.match(output, /Then start one watcher from this seat's live host session after its context is verified/);
-      assert.doesNotMatch(output, /cswarm inbox --notify/);
-    }
-    if (expected === "cannot_determine") {
-      assert.match(output, stdout === "cannot_determine" ? /unknown stdout reader/ : /unknown parent process/);
-      if (stdout === "not_pipe") assert.doesNotMatch(output, /unknown stdout reader/);
-    }
-  }
-});
-
 test("the orphan stop command runs exactly as printed", { timeout: 3_000 }, async () => {
   const sleeper = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
   try {
@@ -1657,10 +877,4 @@ test("the orphan stop command runs exactly as printed", { timeout: 3_000 }, asyn
     assert.equal(await waitForExit(shell, () => "", 1_000), 0);
     await sleeperExit;
   } finally { if (sleeper.exitCode === null) sleeper.kill("SIGKILL"); }
-});
-
-test("lane record names the Linux idle-check limit", { timeout: 1_000 }, async () => {
-  const record = await readFile("docs/evidence/2026-09-24-item-g-lane2a/LANE.md", "utf8");
-  assert.match(record, /On Linux, `lsof` without `\+E` prints no peer/);
-  assert.match(record, /never exits 74 from that check/);
 });

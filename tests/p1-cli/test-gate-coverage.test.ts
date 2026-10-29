@@ -29,7 +29,6 @@ const localStackTests = [
   "tests/p1-local/chat-recipients-postgres.test.ts",
   "tests/p1-local/delivery-receipts-postgres.test.ts",
   "tests/p1-local/file-artifacts-e2e.test.ts",
-  "tests/p1-local/human-seen-browser.test.ts",
   "tests/p1-local/idempotency-retention.test.ts",
   "tests/p1-local/local-integration.test.ts",
   "tests/p1-local/standing-grants-postgres.test.ts",

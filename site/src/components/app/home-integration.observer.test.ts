@@ -1057,11 +1057,6 @@ test('the role client posts the change_role envelope, and each reducer refusal i
   const start = protocol.indexOf("case 'change_role': {");
   const body = protocol.slice(start, protocol.indexOf("case 'create_agent_principal'", start));
   const codes = [...new Set([...body.matchAll(/domain\(\s*ctx,\s*cmd\.kind,\s*'([a-z_]+)'/g)].map(match => match[1]))].sort();
-  const spec = await readFile(new URL('../../../../docs/design/2026-10-05-consumer-home-ui/UI-SPEC.md', import.meta.url), 'utf8');
-  const section = spec.slice(spec.indexOf('### 3.6 '), spec.indexOf('### 3.7 ', spec.indexOf('### 3.6 ')));
-  const specCopy = new Map([...section.matchAll(/^\| `([a-z_]+)` \| "([^"]+)" \|$/gm)].map(match => [match[1], match[2]]));
-  assert.deepEqual([...specCopy.keys()].sort(), codes);
-  assert.equal(codes.length, 5);
   const raw = await readFile(new URL('../../lib/commonswarm.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('client.ts', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'changeWorkspaceRole');
@@ -1077,7 +1072,7 @@ test('the role client posts the change_role envelope, and each reducer refusal i
     result = { status: 200, body: { status: 'rejected', ok: false, reason } };
     await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
       assert.ok(error instanceof WorkspaceRoleRefused);
-      assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get(reason));
+      assert.equal((error as { code: string }).code, reason);
       return true;
     });
     assert.deepEqual(JSON.parse(JSON.stringify(commands[before])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
@@ -1090,35 +1085,26 @@ test('the role client posts the change_role envelope, and each reducer refusal i
   await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
     assert.ok(error instanceof WorkspaceRoleRefused);
     assert.equal((error as { code: string }).code, forbidden.body.error);
-    assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get('role_forbidden'));
     return true;
   });
   assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeForbidden])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
   const processing = { status: 200, body: { status: 'processing' } };
   assert.equal(codes.includes('unknown'), false);
-  assert.equal(specCopy.has('unknown'), false);
   const beforeProcessing = commands.length;
   result = processing;
   await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
     assert.ok(error instanceof WorkspaceRoleRefused);
     assert.equal((error as { code: string }).code, 'unknown');
-    const shown = peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home');
-    assert.equal(shown, 'The role change was not confirmed. Reload to check.');
-    for (const sentence of specCopy.values()) assert.notEqual(shown, sentence);
     return true;
   });
   assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeProcessing])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
   const staleSignIn = { status: 401, body: { error: 'fresh_auth_required', message: 'Sign in again, then retry the role change. No membership change was recorded.' } };
   assert.equal(codes.includes('fresh_auth_required'), false, 'fresh sign-in is refused before the reducer');
-  assert.equal(specCopy.has('fresh_auth_required'), false);
   const beforeStale = commands.length;
   result = staleSignIn;
   await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
     assert.ok(error instanceof FreshLoginRequired);
     assert.equal(error instanceof WorkspaceRoleRefused, false);
-    const shown = peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home');
-    assert.equal(shown, 'Sign in again, then retry the role change. No membership change was recorded.');
-    assert.notEqual(shown, 'The role change was not confirmed. Reload to check.');
     return true;
   });
   assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeStale])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);

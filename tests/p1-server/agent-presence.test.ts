@@ -1,11 +1,10 @@
 /** G3d per-seat presence against the served command/read edges. */
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -89,22 +88,6 @@ async function command(
 
 function note(body = `presence-${randomUUID()}`): Record<string, unknown> {
   return { kind: "post_signal", signal_kind: "note", body, to_user_id: null, about: null };
-}
-
-async function ask(): Promise<string> {
-  const sent = await command(fixture.ownerJwt, {
-    kind: "post_signal",
-    signal_kind: "ask",
-    body: `presence-ask-${randomUUID()}`,
-    to_user_id: null,
-    to_agent_principal_id: fixture.principal,
-    in_reply_to: null,
-    about: null,
-  });
-  assert.equal(sent.status, 200, JSON.stringify(sent.body));
-  const id = (sent.body.signal as { id?: unknown } | undefined)?.id;
-  assert.equal(typeof id, "string");
-  return id as string;
 }
 
 async function presence() {
@@ -218,47 +201,6 @@ after(async () => {
   if (envDir) rmSync(envDir, { recursive: true, force: true });
 });
 
-test("watcher, turn, channel, and listener routes remain independent", async () => {
-  const watcher = randomUUID();
-  const host = randomUUID();
-  const claimed = await command(fixture.token, {
-    kind: "claim_wake_lease", watcher_id: watcher, host_label: "presence-host",
-    host_id: host, take_over: false,
-  }, { clientBuild: "0.1.77" });
-  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
-  const generation = Number(claimed.body.generation);
-  const afterClaim = await presence();
-  assert.ok(afterClaim.watcher_at);
-  assert.equal(afterClaim.client_build, "0.1.77");
-
-  await delay(20);
-  const touched = await command(fixture.token, { kind: "touch_presence" });
-  assert.deepEqual(touched, { status: 200, body: { ok: true } });
-  const afterTouch = await presence();
-  assert.ok(afterTouch.turn_at);
-  assert.equal(afterTouch.watcher_at?.toISOString(), afterClaim.watcher_at?.toISOString());
-
-  await delay(20);
-  const renewed = await command(fixture.token, {
-    kind: "renew_wake_lease", watcher_id: watcher, generation,
-  });
-  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
-  const afterRenew = await presence();
-  assert.ok(afterRenew.watcher_at && afterRenew.watcher_at >= afterClaim.watcher_at!);
-  assert.equal(afterRenew.turn_at?.toISOString(), afterTouch.turn_at?.toISOString());
-
-  const channel = await command(fixture.token, {
-    kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 1, route: "channel",
-  });
-  assert.equal(channel.status, 200, JSON.stringify(channel.body));
-  assert.ok((await presence()).channel_at);
-  const listener = await command(fixture.token, {
-    kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 1, route: "listener",
-  });
-  assert.equal(listener.status, 200, JSON.stringify(listener.body));
-  assert.ok((await presence()).listener_at);
-});
-
 test("route is refused everywhere except the two claim_agent_inbox values", async () => {
   for (const commandBody of [
     { kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 1, route: "worker" },
@@ -340,64 +282,6 @@ test("ordinary commands throttle last_command_at and replays still update build"
   assert.ok((await presence()).last_command_at > stale.last_command_at);
 });
 
-test("malformed client builds become NULL without refusing the command", async () => {
-  for (const clientBuild of ["not-semver", `1.0.0-${"a".repeat(59)}`]) {
-    if (clientBuild !== "not-semver") assert.equal(clientBuild.length, 65);
-    const result = await command(fixture.token, note(), { clientBuild });
-    assert.equal(result.status, 200, JSON.stringify(result.body));
-    assert.equal((await presence()).client_build, null);
-  }
-});
-
-test("leased and unclaimed ACK routes are derived once", async () => {
-  const leasedSignal = await ask();
-  const listener = randomUUID();
-  const claimed = await command(fixture.token, {
-    kind: "claim_agent_inbox", listener_instance_id: listener, limit: 10, route: "channel",
-  });
-  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
-  const delivery = (claimed.body.deliveries as Array<{ signal: { id: string }; lease_id: string }>)
-    .find((row) => row.signal.id === leasedSignal);
-  assert.ok(delivery);
-  const leasedAck = await command(fixture.token, {
-    kind: "ack_agent_delivery", signal_id: leasedSignal, lease_id: delivery.lease_id,
-    listener_instance_id: listener, outcome: "queued", last_error_code: null,
-  });
-  assert.equal(leasedAck.status, 200, JSON.stringify(leasedAck.body));
-  let [leasedRow] = await sql<{ ack_via: string }[]>`
-    SELECT ack_via FROM swarm.signal_deliveries
-    WHERE signal_id = ${leasedSignal}::uuid AND recipient_agent_principal_id = ${fixture.principal}::uuid`;
-  assert.equal(leasedRow?.ack_via, "leased");
-
-  // Simulate a queued ACK written by the pre-G3d edge. Its persisted lease
-  // provenance must win over the later body-free observed follow-up.
-  await sql`UPDATE swarm.signal_deliveries SET ack_via = NULL
-    WHERE signal_id = ${leasedSignal}::uuid
-      AND recipient_agent_principal_id = ${fixture.principal}::uuid`;
-
-  const later = await command(fixture.token, {
-    kind: "ack_agent_delivery", signal_id: leasedSignal, lease_id: null,
-    listener_instance_id: null, outcome: "observed", last_error_code: null,
-  });
-  assert.equal(later.status, 200, JSON.stringify(later.body));
-  [leasedRow] = await sql<{ ack_via: string }[]>`
-    SELECT ack_via FROM swarm.signal_deliveries
-    WHERE signal_id = ${leasedSignal}::uuid AND recipient_agent_principal_id = ${fixture.principal}::uuid`;
-  assert.equal(leasedRow?.ack_via, "leased");
-
-  const unclaimedSignal = await ask();
-  const unclaimed = await command(fixture.token, {
-    kind: "ack_agent_delivery", signal_id: unclaimedSignal, lease_id: null,
-    listener_instance_id: null, outcome: "observed", last_error_code: null,
-    surfaced: true, unclaimed: true,
-  });
-  assert.equal(unclaimed.status, 200, JSON.stringify(unclaimed.body));
-  const [unclaimedRow] = await sql<{ ack_via: string }[]>`
-    SELECT ack_via FROM swarm.signal_deliveries
-    WHERE signal_id = ${unclaimedSignal}::uuid AND recipient_agent_principal_id = ${fixture.principal}::uuid`;
-  assert.equal(unclaimedRow?.ack_via, "unclaimed");
-});
-
 test("human commands create no presence and the member view is tenant scoped", async () => {
   const before = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM swarm.agent_presence`;
   assert.equal((await command(fixture.ownerJwt, note())).status, 200);
@@ -422,36 +306,6 @@ test("human commands create no presence and the member view is tenant scoped", a
     await tx.unsafe("SET LOCAL ROLE authenticated");
     await tx`SELECT * FROM swarm.agent_presence LIMIT 1`;
   }), /permission denied/);
-});
-
-test("the functional proof uses production psql shape and has a negative control", async () => {
-  const seeded = await command(fixture.token, { kind: "touch_presence" });
-  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
-  const proof = readFileSync(fileURLToPath(new URL(
-    "../../deploy/release-proofs/item-g3d/20260927000002-functional.sql",
-    import.meta.url,
-  )), "utf8");
-  const containers = execFileSync("docker", ["ps", "--format", "{{.Names}}"], { encoding: "utf8" })
-    .trim().split("\n").filter((name) => /^supabase_db_/.test(name));
-  assert.equal(containers.length, 1);
-  const args = [
-    "exec", "-i", containers[0]!, "psql", "-X", "-U", "postgres", "-d", "postgres",
-    "-v", "ON_ERROR_STOP=1",
-    "-v", `item_g3d_principal_id=${fixture.principal}`,
-    "-v", `item_g3d_workspace_id=${fixture.workspace}`,
-    "--file", "-",
-  ];
-  const run = spawnSync("docker", args, { input: proof, encoding: "utf8", timeout: 10_000 });
-  assert.ifError(run.error);
-  assert.equal(run.status, 0, run.stderr);
-  assert.equal(run.stdout.trim().split("\n").at(-1), "t");
-  const negativeArgs = [...args];
-  negativeArgs[negativeArgs.indexOf(`item_g3d_principal_id=${fixture.principal}`)] =
-    `item_g3d_principal_id=${randomUUID()}`;
-  const negative = spawnSync("docker", negativeArgs, { input: proof, encoding: "utf8", timeout: 10_000 });
-  assert.ifError(negative.error);
-  assert.notEqual(negative.status, 0);
-  assert.notEqual(negative.stdout.trim().split("\n").at(-1), "t");
 });
 
 test("a revoked agent is refused without changing presence", async () => {

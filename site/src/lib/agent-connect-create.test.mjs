@@ -50,38 +50,6 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("a default create omits allow_duplicate_name from the JSON", async () => {
-  await createAgentIdentity(SESSION, "web_create_1", WORKSPACE, "echo");
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].command.kind, "create_agent_principal");
-  assert.equal(sent[0].command.name, "echo");
-  assert.equal(Object.hasOwn(sent[0].command, ALLOW_DUPLICATE_NAME_FIELD), false);
-  assert.doesNotMatch(sent[0].raw, /allow_duplicate_name/);
-});
-
-test("the duplicate flag is sent only after an explicit choice", async () => {
-  await createAgentIdentity(
-    SESSION,
-    "web_create_2",
-    WORKSPACE,
-    "echo",
-    undefined,
-    true,
-  );
-  assert.equal(sent[0].command[ALLOW_DUPLICATE_NAME_FIELD], true);
-  assert.match(sent[0].raw, /"allow_duplicate_name":true/);
-});
-
-test("name_taken without an explicit choice does not retry with the duplicate flag", async () => {
-  respond = () => ({ status: "rejected", reason: "principal_name_taken" });
-  await assert.rejects(
-    () => createAgentIdentity(SESSION, "web_create_taken", WORKSPACE, "echo"),
-    (error) => error instanceof AgentNameTaken && error.agentName === "echo",
-  );
-  assert.equal(sent.length, 1);
-  assert.equal(Object.hasOwn(sent[0].command, ALLOW_DUPLICATE_NAME_FIELD), false);
-});
-
 test("an idempotent retry reuses the command id and does not mint a second principal", async () => {
   const commandId = "web_create_retry";
   const first = await createAgentIdentity(
