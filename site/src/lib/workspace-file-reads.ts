@@ -54,7 +54,8 @@ export function bindFileListRetry<T>(options: {
     const pending = retry.run();
     sync();
     const result = await pending;
-    if (result.kind === "busy" || result.kind === "stale") return;
+    if (result.kind === "stale") { sync(); return; }
+    if (result.kind === "busy") return;
     options.apply(result);
     options.render();
     const focused = button.ownerDocument.activeElement;

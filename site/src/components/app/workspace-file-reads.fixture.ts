@@ -23,7 +23,13 @@ export async function readRecoveryFixture(): Promise<string> {
     resolveRead(['brief.pdf']); await new Promise(resolve => setTimeout(resolve, 0));
     check('recovered', $('retry').hidden && $('files').textContent === 'brief.pdf' && $('draft').value === 'keep this draft' && document.activeElement === $('files-title'));
     failed = true; binding.sync(); $('retry').click(); context = { workspaceId:'two', session, generation:2 }; resolveRead(['old private']); await new Promise(resolve => setTimeout(resolve,0));
-    check('stale', $('files').textContent === 'brief.pdf' && $('draft').value === 'keep this draft');
+    check('stale', $('files').textContent === 'brief.pdf' && $('draft').value === 'keep this draft' && !$('retry').disabled && $('status').hidden);
+    $('retry').click(); const resolveOld = resolveRead;
+    context = { workspaceId:'three', session, generation:3 }; binding.sync(); $('retry').click(); const resolveNew = resolveRead;
+    resolveOld(['old']); await new Promise(resolve => setTimeout(resolve,0));
+    check('newer still busy', $('retry').disabled && !$('status').hidden && $('files').textContent === 'brief.pdf');
+    resolveNew(['current.pdf']); await new Promise(resolve => setTimeout(resolve,0));
+    check('newer recovered', $('retry').hidden && $('status').hidden && $('files').textContent === 'current.pdf');
     const ids=['back','selectionPrompt','list','empty','detail','title','meta','bodyMode','markdown','raw','rawToggle','edit','form','textarea','save','cancel','history','historyList'];
     const targets=Object.fromEntries(ids.map(id => [id,$(id)])); Object.assign(targets,{view:$('wiki'),error:$('wikiError'),retry:$('wikiRetry'),status:$('wikiStatus')});
     let grantCount=0, versions=[]; const oldFetch=window.fetch;
