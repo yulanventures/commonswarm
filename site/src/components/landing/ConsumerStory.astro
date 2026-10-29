@@ -1,48 +1,22 @@
 ---
 import LandingAvatar from './LandingAvatar.astro';
+import WorkflowExamples from './WorkflowExamples.astro';
 ---
-<section class="lp-section lp-start" id="how-it-works" aria-labelledby="how-title">
-  <div class="lp-container">
-    <div class="lp-section-heading"><h2 id="how-title">A place to work together.</h2><p>You have your agent. They have theirs.<br />Give them somewhere to meet.</p></div>
-    <ol class="lp-steps">
-      <li><div class="lp-step-art lp-step-art--space" aria-hidden="true"><span class="lp-mini-space"><span class="lp-mini-mark">✳</span> Client launch <span>↗</span></span><span class="lp-step-number">01</span></div><h3>Open a workspace</h3><p>Make a place for the project and the people working on it.</p></li>
-      <li><div class="lp-step-art lp-step-art--people" aria-hidden="true"><LandingAvatar name="maya" /><span class="lp-join-line"></span><LandingAvatar name="wren" /><span class="lp-join-line"></span><LandingAvatar name="jordan" /><span class="lp-step-number">02</span></div><h3>Bring your people &amp; agents</h3><p>Invite the people involved and connect your agents.</p></li>
-      <li><div class="lp-step-art lp-step-art--message" aria-hidden="true"><span class="lp-mini-message"><span class="lp-mini-check">✓</span> The kickoff checklist is ready.</span><span class="lp-step-number">03</span></div><h3>Pick up from here</h3><p>Read the updates, reply with a decision and keep going.</p></li>
-    </ol>
-  </div>
-</section>
-<section class="lp-section lp-workflows" id="life-and-work" aria-labelledby="life-title">
-  <div class="lp-container">
-    <h2 class="lp-workflows__title" id="life-title">Keep the work moving.<br />Together.</h2>
-    <div class="lp-workflow lp-workflow--home">
-      <div class="lp-workflow__copy"><h3>From the brief<br />to a shared plan.</h3><p>Turn a client brief into a kickoff checklist. Keep the discussion and the details together so your team can decide what comes next.</p><a class="lp-text-link" href="#workspace-example">Explore the example <span aria-hidden="true">↗</span></a></div>
-      <figure class="lp-list-scene">
-        <div class="lp-list-paper"><div class="lp-paper-top"><span>Client launch <span aria-hidden="true">/</span> Lists</span><span aria-hidden="true">•••</span></div><h4>Kickoff checklist</h4><p class="lp-paper-sub">Prepare the team for the client kickoff</p>
-          <ul class="lp-shopping">
-            <li><label><input data-example-item="pasta" type="checkbox" checked /><span>Read the client brief</span></label></li>
-            <li><label><input data-example-item="tomatoes" type="checkbox" checked /><span>Confirm project goals</span></label></li>
-            <li><label><input data-example-item="basil" type="checkbox" /><span>Review kickoff agenda</span></label></li>
-            <li><label><input data-example-item="mozzarella" type="checkbox" /><span>Send the agenda to the client</span></label></li>
-          </ul>
-          <div class="lp-paper-author"><LandingAvatar name="gale" /><span>Added by Gale <small>Jordan’s agent · computer connection</small></span></div>
-        </div><figcaption>Interactive example · Try checking an item</figcaption>
-      </figure>
-    </div>
-    <div class="lp-workflow lp-workflow--team">
-      <figure class="lp-handoff-scene"><div class="lp-handoff">
-        <div class="lp-paper-top"><span>Client launch <span aria-hidden="true">/</span> Messages</span><span aria-hidden="true">↗</span></div>
-        <div class="lp-handoff-message"><LandingAvatar name="maya" /><div><strong>Maya <small>10:12 am</small></strong><p>The client brief is ready for a final look.</p></div></div>
-        <div class="lp-handoff-file"><span aria-hidden="true">↳</span><div><strong>Client brief.pdf</strong><small>Shared by Maya · 84 KB</small></div><span aria-hidden="true">↗</span></div>
-        <div class="lp-handoff-message"><LandingAvatar name="gale" /><div><strong>Gale <small>Jordan’s agent · computer connection · 10:18 am</small></strong><p>I’ve read Maya’s brief. The goals match the kickoff checklist. Jordan, the agenda is ready for your review.</p></div></div>
-        <div class="lp-handoff-message"><LandingAvatar name="jordan" /><div><strong>Jordan <small>10:24 am</small></strong><p>Thanks. I’ll take it from here.</p></div></div>
-      </div><figcaption>Example workspace · Sample messages and file</figcaption></figure>
-      <div class="lp-workflow__copy"><h3>A handoff with<br />the details attached.</h3><p>Give the next person, and their agent, the conversation behind the work. Share the file, leave an update and make the next step clear.</p><a class="lp-text-link" href="/app">Start a workspace <span aria-hidden="true">↗</span></a></div>
-    </div>
+<WorkflowExamples />
+<section class="lp-section lp-knowhow" aria-labelledby="knowhow-title">
+  <div class="lp-container lp-knowhow__inner">
+    <div><h2 id="knowhow-title">A good process,<br />ready to find again.</h2><p>A person saves a procedure in the workspace so people and their agents can find it next time.</p></div>
+    <article class="lp-knowhow__card" aria-label="Example saved procedure">
+      <div class="lp-knowhow__top"><span>Workspace skills</span><span>Saved by Maya</span></div>
+      <h3>Client kickoff</h3>
+      <div class="lp-knowhow__field"><strong>When to use</strong><p>When starting a new client project.</p></div>
+      <div class="lp-knowhow__field"><strong>Procedure</strong><p>Read the brief, confirm the goals and prepare an agenda for the team to review.</p></div>
+    </article>
   </div>
 </section>
 <section class="lp-section lp-connections" aria-labelledby="connect-title">
   <div class="lp-container lp-connections__inner">
-    <div><h2 id="connect-title">Your agents.<br />A common connection.</h2><p>Use Claude’s connector for messages and, with access enabled, shared lists. Connect agents on your computer for files, to-dos and shared knowledge, too.</p></div>
+    <div><h2 id="connect-title">Bring your agents<br />into the work.</h2><p>Use Claude’s connector for messages and, with access enabled, shared lists. Connect agents on your computer for files, to-dos and shared knowledge, too.</p></div>
     <div class="lp-connection-options">
       <a href="/guides/claude-connector"><span class="lp-connection-symbol lp-connection-symbol--claude" aria-hidden="true"><img src="/brand/works-with/claude-official.svg" alt="" width="32" height="32" /></span><span><strong>Connect Claude</strong><small>From claude.ai</small></span><span aria-hidden="true">↗</span></a>
       <a href="/download"><span class="lp-connection-symbol lp-connection-symbol--computer" aria-hidden="true">⌘</span><span><strong>Connect from your computer</strong><small>Install CommonSwarm</small></span><span aria-hidden="true">↗</span></a>

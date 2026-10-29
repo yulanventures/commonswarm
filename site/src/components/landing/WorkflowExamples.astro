@@ -1,0 +1,56 @@
+---
+import LandingAvatar from './LandingAvatar.astro';
+---
+<section class="lp-section lp-workbench" id="how-it-works" aria-labelledby="workbench-title">
+  <div class="lp-container">
+    <div class="lp-workbench__intro"><div><h2 id="workbench-title">See what working<br />together looks like.</h2></div><p>Give your agents context alongside the people who make the decisions.</p></div>
+    <div class="lp-workbench__frame" id="life-and-work" data-workbench>
+      <div class="lp-workbench__tabs" role="tablist" aria-label="Example workflows">
+        <button type="button" role="tab" id="workflow-tab-launch" aria-controls="workflow-launch" aria-selected="true" tabindex="0" data-workflow-tab="launch">Client launch</button>
+        <button type="button" role="tab" id="workflow-tab-weekly" aria-controls="workflow-weekly" aria-selected="false" tabindex="-1" data-workflow-tab="weekly">Weekly review</button>
+        <button type="button" role="tab" id="workflow-tab-research" aria-controls="workflow-research" aria-selected="false" tabindex="-1" data-workflow-tab="research">Research handoff</button>
+      </div>
+      <section class="lp-workbench__panel" role="tabpanel" id="workflow-launch" aria-labelledby="workflow-tab-launch" tabindex="0" data-workflow-panel="launch">
+        <div class="lp-workbench__conversation"><span class="lp-eyebrow">Client launch / Messages</span><div class="lp-workbench__message"><LandingAvatar name="jordan" /><div><strong>Jordan</strong><p>Gale, could you turn the brief into a kickoff checklist?</p></div></div><div class="lp-workbench__message"><LandingAvatar name="gale" /><div><strong>Gale <small>Jordan’s agent · computer connection</small></strong><p>I’ve added the checklist. Jordan, can you review the agenda?</p></div></div></div>
+        <article class="lp-workbench__artifact"><span class="lp-artifact-label">Shared list</span><h3>Kickoff checklist</h3><p>Prepare the team for the client kickoff</p><ul class="lp-shopping">
+          <li><label><input data-example-item="pasta" type="checkbox" checked /><span>Read the client brief</span></label></li>
+          <li><label><input data-example-item="tomatoes" type="checkbox" checked /><span>Confirm project goals</span></label></li>
+          <li><label><input data-example-item="basil" type="checkbox" /><span>Review kickoff agenda</span></label></li>
+          <li><label><input data-example-item="mozzarella" type="checkbox" /><span>Send the agenda to the client</span></label></li>
+        </ul><p class="lp-artifact-note">Added by Gale · Try checking an item</p></article>
+      </section>
+      <section class="lp-workbench__panel" role="tabpanel" id="workflow-weekly" aria-labelledby="workflow-tab-weekly" tabindex="0" data-workflow-panel="weekly" hidden>
+        <div class="lp-workbench__conversation"><span class="lp-eyebrow">Weekly review / Messages</span><div class="lp-workbench__message"><LandingAvatar name="maya" /><div><strong>Maya</strong><p>Wren, can you collect our decisions and open questions from this week?</p></div></div><div class="lp-workbench__message"><LandingAvatar name="wren" /><div><strong>Wren <small>Maya’s agent · computer connection</small></strong><p>I’ve put them in a shared note for the team to review.</p></div></div></div>
+        <article class="lp-workbench__artifact"><span class="lp-artifact-label">Shared knowledge</span><h3>Friday review</h3><div class="lp-artifact-section"><strong>Decision</strong><p>Use the shorter onboarding flow for the pilot.</p></div><div class="lp-artifact-section"><strong>Open questions</strong><p>Which feedback should we gather first? Who will review the pilot notes?</p></div><p class="lp-artifact-note">Shared by Wren · For team review</p></article>
+      </section>
+      <section class="lp-workbench__panel" role="tabpanel" id="workflow-research" aria-labelledby="workflow-tab-research" tabindex="0" data-workflow-panel="research" hidden>
+        <div class="lp-workbench__conversation"><span class="lp-eyebrow">Research handoff / Messages</span><div class="lp-workbench__message"><LandingAvatar name="marcus" /><div><strong>Marcus</strong><p>Pike, review the research notes and suggest what the team should explore next.</p></div></div><div class="lp-workbench__message"><LandingAvatar name="pike" /><div><strong>Pike <small>Marcus’s agent · computer connection</small></strong><p>I’ve shared a short recommendation with the source context for Priya to review.</p></div></div></div>
+        <article class="lp-workbench__artifact"><span class="lp-artifact-label">Shared file</span><h3>Research handoff.pdf</h3><div class="lp-artifact-section"><strong>Recommendation</strong><p>Explore a simpler first-run guide before adding more setup steps.</p></div><div class="lp-artifact-section"><strong>Context</strong><p>Based on the team’s pilot interview notes and onboarding observations.</p></div><p class="lp-artifact-note">Shared by Pike · For Priya’s review</p></article>
+      </section>
+    </div>
+    <p class="lp-workbench__caption">Illustrative examples · Checklist changes stay on this page.</p>
+  </div>
+</section>
+<script>
+  document.querySelectorAll<HTMLElement>('[data-workbench]').forEach((workbench) => {
+    const tabs = [...workbench.querySelectorAll<HTMLButtonElement>('[data-workflow-tab]')];
+    const panels = [...workbench.querySelectorAll<HTMLElement>('[data-workflow-panel]')];
+    const select = (index: number, focus = false) => {
+      tabs.forEach((tab, i) => { tab.setAttribute('aria-selected', String(i === index)); tab.tabIndex = i === index ? 0 : -1; });
+      panels.forEach((panel, i) => { panel.hidden = i !== index; });
+      if (focus) tabs[index].focus();
+    };
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => select(index));
+      tab.addEventListener('keydown', (event) => {
+        let next: number;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault(); select(next, true);
+      });
+    });
+  });
+</script>

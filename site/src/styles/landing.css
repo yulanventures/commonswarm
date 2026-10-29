@@ -365,3 +365,55 @@
   :root:is([data-home], :has(main .lp-home)) { scroll-behavior: auto; }
   .lp-home *, .lp-home *::before, .lp-home *::after { animation: none !important; transition: none !important; }
 }
+
+/* Workbench: real text and local controls, arranged as conversation beside artifact. */
+.lp-workbench { background: var(--lp-sage); }
+.lp-workbench__intro { display: flex; justify-content: space-between; align-items: end; gap: 32px; margin-bottom: 38px; }
+.lp-workbench__intro > p { max-width: 310px; color: var(--lp-muted); font-size: 16px; }
+.lp-eyebrow { display: block; color: var(--lp-accent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; }
+.lp-workbench__frame { scroll-margin-top: 90px; background: var(--lp-surface); border: 1px solid var(--lp-line); border-radius: 12px; overflow: hidden; box-shadow: 0 18px 50px -30px rgb(var(--lp-shadow) / .25); }
+.lp-workbench__tabs { display: flex; gap: 4px; padding: 12px 20px 0; border-bottom: 1px solid var(--lp-line); }
+.lp-workbench__tabs button { min-height: 52px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--lp-muted); font-size: 14px; font-weight: 600; white-space: nowrap; }
+.lp-workbench__tabs button[aria-selected="true"] { color: var(--lp-ink); border-bottom-color: var(--lp-accent); }
+.lp-workbench__panel { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; padding: 38px; min-height: 390px; }
+.lp-workbench__conversation { padding: 10px 8px; }
+.lp-workbench__message { display: flex; align-items: start; gap: 13px; margin-top: 28px; font-size: 15px; line-height: 1.55; }
+.lp-workbench__message > div { min-width: 0; }
+.lp-workbench__message strong { display: block; font-size: 13px; }
+.lp-workbench__message small { display: block; color: var(--lp-muted); font-size: 11px; font-weight: 400; }
+.lp-workbench__message p { margin-top: 5px; }
+.lp-workbench__artifact { background: var(--lp-paper); border: 1px solid var(--lp-line); border-radius: 9px; padding: 26px 28px; min-width: 0; }
+.lp-artifact-label { color: var(--lp-accent); font-size: 11px; font-weight: 700; }
+.lp-workbench__artifact h3 { font-size: 25px; margin-top: 8px; }
+.lp-workbench__artifact > p { color: var(--lp-muted); font-size: 13px; margin-top: 7px; }
+.lp-workbench__artifact .lp-shopping { margin-top: 12px !important; }
+.lp-workbench__artifact .lp-shopping label { min-height: 44px; }
+.lp-artifact-section { padding: 16px 0; border-bottom: 1px solid var(--lp-line); font-size: 14px; }
+.lp-artifact-section strong { font-size: 12px; }
+.lp-artifact-section p { margin-top: 5px; }
+.lp-workbench__artifact .lp-artifact-note { margin-top: 16px; font-size: 11px; }
+.lp-workbench__caption { text-align: center; color: var(--lp-muted); font-size: 12px; margin-top: 15px !important; }
+.lp-knowhow__inner { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; }
+.lp-knowhow__inner > div > p { color: var(--lp-muted); max-width: 400px; font-size: 16px; margin-top: 22px; }
+.lp-knowhow__card { background: var(--lp-surface); border: 1px solid var(--lp-line); border-radius: 10px; padding: 28px 30px; box-shadow: 0 16px 40px -28px rgb(var(--lp-shadow) / .3); }
+.lp-knowhow__top { display: flex; justify-content: space-between; gap: 12px; color: var(--lp-muted); font-size: 11px; }
+.lp-knowhow__card h3 { font-size: 27px; margin: 20px 0 12px; }
+.lp-knowhow__field { padding: 14px 0; border-top: 1px solid var(--lp-line); font-size: 14px; }
+.lp-knowhow__field strong { color: var(--lp-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.lp-knowhow__field p { margin-top: 5px; }
+@media (max-width: 850px) {
+  .lp-workbench__panel { gap: 20px; padding: 26px; }
+  .lp-knowhow__inner { gap: 35px; }
+}
+@media (max-width: 620px) {
+  .lp-workbench__intro { display: block; margin-bottom: 26px; }
+  .lp-workbench__intro > p { margin-top: 16px; }
+  .lp-workbench__tabs { display: grid; grid-template-columns: 1fr; gap: 0; padding: 8px 14px; }
+  .lp-workbench__tabs button { min-height: 44px; text-align: left; border-bottom: 0; border-left: 3px solid transparent; padding: 0 12px; }
+  .lp-workbench__tabs button[aria-selected="true"] { border-left-color: var(--lp-accent); background: var(--lp-paper); }
+  .lp-workbench__panel { display: flex; flex-direction: column; gap: 22px; padding: 20px; min-height: 0; }
+  .lp-workbench__message { margin-top: 20px; font-size: 14px; }
+  .lp-workbench__artifact { padding: 22px 20px; }
+  .lp-knowhow__inner { grid-template-columns: 1fr; gap: 28px; }
+  .lp-knowhow__card { padding: 23px; }
+}
