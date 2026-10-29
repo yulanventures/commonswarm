@@ -63,7 +63,7 @@ export async function loadAgentCredential(
   if (snapshotKey(await expected.rediscover()) !== snapshotKey(expected.snapshot)) throw new LocalAuthDiscoveryChanged();
   const exact = await discoverLocalCredential(tx, tokenHash);
   if (!exact || !expected.snapshot.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
-  const agent = await lockedCredentialFacts(tx,tokenHash,exact,allowExpiredRenewal,true);
+  const agent = await lockedCredentialFacts(tx,tokenHash,exact,allowExpiredRenewal,true,expected.connectionOnly===true);
   if (agent && !expected.connectionOnly && expected.targetWorkspace) {
     if (!await localCredentialTargetLive(tx,agent,expected.targetWorkspace)) throw new LocalCredentialDenied();
     agent.principal_workspace_id=expected.targetWorkspace;
@@ -91,7 +91,7 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
   if(snapshotKey({...current,objectStreams:initial.objectStreams,todoStreams:initial.todoStreams,todoBindings:initial.todoBindings})!==snapshotKey(initial)) throw new LocalAuthDiscoveryChanged();
   const exact=await discoverLocalCredential(tx,hash);
   if(!exact || !initial.bindings.some(r=>r.token_id===exact.token_id)) throw new LocalAuthDiscoveryChanged();
-  const agent = await lockedCredentialFacts(tx,hash,exact,allowExpiredRenewal,false);
+  const agent = await lockedCredentialFacts(tx,hash,exact,allowExpiredRenewal,false,plan.connectionOnly===true);
   if (agent && !plan.connectionOnly && plan.targetWorkspace) {
     if (!await localCredentialTargetLive(tx,agent,plan.targetWorkspace)) throw new LocalCredentialDenied();
     agent.principal_workspace_id=plan.targetWorkspace;
@@ -99,7 +99,7 @@ export async function recheckLocalCredential(tx:Sql,hash:Uint8Array,plan:LocalAu
   return agent;
 }
 async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCredentialIds,
-  allowExpiredRenewal:boolean,stampUse:boolean):Promise<(AgentAuthRow & {first_use:boolean})|null> {
+  allowExpiredRenewal:boolean,stampUse:boolean,connectionOnly=false):Promise<(AgentAuthRow & {first_use:boolean})|null> {
   // All waits precede this statement. Family policy, unlike a bearer deadline,
   // is terminal. Expired proof is admitted only for silent renewal; an unused
   // predecessorless root additionally needs the exact permanent family below.
@@ -136,9 +136,11 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
       AND swarm.admin_child_scopes_live(t.parent_admin_grant_id,t.scopes)
       AND swarm.admin_child_scopes_live(p.parent_admin_grant_id,t.scopes)
       AND (t.first_used_at IS NOT NULL OR t.predecessor_token_id IS NOT NULL
-        OR (swarm.local_agent_workspace_live(p.principal_id,p.workspace_id)
-          AND swarm.admin_child_live(t.parent_admin_grant_id,p.workspace_id)
-          AND swarm.admin_child_live(p.parent_admin_grant_id,p.workspace_id)))
+        OR EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am
+          WHERE am.principal_id=p.principal_id
+            AND swarm.local_agent_workspace_live(p.principal_id,am.workspace_id)
+            AND swarm.admin_child_live(t.parent_admin_grant_id,am.workspace_id)
+            AND swarm.admin_child_live(p.parent_admin_grant_id,am.workspace_id)))
       AND (g.renewal_grant_id IS NULL OR (g.revoked_at IS NULL AND NOT g.suspension_active AND g.connection_expired_at IS NULL
         AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
         AND ROW(g.principal_id,g.run_id,g.workspace_id,g.created_by)=ROW(t.principal_id,t.run_id,p.workspace_id,p.owner_user_id)

@@ -35,14 +35,15 @@ test('command/activity shared auth gates use target membership; origin loss and 
  const isolated=await adminEdgeDatabase(local.DB_URL);
  try {
   await isolated.db.unsafe(repoSql('tests/fixtures/account-agents-before.sql')+repoSql('tests/fixtures/local-agent-workspaces.sql').split('DO $test$')[0]);
-  const operation=async(workspace:string,connectionOnly=false)=>isolated.db.begin(async tx=>{
+  const operationFor=async(tokenHash:Buffer,workspace:string,connectionOnly=false)=>isolated.db.begin(async tx=>{
    await tx`SET LOCAL ROLE swarm_command`;
-   const plan=await planLocalOperation(tx,{hash,workspace,connectionOnly});assert.ok(plan);
+   const plan=await planLocalOperation(tx,{hash:tokenHash,workspace,connectionOnly});assert.ok(plan);
    await lockLocalAuthPlan(tx,plan);
-   const agent=await loadAgentCredential(tx,hash,plan,connectionOnly);assert.ok(agent);
+   const agent=await loadAgentCredential(tx,tokenHash,plan,connectionOnly);assert.ok(agent);
    assert.equal(agent.principal_id,P);assert.equal(agent.principal_workspace_id,connectionOnly?A:workspace);
-   assert.ok(await recheckLocalCredential(tx,hash,plan,connectionOnly));
+   assert.ok(await recheckLocalCredential(tx,tokenHash,plan,connectionOnly));
   });
+  const operation=(workspace:string,connectionOnly=false)=>operationFor(hash,workspace,connectionOnly);
   const membership=async(add:boolean)=>isolated.db.begin(async tx=>{
    await tx`SET LOCAL ROLE swarm_command`;
    const plan=await planLocalOperation(tx,{workspace:B,actor:U,target:{principals:[P],tokens:[]},memberMutation:true,workspaceMode:'update'});assert.ok(plan);
@@ -58,14 +59,26 @@ test('command/activity shared auth gates use target membership; origin loss and 
   await assert.rejects(()=>operation(B),LocalCredentialDenied);
   await operation(A);
   await membership(true);
+  const unusedSiblingHash=Buffer.from('56'.repeat(32),'hex');
+  await isolated.db`INSERT INTO swarm.agent_runs(run_id,principal_id,device_id)
+   VALUES('42000000-0000-4000-8000-000000000003',${P}::uuid,'32000000-0000-4000-8000-000000000001')`;
+  await isolated.db`INSERT INTO swarm.renewal_grants(renewal_grant_id,principal_id,run_id,workspace_id,created_by,kind,max_successors,horizon_expires_at,bound_device_id)
+   VALUES('62000000-0000-4000-8000-000000000002',${P}::uuid,'42000000-0000-4000-8000-000000000003',${A}::uuid,${U}::uuid,'standing',NULL,NULL,'32000000-0000-4000-8000-000000000001')`;
+  await isolated.db`INSERT INTO swarm.agent_tokens(token_id,principal_id,run_id,scopes,token_hash,expires_at,renewal_grant_id,lineage_id)
+   VALUES('72000000-0000-4000-8000-000000000003',${P}::uuid,'42000000-0000-4000-8000-000000000003','["post_signal"]',${unusedSiblingHash},clock_timestamp()-interval '1 second','62000000-0000-4000-8000-000000000002','82000000-0000-4000-8000-000000000002')`;
   await isolated.db`UPDATE swarm.workspaces SET archived_at=clock_timestamp() WHERE workspace_id=${A}::uuid`;
   await isolated.db`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${A}::uuid AND user_id=${U}::uuid`;
   await operation(B);await assert.rejects(()=>operation(A),LocalCredentialDenied);
   await isolated.db`UPDATE swarm.agent_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_hash=${hash}`;
   await operation(A,true);
+  await assert.rejects(()=>operationFor(unusedSiblingHash,A),LocalCredentialDenied);
+  await operationFor(unusedSiblingHash,A,true);
+  const [stampedWithSibling]=await isolated.db<{first_used_at:Date|null}[]>`SELECT first_used_at FROM swarm.agent_tokens WHERE token_hash=${unusedSiblingHash}`;
+  assert.ok(stampedWithSibling?.first_used_at);
   await membership(false);
   await assert.rejects(()=>operation(B),LocalCredentialDenied);
   await operation(A,true);
+  await operationFor(unusedSiblingHash,A,true);
   await membership(true);
   await isolated.db`INSERT INTO swarm.revocation_tombstones(kind,target_id) VALUES('family','82000000-0000-4000-8000-000000000001')`;
   await assert.rejects(()=>operation(A,true),LocalCredentialDenied);
