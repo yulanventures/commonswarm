@@ -624,6 +624,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <p class="dashboard__file-warning" data-file-warning hidden></p>
               <p class="dashboard__file-empty" data-file-empty hidden>No files shared yet.</p>
               <p class="dashboard__form-error dashboard__file-error" data-file-error role="alert" hidden></p>
+              <button class="dashboard__button dashboard__button--secondary" type="button" data-file-retry hidden>Retry</button>
+              <p role="status" data-file-retry-status hidden></p>
               <ul class="dashboard__file-list" data-file-list hidden></ul>
             </section>
 
@@ -1260,6 +1262,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type ConnectionPolicy,
   } from "../../lib/standing-grants";
   import { renderFileList, type DisplayFile } from "../../lib/file-list";
+  import { bindFileListRetry, createFileListRetry, readWikiContent } from "../../lib/workspace-file-reads";
   import {
     brainTopics,
     BrainSaveCompletedElsewhere,
@@ -5510,6 +5513,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         ? agents.find((agent) => agent.principalId === file.uploadedBy)?.name ?? historicalAgentName(file.uploadedBy) ?? "Former agent"
         : people.get(file.uploadedBy) ?? "Former member";
 
+    const fileRetry = createFileListRetry(
+      () => session && activeWorkspaceId ? { workspaceId: activeWorkspaceId, session, generation: requestVersion } : null,
+      workspaceFiles,
+    );
+
     const renderFiles = (): void => {
       const list = one<HTMLUListElement>("[data-file-list]");
       const empty = one<HTMLElement>("[data-file-empty]");
@@ -5545,12 +5553,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         error.textContent = fileLoadError;
         error.hidden = fileLoadError.length === 0;
       }
+      fileRetryBinding?.sync();
       if (fileLoadError) {
         list.hidden = true;
         empty.hidden = true;
         warning.hidden = true;
       }
     };
+
+    const fileRetryButton = one<HTMLButtonElement>("[data-file-retry]");
+    const fileRetryStatus = one<HTMLElement>("[data-file-retry-status]");
+    const fileRetryHeading = one<HTMLElement>("#dashboard-files-title");
+    const fileRetryBinding = fileRetryButton && fileRetryStatus && fileRetryHeading ? bindFileListRetry({
+      button: fileRetryButton, status: fileRetryStatus, successFocus: fileRetryHeading, retry: fileRetry,
+      hasError: () => !!fileLoadError,
+      apply: (result) => {
+        if (result.kind === "success") { files = result.value; fileLoadError = ""; }
+        else { files = []; fileLoadError = `${readableError(result.error)} The signal feed is still available.`; }
+      },
+      render: renderFiles,
+      isVisible: () => activeWorkspaceView === "files" && !fileRetryButton.closest("[hidden], [inert]"),
+    }) : null;
 
     const brainViewTargets = (): BrainViewTargets | null => {
       const view = one<HTMLElement>("[data-channel-view=brain]");
@@ -5594,18 +5617,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         brainView = createBrainView(targets, {
           read: async (topic, version) => {
             if (!session || !activeWorkspaceId) throw new SessionExpired();
-            const grant = await fileDownloadUrl(
-              session,
-              uuid(),
-              activeWorkspaceId,
-              topic.fileId,
-              version,
+            const workspaceId = activeWorkspaceId;
+            const readSession = session;
+            const generation = requestVersion;
+            return await readWikiContent(
+              () => fileDownloadUrl(readSession, uuid(), workspaceId, topic.fileId, version),
+              () => session === readSession && activeWorkspaceId === workspaceId && requestVersion === generation,
             );
-            const response = await fetch(grant.url);
-            if (!response.ok) {
-              throw new Error(`Topic download failed (HTTP ${response.status}).`);
-            }
-            return await response.text();
           },
           save: async (topic, markdown) => {
             if (!session || !activeWorkspaceId) throw new SessionExpired();
