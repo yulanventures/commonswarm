@@ -208,10 +208,11 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
 
       <div class="hm-ahp__connect">
         <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
-        {actionOf(host) && (
-          host.open
-            ? <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
-            : <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+        {linkOf(host) && (
+          <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+        )}
+        {host.open && (
+          <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
         )}
       </div>
 

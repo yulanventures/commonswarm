@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 
-import { hashOpaque, SESSION_COOKIE } from "../src/browser-security.js";
+import { hashOpaque, SESSION_COOKIE, sessionCookie } from "../src/browser-security.js";
 import { InteractionStore } from "../src/interaction-store.js";
 import { createInteractionHandler } from "../src/interactions.js";
 import { createLogger } from "../src/logger.js";
@@ -233,7 +233,7 @@ test("returning authenticated browser persists identity on a fresh interaction a
     const row = h.pool.interactions.get(uid);
     assert.equal(row.user_id, USER);
     assert.ok(row.consent_token_hash);
-    assert.equal(response.headers["set-cookie"], undefined);
+    assert.equal(response.headers["set-cookie"], sessionCookie(SESSION_A));
   }
 });
 

@@ -30,7 +30,7 @@
     border-block-end: 1px solid var(--border);
   }
 
-  .dashboard__workspace-details-dialog-head p {
+  .dashboard__workspace-details-dialog-head :is(p, h2) {
     margin: 0;
     color: var(--text);
     font-size: var(--t-sm);
