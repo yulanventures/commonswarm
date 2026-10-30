@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  createHouseholdObjectsController, householdAttribution, householdObjectsFixture,
+  createHouseholdObjectsController, householdAttribution, householdObjectsFixture, householdSaveRefusalNotice,
   renderHouseholdObjects, renderHouseholdObjectHistory, type HouseholdObjectView,
 } from '../src/lib/household-objects-view.js';
 
@@ -91,4 +91,20 @@ test('the empty view tells a person how lists are made, in plain words', () => {
   assert.match(html, /No lists or docs yet\. Ask an agent: “Create a CommonSwarm list called Groceries\.”/);
   assert.match(html, /<p class="hh-eyebrow">Lists &amp; docs<\/p>/);
   assert.doesNotMatch(html, /Household objects<\/p>|Approved operations|retained history/);
+});
+
+test('refused saves use plain sentences without leaking raw server codes (D11)', () => {
+  assert.equal(
+    householdSaveRefusalNotice('content_read_only'),
+    'This save was refused because you have reader access. Your local changes remain here.',
+  );
+  assert.equal(
+    householdSaveRefusalNotice('storage_quota_reached'),
+    'This save was refused because the workspace storage limit is full. Your local changes remain here.',
+  );
+  assert.equal(
+    householdSaveRefusalNotice('unknown_internal_code'),
+    'This save was refused. Your local changes remain here.',
+  );
+  assert.doesNotMatch(householdSaveRefusalNotice('unknown_internal_code'), /unknown_internal_code/);
 });

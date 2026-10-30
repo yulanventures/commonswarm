@@ -235,6 +235,25 @@ export function householdContentPatch(base: HouseholdContent, proposed: Househol
  * scoped to a workspace generation so switching away and back cannot revive them.
  * These UI guards complement backend enforcement; they do not grant access.
  */
+const HOUSEHOLD_SAVE_REFUSAL_NOTICES: Readonly<Record<string, string>> = Object.freeze({
+  content_read_only: 'This save was refused because you have reader access. Your local changes remain here.',
+  content_consent_required: 'This save was refused until you confirm Lists & docs access. Your local changes remain here.',
+  workspace_access_refused: 'This save was refused because you are no longer a member of this workspace. Your local changes remain here.',
+  storage_quota_reached: 'This save was refused because the workspace storage limit is full. Your local changes remain here.',
+  object_quota_reached: 'This save was refused because this workspace reached its list and document limit. Your local changes remain here.',
+  object_write_rate_limited: 'This save was refused because too many changes were sent at once. Wait a moment and try again. Your local changes remain here.',
+  object_not_found: 'This save was refused because this item is no longer here. Your local changes remain here.',
+  revision_not_found: 'This save was refused because the version you started from is no longer available. Your local changes remain here.',
+  patch_base_mismatch: 'This save was refused because this item changed since it loaded. Reload it to review. Your local changes remain here.',
+  title_invalid: 'This save was refused because the title is not valid. Your local changes remain here.',
+});
+
+export function householdSaveRefusalNotice(reason: unknown): string {
+  return typeof reason === 'string' && HOUSEHOLD_SAVE_REFUSAL_NOTICES[reason]
+    ? HOUSEHOLD_SAVE_REFUSAL_NOTICES[reason]
+    : 'This save was refused. Your local changes remain here.';
+}
+
 export function createHouseholdObjectsController(workspace: HouseholdWorkspaceView, actions: HouseholdActions,
   requestId: () => string = () => crypto.randomUUID()) {
   let state = createHouseholdObjectsState(workspace);
@@ -280,7 +299,7 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
       state.draft_id = outcome.draft_id; state.conflict_current = outcome.current; state.conflict = null; request = null;
       state.notice = 'Another revision was saved first. Your draft was retained. Recover it and review the changes.';
     } else if (outcome.status === 'pending') state.notice = 'This save is pending. Check it again to find out whether it committed.';
-    else if (outcome.status === 'refused') { state.notice = `This save was refused (${outcome.reason}). Your local changes remain here.`; request = null; }
+    else if (outcome.status === 'refused') { state.notice = householdSaveRefusalNotice(outcome.reason); request = null; }
     else state.notice = 'The save result is unknown. Your local changes remain here. Check this save before making another change.';
     publish(); return true;
   }
