@@ -71,7 +71,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     </ProviderButtons>
     <form class="invite-onramp__auth" data-email-form>
       <label for="invite-email">Email address</label>
-      <input id="invite-email" type="email" autocomplete="email" required placeholder="you@example.com" />
+      <input id="invite-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
       <button class="invite-onramp__button" type="submit">Email me a sign-in link</button>
     </form>
     <p class="invite-onramp__status" data-auth-status role="status" aria-live="polite"></p>

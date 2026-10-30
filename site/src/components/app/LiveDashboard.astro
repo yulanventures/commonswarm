@@ -106,7 +106,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         >
           <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
         </ProviderButtons>
-        <form class="dashboard__email">
+        <form class="dashboard__email" method="post">
           <label for="dashboard-email">Email address</label>
           <div class="dashboard__email-row">
             <input
@@ -457,7 +457,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <input
                   id="dashboard-invite-email"
                   type="email"
-                  autocomplete="email"
+                  autocomplete="off"
                   required
                   placeholder="mei@example.com"
                   aria-describedby="dashboard-invite-email-hint"
@@ -4289,14 +4289,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => { const card = homeTodoCard(todo, ctx.now); return { id: todo.id, title: todo.title, href: card.href,
           state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }), who: card.who }; }) : [],
           allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
-          notice: homeTodosState === "ready" ? undefined : homeTodoReceipt } : null,
+          notice: homeTodosState === "ready" ? undefined : homeTodoReceipt,
+          canRetry: homeTodosState === "failed" } : null,
         objects, sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
           const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
           return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
         }), hrefs: { lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }), wiki: routeHref({ view: "wiki", workspaceId: workspace.id }) } };
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
         void navigateHome({ view: "todos", workspaceId: workspace.id }, "push").then(() => one<HTMLButtonElement>("[data-todo-add]")?.click());
-      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]));
+      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists), onRetryTodos: () => {
+        homeTodosState = "pending"; homeDetailKey = ""; homeTodoReceipt = ""; renderHomeObjectPane(); renderHomeSide(); void loadHomeWorkspace();
+      } })]));
     };
     const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
       if (sampleMode || homeTodoSave === "saving") return;
@@ -4472,6 +4475,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             pressOnPage(`${row.state === "on" ? "withdraw" : "allow"}-${id}`);
           }); },
           onWorkPolicy: value => void homeWrite((server, requestId) => server.setWorkPolicy(workspace.id, { principal_id: id, accepts_from: value }, requestId)),
+          onRetryLine: homeQueueRead === "failed" && homeTodosState !== "absent" ? () => { homeDetailKey = ""; homeTodoReceipt = ""; void loadHomeObject(); } : undefined,
           onQueueAction: (action, row) => {
             const line = homeQueue?.up_next ?? []; const index = line.findIndex(todo => todo.todo_id === row.todoId);
             if (action === "up" || action === "down") steerHomeTodo(row.todoId, { kind: "move", after_todo_id: action === "up" ? line[index - 2]?.todo_id ?? null : line[index + 1]?.todo_id ?? null });
@@ -4486,14 +4490,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         else homePaneMessage("Could not load to-dos.", "");
         return;
       }
-      if (homeTodosState === "refused" || homeTodosState === "failed") { homePaneMessage("Could not load to-dos.", homeTodoReceipt); return; }
+      if (homeTodosState === "refused" || homeTodosState === "failed") {
+        homePaneMessage("Could not load to-dos.", homeTodoReceipt, undefined, homeTodosState === "failed" ? () => {
+          homeTodosState = "pending"; homeDetailKey = ""; homeTodoReceipt = ""; renderHomeObjectPane(); renderHomeSide(); void loadHomeWorkspace();
+        } : undefined);
+        return;
+      }
       if (homeRoute.view === "todos") {
         replaceHomeRegion(slot, "todos", [todosPane(document, { filter: homeTodoFilter, rows: homeTodosState === "ready" ? homeTodoModels().map(todo => ({ todo, href: homeTodoCard(todo, ctx.now).href })) : null,
           now: ctx.now, sample: sampleMode, mayAdd: ctx.editor, save: homeTodoSave, names: personNames(ctx.people.groups) }, {
           filter: value => { homeTodoFilter = value; renderHomeObjectPane(); }, complete: (todo, done) => void completeHomeTodo(todo.id, done),
           add: title => void homeWrite((server, requestId) => server.createTodo(workspace.id, { title }, requestId)) })]); appendReceipt(); return;
       }
-      if (homeQueueRead === "failed" && homeTodoReceipt !== "not-found") { homePaneMessage("Could not load this to-do.", homeTodoReceipt); return; }
+      if (homeQueueRead === "failed" && homeTodoReceipt !== "not-found") {
+        homePaneMessage("Could not load this to-do.", homeTodoReceipt, undefined,
+          homeTodoReceipt === "Could not load this page. Reload to try again." ? () => { homeDetailKey = ""; homeTodoReceipt = ""; void loadHomeObject(); } : undefined);
+        return;
+      }
       const todo = homeTodoRead ? mapHomeTodo(homeTodoRead.todo, ctx, homeTodoRows, homeTodoRead.comments) : null;
       replaceHomeRegion(slot, "todo", [todoView(document, { workspace: { name: workspace.name, todosHref: routeHref({ view: "todos", workspaceId: workspace.id }), homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) },
         view: todo ? { kind: "ready", todo } : homeTodoReceipt === "not-found" ? { kind: "not-found" } : { kind: "loading" }, now: ctx.now,
@@ -4737,7 +4750,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       for (const entry of catchUpData) if (entry.workspace.id !== activeWorkspaceId) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
       renderHomeRail();
     };
-    const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }): void => {
+    const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }, onRetry?: () => void): void => {
       const slot = one<HTMLElement>("[data-home-route-pane]");
       if (!slot) return;
       parkPeopleHosts();
@@ -4746,7 +4759,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
       const back = document.createElement("a"); back.href = homeLink?.href ?? routeHref({ view: "chat", workspaceId: activeWorkspaceId }); back.textContent = homeLink?.label ?? workspace?.name ?? "Workspace";
       back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
-      slot.replaceChildren(title, text, back); slot.hidden = false;
+      if (onRetry && !sampleMode) {
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "hm-todo-save"; retry.dataset.homeRetry = ""; retry.textContent = "Retry";
+        retry.addEventListener("click", () => { retry.disabled = true; onRetry(); });
+        slot.replaceChildren(title, text, retry, back);
+      } else slot.replaceChildren(title, text, back);
+      slot.hidden = false;
       if (homeRoute.view === "todo" || homeRoute.view === "todos") focusHomeView();
     };
     const applyHomePane = (): void => {

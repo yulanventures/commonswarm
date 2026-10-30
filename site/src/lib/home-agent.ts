@@ -124,6 +124,7 @@ export interface AgentPageCallbacks {
   onListsToggle?: (row: SwitchRowVM) => void;
   /** Opens the existing removal confirmation; the danger line shows only when this is wired and may.remove is true. */
   onRemove?: (agent: AgentVM) => void;
+  onRetryLine?: () => void;
 }
 
 
@@ -297,7 +298,13 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   line.append(lineHead);
   const empty = agentLineEmpty(vm);
 
-  if (vm.lineNotice) line.append(el(doc, "p", "hm-agent__meta", vm.lineNotice));
+  if (vm.lineNotice) {
+    line.append(el(doc, "p", "hm-agent__meta", vm.lineNotice));
+    if (canAct && callbacks.onRetryLine) {
+      const retry = actionButton(doc, "Retry", "hm-agent__manage", () => { retry.disabled = true; callbacks.onRetryLine?.(); });
+      retry.dataset.hmRetryLine = ""; line.append(retry);
+    }
+  }
   if (empty && !vm.lineNotice) {
     const vacant = el(doc, "p", "hm-agent__empty", emptyLine(agent.nestedLabel));
     vacant.dataset.hmEmpty = "";
