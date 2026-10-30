@@ -36,6 +36,8 @@ test("Connected apps DOM uses textContent, durable rereads, and no browser owner
   assert.match(source, /durable connection revocation is not visible/u);
   assert.match(source, /durable seat revocation is not visible/u);
   assert.doesNotMatch(source, /innerHTML\s*=.*connected/iu);
+  assert.doesNotMatch(source, /connectedAppsStatus\(`\$\{readableError\(error\)\} Nothing was changed\.`/u);
+  assert.doesNotMatch(source, /channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`/u);
   const client = await readFile(new URL("./connected-apps.ts", import.meta.url), "utf8");
   assert.doesNotMatch(client, /owner_user_id|ownerUserId/u);
   assert.match(client, /revoke_hosted_mcp_grant/u);

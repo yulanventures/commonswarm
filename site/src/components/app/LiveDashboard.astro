@@ -2066,9 +2066,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (
         error instanceof Error &&
-        /network|fetch|offline|connection/i.test(error.message)
+        /network|fetch|offline|connection/i.test(error.message) &&
+        !/connection settings|connection cannot|durable connection/i.test(error.message)
       ) {
         return "Check your internet connection, then try again.";
+      }
+      if (
+        error instanceof Error &&
+        (/^[a-z0-9_.:-]+$/i.test(error.message.trim()) ||
+          /\b(?:PGRST\d+|SQLSTATE|syntax error|unexpected token|TypeError|ReferenceError|undefined is not|cannot read propert)\b/i.test(
+            error.message,
+          ))
+      ) {
+        return "CommonSwarm could not complete that request. Try again.";
       }
       return error instanceof Error
         ? error.message
@@ -7469,7 +7479,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderConnectedApps();
       } catch (error) {
         if (generation !== connectedAppsGeneration) return;
-        connectedAppsStatus(`${readableError(error)} Nothing was changed.`, true);
+        connectedAppsStatus(readableError(error), true);
         if (retry) retry.hidden = false;
       }
     };
@@ -7856,7 +7866,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (version !== requestVersion) return;
         signalHasMore = false;
         if (homePeopleReadState === "pending") homePeopleReadState = "failed";
-        channelLoadError = `${readableError(error)} Nothing was changed.`;
+        channelLoadError = readableError(error);
         const target = one<HTMLElement>("[data-feed-error]");
         if (target) target.textContent = channelLoadError;
         if (addAgentViewOpen()) return;
@@ -8045,7 +8055,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         showChannelView("feed-pending");
         void loadSignals(workspaceId, true, version).catch((error) => {
           if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-          channelLoadError = `${readableError(error)} Nothing was changed.`;
+          channelLoadError = readableError(error);
           const target = one<HTMLElement>("[data-feed-error]");
           if (target) target.textContent = channelLoadError;
           if (addAgentViewOpen()) return;
