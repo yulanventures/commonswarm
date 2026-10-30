@@ -25,7 +25,7 @@ export interface SideTodoVM { id: string; title: string; href: string; state: Si
   who?: PersonVM | AgentVM | null }
 
 /** `null` means the to-dos read is absent: every To-dos surface is then absent too (UI-SPEC 3.3 states). */
-export interface SideTodosVM { items: SideTodoVM[]; allHref: string; canAdd: boolean; notice?: string }
+export interface SideTodosVM { items: SideTodoVM[]; allHref: string; canAdd: boolean; notice?: string; canRetry?: boolean }
 
 /**
  * The Lists & docs read has four measured states. Only a measured refusal shows the door; a read that is
@@ -56,6 +56,7 @@ export interface SideCardsCallbacks {
   onComplete: (todoId: string) => void | Promise<void>;
   onAddTodo: () => void;
   onOpenLists: () => void;
+  onRetryTodos?: () => void;
 }
 
 export interface SideTodoSummary { shown: SideTodoVM[]; more: number }
@@ -192,7 +193,13 @@ export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCa
     add.setAttribute("aria-label", "Add a to-do"); add.title = "Add a to-do"; add.append(plus(doc));
     add.addEventListener("click", () => callbacks.onAddTodo()); head.append(add);
   }
-  if (vm.todos.notice) body.append(node(doc, "p", "hm-side-card__empty", vm.todos.notice));
+  if (vm.todos.notice) {
+    body.append(node(doc, "p", "hm-side-card__empty", vm.todos.notice));
+    if (vm.todos.canRetry && !vm.sample && callbacks.onRetryTodos) {
+      const retry = node(doc, "button", "hm-side-button", "Retry"); retry.type = "button"; retry.dataset.sideRetryTodos = "";
+      retry.addEventListener("click", () => { retry.disabled = true; callbacks.onRetryTodos?.(); }); body.append(retry);
+    }
+  }
   else if (shown.length === 0) body.append(node(doc, "p", "hm-side-card__empty", "No open to-dos."));
   else { const list = node(doc, "ul", "hm-side-list hm-side-list--todos"); list.setAttribute("aria-label", "Open to-dos");
     for (const item of shown) list.append(todoRow(doc, item, vm.sample, callbacks)); body.append(list); }

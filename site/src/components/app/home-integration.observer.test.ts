@@ -253,7 +253,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     const session={user:{id:'tom'}}, keepConnectCredentialVisible=()=>false;
     let homeTodoFilter='open'; const homeTodoModels=()=>[];
     const homeTodoContext=()=>({now:0,viewerId:'tom',editor:true,people:{groups:[],other:[]}}), homeServer=()=>null;
-    const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{};
+    const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, syncFeedChrome=()=>{}, loadHomeWorkspace=async()=>{};
     const closeEntityPanel=()=>{}, closeRosterDialog=()=>{}, closeWorkspaceDetailsDialog=()=>{};
     const renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{}, renderChannelRail=()=>{};
   `, context);
@@ -277,19 +277,21 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
     navigate: (mode: 'replace' | 'pop') => runInContext(`navigateHome({view:'todos',workspaceId:'W'},'${mode}')`, context) as Promise<void> };
 }
 
-test('applyHomePane keeps standalone to-do states readable, with a back link and heading focus when tools become unavailable', async () => {
-  const { context, focused, flushFocus, assertPage } = await routedPaneFixture();
-  for (const [state, queue, receipt, label, expectedHref] of [
-    ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W'],
-    ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W'],
-    ['refused', 'pending', 'Open Lists & docs to choose your access.', 'refused workspace read', '/app?w=W'],
-    ['ready', 'failed', 'Could not load this page. Reload to try again.', 'failed detail read', '/app?w=W'],
-    ['ready', 'failed', 'not-found', 'missing to-do', '/app?w=W'],
-    ['pending', 'pending', '', 'loading to-do', '/app?w=W&v=todos'],
-  ]) {
+test('applyHomePane keeps standalone to-do states readable, with a back link, in-place retry for failed reads, and heading focus when tools become unavailable', async () => {
+  const { context, slot, focused, flushFocus, assertPage } = await routedPaneFixture();
+  for (const [state, queue, receipt, label, expectedHref, expectsRetry] of [
+    ['absent', 'failed', 'Could not load to-dos. Reload to try again.', 'unavailable tools', '/app?w=W', false],
+    ['failed', 'pending', 'Could not load to-dos. Reload to try again.', 'failed workspace read', '/app?w=W', true],
+    ['refused', 'pending', 'Open Lists & docs to choose your access.', 'refused workspace read', '/app?w=W', false],
+    ['ready', 'failed', 'Could not load this page. Reload to try again.', 'failed detail read', '/app?w=W', true],
+    ['ready', 'failed', 'not-found', 'missing to-do', '/app?w=W', false],
+    ['pending', 'pending', '', 'loading to-do', '/app?w=W&v=todos', false],
+  ] as const) {
     runInContext(`homeTodosState=${JSON.stringify(state)}; homeQueueRead=${JSON.stringify(queue)}; homeTodoReceipt=${JSON.stringify(receipt)}; applyHomePane(); focusHomeView();`, context);
     flushFocus();
     assertPage(label, expectedHref);
+    const retry = slot.querySelectorAll('button').find(node => node.textContent === 'Retry');
+    assert.equal(Boolean(retry), expectsRetry, `${label}: in-place retry presence`);
   }
   // The workspace read can settle after navigation's focus call. Repainting alone must focus its message.
   focused.length = 0;
@@ -1022,6 +1024,7 @@ test('the ready To-dos index omits its duplicate card; other routes and unavaila
     runInContext(`homeTodosState='${state}'; homeTodoReceipt='Open Lists & docs to choose your access.'; renderHomeSide();`, context);
     assert.equal(runInContext('painted.todos.notice', context), 'Open Lists & docs to choose your access.');
     assert.equal(runInContext('painted.todos.canAdd', context), false);
+    assert.equal(runInContext('painted.todos.canRetry', context), state === 'failed');
     assert.equal(runInContext('painted.todosInMain === true', context), false, `${state} remains visible`);
   }
   runInContext("homeTodosState='absent'; renderHomeSide();", context);

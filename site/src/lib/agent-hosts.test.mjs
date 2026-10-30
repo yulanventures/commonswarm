@@ -81,6 +81,7 @@ test("invite footnote, setup checklist, and agent docs reflect verified hosts, d
   assert.doesNotMatch(apiDoc, /non-refreshing\. Default TTL\s+one hour/);
   assert.match(apiDoc, /Standing connections minted in\s+the web app stay active until the owner removes them or sets an end date/);
   assert.match(inviteOnramp, />Step 3 of 3</);
+  assert.match(inviteOnramp, /id="invite-email"\s+name="email"\s+type="email"\s+autocomplete="email"/);
   assert.doesNotMatch(inviteOnramp, />Step 2 of 2</);
   assert.doesNotMatch(agentConnect, /\bseat token\b/i);
   assert.doesNotMatch(brainView, /\bcswarm brain put\b|A brain topic cannot be empty/);
