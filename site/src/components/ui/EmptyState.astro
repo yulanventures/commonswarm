@@ -24,6 +24,10 @@ interface Props {
   size?: "sm" | "md";
   /** Heading level. Match the surrounding document outline. */
   headingLevel?: 2 | 3 | 4 | 5 | 6;
+  /** Optional attributes forwarded to the title heading (e.g. data-* hooks). */
+  titleAttrs?: Record<string, string>;
+  /** Optional attributes forwarded to the description paragraph (e.g. data-* hooks). */
+  descriptionAttrs?: Record<string, string>;
   class?: string;
   [key: string]: unknown;
 }
@@ -33,6 +37,8 @@ const {
   description,
   size = "md",
   headingLevel = 3,
+  titleAttrs = {},
+  descriptionAttrs = {},
   class: className,
   ...rest
 } = Astro.props;
@@ -51,9 +57,9 @@ const hasActions = Astro.slots.has("actions");
     )
   }
 
-  <Heading class="ui-empty__title">{title}</Heading>
+  <Heading class="ui-empty__title" {...titleAttrs}>{title}</Heading>
 
-  {description && <p class="ui-empty__body">{description}</p>}
+  {description && <p class="ui-empty__body" {...descriptionAttrs}>{description}</p>}
 
   <slot />
 
