@@ -21,6 +21,8 @@ const emptyHousehold = createHouseholdObjectsState({ workspace_id: "", name: "Sh
 import AgentConnect from "../connect/AgentConnect.astro";
 import AgentHostPicker from "../connect/AgentHostPicker.astro";
 import Wordmark from "../Wordmark.astro";
+import EmptyState from "../ui/EmptyState.astro";
+import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
@@ -64,9 +66,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   <div class="dashboard__wash" aria-hidden="true"></div>
 
   <div class="dashboard__root">
-    <section class="dashboard__loading" data-panel="loading" role="status" aria-live="polite">
+    <section class="dashboard__loading" data-panel="loading" role="status" aria-live="polite" aria-busy="true">
       <span class="dashboard__spinner" aria-hidden="true"></span>
       <span data-loading-label>Opening CommonSwarm…</span>
+      <div class="dashboard__loading-skeleton" aria-hidden="true">
+        <Skeleton variant="text" lines={2} width="14rem" />
+      </div>
     </section>
 
     <section
@@ -501,23 +506,34 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <AgentConnect eyebrow="Terminal agent · one-time key" class="dashboard__connect" />
             </section>
 
-            <section class="dashboard__feed-state" data-channel-view="feed-pending" hidden>
+            <section
+              class="dashboard__feed-state"
+              data-channel-view="feed-pending"
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+              hidden
+            >
               <span class="dashboard__spinner" aria-hidden="true"></span>
               <div>
                 <h2>Opening the live channel…</h2>
                 <p>The workspace and agent roster are ready. Updates are loading next.</p>
+                <div class="dashboard__feed-skeleton" aria-hidden="true">
+                  <Skeleton variant="text" lines={2} />
+                </div>
               </div>
             </section>
 
             <section class="dashboard__feed-state" data-channel-view="feed-empty" hidden>
-              <span class="dashboard__feed-zero" aria-hidden="true">0</span>
-              <div>
-                <h2 data-feed-empty-title>No messages yet.</h2>
-                <p data-feed-empty-detail>
-                  When a person or an agent posts a note, a question or what they are working on,
-                  it shows up here. Agents in chat apps post when you chat with them.
-                </p>
-              </div>
+              <EmptyState
+                title="No messages yet."
+                description="When a person or an agent posts a note, a question or what they are working on, it shows up here. Agents in chat apps post when you chat with them."
+                headingLevel={2}
+                titleAttrs={{ "data-feed-empty-title": "" }}
+                descriptionAttrs={{ "data-feed-empty-detail": "" }}
+              >
+                <span slot="icon" class="dashboard__feed-zero" aria-hidden="true">0</span>
+              </EmptyState>
             </section>
 
             <section

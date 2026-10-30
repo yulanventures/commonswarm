@@ -76,3 +76,22 @@ test("homepage preloads Bricolage Grotesque and DM Sans, sets root attributes ea
   assert.match(landingCss, /--font-display:\s*"Bricolage Grotesque",\s*"Bricolage Grotesque Fallback"/u);
   assert.match(landingCss, /\.lp-home\s+:is\(h1,h2,h3\)\s*\{\s*font-family:\s*var\(--font-display\);/u);
 });
+
+test("app loading and empty surfaces share status live regions and Skeleton, EmptyState, and Toast primitives (D18)", async () => {
+  const appPage = await readFile(new URL("../pages/app.astro", import.meta.url), "utf8");
+  assert.match(appPage, /import Toast from "\.\.\/components\/ui\/Toast\.astro";/u);
+  assert.match(appPage, /<Toast \/>/u);
+
+  const dashboard = await readFile(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(dashboard, /import EmptyState from "\.\.\/ui\/EmptyState\.astro";/u);
+  assert.match(dashboard, /import Skeleton from "\.\.\/ui\/Skeleton\.astro";/u);
+  assert.match(
+    dashboard,
+    /data-channel-view="feed-pending"[\s\S]*?role="status"[\s\S]*?aria-live="polite"[\s\S]*?aria-busy="true"/u,
+  );
+  assert.match(dashboard, /<EmptyState[\s\S]*?data-feed-empty-title[\s\S]*?data-feed-empty-detail/u);
+
+  const homeTodo = await readFile(new URL("./home-todo.ts", import.meta.url), "utf8");
+  assert.match(homeTodo, /hm-todo-skeleton/u);
+  assert.match(homeTodo, /skeleton skeleton--text/u);
+});

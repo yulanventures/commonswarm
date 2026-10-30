@@ -287,6 +287,13 @@ export function todoView(doc: Document, vm: TodoViewVM, callbacks: TodoViewCallb
     root.setAttribute("aria-busy", "true");
     const title = node(doc, "h1", "hm-todo-title", TODO_LOADING); title.tabIndex = -1;
     const intro = node(doc, "header", "hm-todo-intro"); intro.append(topBar(doc, vm, callbacks), title); root.append(intro);
+    const body = node(doc, "div", "hm-todo-skeleton"); body.setAttribute("aria-hidden", "true");
+    const assigned = node(doc, "div", "hm-todo-panel hm-todo-skeleton-card");
+    assigned.append(node(doc, "span", "skeleton skeleton--text"), node(doc, "span", "skeleton skeleton--text"));
+    const comments = node(doc, "div", "hm-todo-comments hm-todo-skeleton-card");
+    comments.append(node(doc, "span", "skeleton skeleton--text"), node(doc, "span", "skeleton skeleton--text"));
+    body.append(assigned, comments);
+    root.append(body);
     return root;
   }
   if (vm.view.kind === "not-found") {
