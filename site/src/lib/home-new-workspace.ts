@@ -138,21 +138,20 @@ export function buildNewWorkspaceForm(
   const purposeField = doc.createElement("fieldset");
   const purposeChoices = newWorkspacePurposeChoices(vm);
   purposeField.className = "hm-new-workspace__purpose";
-  /* The canvas draws the choices as compact pills right under the name, with no heading between:
-     the legend stays the fieldset's accessible name, visually hidden. */
+  /* Show the purpose question visibly above the choice pills so the choice is never hidden (D8). */
   const purposeLegend = doc.createElement("legend");
-  purposeLegend.className = "visually-hidden";
+  purposeLegend.className = "hm-new-workspace__label";
   purposeLegend.textContent = purposeChoices.legend;
   purposeField.append(purposeLegend);
 
   const purposeList = doc.createElement("div");
   purposeList.className = "hm-new-workspace__purpose-list";
-  /* What each choice does, outside the pills: every line until one is chosen, then the chosen one. */
+  /* Keep both option explanations visible so the permanent Just-me rule stays clear (D8). */
   const purposeDetails = doc.createElement("div");
   purposeDetails.className = "hm-new-workspace__purpose-details";
   const details: HTMLElement[] = [];
-  const showDetails = (chosen: string | null): void => {
-    for (const line of details) line.hidden = chosen !== null && line.dataset.createPurposeDetail !== chosen;
+  const showDetails = (_chosen: string | null): void => {
+    for (const line of details) line.hidden = false;
   };
 
   for (const option of purposeChoices.options) {
