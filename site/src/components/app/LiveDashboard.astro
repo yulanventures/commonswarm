@@ -2197,7 +2197,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const panel = one<HTMLElement>("[data-panel=create]"); if (!panel) return;
       const vm = { viewerName: who, viewerInitials: initials(who),
         name: message ? previousName : hasWorkspace ? "" : defaultWorkspaceName(value),
-        purpose: (message && (previousPurpose === "shared" || previousPurpose === "personal") ? previousPurpose : null) as HouseholdPurpose | null,
+        purpose: (previousPurpose === "personal" ? "personal" : "shared") as HouseholdPurpose | null,
         purposes: Object.entries(PURPOSE_COPY).map(([purpose, copy]) => ({ value: purpose as HouseholdPurpose, label: copy.label, detail: CREATE_PURPOSE_DETAILS[purpose as HouseholdPurpose] })), error: message };
       const footer = Array.from(panel.querySelectorAll<HTMLElement>("[data-signout], .dashboard__gateway-mark, .dashboard__account-line"));
       panel.setAttribute("aria-labelledby", "hm-new-workspace-title");

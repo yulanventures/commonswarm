@@ -95,3 +95,16 @@ test("app loading and empty surfaces share status live regions and Skeleton, Emp
   assert.match(homeTodo, /hm-todo-skeleton/u);
   assert.match(homeTodo, /skeleton skeleton--text/u);
 });
+
+test("new-workspace form shows the purpose question visibly, keeps both option details visible, and preselects shared by default (D8)", async () => {
+  const newWorkspace = await readFile(new URL("./home-new-workspace.ts", import.meta.url), "utf8");
+  assert.match(newWorkspace, /purposeLegend\.className = "hm-new-workspace__label";/u);
+  assert.doesNotMatch(newWorkspace, /purposeLegend\.className = "visually-hidden";/u);
+  assert.match(newWorkspace, /for \(const line of details\) line\.hidden = false;/u);
+
+  const dashboard = await readFile(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(
+    dashboard,
+    /purpose:\s*\(previousPurpose === "personal"\s*\?\s*"personal"\s*:\s*"shared"\)\s*as HouseholdPurpose/u,
+  );
+});
