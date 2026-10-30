@@ -3647,6 +3647,23 @@
             "removes": [],
             "reason": "Size bound, not a wait."
           }
+        },
+        "site/src/lib/workspace-file-reads.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read",
+            "/storage/v1/..."
+          ],
+          "citation": "site/src/lib/workspace-file-reads.ts:79-83",
+          "detail": "15-second deadline bounding the selected Wiki version read, including the signed grant and storage body fetch.",
+          "operation": {
+            "name": "browser-wiki-content-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The app's authenticated browser Wiki reader is not a CLI operation."
+          }
         }
       }
     }
