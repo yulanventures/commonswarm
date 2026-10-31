@@ -145,7 +145,7 @@ The workflow has these settings:
   OP credentials. The run step is the only step that receives the OP secret.
   Copy `scripts/smoke/package.json` and `scripts/smoke/package-lock.json` to
   `$GITHUB_WORKSPACE/.cs-smoke-tools` and run `npm ci --ignore-scripts` there.
-  Locked direct dependencies are `playwright@1.63.0`, `imapflow@2.3.0`, and
+  Locked direct dependencies are `playwright@1.64.1`, `imapflow@2.3.0`, and
   `mailparser@3.9.37`. The lockfile also fixes transitive versions and integrity.
   Package root is `$GITHUB_WORKSPACE/.cs-smoke-tools/package.json`.
   Module path is `$GITHUB_WORKSPACE/.cs-smoke-tools/node_modules/playwright`.

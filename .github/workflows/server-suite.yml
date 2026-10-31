@@ -328,7 +328,7 @@ jobs:
           PG_BIN=/usr/lib/postgresql/17/bin C1_DOCKER_PSQL_IMAGE=postgres:17 bash scripts/c1-docker-stdin-check.sh 2>&1 | tee -a server.log
       - name: Install bundled Chromium for p1-local
         if: matrix.suite == 'p1-local'
-        run: npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+        run: npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
       - name: p1-local suite
         if: matrix.suite == 'p1-local'
         env:
@@ -353,7 +353,7 @@ jobs:
           set -o pipefail
           npm ci --prefix site
           cd site
-          npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+          npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
           cd ..
           npm --prefix site run build
           # Runner CHROME_BIN may name installed Chrome; discover the bundled shell instead.
