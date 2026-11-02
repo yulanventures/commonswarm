@@ -83,6 +83,8 @@ export interface AgentPageMay {
   steer: boolean;
   /** The viewer may remove this agent from the workspace (people dialog mayManage). */
   remove?: boolean;
+  /** Workspace owners and admins may set or clear a live local agent as workspace lead. */
+  setLead?: boolean;
 }
 
 export interface AgentNotFoundVM {
@@ -107,6 +109,7 @@ export interface AgentFoundVM {
   facts: AgentFactsVM;
   activity: AgentActivityVM | null;
   may: AgentPageMay;
+  isWorkspaceLead?: boolean;
   workPolicy?: "owner" | "anyone";
   receipt?: string;
   lineNotice?: string | null;
@@ -124,6 +127,7 @@ export interface AgentPageCallbacks {
   onListsToggle?: (row: SwitchRowVM) => void;
   /** Opens the existing removal confirmation; the danger line shows only when this is wired and may.remove is true. */
   onRemove?: (agent: AgentVM) => void;
+  onToggleLead?: (nextIsLead: boolean, agent: AgentVM) => void;
   onRetryLine?: () => void;
 }
 
@@ -229,8 +233,25 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   intro.append(title, byline);
   who.append(intro);
   const statusWrap = el(doc, "div", "hm-agent__status");
+  if (vm.isWorkspaceLead) {
+    const leadBadge = el(doc, "span", "hm-agent__lead-badge", "Lead");
+    leadBadge.dataset.hmLeadBadge = "";
+    statusWrap.append(leadBadge);
+  }
   // The fix is rendered once in What to do, alongside its available action.
   statusWrap.append(statusLine(doc, { ...agent.state, attention: false }, { form: "pill" }));
+  if (canAct && vm.may.setLead && !agent.hosted && callbacks.onToggleLead) {
+    const toggleLead = actionButton(
+      doc,
+      vm.isWorkspaceLead ? "Remove as workspace lead" : "Set as workspace lead",
+      "hm-agent__manage",
+      () => {
+        callbacks.onToggleLead?.(!vm.isWorkspaceLead, agent);
+      },
+    );
+    toggleLead.dataset.hmLeadToggle = vm.isWorkspaceLead ? "clear" : "set";
+    statusWrap.append(toggleLead);
+  }
   // Keys, resume and removal live in People & agents: the header's outline action opens it.
   if (canAct) {
     const manage = actionButton(doc, AGENT_COPY.manage, "hm-agent__manage", () => {

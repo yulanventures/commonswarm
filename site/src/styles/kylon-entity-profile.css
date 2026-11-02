@@ -68,6 +68,32 @@ live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entit
   text-transform: lowercase;
 }
 
+live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entity-badge--lead {
+  display: inline-block;
+  margin-inline-start: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--k-shell-subtle);
+  border: 1px solid var(--k-shell-line);
+  color: var(--k-shell-ink);
+  font: 600 12px/1.4 var(--k-shell-font);
+}
+
+live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entity-lead-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 8px 14px;
+  border-radius: var(--k-shell-radius);
+  border: 1px solid var(--k-shell-line);
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-ink);
+  font: 600 13px/1.4 var(--k-shell-font);
+  cursor: pointer;
+}
+
 live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entity-revoked {
   margin: 0 16px 16px;
   padding: 12px;
@@ -149,13 +175,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entit
   overflow-wrap: anywhere;
 }
 
-live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] :is([data-entity-panel-close], .dashboard__entity-link, .dashboard__entity-agent-link):hover {
+live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] :is([data-entity-panel-close], .dashboard__entity-link, .dashboard__entity-agent-link, .dashboard__entity-lead-button):hover {
   color: var(--k-shell-ink);
   background: var(--k-shell-hover);
   text-decoration-color: currentColor;
 }
 
-live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] :is([data-entity-panel-close], .dashboard__entity-link, .dashboard__entity-agent-link, .dashboard__entity-id summary):focus-visible {
+live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] :is([data-entity-panel-close], .dashboard__entity-link, .dashboard__entity-agent-link, .dashboard__entity-lead-button, .dashboard__entity-id summary):focus-visible {
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px;
   box-shadow: none;
