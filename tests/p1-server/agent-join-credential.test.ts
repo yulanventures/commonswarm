@@ -1642,7 +1642,8 @@ test("bound reconnect code works once for its principal, revokes old tokens incl
     g.workspace,
   );
   assert.equal(reconnectMint.status, 200, JSON.stringify(reconnectMint.body));
-  const reconnectSecret = String(reconnectMint.body.join_code);
+  assert.equal(reconnectMint.body.status, "accepted");
+  const reconnectSecret = String(reconnectMint.body.join_credential);
 
   // Redeeming the bound code preserves principal_id and revokes all prior live tokens for that principal.
   const reconnected = await registrationCommand(reconnectSecret, randomUUID(), "Ignored name");

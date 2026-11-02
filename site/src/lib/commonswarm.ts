@@ -3216,9 +3216,9 @@ export async function mintAgentReconnectCode(
     ttl_hours: 1,
     principal_id: principalId,
   }, { workspace_id: workspaceId, stream: { kind: "workspace" } });
-  if (status === 200 && body.ok === true && typeof body.join_code === "string") {
+  if (status === 200 && body.status === "accepted" && typeof body.join_credential === "string") {
     return {
-      joinCode: body.join_code,
+      joinCode: body.join_credential,
       expiresAt: typeof body.expires_at === "string" ? body.expires_at : "",
     };
   }
