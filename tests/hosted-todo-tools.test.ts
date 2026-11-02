@@ -136,7 +136,7 @@ const todo = (body: Row) => body.value as Row, notices = (body: Row) => body.not
 async function productionEntry() {
   const dir = fileURLToPath(new URL('../supabase/functions/mcp/', import.meta.url));
   const source = `import * as commandApi from "../command/index.ts";\nimport * as readApi from "../read/index.ts";\n${readFileSync(`${dir}index.ts`, 'utf8')}`
-    .replace('const command = await import("../command/index.ts");', 'const command = commandApi;')
+    .replace('const command = await import("../command/index.ts");', 'const command = { ...commandApi, handleHostedCommand: (input, capability) => globalThis.__hostedCommandResult ? Promise.resolve(globalThis.__hostedCommandResult) : commandApi.handleHostedCommand(input, capability) };')
     .replace('const read = await import("../read/index.ts");', 'const read = readApi;')
     .replace('async function executeTool(', 'export async function executeTool(') + '\nexport { createMcpProtocolHandler };\n';
   if (source.includes('await import("../command') || source.includes('await import("../read')) throw new Error('mcp entry still loads command or read dynamically');
@@ -247,5 +247,27 @@ test('hosted to-do tools through the MCP handler', async (t) => {
     const denied = await list();
     assert.equal(denied.status, 'refused'); assert.equal(denied.reason, 'content_consent_required');
     box.flags.consent = id(8); assert.equal((await list()).status, 'ok');
+  });
+  await t.test('backend refusals keep their stable code; unknown codes and prose stay hidden', async () => {
+    box = fresh();
+    const g = globalThis as { __hostedCommandResult?: { status: number; body: Row } };
+    t.after(() => { delete g.__hostedCommandResult; });
+    const rows: Array<[number, Row, string]> = [
+      [403, { error: 'forbidden' }, 'forbidden'],
+      [409, { error: 'command_id_conflict' }, 'command_id_conflict'],
+      [400, { error: 'invalid_request' }, 'invalid_request'],
+      [413, { error: 'payload_too_large' }, 'payload_too_large'],
+      [429, { error: 'rate_limited', resets_at: '2026-11-02T22:00:00.000Z' }, 'rate_limited'],
+      [500, { error: 'internal_error', message: 'private backend detail' }, 'tool_failed'],
+    ];
+    for (const [status, body, code] of rows) {
+      g.__hostedCommandResult = { status, body };
+      const failed = await call(on, 'todo_create', { seat: seatA, request_id: `req-code-${status}`, title: 'x' });
+      assert.equal(failed.isError, true, code); assert.equal(failed.error, code);
+      assert.doesNotMatch(String(failed.message), /claim_seat|private backend detail/u, code);
+      if (code === 'rate_limited') assert.match(String(failed.message), /2026-11-02T22:00:00\.000Z/u);
+    }
+    delete g.__hostedCommandResult;
+    assert.equal((await list()).status, 'ok');
   });
 });
