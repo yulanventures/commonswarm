@@ -1,4 +1,6 @@
-/** Presentation only: the same resource nodes become a native modal sheet on phones. */
+/** Presentation only: the same resource nodes become a native modal sheet on phones.
+ * Starts collapsed, like Slack's details pane: the Details button opens the workspace's details, and
+ * selecting a person or agent opens their profile in the same column (data-entity-panel). */
 export function createChannelDetails(app: HTMLElement) {
   const doc = app.ownerDocument;
   const frame = app.querySelector<HTMLElement>(".hm-frame");
@@ -8,7 +10,7 @@ export function createChannelDetails(app: HTMLElement) {
   dialog.setAttribute("aria-label", "Details");
   const originalId = side?.id, originalLabel = side?.getAttribute("aria-label");
   const anchor = doc.createComment("Workspace details");
-  let mounted = false, expanded = true, enabled = false, opener: HTMLElement | null = null;
+  let mounted = false, expanded = false, enabled = false, opener: HTMLElement | null = null;
   const triggers = () => app.querySelectorAll<HTMLElement>("[data-channel-details-toggle]");
   const decorate = () => {
     const column = side?.querySelector<HTMLElement>(".hm-side");
@@ -19,12 +21,6 @@ export function createChannelDetails(app: HTMLElement) {
       const closeBtn = doc.createElement("button"); closeBtn.className = "hm-details-close"; closeBtn.type = "button";
       closeBtn.textContent = "×"; closeBtn.dataset.channelDetailsClose = ""; closeBtn.setAttribute("aria-label", "Close details");
       heading.append(title, closeBtn); column.prepend(heading);
-    }
-    const shared = column.querySelector<HTMLElement>('[data-side-card="shared"]');
-    if (shared && !shared.closest(".hm-details-sharing")) {
-      const sharing = doc.createElement("details"); sharing.className = "hm-details-sharing";
-      const summary = doc.createElement("summary"); summary.textContent = "Sharing";
-      shared.replaceWith(sharing); sharing.append(summary, shared);
     }
   };
   const sync = () => {
