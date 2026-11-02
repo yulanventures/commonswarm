@@ -1057,7 +1057,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
-  import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
+  import type { TodoVM, AgentVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
   import { listsAndDocsFact } from "../../lib/home-agent-copy";
@@ -1065,7 +1065,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { todoView, type TodoStartInput } from "../../lib/home-todo";
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
   import { tagOptionRow, tagOptions, personNames } from "../../lib/home-pickers";
-  import { buildSideCards, type SideObjectsVM } from "../../lib/home-side-cards";
+  import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
@@ -1440,7 +1440,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let homeDetailGeneration = 0;
     let homeWorkspaceGeneration = 0;
     let homeWorkspaceRead = 0;
-    let homeObjects: SideObjectsVM = { state: "pending" };
     const homeTodoDetails = new Map<string, Todo>();
     const homePolicies = new Map<string, "owner" | "anyone">();
     let homePeopleReadState: HomeReadState = "pending";
@@ -4203,7 +4202,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       ++homeWorkspaceGeneration; ++homeWorkspaceRead; ++homeDetailGeneration;
       homeTodosState = "pending"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "pending";
       homeDetailKey = ""; homeGateEditorId = null; homeTodoSave = "idle"; homeTodoReceipt = ""; homeTodoNotice = null;
-      homeObjects = { state: "pending" }; homeTodoDetails.clear(); homePolicies.clear();
+      homeTodoDetails.clear(); homePolicies.clear();
       const workspace = workspaces.find(row => row.id === activeWorkspaceId) as { todosAvailable?: boolean } | undefined;
       if (workspace) workspace.todosAvailable = false;
       layout.refreshTodoContext(() => one<HTMLElement>("[data-home-side-slot]")?.replaceChildren());
@@ -4263,27 +4262,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (workspace) workspace.todosAvailable = homeTodosAvailable();
       renderHomeRail(); renderHomeShell(); applyHomePane();
       if (homeRoute.view === "chat") renderFeed();
-      // The right column uses the Lists pane's exact read and refusal door.
-      try {
-        if (sampleMode) homeObjects = { state: "ready", lists: [], files: [] };
-        else if (householdAccess.status === "refused") homeObjects = { state: "refused" };
-        else if (session) {
-          const entries: ObjectCardVM[] = []; let offset = 0;
-          for (;;) {
-            const body = await householdCall(session, workspaceId)({ kind: "household_tool", tool: "object_list", arguments: { seat: HOUSEHOLD_LOCAL_SEAT, offset, limit: 100 } }, crypto.randomUUID());
-            if (!live()) return;
-            if (body.status === "refused") { homeObjects = { state: "refused" }; break; }
-            if (body.status !== "ok" || !Array.isArray(body.objects)) throw new Error("home_objects_failed");
-            for (const item of body.objects as Record<string, unknown>[]) {
-              if (item.kind !== "list" && item.kind !== "doc" && item.kind !== "file") continue;
-              entries.push({ kind: item.kind, id: String(item.object_id), title: String(item.title ?? "Untitled"), href: routeHref({ view: item.kind === "file" ? "files" : "lists", workspaceId }), meta: item.kind === "doc" ? "Doc" : item.kind === "list" ? "List" : "File", who: null });
-            }
-            if (body.next_offset === null) { homeObjects = { state: "ready", lists: entries.filter(item => item.kind !== "file"), files: entries.filter(item => item.kind === "file") }; break; }
-            if (!Number.isInteger(body.next_offset) || Number(body.next_offset) <= offset) throw new Error("home_cursor_invalid");
-            offset = Number(body.next_offset);
-          }
-        }
-      } catch { if (live()) homeObjects = { state: "failed" }; }
       if (live()) {
         renderHomeSide();
         if (!sampleMode) void loadHouseholdConnections().then(() => { if (live()) { renderHomeSide(); renderHomeObjectPane(); } });
@@ -4293,27 +4271,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const slot = one<HTMLElement>("[data-home-side-slot]");
       const workspace = workspaces.find(row => row.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { layout.refreshTodoContext(() => slot?.replaceChildren()); return; }
-      const ctx = homeTodoContext(), models = homeTodoModels();
-      const objectsRead = homeObjects;
-      const objects = objectsRead.state === "ready" ? { ...objectsRead, files: [...objectsRead.files,
-        ...files.filter(file => !file.tombstonedAt && !objectsRead.files.some(object => object.id === file.fileId)).map(file => ({ kind: "file" as const, id: file.fileId, title: file.name,
-          href: routeHref({ view: "files", workspaceId: workspace.id }), meta: formatAttachmentSize(file.sizeBytes), who: homeParty({ kind: file.uploadedByKind === "agent" ? "agent" : "user", id: file.uploadedBy }, ctx.people) }))] } : objectsRead;
+      const ctx = homeTodoContext();
       const vm = { sample: sampleMode, workspaceName: workspace.name,
-        todosInMain: homeRoute.view === "todos" && homeTodosState === "ready",
-        todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => { const card = homeTodoCard(todo, ctx.now); return { id: todo.id, title: todo.title, href: card.href,
-          state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }), who: card.who }; }) : [],
-          allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
-          notice: homeTodosState === "ready" ? undefined : homeTodoReceipt,
-          canRetry: homeTodosState === "failed" } : null,
-        objects, sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
+        sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
           const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
           return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
-        }), hrefs: { lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }), wiki: routeHref({ view: "wiki", workspaceId: workspace.id }) } };
-      layout.refreshTodoContext(() => replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
-        void navigateHome({ view: "todos", workspaceId: workspace.id }, "push").then(() => one<HTMLButtonElement>("[data-todo-add]")?.click());
-      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists), onRetryTodos: () => {
-        homeTodosState = "pending"; homeDetailKey = ""; homeTodoReceipt = ""; renderHomeObjectPane(); renderHomeSide(); void loadHomeWorkspace();
-      } })]));
+        }) };
+      layout.refreshTodoContext(() => replaceHomeRegion(slot, "side", [buildSideCards(document, vm)]));
     };
     const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
       if (sampleMode || homeTodoSave === "saving") return;

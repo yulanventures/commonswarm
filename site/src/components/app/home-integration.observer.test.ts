@@ -998,38 +998,6 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     assert.equal(markdown.classes.has('dashboard__message-markdown--collapsed'), false);
   }
 });
-test('the ready To-dos index omits its duplicate card; other routes and unavailable reads keep their honest doors', async () => {
-  const context = createContext({ layout: { refreshTodoContext: (replace: () => void) => replace() } });
-  runInContext(`
-    const slot={}, activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'chat'}, sampleMode=false;
-    let homeTodosState='ready', homeTodoReceipt=''; const homeObjects={state:'pending'}, files=[], householdConnectionsReadState='pending';
-    const one=()=>slot, homeTodoContext=()=>({now:0,editor:true}), homeTodoModels=()=>[], routeHref=()=>'?w=W';
-    let painted; const buildSideCards=(doc,vm)=>{painted=vm; return {};}, document={}, replaceHomeRegion=()=>{};
-  `, context);
-  runInContext(await dashboardFunctions(['homeTodosAvailable', 'renderHomeSide']), context);
-  runInContext('renderHomeSide()', context);
-  assert.equal(runInContext('painted.todos.canAdd', context), true);
-  assert.equal(runInContext('painted.todosInMain === true', context), false, 'Chat keeps its useful summary');
-  runInContext("homeRoute.view='todos'; renderHomeSide()", context);
-  assert.equal(runInContext('painted.todosInMain', context), true, 'the ready index supplies every open row, completion and add action');
-  assert.notEqual(runInContext('painted.todos', context), null, 'presentation omission does not invent tool absence');
-  for (const view of ['todo', 'lists', 'files', 'wiki', 'people', 'chat']) {
-    runInContext(`homeRoute.view='${view}'; renderHomeSide()`, context);
-    assert.equal(runInContext('painted.todosInMain === true', context), false, `${view} does not supply the full index`);
-  }
-  runInContext("homeRoute.view='todos'", context);
-  runInContext("homeTodosState='pending'; renderHomeSide()", context);
-  assert.equal(runInContext('painted.todosInMain === true', context), false, 'a pending index does not suppress the measured status');
-  for (const state of ['refused', 'failed']) {
-    runInContext(`homeTodosState='${state}'; homeTodoReceipt='Open Lists & docs to choose your access.'; renderHomeSide();`, context);
-    assert.equal(runInContext('painted.todos.notice', context), 'Open Lists & docs to choose your access.');
-    assert.equal(runInContext('painted.todos.canAdd', context), false);
-    assert.equal(runInContext('painted.todos.canRetry', context), state === 'failed');
-    assert.equal(runInContext('painted.todosInMain === true', context), false, `${state} remains visible`);
-  }
-  runInContext("homeTodosState='absent'; renderHomeSide();", context);
-  assert.equal(runInContext('painted.todos', context), null);
-});
 test('an unknown write outcome is shown plainly; a late result never writes to the next workspace', async () => {
   const context = createContext({ HomeCommandRefused, HomeToolsUnavailable, CommandOutcomeUnknown, crypto: { randomUUID: () => 'request-1' } });
   runInContext(`

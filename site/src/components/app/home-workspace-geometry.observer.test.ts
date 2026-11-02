@@ -11,18 +11,14 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const read = (path: string) => readFile(new URL(path, import.meta.url), "utf8");
 
 type Geometry = {
-  width: number; scrollWidth: number; cardOverflow: boolean; touchTargets: boolean; smallTargets: string[];
-  order: string[]; todoRows: number; checkboxCalls: string[]; hostileElements: number; hostileTitleText: boolean;
-  noTodoOrder: string[]; doorOrder: string[]; doorButtons: number; doorCalls: number; doorTitle: string; doorButtonText: string;
-  indexOrder: string[]; indexOtherActions: string[][]; chatOtherActions: string[][];
-  narrowTargets: string[];
-  sampleChecks: number; sampleAdd: number; sampleDoor: number; shared: string[];
+  width: number; scrollWidth: number; cardOverflow: boolean;
+  order: string[]; columnActions: number; hostileElements: number; hostileSharedText: boolean; shared: string[];
   streamOverflow: boolean; streamTargets: boolean; dividers: string[]; hostileAuthorText: boolean; extrasCount: number;
 };
 
 // CI only: build the production DOM builders and check them in a real layout engine. The shared primitives
 // (home-primitives.ts) come from lane P, so this runs after both lanes are merged.
-test("W right column and stream decorations have usable geometry and keep hostile text as text", { timeout: 60_000 }, async () => {
+test("the Details column shows only what the workspace shares, and stream decorations keep hostile text as text", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-workspace-"));
   const fixture = join(directory, "index.html");
   const bundle = await build({ absWorkingDir: root, bundle: true, format: "iife", globalName: "HomeWorkspace", platform: "browser", write: false,
@@ -37,42 +33,18 @@ test("W right column and stream decorations have usable geometry and keep hostil
       * { box-sizing: border-box; } body { margin: 0; font-family: sans-serif; }
       ${tokens} ${primitives} ${workspace}
       #column { width: min(22rem, 100%); } #stream { width: 100%; margin: 0; padding: 0; list-style: none; }
-    </style></head><body><div id="column"></div><div id="column-no-todos"></div><div id="column-index"></div><div id="column-door"></div><div id="column-sample"></div><ol id="stream"></ol>
+    </style></head><body><div id="column"></div><ol id="stream"></ol>
       <script>${script}</script><script>
       (async () => {
         const data = ${JSON.stringify(data).replace(/</gu, "\\u003c")};
         const person = (id, name, you = false) => ({ id, name, firstName: name.split(' ')[0], initials: name.slice(0, 2).toUpperCase(), you, role: 'member' });
         const agent = (id, label, yours) => ({ id, name: label, label, nestedLabel: label, ownerId: 'tom', ownerFirstName: 'Tom', ownerInitial: 'T', yours, tint: 0, hosted: false, dashed: false,
           state: { kind: 'idle', word: 'Idle', detail: 'Active 2 hours ago', attention: false, fix: { action: null, allowed: false, askWho: null, sentence: '' } } });
-        const todo = (n, state = 'open', title = 'To-do ' + n) => ({ id: 'td' + n, title, href: '#td' + n, state, mayComplete: n % 2 === 1, subline: 'Your Claude · ' + n + 'th in line' });
-        const card = (kind, n, title) => ({ kind, id: kind + n, title, href: '#' + kind + n, meta: kind + ' meta', who: null });
-        const todos = { items: [todo(1, 'open', data.hostile + data.longWord), ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => todo(n)), todo(10, 'done'), todo(11, 'dropped')], allHref: '#todos', canAdd: true };
-        const objects = { state: 'ready', lists: [1, 2, 3, 4, 5, 6, 7].map((n) => card('list', n, n === 1 ? data.hostile + data.longWord : 'List ' + n)),
-          files: [1, 2, 3].map((n) => card('file', n, 'File ' + n + '.pdf')) };
-        const base = { sample: false, workspaceName: 'Home', todos, objects, sharedAgents: [{ agent: agent('a1', 'Your Claude', true), until: null }, { agent: agent('a2', 'Nikki’s Muse', false), until: null }],
-          hrefs: { lists: '#lists', files: '#files', wiki: '#wiki' } };
-        const checkboxCalls = []; let doorCalls = 0; let completed; const completion = new Promise((resolve) => { completed = resolve; });
-        const callbacks = { onComplete: (id) => { checkboxCalls.push(id); completed(); }, onAddTodo: () => {}, onOpenLists: () => { doorCalls += 1; } };
-        const mount = (id, vm) => { const element = HomeWorkspace.buildSideCards(document, vm, callbacks); document.getElementById(id).append(element); return element; };
-        const keys = (element) => [...element.children].map((child) => child.dataset.sideCard || (child.querySelector('[data-side-link=wiki]') ? 'wiki' : '?'));
-        const main = mount('column', base);
-        const noTodos = mount('column-no-todos', { ...base, todos: null });
-        const index = mount('column-index', { ...base, todosInMain: true });
-        const otherActions = element => [...element.querySelectorAll('a,button,input')].filter(node => !node.closest('[data-side-card=todos]'))
-          .map(node => [node.tagName, node.getAttribute('href') || '', node.getAttribute('aria-label') || '', node.textContent]);
-        const door = mount('column-door', { ...base, objects: { state: 'refused' } });
-        const sample = mount('column-sample', { ...base, sample: true });
-
+        const vm = { sample: false, workspaceName: data.hostile + ' Home',
+          sharedAgents: [{ agent: agent('a1', 'Your Claude', true), until: null }, { agent: agent('a2', 'Nikki’s Muse', false), until: null }, { agent: agent('a3', data.longWord, true), until: '12/1/2026' }] };
+        const main = HomeWorkspace.buildSideCards(document, vm); document.getElementById('column').append(main);
         const shown = (element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
-        const targets = [...document.querySelectorAll('a, button, label.hm-todo-row__check')].filter(shown);
-        const smallTargets = targets.filter((element) => element.getBoundingClientRect().height < 43.5).map((element) => element.className || element.tagName);
-        const narrowTargets = targets.filter((element) => element.getBoundingClientRect().width < 43.5).map((element) => element.className || element.tagName);
-        main.querySelector('[data-side-todo-complete]').click();
-        door.querySelector('[data-side-door]').click();
-
-        await completion; // the checkbox reports through a promise; read the calls only after it ran
-        const hostileTitle = main.querySelector('[data-side-todo-link=td1] .hm-todo-row__title');
-        const cardOverflow = [...document.querySelectorAll('.hm-side-card, .hm-todo-row')].some((element) => element.scrollWidth > element.clientWidth + 1);
+        const cardOverflow = [...document.querySelectorAll('.hm-side-card')].some((element) => element.scrollWidth > element.clientWidth + 1);
 
         const now = Date.parse('2026-10-05T15:00:00Z');
         const stream = document.getElementById('stream');
@@ -92,13 +64,9 @@ test("W right column and stream decorations have usable geometry and keep hostil
           stream.append(li);
         }
         const streamTargets = [...stream.querySelectorAll('a, button')].filter(shown).every((element) => element.getBoundingClientRect().height >= 43.5 && element.getBoundingClientRect().width >= 43.5);
-        const metrics = { width: innerWidth, scrollWidth: document.documentElement.scrollWidth, cardOverflow, touchTargets: smallTargets.length === 0, smallTargets,
-          order: keys(main), todoRows: main.querySelectorAll('[data-side-todo]').length, checkboxCalls, hostileElements: document.querySelectorAll('img').length,
-          hostileTitleText: hostileTitle.textContent.includes(data.hostile) && main.querySelector('[data-side-card=lists]').textContent.includes(data.hostile),
-          noTodoOrder: keys(noTodos), doorOrder: keys(door), doorButtons: door.querySelectorAll('[data-side-door]').length, doorCalls,
-          indexOrder: keys(index), indexOtherActions: otherActions(index), chatOtherActions: otherActions(main),
-          doorTitle: door.querySelector('[data-side-card=objects] h2').textContent, doorButtonText: door.querySelector('[data-side-door]').textContent, narrowTargets,
-          sampleChecks: sample.querySelectorAll('input[type=checkbox]').length, sampleAdd: sample.querySelectorAll('[data-side-add-todo]').length, sampleDoor: sample.querySelectorAll('[data-side-door]').length,
+        const metrics = { width: innerWidth, scrollWidth: document.documentElement.scrollWidth, cardOverflow,
+          order: [...main.children].map((child) => child.dataset.sideCard || '?'), columnActions: main.querySelectorAll('a, button, input').length,
+          hostileElements: document.querySelectorAll('img').length, hostileSharedText: main.textContent.includes(data.hostile),
           shared: [...main.querySelectorAll('[data-side-card=shared] p')].map((p) => p.textContent),
           streamOverflow: stream.scrollWidth > document.documentElement.clientWidth + 1, streamTargets,
           dividers: [...stream.querySelectorAll('[data-day-divider]')].map((d) => d.textContent), hostileAuthorText: stream.querySelector('.hm-author__name').textContent.includes(data.hostile), extrasCount };
@@ -113,14 +81,16 @@ test("W right column and stream decorations have usable geometry and keep hostil
       assert.ok(encoded, `${width}px: the production builders must finish their DOM work`);
       const geometry = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
 
-      // Order (UI-SPEC 3.3): To-dos, Lists, Files, What's shared here, then the Wiki link.
-
-      assert.deepEqual(geometry.checkboxCalls, ["td1"], "the first row has a checkbox and it reports its own to-do");
-      // An absent to-dos read removes every To-dos surface; a refused Lists & docs read shows one door in place of Lists and Files.
-
-      assert.deepEqual([geometry.sampleChecks, geometry.sampleAdd, geometry.sampleDoor], [0, 0, 0], "sample mode renders no actions");
-      assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileTitleText, true); assert.equal(geometry.hostileAuthorText, true);
-
+      // To-dos, Lists, Files and Wiki live in the workspace tabs; the column keeps only what is shared here.
+      assert.deepEqual(geometry.order, ["shared"]);
+      assert.equal(geometry.columnActions, 0, "the workspace details column has no actions of its own");
+      assert.deepEqual(geometry.shared, [
+        `Everyone in ${hostile} Home sees what is posted here, including what agents post.`,
+        "Your Claude can use Lists & docs here, until you withdraw it.",
+        `${longWord} can use Lists & docs here until 12/1/2026, or until you withdraw it.`,
+      ], "only the viewer's own agents are listed");
+      assert.equal(geometry.cardOverflow, false); assert.equal(geometry.scrollWidth <= geometry.width, true);
+      assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileSharedText, true); assert.equal(geometry.hostileAuthorText, true);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

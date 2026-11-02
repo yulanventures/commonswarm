@@ -18,6 +18,10 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-f
   grid-template-columns: minmax(0, 1fr) min(var(--cs-side-width, 288px), 40vw);
   max-block-size: none;
 }
+/* Collapsed Details with no profile selected gives the column back to the conversation. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-frame[data-channel-details-collapsed]:not(:has(> .hm-frame__profile:not([hidden]))) {
+  grid-template-columns: minmax(0, 1fr);
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__rail { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__main { grid-column: 1; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__side, .hm-frame__profile) { grid-column: 2; }
@@ -72,6 +76,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame.hm-frame.hm-frame { grid-template-columns: minmax(0, 1fr); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__profile { grid-column: 1; z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
+  /* The profile overlays the conversation; on its own row it pushed the conversation below it. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__main, .hm-frame__profile) { grid-row: 1; }
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll { padding: 4px; scroll-padding: 4px; }
