@@ -60,6 +60,8 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.revoke_hosted_seat_membership(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.set_local_workspace_approval(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.set_workspace_lead(uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.workspace_live_lead(uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.hosted_mcp_agent_workspace_adds', 'SELECT', false],

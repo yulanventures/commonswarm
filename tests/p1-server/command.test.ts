@@ -12305,7 +12305,7 @@ test("workspace lead: owners and admins set it; an untagged person post wakes it
     const stored = async () => (await sql<{ lead: string | null }[]>`
       SELECT lead_agent_principal_id AS lead FROM swarm.workspaces WHERE workspace_id = ${f.workspaceA}::uuid`)[0]?.lead ?? null;
     const post = async (extra: Record<string, unknown> = {}, token = f.uaJwt) => {
-      const posted = await issueSignal(f, token, { kind: "post_signal", signal_kind: "note", body: `lead-${randomUUID()}`, to_user_id: null, ...extra });
+      const posted = await issueSignal(f, token, { kind: "post_signal", signal_kind: "note", body: `lead-${randomUUID()}`, to_user_id: null, about: "workspace-lead", ...extra });
       assert.equal(posted.status, 200, posted.text);
       const signal = posted.body.signal as Record<string, unknown>;
       const woken = await sql<{ recipient: string }[]>`SELECT recipient_agent_principal_id AS recipient
