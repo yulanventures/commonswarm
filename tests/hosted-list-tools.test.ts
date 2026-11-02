@@ -194,6 +194,9 @@ test('hosted list tools use production capabilities, storage and bounded results
       denied = ''; assert.equal((await call(name)).status, 'ok'); denied = reason;
       const refusal = await call(name); assert.equal(refusal.status, 'refused'); assert.equal(refusal.reason, reason);
       assert.equal(refusal.next_action, householdRefusalNextStep(reason)); assert.match(String(refusal.next_action), /People & agents → this agent → Lists & docs → Allow…/);
+      assert.equal(refusal.code, reason); assert.equal((refusal.missing as string[]).length, 1); assert.equal(refusal.mcp_tool, null); assert.equal(refusal.cli_command, null);
+      const scope = refusal.scope as Row; assert.deepEqual(Object.keys(scope), ['workspace_id']);
+      assert.equal(refusal.remedy_url, `https://commonswarm.com/app?w=${scope.workspace_id}&v=people`);
       denied = ''; assert.equal((await call(name)).status, 'ok');
     }
   });

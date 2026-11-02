@@ -1,5 +1,5 @@
 import { HOUSEHOLD_TOOL_REGISTRY, boundHouseholdListResult } from "../_shared/protocol.js";
-import { householdRefusalNextStep } from "../../../src/protocol/household-next-steps.ts";
+import { householdRefusalDetails, householdRefusalNextStep } from "../../../src/protocol/household-next-steps.ts";
 import postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
@@ -260,12 +260,14 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
       client_version: "0.1.80", workspace_id: binding.workspaceId, stream: { kind: "workspace" },
       command: { kind: "household_tool", tool: call.name, arguments: args } }, capability);
     if (result.status === 503 && serviceUpdating(result.body)) return result.body;
-    if (result.status !== 200) throw new HostedToolFailure("hosted_seat_forbidden");
+    // Forward the backend's stable code; hostedToolError maps unknown codes to tool_failed.
+    if (result.status !== 200) throw new HostedToolFailure(result.body.error, result.body.resets_at);
     const output = call.name.startsWith("list_")
       ? boundHouseholdListResult(result.body, Number(args.offset ?? 0)) : result.body;
-    const next_action = output.status === "refused" && typeof output.reason === "string"
-      ? householdRefusalNextStep(output.reason) : undefined;
-    return next_action === undefined ? output : { ...output, next_action };
+    if (output.status !== "refused" || typeof output.reason !== "string") return output;
+    const next_action = householdRefusalNextStep(output.reason);
+    return { ...output, ...householdRefusalDetails(output.reason, binding.workspaceId),
+      ...(next_action === undefined ? {} : { next_action }) };
   }
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
