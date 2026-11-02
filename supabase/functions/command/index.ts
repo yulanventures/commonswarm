@@ -864,9 +864,17 @@ const SELF_SERVE_CREATE_DAILY_LIMIT = ADMIN_WORKSPACE_CREATE_PER_DAY;
 
 /**
  * §8: free self-serve plus transactional email is a branded-phishing vector,
- * so outbound invites are capped per verified identity per rolling day.
+ * so outbound invites are capped per verified identity per rolling day. Every
+ * issued invitation counts toward the day, used or not.
  */
 const INVITE_IDENTITY_DAILY_LIMIT = ADMIN_INVITATION_ISSUE_PER_DAY;
+
+/**
+ * Outstanding invitations per verified identity, across workspaces. Accepted,
+ * revoked and expired invitations free a slot, so used invitations never block
+ * new ones; the daily limit above bounds churn.
+ */
+const INVITE_IDENTITY_LIVE_LIMIT = ADMIN_INVITATIONS_LIVE_PER_PERSON;
 
 /**
  * §10's per-tenant caps. Seats count live members plus invitations still
@@ -1146,7 +1154,7 @@ const WORKSPACE_COMMAND_KINDS = [
   "household_legacy",
 ] as const;
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
-import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
+import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY, ADMIN_INVITATIONS_LIVE_PER_PERSON } from "../_shared/protocol.js";
 /* Worker scopes are shared by ordinary minting and delegated provisioning.
  * Their extraction preserves the existing ordinary worker permission set.
  * The two rolling-day ceilings come from the consent/enforcement registry.
@@ -8548,10 +8556,14 @@ async function enforceFreeTierBudget(
   };
 
   if (command.kind === "invite_member") {
-    await tx`SELECT user_id FROM swarm.users WHERE user_id=${auth.actor.user}::uuid FOR UPDATE`; const sentRows = await tx<{ sent: string; resets_at: Date | null }[]>`
+    // Both identity limits are counted under this row lock, so concurrent
+    // invites from one person serialize even across workspaces.
+    await tx`SELECT user_id FROM swarm.users WHERE user_id=${auth.actor.user}::uuid FOR UPDATE`; const sentRows = await tx<{ sent: string; resets_at: Date | null; live: string }[]>`
       SELECT
         (count(*) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${auth.actor.user}::uuid AND created_at > statement_timestamp() - interval '24 hours'))::text AS sent,
-        min(created_at) + interval '24 hours' AS resets_at
+        min(created_at) + interval '24 hours' AS resets_at,
+        ((SELECT count(*) FROM swarm.invitations WHERE created_by=${auth.actor.user}::uuid AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > statement_timestamp())
+          + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${auth.actor.user}::uuid AND invitation_kind='member' AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > statement_timestamp()))::text AS live
       FROM swarm.invitations
       WHERE created_by = ${auth.actor.user}::uuid
         AND created_at > statement_timestamp() - interval '24 hours'
@@ -8582,6 +8594,22 @@ async function enforceFreeTierBudget(
           resets_at: resetsAt,
         },
       });
+    }
+
+    const live = Number(sentRows[0]?.live ?? "0");
+    if (live >= INVITE_IDENTITY_LIVE_LIMIT) {
+      return await refuse(
+        "invite_live_limit_reached",
+        `outstanding invitations: ${live}`,
+        {
+          status: 403,
+          body: {
+            error: "invitation_limit_reached",
+            message: `You have ${INVITE_IDENTITY_LIVE_LIMIT} invitations waiting to be accepted. Cancel one, or wait for one to be accepted or expire.`,
+            limit: INVITE_IDENTITY_LIVE_LIMIT,
+          },
+        },
+      );
     }
 
     // Seats in use, not members: an outstanding invitation is a seat someone

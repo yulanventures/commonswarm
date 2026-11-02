@@ -3944,8 +3944,8 @@ test("remove_member enforces role, agent denial, last-owner, and landing authori
 
 test("free-tier invite cap bounds outbound email per identity, not per tenant", async () => {
   await scenario(async (f) => {
-    // Nine invites already sent by UA inside the rolling day. Seeded rather
-    // than issued so this measures the cap, not ten round trips. They expire in
+    // Forty-nine invites already sent by UA inside the rolling day. Seeded rather
+    // than issued so this measures the cap, not fifty round trips. They expire in
     // the past: an expired invite still cost an email, so it still counts here,
     // while occupying no seat (that is the separate cap, tested below).
     await sql`
@@ -3962,7 +3962,7 @@ test("free-tier invite cap bounds outbound email per identity, not per tenant", 
         statement_timestamp() - interval '1 hour',
         ${f.ua}::uuid,
         statement_timestamp() - interval '2 hours'
-      FROM generate_series(1, 9) AS g
+      FROM generate_series(1, 49) AS g
     `;
 
     const tenth = await issueConnect(f, f.uaJwt, {
@@ -3978,8 +3978,8 @@ test("free-tier invite cap bounds outbound email per identity, not per tenant", 
     });
     assert.equal(overCap.status, 429);
     assert.equal(overCap.body.error, "rate_limited");
-    assert.equal(overCap.body.limit, 10);
-    assert.match(String(overCap.body.message), /10 invites\/day/);
+    assert.equal(overCap.body.limit, 50);
+    assert.match(String(overCap.body.message), /50 invites\/day/);
     assert.ok(Number.isFinite(Date.parse(String(overCap.body.resets_at))));
 
     const [sent] = await sql<{ count: string }[]>`
@@ -3987,7 +3987,7 @@ test("free-tier invite cap bounds outbound email per identity, not per tenant", 
       FROM swarm.invitations
       WHERE created_by = ${f.ua}::uuid
     `;
-    assert.equal(sent?.count, "10", "the refused invite wrote no invitation");
+    assert.equal(sent?.count, "50", "the refused invite wrote no invitation");
     const rateAudit = await sql<{ reason: string | null }[]>`
       SELECT reason
       FROM swarm.audit_log
@@ -4015,6 +4015,91 @@ test("free-tier invite cap bounds outbound email per identity, not per tenant", 
     }, commandId("connectinvite"), f.workspaceB);
     assert.equal(colleague.status, 200);
     assert.equal(colleague.body.status, "accepted");
+  });
+});
+
+test("live invitation allowance: accepted, revoked and expired invitations free a slot", async () => {
+  await scenario(async (f) => {
+    // 24 outstanding invitations from UA, issued two days ago (outside the
+    // daily window) into workspace B, so workspace A's seat cap stays clear.
+    const seeded = await sql<{ invitation_id: string }[]>`
+      INSERT INTO swarm.invitations (
+        invitation_id, workspace_id, email, role, token_hash,
+        expires_at, created_by, created_at
+      )
+      SELECT
+        gen_random_uuid(),
+        ${f.workspaceB}::uuid,
+        'live-' || g || '-' || gen_random_uuid() || '@example.test',
+        'member',
+        sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
+        statement_timestamp() + interval '5 days',
+        ${f.ua}::uuid,
+        statement_timestamp() - interval '2 days'
+      FROM generate_series(1, 24) AS g
+      RETURNING invitation_id::text
+    `;
+    const invite = (email: string) =>
+      issueConnect(f, f.uaJwt, { kind: "invite_member", email });
+    const assertFull = async () => {
+      const over = await invite(`over-${randomUUID()}@example.test`);
+      assert.equal(over.status, 403, over.text);
+      assert.equal(over.body.error, "invitation_limit_reached");
+      assert.equal(over.body.limit, 25);
+    };
+
+    const invitee = await createUser("live-allowance");
+    registerHuman(f, invitee);
+    const last = await invite(invitee.email);
+    assert.equal(last.status, 200, last.text);
+    assert.equal(last.body.status, "accepted", last.text);
+    await assertFull();
+
+    // Acceptance frees a slot.
+    const accepted = await issueConnect(
+      f,
+      invitee.jwt,
+      { kind: "accept_invitation", token: String(last.body.invitation_token) },
+      commandId("live_allowance_accept"),
+      undefined,
+    );
+    assert.equal(accepted.status, 200, accepted.text);
+    assert.equal(accepted.body.status, "accepted", accepted.text);
+    const afterAccept = await invite(`after-accept-${randomUUID()}@example.test`);
+    assert.equal(afterAccept.body.status, "accepted", afterAccept.text);
+    await assertFull();
+
+    // Revocation frees a slot.
+    const revoked = await issueConnect(f, f.uaJwt, {
+      kind: "revoke_invitation",
+      invitation_id: String(afterAccept.body.invitation_id),
+    });
+    assert.equal(revoked.body.status, "accepted", revoked.text);
+    const afterRevoke = await invite(`after-revoke-${randomUUID()}@example.test`);
+    assert.equal(afterRevoke.body.status, "accepted", afterRevoke.text);
+    await assertFull();
+
+    // Expiry frees a slot.
+    await sql`
+      UPDATE swarm.invitations
+      SET expires_at = statement_timestamp() - interval '1 second'
+      WHERE invitation_id = ${seeded[0]!.invitation_id}::uuid
+    `;
+    const afterExpiry = await invite(`after-expiry-${randomUUID()}@example.test`);
+    assert.equal(afterExpiry.body.status, "accepted", afterExpiry.text);
+    await assertFull();
+
+    const audit = await sql<{ reason: string | null }[]>`
+      SELECT reason
+      FROM swarm.audit_log
+      WHERE workspace_id = ${f.workspaceA}::uuid
+        AND command_kind = 'invite_member'
+        AND outcome = 'quota'
+    `;
+    assert.deepEqual(
+      audit.map((row) => row.reason),
+      Array(4).fill("invite_live_limit_reached"),
+    );
   });
 });
 

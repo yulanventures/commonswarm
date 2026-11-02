@@ -93,7 +93,7 @@ test("the generated bundle enforces separate routine creation permission and fol
     workspace_seq: 0,
     owned_workspaces: 0,
     workspace_creations_last_day: 0,
-    invitations_last_day: 0,
+    invitations_last_day: 0, live_invitations_person: 0,
     live_principals: 0,
     live_members_and_invitations: 0,
     live_agent_invitations_person: 0,

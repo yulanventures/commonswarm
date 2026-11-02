@@ -10,7 +10,10 @@ export const ADMIN_READ_RATE_PER_HOUR = { lineage: 120, connection: 120, account
 export const ADMIN_MUTATION_RATE_PER_HOUR = { lineage: 20, connection: 20, account: 60, workspace: 60 } as const;
 export const ADMIN_REFRESH_RATE_PER_HOUR = 20;
 export const ADMIN_WORKSPACE_CREATE_PER_DAY = 20;
-export const ADMIN_INVITATION_ISSUE_PER_DAY = 10;
+/** Issued per person per rolling 24 hours, consumed or not. Twice the live allowance, like workspaces (10 live, 20/day). */
+export const ADMIN_INVITATION_ISSUE_PER_DAY = 50;
+/** Outstanding member invitations per person: accepted, revoked and expired ones free a slot. */
+export const ADMIN_INVITATIONS_LIVE_PER_PERSON = 25;
 export const ADMIN_WORKSPACES_CREATED_PER_GRANT = 10;
 export const ADMIN_SEATS_PER_GRANT = { live: 10, total: 50 } as const;
 export const ADMIN_INVITATIONS_PER_GRANT = { total: 10, live_agent: 5 } as const;

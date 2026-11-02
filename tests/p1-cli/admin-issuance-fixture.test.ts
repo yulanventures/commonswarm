@@ -45,7 +45,7 @@ export function routineContext(f: ReturnType<typeof adminCoreFixture>): policy.A
   return { ...f.ctx, actor: { kind: 'delegated_admin', grant_id: f.grantId, admin_identity_id: f.manifest.admin_identity_id,
     connection_id: f.manifest.connection_id, scope_names: f.manifest.scope_names, resource: policy.ADMIN_RESOURCE, access_expires_at: f.now + 300000 },
     workspace: null, workspace_stream_id: randomUUID(), workspace_seq: 0, owned_workspaces: 0, workspace_creations_last_day: 0,
-    invitations_last_day: 0, live_principals: 0, live_members_and_invitations: 0, live_agent_invitations_person: 0,
+    invitations_last_day: 0, live_invitations_person: 0, live_principals: 0, live_members_and_invitations: 0, live_agent_invitations_person: 0,
     live_agent_invitations_workspace: 0, human_worker_scopes: [], recipient_exists: false, recipient_is_member: false,
     delivery_connection_id: null, target_credential: null, principal_lineage_ids: [], nextResourceId: randomUUID };
 }

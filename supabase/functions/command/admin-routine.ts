@@ -141,6 +141,13 @@ export async function prepareAdminRoutine(
   )}) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${owner}::uuid AND created_at > ${new Date(
     ctx.now - 86400000,
   )}))::text AS n`;
+  const [liveInvites] = await tx<
+    { n: string }[]
+  >`SELECT ((SELECT count(*) FROM swarm.invitations WHERE created_by=${owner}::uuid AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>${
+    date(ctx.now)
+  }) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${owner}::uuid AND invitation_kind='member' AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>${
+    date(ctx.now)
+  }))::text AS n`;
   const [principals] = await tx<
     { n: string }[]
   >`SELECT count(*)::text AS n FROM swarm.agent_principals WHERE workspace_id=${command.workspace_id}::uuid AND revoked_at IS NULL`;
@@ -275,6 +282,7 @@ export async function prepareAdminRoutine(
     owned_workspaces: Number(owned!.n),
     workspace_creations_last_day: Number(created!.n),
     invitations_last_day: Number(invites!.n),
+    live_invitations_person: Number(liveInvites!.n),
     live_principals: Number(principals!.n),
     live_members_and_invitations: Number(members!.n),
     live_agent_invitations_person: Number(joins!.mine) +
