@@ -49,3 +49,25 @@ test('picker offers live local and hosted identities in this organization and pe
     {...agent,id:'restore',workspaces:[{...workspace,id:target,revokedAt:'now'}]}];
   assert.deepEqual(addableAccountAgents(choices,target,'org').map(a=>a.id),['local','hosted','restore']);
 });
+
+test("live local agents offer Reconnect and invoke onReconnect with the card panel", () => {
+  const clicked = [];
+  const interactiveDoc = {
+    createElement: tag => ({
+      tag,
+      children: [],
+      listeners: {},
+      append(...children) { this.children.push(...children); },
+      addEventListener(event, fn) { this.listeners[event] = fn; },
+    }),
+  };
+  const view = buildAccountAgents(
+    interactiveDoc,
+    [agent, { ...agent, id: "hosted", transport: "hosted_mcp" }, { ...agent, id: "removed", revokedAt: "2026-11-01" }],
+    (targetAgent, panel, button) => { clicked.push({ id: targetAgent.id, panelHidden: panel.hidden, label: button.textContent }); },
+  );
+  const buttons = descendants(view).filter(node => node.className === "account-agents__reconnect");
+  assert.equal(buttons.length, 1);
+  buttons[0].listeners.click();
+  assert.deepEqual(clicked, [{ id: "local", panelHidden: true, label: "Reconnect" }]);
+});

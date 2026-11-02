@@ -3199,6 +3199,36 @@ export async function moveWorkspaceToOrg(
   );
 }
 
+export interface AgentReconnectCode {
+  joinCode: string;
+  expiresAt: string;
+}
+
+export async function mintAgentReconnectCode(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  principalId: string,
+): Promise<AgentReconnectCode> {
+  const { status, body } = await postCommand(session, commandId, {
+    kind: "mint_agent_join_credential",
+    seat_cap: 1,
+    ttl_hours: 1,
+    principal_id: principalId,
+  }, { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 200 && body.ok === true && typeof body.join_code === "string") {
+    return {
+      joinCode: body.join_code,
+      expiresAt: typeof body.expires_at === "string" ? body.expires_at : "",
+    };
+  }
+  throw new Error(
+    status === 403
+      ? "Only this agent's owner can issue a reconnect code."
+      : "Could not issue a reconnect code. Try again.",
+  );
+}
+
 /** Owner-filtered account directory; no agent credentials or workspace selection required. */
 export async function myAccountAgents(): Promise<AccountAgent[]> {
   const c = client();

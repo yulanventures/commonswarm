@@ -1027,6 +1027,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <h2 id="dashboard-account-agents-title">Your agents</h2>
       <button type="button" data-account-agents-close aria-label="Close Your agents">×</button>
     </header>
+    <p class="account-agents__lead">If an agent says its credential was renewed by another copy, use Reconnect to issue a one-time code for that agent and revoke its other live tokens.</p>
     <p data-account-agents-status role="status" aria-live="polite" hidden></p>
     <div data-account-agents-list></div>
     <button type="button" data-account-agents-retry hidden>Try again</button>
@@ -1064,7 +1065,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { createListsChrome } from "../../lib/lists-chrome";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { buildAccountAgents, addableAccountAgents, buildWorkspaceAgentChoice } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -7527,7 +7528,41 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       try {
         const agents = await myAccountAgents();
         if (!current()) return;
-        list.replaceChildren(buildAccountAgents(document, agents));
+        list.replaceChildren(buildAccountAgents(document, agents, typeof mintAgentReconnectCode === "function" ? async (agent, panel, button) => {
+          const liveWorkspace = agent.workspaces.find(w => !w.revokedAt && !w.archivedAt);
+          if (!session || !liveWorkspace || sampleMode) return;
+          button.disabled = true;
+          panel.hidden = false;
+          panel.textContent = "Issuing one-time reconnect code…";
+          try {
+            const { joinCode } = await mintAgentReconnectCode(session, uuid(), liveWorkspace.id, agent.id);
+            if (!current()) return;
+            panel.replaceChildren();
+            const note = document.createElement("p");
+            note.className = "account-agents__reconnect-note";
+            note.textContent = "Run cswarm mcp connect --profile <abs-path> on the agent's machine and enter this one-time code. Reconnecting keeps this agent ID and revokes its other live tokens.";
+            const row = document.createElement("div");
+            row.className = "account-agents__reconnect-row";
+            const codeEl = document.createElement("code");
+            codeEl.className = "account-agents__reconnect-code";
+            codeEl.textContent = joinCode;
+            const copyBtn = document.createElement("button");
+            copyBtn.type = "button";
+            copyBtn.className = "account-agents__reconnect-copy";
+            copyBtn.textContent = "Copy code";
+            copyBtn.addEventListener("click", async () => {
+              await navigator.clipboard.writeText(joinCode);
+              copyBtn.textContent = "Copied";
+            });
+            row.append(codeEl, copyBtn);
+            panel.append(note, row);
+          } catch (err) {
+            if (!current()) return;
+            panel.textContent = readableError(err);
+          } finally {
+            button.disabled = false;
+          }
+        } : undefined));
         status.textContent = "";
         status.hidden = true;
       } catch (error) {

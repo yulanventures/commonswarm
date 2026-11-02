@@ -505,7 +505,7 @@ export async function requestSuccessor(options: {
     }
     if (reason === "predecessor_superseded") {
       throw new RenewalSuperseded(
-        "another cswarm process renewed this credential first",
+        "This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents.",
       );
     }
     if (REVOCATION_REASONS.has(reason)) {
@@ -836,7 +836,7 @@ export class AgentCredentialSession {
         if (this.expired() || this.token === this.options.presented.token) {
           throw new RenewalRevoked(
             "predecessor_superseded",
-            "Another process renewed this agent credential, and this one no longer has a live copy. Run the command again; if it keeps happening, two agents are sharing one credential and each needs its own.",
+            "This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents.",
           );
         }
         return this.token;

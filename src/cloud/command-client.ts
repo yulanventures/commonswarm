@@ -83,7 +83,7 @@ export interface CommandResult {
 }
 
 export type ConnectCommand =
-  | { kind: "mint_agent_join_credential"; seat_cap: number; ttl_hours: number }
+  | { kind: "mint_agent_join_credential"; seat_cap: number; ttl_hours: number; principal_id?: string }
   | { kind: "invite_member"; email: string; ttl_ms?: number }
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }

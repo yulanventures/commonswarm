@@ -17,7 +17,11 @@ export interface AccountAgent {
 }
 
 /** Account directory follows the shell's pure builders: all user text uses textContent. */
-export function buildAccountAgents(doc: Document, agents: readonly AccountAgent[]): HTMLElement {
+export function buildAccountAgents(
+  doc: Document,
+  agents: readonly AccountAgent[],
+  onReconnect?: (agent: AccountAgent, panel: HTMLElement, button: HTMLButtonElement) => void,
+): HTMLElement {
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string) => {
     const element = doc.createElement(tag);
     element.className = className;
@@ -33,7 +37,18 @@ export function buildAccountAgents(doc: Document, agents: readonly AccountAgent[
     const item = node("li", "account-agents__agent");
     const heading = node("div", "account-agents__heading");
     heading.append(node("h3", "account-agents__name", agent.name));
-    if (agent.revokedAt) heading.append(node("span", "account-agents__state", "Removed"));
+    let reconnectPanel: HTMLElement | null = null;
+    if (agent.revokedAt) {
+      heading.append(node("span", "account-agents__state", "Removed"));
+    } else if (agent.transport === "local" && agent.workspaces.some(w => !w.revokedAt && !w.archivedAt)) {
+      const button = node("button", "account-agents__reconnect", "Reconnect");
+      button.type = "button";
+      const panel = node("div", "account-agents__reconnect-panel");
+      panel.hidden = true;
+      button.addEventListener?.("click", () => onReconnect?.(agent, panel, button));
+      heading.append(button);
+      reconnectPanel = panel;
+    }
     item.append(heading, node("p", "account-agents__model", [agent.model,
       agent.transport === "hosted_mcp" ? "Connected app" : "Terminal"].filter(Boolean).join(" · ")));
     const workspaces = node("ul", "account-agents__workspaces");
@@ -52,6 +67,7 @@ export function buildAccountAgents(doc: Document, agents: readonly AccountAgent[
     }
     if (agent.workspaces.length) item.append(workspaces);
     else item.append(node("p", "account-agents__empty", "No workspaces"));
+    if (reconnectPanel) item.append(reconnectPanel);
     list.append(item);
   }
   return list;
