@@ -5,7 +5,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer {
   --home-ink: var(--k-shell-ink);
   --home-ink-muted: var(--k-shell-secondary);
   gap: 6px;
-  padding: 8px max(24px, calc((100% - 800px) / 2)) calc(8px + env(safe-area-inset-bottom));
+  /* Starts on the message column's edge (its 20px padding) instead of floating centred; capped at 960px. */
+  padding: 8px max(20px, calc(100% - 980px)) calc(8px + env(safe-area-inset-bottom)) 20px;
   color: var(--k-shell-ink);
   background: var(--k-shell-surface);
   border-block-start: 0;
