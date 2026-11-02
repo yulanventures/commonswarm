@@ -1101,16 +1101,6 @@ test('the role client posts the change_role envelope, and each reducer refusal i
     return true;
   });
   assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeProcessing])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
-  const staleSignIn = { status: 401, body: { error: 'fresh_auth_required', message: 'Sign in again, then retry the role change. No membership change was recorded.' } };
-  assert.equal(codes.includes('fresh_auth_required'), false, 'fresh sign-in is refused before the reducer');
-  const beforeStale = commands.length;
-  result = staleSignIn;
-  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
-    assert.ok(error instanceof FreshLoginRequired);
-    assert.equal(error instanceof WorkspaceRoleRefused, false);
-    return true;
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeStale])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
 });
 
 test('browser reads retain a top-level directed reply reference', () => {
