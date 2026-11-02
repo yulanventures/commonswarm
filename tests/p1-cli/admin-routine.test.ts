@@ -79,7 +79,7 @@ function fixture() {
     workspace_seq: 1,
     owned_workspaces: 1,
     workspace_creations_last_day: 1,
-    invitations_last_day: 0,
+    invitations_last_day: 0, live_invitations_person: 0,
     live_principals: 0,
     live_members_and_invitations: 1,
     live_agent_invitations_person: 0,
@@ -467,7 +467,15 @@ test("routine invitations bind recipients and member role, clip expiry, consume 
     "invalid_request",
   );
   assert.equal(
-    x.decide(invite, { invitations_last_day: 10 }).reason,
+    x.decide(invite, { invitations_last_day: 50 }).reason,
+    "invitation_limit_reached",
+  );
+  assert.notEqual(
+    x.decide(invite, { invitations_last_day: 49, live_invitations_person: 24 }).reason,
+    "invitation_limit_reached",
+  );
+  assert.equal(
+    x.decide(invite, { live_invitations_person: 25 }).reason,
     "invitation_limit_reached",
   );
   const d = x.run(invite), id = String(d.events[0]!.payload.invitation_id);

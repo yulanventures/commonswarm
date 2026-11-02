@@ -138,6 +138,7 @@ export interface AdminRoutineContext extends AdminDecisionContext {
     owned_workspaces: number;
     workspace_creations_last_day: number;
     invitations_last_day: number;
+    live_invitations_person: number;
     live_principals: number;
     live_members_and_invitations: number;
     live_agent_invitations_person: number;

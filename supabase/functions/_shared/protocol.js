@@ -1344,7 +1344,8 @@ var ADMIN_READ_RATE_PER_HOUR = { lineage: 120, connection: 120, account: 1e3, wo
 var ADMIN_MUTATION_RATE_PER_HOUR = { lineage: 20, connection: 20, account: 60, workspace: 60 };
 var ADMIN_REFRESH_RATE_PER_HOUR = 20;
 var ADMIN_WORKSPACE_CREATE_PER_DAY = 20;
-var ADMIN_INVITATION_ISSUE_PER_DAY = 10;
+var ADMIN_INVITATION_ISSUE_PER_DAY = 50;
+var ADMIN_INVITATIONS_LIVE_PER_PERSON = 25;
 var ADMIN_WORKSPACES_CREATED_PER_GRANT = 10;
 var ADMIN_SEATS_PER_GRANT = { live: 10, total: 50 };
 var ADMIN_INVITATIONS_PER_GRANT = { total: 10, live_agent: 5 };
@@ -2213,6 +2214,7 @@ function decideAdminRoutine(command, account, ctx) {
     ctx.owned_workspaces,
     ctx.workspace_creations_last_day,
     ctx.invitations_last_day,
+    ctx.live_invitations_person,
     ctx.live_principals,
     ctx.live_members_and_invitations,
     ctx.live_agent_invitations_person,
@@ -2332,7 +2334,7 @@ function decideAdminRoutine(command, account, ctx) {
     const agent = command.kind === "admin_issue_agent_invitation";
     const recipient = agent ? command.intended_owner_user_id : command.recipient_user_id;
     if (!ctx.recipient_exists || !grant.target_rules.recipient_user_ids.includes(recipient)) return finish("recipient_forbidden");
-    if (!budget("invitations", spend.invitations) || ctx.invitations_last_day >= ADMIN_INVITATION_ISSUE_PER_DAY) return finish("invitation_limit_reached");
+    if (!budget("invitations", spend.invitations) || ctx.invitations_last_day >= ADMIN_INVITATION_ISSUE_PER_DAY || !agent && ctx.live_invitations_person >= ADMIN_INVITATIONS_LIVE_PER_PERSON) return finish("invitation_limit_reached");
     if (!agent && (ctx.recipient_is_member || ctx.live_members_and_invitations >= ADMIN_EXISTING_RESOURCE_CEILINGS.members_and_invitations)) return finish("member_limit_reached");
     if (agent) {
       if (!actor.scope_names.includes("seats:create") || !grant.scope_names.includes("seats:create")) return finish("scope_forbidden");
@@ -5636,6 +5638,7 @@ export {
   ADMIN_EVENT_TYPES,
   ADMIN_EXISTING_RESOURCE_CEILINGS,
   ADMIN_GRANT_TTL_SECONDS,
+  ADMIN_INVITATIONS_LIVE_PER_PERSON,
   ADMIN_INVITATIONS_PER_GRANT,
   ADMIN_INVITATION_AND_ATTEMPT_TTL,
   ADMIN_INVITATION_ISSUE_PER_DAY,

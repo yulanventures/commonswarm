@@ -980,8 +980,13 @@ export async function inviteWorkspaceMember(
     );
   }
   if (status !== 200 || body.status !== "accepted") {
+    const limit = Number(body.limit);
     throw new Error(
-      status === 403
+      body.error === "invitation_limit_reached" || body.error === "rate_limited"
+        ? String(body.message ?? "You've reached the invitation limit. Try again later.")
+        : body.error === "member_limit_reached"
+        ? `All ${limit} places in this workspace are in use. Cancel an unused invitation or remove a member first.`
+        : status === 403
         ? "Only a workspace Owner or Admin can invite a teammate."
         : `CommonSwarm did not create the invitation (${String(body.reason ?? body.error ?? status)}).`,
     );

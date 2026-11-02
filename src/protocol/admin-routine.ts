@@ -11,6 +11,7 @@ import {
   ADMIN_EXISTING_RESOURCE_CEILINGS,
   ADMIN_INVITATION_AND_ATTEMPT_TTL,
   ADMIN_INVITATION_ISSUE_PER_DAY,
+  ADMIN_INVITATIONS_LIVE_PER_PERSON,
   ADMIN_ISSUANCE_CEILINGS,
   ADMIN_RESOURCE,
   ADMIN_AVAILABILITY,
@@ -186,6 +187,7 @@ export interface AdminRoutineContext extends AdminDecisionContext {
   owned_workspaces: number;
   workspace_creations_last_day: number;
   invitations_last_day: number;
+  live_invitations_person: number;
   live_principals: number;
   live_members_and_invitations: number;
   live_agent_invitations_person: number;
@@ -504,6 +506,7 @@ export function decideAdminRoutine(
       ctx.owned_workspaces,
       ctx.workspace_creations_last_day,
       ctx.invitations_last_day,
+      ctx.live_invitations_person,
       ctx.live_principals,
       ctx.live_members_and_invitations,
       ctx.live_agent_invitations_person,
@@ -647,7 +650,8 @@ export function decideAdminRoutine(
     ) return finish("recipient_forbidden");
     if (
       !budget("invitations", spend.invitations) ||
-      ctx.invitations_last_day >= ADMIN_INVITATION_ISSUE_PER_DAY
+      ctx.invitations_last_day >= ADMIN_INVITATION_ISSUE_PER_DAY ||
+      (!agent && ctx.live_invitations_person >= ADMIN_INVITATIONS_LIVE_PER_PERSON)
     ) return finish("invitation_limit_reached");
     if (
       !agent &&
