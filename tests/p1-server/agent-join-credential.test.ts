@@ -1591,31 +1591,18 @@ test("bound reconnect code works once for its principal, revokes old tokens incl
   const principalId = String(initialSeat.body.principal_id);
   const originalToken = String(initialSeat.body.agent_token);
   const originalTokenId = String(initialSeat.body.token_id);
-  const originalRunId = String(initialSeat.body.run_id);
 
-  // Confirm first use on the original seat token and insert a rotated successor token in the same lineage.
+  // Confirm first use on the original seat token and rotate it into a live successor via renew_agent_token.
   assert.equal((await useSeatToken(g, originalToken, "initial-seat-signal")).status, 200);
-  const rotatedSuccessorToken = `swm_agt_${randomBytes(32).toString("base64url")}`;
-  const rotatedSuccessorId = randomUUID();
-  await sql`
-    INSERT INTO swarm.agent_tokens (
-      token_id, principal_id, run_id, scopes, token_hash, expires_at,
-      lineage_id, renewal_grant_id, parent_token_id, first_used_at
-    )
-    SELECT
-      ${rotatedSuccessorId}::uuid,
-      principal_id,
-      ${originalRunId}::uuid,
-      scopes,
-      ${createHash("sha256").update(rotatedSuccessorToken).digest()},
-      statement_timestamp() + interval '1 hour',
-      lineage_id,
-      renewal_grant_id,
-      token_id,
-      statement_timestamp()
-    FROM swarm.agent_tokens
-    WHERE token_id = ${originalTokenId}::uuid
-  `;
+  const renewed = await command(
+    originalToken,
+    { kind: "renew_agent_token" },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+  const rotatedSuccessorToken = String(renewed.body.agent_token);
+  const rotatedSuccessorId = String(renewed.body.token_id);
   assert.equal((await useSeatToken(g, rotatedSuccessorToken, "rotated-successor-signal")).status, 200);
 
   // Another owner in the same workspace cannot mint a reconnect code for this agent.

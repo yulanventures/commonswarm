@@ -2632,9 +2632,10 @@ function validateCommand(
         };
     }
     if (cmd.kind === MINT_AGENT_JOIN_CREDENTIAL_KIND) {
+      const mintFields = ["kind", "seat_cap", "ttl_hours"] as const;
       const hasPrincipal = Object.hasOwn(cmd, "principal_id") && cmd.principal_id !== undefined;
       const validKeys = hasPrincipal
-        ? exactKeys(cmd, [...MINT_AGENT_JOIN_CREDENTIAL_FIELDS, "principal_id"])
+        ? exactKeys(cmd, [...mintFields, "principal_id"])
         : exactKeys(cmd, ["kind", "seat_cap", "ttl_hours"]);
       const validPrincipal = !hasPrincipal || (
         typeof cmd.principal_id === "string" &&
