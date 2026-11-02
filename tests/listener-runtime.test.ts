@@ -7021,7 +7021,7 @@ test("terminal renewal wire refusals stop real sessions immediately after cached
     { label: "server-confirmed predecessor expiry", reason: "predecessor_expired", type: RenewalRevoked,
       code: "predecessor_expired", message: "This agent credential expired before it could renew itself. Ask whoever set this agent up for a new one; nothing that was already posted is affected." },
     { label: "superseded without a stored successor", reason: "predecessor_superseded", type: RenewalRevoked,
-      code: "predecessor_superseded", message: "Another process renewed this agent credential, and this one no longer has a live copy. Run the command again; if it keeps happening, two agents are sharing one credential and each needs its own." },
+      code: "predecessor_superseded", message: "This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents." },
     // Standing defaults do not override a server decision for a bounded grant.
     { label: "renewal_horizon_reached", reason: "renewal_horizon_reached", type: RenewalReauthorisationRequired,
       reauthorisationReason: "horizon_reached",

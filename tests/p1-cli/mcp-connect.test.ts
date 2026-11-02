@@ -3534,3 +3534,72 @@ test("mcp code and connect failures use their own labels; serve retains startup 
     assert.match(serve.stderr, /\[mcp_start_failed\]/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("reconnecting an existing unbound profile replaces its credential for the same principal and refuses another principal", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "reconnect", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const reconnectedToken = `swm_agt_${"r".repeat(43)}`;
+    const reconnectedRun = "88888888-8888-4888-8888-888888888888";
+    const reconnectCode = `swm_join_${"b".repeat(43)}`;
+    const otherPrincipal = "99999999-9999-4999-8999-999999999999";
+    const wrongCode = `swm_join_${"c".repeat(43)}`;
+
+    await assert.rejects(connectMcp({
+      target: TARGET,
+      profilePath: path,
+      readCode: async () => wrongCode,
+      fetcher: async (input) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname === "/functions/v1/h0/register") {
+          return Response.json({
+            status: "accepted",
+            workspace_id: WS,
+            principal_id: otherPrincipal,
+            run_id: reconnectedRun,
+            token_id: TOKEN_ID,
+            agent_token: reconnectedToken,
+            expires_at: "2099-01-01T00:00:00Z",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    }), { code: "profile_conflict" });
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, TOKEN);
+
+    const reconnected = await connectMcp({
+      target: TARGET,
+      profilePath: path,
+      readCode: async () => reconnectCode,
+      fetcher: async (input, init) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname === "/functions/v1/h0/register") {
+          const body = JSON.parse(String(init?.body ?? "{}"));
+          assert.equal(body.joinCredential, reconnectCode);
+          return Response.json({
+            status: "accepted",
+            workspace_id: WS,
+            principal_id: PRINCIPAL,
+            run_id: reconnectedRun,
+            token_id: TOKEN_ID,
+            agent_token: reconnectedToken,
+            expires_at: "2099-01-01T00:00:00Z",
+          });
+        }
+        if (pathname === "/functions/v1/read") {
+          return Response.json({
+            ...DIRECTORY,
+            identity: { ...DIRECTORY.identity, run_id: reconnectedRun },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    assert.equal(reconnected.profile, path);
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, reconnectedToken);
+  } finally {
+    await f.close();
+  }
+});

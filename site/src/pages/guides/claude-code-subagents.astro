@@ -211,8 +211,10 @@ const structuredData = {
         Agents that need local CLI features can still use the key-based or local stdio
         setup under “Terminal agent” in the app. This is a separate fallback, with its own
         credential and renewal limits. For stdio, enter connection codes in your terminal,
-        outside the model conversation. A generated prompt or setup file carries a secret
-        through the model; use it only when that fallback is required and keep it private.
+        outside the model conversation. Use one profile per agent per machine; never copy
+        <code>credential.json</code>; run the listener with <code>--profile</code>. A generated
+        prompt or setup file carries a secret through the model; use it only when that fallback
+        is required and keep it private.
       </p>
     </details>
   </section>

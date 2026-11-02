@@ -10145,9 +10145,13 @@ async function runMcpConnect(args: Arguments): Promise<void> {
         : `${removed} No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n`);
     return;
   }
-  if (!args.has("url")) throw new AgentSetupError("connect_url_required", "No project URL was provided. Pass --url <project-url>; the connect line from `cswarm mcp code` shows it.");
-  const explicitUrl = args.required("url");
-  const explicitAnonKey = args.optional("anon-key");
+  const profileOpt = args.optional("profile");
+  const existingProfile = !args.has("url") && profileOpt !== undefined
+    ? await readAgentProfile(profileOpt, undefined, true).catch(() => null)
+    : null;
+  if (!args.has("url") && existingProfile === null) throw new AgentSetupError("connect_url_required", "No project URL was provided. Pass --url <project-url>; the connect line from `cswarm mcp code` shows it.");
+  const explicitUrl = args.optional("url") ?? existingProfile!.url;
+  const explicitAnonKey = args.optional("anon-key") ?? existingProfile?.anon_key;
   if (explicitAnonKey === undefined) {
     const saved = await readCurrentTarget();
     if (saved === null || cloudTarget(explicitUrl, saved.anonKey).url !== saved.url) {
@@ -10156,7 +10160,7 @@ async function runMcpConnect(args: Arguments): Promise<void> {
   }
   const cloud = await resolveCloudTarget({ explicitUrl, explicitAnonKey, mode: "human" });
   const { connectMcp, renderMcpConnect } = await import("./cloud/mcp-connect.js");
-  const result = await connectMcp({ target: cloud, profilePath: args.optional("profile"), name: args.optional("name") });
+  const result = await connectMcp({ target: cloud, profilePath: profileOpt, name: args.optional("name") });
   process.stdout.write(renderMcpConnect(result));
 }
 

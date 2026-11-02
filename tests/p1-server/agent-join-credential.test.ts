@@ -1582,3 +1582,94 @@ test("lost register response recovers one seat with the same attempt and revokes
   assert.notEqual((await useSeatToken(g, firstToken, "old-lost-response")).status, 200);
   assert.equal((await useSeatToken(g, String(retry.body.agent_token), "recovered-lost-response")).status, 200);
 });
+
+test("bound reconnect code works once for its principal, revokes old tokens including rotated successors, and refuses other owners", { timeout: 120000 }, async () => {
+  const g = await createFixture();
+  const initialJoin = await mintJoinCredential(g, 1);
+  const initialSeat = await registrationCommand(initialJoin.secret, randomUUID(), "Reconnect target");
+  assert.equal(initialSeat.status, 200, JSON.stringify(initialSeat.body));
+  const principalId = String(initialSeat.body.principal_id);
+  const originalToken = String(initialSeat.body.agent_token);
+  const originalTokenId = String(initialSeat.body.token_id);
+
+  // Confirm first use on the original seat token and rotate it into a live successor via renew_agent_token.
+  assert.equal((await useSeatToken(g, originalToken, "initial-seat-signal")).status, 200);
+  const renewed = await command(
+    originalToken,
+    { kind: "renew_agent_token" },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+  const rotatedSuccessorToken = String(renewed.body.agent_token);
+  const rotatedSuccessorId = String(renewed.body.token_id);
+  assert.equal((await useSeatToken(g, rotatedSuccessorToken, "rotated-successor-signal")).status, 200);
+
+  // Another owner in the same workspace cannot mint a reconnect code for this agent.
+  const otherOwner = await createUser();
+  await sql`
+    INSERT INTO swarm.users (user_id, display_name)
+    VALUES (${otherOwner.id}::uuid, 'Other Owner')
+  `;
+  await sql`
+    INSERT INTO swarm.memberships (workspace_id, user_id, role)
+    VALUES (${g.workspace}::uuid, ${otherOwner.id}::uuid, 'owner')
+  `;
+  const foreignMint = await command(
+    otherOwner.jwt,
+    {
+      kind: "mint_agent_join_credential",
+      seat_cap: 1,
+      ttl_hours: 1,
+      principal_id: principalId,
+    },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(foreignMint.status, 403, JSON.stringify(foreignMint.body));
+  assert.equal(foreignMint.body.error, "forbidden");
+
+  // The owning user mints a 1-seat reconnect code bound to principalId.
+  const reconnectMint = await command(
+    g.ownerJwt,
+    {
+      kind: "mint_agent_join_credential",
+      seat_cap: 1,
+      ttl_hours: 1,
+      principal_id: principalId,
+    },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(reconnectMint.status, 200, JSON.stringify(reconnectMint.body));
+  assert.equal(reconnectMint.body.status, "accepted");
+  const reconnectSecret = String(reconnectMint.body.join_credential);
+
+  // Redeeming the bound code preserves principal_id and revokes all prior live tokens for that principal.
+  const reconnected = await registrationCommand(reconnectSecret, randomUUID(), "Ignored name");
+  assert.equal(reconnected.status, 200, JSON.stringify(reconnected.body));
+  assert.equal(reconnected.body.principal_id, principalId);
+  const freshToken = String(reconnected.body.agent_token);
+  const freshTokenId = String(reconnected.body.token_id);
+  assert.notEqual(freshTokenId, originalTokenId);
+  assert.notEqual(freshTokenId, rotatedSuccessorId);
+
+  // Both the original token and the rotated successor are now revoked and rejected.
+  const oldStates = await sql<{ token_id: string; revoked_at: Date | null }[]>`
+    SELECT token_id::text, revoked_at
+    FROM swarm.agent_tokens
+    WHERE token_id IN (${originalTokenId}::uuid, ${rotatedSuccessorId}::uuid)
+  `;
+  assert.equal(oldStates.length, 2);
+  for (const row of oldStates) {
+    assert.ok(row.revoked_at instanceof Date, `expected token ${row.token_id} to be revoked`);
+  }
+  assert.notEqual((await useSeatToken(g, originalToken, "after-reconnect-original")).status, 200);
+  assert.notEqual((await useSeatToken(g, rotatedSuccessorToken, "after-reconnect-successor")).status, 200);
+  assert.equal((await useSeatToken(g, freshToken, "after-reconnect-fresh")).status, 200);
+
+  // The bound code works only once.
+  const secondAttempt = await registrationCommand(reconnectSecret, randomUUID(), "Second attempt");
+  assert.equal(secondAttempt.status, 409, JSON.stringify(secondAttempt.body));
+  assert.equal(secondAttempt.body.error, "join_credential_seat_cap_reached");
+});

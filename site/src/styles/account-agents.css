@@ -35,7 +35,13 @@ live-dashboard [data-account-agents-dialog] :is(button, a):focus-visible {
 .account-agents__agent { padding-block: 20px; border-block-end: 1px solid var(--k-shell-line, var(--border)); }
 .account-agents__agent:last-child { border-block-end: 0; padding-block-end: 0; }
 .account-agents__name { margin: 0; font-size: 14px; font-weight: 600; }
-.account-agents__model, .account-agents__empty { margin: 4px 0 12px; color: var(--k-shell-secondary, var(--text-muted)); }
+.account-agents__model, .account-agents__empty, .account-agents__lead { margin: 4px 0 12px; color: var(--k-shell-secondary, var(--text-muted)); }
+.account-agents__reconnect { padding-inline: 10px; min-block-size: 32px; font-size: 12px; }
+.account-agents__reconnect-panel { margin-block-start: 10px; padding: 10px 12px; border: 1px solid var(--k-shell-line, var(--border)); border-radius: 8px; }
+.account-agents__reconnect-note { margin: 0 0 8px; color: var(--k-shell-secondary, var(--text-muted)); }
+.account-agents__reconnect-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.account-agents__reconnect-code { font-family: var(--font-mono, monospace); font-weight: 600; }
+.account-agents__reconnect-copy { padding-inline: 10px; min-block-size: 32px; font-size: 12px; }
 .account-agents__workspace { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; padding-block: 4px; }
 .account-agents__workspace-name { color: inherit; }
 .account-agents__org, .account-agents__state { color: var(--k-shell-secondary, var(--text-muted)); }

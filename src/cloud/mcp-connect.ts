@@ -684,7 +684,7 @@ async function connectedResult(path: string, profile: AgentProfile, fetcher: typ
         predecessor_expired: "The saved predecessor expired before renewal.",
       };
       if (error.code === "predecessor_superseded") {
-        reason = "Another process renewed this credential, but this copy has no usable saved successor. Ask the owner to inspect the connection copies and the intended connection before another attempt.";
+        reason = "Another process renewed this credential, but this copy has no usable saved successor. This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents.";
       } else if (error.code === "predecessor_not_owned") {
         code = "connect_identity_mismatch";
         reason = "The saved predecessor belongs to another identity. Ask for the correct connection file; keep this profile for inspection.";
@@ -697,7 +697,7 @@ async function connectedResult(path: string, profile: AgentProfile, fetcher: typ
       reason = `${error.reason === "horizon_reached" ? "The technical renewal horizon was reached." : "The renewal successor budget was exhausted."} ${replacement}`;
     } else if (error instanceof RenewalSuperseded) {
       code = "connect_renewal_refused";
-      reason = "Another process renewed this credential, but this copy has no usable saved successor. Ask the owner to inspect the connection copies and the intended connection before another attempt.";
+      reason = "Another process renewed this credential, but this copy has no usable saved successor. This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents.";
     } else if (error instanceof RenewalRefused && error.status === 426 && error.code === "upgrade_required") {
       code = "connect_renewal_refused";
       reason = "The deployment requires a newer cswarm. Update cswarm, then rerun the same connect command with the same code.";
@@ -815,13 +815,15 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     try { await (options.checkProfileAccess ?? access)(dirname(path), constants.W_OK); }
     catch (error) { await classifyDirectoryFailure(dirname(path), error); }
     const pending = await readPending(path);
-    // A pending record is the sole exception for an orphan credential.
+    const existingPreCode = !pending ? await completedProfileAt(path) : null;
+    // A pending record or an unbound completed profile (reconnect) may proceed to readCode.
     if (!pending && await pathExists(path)) {
-      if (await completedProfileAt(path) || !await repairableProfileAt(path) || !await readComplete(path)) {
+      if ((existingPreCode && existingPreCode.host_session_id !== undefined) ||
+          (!existingPreCode && (!await repairableProfileAt(path) || !await readComplete(path)))) {
         throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
       }
     }
-    if (!pending && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
+    if (!pending && !existingPreCode && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
       throw new McpConnectError("profile_exists", await emptyClaimAt(join(profileDir, CONNECT_PROFILE_FILES.credential))
         ? `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`
         : `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
@@ -891,8 +893,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           return result;
         }, { publishLink: options.publishLink });
       }
-      if (!current && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
-      if (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))
+      const reconnecting = !current ? await completedProfileAt(path) : null;
+      const isReconnect = reconnecting !== null &&
+        reconnecting.host_session_id === undefined &&
+        reconnecting.url === options.target.url &&
+        (!complete || complete.codeHash !== codeHash(code, complete.attemptId));
+      if (!current && !isReconnect && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
+      if (!current && !isReconnect && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))
         throw new McpConnectError("profile_exists", `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
       if (pending?.attemptId !== current?.attemptId) {
         throw new McpConnectError("connect_pending_changed", "The interrupted connect changed while entering the code. Run mcp connect again.");
@@ -927,7 +934,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       let orphanPrincipalId: string | undefined;
       if (current) orphanPrincipalId = (await checkedOrphan(path))?.principalId;
       const attemptId = current?.attemptId ?? randomUUID();
-      if (!current) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+      if (!current && !isReconnect) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
         await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString() } satisfies PendingConnect));
       }, { publishLink: options.publishLink });
       const controller = new AbortController();
@@ -1000,8 +1007,21 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         if (orphanPrincipalId && orphanPrincipalId !== connection.principal_id) {
           throw new McpConnectError("profile_conflict", "The saved credential belongs to another agent. Inspect the connection before retrying.");
         }
+        if (isReconnect && reconnecting && (reconnecting.principal_id !== connection.principal_id || reconnecting.workspace_id !== connection.workspace_id)) {
+          throw new McpConnectError("profile_conflict", "This connect code belongs to another agent or workspace than the saved profile. Ask the owner to reconnect this agent from Your agents, or pass a new --profile path.");
+        }
         // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
-        const profile = await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId, undefined, attemptId);
+        const profile = await (options.saveProfile ?? saveAgentProfile)(
+          path,
+          connection,
+          isReconnect ? reconnecting?.workspace_name : undefined,
+          undefined,
+          !isReconnect,
+          current !== null,
+          orphanPrincipalId,
+          undefined,
+          attemptId,
+        );
         const result = await connectedResult(path, profile, options.fetcher);
         try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId, url: options.target.url, codeHash: codeHash(code, attemptId),
           workspace_id: connection.workspace_id, anon_key: connection.anon_key, principal_id: connection.principal_id, run_id: body.run_id } satisfies CompleteConnect)); }

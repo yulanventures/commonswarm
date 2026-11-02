@@ -108,7 +108,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   predecessor_not_owned: entry("This agent's prior credential is unavailable.", PERSON),
   predecessor_expired: entry("This agent's credential expired.", PERSON),
   predecessor_expired_local: entry("This agent's credential expired.", PERSON),
-  predecessor_superseded: entry("Another process renewed this agent's credential.", RETRY),
+  predecessor_superseded: entry("This agent's credential was renewed by another copy. Ask the owner to reconnect it from Your agents.", RETRY),
   successor_not_recoverable: entry("The renewed credential cannot be recovered.", PERSON),
   predecessor_not_presented: entry("The prior credential was not presented.", PERSON),
   predecessor_pending_first_use: entry("The prior credential is still pending first use.", RETRY),
