@@ -31,7 +31,8 @@ const OUTCOME_UNKNOWN = "The register outcome is unknown. Run the same cswarm mc
 const PENDING_FILE = CONNECT_PROFILE_FILES.pending;
 const COMPLETE_FILE = CONNECT_PROFILE_FILES.complete;
 
-interface PendingConnect { attemptId: string; url: string; name: string; codeHash: string; createdAt: string }
+/** reconnect: this attempt replaces the credential of the completed profile beside it. */
+interface PendingConnect { attemptId: string; url: string; name: string; codeHash: string; createdAt: string; reconnect?: true }
 interface CompleteConnect { attemptId: string; url: string; codeHash: string; workspace_id?: string; anon_key?: string; principal_id?: string; run_id?: string }
 
 function parseComplete(raw: string): CompleteConnect | null {
@@ -136,6 +137,14 @@ function sameCode(code: string, pending: PendingConnect): boolean {
 }
 
 function pendingPath(profilePath: string): string { return join(dirname(profilePath), PENDING_FILE); }
+
+async function markedAttemptId(profileDir: string): Promise<string | undefined> {
+  const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
+  let marker: string | null = null;
+  try { marker = await readSecureJsonFileIfPresent(markerPath, 4096); }
+  catch { await classifyAttemptMarkerReadFailure(markerPath); }
+  try { return record(JSON.parse(marker ?? "null"))?.attemptId as string | undefined; } catch { return undefined; /* Refuse an invalid marker. */ }
+}
 function completePath(profilePath: string): string { return join(dirname(profilePath), COMPLETE_FILE); }
 function clearCommand(profilePath: string): string { return `cswarm mcp connect --clear-pending --profile ${quoteAgentArgument(profilePath)}`; }
 function damagedProfileMessage(path: string): string {
@@ -296,7 +305,9 @@ async function readPending(profilePath: string): Promise<PendingConnect | null> 
 function parsePending(raw: string): PendingConnect | null {
   let value: Record<string, unknown> | null;
   try { value = record(JSON.parse(raw)); } catch { value = null; }
-  if (!value || Object.keys(value).sort().join() !== ["attemptId", "url", "name", "codeHash", "createdAt"].sort().join() ||
+  const keys = ["attemptId", "url", "name", "codeHash", "createdAt", ...(Object.hasOwn(value ?? {}, "reconnect") ? ["reconnect"] : [])];
+  if (!value || Object.keys(value).sort().join() !== keys.sort().join() ||
+      (Object.hasOwn(value, "reconnect") && value.reconnect !== true) ||
       typeof value.attemptId !== "string" || !ONBOARDING_UUID.test(value.attemptId) ||
       typeof value.url !== "string" || typeof value.name !== "string" ||
       typeof value.codeHash !== "string" || !/^[0-9a-f]{64}$/.test(value.codeHash) ||
@@ -840,14 +851,16 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     const code = (await (options.readCode ?? (() => readHiddenJoinCode(options.terminal, cleanupOnSignal)))()).trim();
     if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
     if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
-    if (pending && !sameCode(code, pending)) {
+    if (pending && !pending.reconnect && !sameCode(code, pending)) {
       if (await completedProfileAt(path)) throw new McpConnectError("connect_code_mismatch", "This directory already holds a working profile. Use a new --profile path for a new agent.");
       throw new McpConnectError("connect_code_mismatch", `The record at ${pendingPath(path)} belongs to another code. Rerun with the original code; ask the operator to inspect the attempt before clearing it with ${clearCommand(path)}.`);
     }
     return await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
       await preflightConnectReservedPaths(path, reservedProbe);
       await cleanConnectTemps(path);
-      const current = await readPending(path);
+      const stored = await readPending(path);
+      // A reconnect record for another code is superseded: the owner issued a new code.
+      const current = stored?.reconnect && !sameCode(code, stored) ? null : stored;
       const complete = await readComplete(path, current !== null);
       if ((!current || current.attemptId === complete?.attemptId) && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
@@ -893,28 +906,24 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           return result;
         }, { publishLink: options.publishLink });
       }
-      const reconnecting = !current ? await completedProfileAt(path) : null;
+      const reconnecting = !current || current.reconnect ? await completedProfileAt(path) : null;
       const isReconnect = reconnecting !== null &&
         reconnecting.host_session_id === undefined &&
         reconnecting.url === options.target.url &&
-        (!complete || complete.codeHash !== codeHash(code, complete.attemptId));
+        (current?.reconnect === true || !complete || complete.codeHash !== codeHash(code, complete.attemptId));
+      if (current?.reconnect && !isReconnect) throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
       if (!current && !isReconnect && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
       if (!current && !isReconnect && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))
         throw new McpConnectError("profile_exists", `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
-      if (pending?.attemptId !== current?.attemptId) {
+      if (pending?.attemptId !== stored?.attemptId) {
         throw new McpConnectError("connect_pending_changed", "The interrupted connect changed while entering the code. Run mcp connect again.");
       }
-      if (current && await pathExists(path)) {
+      // A reconnect's profile predates its attempt; only its own marker means the new credential was saved.
+      if (current && await pathExists(path) && (!current.reconnect || await markedAttemptId(profileDir) === current.attemptId)) {
         try {
           const profile = await completedProfileAt(path);
           if (!profile) throw new Error("profile is incomplete");
-          const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
-          let marker: string | null = null;
-          try { marker = await readSecureJsonFileIfPresent(markerPath, 4096); }
-          catch { await classifyAttemptMarkerReadFailure(markerPath); }
-          let markedAttempt: string | undefined;
-          try { markedAttempt = record(JSON.parse(marker ?? "null"))?.attemptId as string | undefined; } catch { /* Refuse an invalid marker. */ }
-          if (markedAttempt !== current.attemptId) {
+          if (await markedAttemptId(profileDir) !== current.attemptId) {
             throw new McpConnectError("connect_profile_other_attempt", `The profile at ${path} was not written by the pending connect at ${pendingPath(path)}. Keep both files and use a new --profile path for a new agent.`);
           }
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
@@ -932,10 +941,12 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         }
       }
       let orphanPrincipalId: string | undefined;
-      if (current) orphanPrincipalId = (await checkedOrphan(path))?.principalId;
+      if (current && !current.reconnect) orphanPrincipalId = (await checkedOrphan(path))?.principalId;
       const attemptId = current?.attemptId ?? randomUUID();
-      if (!current && !isReconnect) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
-        await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString() } satisfies PendingConnect));
+      // Saved before POST so a lost response retries this attempt instead of spending another code.
+      if (!current) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+        await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString(),
+          ...(isReconnect ? { reconnect: true as const } : {}) } satisfies PendingConnect));
       }, { publishLink: options.publishLink });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);

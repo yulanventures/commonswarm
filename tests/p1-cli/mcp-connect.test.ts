@@ -3535,6 +3535,48 @@ test("mcp code and connect failures use their own labels; serve retains startup 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a reconnect whose response is lost resumes the same attempt with the same code", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "reconnect-lost", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const reconnectCode = `swm_join_${"d".repeat(43)}`;
+    const reconnectedToken = `swm_agt_${"s".repeat(43)}`;
+    const reconnectedRun = "77777777-7777-4777-8777-777777777777";
+    const attempts: string[] = [];
+    const fetcher = (lose: boolean) => async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname === "/functions/v1/h0/register") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        assert.equal(body.joinCredential, reconnectCode);
+        attempts.push(body.attemptId);
+        // The server commits the reconnect; only the response is lost.
+        if (lose) throw new TypeError("socket hang up");
+        return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: reconnectedRun,
+          token_id: TOKEN_ID, agent_token: reconnectedToken, expires_at: "2099-01-01T00:00:00Z" });
+      }
+      if (pathname === "/functions/v1/read") return Response.json({ ...DIRECTORY, identity: { ...DIRECTORY.identity, run_id: reconnectedRun } });
+      return new Response("not found", { status: 404 });
+    };
+
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => reconnectCode, fetcher: fetcher(true) }),
+      { code: "register_outcome_unknown" });
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, TOKEN, "the old credential is untouched");
+    const pending = JSON.parse(await readFile(join(dirname(path), "connect-pending.json"), "utf8"));
+    assert.equal(pending.reconnect, true);
+    assert.equal(pending.attemptId, attempts[0]);
+
+    const resumed = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => reconnectCode, fetcher: fetcher(false) });
+    assert.equal(resumed.profile, path);
+    assert.deepEqual(attempts, [attempts[0], attempts[0]], "the retry reuses the lost attempt");
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, reconnectedToken);
+    await assert.rejects(readFile(join(dirname(path), "connect-pending.json"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await f.close();
+  }
+});
+
 test("reconnecting an existing unbound profile replaces its credential for the same principal and refuses another principal", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
