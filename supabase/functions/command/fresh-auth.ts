@@ -4,7 +4,7 @@ export const FRESH_INTERACTIVE_AUTH_SECONDS = 300;
  * Auth-service (GoTrue claims timestamps) versus command-path database
  * `statement_timestamp()` can disagree by a small amount. A just-signed-in user
  * whose interactive AMR is a few seconds "in the future" relative to the DB
- * clock must not loop forever on fresh_auth_required. This bound is only a
+ * clock must not loop forever on a freshness refusal. This bound is only a
  * negative-age allowance; the 300-second upper freshness window is unchanged.
  */
 export const FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS = 5;
@@ -73,50 +73,4 @@ export function hasFreshInteractiveAuth(
     ageSeconds >= -FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS &&
     ageSeconds <= FRESH_INTERACTIVE_AUTH_SECONDS
   );
-}
-
-/**
- * Membership commands use the existing AMR age bounds.
- * Membership handlers resolve stored replay first.
- */
-export const FRESH_INTERACTIVE_COMMAND_KINDS = [
-  "remove_member",
-  "change_role",
-] as const;
-
-const FRESH_AUTH_REFUSAL_MESSAGE: Record<
-  (typeof FRESH_INTERACTIVE_COMMAND_KINDS)[number],
-  string
-> = {
-  remove_member:
-    "Sign in again, then retry member removal. No membership change was recorded.",
-  change_role:
-    "Sign in again, then retry the role change. No membership change was recorded.",
-};
-
-export function commandNeedsFreshInteractiveAuth(kind: string): boolean {
-  return (FRESH_INTERACTIVE_COMMAND_KINDS as readonly string[]).includes(kind);
-}
-
-/**
- * Null means the command may proceed to the reducer. A refusal is authentication
- * only: the caller's role has not been evaluated.
- */
-export function freshInteractiveAuthRefusal(
-  kind: string,
-  credentialKind: string,
-  interactiveAtSeconds: number | null,
-  serverNowMs: number,
-): { error: "fresh_auth_required"; message: string } | null {
-  if (!commandNeedsFreshInteractiveAuth(kind)) return null;
-  if (
-    credentialKind === "user" &&
-    hasFreshInteractiveAuth(interactiveAtSeconds, serverNowMs)
-  ) {
-    return null;
-  }
-  const message = kind === "change_role"
-    ? FRESH_AUTH_REFUSAL_MESSAGE.change_role
-    : FRESH_AUTH_REFUSAL_MESSAGE.remove_member;
-  return { error: "fresh_auth_required", message };
 }

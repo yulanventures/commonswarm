@@ -79,10 +79,7 @@ import {
   commandPreflight,
   withCommandCors,
 } from "./cors.ts";
-import {
-  commandNeedsFreshInteractiveAuth, freshInteractiveAuthRefusal,
-  newestInteractiveAmrSeconds,
-} from "./fresh-auth.ts";
+import { newestInteractiveAmrSeconds } from "./fresh-auth.ts";
 import {
   adminFailureRetryable, adminOAuthFailureResult, classifyCommandFailure,
   dbCode,
@@ -12715,38 +12712,6 @@ async function handleTransaction(
       return { status: 200, body: { ok: true } };
     }
     await afterStep(7);
-
-    if (commandNeedsFreshInteractiveAuth(command.kind)) {
-      const serverTime = await tx<{ now_ms: string | number }[]>`
-        SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
-      `;
-      const serverNowMs = Number(serverTime[0]?.now_ms);
-      const freshAuth = freshInteractiveAuthRefusal(
-        command.kind,
-        auth.credentialKind,
-        auth.interactiveAuthAtSeconds,
-        serverNowMs,
-      );
-      if (freshAuth !== null) {
-        await insertAudit(tx, {
-          auth,
-          commandKind: kind,
-          workspaceId: route.workspaceId,
-          streamId: route.streamId,
-          outcome: "authn",
-          reason: freshAuth.error,
-          detail: freshAuth.message,
-          hash,
-        });
-        return {
-          status: 401,
-          body: {
-            error: freshAuth.error,
-            message: freshAuth.message,
-          },
-        };
-      }
-    }
 
     if (command.kind === SIGNALS_SEEN_KIND) {
       const userId = auth.actor.user;

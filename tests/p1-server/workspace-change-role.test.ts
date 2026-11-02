@@ -4,9 +4,8 @@
  * The reducer already decided this command. This file proves the edge accepts
  * the wire shape, persists MemberRoleChanged, and returns the reducer's stable
  * refusal reasons. An agent credential is refused before that reducer runs.
- * A stale interactive session is refused with 401 fresh_auth_required before
- * the reducer. tests/fresh-auth.test.ts covers that refusal. A just-signed-in
- * owner below is the fresh-session control.
+ * Role changes need no recent sign-in (Goal 3: re-authentication is only for
+ * password or email changes, payments and export).
  *
  * Reached by `npm run test:p1-server` (globs tests/p1-server/**; serial via
  * --test-concurrency=1 because each file owns the one local runtime).

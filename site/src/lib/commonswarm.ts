@@ -1341,9 +1341,6 @@ export async function removeWorkspaceMember(
     { kind: "remove_member", user_id: userId },
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
   );
-  if (status === 401 && body.error === "fresh_auth_required") {
-    throw new FreshLoginRequired();
-  }
   if (status === 403) {
     throw new Error(
       "Your current project role cannot remove this member. CommonSwarm did not change access.",
@@ -1763,11 +1760,6 @@ export async function changeWorkspaceRole(session: Session, commandId: string, w
   userId: string, role: "owner" | "admin" | "member"): Promise<void> {
   const { status, body } = await postCommand(session, commandId, { kind: "change_role", user_id: userId, role },
     { workspace_id: workspaceId, stream: { kind: "workspace" } });
-  if (status === 401 && body.error === "fresh_auth_required") {
-    throw new FreshLoginRequired(
-      "Sign in again, then retry the role change. No membership change was recorded.",
-    );
-  }
   if (status === 200 && body.status === "accepted") return;
   throw new WorkspaceRoleRefused(typeof body.reason === "string" ? body.reason : typeof body.error === "string" ? body.error : "unknown");
 }

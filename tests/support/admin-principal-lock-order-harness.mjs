@@ -1697,11 +1697,8 @@ async function holderSide(ctx, kind, fixture) {
     };
   }
   if (kind === 'remove') {
-    // remove_member needs a fresh interactive sign-in (fresh-auth.ts:82-83). Without one,
-    // command/index.ts:11352-11380 returns 401 fresh_auth_required before the step-8 workspace
-    // and stream locks (:12350-12357). Production takes the time from the JWT's newest interactive
-    // AMR (:13323); here it is the database clock that the check compares with (:11353), read
-    // just before each command.
+    // Older floor sources required a fresh interactive sign-in for remove_member; current
+    // source does not. The timestamp keeps those floors comparable and is ignored by current code.
     const remove = async (user) => {
       const [clock] = await ctx.observer`SELECT extract(epoch FROM statement_timestamp())::float8 AS seconds`;
       const signedIn = { ...owner, identity: { ...owner.identity, interactiveAuthAtSeconds: Number(clock.seconds) } };
