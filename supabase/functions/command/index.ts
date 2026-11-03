@@ -14578,7 +14578,7 @@ async function handleTransaction(
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
     await reportRevokedLocalCredential(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
-      await db.begin(async (tx) => {
+      await db.begin("isolation level read committed", async (tx) => {
         await setTransaction(tx);
         return await run(tx);
       }) as unknown as T, agentTokenHash);

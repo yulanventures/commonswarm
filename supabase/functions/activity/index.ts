@@ -204,7 +204,7 @@ async function handle(request: Request): Promise<Response> {
     if(error instanceof LocalActivityRefused) return error.response;
     if(error instanceof LocalCredentialDenied) {
       await reportRevokedLocalCredential(async <T,>(run:(tx:postgres.TransactionSql<Record<string,unknown>>)=>Promise<T>):Promise<T> =>
-        await db.begin(async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;return await run(tx);}) as unknown as T,tokenHash);
+        await db.begin("isolation level read committed", async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;return await run(tx);}) as unknown as T,tokenHash);
       return json(403,{error:'forbidden'});
     }
     throw error;
