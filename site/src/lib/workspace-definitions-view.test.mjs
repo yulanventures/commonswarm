@@ -100,7 +100,7 @@ test('renderWorkspaceDefinitionsHtml renders Certified, Proposal pending diff, P
   });
   assert.match(pendingHtml, /hh-def-badge--pending" data-def-status>Proposal pending</);
   assert.match(pendingHtml, /data-def-diff/);
-  assert.match(pendingHtml, /Certified \(active for agents\)/);
+  assert.match(pendingHtml, /<h5>Certified<\/h5>/);
   assert.match(pendingHtml, /Proposed \(/);
   assert.match(pendingHtml, /data-def-action="certify"/);
   assert.match(pendingHtml, /Certify proposed version/);
