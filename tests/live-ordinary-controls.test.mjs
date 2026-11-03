@@ -380,8 +380,8 @@ test('live catalog follows the verified SHA release switch, never the working fi
     ['switch off with files', off, '0', '1', core, 8],
     ['invalid opt-in with files', off, 'invalid', '1', core, 8],
     ['non-exact opt-in with files', off, 'true', '1', core, 8],
-    ['current file with switch on', off, '1', '0', [...core, ...hosted], 27],
-    ['switch on with files', off, '1', '1', [...core, ...hosted], 27],
+    ['current file with switch on', off, '1', '0', [...core, ...hosted], 28],
+    ['switch on with files', off, '1', '1', [...core, ...hosted], 28],
   ]) await t.test(name, async t => {
     assert.equal(listedTools.length, count);
     const f = await fixture(t, { script: producer, releaseSha: latest, liveEdgeSha, listedTools });
