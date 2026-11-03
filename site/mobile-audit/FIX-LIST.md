@@ -88,3 +88,5 @@ Review used the two downloaded CI reports, all28 contact sheets (336 top-of-page
 Zero page overflow does not establish readable text, absence of element clipping, usable vertical scrolling, keyboard reachability, focus order, reduced motion, native-device behavior or every dialog state. Future reports must also be checked for seed prerequisites, effective theme, capture errors, collapsed text, obscured targets and overlap findings. Real-device and interaction checks remain separate from static screenshot inspection.
 
 PR B static build and manifest validation have passed locally. Independent source review, final-branch site CI and new mobile artifact review remain pending. Merge and deployment stay with the Lead/HezLead release process.
+
+Run [41687242535](https://github.com/yulanventures/commonswarm/actions/runs/41687242535) recorded 60 Definitions setup timeouts across five entries; 37 other cases completed. Source shows Lists loads before mounting Definitions. The five entries now use the runner’s visible `waitFor` step before selection or scrolling; a new targeted artifact is required before claiming these frames.

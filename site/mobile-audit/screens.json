@@ -84,6 +84,9 @@
     "path": "/app?w={workspace}&v=lists",
     "setup": [
       {
+        "waitFor": ".household-definitions [data-def-list]"
+      },
+      {
         "scroll": ".household-definitions [data-def-list]"
       }
     ],
@@ -913,6 +916,9 @@
     "path": "/app?w={workspace}&v=lists",
     "setup": [
       {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-active-member\"]"
+      },
+      {
         "click": "[data-def-action=\"select\"][data-def-target=\"def-active-member\"]"
       },
       {
@@ -934,6 +940,9 @@
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
     "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-due-date\"]"
+      },
       {
         "click": "[data-def-action=\"select\"][data-def-target=\"def-due-date\"]"
       },
@@ -958,6 +967,9 @@
     "path": "/app?w={workspace}&v=lists",
     "setup": [
       {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
+      {
         "click": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
       },
       {
@@ -981,6 +993,9 @@
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
     "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
       {
         "click": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
       },
