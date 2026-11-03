@@ -11141,6 +11141,8 @@ async function handleHostedManagement(
             revoked_at = NULL
         WHERE grant_id = ${command.grant_id}::uuid AND state = 'pending'
       `;
+      // A reconnect from the same client restores agents stranded by a retired refresh family.
+      await tx`SELECT swarm.inherit_stranded_hosted_agents(${command.grant_id}::uuid)`;
     } else if (event.type === "HostedMcpGrantRevoked") {
       if (grant === null) throw new Error("revocation event has no grant projection");
       const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)

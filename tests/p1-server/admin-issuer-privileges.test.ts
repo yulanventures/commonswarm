@@ -50,6 +50,7 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.hosted_agent_membership_allowed(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.hosted_binding_eligible(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.hosted_grant_workspace_ids(uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.inherit_stranded_hosted_agents(uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.local_agent_membership_allowed(uuid,uuid,uuid,boolean)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.local_agent_workspace_live(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.local_parent_connection_live(uuid)', 'EXECUTE', false],

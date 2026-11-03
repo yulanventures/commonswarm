@@ -105,12 +105,12 @@ const {
 } = commandModule;
 const { authenticateHostedGrantCapability, authenticateHostedSeatCapability } = authModule;
 
-const commandInput = (workspaceId, name, commandId) => ({
+const commandInput = (workspaceId, name, commandId, agentId) => ({
   command_id: commandId,
   client_version: "0.1.0",
   workspace_id: workspaceId,
   stream: { kind: "workspace" },
-  command: { kind: "claim_hosted_seat", name },
+  command: { kind: "claim_hosted_seat", ...(name === undefined ? {} : { name }), ...(agentId === undefined ? {} : { agent_id: agentId }) },
 });
 
 async function capability(grantId, ownerUserId, workspaceId) {
@@ -142,7 +142,7 @@ async function claim(spec, existingCapability) {
   );
   if (cap === null) return { status: 403, body: { error: "hosted_grant_forbidden" } };
   return reportNon2xx("hosted", await handleHostedCommand(
-    commandInput(spec.workspaceId, spec.name, spec.commandId),
+    commandInput(spec.workspaceId, spec.name, spec.commandId, spec.agentId),
     cap,
   ));
 }
@@ -1782,6 +1782,62 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   const [catalog] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
   assert.equal(catalog?.catalog_ok, true);
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
+});
+
+test("reconnect inherits hosted agents stranded by a retired refresh family: same owner and client only, never from a revoked grant", { timeout: 180_000 }, async () => {
+  const inherit = (grant: string) => sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    const [row] = await tx<{ n: number }[]>`SELECT swarm.inherit_stranded_hosted_agents(${grant}::uuid) AS n`;
+    return row!.n;
+  });
+  const bound = async (grant: string, principal: unknown) => (await sql<{ n: number }[]>`SELECT count(*)::int AS n
+    FROM swarm.hosted_mcp_grant_agents WHERE grant_id=${grant}::uuid AND principal_id=${String(principal)}::uuid AND revoked_at IS NULL`)[0]!.n;
+  const retireFamily = (grant: string) => sql`INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at)
+    VALUES (${`provider-${grant}`}, clock_timestamp())`;
+
+  // GameMaster: an agent on grant A, whose family is retired while A itself stays active.
+  const fixture = await seedHostedFixture();
+  const agent = claimSeat(fixture, fixture.grantA, `stranded-${randomUUID()}`);
+  assert.equal(await inherit(fixture.grantB), 0, "a live family keeps its agents to itself");
+  assert.equal(await bound(fixture.grantB, agent.body.principal_id), 0);
+  await retireFamily(fixture.grantA);
+  assert.equal(await inherit(fixture.grantB), 1, "the owner's reconnect from the same client inherits the stranded agent");
+  assert.equal(await bound(fixture.grantB, agent.body.principal_id), 1);
+  const [eligible] = await sql<{ ok: boolean }[]>`SELECT swarm.hosted_binding_eligible(${fixture.grantB}::uuid,
+    ${fixture.workspaceA}::uuid, ${String(agent.body.principal_id)}::uuid) AS ok`;
+  assert.equal(eligible?.ok, true, "claim_seat with agent_id is eligible on the new grant");
+  const [oldSeat] = await sql<{ seat: Date | null; handle: Date | null }[]>`SELECT s.revoked_at AS seat, h.revoked_at AS handle
+    FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_seat_handles h USING (seat_id) WHERE s.seat_id=${String(agent.body.seat_id)}::uuid`;
+  assert.ok(oldSeat?.seat && oldSeat.handle, "the stranded seat and handle on the retired grant are closed, freeing the live name");
+  const [principal] = await sql<{ revoked_at: Date | null }[]>`SELECT revoked_at FROM swarm.agent_principals WHERE principal_id=${String(agent.body.principal_id)}::uuid`;
+  assert.equal(principal?.revoked_at, null, "the agent itself stays");
+  assert.equal(await inherit(fixture.grantB), 0, "idempotent");
+  // GameMaster's exact recovery: claim_seat with agent_id on the reconnected grant.
+  const reclaimed = runHostedHarness<HarnessResult>({ operation: "claim", claim: { grantId: fixture.grantB,
+    ownerUserId: fixture.owner, workspaceId: fixture.workspaceA, agentId: String(agent.body.principal_id), commandId: randomUUID() } });
+  assert.equal(reclaimed.status, 200, JSON.stringify(reclaimed.body));
+  assert.equal(reclaimed.body.principal_id, agent.body.principal_id, "the same agent, on a new seat");
+  assert.notEqual(reclaimed.body.seat_id, agent.body.seat_id);
+
+  // A different OAuth client, or a grant the owner revoked, is not inherited.
+  const other = await seedHostedFixture();
+  const otherAgent = claimSeat(other, other.grantA, `stranded-${randomUUID()}`);
+  await retireFamily(other.grantA);
+  await sql`UPDATE swarm.hosted_mcp_grants SET client_id='another-client' WHERE grant_id=${other.grantB}::uuid`;
+  assert.equal(await inherit(other.grantB), 0, "another client never inherits");
+  await sql`UPDATE swarm.hosted_mcp_grants SET client_id='test-client' WHERE grant_id=${other.grantB}::uuid`;
+  await sql`UPDATE swarm.hosted_mcp_grants SET state='revoked', revoked_at=clock_timestamp() WHERE grant_id=${other.grantA}::uuid`;
+  assert.equal(await inherit(other.grantB), 0, "an owner-revoked grant's agents stay revoked");
+  assert.equal(await bound(other.grantB, otherAgent.body.principal_id), 0);
+
+  // A connection deadline that has passed, with the expired marker still NULL, is owner policy too.
+  const expired = await seedHostedFixture();
+  const expiredAgent = claimSeat(expired, expired.grantA, `stranded-${randomUUID()}`);
+  await retireFamily(expired.grantA);
+  await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp() - interval '1 minute'
+    WHERE grant_id=${expired.grantA}::uuid AND connection_expired_at IS NULL`;
+  assert.equal(await inherit(expired.grantB), 0, "a passed deadline with a NULL marker is not inherited");
+  assert.equal(await bound(expired.grantB, expiredAgent.body.principal_id), 0);
 });
 
 test("historical orphan is reclaimable at the hosted seat limit while new names are refused", { timeout: 180_000 }, async () => {
