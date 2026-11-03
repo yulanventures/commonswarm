@@ -10,12 +10,13 @@ import {
   type HouseholdAccessFacts, type HouseholdContentOperation,
 } from './household-object-policy.js';
 import {
-  HOUSEHOLD_OBJECT_EVENT_TYPES, HOUSEHOLD_OBJECT_TYPES,
-  type HouseholdAttribution, type HouseholdBlob, type HouseholdContent,
+  HOUSEHOLD_DEFINITION_TERM_MAX, HOUSEHOLD_DEFINITION_TEXT_MAX,
+  HOUSEHOLD_OBJECT_EVENT_TYPES, HOUSEHOLD_OBJECT_TYPES, HOUSEHOLD_STORED_OBJECT_TYPES,
+  type HouseholdAttribution, type HouseholdDefinitionFields, type HouseholdBlob, type HouseholdContent,
   type HouseholdDraft, type HouseholdObject, type HouseholdObjectEvent,
   type HouseholdObjectState, type HouseholdOutcome, type HouseholdPatch,
   type HouseholdReceipt, type HouseholdReservation, type HouseholdRevision,
-  type HouseholdRevisionRef,
+  type HouseholdRevisionRef, type HouseholdDefinitionCertification,
 } from './household-object-events.js';
 
 export type HouseholdObjectCommand =
@@ -26,7 +27,9 @@ export type HouseholdObjectCommand =
       change: { kind: 'create'; title: string; content: HouseholdContent }
         | { kind: 'update'; base: HouseholdRevisionRef; patch: HouseholdPatch; title?: { before: string; after: string } } }
   | { kind: 'commit_household_upload'; reservation_id: string; operation: 'create' | 'update' }
-  | { kind: 'release_household_upload'; reservation_id: string; operation: 'create' | 'update' };
+  | { kind: 'release_household_upload'; reservation_id: string; operation: 'create' | 'update' }
+  /** People only: pin the current revision of a definition as the certified one. */
+  | { kind: 'certify_household_definition'; object_id: string; revision: HouseholdRevisionRef };
 
 /** Adapter-verified artifact facts, never a client's size/digest attestation.
  * For list/docs the blob is the canonical encoding of content. For files it is
@@ -102,6 +105,7 @@ function validContent(content: HouseholdContent): boolean {
   switch (content.kind) {
     case 'doc': return typeof content.markdown === 'string';
     case 'file': return identifier(content.name) && identifier(content.media_type);
+    case 'definition': return validDefinition(content);
     case 'list': {
       if (!Array.isArray(content.items)) return false;
       const ids = new Set<string>();
@@ -116,8 +120,26 @@ function validContent(content: HouseholdContent): boolean {
   }
 }
 
+const LINE_BREAK_OR_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+const codePoints = (value: string): number => Array.from(value).length;
+/** Term: 1-80 characters on one line, without surrounding spaces. Meaning:
+ * 1-2000 characters. Source (how to compute it, or where it comes from): 0-2000. */
+export function validDefinition(value: unknown): value is HouseholdDefinitionFields {
+  if (!value || typeof value !== 'object') return false;
+  const { term, meaning, source } = value as Record<string, unknown>;
+  return typeof term === 'string' && term.length > 0 && term === term.trim() && !LINE_BREAK_OR_CONTROL.test(term)
+    && codePoints(term) <= HOUSEHOLD_DEFINITION_TERM_MAX
+    && typeof meaning === 'string' && meaning.trim().length > 0 && codePoints(meaning) <= HOUSEHOLD_DEFINITION_TEXT_MAX
+    && typeof source === 'string' && codePoints(source) <= HOUSEHOLD_DEFINITION_TEXT_MAX;
+}
+const sameDefinition = (a: HouseholdDefinitionFields, b: HouseholdDefinitionFields): boolean =>
+  a.term === b.term && a.meaning === b.meaning && a.source === b.source;
+/** Terms are unique per workspace, ignoring case. */
+export const householdDefinitionKey = (term: string): string => term.normalize('NFKC').toLocaleLowerCase('en-US');
+
 function sameContent(a: HouseholdContent, b: HouseholdContent): boolean {
   if (a.kind !== b.kind) return false;
+  if (a.kind === 'definition' && b.kind === 'definition') return sameDefinition(a, b);
   if (a.kind === 'doc' && b.kind === 'doc') return a.markdown === b.markdown;
   if (a.kind === 'file' && b.kind === 'file') return a.name === b.name && a.media_type === b.media_type;
   return a.kind === 'list' && b.kind === 'list' && a.items.length === b.items.length
@@ -165,6 +187,10 @@ export function householdObjectUsage(state: HouseholdObjectState): { object_coun
  */
 export function applyHouseholdPatch(base: HouseholdContent, patch: HouseholdPatch, blob: HouseholdBlob): HouseholdContent | null {
   if (!patch || patch.kind !== base.kind) return null;
+  if (base.kind === 'definition' && patch.kind === 'definition') {
+    return validDefinition(patch.before) && validDefinition(patch.after) && sameDefinition(base, patch.before)
+      ? { kind: 'definition', term: patch.after.term, meaning: patch.after.meaning, source: patch.after.source } : null;
+  }
   if (base.kind === 'doc' && patch.kind === 'doc') {
     if (!Array.isArray(patch.splices)) return null;
     let cursor = 0;
@@ -240,6 +266,8 @@ export function decideHouseholdObject(
   // Refuse before inspecting object names, history, drafts or retry results.
   const denied = householdAccessRefusal(ctx.access, state.workspace_id, operation, ctx.now);
   if (denied) return noEvent(denied);
+  // An agent may propose a definition but never certify one.
+  if (command.kind === 'certify_household_definition' && ctx.access.credential.kind === 'agent') return noEvent('human_confirmation_required');
   if (!identifier(ctx.command_id) || !digest(ctx.request_digest) || !identifier(ctx.event_id)
     || !Number.isSafeInteger(ctx.seq) || ctx.seq <= state.last_seq) return noEvent('invalid_command_context');
   const author = attribution(ctx.access);
@@ -324,6 +352,14 @@ export function decideHouseholdObject(
   }
 
   if (householdWriteLimitReached(ctx.identity_write_attempts, ctx.workspace_write_attempts)) return refuse('object_write_rate_limited');
+  if (command.kind === 'certify_household_definition') {
+    const object = own(state.objects, command.object_id);
+    if (!object) return refuse('object_not_found');
+    if (object.kind !== 'definition') return refuse('object_type_mismatch');
+    if (!sameRevision(object.history.at(-1)!.revision, command.revision)) return refuse('definition_not_current');
+    return emit('HouseholdDefinitionCertified', { object_id: object.object_id, revision: structuredClone(command.revision) },
+      { status: 'committed', object_id: object.object_id, revision: structuredClone(command.revision) });
+  }
   const objectId = command.object_id;
   if (!identifier(objectId)) return refuse('object_id_invalid');
   const change = command.kind === 'reserve_household_upload' ? command.change
@@ -359,6 +395,12 @@ export function decideHouseholdObject(
     if (!sameRevision(base, current.revision)) return conflict(objectId, base, prepared.blob, null, title);
   }
   if (!identifier(title)) return refuse('title_invalid');
+  if (prepared.content.kind === 'definition') {
+    if (title !== prepared.content.term) return refuse('definition_term_mismatch');
+    const key = householdDefinitionKey(title);
+    if (Object.values(state.objects).some((object) => object.kind === 'definition' && object.object_id !== objectId
+      && householdDefinitionKey(object.history.at(-1)!.title) === key)) return refuse('definition_term_taken');
+  }
   if (bytes + prepared.blob.size_bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT) return refuse('storage_quota_reached');
   if (command.kind === 'reserve_household_upload') {
     if (!identifier(command.reservation_id) || own(state.reservations, command.reservation_id)
@@ -420,7 +462,7 @@ export function reduceHouseholdObject(state: HouseholdObjectState, event: Househ
       assertAuthor(revision.author);
       assertMetadata(revision.kind, revision.file_metadata);
       if (!identifier(objectId) || !identifier(revision.title) || !validBlob(revision.blob)
-        || !(HOUSEHOLD_OBJECT_TYPES as readonly string[]).includes(revision.kind)
+        || !(HOUSEHOLD_STORED_OBJECT_TYPES as readonly string[]).includes(revision.kind)
         || revision.command_id !== event.command_id || revision.occurred_at_server !== event.occurred_at_server
         || Object.values(objects).some((object) => object.history.some((old) => old.revision.token === revision.revision.token))) fail('invalid revision');
       const object = own(objects, objectId);
@@ -439,7 +481,8 @@ export function reduceHouseholdObject(state: HouseholdObjectState, event: Househ
             || !sameContent(revision.file_metadata, pending.file_metadata)))) fail('invalid reservation commit');
       }
       release(event.payload.reservation_id, objectId, revision.parent, revision.blob);
-      objects[objectId] = { object_id: objectId, kind: revision.kind, history: [...(object?.history ?? []), structuredClone(revision)] };
+      objects[objectId] = { object_id: objectId, kind: revision.kind, history: [...(object?.history ?? []), structuredClone(revision)],
+        ...(object?.certification ? { certification: object.certification } : {}) };
       break;
     }
     case 'HouseholdUploadReserved': {
@@ -476,7 +519,7 @@ export function reduceHouseholdObject(state: HouseholdObjectState, event: Househ
       if (!draft || draft.workspace_id !== state.workspace_id || !identifier(draft.draft_id) || own(drafts, draft.draft_id)
         || !identifier(draft.title) || !validBlob(draft.proposed) || draft.command_id !== event.command_id || draft.occurred_at_server !== event.occurred_at_server) fail('invalid draft');
       assertAuthor(draft.owner);
-      if (!(HOUSEHOLD_OBJECT_TYPES as readonly string[]).includes(draft.kind)) fail('invalid draft kind');
+      if (!(HOUSEHOLD_STORED_OBJECT_TYPES as readonly string[]).includes(draft.kind)) fail('invalid draft kind');
       assertMetadata(draft.kind, draft.file_metadata);
       assertRef(draft.base, draft.object_id);
       assertRef(draft.current, draft.object_id);
@@ -498,6 +541,19 @@ export function reduceHouseholdObject(state: HouseholdObjectState, event: Househ
     case 'HouseholdObjectCommandRefused':
       if (receipt.outcome.status !== 'refused' || !identifier(receipt.outcome.reason)) fail('invalid refusal');
       break;
+    case 'HouseholdDefinitionCertified': {
+      const object = own(objects, event.payload.object_id);
+      // Agents never certify: the actor is a person with no agent attribution.
+      if (!object || object.kind !== 'definition' || event.actor_agent_principal !== null || event.actor_run !== null
+        || !identifier(event.actor_user)) fail('invalid certification');
+      assertRef(event.payload.revision, object!.object_id);
+      if (!sameRevision(object!.history.at(-1)!.revision, event.payload.revision)) fail('certified revision is not current');
+      const outcome = receipt.outcome;
+      if (outcome.status !== 'committed' || outcome.object_id !== object!.object_id || !sameRevision(outcome.revision, event.payload.revision)) fail('certification receipt mismatch');
+      objects[object!.object_id] = { ...object!, certification: { revision: structuredClone(event.payload.revision),
+        certified_by: event.actor_user as string, certified_at: event.occurred_at_server } };
+      break;
+    }
   }
   const next: HouseholdObjectState = { ...state, objects, reservations, drafts, last_seq: event.seq,
     receipts: { ...state.receipts, [receiptKey(receipt.principal, receipt.command_id)]: structuredClone(receipt) } };
@@ -513,14 +569,20 @@ export function reduceHouseholdObjectStream(
 }
 
 export type HouseholdReadQuery =
-  | { kind: 'object_list'; offset: number; limit: number; kind_filter?: 'list' }
-  | { kind: 'object_read'; object_id: string; revision?: HouseholdRevisionRef; kind_filter?: 'list' }
-  | { kind: 'object_history'; object_id: string; offset: number; limit: number; kind_filter?: 'list' }
+  | { kind: 'object_list'; offset: number; limit: number; kind_filter?: HouseholdKindFilter }
+  | { kind: 'object_read'; object_id: string; revision?: HouseholdRevisionRef; kind_filter?: HouseholdKindFilter }
+  | { kind: 'object_history'; object_id: string; offset: number; limit: number; kind_filter?: HouseholdKindFilter }
   | { kind: 'draft_read'; draft_id: string };
+
+/** Server-owned filters. Without 'definition', definitions stay hidden. */
+export type HouseholdKindFilter = 'list' | 'definition';
+const kindVisible = (kind: HouseholdObject['kind'], filter: HouseholdKindFilter | undefined): boolean =>
+  filter ? kind === filter : kind !== 'definition';
 
 export type HouseholdReadResult =
   | { status: 'refused'; reason: string }
-  | { status: 'ok'; kind: 'object_list'; objects: readonly { object_id: string; kind: HouseholdContent['kind']; title: string; revision: HouseholdRevisionRef }[]; next_offset: number | null }
+  | { status: 'ok'; kind: 'object_list'; objects: readonly { object_id: string; kind: HouseholdContent['kind']; title: string; revision: HouseholdRevisionRef;
+      certification?: HouseholdDefinitionCertification | null }[]; next_offset: number | null }
   | { status: 'ok'; kind: 'object_read'; revision: HouseholdRevision; live: boolean }
   | { status: 'ok'; kind: 'object_history'; revisions: readonly (HouseholdRevision & { live: boolean })[]; next_offset: number | null }
   | { status: 'ok'; kind: 'draft_read'; draft: HouseholdDraft };
@@ -539,11 +601,12 @@ export function readHouseholdObjects(
     if (!nonnegative(query.offset) || !Number.isSafeInteger(query.limit) || query.limit <= 0) return { status: 'refused', reason: 'invalid_page' };
   }
   if (query.kind === 'object_list') {
-    const all = Object.values(state.objects).filter(object => !query.kind_filter || object.kind === query.kind_filter)
+    const all = Object.values(state.objects).filter(object => kindVisible(object.kind, query.kind_filter))
       .sort((a, b) => a.object_id < b.object_id ? -1 : a.object_id > b.object_id ? 1 : 0);
     return { status: 'ok', kind: query.kind, objects: all.slice(query.offset, query.offset + query.limit).map((object) => {
       const revision = object.history.at(-1)!;
-      return { object_id: object.object_id, kind: object.kind, title: revision.title, revision: structuredClone(revision.revision) };
+      return { object_id: object.object_id, kind: object.kind, title: revision.title, revision: structuredClone(revision.revision),
+        ...(object.kind === 'definition' ? { certification: object.certification ? structuredClone(object.certification) : null } : {}) };
     }), next_offset: query.offset + query.limit < all.length ? query.offset + query.limit : null };
   }
   if (query.kind === 'draft_read') {
@@ -557,7 +620,7 @@ export function readHouseholdObjects(
   const object: HouseholdObject | undefined = own(state.objects, query.object_id);
   if (!object) return { status: 'refused', reason: 'object_not_found' };
   // Registry-owned list queries refuse other kinds before inspecting revisions.
-  if (query.kind_filter && object.kind !== query.kind_filter) return { status: 'refused', reason: 'object_type_mismatch' };
+  if (!kindVisible(object.kind, query.kind_filter)) return { status: 'refused', reason: 'object_type_mismatch' };
   const liveStart = Math.max(0, object.history.length - HOUSEHOLD_LIVE_REVISION_LIMIT);
   if (query.kind === 'object_history') return { status: 'ok', kind: query.kind,
     revisions: object.history.slice(query.offset, query.offset + query.limit).map((revision, index) => ({

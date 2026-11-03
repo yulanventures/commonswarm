@@ -64,6 +64,8 @@ tests/household-tool-registry.test.ts
 tests/household-list-registry.test.ts
 tests/read-provenance.test.ts
 tests/household-objects.test.ts
+tests/household-definitions.test.ts
+tests/household-definitions-dispatch.test.ts
 tests/household-lazy-storage.test.ts
 tests/listener-runtime.test.ts
 tests/listener-wake.test.ts

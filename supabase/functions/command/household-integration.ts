@@ -12,7 +12,7 @@ import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
 import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity', 'household_skills'] as const;
+export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity', 'household_skills', 'household_definition_certify'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
@@ -47,7 +47,8 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (value.kind === 'household_approve_connection') return approveHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   if (value.kind === 'household_withdraw_connection') return withdrawHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   // Refuse agent credentials before touching any human-only content or input.
-  const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'].includes(String(value.kind));
+  const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity',
+    'household_definition_certify'].includes(String(value.kind));
   if (humanOnly && identity.principal_id !== null) return refused('human_confirmation_required');
   const store = householdStore(recheckCredential);
   const missingAccess = async () => {
@@ -69,6 +70,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (humanOnly) {
     const command = core.validateHouseholdHumanCommand(value);
     if (command.kind === 'household_activity') return readHouseholdActivity(tx, workspaceId, identity, command, store.access);
+    if (command.kind === 'household_definition_certify') {
+      const decision = await store.write(tx, workspaceId, identity, requestId,
+        { kind: 'certify_household_definition', object_id: command.object_id, revision: command.revision }, null);
+      return { ...decision.outcome, request_id: requestId, replayed: decision.replayed };
+    }
     const result = await todos.write(tx, workspaceId, identity, requestId, command);
     return { ...result.outcome, notices: result.notices, request_id: requestId, replayed: result.replayed };
   }
@@ -348,6 +354,11 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (!access) return missingAccess();
   const denied = core.householdAccessRefusal(access.facts, workspaceId, operation, access.now);
   if (denied) return refused(denied);
+  if (value.tool === 'definitions_search' || value.tool === 'definition_read') {
+    return await readDefinitions(tx, workspaceId, identity, store, value.tool, args);
+  }
+  if ((value.tool === 'definition_create' && !core.validDefinition(args))
+    || (value.tool === 'definition_update' && (!core.validDefinition(args.before) || !core.validDefinition(args.after)))) return refused('definition_invalid');
   if (core.HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === value.tool)!.objectTypes.includes('todo')) {
     const todoInvocation = core.householdToolInvocation(value.tool, args, { workspace_id: workspaceId });
     if ('query' in todoInvocation) {
@@ -391,7 +402,8 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   let proposal = null;
   if (command.kind === 'create_household_object') proposal = { content: command.content };
   if (command.kind === 'update_household_object') {
-    const result = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: command.object_id, revision: command.base });
+    const result = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: command.object_id, revision: command.base,
+      ...(command.patch.kind === 'definition' ? { kind_filter: 'definition' as const } : {}) });
     if (!('bytes' in result) || result.metadata.kind !== 'object_read') return refused('revision_not_found');
     const revision = result.metadata.revision;
     if (revision.kind === 'file') return refused('object_type_mismatch');
@@ -408,4 +420,45 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   }
   const decision = await store.write(tx, workspaceId, identity, requestId, command, proposal);
   return { ...decision.outcome, request_id: requestId, replayed: decision.replayed };
+}
+
+type HouseholdStore = ReturnType<typeof householdStore>;
+const DEFINITION_PAGE_DEFAULT = 50;
+
+/** Definitions are read only through these two tools, with a server-owned kind
+ * filter. Search reads titles from the projection; read loads at most two blobs. */
+async function readDefinitions(tx: Sql, workspaceId: string, identity: HouseholdIdentity, store: HouseholdStore,
+  tool: 'definitions_search' | 'definition_read', args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (tool === 'definitions_search') {
+    const listed = await store.read(tx, workspaceId, identity, { kind: 'object_list', offset: 0, limit: Number.MAX_SAFE_INTEGER, kind_filter: 'definition' });
+    if (listed.status !== 'ok' || listed.kind !== 'object_list') return listed;
+    const needle = core.householdDefinitionKey(String(args.query ?? '').trim());
+    const offset = Number(args.offset ?? 0);
+    const limit = Number(args.limit ?? DEFINITION_PAGE_DEFAULT);
+    const matches = listed.objects.filter(row => core.householdDefinitionKey(row.title).includes(needle))
+      .sort((a, b) => core.householdDefinitionKey(a.title).localeCompare(core.householdDefinitionKey(b.title)) || a.object_id.localeCompare(b.object_id));
+    return { status: 'ok', definitions: matches.slice(offset, offset + limit).map(row => ({ object_id: row.object_id, term: row.title,
+      revision: row.revision, certification: row.certification ?? null })),
+      next_offset: offset + limit < matches.length ? offset + limit : null };
+  }
+  const objectId = String(args.object_id);
+  const current = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: objectId, kind_filter: 'definition' });
+  if (!('bytes' in current) || current.metadata.kind !== 'object_read') return current;
+  const fields = (bytes: Uint8Array) => {
+    const content = transfers.decodeHouseholdContent(bytes, 'definition') as Extract<HouseholdContent, { kind: 'definition' }>;
+    return { term: content.term, meaning: content.meaning, source: content.source };
+  };
+  const head = current.metadata.revision;
+  // The projection is read after the access checks inside readBytes.
+  const certification = (await store.state(tx, workspaceId, false)).objects[objectId]?.certification ?? null;
+  let certified: Record<string, unknown> | null = null;
+  if (certification) {
+    const pinned = certification.revision.token === head.revision.token ? current
+      : await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: objectId, revision: certification.revision, kind_filter: 'definition' });
+    if (!('bytes' in pinned) || pinned.metadata.kind !== 'object_read') return pinned;
+    certified = { revision: certification.revision, ...fields(pinned.bytes), certified_by: certification.certified_by, certified_at: certification.certified_at };
+  }
+  return { status: 'ok', object_id: objectId,
+    current: { revision: head.revision, ...fields(current.bytes), author: head.author, occurred_at_server: head.occurred_at_server },
+    certified, proposal_pending: certification?.revision.token !== head.revision.token };
 }
