@@ -1,5 +1,7 @@
 import type postgres from "npm:postgres@3.4.9";
 
+import { accessLostProbes, logAccessLost } from "./access-lost.ts";
+
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export interface AgentAuthRow {
@@ -173,6 +175,37 @@ async function lockedCredentialFacts(tx:Sql,tokenHash:Uint8Array,exact:LocalCred
   // possession here. Command commits this use only after validation and final
   // authorization, then retries issuance in a fresh transaction.
   return agent;
+}
+
+/**
+ * Failure path only, after the refused transaction has rolled back (discovery
+ * RAISEs, which aborts it): `withTx` opens a fresh one for one lookup by the
+ * UNIQUE token hash. Emits
+ * `access_lost` when the presented credential matches a local token whose
+ * token, principal, device or renewal grant was revoked. Never throws.
+ */
+export async function reportRevokedLocalCredential(
+  withTx: <T>(run: (tx: Sql) => Promise<T>) => Promise<T>, tokenHash: Uint8Array, now = Date.now(),
+): Promise<void> {
+  try {
+    // In-memory gate only; the key never reaches a log field.
+    const key = Array.from(tokenHash.subarray(0, 8), b => b.toString(16).padStart(2, "0")).join("");
+    if (tokenHash.length !== 32 || !accessLostProbes.allow(`local_credential_revoked:${key}`, now)) return;
+    const [row] = await withTx(tx => tx<{ principal_id: string; owner_user_id: string; revoked: boolean }[]>`
+      SELECT t.principal_id::text AS principal_id, p.owner_user_id::text AS owner_user_id,
+        (t.revoked_at IS NOT NULL OR p.revoked_at IS NOT NULL OR d.revoked_at IS NOT NULL
+          OR g.revoked_at IS NOT NULL) IS TRUE AS revoked
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p USING(principal_id)
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+      LEFT JOIN swarm.devices d ON d.device_id=r.device_id
+      LEFT JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id
+      WHERE t.token_hash=${tokenHash} AND p.transport='local'`);
+    if (row?.revoked !== true) return;
+    logAccessLost({ class: "local_credential_revoked", principal_ref: row.principal_id,
+      owner_ref: row.owner_user_id, grant_ref: null }, now);
+  } catch {
+    // Observability must never change the refusal the caller returns.
+  }
 }
 
 export async function agentCredentialRevoked(

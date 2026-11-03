@@ -48,6 +48,7 @@ tests/p1-cli/n-db-cron-job-compare.test.ts
 tests/p1-cli/supabase-stack.test.ts
 tests/command-cors.test.ts
 tests/command-durable-failures.test.ts
+tests/access-lost.test.ts
 tests/fresh-auth.test.ts
 tests/read-edge-diagnostics.test.ts
 tests/host-acp-grok.test.ts

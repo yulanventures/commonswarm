@@ -3,7 +3,8 @@ import { basename } from "node:path";
 import { registrationErrorResponse } from "./registration.js";
 
 const ALLOWED_FIELDS = new Set(["event", "method", "path", "request_id", "status", "duration_ms",
-  "error_code", "error_name", "stack_frames", "registration_error_description", "grant_type", "grant_ref", "client_ref"]);
+  "error_code", "error_name", "stack_frames", "registration_error_description", "grant_type", "grant_ref", "client_ref",
+  "class", "principal_ref", "owner_ref", "at"]);
 
 /** Non-secret correlation for token events: the grant type, the first 8 characters of the
  *  provider grant id, and a short hash of the public client id. Never a token or a secret. */
@@ -44,7 +45,46 @@ export function logProviderError(logger, event, requestId, error, ctx) {
   });
 }
 
-export function subscribeProviderErrors(provider, logger) {
+const ACCESS_LOST_INTERVAL_MS = 60_000;
+const ACCESS_LOST_MAX_KEYS = 4096;
+
+/** First 8 characters of an identifier, or null when it is not one. */
+export function accessRef(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{8}/u.test(value) ? value.slice(0, 8) : null;
+}
+
+/** One `access_lost` line per grant per 60 s; bounded memory. */
+export function accessLostLimiter(intervalMs = ACCESS_LOST_INTERVAL_MS, maxKeys = ACCESS_LOST_MAX_KEYS) {
+  const next = new Map();
+  return (key, now) => {
+    const until = next.get(key);
+    if (until !== undefined && now < until) return false;
+    next.delete(key);
+    if (next.size >= maxKeys) {
+      for (const [k, at] of next) if (at <= now) next.delete(k);
+      if (next.size >= maxKeys) next.delete(next.keys().next().value);
+    }
+    next.set(key, now + intervalMs);
+    return true;
+  };
+}
+
+export function subscribeProviderErrors(provider, logger, { now = Date.now, allow = accessLostLimiter() } = {}) {
+  // oidc-provider 9.12.2 emits grant.revoked from helpers/revoke.js. At the
+  // token route that is refresh-token or authorization-code reuse retiring the
+  // whole family: the agent holding it has lost access. The revocation route is
+  // a client revoking its own token and is not reported.
+  provider.on?.("grant.revoked", (ctx, grantId) => {
+    if (ctx?.oidc?.route !== "token") return;
+    const grantRef = accessRef(grantId);
+    const at = now();
+    if (grantRef === null || !allow(`hosted_family_retired:${grantRef}`, at)) return;
+    const entities = ctx.oidc.entities ?? {};
+    logger.info({ event: "access_lost", class: "hosted_family_retired", principal_ref: null,
+      owner_ref: accessRef(entities.RefreshToken?.accountId ?? entities.Grant?.accountId),
+      grant_ref: grantRef, at: new Date(at).toISOString() });
+  });
+
   // oidc-provider 9.12.2 emits these error events. Its interaction.started and
   // interaction.ended events are successes, not errors; custom interaction
   // failures are captured by the application's outer handler instead.

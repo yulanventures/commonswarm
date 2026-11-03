@@ -24,8 +24,10 @@ import {
   planLocalOperation, localAgentWorkspaceLive, planLocalConnection, lockLocalAuthPlan, type LocalAuthLockPlan, LocalCredentialDenied, recheckLocalCredential, LocalAuthDiscoveryChanged,
   retryLocalAuthTransaction,
   planHostedClaimPrefix,
+  reportRevokedLocalCredential,
   type AgentAuthRow,
 } from "../_shared/agent-auth.ts";
+import { logAccessLost } from "../_shared/access-lost.ts";
 import {
   AGENT_SESSION_BINDING_FIELDS, AGENT_SESSION_ID_RE,
   AGENT_SESSION_TTL_SECONDS,
@@ -1659,6 +1661,12 @@ async function rotateWakeId(tx: Sql, principalId: string): Promise<void> {
 
 async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
   const auth = audit.auth;
+  // Every refusal of a renewal, first decision or fence-lost re-decision, is
+  // audited here: the agent's credential has a used successor it cannot reach.
+  if (audit.commandKind === RENEW_AGENT_TOKEN_KIND && audit.reason === "predecessor_superseded") {
+    logAccessLost({ class: "local_renewal_superseded",
+      principal_ref: auth?.actor.agent_principal ?? null, owner_ref: null, grant_ref: null });
+  }
   const auditCredentialKind = auth === null
     ? null
     : "ledgerCredentialKind" in auth
@@ -11724,8 +11732,10 @@ async function handleTransaction(
   const kind = commandKind(body);
   const commandId = String(body.command_id);
   let recoverSavedPending = false;
+  let localCredentialDenied = false;
   const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
     recoverSavedPending = false;
+    localCredentialDenied = false;
     // Only explicit, completed domain decisions may commit a refusal. Unknown
     // failures and credential/session denials still unwind the whole transaction.
     type LocalOutcome = {kind:'rollback'} | {kind:'decided';result:HttpResult};
@@ -14552,6 +14562,7 @@ async function handleTransaction(
       logLocalDiscoveryBindingRefusal();
       return {status:403,body:{error:'forbidden'}};
     }
+    if (error instanceof LocalCredentialDenied) localCredentialDenied = true;
     if (error instanceof LocalCredentialDenied
       && (kind===CLAIM_AGENT_INBOX_KIND || kind===ACK_AGENT_DELIVERY_KIND))
       return {status:403,body:{error:'delivery_unavailable'}};
@@ -14564,6 +14575,14 @@ async function handleTransaction(
     }
     throw error;
   }));
+  if (localCredentialDenied && agentTokenHash !== null) {
+    // Failure path only: discovery's RAISE aborted the refused transaction.
+    await reportRevokedLocalCredential(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
+      await db.begin(async (tx) => {
+        await setTransaction(tx);
+        return await run(tx);
+      }) as unknown as T, agentTokenHash);
+  }
   return recoverSavedPending && response.status===204
     ? await handleTransaction(body,verifiedHuman,agentTokenHash,joinCredentialHash,sessionProofParse,acquireProofParse,hostedSeatCapability)
     : response;
