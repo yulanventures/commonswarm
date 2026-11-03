@@ -10492,7 +10492,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!confirm || !cancel || !status || confirm.disabled) return;
         confirm.disabled = true; confirm.setAttribute("aria-busy", "true");
         try {
-          await signOutOtherDevices();
+          await signOutOtherDevices(session);
           status.textContent = "Other devices are signed out.";
           confirm.hidden = true; cancel.textContent = "Done"; cancel.focus();
         } catch (error) {
