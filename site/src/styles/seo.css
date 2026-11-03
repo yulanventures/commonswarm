@@ -441,3 +441,10 @@
     pointer-events: none;
   }
 }
+
+@media (width <= 64rem) {
+  .seo-page details > summary { display: flex; align-items: center; gap: 0.5em; min-inline-size: 44px; min-block-size: 44px; list-style: none; cursor: pointer; }
+  .seo-page details > summary::-webkit-details-marker { display: none; }
+  .seo-page details > summary::before { content: "▸"; flex: none; }
+  .seo-page details[open] > summary::before { content: "▾"; }
+}

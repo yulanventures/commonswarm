@@ -82,10 +82,22 @@
     "id": "app.definitions",
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
-    "setup": [],
-    "ready": "[data-channel-view=\"objects\"]:not([hidden]) .household-definitions [data-def-list]",
+    "setup": [
+      {
+        "waitFor": ".household-definitions [data-def-list]"
+      },
+      {
+        "scroll": ".household-definitions [data-def-list]"
+      }
+    ],
+    "ready": ".household-definitions [data-def-list]",
     "states": [
       "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "definition_create Active member"
     ]
   },
   {
@@ -174,12 +186,13 @@
         "click": "[data-user-menu-trigger]"
       }
     ],
-    "ready": "[data-user-menu]:not([hidden])",
+    "ready": "live-dashboard:has([data-user-menu-trigger][aria-expanded=\"true\"]) [data-user-menu]:not([hidden])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Phone drawer and relocated account menu trigger need confirmation."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "route.acceptable-use",
@@ -383,14 +396,16 @@
   {
     "id": "app.todo-detail",
     "kind": "view",
-    "path": "/app?w={workspace}",
+    "path": "/app?w={workspace}&todo={todo}",
     "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "ready": "[data-home-route-pane]:not([hidden]) .hm-todo[data-todo-state]:has([data-todo-complete])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "requiresSeed": [
+      "create_workspace",
+      "todo_create 0"
+    ]
   },
   {
     "id": "app.list-conflict",
@@ -552,49 +567,87 @@
     "id": "dialog.connected-apps",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
+    "setup": [
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      }
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connected-apps-list] > p:has-text(\"No apps are connected to this account.\")",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "dialog.signout-others",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-signout-others-open]"
+      }
+    ],
+    "ready": "dialog[data-signout-others-dialog][open] [data-signout-others-cancel]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "dialog.account-agents",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-account-agents-open]"
+      }
+    ],
+    "ready": "dialog[data-account-agents-dialog][open] .account-agents__agent",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Orbit"
+    ]
   },
   {
     "id": "dialog.workspace-skills",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
+    "setup": [
+      {
+        "press": "ControlOrMeta+k"
+      },
+      {
+        "type": "[data-command-palette-input]",
+        "text": "Workspace skills"
+      },
+      {
+        "click": "[data-command-palette-item=\"action:skills\"]"
+      }
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "ready": "dialog[data-workspace-skills-dialog][open] [data-skills-empty]",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions"
+    ]
   },
   {
     "id": "dialog.people-confirm",
@@ -743,14 +796,26 @@
   {
     "id": "menu.member-actions",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"])"
+      },
+      {
+        "click": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) summary.pd-actions-toggle"
+      },
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) .pd-row-actions[open] .pd-agent-actions"
+      }
+    ],
+    "ready": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) .pd-row-actions[open] .pd-agent-actions",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
   },
   {
     "id": "menu.provider",
@@ -767,14 +832,23 @@
   {
     "id": "menu.landing-preview",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "[data-preview-tab=\"lists\"]"
+      },
+      {
+        "click": "[data-preview-tab=\"lists\"]"
+      },
+      {
+        "scroll": "[data-preview-tab=\"lists\"]"
+      }
+    ],
+    "ready": "[data-preview-tab=\"lists\"][aria-selected=\"true\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": []
   },
   {
     "id": "menu.download-disclosures",
@@ -840,49 +914,106 @@
     "id": "app.definitions.proposed",
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-active-member\"]"
+      },
+      {
+        "click": "[data-def-action=\"select\"][data-def-target=\"def-active-member\"]"
+      },
+      {
+        "scroll": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-active-member\"][aria-current=\"true\"]) article .hh-def-badge--proposed[data-def-status]"
+      }
+    ],
+    "ready": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-active-member\"][aria-current=\"true\"]) article .hh-def-badge--proposed[data-def-status]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "definition_create Active member"
+    ]
   },
   {
     "id": "app.definitions.certified",
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-due-date\"]"
+      },
+      {
+        "click": "[data-def-action=\"select\"][data-def-target=\"def-due-date\"]"
+      },
+      {
+        "scroll": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-due-date\"][aria-current=\"true\"]) article .hh-def-badge--certified[data-def-status]"
+      }
+    ],
+    "ready": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-due-date\"][aria-current=\"true\"]) article .hh-def-badge--certified[data-def-status]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "definition_create Due date",
+      "certify def-due-date"
+    ]
   },
   {
     "id": "app.definitions.proposal-pending",
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
+      {
+        "click": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
+      {
+        "scroll": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) article .hh-def-badge--pending[data-def-status]"
+      }
+    ],
+    "ready": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) article .hh-def-badge--pending[data-def-status]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "definition_create Monthly spend",
+      "certify def-monthly-spend",
+      "definition_update pending"
+    ]
   },
   {
     "id": "app.definitions.diff",
     "kind": "view",
     "path": "/app?w={workspace}&v=lists",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
+      {
+        "click": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
+      },
+      {
+        "scroll": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) [data-def-diff] > .hh-comparison:has([aria-label=\"Certified version\"]):has([aria-label=\"Proposed version\"])"
+      }
+    ],
+    "ready": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) [data-def-diff] > .hh-comparison:has([aria-label=\"Certified version\"]):has([aria-label=\"Proposed version\"])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "definition_create Monthly spend",
+      "certify def-monthly-spend",
+      "definition_update pending"
+    ]
   },
   {
     "id": "app.wiki.topic",
@@ -1000,6 +1131,88 @@
     ],
     "requiresSeed": [
       "household_permissions empty"
+    ]
+  },
+  {
+    "id": "dialog.password",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-password-open]"
+      }
+    ],
+    "ready": "dialog[data-password-dialog][open] [data-password-new]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "route.home.footer",
+    "kind": "view",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "footer.ft .ft__link"
+      }
+    ],
+    "ready": "footer.ft .ft__link",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.guides.claude-code-subagents.disclosure",
+    "kind": "view",
+    "path": "/guides/claude-code-subagents",
+    "setup": [
+      {
+        "scroll": ".seo-page details > summary"
+      },
+      {
+        "click": ".seo-page details > summary"
+      },
+      {
+        "scroll": ".seo-page details[open] > summary"
+      }
+    ],
+    "ready": ".seo-page details[open] > summary",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.home.footer.guides-end",
+    "kind": "view",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "footer.ft nav[aria-label=\"Guides\"] a.ft__link[href=\"/alternatives/crewai\"]"
+      }
+    ],
+    "ready": "footer.ft nav[aria-label=\"Guides\"] a.ft__link[href=\"/alternatives/crewai\"]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.home.footer.legal-end",
+    "kind": "view",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]"
+      }
+    ],
+    "ready": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]",
+    "states": [
+      "dense"
     ]
   }
 ]
