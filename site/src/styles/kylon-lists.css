@@ -190,3 +190,42 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label):has(input:focus-visible) { outline: 3px solid Highlight; outline-offset: 2px; }
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label) input:focus-visible { outline: none !important; }
 }
+
+/* Borderless Lists controls (Tom, 2026-11-03): fields and buttons are filled, rows are separated by space
+   and a hover fill, and the checkbox is a rounded square. Forced-colors mode keeps system borders. */
+@media (forced-colors: none) {
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-bar { border-block-end: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input) {
+    min-block-size: 38px; border-color: transparent; border-radius: 10px; background: var(--k-shell-subtle);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input):focus {
+    outline: none; background: var(--k-shell-hover); box-shadow: none;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button {
+    border-color: transparent; border-radius: 10px; color: var(--k-shell-ink); background: var(--k-shell-subtle);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button:hover:enabled { color: var(--k-shell-ink); background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button[data-hh-action=revision] { border-color: transparent; background: var(--k-shell-subtle); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button[data-hh-action=revision]:hover:enabled { background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable { gap: 2px; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li {
+    padding: 2px 6px; border-block-end: 0; border-radius: 10px;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li:hover { background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] {
+    inline-size: 22px; block-size: 22px; min-inline-size: 22px; min-block-size: 22px; margin: 7px; border: 0; border-radius: 6px;
+    background: var(--k-shell-selected); font-size: 13px; color: transparent;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true] {
+    color: var(--k-shell-accent-ink); background: var(--k-shell-accent);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] > span { display: none; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true]::after {
+    content: ""; inline-size: 5px; block-size: 10px; margin-block-start: -2px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { opacity: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li:is(:hover, :focus-within) .hh-list-remove { opacity: 1; }
+  @media (hover: none) {
+    live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { opacity: 1; }
+  }
+}
