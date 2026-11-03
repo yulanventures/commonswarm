@@ -18,7 +18,9 @@
     "ready": "[data-home-catchup]:not([hidden]) .hm-catchup-card-body",
     "states": [
       "dense"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Seeded unread messages do not guarantee the Catch up card; confirm its rule and visible card in the first artifact."
   },
   {
     "id": "app.chat.general",
@@ -74,9 +76,7 @@
     "ready": "[data-channel-view=\"objects\"]:not([hidden]) [data-household-objects] [data-hh-action=\"select\"]",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Seeded list identity, permission and populated index selector require CI fixture confirmation."
+    ]
   },
   {
     "id": "app.definitions",
@@ -96,7 +96,9 @@
     "ready": "[data-channel-view=\"files\"]:not([hidden]) [data-file-list]:not([hidden]) [data-file-name]",
     "states": [
       "dense"
-    ]
+    ],
+    "status": "pending",
+    "reason": "PR 1 does not seed files; populated Files capture needs a file fixture."
   },
   {
     "id": "app.wiki",
@@ -106,7 +108,9 @@
     "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-list]:not([hidden]) [data-brain-topic]",
     "states": [
       "dense"
-    ]
+    ],
+    "status": "pending",
+    "reason": "PR 1 does not seed Wiki pages; populated Wiki index needs topic fixtures."
   },
   {
     "id": "app.people",
@@ -123,7 +127,7 @@
     "kind": "view",
     "path": "/app?w={workspace}&agent={agent}",
     "setup": [],
-    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] .hm-agent__queue li",
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has(.hm-agent__title):has([data-hm-fact=\"model\"])",
     "states": [
       "dense"
     ]
@@ -182,156 +186,131 @@
     "kind": "route",
     "path": "/acceptable-use",
     "setup": [],
-    "ready": "body",
+    "ready": ".lgl__head h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.alternatives.crewai",
     "kind": "route",
     "path": "/alternatives/crewai",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.alternatives.langgraph",
     "kind": "route",
     "path": "/alternatives/langgraph",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.download",
     "kind": "route",
     "path": "/download",
     "setup": [],
-    "ready": "body",
+    "ready": "#dl-title",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.guides.claude-code-subagents",
     "kind": "route",
     "path": "/guides/claude-code-subagents",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.guides.claude-connector",
     "kind": "route",
     "path": "/guides/claude-connector",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.guides.grok-bot",
     "kind": "route",
     "path": "/guides/grok-bot",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.home",
     "kind": "route",
     "path": "/",
     "setup": [],
-    "ready": "body",
+    "ready": "#consumer-hero-heading",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.invite",
     "kind": "route",
     "path": "/invite",
     "setup": [],
-    "ready": "body",
+    "ready": "invite-onramp [data-view=\"unusable\"]:not([hidden])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    "signedOut": true
   },
   {
     "id": "route.oauth.c1-controls.callback",
     "kind": "route",
     "path": "/oauth/c1-controls/callback",
     "setup": [],
-    "ready": "body",
+    "ready": "body > p",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.oauth.c1-smoke.callback",
     "kind": "route",
     "path": "/oauth/c1-smoke/callback",
     "setup": [],
-    "ready": "body",
+    "ready": "body > p",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.orchestration",
     "kind": "route",
     "path": "/orchestration",
     "setup": [],
-    "ready": "body",
+    "ready": ".seo-hero h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.privacy",
     "kind": "route",
     "path": "/privacy",
     "setup": [],
-    "ready": "body",
+    "ready": ".lgl__head h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.start",
@@ -343,31 +322,27 @@
       "dense"
     ],
     "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    "reason": "JavaScript immediately redirects to /app; capture of the handoff or redirect behavior needs a dedicated runner mode."
   },
   {
     "id": "route.support",
     "kind": "route",
     "path": "/support",
     "setup": [],
-    "ready": "body",
+    "ready": "#support-title",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "route.terms",
     "kind": "route",
     "path": "/terms",
     "setup": [],
-    "ready": "body",
+    "ready": ".lgl__head h1",
     "states": [
       "dense"
-    ],
-    "status": "pending",
-    "reason": "Runner dashboard readiness is not confirmed for public or diagnostic routes; route-specific state/redirect capture also requires CI support."
+    ]
   },
   {
     "id": "app.workspace-new",
@@ -968,5 +943,37 @@
     ],
     "status": "pending",
     "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
+  },
+  {
+    "id": "app.files.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=files",
+    "setup": [],
+    "ready": "[data-channel-view=\"files\"]:not([hidden]) [data-file-empty]:not([hidden])",
+    "states": [
+      "empty"
+    ]
+  },
+  {
+    "id": "app.wiki.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=wiki",
+    "setup": [],
+    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-empty]:not([hidden]):has-text(\"No wiki pages yet.\")",
+    "states": [
+      "empty"
+    ]
+  },
+  {
+    "id": "app.agent.queue",
+    "kind": "view",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] .hm-agent__queue li",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Selected agent queue visibility and density are not guaranteed; confirm in the first artifact."
   }
 ]

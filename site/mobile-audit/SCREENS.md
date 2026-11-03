@@ -252,31 +252,31 @@ These exact declarations supplement stable IDs above; use them to match harness 
 
 ## Manifest crosswalk and current capture limits
 
-`screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry is a source-backed candidate, not a verified capture; the first integration run belongs in CI. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Empty, error and loading need per-surface fixture support (`state.empty`, `state.error`, `state.loading` are pending). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
+`screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry is a source-backed candidate, not a verified capture; the first integration run belongs in CI. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Other empty, error and loading captures need per-surface fixture support (`state.empty`, `state.error`, `state.loading` are pending). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
 
-The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Those detail captures are pending until identities, triggers and loaded-content readiness are bound. Public and diagnostic routes are pending because the current runner waits for the dashboard; redirects, invitation states and native-platform behavior also need their own support. No actual captures or runtime verification are claimed.
+The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Those detail captures are pending until identities, triggers and loaded-content readiness are bound. Public and diagnostic route candidates have source-backed readiness; the tokenless invitation candidate uses a signed-out context. The /start handoff redirects immediately and remains pending. Invitation variants and native-platform behavior need their own support. Command Palette integration remains conditional on the runner fixing its ready-before-setup ordering. No actual captures or runtime verification are claimed.
 
 | Inventory unit | Manifest disposition |
 | --- | --- |
-| R01 | `route.acceptable-use` — pending |
-| R02 | `route.alternatives.crewai` — pending |
-| R03 | `route.alternatives.langgraph` — pending |
+| R01 | `route.acceptable-use` — candidate; other states pending |
+| R02 | `route.alternatives.crewai` — candidate; other states pending |
+| R03 | `route.alternatives.langgraph` — candidate; other states pending |
 | R04 | `app.signin` — app families below; candidate sign-in |
-| R05 | `route.download` — pending |
-| R06 | `route.guides.claude-code-subagents` — pending |
-| R07 | `route.guides.claude-connector` — pending |
-| R08 | `route.guides.grok-bot` — pending |
-| R09 | `route.home` — pending |
-| R10 | `route.invite` — pending |
-| R11 | `route.oauth.c1-controls.callback` — pending |
-| R12 | `route.oauth.c1-smoke.callback` — pending |
-| R13 | `route.orchestration` — pending |
-| R14 | `route.privacy` — pending |
+| R05 | `route.download` — candidate; other states pending |
+| R06 | `route.guides.claude-code-subagents` — candidate; other states pending |
+| R07 | `route.guides.claude-connector` — candidate; other states pending |
+| R08 | `route.guides.grok-bot` — candidate; other states pending |
+| R09 | `route.home` — candidate; other states pending |
+| R10 | `route.invite` — candidate; other states pending |
+| R11 | `route.oauth.c1-controls.callback` — candidate; other states pending |
+| R12 | `route.oauth.c1-smoke.callback` — candidate; other states pending |
+| R13 | `route.orchestration` — candidate; other states pending |
+| R14 | `route.privacy` — candidate; other states pending |
 | R15 | `route.start` — pending |
-| R16 | `route.support` — pending |
-| R17 | `route.terms` — pending |
+| R16 | `route.support` — candidate; other states pending |
+| R17 | `route.terms` — candidate; other states pending |
 | V01 | `app.signin` — candidate; other states pending |
-| V02 | `app.catchup` — candidate; other states pending |
+| V02 | `app.catchup` — pending |
 | V03 | `app.workspace-new` — pending |
 | V04 | `app.chat.general` — candidate; other states pending |
 | V05 | `app.chat.group` — candidate; other states pending |
@@ -286,10 +286,10 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V09 | `app.agent` — candidate; other states pending |
 | V10 | `app.todos` — candidate; other states pending |
 | V11 | `app.todo-detail` — pending |
-| V12 | `app.lists` — pending |
+| V12 | `app.lists` — candidate; other states pending |
 | V13 | `app.list-conflict` — pending |
-| V14 | `app.files` — candidate; other states pending |
-| V15 | `app.wiki` — candidate; other states pending |
+| V14 | `app.files` — populated pending; `app.files.empty` candidate |
+| V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
 | V16 | `app.wiki-editor` — pending |
 | V17 | `app.agent-chooser` — pending |
 | V18 | `app.agent-connect` — pending |
@@ -330,6 +330,8 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M13 | `menu.context` — pending |
 | M14 | `menu.workspace-dock` — pending |
 | M15 | `menu.profile-inspector` — pending |
+
+The seeded workspace has no files or Wiki topics in PR 1; the two empty candidates wait for the actual empty text or marker. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
 
 Additional pending detail captures: `app.definitions.proposed`, `app.definitions.certified`, `app.definitions.proposal-pending`, `app.definitions.diff`, `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
