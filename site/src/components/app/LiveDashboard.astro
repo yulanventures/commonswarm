@@ -527,6 +527,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
             <section class="dashboard__feed-view" data-channel-view="feed" hidden>
               <div class="dashboard__feed-toolbar">
+                <div class="dashboard__dm-bar" data-dm-bar hidden>
+                  <span class="dashboard__dm-bar-title" data-dm-bar-title></span>
+                  <button class="dashboard__dm-bar-close" type="button" data-dm-close>Close</button>
+                </div>
                 <div class="dashboard__feed-filters" role="group" aria-label="Filter messages">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
@@ -1210,6 +1214,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     groupSignalThreads,
     signalCounts,
     signalIsDirectToViewer,
+    signalIsDirectBetween,
     type SignalFilter,
   } from "../../lib/signal-feed";
   import {
@@ -1456,6 +1461,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let fileLoadError = "";
     let brainView: BrainView | null = null;
     let signalFilter: SignalFilter = "all";
+    /* The teammate whose 1:1 Direct Message is open in Chat (Grokbot model). Null: the group chat. */
+    let activeDm: EntityRef | null = null;
     /* Channels the viewer can see, archived ones included: an archived channel still has to
        resolve for a permalink and still names the messages already in it. The rail lists the
        live ones only. */
@@ -2856,6 +2863,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const workspace = workspaces.find((candidate) => candidate.id === targetWorkspaceId);
       if (workspace) workspace.leadAgentPrincipalId = savedLeadId;
       renderEntityPanel();
+      if (typeof syncChannelLeadPill === "function") syncChannelLeadPill();
+      if (typeof renderHomeRail === "function") renderHomeRail();
       renderHomeSide();
       renderHomeObjectPane();
       syncComposerPlacement();
@@ -3102,8 +3111,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * Every addressee of the next send, in order. Empty is a broadcast, and the row says so
      * in words rather than by showing nothing.
      */
-    const composerRecipients = (): ComposerRecipient[] =>
-      composerSendRecipients(composerTo, composerIsReplying());
+    const composerRecipients = (): ComposerRecipient[] => {
+      const replying = composerIsReplying();
+      const named = composerSendRecipients(composerTo, replying);
+      /* A Direct Message always addresses its teammate first, whatever the chips were reset to;
+         anyone else @mentioned rides along after them. */
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      if (!dm || replying) return named;
+      return [{ kind: dm.kind, id: dm.id }, ...named.filter(recipient => !(recipient.kind === dm.kind && recipient.id === dm.id))];
+    };
 
     /** Identity of the whole addressee set, so changing it invalidates a pending send intent. */
     const composerRecipientsKey = (): string =>
@@ -3204,6 +3220,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const syncComposerToVisibility = (): void => {
       const row = one<HTMLElement>("[data-composer-to]");
       if (!row) return;
+      /* In a Direct Message the composer already says who it goes to; the row returns only for extra names. */
+      if (typeof activeDm !== "undefined" && activeDm && !composerIsReplying() && composerRecipients().length <= 1) { row.hidden = true; return; }
       const picker = one<HTMLElement>("[data-mention-picker]");
       const choosing = picker !== null && !picker.hidden;
       row.hidden = !(
@@ -4651,17 +4669,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const orgWorkspaces=organizationWorkspaces(workspaces,selectedOrgId);
       const orgWorkspaceIds=new Set(orgWorkspaces.map(workspace=>workspace.id));
       const railPeople = homeRailPeople(catchUpData.filter(entry=>orgWorkspaceIds.has(entry.workspace.id)), homeRoute.view === "catchup" ? null : currentHomePeople());
-      const vm = mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
+      const vm = { ...mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts),
+        ...(typeof activeDm !== "undefined" && activeDm ? { currentDmId: activeDm.id } : {}),
+        ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}) };
       /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
          follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
       const draftName = homeRoute.view === "new" ? one<HTMLInputElement>("[data-panel=create] #dashboard-workspace-name")?.value ?? null : null;
-      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft");
+      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft") + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}`;
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
-        openPerson: id => { void selectHomePerson(id); },
+        /* People and agents open a 1:1 Direct Message in this workspace's Chat. Yourself, or someone not in
+           this workspace, keeps the People & agents page. */
+        openPerson: id => {
+          if (homeRoute.view !== "catchup" && id !== homeViewerId() && members.some(member => member.userId === id)) void openDirectMessage({ kind: "person", id });
+          else void selectHomePerson(id);
+        },
         /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
            workspace whose roster names it. */
         openAgent: id => {
@@ -4669,12 +4694,62 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
           const workspaceId = homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
             : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
-          if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
+          if (workspaceId && workspaceId === activeWorkspaceId && homeRoute.view !== "catchup") void openDirectMessage({ kind: "agent", id });
+          else if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
       }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
         ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
       homeRailKey = key;
+    };
+    /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
+     *  addressed to them, and their profile in the Details column. */
+    const openDirectMessage = async (entity: EntityRef): Promise<void> => {
+      if (!activeWorkspaceId) return;
+      if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+      activeDm = { kind: entity.kind, id: entity.id } as EntityRef;
+      syncComposerAddress([{ kind: entity.kind, id: entity.id }]);
+      renderFeed();
+      syncComposerPlacement();
+      renderHomeRail();
+      const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
+      if (anchor) openEntityPanel(entity, anchor);
+    };
+    const closeDirectMessage = (): void => {
+      if (!activeDm) return;
+      activeDm = null;
+      syncComposerAddress([]);
+      closeEntityPanel(false);
+      renderFeed();
+      syncComposerPlacement();
+      renderHomeRail();
+      one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+    };
+    /* For other modules (the Cmd+K palette): open a DM by principal or user id. */
+    (app as HTMLElement & { openDirectMessage?: (id: string) => void }).openDirectMessage = (id: string): void => {
+      const kind = agents.some(agent => agent.principalId === id) ? "agent" : members.some(member => member.userId === id) ? "person" : null;
+      if (kind) void openDirectMessage({ kind, id } as EntityRef);
+    };
+    /** Group chat header: "Lead: <agent>" opens the lead's profile; owners and admins without a lead get "Set lead". */
+    const syncChannelLeadPill = (): void => {
+      const copy = one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__copy");
+      copy?.querySelector("[data-channel-lead-pill]")?.remove();
+      if (!copy || homeRoute.view !== "chat" || sampleMode) return;
+      const lead = activeWorkspaceLeadAgent();
+      if (!lead && !viewerMaySetWorkspaceLead()) return;
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "hm-lead-pill";
+      pill.dataset.channelLeadPill = "";
+      if (lead) {
+        pill.textContent = `Lead: ${lead.name}`;
+        pill.addEventListener("click", () => openEntityPanel({ kind: "agent", id: lead.principalId }, pill));
+      } else {
+        pill.textContent = "Set lead";
+        pill.dataset.leadUnset = "";
+        pill.addEventListener("click", () => openRosterDialog());
+      }
+      copy.append(pill);
     };
     const renderHomeShell = (): void => {
       const slot = one<HTMLElement>("[data-home-workspace-shell]");
@@ -4700,7 +4775,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); return; }
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
@@ -4721,6 +4796,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
+      syncChannelLeadPill();
       syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
@@ -4892,6 +4968,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
+      if (typeof activeDm !== "undefined") activeDm = null;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -6320,7 +6398,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
-      const visibleSignals = filterSignals(signals, signalFilter, viewerId);
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      const visibleSignals = dm ? signals.filter(signal => signalIsDirectBetween(signal, viewerId, dm)) : filterSignals(signals, signalFilter, viewerId);
+      const dmBar = one<HTMLElement>("[data-dm-bar]");
+      if (dmBar) {
+        dmBar.hidden = !dm;
+        const dmTitle = one<HTMLElement>("[data-dm-bar-title]");
+        if (dmTitle) dmTitle.textContent = dm ? entityName(dm) : "";
+      }
+      const filterRow = one<HTMLElement>(".dashboard__feed-filters");
+      if (filterRow) filterRow.hidden = !!dm;
       const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
       for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
         const active = button.dataset.feedFilter === signalFilter;
@@ -6330,7 +6417,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (visibleSignals.length === 0) {
         const empty = document.createElement("li");
         empty.className = "dashboard__filter-empty";
-        empty.textContent = signalFilter === "broadcast"
+        empty.textContent = dm ? `No messages with ${entityName(dm)} yet.`
+          : signalFilter === "broadcast"
           ? "No broadcasts in the loaded signals."
           : "No loaded signals are directed to you.";
         list.append(empty);
@@ -8933,6 +9021,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (broadcastRow) broadcastRow.hidden = true;
       const channel = activeChannel();
       if (!input) return;
+      const directPartner = typeof activeDm === "undefined" ? null : activeDm;
+      if (directPartner) {
+        const partnerName = typeof entityName === "function" ? entityName(directPartner) : "";
+        input.placeholder = `Message ${partnerName}`;
+        input.setAttribute("aria-label", `Message ${partnerName}`);
+        return;
+      }
       const leadName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
       if (channel === null) {
         input.placeholder = leadName ? `Message… (${leadName} leads)` : "Message…";
@@ -11381,6 +11476,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       "input",
       disarmChannelArchive,
     );
+    one<HTMLButtonElement>("[data-dm-close]")?.addEventListener("click", () => closeDirectMessage());
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;

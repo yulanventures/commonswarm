@@ -7,6 +7,9 @@ import type { AgentVM, CapsuleVM, Id, PersonVM, RailVM } from "./home-types";
 export const RAIL_WORKSPACE_CAP = 6;
 export const RAIL_OWNERSHIP_NOTE = "Every agent belongs to a person, who connects it.";
 export const RAIL_CATCH_UP_PEOPLE_TITLE = "You and your agents";
+/** Grokbot-style sections: workspaces are the group chats; people and agents are 1:1 Direct messages. */
+export const RAIL_GROUP_CHATS_TITLE = "Group chats";
+export const RAIL_DIRECT_MESSAGES_TITLE = "Direct messages";
 
 type RailWorkspace = RailVM["workspaces"][number];
 type RailPeople = NonNullable<RailVM["people"]>;
@@ -23,7 +26,13 @@ export interface RailCallbacks {
 }
 
 /** The rail model plus the agent whose page is open (home-types.ts RailVM is frozen). */
-export type HomeRailVM = RailVM & { currentAgentId?: Id };
+export type HomeRailVM = RailVM & {
+  currentAgentId?: Id;
+  /** The teammate whose 1:1 Direct Message is open in Chat. */
+  currentDmId?: Id;
+  /** The workspace Lead agent: tagged "Lead" in Direct messages. */
+  leadAgentId?: Id;
+};
 
 /** Local to this lane; home-types.ts has no rail options. */
 export interface RailOptions {
@@ -194,9 +203,10 @@ function interactiveRow(doc: Document, className: string, sample: boolean, open:
   return row;
 }
 
-function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: RailCallbacks): HTMLElement {
+function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: RailCallbacks, currentDmId?: Id): HTMLElement {
   const row = interactiveRow(doc, "hm-rail__person", sample, () => callbacks.openPerson(person.id));
   row.dataset.railPerson = person.id;
+  if (currentDmId === person.id) row.setAttribute("aria-current", "page");
   row.setAttribute("aria-label", railPersonName(person));
   const face = node(doc, "span", "hm-rail__face");
   face.setAttribute("aria-hidden", "true");
@@ -208,11 +218,11 @@ function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: 
   return row;
 }
 
-function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
+function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id, currentDmId?: Id, leadAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__agent-item");
   const row = interactiveRow(doc, "hm-rail__agent", sample, () => callbacks.openAgent(agent.id));
   row.dataset.railAgent = agent.id;
-  if (currentAgentId === agent.id) row.setAttribute("aria-current", "page");
+  if (currentAgentId === agent.id || currentDmId === agent.id) row.setAttribute("aria-current", "page");
   row.dataset.agentState = agent.state.kind;
   row.setAttribute("aria-label", railAgentName(agent));
   const orb = node(doc, "span", "hm-rail__orb");
@@ -222,19 +232,21 @@ function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: Rai
   name.title = agent.nestedLabel;
   const status = node(doc, "span", "hm-rail__status");
   status.append(statusLine(doc, agent.state, { form: "word" }));
-  row.append(orb, name, status);
+  row.append(orb, name);
+  if (leadAgentId === agent.id) { row.dataset.railLead = ""; row.append(node(doc, "span", "hm-rail__lead", "Lead")); }
+  row.append(status);
   item.append(row);
   return item;
 }
 
-function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
+function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id, currentDmId?: Id, leadAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__group");
   if (capsule.person.you) item.dataset.railViewer = "";
-  item.append(personRow(doc, capsule.person, sample, callbacks));
+  item.append(personRow(doc, capsule.person, sample, callbacks, currentDmId));
   if (capsule.agents.length) {
     const agents = node(doc, "ul", "hm-rail__agents");
     agents.setAttribute("aria-label", `${capsule.person.you ? "Your" : `${capsule.person.firstName}’s`} agents`);
-    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks, currentAgentId));
+    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks, currentAgentId, currentDmId, leadAgentId));
     item.append(agents);
   }
   return item;
@@ -243,7 +255,7 @@ function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: Ra
 /** The left rail: brand row, Catch up, Workspaces with its create action, then People & agents. The ownership line is
  *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
 export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
-  const currentAgentId = vm.currentAgentId;
+  const { currentAgentId, currentDmId, leadAgentId } = vm;
   const root = node(doc, "div", "hm-rail");
   root.dataset.homeRail = "";
 
@@ -262,7 +274,7 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
 
   const workspaces = node(doc, "section", "hm-rail__workspaces");
   workspaces.setAttribute("aria-labelledby", "hm-rail-workspaces-title");
-  const workspacesTitle = node(doc, "h2", "hm-rail__heading", "Workspaces");
+  const workspacesTitle = node(doc, "h2", "hm-rail__heading", RAIL_GROUP_CHATS_TITLE);
   workspacesTitle.id = "hm-rail-workspaces-title";
   const workspacesHead = node(doc, "div", "hm-rail__section-head");
   workspacesHead.append(workspacesTitle);
@@ -320,18 +332,18 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
     const people = orderRailPeople(vm.people);
     const section = node(doc, "section", "hm-rail__people");
     section.setAttribute("aria-labelledby", "hm-rail-people-title");
-    const title = node(doc, "h2", "hm-rail__heading", people.title);
+    const title = node(doc, "h2", "hm-rail__heading", people.title === "People & agents" ? RAIL_DIRECT_MESSAGES_TITLE : people.title);
     title.id = "hm-rail-people-title";
     const peopleList = node(doc, "ul", "hm-rail__people-list");
     peopleList.dataset.sidebarParticipantList = "";
-    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks, currentAgentId));
+    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks, currentAgentId, currentDmId, leadAgentId));
     if (people.other.length) {
       const item = node(doc, "li", "hm-rail__group hm-rail__group--other");
       const head = node(doc, "p", "hm-rail__other-head", "Other agents");
       head.id = "hm-rail-other-title";
       const agents = node(doc, "ul", "hm-rail__agents");
       agents.setAttribute("aria-labelledby", head.id);
-      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks, currentAgentId));
+      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks, currentAgentId, currentDmId, leadAgentId));
       item.append(head, agents);
       peopleList.append(item);
     }
