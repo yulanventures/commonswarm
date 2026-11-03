@@ -1,0 +1,217 @@
+/* Grokbot Command Palette (Cmd+K / Ctrl+K), Workspace Skills dialog, and Agent Inspector Routines.
+ * Uses only --k-shell-*, --cs-*, --home-*, and --carbon-* tokens from carbon-theme.css. */
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__command-palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--k-shell-line);
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__command-palette-trigger:hover {
+  background: var(--k-shell-hover);
+  color: var(--k-shell-ink);
+  border-color: var(--k-shell-control);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__command-palette-kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--k-shell-line);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(
+  dialog.dashboard__command-palette,
+  dialog.dashboard__skills-dialog
+) {
+  width: min(560px, calc(100vw - 24px));
+  max-height: min(640px, calc(100vh - 48px));
+  margin: 8vh auto auto;
+  padding: 0;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 12px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  box-shadow: var(--k-shell-shadow);
+  overflow: hidden;
+}
+
+live-dashboard.dashboard[data-kylon-shell] :is(
+  dialog.dashboard__command-palette,
+  dialog.dashboard__skills-dialog
+)::backdrop {
+  background: rgba(9, 9, 11, 0.62);
+  backdrop-filter: blur(2px);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--k-shell-line);
+  background: var(--k-shell-subtle);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-input:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 1px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-body {
+  max-height: min(480px, calc(100vh - 160px));
+  overflow-y: auto;
+  padding: 10px;
+  display: grid;
+  gap: 12px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-group {
+  display: grid;
+  gap: 4px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-group__title {
+  margin: 0;
+  padding: 4px 8px 2px;
+  color: var(--k-shell-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-group__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__button {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--k-shell-ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__button:hover,
+live-dashboard.dashboard[data-kylon-shell] .cp-item__button--active {
+  background: var(--k-shell-selected);
+  border-color: var(--k-shell-line);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--k-shell-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__subtitle {
+  font-size: 12px;
+  color: var(--k-shell-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--k-shell-line);
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-item__badge--lead {
+  background: var(--k-shell-accent);
+  color: var(--k-shell-accent-ink);
+  border-color: var(--k-shell-accent);
+}
+
+live-dashboard.dashboard[data-kylon-shell] .cp-empty {
+  margin: 0;
+  padding: 20px 12px;
+  text-align: center;
+  color: var(--k-shell-secondary);
+  font-size: 13px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] dialog.dashboard__skills-dialog .dashboard__skills-dialog-body {
+  max-height: min(520px, calc(100vh - 150px));
+  overflow-y: auto;
+  padding: 16px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__entity-routines-list {
+  display: grid;
+  gap: 6px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__entity-routine-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+live-dashboard.dashboard[data-kylon-shell] .dashboard__entity-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}

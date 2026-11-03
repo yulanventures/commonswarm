@@ -1691,3 +1691,105 @@ test('workspace lead helpers resolve live local lead agents, gate owner/admin up
   assert.equal(runInContext('workspaces[0].leadAgentPrincipalId', context), 'a-local');
   assert.deepEqual(paints, ['entity', 'side', 'object', 'composer']);
 });
+
+test('Grokbot command palette and agent routines summary surface teammates, lead controls, skills, and scheduled routines', async () => {
+  const {
+    buildCommandPaletteItems,
+    filterCommandPaletteItems,
+    summarizeAgentRoutines,
+  } = await import('../../lib/home-command-palette.js');
+
+  const items = buildCommandPaletteItems({
+    agents: [
+      {
+        principalId: 'a-lead',
+        name: 'Mr. Marketing',
+        model: 'Grok-4',
+        transport: 'local',
+        turnOnly: false,
+        revokedAt: null,
+      },
+      {
+        principalId: 'a-writer',
+        name: 'Copywriter',
+        model: 'Claude',
+        transport: 'local',
+        turnOnly: false,
+        revokedAt: null,
+      },
+      {
+        principalId: 'a-hosted',
+        name: 'Connector Bot',
+        model: null,
+        transport: 'hosted_mcp',
+        turnOnly: true,
+        revokedAt: null,
+      },
+    ],
+    members: [{ userId: 'u1', name: 'Tom' }],
+    channels: [{ slug: 'campaigns', purpose: 'Launch planning', archivedAt: null }],
+    leadAgentPrincipalId: 'a-lead',
+    maySetLead: true,
+    themeLabel: 'Dark',
+  });
+
+  const leadItem = items.find((i) => i.id === 'teammate:agent:a-lead');
+  assert.equal(leadItem?.badge, 'LEAD');
+  assert.ok(items.some((i) => i.id === 'lead:set:a-writer'), 'eligible local non-lead agent has a Set lead action');
+  assert.ok(!items.some((i) => i.id === 'lead:set:a-hosted'), 'hosted turn-only agent is not offered as workspace lead');
+  assert.ok(items.some((i) => i.id === 'lead:clear'), 'current lead can be cleared from palette');
+  assert.ok(items.some((i) => i.id === 'action:skills'), 'Workspace skills is a first-class palette action');
+
+  const filtered = filterCommandPaletteItems(items, 'marketing');
+  assert.equal(filtered[0]?.id, 'teammate:agent:a-lead');
+
+  const routines = summarizeAgentRoutines('a-lead', [
+    {
+      todo_id: 't-doing',
+      version: 1,
+      title: 'Draft launch brief',
+      state: 'doing',
+      due_on: null,
+      assignee: { kind: 'agent', id: 'a-lead' },
+      offer: null,
+      gate: { kind: 'none', clear: true, todo_id: null, at: null },
+      queue_position: null,
+      comment_count: 0,
+      state_at: '2026-11-02T18:00:00Z',
+    },
+    {
+      todo_id: 't-routine',
+      version: 1,
+      title: 'Publish weekly metrics',
+      state: 'open',
+      due_on: null,
+      assignee: { kind: 'agent', id: 'a-lead' },
+      offer: null,
+      gate: { kind: 'at', clear: false, todo_id: null, at: '2026-11-04T09:00:00Z' },
+      queue_position: null,
+      comment_count: 0,
+      state_at: '2026-11-02T18:00:00Z',
+    },
+    {
+      todo_id: 't-queue',
+      version: 1,
+      title: 'Review landing copy',
+      state: 'open',
+      due_on: null,
+      assignee: { kind: 'agent', id: 'a-lead' },
+      offer: null,
+      gate: { kind: 'none', clear: true, todo_id: null, at: null },
+      queue_position: 1,
+      comment_count: 0,
+      state_at: '2026-11-02T18:00:00Z',
+    },
+  ]);
+
+  assert.equal(routines.doingNow.length, 1);
+  assert.equal(routines.doingNow[0]?.title, 'Draft launch brief');
+  assert.equal(routines.routines.length, 1);
+  assert.equal(routines.routines[0]?.title, 'Publish weekly metrics');
+  assert.ok(routines.routines[0]?.badge.startsWith('Scheduled'));
+  assert.equal(routines.upNext.length, 1);
+  assert.equal(routines.upNext[0]?.badge, '#1 in queue');
+});

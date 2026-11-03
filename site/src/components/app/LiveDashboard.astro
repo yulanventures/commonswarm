@@ -55,6 +55,7 @@ import "../../styles/kylon-entity-profile.css";
 import "../../styles/kylon-channel-dialog.css";
 import "../../styles/kylon-agent-page.css";
 import "../../styles/kylon-chat-empty.css";
+import "../../styles/kylon-command-palette.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -327,6 +328,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               </span>
               <span class="dashboard__update-count" data-update-count hidden>0 updates</span>
               <button
+                class="dashboard__command-palette-trigger"
+                type="button"
+                data-command-palette-open
+                aria-label="Command palette (Cmd+K)"
+                title="Command palette (Cmd+K)"
+              >
+                <span>Jump</span>
+                <kbd class="dashboard__command-palette-kbd" aria-hidden="true">⌘K</kbd>
+              </button>
+              <button
                 class="dashboard__icon-button"
                 type="button"
                 data-refresh
@@ -527,6 +538,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
             <section class="dashboard__feed-view" data-channel-view="feed" hidden>
               <div class="dashboard__feed-toolbar">
+                <div class="dashboard__dm-bar" data-dm-bar hidden>
+                  <span class="dashboard__dm-bar-title" data-dm-bar-title></span>
+                  <button class="dashboard__dm-bar-close" type="button" data-dm-close>Close</button>
+                </div>
                 <div class="dashboard__feed-filters" role="group" aria-label="Filter messages">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
@@ -1006,6 +1021,61 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     <button type="button" data-account-agents-retry hidden>Try again</button>
   </dialog>
 
+  <dialog
+    class="dashboard__command-palette"
+    data-command-palette
+    aria-labelledby="dashboard-command-palette-title"
+  >
+    <header class="cp-head">
+      <h2 id="dashboard-command-palette-title" class="pd-sr-only">Command palette</h2>
+      <input
+        type="search"
+        class="cp-input"
+        data-command-palette-input
+        placeholder="Jump to a teammate, channel, skill, or action…"
+        aria-label="Jump to a teammate, channel, skill, or action"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-command-palette-close
+        aria-label="Close command palette"
+        title="Close (Esc)"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="cp-body" data-command-palette-list role="listbox" aria-label="Results"></div>
+  </dialog>
+
+  <dialog
+    class="dashboard__skills-dialog"
+    data-workspace-skills-dialog
+    aria-labelledby="dashboard-workspace-skills-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-workspace-skills-title">Workspace skills</h2>
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-workspace-skills-close
+        aria-label="Close workspace skills"
+        title="Close workspace skills"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="dashboard__skills-dialog-body" data-workspace-skills-body>
+      <div data-workspace-skills-anchor hidden></div>
+    </div>
+  </dialog>
+
   {/* PEOPLE & AGENTS IS A PAGE (the canvas Members artboard, route `?v=people`), rendered by
       renderPeopleDialog(..., { layout: "page" }) into the route pane. ~~"The agent management dialog. A
       native <dialog> ... At ≤52rem it is a bottom sheet"~~, retired 2026-10-07 (home visual lane): the
@@ -1061,6 +1131,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { todoView, type TodoStartInput } from "../../lib/home-todo";
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
   import { tagOptionRow, tagOptions, personNames } from "../../lib/home-pickers";
+  import { buildOfferCard, pendingOfferCards, type OfferAnswer, type OfferCardVM } from "../../lib/home-stream-approvals";
   import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
@@ -1071,6 +1142,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
+  import { mountWorkspaceSkills } from "../../lib/workspace-skills-view";
+  import {
+    buildCommandPaletteItems,
+    filterCommandPaletteItems,
+    renderCommandPaletteList,
+    summarizeAgentRoutines,
+    buildAgentRoutinesSection,
+    type CommandPaletteItem,
+  } from "../../lib/home-command-palette";
   import {
     CONTENT_OPERATION_LABELS,
     CONTENT_OPERATIONS,
@@ -1210,6 +1290,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     groupSignalThreads,
     signalCounts,
     signalIsDirectToViewer,
+    signalIsDirectBetween,
     type SignalFilter,
   } from "../../lib/signal-feed";
   import {
@@ -1456,6 +1537,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let fileLoadError = "";
     let brainView: BrainView | null = null;
     let signalFilter: SignalFilter = "all";
+    /* The teammate whose 1:1 Direct Message is open in Chat (Grokbot model). Null: the group chat. */
+    let activeDm: EntityRef | null = null;
     /* Channels the viewer can see, archived ones included: an archived channel still has to
        resolve for a permalink and still names the messages already in it. The rail lists the
        live ones only. */
@@ -2856,6 +2939,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const workspace = workspaces.find((candidate) => candidate.id === targetWorkspaceId);
       if (workspace) workspace.leadAgentPrincipalId = savedLeadId;
       renderEntityPanel();
+      if (typeof syncChannelLeadPill === "function") syncChannelLeadPill();
+      if (typeof renderHomeRail === "function") renderHomeRail();
       renderHomeSide();
       renderHomeObjectPane();
       syncComposerPlacement();
@@ -2955,6 +3040,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           body.append(leadSection);
         }
 
+        if (!details.revoked) {
+          const routinesSummary = summarizeAgentRoutines(
+            details.principalId,
+            typeof homeTodoRows !== "undefined" && Array.isArray(homeTodoRows) ? homeTodoRows : [],
+          );
+          const routinesSection = buildAgentRoutinesSection(document, routinesSummary, {
+            onOpenTodo: (todoId) => {
+              if (!activeWorkspaceId) return;
+              void navigateHome({ view: "todo", workspaceId: activeWorkspaceId, todoId }, "push");
+            },
+            onOpenAgentQueue: () => {
+              if (!activeWorkspaceId) return;
+              void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId: details.principalId }, "push");
+            },
+            onOpenSkills: () => {
+              if (typeof openWorkspaceSkillsDialog === "function") openWorkspaceSkillsDialog();
+            },
+          });
+          body.append(routinesSection);
+        }
+
         const live = renderAgentActivitySection(details.principalId);
         const info = document.createElement("section");
         info.className = "dashboard__entity-section";
@@ -2987,6 +3093,30 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         appendEntityField(runtimeList, "Revoked", details.revokedAt);
         runtime.append(runtimeTitle, runtimeList);
         body.append(live, info, runtime);
+        /* Your own agent without Lists & docs access: allow it here, with the same defaults as the Lists card. */
+        if (!sampleMode && agent.ownerUserId === homeViewerId() && householdConnectionsReadState === "succeeded") {
+          const connection = householdConnections.find(row => row.principal_id === agent.principalId);
+          if (connection && !connectionApproval(connection)) {
+            const access = document.createElement("section");
+            access.className = "dashboard__entity-section dashboard__entity-access";
+            const accessTitle = document.createElement("h3");
+            accessTitle.textContent = "Lists & docs";
+            const allow = document.createElement("button");
+            allow.type = "button";
+            allow.className = "hm-approval-card__button hm-approval-card__button--accept";
+            allow.dataset.entityAllow = "";
+            allow.textContent = "Allow";
+            const allowStatus = document.createElement("p");
+            allowStatus.className = "hm-approval-card__status";
+            allowStatus.setAttribute("role", "status");
+            allow.addEventListener("click", () => {
+              const operations = householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"];
+              void approveAgent(connection, operations, allow, allowStatus).then(() => renderEntityPanel());
+            });
+            access.append(accessTitle, allow, allowStatus);
+            body.append(access);
+          }
+        }
       } else {
         const member = members.find((candidate) => candidate.userId === selectedEntity?.id);
         if (!member) {
@@ -3102,8 +3232,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * Every addressee of the next send, in order. Empty is a broadcast, and the row says so
      * in words rather than by showing nothing.
      */
-    const composerRecipients = (): ComposerRecipient[] =>
-      composerSendRecipients(composerTo, composerIsReplying());
+    const composerRecipients = (): ComposerRecipient[] => {
+      const replying = composerIsReplying();
+      const named = composerSendRecipients(composerTo, replying);
+      /* A Direct Message always addresses its teammate first, whatever the chips were reset to;
+         anyone else @mentioned rides along after them. */
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      if (!dm || replying) return named;
+      return [{ kind: dm.kind, id: dm.id }, ...named.filter(recipient => !(recipient.kind === dm.kind && recipient.id === dm.id))];
+    };
 
     /** Identity of the whole addressee set, so changing it invalidates a pending send intent. */
     const composerRecipientsKey = (): string =>
@@ -3204,6 +3341,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const syncComposerToVisibility = (): void => {
       const row = one<HTMLElement>("[data-composer-to]");
       if (!row) return;
+      /* In a Direct Message the composer already says who it goes to; the row returns only for extra names. */
+      if (typeof activeDm !== "undefined" && activeDm && !composerIsReplying() && composerRecipients().length <= 1) { row.hidden = true; return; }
       const picker = one<HTMLElement>("[data-mention-picker]");
       const choosing = picker !== null && !picker.hidden;
       row.hidden = !(
@@ -4651,17 +4790,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const orgWorkspaces=organizationWorkspaces(workspaces,selectedOrgId);
       const orgWorkspaceIds=new Set(orgWorkspaces.map(workspace=>workspace.id));
       const railPeople = homeRailPeople(catchUpData.filter(entry=>orgWorkspaceIds.has(entry.workspace.id)), homeRoute.view === "catchup" ? null : currentHomePeople());
-      const vm = mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
+      const vm = { ...mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts),
+        ...(typeof activeDm !== "undefined" && activeDm ? { currentDmId: activeDm.id } : {}),
+        ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}) };
       /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
          follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
       const draftName = homeRoute.view === "new" ? one<HTMLInputElement>("[data-panel=create] #dashboard-workspace-name")?.value ?? null : null;
-      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft");
+      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft") + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}`;
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
-        openPerson: id => { void selectHomePerson(id); },
+        /* People and agents open a 1:1 Direct Message in this workspace's Chat. Yourself, or someone not in
+           this workspace, keeps the People & agents page. */
+        openPerson: id => {
+          if (homeRoute.view !== "catchup" && id !== homeViewerId() && members.some(member => member.userId === id)) void openDirectMessage({ kind: "person", id });
+          else void selectHomePerson(id);
+        },
         /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
            workspace whose roster names it. */
         openAgent: id => {
@@ -4669,12 +4815,77 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
           const workspaceId = homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
             : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
-          if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
+          if (workspaceId && workspaceId === activeWorkspaceId && homeRoute.view !== "catchup") void openDirectMessage({ kind: "agent", id });
+          else if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
       }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
         ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
       homeRailKey = key;
+    };
+    const answerOffer = (card: OfferCardVM, answer: OfferAnswer, controls: { buttons: HTMLButtonElement[]; status: HTMLElement }): void => {
+      const server = homeServer();
+      const workspaceId = activeWorkspaceId;
+      if (!server || !workspaceId) return;
+      const settle = (message: string, retry: boolean): void => {
+        controls.status.textContent = message;
+        for (const button of controls.buttons) button.disabled = !retry;
+      };
+      settle("Saving…", false);
+      void server.answerRequest(workspaceId, { todo_id: card.todoId, offer_id: card.offerId, answer }, uuid()).then(result => {
+        if (workspaceId !== activeWorkspaceId) return;
+        if (result.status === "committed") { settle(answer === "accept" ? "Accepted." : "Declined.", false); void loadHomeWorkspace(); }
+        else settle(result.status === "conflict" ? "This to-do changed. Reload to check." : homeRefusalCopy(result.reason), true);
+      }).catch(() => { if (workspaceId === activeWorkspaceId) settle("The answer may not have been saved. Reload to check.", true); });
+    };
+    /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
+     *  addressed to them, and their profile in the Details column. */
+    const openDirectMessage = async (entity: EntityRef): Promise<void> => {
+      if (!activeWorkspaceId) return;
+      if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+      activeDm = { kind: entity.kind, id: entity.id } as EntityRef;
+      syncComposerAddress([{ kind: entity.kind, id: entity.id }]);
+      renderFeed();
+      syncComposerPlacement();
+      renderHomeRail();
+      const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
+      if (anchor) openEntityPanel(entity, anchor);
+    };
+    const closeDirectMessage = (): void => {
+      if (!activeDm) return;
+      activeDm = null;
+      syncComposerAddress([]);
+      closeEntityPanel(false);
+      renderFeed();
+      syncComposerPlacement();
+      renderHomeRail();
+      one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+    };
+    /* For other modules (the Cmd+K palette): open a DM by principal or user id. */
+    (app as HTMLElement & { openDirectMessage?: (id: string) => void }).openDirectMessage = (id: string): void => {
+      const kind = agents.some(agent => agent.principalId === id) ? "agent" : members.some(member => member.userId === id) ? "person" : null;
+      if (kind) void openDirectMessage({ kind, id } as EntityRef);
+    };
+    /** Group chat header: "Lead: <agent>" opens the lead's profile; owners and admins without a lead get "Set lead". */
+    const syncChannelLeadPill = (): void => {
+      const copy = one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__copy");
+      copy?.querySelector("[data-channel-lead-pill]")?.remove();
+      if (!copy || homeRoute.view !== "chat" || sampleMode) return;
+      const lead = activeWorkspaceLeadAgent();
+      if (!lead && !viewerMaySetWorkspaceLead()) return;
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "hm-lead-pill";
+      pill.dataset.channelLeadPill = "";
+      if (lead) {
+        pill.textContent = `Lead: ${lead.name}`;
+        pill.addEventListener("click", () => openEntityPanel({ kind: "agent", id: lead.principalId }, pill));
+      } else {
+        pill.textContent = "Set lead";
+        pill.dataset.leadUnset = "";
+        pill.addEventListener("click", () => openRosterDialog());
+      }
+      copy.append(pill);
     };
     const renderHomeShell = (): void => {
       const slot = one<HTMLElement>("[data-home-workspace-shell]");
@@ -4700,7 +4911,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); return; }
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
@@ -4721,6 +4932,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
+      syncChannelLeadPill();
       syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
@@ -4892,6 +5104,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
+      if (typeof activeDm !== "undefined") activeDm = null;
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
       if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
@@ -6290,6 +6504,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const card = { ...fix, sample: sampleMode };
         row.append(needsYouCard(document, card, () => {})); list.append(row);
       }
+      /* Offers waiting on you, answered in place (Accept / Decline) without leaving Chat. */
+      const offerViewer = typeof homeViewerId === "function" ? homeViewerId() ?? "" : "";
+      const offers = typeof answerOffer === "function" && homeTodosState === "ready"
+        ? pendingOfferCards(homeTodoRows, offerViewer, party => entityName(party.kind === "agent" ? { kind: "agent", id: party.id } : { kind: "person", id: party.id }))
+        : [];
+      for (const offer of offers) {
+        const row = document.createElement("li");
+        row.className = "dashboard__feed-fix dashboard__feed-approval";
+        row.append(buildOfferCard(document, offer, { answer: answerOffer }));
+        list.append(row);
+      }
       if (signals.length === 0) {
         humanSeenReporter.resetVisible();
         humanSeenObserver?.disconnect();
@@ -6320,7 +6545,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
-      const visibleSignals = filterSignals(signals, signalFilter, viewerId);
+      const dm = typeof activeDm === "undefined" ? null : activeDm;
+      const visibleSignals = dm ? signals.filter(signal => signalIsDirectBetween(signal, viewerId, dm)) : filterSignals(signals, signalFilter, viewerId);
+      const dmBar = one<HTMLElement>("[data-dm-bar]");
+      if (dmBar) {
+        dmBar.hidden = !dm;
+        const dmTitle = one<HTMLElement>("[data-dm-bar-title]");
+        if (dmTitle) dmTitle.textContent = dm ? entityName(dm) : "";
+      }
+      const filterRow = one<HTMLElement>(".dashboard__feed-filters");
+      if (filterRow) filterRow.hidden = !!dm;
       const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
       for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
         const active = button.dataset.feedFilter === signalFilter;
@@ -6330,7 +6564,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (visibleSignals.length === 0) {
         const empty = document.createElement("li");
         empty.className = "dashboard__filter-empty";
-        empty.textContent = signalFilter === "broadcast"
+        empty.textContent = dm ? `No messages with ${entityName(dm)} yet.`
+          : signalFilter === "broadcast"
           ? "No broadcasts in the loaded signals."
           : "No loaded signals are directed to you.";
         list.append(empty);
@@ -6352,6 +6587,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
         row.dataset.signalId = signal.id;
+        /* Working-on posts are status, not conversation: a compact activity line. */
+        if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
         markThreadReplyRoot(row);
         if (
           !sampleMode && session && activeWorkspaceId &&
@@ -8933,6 +9170,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (broadcastRow) broadcastRow.hidden = true;
       const channel = activeChannel();
       if (!input) return;
+      const directPartner = typeof activeDm === "undefined" ? null : activeDm;
+      if (directPartner) {
+        const partnerName = typeof entityName === "function" ? entityName(directPartner) : "";
+        input.placeholder = `Message ${partnerName}`;
+        input.setAttribute("aria-label", `Message ${partnerName}`);
+        return;
+      }
       const leadName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
       if (channel === null) {
         input.placeholder = leadName ? `Message… (${leadName} leads)` : "Message…";
@@ -10229,6 +10473,218 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       });
     }
 
+    let unmountSkillsDialog: (() => void) | null = null;
+    function openWorkspaceSkillsDialog(): void {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      const body = one<HTMLElement>("[data-workspace-skills-body]");
+      const anchor = one<HTMLElement>("[data-workspace-skills-anchor]");
+      if (!dialog || !body || !anchor) return;
+      unmountSkillsDialog?.();
+      unmountSkillsDialog = null;
+      const canEdit = viewerRole() === "owner" || viewerRole() === "admin" || householdAccess.content_role === "editor";
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      const call = activeSession && workspaceId && !sampleMode
+        ? householdCall(activeSession, workspaceId)
+        : async () => ({
+            status: "ok",
+            cap: 20,
+            ttl_days: 60,
+            skills: [],
+            suggestions: [],
+          });
+      unmountSkillsDialog = mountWorkspaceSkills(body, anchor, canEdit && !sampleMode, call);
+      if (!dialog.open) dialog.showModal();
+    }
+    function closeWorkspaceSkillsDialog(): void {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      if (dialog?.open) dialog.close();
+    }
+    one<HTMLButtonElement>("[data-workspace-skills-close]")?.addEventListener("click", closeWorkspaceSkillsDialog);
+    {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      dialog?.addEventListener("close", () => {
+        unmountSkillsDialog?.();
+        unmountSkillsDialog = null;
+      });
+      dialog?.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    }
+
+    let commandPaletteFiltered: CommandPaletteItem[] = [];
+    let commandPaletteIndex = 0;
+    const executeCommandPaletteItem = (item: CommandPaletteItem): void => {
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      if (dialog?.open) dialog.close();
+      const action = item.action;
+      if (action.type === "teammate") {
+        const dmFn = (app as unknown as { openDirectMessage?: (id: string) => void }).openDirectMessage;
+        if (typeof dmFn === "function") {
+          dmFn.call(app, action.id);
+          return;
+        }
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          composerTo = [{ kind: action.entityKind, id: action.id }];
+          renderComposerTo();
+          const trigger = one<HTMLElement>("[data-command-palette-open]") ?? app;
+          openEntityPanel({ kind: action.entityKind, id: action.id }, trigger);
+          one<HTMLTextAreaElement>("[data-composer-input]")?.focus();
+        };
+        void go();
+        return;
+      }
+      if (action.type === "channel") {
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          if (action.slug === ALL_SIGNALS_SLUG) {
+            selectChannel(null);
+          } else {
+            const match = channels.find((channel) => channel.slug === action.slug);
+            if (match) selectChannel(match.channelId);
+          }
+        };
+        void go();
+        return;
+      }
+      if (action.type === "set-lead") {
+        void updateWorkspaceLead(action.principalId);
+        return;
+      }
+      if (action.type === "open-skills") {
+        openWorkspaceSkillsDialog();
+        return;
+      }
+      if (action.type === "navigate") {
+        if (!activeWorkspaceId) return;
+        if (action.view === "people") {
+          void openRosterDialog();
+        } else {
+          void navigateHome({ view: action.view, workspaceId: activeWorkspaceId }, "push");
+        }
+        return;
+      }
+      if (action.type === "connect-agent") {
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          openConnect();
+        };
+        void go();
+        return;
+      }
+      if (action.type === "new-channel") {
+        openChannelDialog();
+        return;
+      }
+      if (action.type === "cycle-theme") {
+        one<HTMLButtonElement>("[data-theme-toggle]")?.click();
+      }
+    };
+
+    const renderCommandPalette = (): void => {
+      const list = one<HTMLElement>("[data-command-palette-list]");
+      const input = one<HTMLInputElement>("[data-command-palette-input]");
+      if (!list) return;
+      const allItems = buildCommandPaletteItems({
+        agents: agents.map((agent) => ({
+          principalId: agent.principalId,
+          name: agent.name,
+          model: agent.model,
+          transport: agent.transport === "hosted_mcp" ? "hosted_mcp" : "local",
+          turnOnly: agent.turnOnly === true,
+          revokedAt: agent.revokedAt,
+        })),
+        members: members.map((member) => ({
+          userId: member.userId,
+          name: member.name,
+        })),
+        channels: channels.map((channel) => ({
+          slug: channel.slug,
+          purpose: channel.purpose,
+          archivedAt: channel.archivedAt,
+        })),
+        leadAgentPrincipalId: activeWorkspaceLeadAgent()?.principalId ?? null,
+        maySetLead: viewerMaySetWorkspaceLead(),
+        themeLabel: (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim() || undefined,
+      });
+      commandPaletteFiltered = filterCommandPaletteItems(allItems, input?.value ?? "");
+      if (commandPaletteIndex >= commandPaletteFiltered.length) {
+        commandPaletteIndex = 0;
+      }
+      renderCommandPaletteList(
+        document,
+        list,
+        commandPaletteFiltered,
+        commandPaletteIndex,
+        executeCommandPaletteItem,
+      );
+    };
+
+    const openCommandPalette = (): void => {
+      if (app.dataset.state !== "channel") return;
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      const input = one<HTMLInputElement>("[data-command-palette-input]");
+      if (!dialog) return;
+      if (input) input.value = "";
+      commandPaletteIndex = 0;
+      renderCommandPalette();
+      if (!dialog.open) dialog.showModal();
+      input?.focus();
+    };
+
+    one<HTMLButtonElement>("[data-command-palette-open]")?.addEventListener("click", openCommandPalette);
+    one<HTMLButtonElement>("[data-command-palette-close]")?.addEventListener("click", () => {
+      one<HTMLDialogElement>("[data-command-palette]")?.close();
+    });
+    one<HTMLInputElement>("[data-command-palette-input]")?.addEventListener("input", () => {
+      commandPaletteIndex = 0;
+      renderCommandPalette();
+    });
+    one<HTMLInputElement>("[data-command-palette-input]")?.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (commandPaletteFiltered.length > 0) {
+          commandPaletteIndex = (commandPaletteIndex + 1) % commandPaletteFiltered.length;
+          renderCommandPalette();
+        }
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (commandPaletteFiltered.length > 0) {
+          commandPaletteIndex =
+            (commandPaletteIndex - 1 + commandPaletteFiltered.length) % commandPaletteFiltered.length;
+          renderCommandPalette();
+        }
+      } else if (event.key === "Enter") {
+        const selected = commandPaletteFiltered[commandPaletteIndex];
+        if (selected) {
+          event.preventDefault();
+          executeCommandPaletteItem(selected);
+        }
+      }
+    });
+    {
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      dialog?.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    }
+    document.addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        if (app.dataset.state !== "channel") return;
+        event.preventDefault();
+        const dialog = one<HTMLDialogElement>("[data-command-palette]");
+        if (dialog?.open) dialog.close();
+        else openCommandPalette();
+      }
+    });
+
     one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", homeBack);
     one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", () => openRosterDialog());
     one<HTMLButtonElement>("[data-workspace-details-trigger]")?.addEventListener(
@@ -11381,6 +11837,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       "input",
       disarmChannelArchive,
     );
+    one<HTMLButtonElement>("[data-dm-close]")?.addEventListener("click", () => closeDirectMessage());
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;

@@ -105,3 +105,22 @@ live-dashboard.dashboard[data-kylon-shell] [data-roster-open][data-pending-acces
 @media (width > 52rem) and (width < 64rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-active]:not([data-channel-details-collapsed]):not(:has(> .hm-frame__profile:not([hidden]))) > .hm-frame__side { display: block; }
 }
+
+/* Direct Message bar: replaces the message filters while a 1:1 view is open. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar { display: flex; align-items: center; gap: 12px; min-block-size: 38px; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar-title { font: 600 15px var(--k-shell-font); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar-close {
+  min-block-size: 32px; padding: 0 12px; border: 0; border-radius: 999px; font: 500 13px var(--k-shell-font);
+  color: var(--k-shell-secondary); background: var(--k-shell-subtle); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar-close:hover { color: var(--k-shell-ink); background: var(--k-shell-selected); }
+/* Group chat header: who answers untagged messages. */
+live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill {
+  display: inline-flex; align-items: center; min-block-size: 28px; margin-inline-start: 10px; padding: 0 12px;
+  border: 0; border-radius: 999px; font: 600 12px var(--k-shell-font); color: var(--k-shell-ink);
+  background: var(--k-shell-subtle); cursor: pointer; vertical-align: middle;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill:hover { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill[data-lead-unset] { color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-lead-pill, .dashboard__dm-bar-close):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
