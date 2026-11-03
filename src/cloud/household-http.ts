@@ -15,9 +15,10 @@ export class ServerError extends Error {
   }
 }
 
-export function householdWireRequest(invocation: HouseholdToolInvocation): { tool: string; arguments: Record<string, unknown> } {
+export function householdWireRequest(invocation: HouseholdToolInvocation & { wire?: { tool: string; arguments: Record<string, unknown> } }): { tool: string; arguments: Record<string, unknown> } {
   const args: Record<string, unknown> = { seat: LOCAL_HOUSEHOLD_SEAT,
     ...(invocation.request_id ? { request_id: invocation.request_id } : {}) };
+  if (invocation.wire) return { tool: invocation.wire.tool, arguments: { ...invocation.wire.arguments, ...args } };
   if ('query' in invocation) {
     const { kind, ...query } = invocation.query;
     return { tool: kind === 'object_read' && invocation.objectTypes.length === 1 && invocation.objectTypes[0] === 'file' ? 'file_read' : kind,

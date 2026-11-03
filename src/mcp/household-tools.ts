@@ -3,20 +3,20 @@
  * The registry owns admission/schema/annotations; the authenticated host supplies the
  * transport and protected attachment channel.
  */
-import { HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArguments,
+import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArguments,
   type HouseholdToolHostContext } from '../protocol/household-tool-registry.js';
 import { HouseholdObjectClient, type HouseholdClientResult, type HouseholdPreparedRequest } from '../cloud/household-objects.js';
 import { MCP_RESULT_MAX_BYTES } from './tools.js';
 import { householdRefusalNextStep } from '../protocol/household-next-steps.js';
 import { householdReadProvenance, withReadProvenance } from '../protocol/read-provenance.js';
 
-export const HOUSEHOLD_MCP_TOOLS: typeof HOUSEHOLD_TOOLS = HOUSEHOLD_TOOLS;
+export const HOUSEHOLD_MCP_TOOLS = [...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS];
 export interface HouseholdMcpResult {
   isError: boolean;
   content: readonly { type: 'text'; text: string }[];
 }
 export interface HouseholdMcpTools {
-  tools: typeof HOUSEHOLD_TOOLS;
+  tools: typeof HOUSEHOLD_MCP_TOOLS;
   prepare(name: string, input: unknown, host?: Pick<HouseholdToolHostContext, 'upload'>): HouseholdPreparedRequest;
   call(name: string, input: unknown, host?: Pick<HouseholdToolHostContext, 'upload'>, options?: { signal?: AbortSignal }): Promise<HouseholdMcpResult>;
   retry(request: HouseholdPreparedRequest, options?: { signal?: AbortSignal }): Promise<HouseholdMcpResult>;

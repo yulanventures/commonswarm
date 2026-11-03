@@ -4,8 +4,10 @@
  * to that host's protected attachment channel, never a model-visible URL.
  */
 import {
-  householdToolInvocation, type HouseholdToolHostContext, type HouseholdToolInvocation,
+  HOUSEHOLD_DEFINITION_TOOL_REGISTRY, householdToolInvocation, validateHouseholdToolArguments,
+  type HouseholdToolHostContext, type HouseholdToolInvocation,
 } from '../protocol/household-tool-registry.js';
+import { HOUSEHOLD_DEFINITION_TERM_MAX, HOUSEHOLD_DEFINITION_TEXT_MAX } from '../protocol/household-object-events.js';
 import type {
   HouseholdContent, HouseholdObjectType, HouseholdRevisionRef,
 } from '../protocol/household-object-events.js';
@@ -43,7 +45,23 @@ export type HouseholdClientResult =
       object_id: string; kind: HouseholdObjectType; title: string; revision: HouseholdRevisionRef;
     }[]; next_offset: number | null }
   | { status: 'ok'; kind: 'object_history'; revisions: readonly (HouseholdRevisionView & { live: boolean })[]; next_offset: number | null }
-  | { status: 'ok'; kind: 'object_read'; revision: HouseholdRevisionView; live: boolean; content?: HouseholdContent };
+  | { status: 'ok'; kind: 'object_read'; revision: HouseholdRevisionView; live: boolean; content?: HouseholdContent }
+  | { status: 'ok'; kind: 'definitions_search'; definitions: readonly HouseholdDefinitionSummary[]; next_offset: number | null }
+  | { status: 'ok'; kind: 'definition_read'; object_id: string; current: HouseholdDefinitionVersion;
+      certified: HouseholdDefinitionCertifiedVersion | null; proposal_pending: boolean };
+
+export interface HouseholdDefinitionCertificationView { revision: HouseholdRevisionRef; certified_by: string; certified_at: number }
+export interface HouseholdDefinitionSummary { object_id: string; term: string; revision: HouseholdRevisionRef;
+  certification: HouseholdDefinitionCertificationView | null }
+interface HouseholdDefinitionText { term: string; meaning: string; source: string }
+export interface HouseholdDefinitionVersion extends HouseholdDefinitionText { revision: HouseholdRevisionRef;
+  author: { user_id: string; principal_id: string | null }; occurred_at_server: number }
+export interface HouseholdDefinitionCertifiedVersion extends HouseholdDefinitionText, HouseholdDefinitionCertificationView {}
+
+/** Definition tools travel under their own name and arguments: their core query
+ * is a whole-set read that the server pages, filters and sorts itself. */
+const DEFINITION_TOOLS = new Set<string>(HOUSEHOLD_DEFINITION_TOOL_REGISTRY.map(row => row.name));
+export type HouseholdClientInvocation = HouseholdToolInvocation & { wire?: { tool: string; arguments: Record<string, unknown> } };
 
 export interface HouseholdPreparedRequest {
   readonly workspace_id: string;
@@ -66,9 +84,10 @@ export class HouseholdObjectClient {
   constructor(private readonly transport: HouseholdTransport, readonly workspace_id: string) {}
 
   prepare(tool: string, input: unknown, host: Pick<HouseholdToolHostContext, 'upload'> = {}): HouseholdPreparedRequest {
-    const invocation = householdToolInvocation(tool, structuredClone(input), {
+    const invocation: HouseholdClientInvocation = householdToolInvocation(tool, structuredClone(input), {
       ...host, workspace_id: this.workspace_id,
     });
+    if (DEFINITION_TOOLS.has(tool)) invocation.wire = { tool, arguments: validateHouseholdToolArguments(tool, structuredClone(input)) };
     const snapshot = structuredClone(invocation);
     let last: HouseholdClientResult | undefined;
     let running: Promise<HouseholdClientResult> | undefined;
@@ -149,6 +168,57 @@ function revisionView(value: unknown, workspace: string, object?: string): House
     author: { user_id: author.user_id, principal_id: author.principal_id, run_id: author.run_id },
     occurred_at_server: data.occurred_at_server, command_id: data.command_id };
 }
+function definitionText(value: Row | null, termMin = 1): HouseholdDefinitionText | null {
+  const length = (v: unknown, min: number, max: number) => text(v) && v.length >= min && Array.from(v).length <= max;
+  return value && length(value.term, termMin, HOUSEHOLD_DEFINITION_TERM_MAX) && length(value.meaning, 1, HOUSEHOLD_DEFINITION_TEXT_MAX)
+    && length(value.source, 0, HOUSEHOLD_DEFINITION_TEXT_MAX)
+    ? { term: value.term as string, meaning: value.meaning as string, source: value.source as string } : null;
+}
+function certification(value: unknown, workspace: string, object: string): HouseholdDefinitionCertificationView | null {
+  const data = row(value);
+  const ref = data ? revision(data.revision, workspace, object) : null;
+  return data && ref && id(data.certified_by) && typeof data.certified_at === 'number' && Number.isFinite(data.certified_at)
+    ? { revision: ref, certified_by: data.certified_by, certified_at: data.certified_at } : null;
+}
+/** Closed projections of definitions_search and definition_read. */
+function decodeDefinitionRead(data: Row, invocation: HouseholdClientInvocation): HouseholdClientResult | null {
+  const tool = invocation.wire?.tool;
+  const workspace = invocation.workspace_id;
+  if (tool === 'definitions_search') {
+    if (!Array.isArray(data.definitions) || !page(data.next_offset) || data.definitions.length > 100) return null;
+    const definitions: HouseholdDefinitionSummary[] = [];
+    for (const value of data.definitions) {
+      const entry = row(value);
+      if (!entry || !id(entry.object_id) || !text(entry.term) || !entry.term) return null;
+      const ref = revision(entry.revision, workspace, entry.object_id);
+      const certified = entry.certification === null ? null : certification(entry.certification, workspace, entry.object_id);
+      if (!ref || (entry.certification !== null && !certified)) return null;
+      definitions.push({ object_id: entry.object_id, term: entry.term, revision: ref, certification: certified });
+    }
+    return { status: 'ok', kind: 'definitions_search', definitions, next_offset: data.next_offset };
+  }
+  if (tool !== 'definition_read' || !id(data.object_id) || typeof data.proposal_pending !== 'boolean') return null;
+  const objectId = data.object_id;
+  const currentRow = row(data.current);
+  const current = definitionText(currentRow);
+  const currentRef = currentRow ? revision(currentRow.revision, workspace, objectId) : null;
+  const author = row(currentRow?.author);
+  if (!current || !currentRef || !author || !id(author.user_id) || !(author.principal_id === null || id(author.principal_id))
+    || typeof currentRow!.occurred_at_server !== 'number') return null;
+  let certified: HouseholdDefinitionCertifiedVersion | null = null;
+  if (data.certified !== null) {
+    const pinned = row(data.certified);
+    const fields = definitionText(pinned);
+    const stamp = certification(pinned, workspace, objectId);
+    if (!fields || !stamp) return null;
+    certified = { ...fields, ...stamp };
+  }
+  return { status: 'ok', kind: 'definition_read', object_id: objectId,
+    current: { ...current, revision: currentRef, author: { user_id: author.user_id, principal_id: author.principal_id as string | null },
+      occurred_at_server: currentRow!.occurred_at_server as number },
+    certified, proposal_pending: data.proposal_pending };
+}
+
 function unknown(invocation: HouseholdToolInvocation, reason: Extract<HouseholdClientResult, { status: 'unknown' }>['reason']): HouseholdClientResult {
   return { status: 'unknown', ...(invocation.request_id ? { request_id: invocation.request_id } : {}), reason };
 }
@@ -182,6 +252,9 @@ function decodeResponse(value: unknown, invocation: HouseholdToolInvocation): Ho
       if (current && id(data.draft_id)) return { status: 'conflict', request_id, object_id: data.object_id, current, draft_id: data.draft_id };
     }
     return invalid();
+  }
+  if ((invocation as HouseholdClientInvocation).wire) {
+    return data.status === 'ok' ? decodeDefinitionRead(data, invocation as HouseholdClientInvocation) ?? invalid() : invalid();
   }
   const query = invocation.query;
   if (data.status !== 'ok' || data.kind !== query.kind) return invalid();

@@ -529,6 +529,21 @@ export declare const HOUSEHOLD_TOOLS: {
         openWorldHint: boolean;
     };
 }[];
+/** Definition tools for both MCP catalogs. Agents read certified terms and may
+ * propose; certifying stays a human-only surface command. */
+export declare const HOUSEHOLD_DEFINITION_TOOLS: {
+    name: "definitions_search" | "definition_read" | "definition_create" | "definition_update";
+    title: string;
+    description: string;
+    inputSchema: Schema;
+    annotations: {
+        title: string;
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+}[];
 /** One hosted catalog/set for gates and pins. Existing to-do entries are reused;
  * only this surface narrows comment targets to to-dos and lists. */
 export declare const HOSTED_TODO_LIST_TOOLS: {

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { HOSTED_TODO_LIST_TOOLS, HOUSEHOLD_TOOLS, householdToolInvocation, validateHouseholdHumanCommand,
+import { HOSTED_TODO_LIST_TOOLS, HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, householdToolInvocation, validateHouseholdHumanCommand,
   validateHouseholdToolArguments } from '../src/protocol/household-tool-registry.js';
 import { emptyHouseholdObjectState, decideHouseholdObject, reduceHouseholdObjectStream, readHouseholdObjects,
   validDefinition, type HouseholdObjectCommand, type HouseholdVerifiedContent } from '../src/protocol/household-objects.js';
@@ -122,12 +122,13 @@ test('certify refuses other kinds and readers; replay rejects a certification by
   assert.throws(() => reduceHouseholdObjectStream([forged], state), /invalid certification/);
 });
 
-test('the certify surface command is closed and binds its revision; catalogs are unchanged', () => {
+test('the certify surface command is closed and binds its revision; no catalog offers certification', () => {
   const revision = { workspace_id: workspace, object_id: 'spend', token: 'revision_000000000000000000000001' };
   assert.deepEqual(validateHouseholdHumanCommand({ kind: 'household_definition_certify', object_id: 'spend', revision }),
     { kind: 'household_definition_certify', object_id: 'spend', revision });
   assert.throws(() => validateHouseholdHumanCommand({ kind: 'household_definition_certify', object_id: 'other', revision }));
   assert.throws(() => validateHouseholdHumanCommand({ kind: 'household_definition_certify', object_id: 'spend', revision, extra: 1 }));
-  const names = [...HOUSEHOLD_TOOLS, ...HOSTED_TODO_LIST_TOOLS].map(tool => tool.name);
-  for (const name of ['definitions_search', 'definition_read', 'definition_create', 'definition_update']) assert.ok(!names.includes(name));
+  const names = [...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS, ...HOSTED_TODO_LIST_TOOLS].map(tool => tool.name);
+  for (const name of ['definitions_search', 'definition_read', 'definition_create', 'definition_update']) assert.ok(names.includes(name));
+  assert.ok(!names.some(name => /certif/i.test(name)));
 });

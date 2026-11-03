@@ -43,7 +43,7 @@ const source = (fields: { kind: string; id: unknown } & Omit<Partial<ReadProvena
 const present = (list: (ReadProvenanceSource | null)[]) => list.filter((s): s is ReadProvenanceSource => s !== null);
 
 /** Echo only the selecting arguments, never the seat, request id or content. */
-const QUERY_ARGUMENTS = ['object_id', 'todo_id', 'principal_id', 'scope', 'section', 'assignee', 'target', 'offset', 'limit', 'comment_offset'] as const;
+const QUERY_ARGUMENTS = ['query', 'object_id', 'todo_id', 'principal_id', 'scope', 'section', 'assignee', 'target', 'offset', 'limit', 'comment_offset'] as const;
 function query(tool: string, args: Row): Record<string, unknown> {
   const out: Record<string, unknown> = { tool };
   for (const key of QUERY_ARGUMENTS) if (Object.hasOwn(args, key)) out[key] = args[key];
@@ -82,6 +82,17 @@ export function householdReadProvenance(tool: string, args: Record<string, unkno
     const revisions = rows(result.revisions);
     return { sources: present(revisions.map(r => revisionSource(r, args.object_id))), query: q,
       row_count: revisions.length, truncated: more(result.next_offset) };
+  }
+  if (tool === 'definitions_search') {
+    const definitions = rows(result.definitions);
+    return { sources: present(definitions.map(d => source({ kind: 'definition', id: d.object_id, title: title(d.term),
+      revision: str(row(d.revision)?.token) }))), query: q, row_count: definitions.length, truncated: more(result.next_offset) };
+  }
+  if (tool === 'definition_read') {
+    // Cite the certified revision agents answer from; an uncertified definition cites its current one.
+    const version = row(result.certified) ?? row(result.current);
+    return { sources: present([version ? source({ kind: 'definition', id: result.object_id, title: title(version.term),
+      revision: str(row(version.revision)?.token) }) : null]), query: q, row_count: version ? 1 : 0, truncated: false };
   }
   const todo = (t: Row) => source({ kind: 'todo', id: t.todo_id, title: title(t.title) });
   const comment = (c: Row) => source({ kind: 'comment', id: c.comment_id });
