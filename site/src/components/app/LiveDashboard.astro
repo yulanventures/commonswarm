@@ -10646,7 +10646,7 @@ import "../../styles/kylon-command-palette.css";
         if (!dialog || !form || !fresh || !codeRow || !code || !save || !cancel || !status || !session || sampleMode) return;
         passwordGuard.open(session.user.id);
         form.reset(); clear();
-        save.hidden = false; save.disabled = false; cancel.textContent = "Cancel";
+        save.hidden = false; save.disabled = false; save.removeAttribute("aria-busy"); cancel.textContent = "Cancel";
         dialog.showModal(); fresh.focus();
       });
       cancel?.addEventListener("click", () => dialog?.close());
@@ -10682,7 +10682,10 @@ import "../../styles/kylon-command-palette.css";
           if (!passwordGuard.live(ticket, session?.user.id)) return;
           if (error instanceof PasswordCodeRequired) await sendCode(ticket);
           else status.textContent = readableError(error);
-        } finally { save.disabled = false; save.removeAttribute("aria-busy"); }
+        } finally {
+          // A stale Save never touches a reopened dialog's button; open() resets it for a new ticket.
+          if (passwordGuard.live(ticket, session?.user.id)) { save.disabled = false; save.removeAttribute("aria-busy"); }
+        }
       });
     }
     one<HTMLButtonElement>("[data-connected-apps-close]")?.addEventListener("click", () => {

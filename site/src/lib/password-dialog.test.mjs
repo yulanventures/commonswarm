@@ -47,4 +47,6 @@ test("the dashboard closes the dialog on auth events and sends every call with t
   assert.doesNotMatch(source, /setPassword\(fresh\.value|sendPasswordCode\(\)/, "no call may use the SDK's current session");
   // After each awaited call the dialog re-checks its ticket before touching the page.
   assert.ok((source.match(/if \(!passwordGuard\.live\(ticket, session\?\.user\.id\)\) return;/g) ?? []).length >= 4);
+  // The submit cleanup is guarded too, so a stale Save cannot re-enable a reopened dialog's button.
+  assert.match(source, /finally \{\s*\/\/[^\n]*\n\s*if \(passwordGuard\.live\(ticket, session\?\.user\.id\)\) \{ save\.disabled = false; save\.removeAttribute\("aria-busy"\); \}/);
 });
