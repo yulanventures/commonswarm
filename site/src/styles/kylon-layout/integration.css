@@ -370,7 +370,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new { inline-size: 44px; }
 }
 @media (width > 52rem) and (width <= 64rem) {
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: 44px; min-block-size: 44px; }
+  /* 45px with its 1px bottom border, so the products inside get a full 44px (they measured 43). */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: auto; min-block-size: 45px; }
 }
 
 /* On short landscape screens, reserve bounded tracks for both the Wiki index and product rail. */
