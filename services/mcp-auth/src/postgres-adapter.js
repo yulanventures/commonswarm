@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 
 import { errors } from "oidc-provider";
 import { adminTransactionContext, adminQuery, joinAdminTransaction, AdminTransactionError } from "./admin-transaction.js";
@@ -24,8 +24,44 @@ function assertIdentifier(value) {
   return value;
 }
 
+/** Payload field on a consumed hosted RefreshToken that holds its rotation's sealed response. */
+export const ROTATION_REPLAY_FIELD = "cs_rotation_replay";
+/** Seconds after a hosted rotation in which an exact repeat of the predecessor gets the SAME
+ *  response back (GameMaster, 2026-11-03: a 200 lost in transit, retried 43s later). One lineage:
+ *  nothing new is minted. Outside the window, or once the successor is used, the repeat reaches
+ *  oidc-provider's reuse path and the family is retired as before. */
+export const HOSTED_ROTATION_REPLAY_SECONDS = 300;
+
+/* The sealing key derives from the presented predecessor itself, so the database (which holds only
+ * sha256 lookups of tokens) cannot open a sealed response, and no new server secret exists. */
+function replayKey(predecessor, salt) {
+  return Buffer.from(hkdfSync("sha256", Buffer.from(predecessor, "utf8"), salt, "commonswarm hosted refresh replay v1", 32));
+}
+function replayAad(predecessor, clientId, fingerprint) {
+  return Buffer.from(`${lookupHash(predecessor)}\n${clientId}\n${fingerprint}`, "utf8");
+}
+export function sealRotation(predecessor, clientId, fingerprint, body) {
+  const salt = randomBytes(16), iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", replayKey(predecessor, salt), iv);
+  cipher.setAAD(replayAad(predecessor, clientId, fingerprint));
+  const ct = Buffer.concat([cipher.update(JSON.stringify(body), "utf8"), cipher.final()]);
+  return { v: 1, salt: salt.toString("base64url"), iv: iv.toString("base64url"),
+    tag: cipher.getAuthTag().toString("base64url"), ct: ct.toString("base64url") };
+}
+export function openRotation(predecessor, clientId, fingerprint, sealed) {
+  if (sealed?.v !== 1) return undefined;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", replayKey(predecessor, Buffer.from(sealed.salt, "base64url")),
+      Buffer.from(sealed.iv, "base64url"));
+    decipher.setAAD(replayAad(predecessor, clientId, fingerprint));
+    decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(sealed.ct, "base64url")), decipher.final()]).toString("utf8"));
+  } catch { return undefined; }
+}
+
 function storedPayload(row, recoveredJti) {
   const payload = structuredClone(row.payload);
+  delete payload[ROTATION_REPLAY_FIELD];
   if (recoveredJti !== undefined && payload.jti === undefined) payload.jti = recoveredJti;
   if (row.consumed_at !== null) {
     payload.consumed = Math.floor(new Date(row.consumed_at).getTime() / 1000);
@@ -57,7 +93,11 @@ async function transaction(pool, callback, connection) {
  * the same transaction advisory lock, and a durable tombstone wins before an
  * artifact can be (re)inserted.
  */
-export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", beforeConsume } = {}) {
+export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", beforeConsume,
+  rotationReplaySeconds = HOSTED_ROTATION_REPLAY_SECONDS } = {}) {
+  if (!Number.isSafeInteger(rotationReplaySeconds) || rotationReplaySeconds < 0 || rotationReplaySeconds > 600) {
+    throw new TypeError("rotationReplaySeconds must be an integer from 0 to 600");
+  }
   if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
     throw new TypeError("a pg-compatible pool is required");
   }
@@ -263,7 +303,70 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     });
   }
 
-  return (model) => ({
+  /* Under the family locks: the consumed hosted predecessor, its live unused successor in the same
+   * family, and an active policy. Returns the locked predecessor row or undefined. */
+  async function lockedRotation(client, predecessor, clientId) {
+    const model = "RefreshToken";
+    const initial = (await client.query(`SELECT payload FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2`,
+      [model,lookupHash(predecessor)])).rows[0];
+    if (!initial || initial.payload?.clientId !== clientId) return undefined;
+    await requireBoundContext(model,predecessor,initial.payload,client);
+    const envelope = await lockFamily(client,model,predecessor,initial.payload);
+    if (!envelope.binding || !envelope.policy?.active || envelope.binding.client_id !== clientId) return undefined;
+    const row = (await client.query(`SELECT *, consumed_at > clock_timestamp() - make_interval(secs => $3) AS within
+      FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`,
+      [model,lookupHash(predecessor),rotationReplaySeconds])).rows[0];
+    if (!row || row.consumed_at === null || row.within !== true || row.grant_id !== envelope.family) return undefined;
+    assertHostedPayload(model,predecessor,row.payload,envelope.binding);
+    if ((await client.query(`SELECT 1 FROM ${tombstones} WHERE grant_id=$1`, [envelope.family])).rowCount) return undefined;
+    return { row, envelope };
+  }
+  async function successorLive(client, successorHash, family) {
+    return (await client.query(`SELECT 1 FROM ${artifacts} WHERE model='RefreshToken' AND artifact_id_hash=$1
+      AND grant_id=$2 AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())`,
+      [successorHash, family])).rowCount === 1;
+  }
+
+  const factory = (model) => ({
+    /** After a hosted rotation answered 200: seal that exact response onto the consumed predecessor. */
+    async rememberHostedRotation({ predecessor, successor, clientId, fingerprint, body }) {
+      if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return false;
+      if (typeof predecessor !== "string" || typeof successor !== "string" || predecessor === successor ||
+          typeof fingerprint !== "string" || fingerprint.length === 0) return false;
+      return transaction(pool, async client => {
+        const locked = await lockedRotation(client, predecessor, clientId);
+        if (!locked || Object.hasOwn(locked.row.payload, ROTATION_REPLAY_FIELD)) return false;
+        if (!await successorLive(client, lookupHash(successor), locked.envelope.family)) return false;
+        // The fingerprint is of the request the provider just validated and answered (grant_type,
+        // client_id, resource, scope); only an identical request may receive this response again.
+        const sealed = { ...sealRotation(predecessor, clientId, fingerprint, body), successor: lookupHash(successor),
+          fingerprint, at: Math.floor(Date.now() / 1000) };
+        const updated = await client.query(`UPDATE ${artifacts} SET payload=payload || jsonb_build_object($3::text,$4::jsonb),
+            updated_at=clock_timestamp()
+          WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NOT NULL AND NOT (payload ? $3::text)`,
+          [model,lookupHash(predecessor),ROTATION_REPLAY_FIELD,JSON.stringify(sealed)]);
+        return updated.rowCount === 1;
+      });
+    },
+
+    /** An exact repeat inside the window: the same sealed response, while its successor is unused. */
+    async replayHostedRotation({ predecessor, clientId, fingerprint }) {
+      if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return undefined;
+      if (typeof predecessor !== "string" || typeof clientId !== "string" || typeof fingerprint !== "string") return undefined;
+      return transaction(pool, async client => {
+        const locked = await lockedRotation(client, predecessor, clientId);
+        const sealed = locked?.row.payload[ROTATION_REPLAY_FIELD];
+        if (!sealed || typeof sealed.successor !== "string" || sealed.fingerprint !== fingerprint) return undefined;
+        if (!await successorLive(client, sealed.successor, locked.envelope.family)) return undefined;
+        const body = openRotation(predecessor, clientId, fingerprint, sealed);
+        if (!body || typeof body.refresh_token !== "string" || lookupHash(body.refresh_token) !== sealed.successor) return undefined;
+        if (Number.isSafeInteger(body.expires_in) && Number.isSafeInteger(sealed.at)) {
+          body.expires_in = Math.max(0, body.expires_in - (Math.floor(Date.now() / 1000) - sealed.at));
+        }
+        return body;
+      });
+    },
+
     async proveHostedRefreshToken(predecessor, clientId) {
       if (model !== "RefreshToken" || adminTransactionContext(false)) return undefined;
       const id = predecessor.jti;
@@ -484,4 +587,5 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       });
     },
   });
+  return factory;
 }

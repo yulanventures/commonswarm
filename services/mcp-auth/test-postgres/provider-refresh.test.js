@@ -8,7 +8,7 @@ import { Pool } from "pg";
 
 import { createAdminHttpHandler } from "../src/admin-http.js";
 import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
-import { createLogger } from "../src/logger.js";
+import { createLogger, subscribeProviderErrors } from "../src/logger.js";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
 
@@ -34,7 +34,7 @@ function metadata(clientId) {
   };
 }
 
-async function startProvider(clientId, beforeConsume, database = pool, { permanent = false, refreshTokenTtlSeconds } = {}) {
+async function startProvider(clientId, beforeConsume, database = pool, { permanent = false, refreshTokenTtlSeconds, rotationReplaySeconds } = {}) {
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), stream = randomUUID();
   await database.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)",
     [owner, `${owner}@example.test`]);
@@ -45,7 +45,7 @@ async function startProvider(clientId, beforeConsume, database = pool, { permane
     [workspace, owner]);
   await database.query("INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES($1,$2,'workspace')",
     [stream, workspace]);
-  const adapter = createPostgresAdapter(database, { beforeConsume });
+  const adapter = createPostgresAdapter(database, { beforeConsume, ...(rotationReplaySeconds === undefined ? {} : { rotationReplaySeconds }) });
   const provider = await createMcpProvider({
     adapter,
     ...(refreshTokenTtlSeconds ? { refreshTokenTtlSeconds } : {}),
@@ -255,6 +255,92 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
     await pool.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE payload->>'clientId' = $1", [clientId]);
     await server.cleanup();
   }
+});
+
+async function hostedSession(options = {}) {
+  const clientId = `https://postgres-replay-${randomUUID()}.example/oauth-client.json`;
+  const server = await startProvider(clientId, undefined, pool, { permanent: true, ...options });
+  subscribeProviderErrors(server.provider, createLogger(line => server.logs.push(JSON.parse(line))));
+  const code = await authorizeCode(server, clientId);
+  const initial = await tokenRequest(server, { client_id: clientId, code, code_verifier: verifier,
+    grant_type: "authorization_code", redirect_uri: redirectUri, resource: RESOURCE });
+  assert.equal(initial.status, 200);
+  const grantId = decodeJwt(initial.body.access_token).grant_id;
+  return {
+    server, clientId, initial,
+    refresh: (token) => tokenRequest(server, { client_id: clientId, grant_type: "refresh_token", refresh_token: token, resource: RESOURCE }),
+    tombstoned: async () => (await pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1", [grantId])).rows[0].n,
+    async close() {
+      await server.close();
+      await pool.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE payload->>'clientId' = $1", [clientId]);
+      await server.cleanup();
+    },
+  };
+}
+
+test("hosted refresh repeat inside the window returns the SAME rotation result; once the successor is used, a repeat retires the family", async () => {
+  const session = await hostedSession();
+  try {
+    const R0 = session.initial.body.refresh_token;
+    const first = await session.refresh(R0);
+    assert.equal(first.status, 200, "ordinary rotation");
+    // GameMaster: the 200 was lost in transit, so the client repeats R0.
+    for (const attempt of [1, 2]) {
+      const repeat = await session.refresh(R0);
+      assert.equal(repeat.status, 200, `repeat ${attempt}: ${JSON.stringify(repeat.body)}`);
+      assert.equal(repeat.body.refresh_token, first.body.refresh_token, "one lineage: the same successor, nothing new minted");
+      assert.equal(repeat.body.access_token, first.body.access_token);
+      assert.ok(repeat.body.expires_in <= first.body.expires_in);
+    }
+    assert.equal(await session.tombstoned(), 0);
+    const stored = await pool.query(`SELECT payload FROM commonswarm_oauth.provider_artifacts WHERE model='RefreshToken' AND artifact_id_hash=$1`,
+      [createHash("sha256").update(R0).digest("base64url")]);
+    const sealed = JSON.stringify(stored.rows[0].payload);
+    assert.ok(!sealed.includes(first.body.refresh_token) && !sealed.includes(first.body.access_token), "no token is stored in the clear");
+    assert.ok(session.server.logs.some(line => line.event === "grant.replayed" && line.grant_type === "refresh_token"));
+
+    const next = await session.refresh(first.body.refresh_token);
+    assert.equal(next.status, 200, "the single successor keeps rotating");
+    // The successor is used: a repeat of R0 is now reuse, and today's family containment applies.
+    const stale = await session.refresh(R0);
+    assert.equal(stale.status, 400);
+    assert.equal(stale.body.error, "invalid_grant");
+    assert.equal(await session.tombstoned(), 1);
+    assert.equal((await session.refresh(next.body.refresh_token)).status, 400, "the whole family is retired");
+  } finally { await session.close(); }
+});
+
+test("the replay is bound to the whole validated request: a changed scope or resource never gets the stored pair", async () => {
+  for (const [label, change] of [["scope", { scope: "openid" }], ["resource", { resource: "https://other.example/mcp" }]]) {
+    const session = await hostedSession();
+    try {
+      const R0 = session.initial.body.refresh_token;
+      const first = await session.refresh(R0);
+      assert.equal(first.status, 200);
+      const same = await session.refresh(R0);
+      assert.equal(same.status, 200, `${label}: the unchanged repeat still gets the same pair`);
+      assert.equal(same.body.refresh_token, first.body.refresh_token);
+      const changed = await tokenRequest(session.server, { client_id: session.clientId, grant_type: "refresh_token",
+        refresh_token: R0, resource: RESOURCE, ...change });
+      assert.equal(changed.status, 400, `${label}: ${JSON.stringify(changed.body)}`);
+      assert.equal(changed.body.refresh_token, undefined, `${label}: no stored token is returned`);
+      assert.equal(changed.body.access_token, undefined);
+    } finally { await session.close(); }
+  }
+});
+
+test("a zero replay window keeps the strict reuse fence", async () => {
+  const session = await hostedSession({ rotationReplaySeconds: 0 });
+  try {
+    const R0 = session.initial.body.refresh_token;
+    const first = await session.refresh(R0);
+    assert.equal(first.status, 200);
+    const repeat = await session.refresh(R0);
+    assert.equal(repeat.status, 400);
+    assert.equal(repeat.body.error, "invalid_grant");
+    assert.equal(await session.tombstoned(), 1);
+    assert.equal((await session.refresh(first.body.refresh_token)).status, 400);
+  } finally { await session.close(); }
 });
 
 // The shared fixture copies the actual application DDL into empty schemas;

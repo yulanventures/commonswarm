@@ -4,7 +4,7 @@ import { AdminConsentError, adminDigest, resolveAdminClientMetadata } from "./ad
 import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
 import { bindProviderAdminNonceStore } from "./provider-admin-pin.js";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { generateKeyPair, exportJWK } from "jose";
 import Provider, { errors, interactionPolicy } from "oidc-provider";
 
@@ -35,6 +35,34 @@ async function signingJwk() {
     kid: "mcp-auth-spike-es256",
     use: "sig",
   };
+}
+
+const TOKEN_BODY_LIMIT = 56 * 1024;
+const REPLAY_PARAMS = new Set(["grant_type", "refresh_token", "client_id", "resource", "scope"]);
+/** The only refresh request shape eligible for replay: each supported parameter at most once,
+ *  nothing else, grant_type refresh_token. The fingerprint covers every parameter except the token. */
+export function replayShape(params) {
+  const seen = new Map();
+  for (const [key, value] of params) {
+    if (!REPLAY_PARAMS.has(key) || seen.has(key)) return undefined;
+    seen.set(key, value);
+  }
+  if (seen.get("grant_type") !== "refresh_token" || !seen.get("refresh_token") || !seen.get("client_id")) return undefined;
+  const canonical = JSON.stringify(["grant_type", "client_id", "resource", "scope"].map(key => [key, seen.get(key) ?? null]));
+  return { refreshToken: seen.get("refresh_token"), clientId: seen.get("client_id"), resource: seen.get("resource"),
+    fingerprint: createHash("sha256").update(canonical).digest("base64url") };
+}
+/** Drain a token request body within oidc-provider's own limit; it then parses ctx.req.body. */
+async function readTokenBody(req, length) {
+  if (length !== undefined && length > TOKEN_BODY_LIMIT) throw new errors.InvalidRequest("failed to parse the request body");
+  const chunks = [];
+  let received = 0;
+  for await (const chunk of req) {
+    received += chunk.length;
+    if (received > TOKEN_BODY_LIMIT) throw new errors.InvalidRequest("failed to parse the request body");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, received).toString("utf8");
 }
 
 export async function createMcpProvider({
@@ -315,6 +343,41 @@ export async function createMcpProvider({
   provider.proxy = true;
   // RFC 7591 errors are JSON regardless of Accept. Capture the typed error at
   // the provider boundary; never serialize an exception or reflected URI value.
+  // Hosted refresh replay (GameMaster, 2026-11-03): an exact repeat of a just-rotated hosted refresh
+  // token gets the SAME response back instead of oidc-provider's reuse revoke. Nothing new is minted;
+  // the adapter decides eligibility under the family locks and returns nothing otherwise.
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== "POST" || ctx.path !== "/token" || !ctx.is("application/x-www-form-urlencoded") ||
+        typeof adapter("RefreshToken").replayHostedRotation !== "function") return next();
+    const raw = await readTokenBody(ctx.req, ctx.request.length);
+    ctx.req.body = raw; // oidc-provider's body parser reads this once the stream is drained.
+    const shape = replayShape(new URLSearchParams(raw));
+    const presented = [shape?.refreshToken];
+    const clientId = [shape?.clientId];
+    const eligible = shape !== undefined && shape.resource !== ADMIN_RESOURCE && !ctx.get("authorization") && !ctx.get("dpop");
+    if (eligible) {
+      // Any doubt falls through to the provider's ordinary refresh (and its reuse fence). The stored
+      // response is bound to the full request fingerprint, so a changed scope or resource never matches.
+      const replayed = await adapter("RefreshToken").replayHostedRotation({ predecessor: presented[0], clientId: clientId[0],
+        fingerprint: shape.fingerprint }).catch(() => undefined);
+      if (replayed) {
+        ctx.status = 200;
+        ctx.set("cache-control", "no-store");
+        ctx.set("pragma", "no-cache");
+        ctx.body = replayed;
+        ctx.state.replayedClientId = clientId[0];
+        provider.emit("grant.replayed", ctx);
+        return;
+      }
+    }
+    await next();
+    if (eligible && ctx.status === 200 && typeof ctx.body?.refresh_token === "string" &&
+        ctx.body.refresh_token !== presented[0]) {
+      // Best effort: a failure only means a later repeat takes the ordinary reuse path.
+      await adapter("RefreshToken").rememberHostedRotation({ predecessor: presented[0],
+        successor: ctx.body.refresh_token, clientId: clientId[0], fingerprint: shape.fingerprint, body: ctx.body }).catch(() => false);
+    }
+  });
   for (const event of ["registration_create.error", "server_error"]) {
     provider.on(event, (ctx, error) => {
       if (ctx.path === "/reg") ctx.state.registrationFailure = registrationErrorResponse(error);
