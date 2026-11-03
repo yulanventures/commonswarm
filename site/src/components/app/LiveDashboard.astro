@@ -290,6 +290,7 @@ import "../../styles/kylon-command-palette.css";
               </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-account-agents-open>Your agents</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-password-open hidden>Password</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>Sign out other devices</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
@@ -1022,6 +1023,31 @@ import "../../styles/kylon-command-palette.css";
   </dialog>
 
   <dialog
+    class="dashboard__connected-apps-dialog dashboard__password-dialog"
+    data-password-dialog
+    aria-labelledby="dashboard-password-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-password-title">Password</h2>
+      <button type="button" data-password-close aria-label="Close Password">×</button>
+    </header>
+    <form class="dashboard__password-form" data-password-form novalidate>
+      <label for="dashboard-new-password">New password</label>
+      <input id="dashboard-new-password" name="new-password" type="password" autocomplete="new-password" minlength="12" required data-password-new />
+      <div data-password-code-row hidden>
+        <label for="dashboard-password-code">Code from your email</label>
+        <input id="dashboard-password-code" name="one-time-code" type="text" inputmode="numeric" autocomplete="one-time-code" data-password-code />
+        <button class="dashboard__text-button" type="button" data-password-resend>Send a new code</button>
+      </div>
+      <p class="dashboard__connected-apps-status" data-password-status role="status" aria-live="polite"></p>
+      <div class="dashboard__signout-others-actions">
+        <button class="dashboard__button" type="submit" data-password-save>Save password</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-password-cancel>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog
     class="dashboard__connected-apps-dialog dashboard__signout-others-dialog"
     data-signout-others-dialog
     role="alertdialog"
@@ -1255,6 +1281,10 @@ import "../../styles/kylon-command-palette.css";
     signInWithProvider,
     signOut,
     signOutOtherDevices,
+    setPassword,
+    sendPasswordCode,
+    PasswordCodeRequired,
+    PASSWORD_MIN_LENGTH,
     removeWorkspaceMember,
     revokeAgentPrincipal,
     addAgentToWorkspace,
@@ -2094,6 +2124,7 @@ import "../../styles/kylon-command-palette.css";
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
         yourAgents: !!session,
+        password: !!session && !sampleMode,
         signOutOthers: !!session && !sampleMode,
         signOut: !!signOut && !signOut.hidden,
       };
@@ -2104,6 +2135,7 @@ import "../../styles/kylon-command-palette.css";
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
       else if (action === "sign-out-others") one<HTMLButtonElement>("[data-signout-others-open]")?.click();
+      else if (action === "password") one<HTMLButtonElement>("[data-password-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
 
@@ -10085,7 +10117,7 @@ import "../../styles/kylon-command-palette.css";
       if (chip) chip.hidden = false;
       const refresh = one<HTMLButtonElement>("[data-refresh]");
       if (refresh) refresh.hidden = true;
-      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open]")) button.hidden = true;
+      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open], [data-password-open]")) button.hidden = true;
       homeRoute = { view: "chat", workspaceId: activeWorkspaceId };
       renderChannel(workspaces[0]!);
       applyHomePane();
@@ -10100,7 +10132,7 @@ import "../../styles/kylon-command-palette.css";
 
       authRecoveryActive = false;
       sampleMode = false;
-      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open]")) button.hidden = false;
+      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open], [data-password-open]")) button.hidden = false;
       setLoading("Checking your sign-in…");
       try {
         const verified = await currentSession();
@@ -10571,6 +10603,61 @@ import "../../styles/kylon-command-palette.css";
           status.textContent = readableError(error);
           confirm.disabled = false;
         } finally { confirm.removeAttribute("aria-busy"); }
+      });
+    }
+    /* Password (CS-E17 part B): set or change. A session older than a day needs the emailed
+       reauthentication code; the change then signs out every other device. */
+    {
+      const dialog = one<HTMLDialogElement>("[data-password-dialog]");
+      const form = one<HTMLFormElement>("[data-password-form]");
+      const fresh = one<HTMLInputElement>("[data-password-new]");
+      const codeRow = one<HTMLElement>("[data-password-code-row]");
+      const code = one<HTMLInputElement>("[data-password-code]");
+      const save = one<HTMLButtonElement>("[data-password-save]");
+      const cancel = one<HTMLButtonElement>("[data-password-cancel]");
+      const status = one<HTMLElement>("[data-password-status]");
+      const sendCode = async (): Promise<boolean> => {
+        if (!status || !codeRow || !code) return false;
+        try {
+          await sendPasswordCode();
+          codeRow.hidden = false; code.value = ""; code.focus();
+          status.textContent = new PasswordCodeRequired().message;
+          return true;
+        } catch (error) { status.textContent = readableError(error); return false; }
+      };
+      one<HTMLButtonElement>("[data-password-open]")?.addEventListener("click", () => {
+        if (!dialog || !form || !fresh || !codeRow || !code || !save || !cancel || !status || !session || sampleMode) return;
+        form.reset(); codeRow.hidden = true; status.textContent = "";
+        fresh.disabled = false; save.hidden = false; save.disabled = false; cancel.textContent = "Cancel";
+        dialog.showModal(); fresh.focus();
+      });
+      cancel?.addEventListener("click", () => dialog?.close());
+      one<HTMLButtonElement>("[data-password-close]")?.addEventListener("click", () => dialog?.close());
+      dialog?.addEventListener("close", () => { if (fresh) fresh.value = ""; if (code) code.value = ""; });
+      one<HTMLButtonElement>("[data-password-resend]")?.addEventListener("click", () => void sendCode());
+      form?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!fresh || !codeRow || !code || !save || !cancel || !status || save.disabled) return;
+        if (fresh.value.length < PASSWORD_MIN_LENGTH) {
+          status.textContent = `Use at least ${PASSWORD_MIN_LENGTH} characters.`; fresh.focus(); return;
+        }
+        if (!codeRow.hidden && !code.value.trim()) { status.textContent = new PasswordCodeRequired().message; code.focus(); return; }
+        save.disabled = true; save.setAttribute("aria-busy", "true"); status.textContent = "";
+        try {
+          await setPassword(fresh.value, codeRow.hidden ? undefined : code.value);
+          fresh.value = ""; code.value = ""; fresh.disabled = true; codeRow.hidden = true;
+          save.hidden = true; cancel.textContent = "Done";
+          try {
+            await signOutOtherDevices(session);
+            status.textContent = "Password saved. Other devices are signed out.";
+          } catch {
+            status.textContent = "Password saved. Other devices could not be signed out; use Sign out other devices.";
+          }
+          cancel.focus();
+        } catch (error) {
+          if (error instanceof PasswordCodeRequired) await sendCode();
+          else status.textContent = readableError(error);
+        } finally { save.disabled = false; save.removeAttribute("aria-busy"); }
       });
     }
     one<HTMLButtonElement>("[data-connected-apps-close]")?.addEventListener("click", () => {
@@ -12671,6 +12758,7 @@ import "../../styles/kylon-command-palette.css";
   }
 
   .dashboard__email input,
+  .dashboard__password-form input,
   .dashboard__create-form input[type="text"] {
     min-block-size: 2.75rem;
     inline-size: 100%;
@@ -16924,7 +17012,18 @@ import "../../styles/kylon-command-palette.css";
     margin-inline: var(--s-5);
   }
 
-  .dashboard__signout-others-dialog { inline-size: min(28rem, calc(100% - 2rem)); }
+  .dashboard__signout-others-dialog,
+  .dashboard__password-dialog { inline-size: min(28rem, calc(100% - 2rem)); }
+  .dashboard__password-form,
+  .dashboard__password-form [data-password-code-row]:not([hidden]) {
+    display: grid;
+    gap: var(--s-2);
+  }
+  .dashboard__password-form { margin: var(--s-4) var(--s-5) 0; }
+  .dashboard__password-form label { color: var(--text); font-size: var(--t-sm); font-weight: var(--weight-semibold); }
+  .dashboard__password-form .dashboard__signout-others-actions,
+  .dashboard__password-form .dashboard__connected-apps-status { margin-inline: 0; }
+  .dashboard__password-form .dashboard__signout-others-actions { margin-block-end: var(--s-5); }
   .dashboard__signout-others-actions {
     display: flex;
     flex-wrap: wrap;

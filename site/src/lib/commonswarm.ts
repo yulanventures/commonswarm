@@ -763,6 +763,62 @@ export async function signOutOtherDevices(
   throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
 }
 
+/** Minimum password length; GoTrue enforces the same (GOTRUE_PASSWORD_MIN_LENGTH=12, #273). */
+export const PASSWORD_MIN_LENGTH = 12;
+
+/** GoTrue needs a reauthentication code before this password change (the session is older than
+ *  a day). sendPasswordCode() emails one; pass it to setPassword() as the nonce. */
+export class PasswordCodeRequired extends Error {
+  constructor() {
+    super("Enter the code we just emailed you to confirm the change.");
+    this.name = "PasswordCodeRequired";
+  }
+}
+
+type PasswordAuth = Pick<SupabaseClient["auth"], "updateUser" | "reauthenticate">;
+
+function passwordError(error: unknown, fallback: string): Error {
+  const status = (error as { status?: number }).status ?? 0;
+  const code = (error as { code?: string }).code ?? "";
+  if (code === "reauthentication_needed") return new PasswordCodeRequired();
+  if (code === "reauthentication_not_valid") return new Error("That code is wrong or expired. Send a new code and try again.");
+  if (code === "weak_password") return new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters, and avoid common passwords.`);
+  if (code === "same_password") return new Error("That is already your password. Choose a different one.");
+  if (status === 429 || code === "over_request_rate_limit" || code === "over_email_send_rate_limit") {
+    return new Error("Too many attempts. Wait a few minutes and try again.");
+  }
+  if (status === 401 || status === 403 || code === "session_not_found" || code === "bad_jwt") {
+    return new Error("Your sign-in could not be confirmed. Sign in again, then try once more.");
+  }
+  return new Error(fallback);
+}
+
+/**
+ * Set or change this account's password (CS-E17 part B). Sessions older than a day must pass the
+ * emailed reauthentication code as `nonce` (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION);
+ * without one GoTrue refuses and this throws PasswordCodeRequired. GoTrue's text never reaches the page.
+ */
+export async function setPassword(
+  password: string,
+  nonce?: string,
+  auth: PasswordAuth | undefined = client()?.auth,
+): Promise<void> {
+  if (!auth) throw new NoDeployment();
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters.`);
+  }
+  const code = nonce?.trim();
+  const { error } = await auth.updateUser(code ? { password, nonce: code } : { password });
+  if (error) throw passwordError(error, "Your password was not changed. Try again.");
+}
+
+/** Email this account a reauthentication code for setPassword(). */
+export async function sendPasswordCode(auth: PasswordAuth | undefined = client()?.auth): Promise<void> {
+  if (!auth) throw new NoDeployment();
+  const { error } = await auth.reauthenticate();
+  if (error) throw passwordError(error, "The code could not be sent. Try again.");
+}
+
 export async function signOut(): Promise<void> {
   deadSession = false;
   await client()?.auth.signOut();
