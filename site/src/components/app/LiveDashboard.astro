@@ -259,10 +259,10 @@ import "../../styles/kylon-command-palette.css";
               aria-haspopup="menu"
               aria-expanded="false"
               aria-controls="dashboard-user-menu"
-              aria-label="Organizations and account"
+              aria-label="Profile and account settings"
             >
-              <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark aria-hidden="true">O</span>
-              <span class="dashboard__user-trigger-brand" data-org-name>Organizations</span>
+              <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark data-user-avatar aria-hidden="true">U</span>
+              <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
               </svg>
@@ -498,13 +498,20 @@ import "../../styles/kylon-command-palette.css";
               aria-busy="true"
               hidden
             >
-              <span class="dashboard__spinner" aria-hidden="true"></span>
-              <div>
-                <h2>Opening the live channel…</h2>
-                <p>The workspace and agent roster are ready. Updates are loading next.</p>
-                <div class="dashboard__feed-skeleton" aria-hidden="true">
-                  <Skeleton variant="text" lines={2} />
-                </div>
+              <span class="visually-hidden">Loading messages…</span>
+              <div class="dashboard__feed-skeleton" data-feed-skeleton aria-hidden="true">
+                {Array.from({ length: 4 }).map(() => (
+                  <div class="dashboard__feed-skeleton-row">
+                    <span class="skeleton dashboard__feed-skeleton-avatar"></span>
+                    <div class="dashboard__feed-skeleton-body">
+                      <div class="dashboard__feed-skeleton-meta">
+                        <span class="skeleton skeleton--text dashboard__feed-skeleton-author"></span>
+                        <span class="skeleton skeleton--text dashboard__feed-skeleton-time"></span>
+                      </div>
+                      <Skeleton variant="text" lines={2} />
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
 
@@ -4785,12 +4792,19 @@ import "../../styles/kylon-command-palette.css";
       const orgs = organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId);
       const currentOrg = orgs.find(org => org.current);
       selectedOrgId = currentOrg?.id ?? null;
-      const orgName = currentOrg?.name ?? "Organizations";
+      const viewerLabel = sampleMode || !session
+        ? "Sample account"
+        : (members.find(member => member.userId === session.user.id)?.name?.trim()
+          || (typeof accountName === "function" ? accountName(session) : "Your account"));
+      const avatarParts = (viewerLabel.includes("@") ? (viewerLabel.split("@")[0] ?? viewerLabel) : viewerLabel)
+        .trim().split(/[\s._-]+/).filter(Boolean).slice(0, 2);
+      const avatarMark = avatarParts.map(part => Array.from(part)[0] ?? "").join("").toLocaleUpperCase()
+        || Array.from(viewerLabel.trim())[0]?.toLocaleUpperCase() || "U";
       const name = one<HTMLElement>("[data-org-name]");
-      if (name) name.textContent = orgName;
+      if (name) name.textContent = viewerLabel;
       const mark = one<HTMLElement>("[data-org-mark]");
-      if (mark) mark.textContent = Array.from(orgName.trim())[0]?.toLocaleUpperCase() ?? "O";
-      one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${orgName}, organizations and account`);
+      if (mark) mark.textContent = avatarMark;
+      one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${viewerLabel}, profile and account settings`);
       const orgSlot = one<HTMLElement>("[data-org-menu]");
       const orgKey = JSON.stringify(orgs);
       if (orgSlot && orgSlot.dataset.orgKey !== orgKey) {
@@ -8116,8 +8130,27 @@ import "../../styles/kylon-command-palette.css";
       signalHasMore = false;
       signalCutoff = "";
       channelLoadError = "";
-      if (keepShell) renderChannel(selected, true);
-      else setLoading(`Opening ${selected.name}…`);
+      if (keepShell) {
+        renderChannel(selected, true);
+        renderHomeShell();
+        renderHomeSide();
+        if (homeRoute.view !== "catchup") {
+          const catchUp = one<HTMLElement>("[data-home-catchup]");
+          const routePane = one<HTMLElement>("[data-home-route-pane]");
+          const channel = one<HTMLElement>(".dashboard__channel");
+          const frame = one<HTMLElement>(".hm-frame");
+          if (catchUp) catchUp.hidden = true;
+          if (homeRoute.view === "chat" || homeRoute.view === "channels") {
+            if (routePane) routePane.hidden = true;
+            if (channel) channel.hidden = false;
+            parkPeopleHosts();
+            syncListsChrome();
+            frame?.classList.remove("hm-frame--catchup", "hm-frame--agent", "hm-frame--people", "hm-frame--todo", "hm-frame--add-agent");
+            syncStandalonePage();
+            syncFeedChrome();
+          }
+        }
+      } else setLoading(`Opening ${selected.name}…`);
       /* The generation is taken BEFORE the read, not after it. Taken after, a slow open could
          land behind a create the reader made while it was still loading — same workspace,
          same requestVersion, so nothing else dropped it — and overwrite the list with the
@@ -8128,6 +8161,7 @@ import "../../styles/kylon-command-palette.css";
       try {
         const removedAgentsRead = removedAgentNames(selected.id);
         const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
+        const claimsRead = homeWorkingOn(selected.id);
         const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
@@ -8191,10 +8225,13 @@ import "../../styles/kylon-command-palette.css";
         renderPendingAccess();
         renderFiles();
         renderBrain();
-        if (agents.length > 0) {
-          await loadSignals(selected.id, true, version);
-        }
-        const claims = await homeWorkingOn(selected.id);
+        renderHomeRail();
+        renderHomeShell();
+        renderHomeSide();
+        const [, claims] = await Promise.all([
+          agents.length > 0 ? loadSignals(selected.id, true, version) : Promise.resolve(),
+          claimsRead,
+        ]);
         if (version !== requestVersion) return;
         homeWorkClaims = claims;
         renderHomeRail();
