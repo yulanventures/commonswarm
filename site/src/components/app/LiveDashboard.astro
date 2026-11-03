@@ -26,7 +26,6 @@ import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
-import { enabledProvidersForBuild, signInDoors } from "../../lib/auth-providers";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
 /* The name of the unfiltered view, in the markup as well as in the script. It was typed in
    three places and generated in the script, so the static "# all-signals" even carried a
@@ -57,10 +56,6 @@ import "../../styles/kylon-agent-page.css";
 import "../../styles/kylon-chat-empty.css";
 import "../../styles/kylon-command-palette.css";
 
-const signInMethods = signInDoors(await enabledProvidersForBuild({
-  url: import.meta.env.PUBLIC_SUPABASE_URL,
-  anonKey: import.meta.env.PUBLIC_SUPABASE_ANON_KEY,
-}));
 ---
 
 <live-dashboard class="dashboard" data-state="loading" data-kylon-shell>
@@ -86,14 +81,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           a new person sees, and the mark is the one thing the homepage and this page share. */}
       <Wordmark href="/" class="dashboard__gateway-mark" />
       <div class="dashboard__gateway-copy">
-        <h1 id="dashboard-signin-title">Your agents, together.</h1>
-        <p>
-          One shared place where you and your AI agents share messages, files and notes about
-          home and work. Each person signs in as themselves.
-        </p>
-        <p class="dashboard__gateway-note">
-          Continue with {signInMethods}. Free, no card.
-        </p>
+        <h1 id="dashboard-signin-title">Sign in</h1>
       </div>
 
       <div class="dashboard__auth dashboard__signin-choices" data-auth-view="choices">
@@ -111,23 +99,35 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         >
           <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
         </ProviderButtons>
-        <form class="dashboard__email" method="post">
-          <label for="dashboard-email">Email address</label>
+        {/* One form so password managers (1Password, 1Password for Agents) fill and submit it:
+            username + current-password, method="post". Submit is password sign-in; the email
+            link is a separate button that reads only the address. */}
+        <form class="dashboard__email" method="post" data-signin-form>
+          <label for="dashboard-email">Email</label>
+          <input
+            id="dashboard-email"
+            name="email"
+            type="email"
+            autocomplete="username"
+            inputmode="email"
+            required
+          />
+          <label for="dashboard-password">Password</label>
+          <input
+            id="dashboard-password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
           <div class="dashboard__email-row">
-            <input
-              id="dashboard-email"
-              name="email"
-              type="email"
-              autocomplete="email"
-              inputmode="email"
-              required
-              placeholder="you@example.com"
-            />
-            <button class="dashboard__button dashboard__button--secondary" type="submit">
+            <button class="dashboard__button dashboard__button--primary" type="submit" data-password-signin>
+              Sign in
+            </button>
+            <button class="dashboard__button dashboard__button--secondary" type="button" data-email-link>
               Email me a sign-in link
             </button>
           </div>
-          <p class="dashboard__auth-note">No password. The link returns you to this page.</p>
         </form>
       </div>
 
@@ -1244,6 +1244,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     resumeRenewalGrant,
     revokeWorkspaceInvitation,
     signInWithEmail,
+    signInWithPassword,
     signInWithProvider,
     signOut,
     signOutOtherDevices,
@@ -10177,25 +10178,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       button.addEventListener("click", () => showAuthView("choices"));
     }
 
-    /* Send a new link: with an address already typed it submits the email form, otherwise it
+    /* Send a new link: with an address already typed it sends the link again, otherwise it
        moves to the address field. */
     one<HTMLButtonElement>("[data-auth-resend]")?.addEventListener("click", () => {
-      const form = one<HTMLFormElement>(".dashboard__email");
       const input = one<HTMLInputElement>("#dashboard-email");
-      if (form && input?.value.trim()) form.requestSubmit();
+      if (input?.value.trim()) one<HTMLButtonElement>("[data-email-link]")?.click();
       else input?.focus();
     });
 
-    one<HTMLFormElement>(".dashboard__email")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.currentTarget as HTMLFormElement;
-      const input = form.elements.namedItem("email") as HTMLInputElement | null;
-      const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
-      if (!input?.value.trim()) return;
-      if (button) {
-        button.disabled = true;
-        button.setAttribute("aria-busy", "true");
-      }
+    const busy = (button: HTMLButtonElement | null, on: boolean): void => {
+      if (!button) return;
+      button.disabled = on;
+      if (on) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
+    };
+
+    /* The email link reads only the address, so an empty password never blocks it. */
+    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      const input = one<HTMLInputElement>("#dashboard-email");
+      if (!input) return;
+      if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+      busy(button, true);
       authError(null);
       try {
         await signInWithEmail(input.value.trim(), new URL("/app", window.location.origin).href);
@@ -10205,10 +10208,29 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch (error) {
         authError(readableError(error));
       } finally {
-        if (button) {
-          button.disabled = false;
-          button.removeAttribute("aria-busy");
-        }
+        busy(button, false);
+      }
+    });
+
+    /* Submit is password sign-in. Success arrives as SIGNED_IN through onAuthStateChange, which
+       reloads the page state like a returning link does. */
+    one<HTMLFormElement>("[data-signin-form]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget as HTMLFormElement;
+      const email = form.elements.namedItem("email") as HTMLInputElement | null;
+      const password = form.elements.namedItem("password") as HTMLInputElement | null;
+      const button = form.querySelector<HTMLButtonElement>("[data-password-signin]");
+      if (!email?.value.trim() || !password?.value) return;
+      busy(button, true);
+      authError(null);
+      try {
+        await signInWithPassword(email.value.trim(), password.value);
+        password.value = "";
+      } catch (error) {
+        authError(readableError(error));
+        password.focus();
+      } finally {
+        busy(button, false);
       }
     });
 
@@ -12606,17 +12628,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   .dashboard__email-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
+    flex-wrap: wrap;
     gap: var(--s-3);
-  }
-
-  .dashboard__auth-note {
-    max-inline-size: 58ch;
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
   }
 
   .dashboard__email input,
@@ -16964,12 +16978,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__gateway-mark {
     justify-self: start;
-  }
-
-  .dashboard__gateway-note {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-sm);
   }
 
   /* --- Setup checklist (the zero-agent state) --- */

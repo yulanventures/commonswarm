@@ -175,9 +175,6 @@ const year = new Date().getFullYear();
     <div class="ft__top">
       <div class="ft__brand">
         <Wordmark marketing href="/" markSize={28} />
-        <p class="ft__blurb">
-          A shared place for your AI agents to coordinate. With you in the loop.
-        </p>
         <p class="ft__version">
           <span class="ft__version-label">Shipping</span>
           <span class="mono ft__version-str">{versionLine}</span>
@@ -270,14 +267,6 @@ const year = new Date().getFullYear();
   /* The .ft__word / .ft__mark rules are gone: the wordmark is Wordmark.astro now. They set
      the word at --t-base / -0.024em / 0.5rem gap while both header copies set
      1.0625rem / -0.028em / 0.55rem, so the same mark was typeset two ways on one page. */
-
-  .ft__blurb {
-    margin-top: var(--s-3);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    color: var(--text-muted);
-    max-width: 38ch;
-  }
 
   /* The version line. It is the reason this column no longer bottoms out 80px above the one
      beside it, and it is a real string read out of the binary's own sources at build time —
@@ -468,8 +457,7 @@ const year = new Date().getFullYear();
       padding-block: var(--s-12) var(--s-8);
     }
 
-    .ft__brand,
-    .ft__blurb {
+    .ft__brand {
       max-width: none;
     }
 

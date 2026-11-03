@@ -170,7 +170,7 @@ test("QA-010 dashboard renders an expired session as signed out with a re-auth p
 });
 
 test("QA-010 invite form routes empty and malformed input through the validator", () => {
-  assert.match(dashboard, /<form class="dashboard__email" method="post">/);
+  assert.match(dashboard, /<form class="dashboard__email" method="post" data-signin-form>/);
   assert.match(dashboard, /<form class="dashboard__invite-form" data-invite-form novalidate>/);
   assert.match(dashboard, /id="dashboard-invite-email"[\s\S]*?autocomplete="off"/);
   assert.match(

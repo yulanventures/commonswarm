@@ -645,8 +645,46 @@ export class EmailAddressRejected extends Error {
   }
 }
 
+/** Password sign-in refused. One message for a wrong password, an unknown address and an
+ *  account with no password yet, so the form never says which addresses have accounts. */
+export class PasswordSignInRefused extends Error {
+  constructor(message = "That email and password don't match. If you haven't set a password, use the email link.") {
+    super(message);
+    this.name = "PasswordSignInRefused";
+  }
+}
+
 /**
- * Sign in with a link sent to an email address — no password, no developer account.
+ * Sign in with an email and password, for people who have set one in account settings. There
+ * is no password sign-up: a new address still enters by email link or provider, so every
+ * account has a confirmed address. GoTrue rate-limits the password grant per client.
+ */
+export async function signInWithPassword(
+  email: string,
+  password: string,
+  auth: Pick<SupabaseClient["auth"], "signInWithPassword"> | undefined = client()?.auth,
+): Promise<void> {
+  if (!auth) throw new NoDeployment();
+  const { error } = await auth.signInWithPassword({ email, password });
+  if (!error) return;
+  const status = (error as { status?: number }).status ?? 0;
+  const code = (error as { code?: string }).code ?? "";
+  if (status === 429 || code === "over_request_rate_limit") {
+    throw new Error("Too many sign-in attempts. Wait a few minutes, or use the email link.");
+  }
+  if (code === "email_not_confirmed") {
+    throw new PasswordSignInRefused("Confirm your address first: use the email link.");
+  }
+  if (status === 400 || status === 401 || status === 422 || code === "invalid_credentials") {
+    throw new PasswordSignInRefused();
+  }
+  throw new Error("Sign-in could not be completed. Try again, or use the email link.");
+}
+
+/**
+ * Sign in with a link sent to an email address — no developer account needed. It sits beside
+ * password sign-in (signInWithPassword) and the providers, and it is the only way a new
+ * address joins.
  *
  * WHY THIS EXISTS ALONGSIDE GITHUB. CommonSwarm is a product about agents talking to each
  * other, and requiring a GitHub account to use one excludes exactly the people the consumer

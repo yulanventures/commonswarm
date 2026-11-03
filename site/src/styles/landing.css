@@ -32,7 +32,6 @@
 :root:is([data-home], :has(main .lp-home)) :is(.hdr__cta,.mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
 :root:is([data-home], :has(main .lp-home)) .hdr__progress { display: none; }
 :root:is([data-home], :has(main .lp-home)) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
-:root:is([data-home], :has(main .lp-home)) .ft__blurb { display: none; }
 .lp-home { font-family: var(--font-sans); line-height: 1.5; }
 .lp-home *, .lp-home *::before, .lp-home *::after { box-sizing: border-box; }
 .lp-home :is(h1,h2,h3,h4,p,figure) { margin: 0; }
