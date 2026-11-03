@@ -775,11 +775,7 @@ export class PasswordCodeRequired extends Error {
   }
 }
 
-type PasswordAuth = Pick<SupabaseClient["auth"], "updateUser" | "reauthenticate">;
-
-function passwordError(error: unknown, fallback: string): Error {
-  const status = (error as { status?: number }).status ?? 0;
-  const code = (error as { code?: string }).code ?? "";
+function passwordError(status: number, code: string, fallback: string): Error {
   if (code === "reauthentication_needed") return new PasswordCodeRequired();
   if (code === "reauthentication_not_valid") return new Error("That code is wrong or expired. Send a new code and try again.");
   if (code === "weak_password") return new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters, and avoid common passwords.`);
@@ -793,30 +789,70 @@ function passwordError(error: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
+interface PasswordRequestOptions { fetcher?: typeof fetch; target?: Deployment | null }
+
+/* Both password calls go to GoTrue with THIS session's own access token (and the public anon key),
+ * never the SDK's current session, so a dialog opened as one account can never act as another. */
+async function passwordRequest(
+  session: Pick<Session, "access_token"> | null, path: string, init: RequestInit,
+  fallback: string, options: PasswordRequestOptions,
+): Promise<void> {
+  const target = options.target === undefined ? deployment() : options.target;
+  if (!target) throw new NoDeployment();
+  if (!session || typeof session.access_token !== "string" || !session.access_token) {
+    throw new Error("Sign in again, then try once more.");
+  }
+  const deadline = requestDeadline();
+  let response: Response;
+  try {
+    response = await (options.fetcher ?? fetch)(`${target.url}/auth/v1/${path}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${session.access_token}`, apikey: target.anonKey },
+      signal: deadline.controller.signal,
+    });
+  } catch {
+    throw new Error(fallback);
+  } finally {
+    deadline.clear();
+  }
+  if (response.status === 200) return;
+  let code = "";
+  try {
+    const body = await response.json() as { error_code?: unknown; code?: unknown };
+    code = typeof body.error_code === "string" ? body.error_code : typeof body.code === "string" ? body.code : "";
+  } catch { /* no JSON: status alone decides */ }
+  throw passwordError(response.status, code, fallback);
+}
+
 /**
- * Set or change this account's password (CS-E17 part B). Sessions older than a day must pass the
- * emailed reauthentication code as `nonce` (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION);
- * without one GoTrue refuses and this throws PasswordCodeRequired. GoTrue's text never reaches the page.
+ * Set or change the password of the account `session` belongs to (CS-E17 part B). Sessions older
+ * than a day must pass the emailed reauthentication code as `nonce`
+ * (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION); without one GoTrue refuses and this
+ * throws PasswordCodeRequired. GoTrue's text never reaches the page.
  */
 export async function setPassword(
+  session: Pick<Session, "access_token"> | null,
   password: string,
   nonce?: string,
-  auth: PasswordAuth | undefined = client()?.auth,
+  options: PasswordRequestOptions = {},
 ): Promise<void> {
-  if (!auth) throw new NoDeployment();
   if (password.length < PASSWORD_MIN_LENGTH) {
     throw new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters.`);
   }
   const code = nonce?.trim();
-  const { error } = await auth.updateUser(code ? { password, nonce: code } : { password });
-  if (error) throw passwordError(error, "Your password was not changed. Try again.");
+  await passwordRequest(session, "user", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(code ? { password, nonce: code } : { password }),
+  }, "Your password was not changed. Try again.", options);
 }
 
-/** Email this account a reauthentication code for setPassword(). */
-export async function sendPasswordCode(auth: PasswordAuth | undefined = client()?.auth): Promise<void> {
-  if (!auth) throw new NoDeployment();
-  const { error } = await auth.reauthenticate();
-  if (error) throw passwordError(error, "The code could not be sent. Try again.");
+/** Email the account `session` belongs to a reauthentication code for setPassword(). */
+export async function sendPasswordCode(
+  session: Pick<Session, "access_token"> | null,
+  options: PasswordRequestOptions = {},
+): Promise<void> {
+  await passwordRequest(session, "reauthenticate", { method: "GET" }, "The code could not be sent. Try again.", options);
 }
 
 export async function signOut(): Promise<void> {
