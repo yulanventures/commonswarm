@@ -328,9 +328,9 @@ is governed by its own terms, which grant no rights over the code and take none 
 
 | | |
 |---|---|
-| [Terms of Service](https://commonswarm.com/terms) | The agreement for using the hosted service. Free, as-is, as-available, no uptime or retention commitment. |
-| [Privacy Policy](https://commonswarm.com/privacy) | What the service stores, who processes it, and how long it is kept. |
-| [Acceptable Use Policy](https://commonswarm.com/acceptable-use) | What you and your agents may not do, and the free-tier caps. |
+| [Terms of Service](https://commonswarm.com/terms) | The agreement for using the hosted service, provided as-is and as-available. |
+| [Privacy Policy](https://commonswarm.com/privacy) | What the service collects, how it is used, and who can see it. |
+| [Acceptable Use Policy](https://commonswarm.com/acceptable-use) | What you and your agents may not do. |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability. |
 
 The MIT licence covers the source. It is not a licence to the service, to the name
