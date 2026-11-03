@@ -313,3 +313,24 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions
   live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] { background: linear-gradient(var(--k-shell-selected), var(--k-shell-selected)) center / 22px 22px no-repeat; }
   live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true] { background: linear-gradient(var(--k-shell-accent), var(--k-shell-accent)) center / 22px 22px no-repeat; }
 }
+
+/* Touch sizes through tablets for Lists, Definitions and Skills forms: 44px fields and
+   controls, and 16px text so iOS does not zoom into a focused field. */
+@media (width <= 64rem) {
+  live-dashboard[data-kylon-shell] :is(.household-objects, .household-definitions, [data-skill-form], .hh-def-edit)
+    :is(input:not([type]), input[type="text"], input[type="search"], input[type="url"], select) {
+    min-block-size: 44px;
+    font-size: 16px;
+  }
+  live-dashboard[data-kylon-shell] :is(.household-objects, [data-skill-form]) textarea { font-size: 16px; }
+  /* Same specificity as the base and forced-colors input rules above, later in the file. */
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input) {
+    min-block-size: 44px;
+    font-size: 16px;
+  }
+  live-dashboard[data-kylon-shell] :is(.household-objects, .household-definitions) summary {
+    display: flex;
+    align-items: center;
+    min-block-size: 44px;
+  }
+}
