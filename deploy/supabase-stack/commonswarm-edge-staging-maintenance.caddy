@@ -48,7 +48,7 @@ edge-staging.commonswarm.com {
 	@edge_functions path /functions/v1 /functions/v1/*
 	handle @edge_functions {
 		reverse_proxy 127.0.0.1:9000 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				response_header_timeout 165s
 			}
@@ -68,7 +68,7 @@ edge-staging.commonswarm.com {
 		# Same GoTrue as api.commonswarm.com: overwrite the rate-limit key with the trusted client
 		# IP and drop inbound SBFF (see commonswarm-api.caddy).
 		reverse_proxy 127.0.0.1:18001 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			header_up -Sb-Forwarded-For
 		}
 	}
