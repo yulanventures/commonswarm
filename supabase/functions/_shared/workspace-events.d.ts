@@ -6,7 +6,7 @@ export type WorkspaceRole = 'owner' | 'admin' | 'member';
 export declare const WORKSPACE_ROLES: readonly WorkspaceRole[];
 export type AgentTransport = 'local' | 'hosted_mcp';
 export declare const AGENT_TRANSPORTS: readonly AgentTransport[];
-export type WorkspaceEventType = AdminRoutineEventType | 'WorkspaceCreated' | 'WorkspaceArchived' | 'MemberInvited' | 'InvitationRevoked' | 'InvitationAccepted' | 'MemberJoined' | 'MemberRemoved' | 'MemberRoleChanged' | 'AgentAddedToWorkspace' | 'AgentRemovedFromWorkspace' | 'AgentPrincipalCreated' | 'AgentPrincipalRevoked' | 'AgentModelDeclared' | 'FeedbackSubmitted' | 'AgentTokenMinted' | 'AgentTokenRevoked' | 'HostedMcpGrantBegun' | 'HostedMcpWorkspaceConsented' | 'HostedMcpGrantActivated' | 'HostedMcpGrantRevoked' | 'HostedMcpSeatClaimed' | 'HostedMcpSeatRevoked' | 'CommandRejected';
+export type WorkspaceEventType = AdminRoutineEventType | 'WorkspaceCreated' | 'WorkspaceArchived' | 'WorkspaceRenamed' | 'MemberInvited' | 'InvitationRevoked' | 'InvitationAccepted' | 'MemberJoined' | 'MemberRemoved' | 'MemberRoleChanged' | 'AgentAddedToWorkspace' | 'AgentRemovedFromWorkspace' | 'AgentPrincipalCreated' | 'AgentPrincipalRevoked' | 'AgentModelDeclared' | 'FeedbackSubmitted' | 'AgentTokenMinted' | 'AgentTokenRevoked' | 'HostedMcpGrantBegun' | 'HostedMcpWorkspaceConsented' | 'HostedMcpGrantActivated' | 'HostedMcpGrantRevoked' | 'HostedMcpSeatClaimed' | 'HostedMcpSeatRevoked' | 'CommandRejected';
 export declare const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[];
 export type WorkspaceEventEnvelope<P = unknown> = EventEnvelope<P, WorkspaceEventType>;
 export interface WorkspaceRecord {
@@ -76,6 +76,10 @@ export interface WorkspaceCreated {
 }
 export interface WorkspaceArchived {
     archived_at: number;
+}
+export interface WorkspaceRenamed {
+    name: string;
+    previous_name: string;
 }
 export interface MemberInvited {
     invitation_id: string;
@@ -186,7 +190,7 @@ export interface HostedMcpSeatRevoked {
     principal_id: string;
     revoked_at: number;
 }
-export type WorkspaceRejectionReason = 'workspace_exists' | 'operator_not_allowed' | 'workspace_not_found' | 'workspace_already_archived' | 'credential_kind_forbidden' | 'role_forbidden' | 'not_workspace_owner' | 'member_exists' | 'member_not_found' | 'invitation_ttl_invalid' | 'invitation_not_found' | 'invitation_not_live' | 'invitation_token_mismatch' | 'identity_not_verified' | 'last_owner' | 'landing_authority_unresolved' | 'principal_name_taken' | 'principal_not_found' | 'principal_not_owned' | 'principal_revoked' | 'transport_unavailable' | 'token_not_found' | 'token_revoked' | 'scope_not_allowed' | 'scope_denylisted' | 'binding_required' | 'token_ttl_invalid' | 'model_invalid' | 'feedback_invalid' | 'principal_not_presented' | 'bad_state';
+export type WorkspaceRejectionReason = 'workspace_exists' | 'operator_not_allowed' | 'workspace_not_found' | 'workspace_already_archived' | 'credential_kind_forbidden' | 'role_forbidden' | 'not_workspace_owner' | 'member_exists' | 'member_not_found' | 'invitation_ttl_invalid' | 'invitation_not_found' | 'invitation_not_live' | 'invitation_token_mismatch' | 'identity_not_verified' | 'last_owner' | 'landing_authority_unresolved' | 'principal_name_taken' | 'principal_not_found' | 'principal_not_owned' | 'principal_revoked' | 'transport_unavailable' | 'token_not_found' | 'token_revoked' | 'scope_not_allowed' | 'scope_denylisted' | 'binding_required' | 'token_ttl_invalid' | 'model_invalid' | 'feedback_invalid' | 'workspace_name_invalid' | 'principal_not_presented' | 'bad_state';
 export interface WorkspaceCommandRejected {
     workspace_id: string;
     command: string;

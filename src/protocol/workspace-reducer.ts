@@ -23,6 +23,7 @@ import {
   WorkspaceCommandRejected,
   WorkspaceCreated,
   WorkspaceArchived,
+  WorkspaceRenamed,
   WorkspaceEventEnvelope,
   WorkspaceRole,
   WorkspaceState,
@@ -139,6 +140,14 @@ export function reduceWorkspace(
   const s = prev; let next: WorkspaceState;
 
   switch (env.type) {
+    case 'WorkspaceRenamed': {
+      const p = req<WorkspaceRenamed>(env.payload, ['name', 'previous_name'], env.type, env.seq);
+      if (typeof p.name !== 'string' || !p.name || p.previous_name !== s.workspace.name) {
+        throw new StreamIntegrityError(`workspace rename does not follow its current name at seq ${env.seq}`);
+      }
+      next = { ...s, workspace: { ...s.workspace, name: p.name } };
+      break;
+    }
     case 'WorkspaceArchived': {
       const p = req<WorkspaceArchived>(env.payload, ['archived_at'], env.type, env.seq);
       if (s.workspace.archived_at !== null) {

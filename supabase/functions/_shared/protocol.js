@@ -365,6 +365,7 @@ var WORKSPACE_EVENT_TYPES = [
   ...ADMIN_ROUTINE_EVENT_TYPES,
   "WorkspaceCreated",
   "WorkspaceArchived",
+  "WorkspaceRenamed",
   "MemberInvited",
   "InvitationRevoked",
   "InvitationAccepted",
@@ -411,6 +412,7 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "move_workspace_to_org",
   "create_workspace",
   "archive_workspace",
+  "rename_workspace",
   "invite_member",
   "revoke_invitation",
   "accept_invitation",
@@ -589,6 +591,10 @@ function normalizedFeedbackContext(value) {
   }
   return { ok: true, context: Object.fromEntries(entries) };
 }
+var WORKSPACE_NAME_MAX = 80;
+function validWorkspaceName(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= WORKSPACE_NAME_MAX && value === value.trim() && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
 function ownerOrAdmin(role) {
   return role === "owner" || role === "admin";
 }
@@ -751,6 +757,20 @@ function decideWorkspace(state, cmd, ctx) {
       }
       return accept2([
         env2(ctx, "WorkspaceArchived", { archived_at: ctx.now })
+      ]);
+    }
+    case "rename_workspace": {
+      if (!ownerOrAdmin(actorRole)) {
+        return domain2(ctx, cmd.kind, "role_forbidden", "renaming a workspace requires Owner/Admin");
+      }
+      if (!validWorkspaceName(cmd.name)) {
+        return domain2(ctx, cmd.kind, "workspace_name_invalid", "a workspace name is 1..80 characters with no surrounding spaces or control characters");
+      }
+      if (cmd.name === state.workspace.name) {
+        return domain2(ctx, cmd.kind, "bad_state", "the workspace already has that name");
+      }
+      return accept2([
+        env2(ctx, "WorkspaceRenamed", { name: cmd.name, previous_name: state.workspace.name })
       ]);
     }
     case "invite_member": {
@@ -2852,6 +2872,14 @@ function reduceWorkspace(prev, env3) {
   const s = prev;
   let next;
   switch (env3.type) {
+    case "WorkspaceRenamed": {
+      const p = req2(env3.payload, ["name", "previous_name"], env3.type, env3.seq);
+      if (typeof p.name !== "string" || !p.name || p.previous_name !== s.workspace.name) {
+        throw new StreamIntegrityError(`workspace rename does not follow its current name at seq ${env3.seq}`);
+      }
+      next = { ...s, workspace: { ...s.workspace, name: p.name } };
+      break;
+    }
     case "WorkspaceArchived": {
       const p = req2(env3.payload, ["archived_at"], env3.type, env3.seq);
       if (s.workspace.archived_at !== null) {
@@ -5921,6 +5949,7 @@ export {
   UnknownEventTypeError,
   UpcastError,
   WORKSPACE_EVENT_TYPES,
+  WORKSPACE_NAME_MAX,
   WORKSPACE_ROLES,
   WORKSPACE_SKILLS_CAP,
   WORKSPACE_SKILL_TRUST_WARNING,
@@ -6019,6 +6048,7 @@ export {
   upcastPayload,
   useWorkspaceSkill,
   validDefinition,
+  validWorkspaceName,
   validateHostedTodoListToolArguments,
   validateHouseholdHumanCommand,
   validateHouseholdToolArguments,

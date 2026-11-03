@@ -69,6 +69,7 @@ type ConnectCommand =
   | { kind: "accept_invitation"; token: string }
   | { kind: "remove_member"; user_id: string }
   | { kind: "archive_workspace" }
+  | { kind: "rename_workspace"; name: string }
   | { kind: "move_workspace_to_org"; org_id: string }
   | { kind: "set_workspace_lead"; principal_id: string | null }
   | { kind: "create_agent_principal"; name: string; model?: string }
@@ -3608,6 +3609,44 @@ test("remove_member revokes exactly one workspace membership at the event timest
       "projection timestamp is the MemberRemoved payload timestamp",
     );
     assert.equal(untouched?.revoked_at, null, "other workspace remains live");
+  });
+});
+
+test("rename_workspace is owner/admin-only, human-only, and projects the name onto swarm.workspaces", async () => {
+  await scenario(async (f) => {
+    const name = async () => (await sql<{ name: string }[]>`
+      SELECT name FROM swarm.workspaces WHERE workspace_id = ${f.workspaceA}::uuid`)[0]?.name;
+    const before = await name();
+    assert.ok(before, "positive control: the workspace has a name");
+
+    const member = await issueConnect(f, f.ua2Jwt, { kind: "rename_workspace", name: "Member rename" });
+    assert.equal(member.status, 200);
+    assert.equal(member.body.status, "rejected");
+    assert.equal(member.body.reason, "role_forbidden");
+
+    const agent = await issueConnect(f, f.agentToken, { kind: "rename_workspace", name: "Agent rename" });
+    assert.equal(agent.status, 403);
+    assert.deepEqual(agent.body, { error: "forbidden" });
+
+    const tooLong = await issueConnect(f, f.uaJwt, { kind: "rename_workspace", name: "x".repeat(81) });
+    assert.equal(tooLong.status, 400);
+    const padded = await issueConnect(f, f.uaJwt, { kind: "rename_workspace", name: " Padded" });
+    assert.equal(padded.body.reason, "workspace_name_invalid");
+    assert.equal(await name(), before, "refusals change nothing");
+
+    const renamed = await issueConnect(f, f.uaJwt, { kind: "rename_workspace", name: "Science Lab" },
+      commandId("rename_workspace"));
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.status, "accepted");
+    assert.equal(await name(), "Science Lab");
+    const [event] = await sql<{ payload: Record<string, unknown> }[]>`
+      SELECT payload FROM swarm.events
+      WHERE workspace_id = ${f.workspaceA}::uuid AND type = 'WorkspaceRenamed'
+      ORDER BY seq DESC LIMIT 1`;
+    assert.deepEqual(event?.payload, { name: "Science Lab", previous_name: before });
+
+    const same = await issueConnect(f, f.uaJwt, { kind: "rename_workspace", name: "Science Lab" });
+    assert.equal(same.body.reason, "bad_state");
   });
 });
 

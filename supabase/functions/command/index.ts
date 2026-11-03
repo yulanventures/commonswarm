@@ -154,7 +154,7 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
-  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS,
+  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS, WORKSPACE_NAME_MAX,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -238,6 +238,7 @@ type ConnectCommand =
   | { kind: "remove_member"; user_id: string }
   | { kind: "change_role"; user_id: string; role: WorkspaceRole }
   | { kind: "archive_workspace" }
+  | { kind: "rename_workspace"; name: string }
   | {
     kind: "create_agent_principal";
     name: string;
@@ -437,6 +438,7 @@ interface WorkspaceState {
 
 type WorkspaceCommand =
   | { kind: "archive_workspace" }
+  | { kind: "rename_workspace"; name: string }
   | {
     kind: "invite_member";
     invitation_id: string;
@@ -1073,6 +1075,7 @@ const COMMAND_KINDS = [
   "accept_invitation",
   "remove_member",
   "archive_workspace",
+  "rename_workspace",
   "create_agent_principal",
   "change_role",
   "mint_agent_token",
@@ -1119,6 +1122,7 @@ const CONNECT_COMMAND_KINDS = [
   "accept_invitation",
   "remove_member",
   "archive_workspace",
+  "rename_workspace",
   "create_agent_principal",
   "change_role",
   "mint_agent_token",
@@ -2505,6 +2509,16 @@ function validateCommand(
           reason: "archive_workspace fields are malformed",
         };
     }
+    if (cmd.kind === "rename_workspace") {
+      // Shape only; the reducer owns the name rule and refuses with workspace_name_invalid.
+      return exactKeys(cmd, ["kind", "name"]) && boundedText(cmd.name, WORKSPACE_NAME_MAX)
+        ? { ok: true, command: { kind: "rename_workspace", name: cmd.name } }
+        : {
+          ok: false,
+          status: 400,
+          reason: "rename_workspace fields are malformed",
+        };
+    }
     if (cmd.kind === "remove_member") {
       return exactKeys(cmd, ["kind", "user_id"]) &&
           typeof cmd.user_id === "string" &&
@@ -3729,6 +3743,8 @@ async function prepareWorkspaceCommand(
     };
   } else if (wire.kind === "archive_workspace") {
     command = { kind: "archive_workspace" };
+  } else if (wire.kind === "rename_workspace") {
+    command = { kind: "rename_workspace", name: wire.name };
   } else if (wire.kind === "revoke_agent_principal") {
     command = {
       kind: "revoke_agent_principal",
@@ -4615,6 +4631,21 @@ async function updateWorkspaceProjection(
       `;
       if (archived.length !== 1) {
         throw new Error("WorkspaceArchived projection did not archive exactly one workspace");
+      }
+    } else if (event.type === "WorkspaceRenamed") {
+      if (typeof payload.name !== "string" || typeof payload.previous_name !== "string") {
+        throw new Error("WorkspaceRenamed payload is malformed");
+      }
+      const renamed = await tx<{ workspace_id: string }[]>`
+        UPDATE swarm.workspaces
+        SET name = ${payload.name}
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND archived_at IS NULL
+          AND name = ${payload.previous_name}
+        RETURNING workspace_id
+      `;
+      if (renamed.length !== 1) {
+        throw new Error("WorkspaceRenamed projection did not rename exactly one workspace");
       }
     } else if (event.type === "MemberInvited") {
       const invitation = projection.invitations[String(payload.invitation_id)];
@@ -11753,7 +11784,7 @@ async function handleTransaction(
         WHERE m.workspace_id=${localWorkspace}::uuid AND m.user_id=${verifiedHuman.userId}::uuid
           AND m.revoked_at IS NULL AND w.archived_at IS NULL`;
       if (!admission) return 'forbidden';
-      if (['remove_member','change_role','archive_workspace'].includes(kind)
+      if (['remove_member','change_role','archive_workspace','rename_workspace'].includes(kind)
         && !['owner','admin'].includes(admission.role))
         return 'business-refusal';
       const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;

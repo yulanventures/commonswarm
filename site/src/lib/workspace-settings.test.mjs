@@ -27,6 +27,8 @@ function fixture(options = {}) {
       addEventListener(key, value) {
         this.listeners[key] = value;
       },
+      focus() {},
+      select() {},
     }),
   };
   const root = doc.createElement("div");
@@ -116,4 +118,41 @@ test("settings without eligible destinations offers no move action", () => {
     ),
     false,
   );
+});
+
+test("rename is offered only when allowed, saves a changed name once, and keeps the field on refusal", async () => {
+  const find = (nodes, key) => nodes.find((node) => key in node.dataset);
+  assert.equal(find(fixture(), "workspaceRename"), undefined, "no Rename without canRename");
+  const calls = [];
+  let refuse = true;
+  const nodes = fixture({ canRename: true, onRename: async (name) => {
+    calls.push(name);
+    if (refuse) throw new Error("Only an owner or admin can rename this workspace.");
+  } });
+  const open = find(nodes, "workspaceRename");
+  const row = nodes.find((node) => node.className === "dashboard__workspace-settings-title-row");
+  open.listeners.click();
+  const form = row.children[0];
+  assert.ok("workspaceRenameForm" in form.dataset, "the form replaces the title");
+  const [input, save, , error] = form.children;
+  assert.equal(input.value, "Science");
+  assert.equal(save.disabled, true, "an unchanged name cannot be saved");
+  input.value = "  Science   Lab ";
+  input.listeners.input();
+  assert.equal(save.disabled, false);
+  await form.listeners.submit({ preventDefault() {} });
+  assert.deepEqual(calls, ["Science Lab"], "spaces are collapsed and trimmed");
+  assert.equal(error.hidden, false);
+  assert.equal(error.textContent, "Only an owner or admin can rename this workspace.");
+  assert.equal(input.disabled, false, "the field stays editable after a refusal");
+  input.listeners.keydown({ key: "Escape", preventDefault() {} });
+  assert.equal(row.children[1], open, "Escape puts the title and Rename back");
+  open.listeners.click();
+  const again = row.children[0];
+  again.children[0].value = "Lab";
+  again.children[0].listeners.input();
+  refuse = false;
+  await again.listeners.submit({ preventDefault() {} });
+  assert.deepEqual(calls, ["Science Lab", "Lab"]);
+  assert.equal(again.children[1].disabled, true, "saved: busy until the panel repaints with the new name");
 });

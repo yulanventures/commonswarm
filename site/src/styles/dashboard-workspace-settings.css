@@ -104,3 +104,8 @@
     border-radius: var(--radius); font: inherit;
   }
   .dashboard__workspace-move select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+  .dashboard__workspace-settings-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
+  .dashboard__workspace-rename { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); inline-size: 100%; }
+  .dashboard__workspace-rename input { flex: 1 1 12rem; min-inline-size: 0; padding: var(--s-2) var(--s-3); font: inherit; }
+  .dashboard__workspace-rename .dashboard__form-error { flex-basis: 100%; margin: 0; }

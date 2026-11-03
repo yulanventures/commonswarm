@@ -638,6 +638,37 @@ describe('workspace archive authority', () => {
   });
 });
 
+describe('workspace rename authority', () => {
+  it('lets an Owner or Admin rename, carrying the previous name', () => {
+    const world = makeWorld();
+    world.create();
+    const before = world.state()!.workspace.name;
+    const decision = world.apply({ kind: 'rename_workspace', name: 'Science Lab' });
+    assert.equal(decision.ok, true);
+    assert.deepEqual(decision.ok && decision.events[0]?.payload, { name: 'Science Lab', previous_name: before });
+    assert.equal(world.state()!.workspace.name, 'Science Lab');
+    world.join('bob', 'admin');
+    assert.equal(world.apply({ kind: 'rename_workspace', name: 'Lab' }, { actor: human('bob') }).ok, true);
+    assert.equal(world.state()!.workspace.name, 'Lab');
+  });
+
+  it('refuses a Member, an agent, an invalid name and an unchanged name', () => {
+    const world = makeWorld();
+    world.create();
+    world.join('bob');
+    rejected(world.apply({ kind: 'rename_workspace', name: 'Mine' }, { actor: human('bob') }), 'role_forbidden');
+    rejected(
+      world.apply({ kind: 'rename_workspace', name: 'Mine' }, { actor: agent('alice', 'principal-alice'), credential_kind: 'agent' }),
+      'credential_kind_forbidden',
+      'authz',
+    );
+    for (const name of ['', ' padded', 'two\nlines', 'x'.repeat(81)]) {
+      rejected(world.apply({ kind: 'rename_workspace', name }), 'workspace_name_invalid');
+    }
+    rejected(world.apply({ kind: 'rename_workspace', name: world.state()!.workspace.name }), 'bad_state');
+  });
+});
+
 describe('membership and no-orphan authority', () => {
   it('remove_member accepts, but refuses last Owner and unresolved landing authority', () => {
     const world = makeWorld();

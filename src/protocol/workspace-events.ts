@@ -18,6 +18,7 @@ export const AGENT_TRANSPORTS: readonly AgentTransport[] = ['local', 'hosted_mcp
 export type WorkspaceEventType = AdminRoutineEventType
   | 'WorkspaceCreated'
   | 'WorkspaceArchived'
+  | 'WorkspaceRenamed'
   | 'MemberInvited'
   | 'InvitationRevoked'
   | 'InvitationAccepted'
@@ -44,6 +45,7 @@ export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   ...ADMIN_ROUTINE_EVENT_TYPES,
   'WorkspaceCreated',
   'WorkspaceArchived',
+  'WorkspaceRenamed',
   'MemberInvited',
   'InvitationRevoked',
   'InvitationAccepted',
@@ -143,6 +145,11 @@ export interface WorkspaceCreated {
 
 export interface WorkspaceArchived {
   archived_at: number;
+}
+
+export interface WorkspaceRenamed {
+  name: string;
+  previous_name: string;
 }
 
 export interface MemberInvited {
@@ -298,6 +305,7 @@ export type WorkspaceRejectionReason =
   | 'token_ttl_invalid'
   | 'model_invalid'
   | 'feedback_invalid'
+  | 'workspace_name_invalid'
   | 'principal_not_presented'
   | 'bad_state';
 

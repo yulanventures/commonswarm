@@ -196,3 +196,51 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(
     font-size: 16px;
   }
 }
+
+/* Rename: the title shares its row with a quiet Rename control; the form replaces the title in place. */
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-settings-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  inline-size: 100%;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-rename-input] {
+  flex: 1 1 200px;
+  min-inline-size: 0;
+  min-block-size: 40px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-subtle);
+  font-family: var(--k-shell-font);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename .dashboard__form-error {
+  flex-basis: 100%;
+  margin: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename button[type="submit"] {
+  min-block-size: 36px;
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--k-shell-surface);
+  background: var(--k-shell-ink);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename button[type="submit"]:disabled {
+  opacity: .4;
+}

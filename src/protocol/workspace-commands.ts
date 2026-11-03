@@ -68,6 +68,7 @@ export const RENEWAL_IDLE_PAUSE_DAYS = 14;
 export type WorkspaceCommand =
   | { kind: 'create_workspace'; workspace_id: string; name: string }
   | { kind: 'archive_workspace' }
+  | { kind: 'rename_workspace'; name: string }
   | {
       kind: 'invite_member';
       invitation_id: string;
@@ -419,6 +420,7 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent
   'move_workspace_to_org',
   'create_workspace',
   'archive_workspace',
+  'rename_workspace',
   'invite_member',
   'revoke_invitation',
   'accept_invitation',
@@ -637,6 +639,13 @@ export function normalizedFeedbackContext(
   return { ok: true, context: Object.fromEntries(entries) as Record<string, string> };
 }
 
+export const WORKSPACE_NAME_MAX = 80;
+/** Same bound as create_workspace (80), plus no control characters or surrounding spaces. */
+export function validWorkspaceName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= WORKSPACE_NAME_MAX
+    && value === value.trim() && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
 function ownerOrAdmin(role: WorkspaceRole | null): boolean {
   return role === 'owner' || role === 'admin';
 }
@@ -847,6 +856,21 @@ export function decideWorkspace(
       }
       return accept([
         env(ctx, 'WorkspaceArchived', { archived_at: ctx.now }),
+      ]);
+    }
+
+    case 'rename_workspace': {
+      if (!ownerOrAdmin(actorRole)) {
+        return domain(ctx, cmd.kind, 'role_forbidden', 'renaming a workspace requires Owner/Admin');
+      }
+      if (!validWorkspaceName(cmd.name)) {
+        return domain(ctx, cmd.kind, 'workspace_name_invalid', 'a workspace name is 1..80 characters with no surrounding spaces or control characters');
+      }
+      if (cmd.name === state.workspace.name) {
+        return domain(ctx, cmd.kind, 'bad_state', 'the workspace already has that name');
+      }
+      return accept([
+        env(ctx, 'WorkspaceRenamed', { name: cmd.name, previous_name: state.workspace.name }),
       ]);
     }
 
