@@ -18,6 +18,7 @@ export interface SeedResult {
   owner: { email: string; password: string };
   ids: Record<string, string>;
   notes: string[];
+  steps: string[];
 }
 
 const LOCAL_SEAT = "seat_0000000000000000000000";
@@ -55,6 +56,8 @@ const BODIES = [
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
   for (const url of [env.apiUrl, env.dbUrl]) assert.ok(loopback(url), `seed refuses non-local target ${new URL(url).hostname}`);
   const notes: string[] = [];
+  /** Seed steps that were positively accepted; a manifest entry's requiresSeed names these. */
+  const steps: string[] = [];
   const ids: Record<string, string> = {};
   const note = (step: string, detail: unknown) => { notes.push(`${step}: ${String(detail).slice(0, 400)}`); };
   const sql = postgres(env.dbUrl, { prepare: false, max: 4 });
@@ -94,6 +97,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     const ok = (step: string, result: { status: number; body: Record<string, unknown> }) => {
       const accepted = result.status === 200 && ["accepted", "committed", "ok"].includes(String(result.body.status));
       if (!accepted) note(step, `HTTP ${result.status} ${JSON.stringify(result.body).slice(0, 300)}`);
+      else steps.push(step);
       return accepted;
     };
 
@@ -215,7 +219,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         if (n === 5) ok("todo start", await tool("todo_start", { todo_id: todo.todo_id }));
       }
     }
-    return { owner: { email: owner.email, password: owner.password }, ids, notes };
+    return { owner: { email: owner.email, password: owner.password }, ids, notes, steps };
   } finally {
     await sql.end({ timeout: 5 });
   }

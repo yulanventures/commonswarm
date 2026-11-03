@@ -30,7 +30,9 @@ export const VIEWPORTS = [
 export const THEMES = ["light", "dark"] as const;
 
 type Step = { click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
-export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[] }
+export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
+  /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
+  requiresSeed?: string[] }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
 const STARTER: Screen[] = [
@@ -136,7 +138,7 @@ async function main(): Promise<void> {
     }
     const seed = await seedHeavyWorkspace(env);
     seedNotes = seed.notes;
-    writeFileSync(join(OUT, "seed.json"), JSON.stringify({ ids: seed.ids, notes: seed.notes }, null, 2));
+    writeFileSync(join(OUT, "seed.json"), JSON.stringify({ ids: seed.ids, notes: seed.notes, steps: seed.steps }, null, 2));
 
     // Installed only in the CI job (npm install --no-save), so it stays out of the lockfile and typecheck.
     const playwrightModule = "playwright";
@@ -166,6 +168,8 @@ async function main(): Promise<void> {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
           if (screen.status === "pending") { report.push({ ...entry, error: "pending", reason: screen.reason ?? null }); continue; }
+          const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
+          if (unmet.length) { report.push({ ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` }); continue; }
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
             await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
