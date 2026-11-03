@@ -159,15 +159,22 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
   }
 }
 
-/* Inline author, mention and channel buttons: a real 44px box through tablets. The extra
-   block padding is cancelled by an equal negative margin, so the line and message rhythm
-   do not move; only the tappable box (and getBoundingClientRect) grows. */
+/* Author and channel buttons: a real 44px box through tablets. The extra block padding is
+   cancelled by an equal negative margin, so the line and message rhythm do not move; they sit
+   above neighbouring text so the whole box takes the tap. Mentions inside message text keep
+   the 24px WCAG 2.5.8 minimum: a 44px box there would cover the next line and the receipt. */
 @media (width <= 64rem) {
-  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) :is(.dashboard__message-entity, .dashboard__message-channel) {
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) :is(.dashboard__message-author, .dashboard__message-channel) {
+    position: relative;
+    z-index: 1;
     min-inline-size: 44px;
     min-block-size: 44px;
     padding-block: 10px;
     margin-block: -10px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) .dashboard__message-entity:not(.dashboard__message-author) {
+    min-inline-size: 24px;
+    min-block-size: 24px;
   }
 }
 

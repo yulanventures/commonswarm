@@ -139,14 +139,34 @@ const CHECKS = () => {
   const modal = [...document.querySelectorAll("dialog[open]")].find(d => d.matches(":modal"));
   const tappable = modal ? measured.filter(m => modal.contains(m.el)) : measured;
   const centreInView = (r: DOMRect) => { const x = r.left + r.width / 2, y = r.top + r.height / 2; return x >= 0 && y >= 0 && x < width && y < window.innerHeight; };
-  const obscured = tappable.filter(m => centreInView(m.rect) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
+  // Scrolling, not a defect: a centre clipped by the target's own scroll container, or content
+  // passing under a fixed or sticky bar. Both are skipped; anything else covering a target counts.
+  const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
+  const clipped = (el: Element, x: number, y: number) => {
+    for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (/(auto|scroll|hidden|clip)/u.test(st.overflowX + st.overflowY)) {
+        const r = n.getBoundingClientRect();
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return true;
+      }
+    }
+    return false;
+  };
+  const scrolledAway = (m: { el: Element; rect: DOMRect }) => {
+    const x = m.rect.left + m.rect.width / 2, y = m.rect.top + m.rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return clipped(m.el, x, y) || (pinned(hit) && !pinned(m.el));
+  };
+  const obscured = tappable.filter(m => centreInView(m.rect) && !scrolledAway(m) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
     .slice(0, 20).map(m => ({ selector: describe(m.el), by: describe(document.elementFromPoint(m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2) ?? document.body) }));
   // Non-overlap: two different controls whose measured boxes intersect by more than 4px² share taps.
+  const pin = new Map(tappable.map(m => [m.el, pinned(m.el)] as const));
   const overlaps: { a: string; b: string; area: number }[] = [];
   for (let i = 0; i < tappable.length && overlaps.length < 20; i += 1) {
     for (let j = i + 1; j < tappable.length && overlaps.length < 20; j += 1) {
       const a = tappable[i]!, b = tappable[j]!;
       if (a.el.contains(b.el) || b.el.contains(a.el) || labelFor(a.el)?.contains(b.el) || labelFor(b.el)?.contains(a.el)) continue;
+      if (pin.get(a.el) !== pin.get(b.el)) continue; // scrolling content under a fixed or sticky bar
       const w = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
       const h = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
       if (w > 0 && h > 0 && w * h > 4) overlaps.push({ a: describe(a.el), b: describe(b.el), area: Math.round(w * h) });
