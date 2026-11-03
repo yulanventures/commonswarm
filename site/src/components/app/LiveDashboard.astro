@@ -8542,7 +8542,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       /* Nothing shows until household_access answers for this workspace, so a confirmed
          person never sees the access card flash before their lists. */
       if (card) card.hidden = !current || confirmed;
-      if (approvals) approvals.hidden = !confirmed;
+      if (approvals) approvals.hidden = !confirmed || !listsAllowLanding;
       const notice = one<HTMLElement>("[data-household-consent-result]");
       if (notice && current && householdAccess.status === "unknown") {
         notice.textContent = "Lists & docs could not check your access. Open it again to retry.";

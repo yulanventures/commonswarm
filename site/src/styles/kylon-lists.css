@@ -66,40 +66,89 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__button
   padding: 8px 12px; border: 1px solid var(--k-shell-control); color: var(--k-shell-ink); background: var(--k-shell-surface); box-shadow: none;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__button,.household-objects button):hover:enabled { background: var(--k-shell-hover); }
-live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save]) { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
-live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
+live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list]) { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view button:disabled { color: var(--k-shell-secondary); background: var(--k-shell-subtle); border-color: var(--k-shell-control); opacity: 1; cursor: default; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(p,.hh-eyebrow) { margin: 0 0 4px; color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); letter-spacing: 0; text-transform: none; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-inline-size: 0; margin-block-end: 4px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) > :is(p,h2) {
+  min-inline-size: 0; max-inline-size: 100%; margin: 0; overflow-wrap: anywhere;
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-status { min-block-size: 0; padding-block: 8px; border-color: var(--k-shell-line); color: var(--k-shell-secondary); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(nav,article,.hh-comparison > section) { min-inline-size: 0; overflow-wrap: anywhere; }
 /* Keep the complete index as quiet navigation; selection and focus have separate cues. */
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout {
   position: relative;
-  grid-template-columns: min(var(--cs-lists-nav-width, 220px), 45%) minmax(0, 1fr);
+  grid-template-columns: min(var(--cs-lists-nav-width, 250px), 45%) minmax(0, 1fr);
   gap: 24px;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-layout > nav {
+  display: flex; flex-direction: column; gap: 12px;
   padding-inline-end: 12px;
   border-inline-end: 1px solid var(--k-shell-line);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-bar {
+  display: flex; flex-direction: column; gap: 8px; padding-block-end: 10px; border-block-end: 1px solid var(--k-shell-line);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input,.hh-add-item-input) {
+  box-sizing: border-box; inline-size: 100%; min-block-size: 36px; padding: 6px 10px;
+  border: 1px solid var(--k-shell-control); border-radius: 6px;
+  color: var(--k-shell-ink); background: var(--k-shell-surface); font: 400 13px/1.4 var(--k-shell-font);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button {
+  justify-content: center; text-align: center; padding: 6px 8px; min-block-size: 36px; border: 1px solid var(--k-shell-control);
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav ul {
   display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,10rem),1fr)); gap: 2px;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav li { margin: 0; }
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button {
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav ul button {
   margin: 0; padding: 8px 10px; border-color: transparent; border-inline-start: 3px solid transparent;
   background: transparent; font-weight: 400; text-align: start;
 }
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button:not([aria-current=true]):hover:enabled {
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav ul button:not([aria-current=true]):hover:enabled {
   border-color: transparent; background: var(--k-shell-hover);
 }
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav button[aria-current=true] {
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects nav ul button[aria-current=true] {
   border-inline-start-color: var(--k-shell-selection-edge); background: var(--k-shell-selected); font-weight: 600;
 }
-/* Preserve each original Check/Uncheck action and label as a full-width action row. */
-live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects article > button[data-hh-action=toggle] {
-  display: block; inline-size: 100%; margin: 0; border-color: transparent; border-block-end-color: var(--k-shell-line);
-  text-align: start; font-weight: 400;
+/* Interactive checklist rows with check toggle, text and remove action. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable {
+  list-style: none; padding: 0; margin: 12px 0; display: flex; flex-direction: column; gap: 4px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li {
+  padding: 4px 0; border-block-end: 1px solid var(--k-shell-line);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row {
+  display: flex; align-items: center; gap: 10px; min-inline-size: 0;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-text {
+  flex: 1 1 auto; min-inline-size: 0; overflow-wrap: anywhere;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-text--checked {
+  text-decoration: line-through; color: var(--k-shell-secondary);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  inline-size: 36px; block-size: 36px; min-inline-size: 36px; min-block-size: 36px; margin: 0; padding: 0; border-radius: 6px; font-size: 18px; line-height: 1;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[aria-checked=true] {
+  color: var(--accent-ink); background: var(--accent); border-color: var(--accent);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove {
+  flex: none; min-block-size: 32px; padding: 4px 8px; border-color: transparent; background: transparent;
+  color: var(--k-shell-secondary); font-size: 12px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove:hover:enabled {
+  color: var(--k-shell-ink); background: var(--k-shell-hover);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-add-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-block-start: 12px;
 }
 /* Keep the selected title, document sections and attribution distinct. */
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects article > h3:first-child {
@@ -140,4 +189,43 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(button,a,input,select,textarea):focus-visible,
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label):has(input:focus-visible) { outline: 3px solid Highlight; outline-offset: 2px; }
   live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label) input:focus-visible { outline: none !important; }
+}
+
+/* Borderless Lists controls (Tom, 2026-11-03): fields and buttons are filled, rows are separated by space
+   and a hover fill, and the checkbox is a rounded square. Forced-colors mode keeps system borders. */
+@media (forced-colors: none) {
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-bar { border-block-end: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input) {
+    min-block-size: 38px; border-color: transparent; border-radius: 10px; background: var(--k-shell-subtle);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input):focus {
+    outline: none; background: var(--k-shell-hover); box-shadow: none;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button {
+    border-color: transparent; border-radius: 10px; color: var(--k-shell-ink); background: var(--k-shell-subtle);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button:hover:enabled { color: var(--k-shell-ink); background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button[data-hh-action=revision] { border-color: transparent; background: var(--k-shell-subtle); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects button[data-hh-action=revision]:hover:enabled { background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable { gap: 2px; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li {
+    padding: 2px 6px; border-block-end: 0; border-radius: 10px;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li:hover { background: var(--k-shell-hover); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] {
+    inline-size: 22px; block-size: 22px; min-inline-size: 22px; min-block-size: 22px; margin: 7px; border: 0; border-radius: 6px;
+    background: var(--k-shell-selected); font-size: 13px; color: transparent;
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true] {
+    color: var(--k-shell-accent-ink); background: var(--k-shell-accent);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] > span { display: none; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true]::after {
+    content: ""; inline-size: 5px; block-size: 10px; margin-block-start: -2px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { opacity: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list--editable > li:is(:hover, :focus-within) .hh-list-remove { opacity: 1; }
+  @media (hover: none) {
+    live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { opacity: 1; }
+  }
 }

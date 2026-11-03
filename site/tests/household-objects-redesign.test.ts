@@ -108,3 +108,96 @@ test('refused saves use plain sentences without leaking raw server codes (D11)',
   );
   assert.doesNotMatch(householdSaveRefusalNotice('unknown_internal_code'), /unknown_internal_code/);
 });
+
+test('editors can create lists and docs and add or remove list items inline from /app', async () => {
+  const workspace = householdObjectsFixture();
+  const createdRequests: unknown[] = [];
+  const savedRequests: unknown[] = [];
+  let latestList: HouseholdObjectView = structuredClone(workspace.objects[0]!);
+  const controller = createHouseholdObjectsController(workspace, {
+    save: async (request) => {
+      savedRequests.push(structuredClone(request));
+      if (request.patch.kind === 'list') {
+        for (const op of request.patch.operations) {
+          if (op.kind === 'add') {
+            latestList.current.content = {
+              kind: 'list',
+              items: [
+                ...(latestList.current.content?.kind === 'list' ? latestList.current.content.items : []),
+                { item_id: op.item_id, text: op.text, checked: op.checked, order: 2 },
+              ],
+            };
+          } else if (op.kind === 'remove' && latestList.current.content?.kind === 'list') {
+            latestList.current.content = {
+              kind: 'list',
+              items: latestList.current.content.items
+                .filter((item) => item.item_id !== op.item_id)
+                .map((item, idx) => ({ ...item, order: idx })),
+            };
+          }
+        }
+      }
+      return { status: 'committed', object_id: request.object_id, revision: { ...latestList.current.revision } } as never;
+    },
+    create: async (request) => {
+      createdRequests.push(structuredClone(request));
+      return {
+        status: 'committed',
+        object_id: request.object_id,
+        revision: { workspace_id: request.workspace_id, object_id: request.object_id, token: 'created-rev-1' },
+      } as never;
+    },
+    readRevision: async () => ({ kind: 'doc', markdown: '' }),
+    recoverDraft: async () => { throw new Error('not used'); },
+    reloadObject: async (workspaceId, objectId) => {
+      if (objectId === 'packing-list') {
+        return {
+          object_id: 'packing-list',
+          kind: 'list',
+          current: {
+            revision: { workspace_id: workspaceId, object_id: 'packing-list', token: 'created-rev-1' },
+            title: 'Packing list',
+            author: { user_id: 'person-a', principal_id: null, run_id: null, connection_id: null, grant_id: null },
+            occurred_at_server: Date.now(),
+            live: true,
+            content: { kind: 'list', items: [] },
+          },
+          history: [{
+            revision: { workspace_id: workspaceId, object_id: 'packing-list', token: 'created-rev-1' },
+            title: 'Packing list',
+            author: { user_id: 'person-a', principal_id: null, run_id: null, connection_id: null, grant_id: null },
+            occurred_at_server: Date.now(),
+            live: true,
+            content: { kind: 'list', items: [] },
+          }],
+          next_history_cursor: null,
+        };
+      }
+      return structuredClone(latestList);
+    },
+  });
+
+  controller.select('groceries');
+  const initialHtml = renderHouseholdObjects(controller.getState());
+  assert.match(initialHtml, /data-hh-create-title/);
+  assert.match(initialHtml, /data-hh-action="create-list"/);
+  assert.match(initialHtml, /data-hh-action="create-doc"/);
+  assert.match(initialHtml, /class="hh-list hh-list--editable"/);
+  assert.match(initialHtml, /role="checkbox"/);
+  assert.match(initialHtml, /data-hh-action="remove-item"/);
+  assert.match(initialHtml, /data-hh-new-item/);
+  assert.match(initialHtml, /data-hh-action="add-item"/);
+
+  assert.equal(await controller.addItem('Oat milk'), true);
+  assert.equal(savedRequests.length, 1);
+  assert.match(renderHouseholdObjects(controller.getState()), /Oat milk/);
+
+  assert.equal(await controller.removeItem('apples'), true);
+  assert.equal(savedRequests.length, 2);
+  assert.doesNotMatch(renderHouseholdObjects(controller.getState()), /Apples/);
+
+  assert.equal(await controller.create('list', 'Packing list'), true);
+  assert.equal(createdRequests.length, 1);
+  assert.equal(controller.getState().selected_id, 'packing-list');
+  assert.match(renderHouseholdObjects(controller.getState()), /No items in this list yet\./);
+});
