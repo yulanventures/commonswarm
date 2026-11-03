@@ -55,8 +55,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
   position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--cs-rail-accent, #ba3d23); }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: color-mix(in srgb, var(--cs-rail-accent, #ba3d23) 85%, #000); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-collapsed] { grid-template-columns: minmax(0, 1fr); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-channel-details-collapsed] > .hm-frame__side { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-frame__side {

@@ -31,9 +31,10 @@ const description = "Open a workspace for home or work. Connect your agents and 
       const readPreference = () => {
         try {
           const stored = window.localStorage.getItem(storageKey);
-          return preferences.includes(stored) ? stored : "system";
+          // Dark first (Tom, 2026-11-02): with nothing stored, the app opens dark.
+          return preferences.includes(stored) ? stored : "dark";
         } catch {
-          return "system";
+          return "dark";
         }
       };
 
