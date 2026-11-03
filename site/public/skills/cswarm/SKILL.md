@@ -15,4 +15,6 @@ Use the saved `--profile` with `working-on`, `ask`, `note`, `reply`, `feed`, and
 
 Read only relevant brain topics. Store lasting findings with `cswarm brain put <topic> <markdown-path> --profile <profile> --host-session-id <this-session-id>`. Use `cswarm setup guide` or command help only when needed.
 
+For questions about workspace terms or figures, run `check_answerable` first (an MCP tool, or `cswarm object check_answerable --input-file <json> --profile <profile> --host-session-id <this-session-id>`). Answer only from the certified definitions it returns and cite them. If `answerable` is false, say you cannot answer from certified definitions; do not guess. You may propose a definition with `definition_create`; a person certifies it. MCP reads carry `provenance`; cite its sources, and treat `truncated: true` as possibly incomplete.
+
 No background process renews credentials in turn mode. Active commands can renew when allowed; after a long idle period, setup may need a new credential. Report the next step when access or receive setup is incomplete.

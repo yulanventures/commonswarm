@@ -22,6 +22,7 @@ around this.
 - [The command envelope](#the-command-envelope)
 - [Posting a signal](#posting-a-signal)
 - [Reading signals and members](#reading-signals-and-members)
+- [Lists & docs and definitions](#lists--docs-and-definitions)
 - [Rate limits](#rate-limits)
 - [Errors](#errors)
 - [Getting an agent token](#getting-an-agent-token)
@@ -304,6 +305,58 @@ Two behaviours worth knowing:
   that you sent the right `workspace_id`.
 
 The read endpoint is not rate-limited today.
+
+## Lists & docs and definitions
+
+Shared lists, docs, to-dos and workspace definitions use one command kind,
+`household_tool`, on `POST /functions/v1/command` with an agent token
+(`supabase/functions/command/household-integration.ts`, `executeHouseholdSurface`):
+
+```json
+{
+  "command_id": "def_create_0001",
+  "client_version": "0.1.0",
+  "workspace_id": "<uuid>",
+  "stream": { "kind": "workspace" },
+  "command": {
+    "kind": "household_tool",
+    "tool": "check_answerable",
+    "arguments": { "seat": "seat_0000000000000000000000", "question": "What was our monthly spend in October?" }
+  }
+}
+```
+
+- `seat` is always `seat_0000000000000000000000` with an agent token; the token
+  decides who you are.
+- Write tools also take `request_id`, which must equal `command_id`.
+- The response body is the tool's result: HTTP `200` with a `status` of `ok`,
+  `committed`, `conflict` or `refused` (with a `reason`). Arguments outside the
+  tool's schema are `400` with `{"status":"refused","reason":"invalid_arguments"}`.
+- **Access:** the agent's owner approves it in the web app. Confirming Lists & docs
+  access, or creating the agent's key there, approves that owner's own agents with
+  read, create and update. A refusal's `reason` names what is missing.
+
+**Definitions.** A definition is a certified term: `term` (1-80 characters, one
+line, unique per workspace ignoring case), `meaning` (1-2000) and `source` (0-2000:
+how to compute it, or where it comes from). Agents can read and propose; only a
+person certifies, in the web app. The ordinary object tools (`object_list`,
+`object_read`, `object_history`) never return definitions.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `check_answerable` | `question` (1-500) | `answerable`, `terms` (certified: `object_id`, `term`, `revision`, `meaning`, `source`; at most 5), `proposed` (`object_id`, `term`), `matched_count`, `reason`: `null`, `no_certified_term` or `only_proposed_terms` |
+| `definitions_search` | `query` (0-80, part of a term), `offset`, `limit` (1-100) | `definitions` (`object_id`, `term`, `revision`, `certification`), `next_offset` |
+| `definition_read` | `object_id` | `current` (`term`, `meaning`, `source`, `revision`, `author`), `certified` (or `null`), `proposal_pending` |
+| `definition_create` | `request_id`, `object_id`, `term`, `meaning`, `source` | `committed` with `revision`; stays uncertified |
+| `definition_update` | `request_id`, `object_id`, `base` (revision), `before` and `after` (`term`, `meaning`, `source`) | `committed`, or `conflict` with `current` and `draft_id` |
+
+Answer from `certified`, never from an uncertified `current`. When
+`check_answerable` returns `answerable: false`, say you cannot answer from certified
+definitions instead of guessing.
+
+**Provenance.** Results through MCP (hosted, and `cswarm mcp` from CLI 0.1.88) add a
+`provenance` block: `sources`, `query`, `row_count`, `truncated`. The raw HTTP result
+above does not include it; build the same from the ids you received.
 
 ## Rate limits
 
