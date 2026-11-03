@@ -323,6 +323,11 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions
     font-size: 16px;
   }
   live-dashboard[data-kylon-shell] :is(.household-objects, [data-skill-form]) textarea { font-size: 16px; }
+  /* Same specificity as the base and forced-colors input rules above, later in the file. */
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(.hh-create-input, .hh-add-item-input) {
+    min-block-size: 44px;
+    font-size: 16px;
+  }
   live-dashboard[data-kylon-shell] :is(.household-objects, .household-definitions) summary {
     display: flex;
     align-items: center;

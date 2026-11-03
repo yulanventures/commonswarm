@@ -129,14 +129,17 @@ const CHECKS = () => {
     const label = labelFor(el);
     return !!hit && (el === hit || el.contains(hit) || (!!label && (label === hit || label.contains(hit))));
   };
-  const inView = (r: DOMRect) => r.right > 0 && r.bottom > 0 && r.left < width && r.top < window.innerHeight;
-  const obscured = measured.filter(m => inView(m.rect) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
+  // While a modal dialog is open, only its own controls can be tapped: judge those alone.
+  const modal = [...document.querySelectorAll("dialog[open]")].find(d => d.matches(":modal"));
+  const tappable = modal ? measured.filter(m => modal.contains(m.el)) : measured;
+  const centreInView = (r: DOMRect) => { const x = r.left + r.width / 2, y = r.top + r.height / 2; return x >= 0 && y >= 0 && x < width && y < window.innerHeight; };
+  const obscured = tappable.filter(m => centreInView(m.rect) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
     .slice(0, 20).map(m => ({ selector: describe(m.el), by: describe(document.elementFromPoint(m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2) ?? document.body) }));
   // Non-overlap: two different controls whose measured boxes intersect by more than 4px² share taps.
   const overlaps: { a: string; b: string; area: number }[] = [];
-  for (let i = 0; i < measured.length && overlaps.length < 20; i += 1) {
-    for (let j = i + 1; j < measured.length && overlaps.length < 20; j += 1) {
-      const a = measured[i]!, b = measured[j]!;
+  for (let i = 0; i < tappable.length && overlaps.length < 20; i += 1) {
+    for (let j = i + 1; j < tappable.length && overlaps.length < 20; j += 1) {
+      const a = tappable[i]!, b = tappable[j]!;
       if (a.el.contains(b.el) || b.el.contains(a.el) || labelFor(a.el)?.contains(b.el) || labelFor(b.el)?.contains(a.el)) continue;
       const w = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
       const h = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
