@@ -469,6 +469,16 @@ export const HOUSEHOLD_TOOLS = BASE_HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
     idempotentHint: true, openWorldHint: false },
 }));
 
+/** Definition tools for both MCP catalogs. Agents read certified terms and may
+ * propose; certifying stays a human-only surface command. */
+export const HOUSEHOLD_DEFINITION_TOOLS = HOUSEHOLD_DEFINITION_TOOL_REGISTRY.map((row) => ({
+  name: row.name, title: row.title,
+  description: row.description + (row.effect === 'read' ? '' : ' Retry an unknown outcome with the same request_id and identical input.'),
+  inputSchema: row.inputSchema,
+  annotations: { title: row.title, readOnlyHint: row.effect === 'read', destructiveHint: row.effect !== 'read',
+    idempotentHint: true, openWorldHint: false },
+}));
+
 /** One hosted catalog/set for gates and pins. Existing to-do entries are reused;
  * only this surface narrows comment targets to to-dos and lists. */
 export const HOSTED_TODO_LIST_TOOLS = [
@@ -482,6 +492,7 @@ export const HOSTED_TODO_LIST_TOOLS = [
     inputSchema: row.inputSchema, annotations: { title: row.title, readOnlyHint: row.effect === 'read',
       destructiveHint: row.effect !== 'read', idempotentHint: true, openWorldHint: false },
   })),
+  ...HOUSEHOLD_DEFINITION_TOOLS,
 ];
 
 /** Hosted admission takes model arguments and returns validated input. Check the

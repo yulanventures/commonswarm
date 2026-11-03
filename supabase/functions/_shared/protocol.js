@@ -4867,6 +4867,19 @@ var HOUSEHOLD_TOOLS = BASE_HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
     openWorldHint: false
   }
 }));
+var HOUSEHOLD_DEFINITION_TOOLS = HOUSEHOLD_DEFINITION_TOOL_REGISTRY.map((row) => ({
+  name: row.name,
+  title: row.title,
+  description: row.description + (row.effect === "read" ? "" : " Retry an unknown outcome with the same request_id and identical input."),
+  inputSchema: row.inputSchema,
+  annotations: {
+    title: row.title,
+    readOnlyHint: row.effect === "read",
+    destructiveHint: row.effect !== "read",
+    idempotentHint: true,
+    openWorldHint: false
+  }
+}));
 var HOSTED_TODO_LIST_TOOLS = [
   ...HOUSEHOLD_TOOLS.filter((tool) => definition(tool.name).objectTypes.includes("todo")).map((tool) => ({
     ...tool,
@@ -4887,7 +4900,8 @@ var HOSTED_TODO_LIST_TOOLS = [
       idempotentHint: true,
       openWorldHint: false
     }
-  }))
+  })),
+  ...HOUSEHOLD_DEFINITION_TOOLS
 ];
 function validateHostedTodoListToolArguments(name, value) {
   const tool = HOSTED_TODO_LIST_TOOLS.find((tool2) => tool2.name === name);
@@ -5827,6 +5841,7 @@ export {
   HOUSEHOLD_CONTENT_ROLES,
   HOUSEHOLD_DEFINITION_TERM_MAX,
   HOUSEHOLD_DEFINITION_TEXT_MAX,
+  HOUSEHOLD_DEFINITION_TOOLS,
   HOUSEHOLD_DEFINITION_TOOL_REGISTRY,
   HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT,
   HOUSEHOLD_JOIN_CONSENT_VERSION,

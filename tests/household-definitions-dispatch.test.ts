@@ -80,7 +80,7 @@ function storage(t: { after: (fn: () => void) => void; mock: { method: (...args:
     const key = url.replace('https://storage.invalid/storage/v1/object/authenticated/swarm-files/', '');
     const bytes = blobs.get(key);
     assert.ok(bytes, `unexpected blob ${key}`);
-    return new Response(bytes);
+    return new Response(new Uint8Array(bytes));
   });
 }
 

@@ -7,7 +7,7 @@ import { CLIENT_PROTOCOL_VERSION } from '../../src/cloud/config.js';
 import { CLI_BUILD_VERSION } from '../../src/cloud/client-build.js';
 import { createHouseholdMcpTools } from '../../src/mcp/household-tools.js';
 import { MCP_RESULT_MAX_BYTES } from '../../src/mcp/tools.js';
-import { HOUSEHOLD_TOOLS, HouseholdToolInputError, type HouseholdToolInvocation } from '../../src/protocol/household-tool-registry.js';
+import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HouseholdToolInputError, type HouseholdToolInvocation } from '../../src/protocol/household-tool-registry.js';
 import { decideHouseholdObject, emptyHouseholdObjectState, readHouseholdObjects, reduceHouseholdObjectStream,
   type HouseholdVerifiedContent } from '../../src/protocol/household-objects.js';
 import type { HouseholdAccessFacts } from '../../src/protocol/household-object-policy.js';
@@ -212,8 +212,8 @@ test('stale patch preserves a draft and never retries blindly; reviewed patch us
 test('registry-derived local tools pass reads, surface reader refusal, and reject malformed model arguments', async () => {
   const host = coreHost();
   const tools = createHouseholdMcpTools(host.client);
-  assert.deepEqual(tools.tools, HOUSEHOLD_TOOLS);
-  assert.equal(tools.tools.length, 18, 'eight object/file tools and ten to-do/comment tools');
+  assert.deepEqual(tools.tools, [...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS]);
+  assert.equal(tools.tools.length, 22, 'eight object/file, ten to-do/comment and four definition tools');
   const created = await tools.call('object_create', create());
   assert.equal(JSON.parse(created.content[0]!.text).status, 'committed');
   host.reader();
