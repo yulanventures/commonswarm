@@ -290,6 +290,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-account-agents-open>Your agents</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout-others-open hidden>Sign out other devices</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" role="menuitem" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
@@ -1013,6 +1014,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
   </dialog>
 
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__signout-others-dialog"
+    data-signout-others-dialog
+    role="alertdialog"
+    aria-labelledby="dashboard-signout-others-title"
+    aria-describedby="dashboard-signout-others-description"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-signout-others-title">Sign out other devices?</h2>
+    </header>
+    <p class="dashboard__connected-apps-intro" id="dashboard-signout-others-description">Every other browser and device signed in to your account is signed out and loses access within an hour. This one stays signed in.</p>
+    <p class="dashboard__connected-apps-status" data-signout-others-status role="status" aria-live="polite"></p>
+    <div class="dashboard__signout-others-actions">
+      <button class="dashboard__danger-button" type="button" data-signout-others-confirm>Sign out other devices</button>
+      <button class="dashboard__button dashboard__button--secondary" type="button" data-signout-others-cancel>Cancel</button>
+    </div>
+  </dialog>
+
   <dialog data-account-agents-dialog aria-labelledby="dashboard-account-agents-title">
     <header>
       <h2 id="dashboard-account-agents-title">Your agents</h2>
@@ -1226,6 +1245,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     signInWithEmail,
     signInWithProvider,
     signOut,
+    signOutOtherDevices,
     removeWorkspaceMember,
     revokeAgentPrincipal,
     addAgentToWorkspace,
@@ -2065,6 +2085,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
         connectedApps: !!apps && !apps.hidden,
         yourAgents: !!session,
+        signOutOthers: !!session && !sampleMode,
         signOut: !!signOut && !signOut.hidden,
       };
     };
@@ -2073,6 +2094,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       else if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
       else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
       else if (action === "your-agents") one<HTMLButtonElement>("[data-account-agents-open]")?.click();
+      else if (action === "sign-out-others") one<HTMLButtonElement>("[data-signout-others-open]")?.click();
       else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
 
@@ -10012,7 +10034,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (chip) chip.hidden = false;
       const refresh = one<HTMLButtonElement>("[data-refresh]");
       if (refresh) refresh.hidden = true;
-      for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = true;
+      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open]")) button.hidden = true;
       homeRoute = { view: "chat", workspaceId: activeWorkspaceId };
       renderChannel(workspaces[0]!);
       applyHomePane();
@@ -10027,7 +10049,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
       authRecoveryActive = false;
       sampleMode = false;
-      for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = false;
+      for (const button of all<HTMLButtonElement>("[data-signout], [data-signout-others-open]")) button.hidden = false;
       setLoading("Checking your sign-in…");
       try {
         const verified = await currentSession();
@@ -10453,6 +10475,32 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       dialog?.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
     }
     one<HTMLButtonElement>("[data-connected-apps-open]")?.addEventListener("click", openConnectedApps);
+    /* Sign out other devices: GoTrue logout scope=others. Cancel has focus first; on success the
+       dialog says so and offers only Done. */
+    {
+      const dialog = one<HTMLDialogElement>("[data-signout-others-dialog]");
+      const confirm = one<HTMLButtonElement>("[data-signout-others-confirm]");
+      const cancel = one<HTMLButtonElement>("[data-signout-others-cancel]");
+      const status = one<HTMLElement>("[data-signout-others-status]");
+      one<HTMLButtonElement>("[data-signout-others-open]")?.addEventListener("click", () => {
+        if (!dialog || !confirm || !cancel || !status || !session || sampleMode) return;
+        status.textContent = ""; confirm.hidden = false; confirm.disabled = false; cancel.textContent = "Cancel";
+        dialog.showModal(); cancel.focus();
+      });
+      cancel?.addEventListener("click", () => dialog?.close());
+      confirm?.addEventListener("click", async () => {
+        if (!confirm || !cancel || !status || confirm.disabled) return;
+        confirm.disabled = true; confirm.setAttribute("aria-busy", "true");
+        try {
+          await signOutOtherDevices();
+          status.textContent = "Other devices are signed out.";
+          confirm.hidden = true; cancel.textContent = "Done"; cancel.focus();
+        } catch (error) {
+          status.textContent = readableError(error);
+          confirm.disabled = false;
+        } finally { confirm.removeAttribute("aria-busy"); }
+      });
+    }
     one<HTMLButtonElement>("[data-connected-apps-close]")?.addEventListener("click", () => {
       one<HTMLDialogElement>("[data-connected-apps-dialog]")?.close();
     });
@@ -16810,6 +16858,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__connected-apps-dialog > [data-connected-apps-list],
   .dashboard__connected-apps-dialog > [data-connected-apps-retry] {
     margin-inline: var(--s-5);
+  }
+
+  .dashboard__signout-others-dialog { inline-size: min(28rem, calc(100% - 2rem)); }
+  .dashboard__signout-others-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+    margin: var(--s-4) var(--s-5) var(--s-5);
   }
 
   .dashboard__connected-app {

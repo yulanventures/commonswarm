@@ -62,9 +62,10 @@ export interface AccountMenuState {
   theme: string | null;
   connectedApps: boolean;
   yourAgents?: boolean;
+  signOutOthers?: boolean;
   signOut: boolean;
 }
-export type AccountMenuAction = "theme" | "your-agents" | "connected-apps" | "sign-out" | { kind: "organization"; workspaceId: string };
+export type AccountMenuAction = "theme" | "your-agents" | "connected-apps" | "sign-out-others" | "sign-out" | { kind: "organization"; workspaceId: string };
 
 export interface OrganizationMenuItem {
   id: string;
@@ -307,6 +308,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     if (state.theme) entry(state.theme, "theme", "menuTheme");
     if (state.yourAgents) entry("Your agents", "your-agents", "menuYourAgents");
     if (state.connectedApps) entry("Connected apps", "connected-apps", "menuConnectedApps");
+    if (state.signOutOthers) entry("Sign out other devices", "sign-out-others", "menuSignOutOthers");
     if (state.signOut) entry("Sign out", "sign-out", "menuSignOut");
     const home = node(doc, "li", "hm-menu__entry"); home.setAttribute("role", "none");
     const homeLink = node(doc, "a", "hm-menu__item", "CommonSwarm home");

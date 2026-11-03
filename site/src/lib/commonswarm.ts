@@ -692,6 +692,14 @@ export async function signInWithEmail(
   throw new Error(error.message);
 }
 
+/** Ends every other session of this account (GoTrue logout scope=others); this one stays. */
+export async function signOutOtherDevices(): Promise<void> {
+  const auth = client()?.auth;
+  if (!auth) throw new Error("Sign in first.");
+  const { error } = await auth.signOut({ scope: "others" });
+  if (error) throw new Error("Other devices could not be signed out. Try again.");
+}
+
 export async function signOut(): Promise<void> {
   deadSession = false;
   await client()?.auth.signOut();
