@@ -8,6 +8,19 @@ type AddressedSignal = Pick<Signal, "to" | "toAgent">;
 export const signalIsBroadcast = (signal: AddressedSignal): boolean =>
   signal.to === null && signal.toAgent === null;
 
+/** A Direct Message partner: the one teammate a 1:1 view is with. */
+export interface DirectPartner { kind: "agent" | "person"; id: string }
+type DirectSignal = Pick<Signal, "from" | "fromKind" | "to" | "toAgent">;
+
+/** A message in the 1:1 view: the viewer addressed the teammate, or the teammate addressed the viewer. */
+export const signalIsDirectBetween = (signal: DirectSignal, viewerId: string, partner: DirectPartner): boolean => {
+  if (viewerId === "" || partner.id === viewerId) return false;
+  const fromViewer = signal.fromKind === "user" && signal.from === viewerId;
+  const toPartner = partner.kind === "agent" ? signal.toAgent === partner.id : signal.to === partner.id;
+  const fromPartner = signal.from === partner.id && signal.fromKind === (partner.kind === "agent" ? "agent" : "user");
+  return (fromViewer && toPartner) || (fromPartner && signal.to === viewerId);
+};
+
 /* ~~"targets them or an agent they operate"~~ Dead 2026-09-01, by operator report:
  * in a solo-owner workspace the operator operates nearly every agent, so the
  * operated-agent clause made "Direct to you" degenerate into ALL directed

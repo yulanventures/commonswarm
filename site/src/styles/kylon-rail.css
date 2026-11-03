@@ -1,0 +1,16 @@
+/* Grokbot-style rail: Group chats, then Direct messages with a status dot and the workspace Lead tag. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb { position: relative; }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb::after {
+  content: ""; position: absolute; inset-block-end: -1px; inset-inline-end: -1px;
+  inline-size: 8px; block-size: 8px; border-radius: 50%;
+  background: var(--k-shell-muted); box-shadow: 0 0 0 2px var(--cs-rail-bg, var(--k-shell-subtle));
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent[data-agent-state="idle"] .hm-rail__orb::after { background: var(--carbon-live, #10b981); }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent[data-agent-state="working"] .hm-rail__orb::after { background: var(--carbon-working, #f59e0b); }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__lead {
+  flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 16px;
+  color: var(--k-shell-accent-ink); background: var(--k-shell-accent);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__agent, .hm-rail__person)[aria-current="page"] {
+  background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
+}
