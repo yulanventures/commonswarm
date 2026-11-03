@@ -6068,6 +6068,71 @@ test("§2.3 self-healing renewal keeps exactly one live successor per predecesso
   });
 });
 
+test("§2.3 standing renewal self-heals a stale pending successor after predecessor expiry even when the client rolls a new command_id", async () => {
+  await scenario(async (f) => {
+    const grantId = await seedRenewalGrant(f, { standing: true });
+    const predecessor = await seedPredecessor(f, { grantId });
+    const auditFloor = await latestAuditId();
+
+    const lostCommandId = commandId("renewstandinglost");
+    const first = await issueRenewal(f, predecessor.token, lostCommandId);
+    assert.equal(first.status, 200, first.text);
+    assert.equal(first.body.status, "accepted", first.text);
+    const strandedId = String(first.body.token_id);
+    const strandedToken = String(first.body.agent_token);
+    registerAgentCredential(f, strandedToken);
+
+    // Move the predecessor past its 1h TTL while the pending successor is still
+    // fresh (< 5 minutes old and un-expired). A distinct command_id must still
+    // be refused with predecessor_superseded so a freshly issued in-flight
+    // credential cannot be clobbered prematurely.
+    await sql`
+      UPDATE swarm.agent_tokens
+      SET expires_at = statement_timestamp() - interval '1 minute'
+      WHERE token_id = ${predecessor.tokenId}::uuid
+    `;
+    const tooEarly = await issueRenewal(f, predecessor.token, commandId("renewtooearly"));
+    assert.equal(tooEarly.status, 200, tooEarly.text);
+    assert.equal(tooEarly.body.status, "rejected", tooEarly.text);
+    assert.equal(tooEarly.body.reason, "predecessor_superseded", tooEarly.text);
+    assert.equal(
+      (await tokenLifecycle(strandedId)).revokedAt,
+      null,
+      "a fresh pending successor (< 5m old) is not discarded under a different command_id",
+    );
+
+    // Once the pending successor has sat unused past the 5-minute pending
+    // recovery window (e.g. a cswarm daemon polling every 10 minutes after a
+    // dropped HTTP response right as the predecessor expires), a standing
+    // renewal presenting the expired predecessor with a fresh command_id
+    // self-heals the stranded successor and mints a working replacement.
+    await sql`
+      UPDATE swarm.agent_tokens
+      SET issued_at = statement_timestamp() - interval '6 minutes'
+      WHERE token_id = ${strandedId}::uuid
+    `;
+    const recovered = await issueRenewal(f, predecessor.token, commandId("renewfreshstanding"));
+    assert.equal(recovered.status, 200, recovered.text);
+    assert.equal(recovered.body.status, "accepted", recovered.text);
+    const freshId = String(recovered.body.token_id);
+    const freshToken = String(recovered.body.agent_token);
+    assert.notEqual(freshId, strandedId);
+    registerAgentCredential(f, freshToken);
+
+    const strandedAfter = await tokenLifecycle(strandedId);
+    assert.equal(strandedAfter.firstUsedAt, null);
+    assert.notEqual(strandedAfter.revokedAt, null, "the stale pending successor is revoked");
+    assert.equal(await effectiveSpend(grantId), 1, "effective spend stays at 1");
+    assert.equal(await successorsUsed(grantId), 2);
+    const evidence = await discardEvidence(strandedId, auditFloor);
+    assert.match(evidence, /strand/i);
+
+    const working = await useToken(f, freshToken);
+    assert.equal(working.status, 200, working.text);
+    assert.equal(working.body.status, "accepted", working.text);
+  });
+});
+
 test("§2.3 first_used_at is write-once in the DATABASE, not merely in the writer", async () => {
   await scenario(async (f) => {
     /* ★ THESE TWO TRIGGERS HAD ZERO COVERAGE. Both could be dropped from

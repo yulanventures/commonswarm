@@ -3672,6 +3672,7 @@ async function prepareWorkspaceCommand(
    * the successor the stored response names is still live and still unused.
    */
   selfHealStranded = false,
+  allowStalePendingRecovery = true,
 ): Promise<PreparedWorkspace> {
   const state = await loadWorkspaceState(tx, route,
     wire.kind==='renew_agent_token' && auth.agent ? [auth.agent.token_id]
@@ -3776,12 +3777,11 @@ async function prepareWorkspaceCommand(
         predecessorTokenId,
         auth.agentFirstUse,
         auth.agent?.device_id ?? null,
+        selfHealStranded,
+        allowStalePendingRecovery,
       );
     if (auth.agent && !auth.agent.unexpired && renewalFacts?.grant?.kind==='standing' && predecessor) {
       state.tokens[auth.agent.token_id] = {...predecessor,expires_at:now+1};
-    }
-    if (renewalFacts !== null && !selfHealStranded) {
-      renewalFacts = { ...renewalFacts, successor_pending: false };
     }
     agentToken = opaqueToken("swm_agt_");
     agentTokenHash = await sha256(agentToken);
@@ -3913,6 +3913,8 @@ async function loadRenewalFacts(
   predecessorTokenId: string,
   predecessorPending: boolean,
   deviceId: string | null,
+  selfHealStranded = false,
+  allowStalePendingRecovery = true,
 ): Promise<RenewalFacts | null> {
   const preflight = await tx<{ code: string | null }[]>`
     SELECT swarm.prepare_renewal_grant(
@@ -3967,6 +3969,18 @@ async function loadRenewalFacts(
       ) AS successor_token_id,
       (
         SELECT s.first_used_at IS NULL
+          AND (
+            ${selfHealStranded}
+            OR (
+              ${allowStalePendingRecovery}
+              AND g.kind = 'standing'
+              AND t.expires_at <= clock_timestamp()
+              AND (
+                s.expires_at <= clock_timestamp()
+                OR s.issued_at <= clock_timestamp() - interval '5 minutes'
+              )
+            )
+          )
         FROM swarm.agent_tokens AS s
         WHERE s.predecessor_token_id = t.token_id
           AND s.revoked_at IS NULL
@@ -14099,6 +14113,7 @@ async function handleTransaction(
           commandId,
           headSeq,
           now,
+          false,
           false,
         );
         decision = decideWorkspace(
