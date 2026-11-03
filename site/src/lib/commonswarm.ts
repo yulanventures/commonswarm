@@ -659,10 +659,13 @@ export class PasswordSignInRefused extends Error {
  * is no password sign-up: a new address still enters by email link or provider, so every
  * account has a confirmed address. GoTrue rate-limits the password grant per client.
  */
-export async function signInWithPassword(email: string, password: string): Promise<void> {
-  const c = client();
-  if (!c) throw new NoDeployment();
-  const { error } = await c.auth.signInWithPassword({ email, password });
+export async function signInWithPassword(
+  email: string,
+  password: string,
+  auth: Pick<SupabaseClient["auth"], "signInWithPassword"> | undefined = client()?.auth,
+): Promise<void> {
+  if (!auth) throw new NoDeployment();
+  const { error } = await auth.signInWithPassword({ email, password });
   if (!error) return;
   const status = (error as { status?: number }).status ?? 0;
   const code = (error as { code?: string }).code ?? "";
