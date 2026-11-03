@@ -61,6 +61,7 @@ const seat = HOUSEHOLD_LOCAL_SEAT;
 
 const REFUSAL_NOTICES: Readonly<Record<string, string>> = Object.freeze({
   definition_term_taken: 'A definition with this term already exists in this workspace.',
+  definition_invalid: 'Use a one-line term up to 80 characters and a meaning up to 2,000 characters.',
   definition_not_current: 'A newer version was saved since you opened this definition. Reloaded the latest version for review.',
   human_confirmation_required: 'Only a workspace member can certify a definition.',
   content_read_only: 'This action was refused because you have reader access.',
@@ -125,7 +126,7 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
         const statusLabel = summaryStatusLabel(item);
         return `<li><button type="button" data-def-action="select" data-def-target="${esc(item.object_id)}"${busy ? ' disabled' : ''}${selected ? ' aria-current="true"' : ''}><span>${esc(item.term)}</span><span class="hh-def-badge">${statusLabel}</span></button></li>`;
       }).join('')}</ul>`
-    : '<p class="hh-empty-note" data-def-empty>No certified or proposed definitions yet.</p>';
+    : '<p class="hh-empty-note" data-def-empty>No definitions yet.</p>';
 
   const createControls = can_edit
     ? `<div class="hh-create-bar">
@@ -135,19 +136,19 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
       </div>`
     : '';
 
-  let detailHtml = '<p>Select a definition to inspect its meaning, source and certification, or create a new one.</p>';
+  let detailHtml = '';
 
   if (creating && can_edit) {
     detailHtml = `<form class="hh-editor hh-def-form" data-def-create-form>
       <h4>New definition</h4>
       <label>Term
-        <input type="text" name="term" maxlength="80" placeholder="e.g. Monthly spend" required data-def-input-term${busy ? ' disabled' : ''} />
+        <input type="text" name="term" maxlength="80" required data-def-input-term${busy ? ' disabled' : ''} />
       </label>
       <label>Meaning
-        <textarea name="meaning" rows="3" maxlength="2000" placeholder="Plain-language meaning for people and agents…" required data-def-input-meaning${busy ? ' disabled' : ''}></textarea>
+        <textarea name="meaning" rows="3" maxlength="2000" required data-def-input-meaning${busy ? ' disabled' : ''}></textarea>
       </label>
-      <label>Source or how to compute
-        <textarea name="source" rows="2" maxlength="2000" placeholder="Where this comes from or how to calculate it (optional)…" data-def-input-source${busy ? ' disabled' : ''}></textarea>
+      <label>Source
+        <textarea name="source" rows="2" maxlength="2000" data-def-input-source${busy ? ' disabled' : ''}></textarea>
       </label>
       <div class="hh-def-form-actions">
         <button type="submit" class="dashboard__button--primary" data-def-action="create"${busy ? ' disabled' : ''}>Create definition</button>
@@ -173,10 +174,9 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
 
     const diffHtml = proposal_pending && certified
       ? `<section class="hh-conflict hh-def-diff" aria-label="Proposal comparison" data-def-diff>
-          <h4>Review proposed update against certified version</h4>
           <div class="hh-comparison">
             <section aria-label="Certified version">
-              <h5>Certified (active for agents)</h5>
+              <h5>Certified</h5>
               <dl class="hh-def-fields">
                 <dt>Term</dt><dd>${esc(certified.term)}</dd>
                 <dt>Meaning</dt><dd>${esc(certified.meaning)}</dd>
@@ -197,9 +197,6 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
 
     const certifyBarHtml = proposal_pending && can_edit
       ? `<div class="hh-def-certify-bar" data-def-certify-bar>
-          <p>${certified
-            ? 'Agents continue answering from the certified version until a member certifies this proposal.'
-            : 'Uncertified proposal. Certify it so agents can answer questions using this definition.'}</p>
           <button type="button" class="dashboard__button--primary" data-def-action="certify" data-def-target="${esc(opened.object_id)}" data-def-revision="${esc(current.revision.token)}"${busy ? ' disabled' : ''}>${certified ? 'Certify proposed version' : 'Certify definition'}</button>
         </div>`
       : '';
@@ -214,7 +211,7 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
             <label>Meaning
               <textarea name="meaning" rows="3" maxlength="2000" required data-def-edit-meaning${busy ? ' disabled' : ''}>${esc(current.meaning)}</textarea>
             </label>
-            <label>Source or how to compute
+            <label>Source
               <textarea name="source" rows="2" maxlength="2000" data-def-edit-source${busy ? ' disabled' : ''}>${esc(current.source)}</textarea>
             </label>
             <div class="hh-def-form-actions">
@@ -241,7 +238,6 @@ export function renderWorkspaceDefinitionsHtml(state: WorkspaceDefinitionsViewDa
 
   return `<header>
       <div class="hh-workspace-identity">
-        <p class="hh-eyebrow">Certified terms</p>
         <h3>Definitions</h3>
       </div>
     </header>
@@ -430,7 +426,7 @@ export function mountWorkspaceDefinitions(
         ).catch(() => ({ status: 'unknown' }));
         if (disposed) return;
         if (res.status === 'committed') {
-          await refresh('Definition created as a proposal. Certify it when ready.', String(res.object_id ?? objectId));
+          await refresh('Created.', String(res.object_id ?? objectId));
         } else {
           state = {
             ...state,
@@ -473,6 +469,9 @@ export function mountWorkspaceDefinitions(
         if (disposed) return;
         if (res.status === 'committed') {
           await refresh('Saved.', opened.object_id);
+        } else if (res.status === 'conflict') {
+          // Someone saved first: show their version instead of a dead end.
+          await refresh('Someone saved a newer version. Review it, then edit again.', opened.object_id);
         } else {
           state = {
             ...state,
