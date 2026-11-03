@@ -65,7 +65,14 @@ api.commonswarm.com {
 
 	handle /auth/v1/* {
 		uri strip_prefix /auth/v1
-		reverse_proxy 127.0.0.1:18001
+		# GoTrue rate-limits by GOTRUE_RATE_LIMIT_HEADER=X-Forwarded-For (first value) or by
+		# Sb-Forwarded-For. Overwrite XFF with the trusted client IP (CF-Connecting-IP under
+		# trusted_proxies_strict), as the functions proxy does, and drop any inbound SBFF, so a
+		# caller cannot choose its own rate-limit key.
+		reverse_proxy 127.0.0.1:18001 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			header_up -Sb-Forwarded-For
+		}
 	}
 
 	handle /rest/v1/* {

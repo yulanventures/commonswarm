@@ -65,7 +65,12 @@ edge-staging.commonswarm.com {
 
 	handle /auth/v1/* {
 		uri strip_prefix /auth/v1
-		reverse_proxy 127.0.0.1:18001
+		# Same GoTrue as api.commonswarm.com: overwrite the rate-limit key with the trusted client
+		# IP and drop inbound SBFF (see commonswarm-api.caddy).
+		reverse_proxy 127.0.0.1:18001 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			header_up -Sb-Forwarded-For
+		}
 	}
 
 	handle /rest/v1/* {
