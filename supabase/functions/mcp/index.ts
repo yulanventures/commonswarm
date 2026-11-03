@@ -1,5 +1,6 @@
-import { HOUSEHOLD_TOOL_REGISTRY, boundHouseholdListResult } from "../_shared/protocol.js";
+import { HOUSEHOLD_TOOL_REGISTRY, HOSTED_CHECK_BATCH_LIMIT, boundHouseholdListResult } from "../_shared/protocol.js";
 import { householdRefusalDetails, householdRefusalNextStep } from "../../../src/protocol/household-next-steps.ts";
+import { householdReadProvenance, messageReadProvenance, withReadProvenance } from "../../../src/protocol/read-provenance.ts";
 import postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
@@ -87,6 +88,13 @@ const limits: McpProtocolLimits = {
   requestTimeoutMs: boundedInteger("SWARM_MCP_REQUEST_TIMEOUT_MS", 25_000, 1_000, 120_000),
   maxConcurrentRequests: boundedInteger("SWARM_MCP_MAX_CONCURRENT_REQUESTS", 4, 1, 16),
 };
+/** Provenance only rides a tool result that still fits the response cap with
+ * room for the JSON-RPC envelope; otherwise it shrinks, then is left off. */
+const RESPONSE_ENVELOPE_RESERVE_BYTES = 1024;
+function fitsResponse(output: Record<string, unknown>): boolean {
+  return new TextEncoder().encode(JSON.stringify(JSON.stringify(output))).byteLength + RESPONSE_ENVELOPE_RESERVE_BYTES
+    <= limits.maxResponseBytes;
+}
 const issuer = exactContract("SWARM_MCP_ISSUER", MCP_ISSUER);
 const resource = exactContract("SWARM_MCP_RESOURCE", MCP_RESOURCE);
 exactContract("SWARM_MCP_JWKS_URL", MCP_JWKS_URL);
@@ -262,8 +270,10 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     if (result.status === 503 && serviceUpdating(result.body)) return result.body;
     // Forward the backend's stable code; hostedToolError maps unknown codes to tool_failed.
     if (result.status !== 200) throw new HostedToolFailure(result.body.error, result.body.resets_at);
-    const output = call.name.startsWith("list_")
+    const bounded = call.name.startsWith("list_")
       ? boundHouseholdListResult(result.body, Number(args.offset ?? 0)) : result.body;
+    const output = row.effect === "read"
+      ? withReadProvenance(bounded, householdReadProvenance(call.name, args, bounded), fitsResponse) : bounded;
     if (output.status !== "refused" || typeof output.reason !== "string") return output;
     const next_action = householdRefusalNextStep(output.reason);
     return { ...output, ...householdRefusalDetails(output.reason, binding.workspaceId),
@@ -313,7 +323,11 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
         ? { kind: "open_hosted_mcp_check_batch", seat: handle }
         : { kind: "ack_hosted_mcp_check_batch", seat: handle, ack: args.ack },
     }, capability);
-    return commandOutput(result);
+    const output = commandOutput(result);
+    const signals = Array.isArray(output.signals) ? output.signals : [];
+    return withReadProvenance(output, messageReadProvenance(signals,
+      { tool: "check", scope: "new messages addressed to this seat" },
+      signals.length >= HOSTED_CHECK_BATCH_LIMIT), fitsResponse);
   }
   return commandOutput(await handleHostedCommand(
     hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
