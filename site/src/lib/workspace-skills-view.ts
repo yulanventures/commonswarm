@@ -114,18 +114,32 @@ export function mountWorkspaceSkills(
   };
 
   const refresh = async (notice = '', opened?: WorkspaceSkillView | null) => {
-    const res = await call({ kind: 'household_skills', action: 'list' }, crypto.randomUUID());
-    if (disposed || res.status !== 'ok') return;
-    state = {
-      cap: typeof res.cap === 'number' ? res.cap : 20,
-      ttl_days: typeof res.ttl_days === 'number' ? res.ttl_days : 60,
-      can_edit: canEdit,
-      skills: Array.isArray(res.skills) ? res.skills as WorkspaceSkillSummary[] : [],
-      suggestions: Array.isArray(res.suggestions) ? res.suggestions as WorkspaceSkillSuggestion[] : [],
-      opened_skill: opened !== undefined ? opened : state.opened_skill,
-      notice,
-    };
-    paint();
+    try {
+      const res = await call({ kind: 'household_skills', action: 'list' }, crypto.randomUUID());
+      if (disposed) return;
+      if (res.status !== 'ok') {
+        state = {
+          ...state,
+          notice: notice || 'Choose Lists & docs access in this workspace to view and edit shared skills.',
+        };
+        paint();
+        return;
+      }
+      state = {
+        cap: typeof res.cap === 'number' ? res.cap : 20,
+        ttl_days: typeof res.ttl_days === 'number' ? res.ttl_days : 60,
+        can_edit: canEdit,
+        skills: Array.isArray(res.skills) ? res.skills as WorkspaceSkillSummary[] : [],
+        suggestions: Array.isArray(res.suggestions) ? res.suggestions as WorkspaceSkillSuggestion[] : [],
+        opened_skill: opened !== undefined ? opened : state.opened_skill,
+        notice,
+      };
+      paint();
+    } catch {
+      if (disposed) return;
+      state = { ...state, notice: 'Could not load workspace skills.' };
+      paint();
+    }
   };
 
   const onClick = (event: Event) => {
@@ -193,6 +207,7 @@ export function mountWorkspaceSkills(
 
   container.addEventListener('click', onClick);
   container.addEventListener('submit', onSubmit);
+  paint();
   void refresh();
 
   return () => {

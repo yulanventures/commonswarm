@@ -55,6 +55,7 @@ import "../../styles/kylon-entity-profile.css";
 import "../../styles/kylon-channel-dialog.css";
 import "../../styles/kylon-agent-page.css";
 import "../../styles/kylon-chat-empty.css";
+import "../../styles/kylon-command-palette.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -326,6 +327,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <span class="dashboard__live-word">Live</span>
               </span>
               <span class="dashboard__update-count" data-update-count hidden>0 updates</span>
+              <button
+                class="dashboard__command-palette-trigger"
+                type="button"
+                data-command-palette-open
+                aria-label="Command palette (Cmd+K)"
+                title="Command palette (Cmd+K)"
+              >
+                <span>Jump</span>
+                <kbd class="dashboard__command-palette-kbd" aria-hidden="true">⌘K</kbd>
+              </button>
               <button
                 class="dashboard__icon-button"
                 type="button"
@@ -1010,6 +1021,61 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     <button type="button" data-account-agents-retry hidden>Try again</button>
   </dialog>
 
+  <dialog
+    class="dashboard__command-palette"
+    data-command-palette
+    aria-labelledby="dashboard-command-palette-title"
+  >
+    <header class="cp-head">
+      <h2 id="dashboard-command-palette-title" class="pd-sr-only">Command palette</h2>
+      <input
+        type="search"
+        class="cp-input"
+        data-command-palette-input
+        placeholder="Jump to a teammate, channel, skill, or action…"
+        aria-label="Jump to a teammate, channel, skill, or action"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-command-palette-close
+        aria-label="Close command palette"
+        title="Close (Esc)"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="cp-body" data-command-palette-list role="listbox" aria-label="Results"></div>
+  </dialog>
+
+  <dialog
+    class="dashboard__skills-dialog"
+    data-workspace-skills-dialog
+    aria-labelledby="dashboard-workspace-skills-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-workspace-skills-title">Workspace skills</h2>
+      <button
+        class="dashboard__icon-button"
+        type="button"
+        data-workspace-skills-close
+        aria-label="Close workspace skills"
+        title="Close workspace skills"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+    <div class="dashboard__skills-dialog-body" data-workspace-skills-body>
+      <div data-workspace-skills-anchor hidden></div>
+    </div>
+  </dialog>
+
   {/* PEOPLE & AGENTS IS A PAGE (the canvas Members artboard, route `?v=people`), rendered by
       renderPeopleDialog(..., { layout: "page" }) into the route pane. ~~"The agent management dialog. A
       native <dialog> ... At ≤52rem it is a bottom sheet"~~, retired 2026-10-07 (home visual lane): the
@@ -1075,6 +1141,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
+  import { mountWorkspaceSkills } from "../../lib/workspace-skills-view";
+  import {
+    buildCommandPaletteItems,
+    filterCommandPaletteItems,
+    renderCommandPaletteList,
+    summarizeAgentRoutines,
+    buildAgentRoutinesSection,
+    type CommandPaletteItem,
+  } from "../../lib/home-command-palette";
   import {
     CONTENT_OPERATION_LABELS,
     CONTENT_OPERATIONS,
@@ -2962,6 +3037,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             leadSection.append(leadBtn, leadError);
           }
           body.append(leadSection);
+        }
+
+        if (!details.revoked) {
+          const routinesSummary = summarizeAgentRoutines(
+            details.principalId,
+            typeof homeTodoRows !== "undefined" && Array.isArray(homeTodoRows) ? homeTodoRows : [],
+          );
+          const routinesSection = buildAgentRoutinesSection(document, routinesSummary, {
+            onOpenTodo: (todoId) => {
+              if (!activeWorkspaceId) return;
+              void navigateHome({ view: "todo", workspaceId: activeWorkspaceId, todoId }, "push");
+            },
+            onOpenAgentQueue: () => {
+              if (!activeWorkspaceId) return;
+              void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId: details.principalId }, "push");
+            },
+            onOpenSkills: () => {
+              if (typeof openWorkspaceSkillsDialog === "function") openWorkspaceSkillsDialog();
+            },
+          });
+          body.append(routinesSection);
         }
 
         const live = renderAgentActivitySection(details.principalId);
@@ -10323,6 +10419,218 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (event.target === dialog) dialog.close();
       });
     }
+
+    let unmountSkillsDialog: (() => void) | null = null;
+    function openWorkspaceSkillsDialog(): void {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      const body = one<HTMLElement>("[data-workspace-skills-body]");
+      const anchor = one<HTMLElement>("[data-workspace-skills-anchor]");
+      if (!dialog || !body || !anchor) return;
+      unmountSkillsDialog?.();
+      unmountSkillsDialog = null;
+      const canEdit = viewerRole() === "owner" || viewerRole() === "admin" || householdAccess.content_role === "editor";
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      const call = activeSession && workspaceId && !sampleMode
+        ? householdCall(activeSession, workspaceId)
+        : async () => ({
+            status: "ok",
+            cap: 20,
+            ttl_days: 60,
+            skills: [],
+            suggestions: [],
+          });
+      unmountSkillsDialog = mountWorkspaceSkills(body, anchor, canEdit && !sampleMode, call);
+      if (!dialog.open) dialog.showModal();
+    }
+    function closeWorkspaceSkillsDialog(): void {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      if (dialog?.open) dialog.close();
+    }
+    one<HTMLButtonElement>("[data-workspace-skills-close]")?.addEventListener("click", closeWorkspaceSkillsDialog);
+    {
+      const dialog = one<HTMLDialogElement>("[data-workspace-skills-dialog]");
+      dialog?.addEventListener("close", () => {
+        unmountSkillsDialog?.();
+        unmountSkillsDialog = null;
+      });
+      dialog?.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    }
+
+    let commandPaletteFiltered: CommandPaletteItem[] = [];
+    let commandPaletteIndex = 0;
+    const executeCommandPaletteItem = (item: CommandPaletteItem): void => {
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      if (dialog?.open) dialog.close();
+      const action = item.action;
+      if (action.type === "teammate") {
+        const dmFn = (app as unknown as { openDirectMessage?: (id: string) => void }).openDirectMessage;
+        if (typeof dmFn === "function") {
+          dmFn.call(app, action.id);
+          return;
+        }
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          composerTo = [{ kind: action.entityKind, id: action.id }];
+          renderComposerTo();
+          const trigger = one<HTMLElement>("[data-command-palette-open]") ?? app;
+          openEntityPanel({ kind: action.entityKind, id: action.id }, trigger);
+          one<HTMLTextAreaElement>("[data-composer-input]")?.focus();
+        };
+        void go();
+        return;
+      }
+      if (action.type === "channel") {
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          if (action.slug === ALL_SIGNALS_SLUG) {
+            selectChannel(null);
+          } else {
+            const match = channels.find((channel) => channel.slug === action.slug);
+            if (match) selectChannel(match.channelId);
+          }
+        };
+        void go();
+        return;
+      }
+      if (action.type === "set-lead") {
+        void updateWorkspaceLead(action.principalId);
+        return;
+      }
+      if (action.type === "open-skills") {
+        openWorkspaceSkillsDialog();
+        return;
+      }
+      if (action.type === "navigate") {
+        if (!activeWorkspaceId) return;
+        if (action.view === "people") {
+          void openRosterDialog();
+        } else {
+          void navigateHome({ view: action.view, workspaceId: activeWorkspaceId }, "push");
+        }
+        return;
+      }
+      if (action.type === "connect-agent") {
+        const go = async () => {
+          if (homeRoute.view !== "chat" && activeWorkspaceId) {
+            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
+          }
+          openConnect();
+        };
+        void go();
+        return;
+      }
+      if (action.type === "new-channel") {
+        openChannelDialog();
+        return;
+      }
+      if (action.type === "cycle-theme") {
+        one<HTMLButtonElement>("[data-theme-toggle]")?.click();
+      }
+    };
+
+    const renderCommandPalette = (): void => {
+      const list = one<HTMLElement>("[data-command-palette-list]");
+      const input = one<HTMLInputElement>("[data-command-palette-input]");
+      if (!list) return;
+      const allItems = buildCommandPaletteItems({
+        agents: agents.map((agent) => ({
+          principalId: agent.principalId,
+          name: agent.name,
+          model: agent.model,
+          transport: agent.transport === "hosted_mcp" ? "hosted_mcp" : "local",
+          turnOnly: agent.turnOnly === true,
+          revokedAt: agent.revokedAt,
+        })),
+        members: members.map((member) => ({
+          userId: member.userId,
+          name: member.name,
+        })),
+        channels: channels.map((channel) => ({
+          slug: channel.slug,
+          purpose: channel.purpose,
+          archivedAt: channel.archivedAt,
+        })),
+        leadAgentPrincipalId: activeWorkspaceLeadAgent()?.principalId ?? null,
+        maySetLead: viewerMaySetWorkspaceLead(),
+        themeLabel: (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim() || undefined,
+      });
+      commandPaletteFiltered = filterCommandPaletteItems(allItems, input?.value ?? "");
+      if (commandPaletteIndex >= commandPaletteFiltered.length) {
+        commandPaletteIndex = 0;
+      }
+      renderCommandPaletteList(
+        document,
+        list,
+        commandPaletteFiltered,
+        commandPaletteIndex,
+        executeCommandPaletteItem,
+      );
+    };
+
+    const openCommandPalette = (): void => {
+      if (app.dataset.state !== "channel") return;
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      const input = one<HTMLInputElement>("[data-command-palette-input]");
+      if (!dialog) return;
+      if (input) input.value = "";
+      commandPaletteIndex = 0;
+      renderCommandPalette();
+      if (!dialog.open) dialog.showModal();
+      input?.focus();
+    };
+
+    one<HTMLButtonElement>("[data-command-palette-open]")?.addEventListener("click", openCommandPalette);
+    one<HTMLButtonElement>("[data-command-palette-close]")?.addEventListener("click", () => {
+      one<HTMLDialogElement>("[data-command-palette]")?.close();
+    });
+    one<HTMLInputElement>("[data-command-palette-input]")?.addEventListener("input", () => {
+      commandPaletteIndex = 0;
+      renderCommandPalette();
+    });
+    one<HTMLInputElement>("[data-command-palette-input]")?.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (commandPaletteFiltered.length > 0) {
+          commandPaletteIndex = (commandPaletteIndex + 1) % commandPaletteFiltered.length;
+          renderCommandPalette();
+        }
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (commandPaletteFiltered.length > 0) {
+          commandPaletteIndex =
+            (commandPaletteIndex - 1 + commandPaletteFiltered.length) % commandPaletteFiltered.length;
+          renderCommandPalette();
+        }
+      } else if (event.key === "Enter") {
+        const selected = commandPaletteFiltered[commandPaletteIndex];
+        if (selected) {
+          event.preventDefault();
+          executeCommandPaletteItem(selected);
+        }
+      }
+    });
+    {
+      const dialog = one<HTMLDialogElement>("[data-command-palette]");
+      dialog?.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    }
+    document.addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        if (app.dataset.state !== "channel") return;
+        event.preventDefault();
+        const dialog = one<HTMLDialogElement>("[data-command-palette]");
+        if (dialog?.open) dialog.close();
+        else openCommandPalette();
+      }
+    });
 
     one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", homeBack);
     one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", () => openRosterDialog());
