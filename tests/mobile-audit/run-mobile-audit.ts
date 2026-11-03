@@ -184,6 +184,7 @@ async function main(): Promise<void> {
   const closeSite = await serveDist();
   const report: Record<string, unknown>[] = [];
   let seedNotes: string[] = [];
+  let captureErrors = -1;
   try {
     for (const fn of ["command", "read"]) {
       await awaitFunctionRunning({ url: `${env.apiUrl}/functions/v1/${fn}`, fetcher: fetch, timeoutMs: 60_000,
@@ -269,12 +270,16 @@ async function main(): Promise<void> {
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
+    captureErrors = summary.errors;
     await closeSite();
     functions.kill();
     await delay(1_000);
     if (functions.exitCode === null) functions.kill("SIGKILL");
     rmSync(envDir, { recursive: true, force: true });
   }
+  // Fail after the report and screenshots are written (the upload step still runs), so a green
+  // workflow can never hide a missing capture. Pending entries are not errors.
+  assert.equal(captureErrors, 0, `${captureErrors} capture(s) failed; see mobile-audit-report.json items[].error`);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
