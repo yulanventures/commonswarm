@@ -6,7 +6,7 @@ import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
   loadAgentCredential,
-  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, LocalCredentialDenied, recheckLocalCredential,
+  planLocalOperation, lockLocalAuthPlan, retryLocalAuthTransaction, LocalCredentialDenied, recheckLocalCredential, reportRevokedLocalCredential,
 } from "../_shared/agent-auth.ts";
 import { parseAgentSessionProofHeaders } from "../../../src/cloud/session-wire.ts";
 import { activityFailureResult } from "../command/failures.ts";
@@ -200,7 +200,15 @@ async function handle(request: Request): Promise<Response> {
     })();
     if(result.status>=400) throw new LocalActivityRefused(result);
     return result;
-  }).catch(error=>{if(error instanceof LocalActivityRefused) return error.response;if(error instanceof LocalCredentialDenied) return json(403,{error:'forbidden'});throw error;}));
+  }).catch(async error=>{
+    if(error instanceof LocalActivityRefused) return error.response;
+    if(error instanceof LocalCredentialDenied) {
+      await reportRevokedLocalCredential(async <T,>(run:(tx:postgres.TransactionSql<Record<string,unknown>>)=>Promise<T>):Promise<T> =>
+        await db.begin("isolation level read committed", async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;return await run(tx);}) as unknown as T,tokenHash);
+      return json(403,{error:'forbidden'});
+    }
+    throw error;
+  }));
 }
 
 Deno.serve((request) =>

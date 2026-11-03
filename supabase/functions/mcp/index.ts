@@ -21,6 +21,7 @@ import {
 } from "./auth.ts";
 import { executeClaimSeat } from "./claim-seat.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
+import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
   createMcpProtocolHandler,
   WWW_AUTHENTICATE,
@@ -241,6 +242,19 @@ function hostedCommand(
 }
 
 async function executeTool(call: HostedToolCall): Promise<Record<string, unknown>> {
+  try {
+    return await executeToolCall(call);
+  } catch (error) {
+    // A retired provider family still holds signed, unexpired access tokens;
+    // their seat and grant refusals are the hosted agent losing access.
+    if (error instanceof HostedToolFailure) {
+      await reportHostedSeatRefused(error.code, call.token, providerStatus);
+    }
+    throw error;
+  }
+}
+
+async function executeToolCall(call: HostedToolCall): Promise<Record<string, unknown>> {
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
   if (call.name === "claim_seat") {
