@@ -6,7 +6,8 @@ import test from 'node:test';
 import { householdReadProvenance, messageReadProvenance, PROVENANCE_TITLE_MAX } from '../src/protocol/read-provenance.js';
 import { HOUSEHOLD_LOCAL_SEAT } from '../src/protocol/household-tool-registry.js';
 import { createHouseholdMcpTools } from '../src/mcp/household-tools.js';
-import { capFreshCheck, mapCheck, MCP_RESULT_MAX_BYTES } from '../src/mcp/tools.js';
+import { capFreshCheck, capMcpResult, mapCachedCheck, mapCheck, MCP_RESULT_MAX_BYTES } from '../src/mcp/tools.js';
+import type { SignalRecord } from '../src/cloud/command-client.js';
 import type { HouseholdObjectClient } from '../src/cloud/household-objects.js';
 import type { AgentCheckResult } from '../src/cloud/agent-check.js';
 
@@ -103,4 +104,20 @@ test('check withholds no message for provenance', () => {
   assert.equal(output.messages.length, bare);
   assert.equal(output.provenance?.truncated, true);
   assert.equal(output.provenance?.row_count, output.messages.length);
+});
+
+test('a cached full-text check near the cap is never cut for provenance', () => {
+  const row = (body: string) => ({ id: '00000000-0000-4000-8000-000000000001', from: 'Ana', from_kind: 'user', kind: 'note',
+    body, created_at: '2026-11-03T00:00:00.000Z' }) as unknown as SignalRecord;
+  const bareBytes = (body: string) => Buffer.byteLength(JSON.stringify({ checked: true, cached: true, messages: [{ id: row(body).id,
+    from: 'Ana', from_kind: 'user', sender_owner_relation: 'unknown', kind: 'note', body, created_at: '2026-11-03T00:00:00.000Z' }] }));
+  // Escaped control characters make an 8,000-character body large; pad to just under the cap.
+  let body = '\u0001'.repeat(5000);
+  body += 'x'.repeat(MCP_RESULT_MAX_BYTES - bareBytes(body) - 50);
+  assert.ok(bareBytes(body) <= MCP_RESULT_MAX_BYTES && bareBytes(body) > MCP_RESULT_MAX_BYTES - 100);
+  const capped = capMcpResult(mapCachedCheck(row(body))) as { messages?: { body: string }[]; truncated?: boolean };
+  assert.equal(capped.truncated, undefined);
+  assert.equal(capped.messages?.[0]?.body, body);
+  const small = mapCachedCheck(row('hi')) as { provenance?: { sources: unknown[] } };
+  assert.deepEqual(small.provenance?.sources, [{ kind: 'message', id: row('hi').id, from: 'Ana', created_at: '2026-11-03T00:00:00.000Z' }]);
 });

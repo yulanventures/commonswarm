@@ -10,7 +10,7 @@ import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
 import type { SignalDirectory } from "../cloud/signals.js";
 import type { PostSignalResult } from "../cloud/command-client.js";
-import { messageReadProvenance, provenanceForms, type ReadProvenance } from "../protocol/read-provenance.js";
+import { messageReadProvenance, provenanceForms, withReadProvenance, type ReadProvenance } from "../protocol/read-provenance.js";
 
 /** An unknown argument name is echoed to the caller only up to this length. */
 export const MCP_ARGUMENT_NAME_ECHO_MAX = 64;
@@ -91,10 +91,12 @@ export function mapCheck(result: AgentCheckResult, provenance: ReadProvenance | 
 }
 
 export function mapCachedCheck(row: SignalRecord): object {
-  return { checked: true, cached: true, messages: [{ id: row.id, from: row.from, from_kind: row.from_kind,
+  const output = { checked: true, cached: true, messages: [{ id: row.id, from: row.from, from_kind: row.from_kind,
     sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind, body: row.body, created_at: row.created_at,
-    ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}) }],
-    provenance: messageReadProvenance([row], { tool: "check", message_id: row.id }, false) };
+    ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}) }] };
+  // A cached read returns full text, so provenance must not push it past capMcpResult.
+  return withReadProvenance(output, messageReadProvenance([row], { tool: "check", message_id: row.id }, false),
+    value => Buffer.byteLength(JSON.stringify(value)) <= MCP_RESULT_MAX_BYTES);
 }
 
 export function mapWhoami(directory: SignalDirectory, principalId: string, workspaceId: string): object {
