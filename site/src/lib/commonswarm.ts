@@ -692,6 +692,39 @@ export async function signInWithEmail(
   throw new Error(error.message);
 }
 
+/** Ends every other session of this account: GoTrue `POST /auth/v1/logout?scope=others` with this
+ *  session's own access token and the public anon key, never an elevated key. auth-js signOut() is
+ *  not used: it reports success with no local session and swallows a 401/403/404 from logout.
+ *  Success is only GoTrue's 204. A refusal throws plainly; anything else is an unknown outcome. */
+export async function signOutOtherDevices(
+  session: Pick<Session, "access_token"> | null,
+  options: { fetcher?: typeof fetch; target?: Deployment | null } = {},
+): Promise<void> {
+  const target = options.target === undefined ? deployment() : options.target;
+  if (!target) throw new Error("CommonSwarm is not configured on this page. No device was signed out.");
+  if (!session || typeof session.access_token !== "string" || !session.access_token) {
+    throw new Error("Sign in again, then try once more. No device was signed out.");
+  }
+  const deadline = requestDeadline();
+  let response: Response;
+  try {
+    response = await (options.fetcher ?? fetch)(`${target.url}/auth/v1/logout?scope=others`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.access_token}`, apikey: target.anonKey },
+      signal: deadline.controller.signal,
+    });
+  } catch {
+    throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
+  } finally {
+    deadline.clear();
+  }
+  if (response.status === 204) return;
+  if (response.status === 401 || response.status === 403 || response.status === 404) {
+    throw new Error("Your sign-in could not be confirmed. Sign in again, then try once more. No device was signed out.");
+  }
+  throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
+}
+
 export async function signOut(): Promise<void> {
   deadSession = false;
   await client()?.auth.signOut();
