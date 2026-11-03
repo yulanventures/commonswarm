@@ -69,10 +69,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     >
       <div slot="after" class="invite-onramp__divider" aria-hidden="true"><span>or</span></div>
     </ProviderButtons>
-    <form class="invite-onramp__auth" data-email-form>
-      <label for="invite-email">Email address</label>
-      <input id="invite-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
-      <button class="invite-onramp__button" type="submit">Email me a sign-in link</button>
+    <form class="invite-onramp__auth" method="post" data-email-form>
+      <label for="invite-email">Email</label>
+      <input id="invite-email" name="email" type="email" autocomplete="username" required />
+      <label for="invite-password">Password</label>
+      <input id="invite-password" name="password" type="password" autocomplete="current-password" required />
+      <button class="invite-onramp__button" type="submit" data-password-signin>Sign in</button>
+      <button class="invite-onramp__button invite-onramp__button--quiet" type="button" data-email-link>Email me a sign-in link</button>
     </form>
     <p class="invite-onramp__status" data-auth-status role="status" aria-live="polite"></p>
     <p class="invite-onramp__error" data-auth-error role="alert" hidden></p>
@@ -237,6 +240,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     deployment,
     myWorkspaces,
     signInWithEmail,
+    signInWithPassword,
     signInWithProvider,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
@@ -724,12 +728,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       await accept();
     };
 
-    one<HTMLFormElement>("[data-email-form]")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    /* The email link reads only the address, so an empty password never blocks it. */
+    one<HTMLButtonElement>("[data-email-link]")?.addEventListener("click", async () => {
       const input = one<HTMLInputElement>("#invite-email");
       const error = one<HTMLElement>("[data-auth-error]");
       const status = one<HTMLElement>("[data-auth-status]");
       if (!input || !resumeId) return;
+      if (!input.value.trim() || !input.checkValidity()) { input.reportValidity(); input.focus(); return; }
       if (error) error.hidden = true;
       try {
         const redirect = new URL("/invite", window.location.origin);
@@ -750,6 +755,33 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
             : "CommonSwarm could not send the sign-in link.";
           error.hidden = false;
         }
+      }
+    });
+
+    /* Submit is password sign-in. On success the invitation continues where a returning link
+       would: boot() reads the remembered invite (?resume=) and the new session. */
+    one<HTMLFormElement>("[data-email-form]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget as HTMLFormElement;
+      const email = form.elements.namedItem("email") as HTMLInputElement | null;
+      const password = form.elements.namedItem("password") as HTMLInputElement | null;
+      const button = form.querySelector<HTMLButtonElement>("[data-password-signin]");
+      const error = one<HTMLElement>("[data-auth-error]");
+      if (!email?.value.trim() || !password?.value || !resumeId) return;
+      if (error) error.hidden = true;
+      if (button) button.disabled = true;
+      try {
+        await signInWithPassword(email.value.trim(), password.value);
+        password.value = "";
+        await boot();
+      } catch (caught) {
+        if (error) {
+          error.textContent = caught instanceof Error ? caught.message : "Sign-in could not be completed.";
+          error.hidden = false;
+        }
+        password.focus();
+      } finally {
+        if (button) button.disabled = false;
       }
     });
 
