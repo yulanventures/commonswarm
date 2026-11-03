@@ -6,6 +6,8 @@ import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToo
 
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { hostedToolError } from "./tool-errors.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
+import { provenanceForms, type ReadProvenance } from "../../../src/protocol/read-provenance.ts";
 
 export const PROTECTED_RESOURCE_METADATA_PATH =
   "/.well-known/oauth-protected-resource/mcp";
@@ -356,7 +358,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
             () => { toolSettled = true; },
           );
           const output = await beforeAbort(toolOperation, lifetime.signal);
-          result = { content: [{ type: "text", text: JSON.stringify(output) }] };
+          result = { content: [{ type: "text", text: JSON.stringify(withinResponseLimit(message.id, output, options.limits.maxResponseBytes)) }] };
         } catch (error) {
           if (lifetime.signal.aborted) return failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
           if (error instanceof HostedToolInputError) {
@@ -413,4 +415,18 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       }
     }
   };
+}
+
+/** Read provenance is optional: shrink it, then drop it, before it alone would
+ * push a tool result over the response limit. Other output is never changed. */
+function withinResponseLimit(id: unknown, output: unknown, maxResponseBytes: number): unknown {
+  if (!output || typeof output !== "object" || Array.isArray(output) || !("provenance" in output)) return output;
+  const { provenance, ...rest } = output as Record<string, unknown> & { provenance: ReadProvenance };
+  const fits = (value: unknown) => new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id,
+    result: { content: [{ type: "text", text: JSON.stringify(value) }] } })).byteLength <= maxResponseBytes;
+  for (const form of provenanceForms(provenance)) {
+    const candidate = { ...rest, provenance: form };
+    if (fits(candidate)) return candidate;
+  }
+  return rest;
 }

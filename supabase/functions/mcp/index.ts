@@ -88,12 +88,11 @@ const limits: McpProtocolLimits = {
   requestTimeoutMs: boundedInteger("SWARM_MCP_REQUEST_TIMEOUT_MS", 25_000, 1_000, 120_000),
   maxConcurrentRequests: boundedInteger("SWARM_MCP_MAX_CONCURRENT_REQUESTS", 4, 1, 16),
 };
-/** Provenance only rides a tool result that still fits the response cap with
- * room for the JSON-RPC envelope; otherwise it shrinks, then is left off. */
-const RESPONSE_ENVELOPE_RESERVE_BYTES = 1024;
-function fitsResponse(output: Record<string, unknown>): boolean {
-  return new TextEncoder().encode(JSON.stringify(JSON.stringify(output))).byteLength + RESPONSE_ENVELOPE_RESERVE_BYTES
-    <= limits.maxResponseBytes;
+/** Household pages keep their 28 KiB escaped budget (boundHouseholdListResult and
+ * the to-do pager) with provenance included; otherwise it shrinks, then is left off. */
+const HOUSEHOLD_PAGE_BYTES = 28 * 1024;
+function fitsHouseholdPage(output: Record<string, unknown>): boolean {
+  return new TextEncoder().encode(JSON.stringify(JSON.stringify(output))).byteLength <= HOUSEHOLD_PAGE_BYTES;
 }
 const issuer = exactContract("SWARM_MCP_ISSUER", MCP_ISSUER);
 const resource = exactContract("SWARM_MCP_RESOURCE", MCP_RESOURCE);
@@ -273,7 +272,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     const bounded = call.name.startsWith("list_")
       ? boundHouseholdListResult(result.body, Number(args.offset ?? 0)) : result.body;
     const output = row.effect === "read"
-      ? withReadProvenance(bounded, householdReadProvenance(call.name, args, bounded), fitsResponse) : bounded;
+      ? withReadProvenance(bounded, householdReadProvenance(call.name, args, bounded), fitsHouseholdPage) : bounded;
     if (output.status !== "refused" || typeof output.reason !== "string") return output;
     const next_action = householdRefusalNextStep(output.reason);
     return { ...output, ...householdRefusalDetails(output.reason, binding.workspaceId),
@@ -325,9 +324,10 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     }, capability);
     const output = commandOutput(result);
     const signals = Array.isArray(output.signals) ? output.signals : [];
-    return withReadProvenance(output, messageReadProvenance(signals,
+    // The protocol layer trims this block to the response limit (protocol.ts).
+    return { ...output, provenance: messageReadProvenance(signals,
       { tool: "check", scope: "new messages addressed to this seat" },
-      signals.length >= HOSTED_CHECK_BATCH_LIMIT), fitsResponse);
+      signals.length >= HOSTED_CHECK_BATCH_LIMIT) };
   }
   return commandOutput(await handleHostedCommand(
     hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
