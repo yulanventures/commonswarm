@@ -1352,6 +1352,30 @@ export async function removeWorkspaceMember(
   }
 }
 
+/** Renames a workspace through the human session (owner or admin). */
+export async function renameWorkspace(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  name: string,
+): Promise<void> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "rename_workspace", name },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") return;
+  const reason = String(body.reason ?? "");
+  throw new Error(
+    reason === "role_forbidden" ? "Only an owner or admin can rename this workspace."
+      : reason === "workspace_name_invalid" || status === 400 ? "Use 1 to 80 characters, with no line breaks."
+      : reason === "bad_state" ? "The workspace already has that name."
+      : status === 403 ? "CommonSwarm could not rename this workspace. It may no longer be available to you."
+      : "The rename was not confirmed. Reload to check.",
+  );
+}
+
 /** Closes a workspace through the human session; the server keeps it restorable. */
 export async function archiveWorkspace(
   session: Session,

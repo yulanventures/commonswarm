@@ -4,6 +4,9 @@ export interface WorkspaceSettingsOptions {
   memberCount: number;
   agentCount: number;
   canClose: boolean;
+  /** Owners and admins may rename; the server decides. */
+  canRename?: boolean;
+  onRename?(name: string): Promise<void>;
   moveDestinations?: readonly { id: string; name: string }[];
   onMove?(orgId: string): Promise<void>;
   onCopy(): Promise<void>;
@@ -28,6 +31,10 @@ export function renderWorkspaceSettings(
   const heading = document.createElement("h2");
   heading.className = "dashboard__workspace-settings-title";
   heading.textContent = options.name;
+  const titleRow = document.createElement("div");
+  titleRow.className = "dashboard__workspace-settings-title-row";
+  titleRow.append(heading);
+  if (options.canRename && options.onRename) titleRow.append(renameControl(root, heading, titleRow, options.name, options.onRename));
 
   const counts = document.createElement("p");
   counts.className = "dashboard__workspace-settings-counts";
@@ -136,7 +143,7 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
-  root.replaceChildren(heading, counts, identity);
+  root.replaceChildren(titleRow, counts, identity);
   if (options.moveDestinations?.length && options.onMove) {
     const form = document.createElement("form");
     form.className = "dashboard__workspace-move";
@@ -196,4 +203,73 @@ export function renderWorkspaceSettings(
   }
   root.append(danger);
   return { confirmInput: input, closeButton: button };
+}
+
+/** A Rename button that swaps the title for a name field; Escape or Cancel puts the title back. */
+function renameControl(root: HTMLElement, heading: HTMLElement, titleRow: HTMLElement, current: string,
+  onRename: (name: string) => Promise<void>): HTMLButtonElement {
+  const document = root.ownerDocument;
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "dashboard__text-button";
+  open.dataset.workspaceRename = "";
+  open.textContent = "Rename";
+  open.addEventListener("click", () => {
+    const form = document.createElement("form");
+    form.className = "dashboard__workspace-rename";
+    form.dataset.workspaceRenameForm = "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = current;
+    input.maxLength = 80;
+    input.required = true;
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", "Workspace name");
+    input.dataset.workspaceRenameInput = "";
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.className = "dashboard__button--primary";
+    save.textContent = "Save";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "dashboard__text-button";
+    cancel.textContent = "Cancel";
+    const error = document.createElement("p");
+    error.className = "dashboard__form-error";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    let busy = false;
+    const next = (): string => input.value.replace(/\s+/g, " ").trim();
+    const sync = (): void => { save.disabled = busy || !next() || next() === current; };
+    const restore = (): void => { titleRow.replaceChildren(heading, open); open.focus(); };
+    input.addEventListener("input", () => { error.hidden = true; sync(); });
+    input.addEventListener("keydown", (event) => { if (event.key === "Escape" && !busy) { event.preventDefault(); restore(); } });
+    cancel.addEventListener("click", () => { if (!busy) restore(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      sync();
+      if (save.disabled) return;
+      busy = true;
+      sync();
+      input.disabled = true;
+      save.setAttribute("aria-busy", "true");
+      try {
+        await onRename(next());
+      } catch (reason) {
+        error.textContent = reason instanceof Error ? reason.message : "The rename was not confirmed. Reload to check.";
+        error.hidden = false;
+        busy = false;
+        input.disabled = false;
+        save.removeAttribute("aria-busy");
+        sync();
+        input.focus();
+      }
+    });
+    form.append(input, save, cancel, error);
+    titleRow.replaceChildren(form);
+    sync();
+    input.focus();
+    input.select();
+  });
+  return open;
 }

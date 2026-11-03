@@ -1187,6 +1187,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     agentAccessStatuses,
     pendingAgentAccess,
     archiveWorkspace,
+    renameWorkspace,
     client,
     createWorkspace,
     myOrganizations, moveWorkspaceToOrg, type Organization,
@@ -7833,6 +7834,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         memberCount: members.length,
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
+        canRename: !sampleMode && (me?.role === "owner" || me?.role === "admin"),
+        onRename: async name => {
+          if (!session || sampleMode) return;
+          await renameWorkspace(session, uuid(), workspace.id, name);
+          workspaces = workspaces.map(row => row.id === workspace.id ? { ...row, name } : row);
+          catchUpData = catchUpData.map(entry => entry.workspace.id === workspace.id
+            ? { ...entry, workspace: { ...entry.workspace, name } } : entry);
+          renderRoster();
+          const renamed = workspaces.find(row => row.id === workspace.id);
+          if (renamed) renderWorkspaceSettingsPanel(renamed);
+          one<HTMLButtonElement>("[data-workspace-rename]")?.focus();
+        },
         moveDestinations: !sampleMode && me?.role === "owner" && moveOrganizations.some(org=>org.id===workspace.orgId && (org.role==="owner" || org.role==="admin"))
           ? moveOrganizations.filter(org=>org.id!==workspace.orgId && (org.role==="owner" || org.role==="admin")) : [],
         onMove: async orgId=>{
