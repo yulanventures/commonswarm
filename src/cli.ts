@@ -2,7 +2,7 @@
 import {bindSessionProof} from './cloud/session-proof.js';
 import {agentWorkspaces} from './cloud/agent-workspaces.js';
 
-import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
+import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
 import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
 import { HouseholdObjectClient } from "./cloud/household-objects.js";
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
@@ -10256,7 +10256,7 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
 }
 
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
-  object: group(Object.fromEntries(HOUSEHOLD_TOOLS.map(row => [row.name, commandEntry({
+  object: group(Object.fromEntries([...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS].map(row => [row.name, commandEntry({
     tool: row.name, mcp: true, handler: runHouseholdObject, description: HOUSEHOLD_TOOL_REGISTRY.find(entry => entry.name === row.name)!.description, mutates: !row.annotations.readOnlyHint,
     flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true,
     help: [`cswarm object ${row.name} --input-file <path> [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`],
@@ -10475,7 +10475,7 @@ function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly stri
 }
 
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  ...Object.fromEntries(HOUSEHOLD_TOOLS.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
+  ...Object.fromEntries([...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS].map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
   "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,

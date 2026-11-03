@@ -354,7 +354,7 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (!access) return missingAccess();
   const denied = core.householdAccessRefusal(access.facts, workspaceId, operation, access.now);
   if (denied) return refused(denied);
-  if (value.tool === 'definitions_search' || value.tool === 'definition_read') {
+  if (value.tool === 'definitions_search' || value.tool === 'definition_read' || value.tool === 'check_answerable') {
     return await readDefinitions(tx, workspaceId, identity, store, value.tool, args);
   }
   if ((value.tool === 'definition_create' && !core.validDefinition(args))
@@ -428,7 +428,8 @@ const DEFINITION_PAGE_DEFAULT = 50;
 /** Definitions are read only through these two tools, with a server-owned kind
  * filter. Search reads titles from the projection; read loads at most two blobs. */
 async function readDefinitions(tx: Sql, workspaceId: string, identity: HouseholdIdentity, store: HouseholdStore,
-  tool: 'definitions_search' | 'definition_read', args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  tool: 'definitions_search' | 'definition_read' | 'check_answerable', args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (tool === 'check_answerable') return await checkAnswerable(tx, workspaceId, identity, store, String(args.question));
   if (tool === 'definitions_search') {
     const listed = await store.read(tx, workspaceId, identity, { kind: 'object_list', offset: 0, limit: Number.MAX_SAFE_INTEGER, kind_filter: 'definition' });
     if (listed.status !== 'ok' || listed.kind !== 'object_list') return listed;
@@ -461,4 +462,37 @@ async function readDefinitions(tx: Sql, workspaceId: string, identity: Household
   return { status: 'ok', object_id: objectId,
     current: { revision: head.revision, ...fields(current.bytes), author: head.author, occurred_at_server: head.occurred_at_server },
     certified, proposal_pending: certification?.revision.token !== head.revision.token };
+}
+
+/** Answer order step: which certified definitions a question uses. Matching reads
+ * only titles from the projection; blobs are read only for certified matches. */
+async function checkAnswerable(tx: Sql, workspaceId: string, identity: HouseholdIdentity, store: HouseholdStore,
+  question: string): Promise<Record<string, unknown>> {
+  const listed = await store.read(tx, workspaceId, identity, { kind: 'object_list', offset: 0, limit: Number.MAX_SAFE_INTEGER, kind_filter: 'definition' });
+  if (listed.status !== 'ok' || listed.kind !== 'object_list') return listed;
+  const objects = (await store.state(tx, workspaceId, false)).objects;
+  const certified: { object_id: string; term: string; revision: HouseholdRevision['revision'] }[] = [];
+  const proposed: { object_id: string; term: string }[] = [];
+  for (const row of listed.objects) {
+    const history = objects[row.object_id]?.history ?? [];
+    const pinned = row.certification ? history.find(r => r.revision.token === row.certification!.revision.token) : undefined;
+    if (pinned && core.householdQuestionUsesTerm(question, pinned.title)) {
+      certified.push({ object_id: row.object_id, term: pinned.title, revision: pinned.revision });
+    } else if (core.householdQuestionUsesTerm(question, row.title)) proposed.push({ object_id: row.object_id, term: row.title });
+  }
+  // More specific (longer) terms first, then by term, so the cap keeps the closest matches.
+  const order = (a: { term: string }, b: { term: string }) => Array.from(b.term).length - Array.from(a.term).length
+    || core.householdDefinitionKey(a.term).localeCompare(core.householdDefinitionKey(b.term));
+  certified.sort(order); proposed.sort(order);
+  const limit = core.HOUSEHOLD_ANSWERABLE_TERM_LIMIT;
+  const terms = [];
+  for (const match of certified.slice(0, limit)) {
+    const read = await store.readBytes(tx, workspaceId, identity, { kind: 'object_read', object_id: match.object_id, revision: match.revision, kind_filter: 'definition' });
+    if (!('bytes' in read) || read.metadata.kind !== 'object_read') return read;
+    const content = transfers.decodeHouseholdContent(read.bytes, 'definition') as Extract<HouseholdContent, { kind: 'definition' }>;
+    terms.push({ object_id: match.object_id, term: content.term, revision: match.revision, meaning: content.meaning, source: content.source });
+  }
+  return { status: 'ok', answerable: terms.length > 0, terms, proposed: proposed.slice(0, limit),
+    matched_count: certified.length,
+    reason: terms.length ? null : proposed.length ? 'only_proposed_terms' : 'no_certified_term' };
 }

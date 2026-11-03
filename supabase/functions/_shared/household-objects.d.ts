@@ -95,6 +95,9 @@ export interface HouseholdObjectDecision {
 export declare function validDefinition(value: unknown): value is HouseholdDefinitionFields;
 /** Terms are unique per workspace, ignoring case. */
 export declare const householdDefinitionKey: (term: string) => string;
+/** A question uses a term when it contains the term as a phrase, or every word
+ * of three or more characters in the term. Matching never reads content. */
+export declare function householdQuestionUsesTerm(question: string, term: string): boolean;
 export declare function emptyHouseholdObjectState(workspaceId: string, streamId: string): HouseholdObjectState;
 /** Includes ALL history and declarations; no expiry/retirement discounts before
  * an explicit release. A pending create reserves an unpurged-name slot. */
