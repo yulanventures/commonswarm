@@ -173,6 +173,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
 
     // Lists & docs, definitions and to-dos through household_tool, as the owner.
     ok("household_permissions", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, workspace));
+    // The same owner grant on the empty workspace, so its Lists and to-do empty states are captured without consent clicks.
+    ok("household_permissions empty", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, emptyWorkspace));
     const tool = async (name: string, args: Record<string, unknown>, write = true) => {
       const commandId = `audit_${randomBytes(9).toString("base64url")}`;
       return await command(owner.token, { kind: "household_tool", tool: name,
