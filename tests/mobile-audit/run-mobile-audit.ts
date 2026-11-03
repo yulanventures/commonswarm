@@ -30,7 +30,7 @@ export const VIEWPORTS = [
 export const THEMES = ["light", "dark"] as const;
 
 type Step = { click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
-export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string }
+export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[] }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
 const STARTER: Screen[] = [
@@ -162,7 +162,9 @@ async function main(): Promise<void> {
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         for (const screen of screens()) {
           const size = `${viewport.width}x${viewport.height}`;
-          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state: "dense", screenshot: null, error: null };
+          // The capture's identity follows the manifest entry's declared states (e.g. "empty").
+          const state = screen.states?.length ? screen.states.join("+") : "default";
+          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
           if (screen.status === "pending") { report.push({ ...entry, error: "pending", reason: screen.reason ?? null }); continue; }
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
@@ -179,12 +181,12 @@ async function main(): Promise<void> {
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
             if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
             Object.assign(entry, await page.evaluate(CHECKS));
-            const shot = `shots/${screen.id}--${size}--${theme}.png`;
+            const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
-            try { const shot = `shots/${screen.id}--${size}--${theme}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
+            try { const shot = `shots/${screen.id}--${state}--${size}--${theme}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
           report.push(entry);
         }
