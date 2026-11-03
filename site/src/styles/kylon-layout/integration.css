@@ -44,13 +44,20 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__name, .hm
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 36px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new { font-size: 13px; border-radius: 6px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-brand { display: grid; place-items: center; inline-size: 44px; block-size: 44px; border-radius: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-account {
+  margin-inline-start: auto; flex: none; display: flex; align-items: center;
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__rail-foot { position: relative; padding: 0; border: 0; background: transparent; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger {
   display: grid; place-items: center; inline-size: 44px; block-size: 44px; min-block-size: 44px;
-  padding: 10px; border: 1px solid var(--cs-line); border-radius: 50%; background: var(--cs-subtle); color: var(--cs-ink);
+  padding: 6px; border: 0; border-radius: 50%; background: transparent; color: var(--cs-ink);
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger :is(.dashboard__user-trigger-brand, .dashboard__user-trigger-name, .dashboard__user-trigger-mark) { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger > svg { display: block; inline-size: 20px; block-size: 20px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger :is(.dashboard__user-trigger-brand, .dashboard__user-trigger-name) { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger > svg { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-trigger .dashboard__org-mark {
+  display: grid; place-items: center; inline-size: 32px; block-size: 32px; border-radius: 50%;
+  background: var(--cs-selected); color: var(--cs-ink); font-size: 12px; font-weight: 700;
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-menu {
   position: fixed; inset: auto auto 12px 56px; inline-size: min(280px, calc(100vw - 72px)); max-block-size: calc(100dvh - 24px); overflow-y: auto; z-index: 100;
 }
@@ -98,25 +105,27 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup-card-capsules { max-inline-size: 100%; }
 }
 
-/* The live organization switcher spans the two navigation columns. */
+/* User avatar & profile settings live at the bottom-left of the left column on desktop and top-right on mobile. */
 @media (width > 52rem) {
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] { grid-template-rows: 56px minmax(0, 1fr); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] { grid-template-rows: minmax(0, 1fr) 56px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail { grid-column: 1; grid-row: 1; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { grid-column: 2; grid-row: 1; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account {
-    grid-column: 1 / 3; grid-row: 1; margin: 0; padding: 6px 12px;
-    border-block-end: 1px solid var(--cs-line); border-inline-end: 1px solid var(--cs-line);
+    grid-column: 1 / 3; grid-row: 2; margin: 0; padding: 6px 12px;
+    border-block-start: 1px solid var(--carbon-line, var(--cs-line)); border-inline-end: 1px solid var(--cs-line);
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail { grid-column: 1; grid-row: 2; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { grid-column: 2; grid-row: 2; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-workspace { grid-column: 3; grid-row: 1 / 3; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-brand { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger {
-    display: flex; align-items: center; gap: 10px; inline-size: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent;
+    display: flex; align-items: center; gap: 10px; inline-size: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent;
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger .dashboard__org-mark { display: grid; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { display: block; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger > svg { flex: none; inline-size: 14px; block-size: 14px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger .dashboard__org-mark {
+    display: grid; place-items: center; inline-size: 32px; block-size: 32px; border-radius: 50%; font-size: 12px; font-weight: 700;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { display: block; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger > svg { display: block; flex: none; inline-size: 14px; block-size: 14px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger > svg > path:not(.cs-org-switcher-chevron) { display: none; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-menu { position: absolute; inset: calc(100% + 8px) auto auto 0; inline-size: min(280px, calc(100vw - 24px)); max-block-size: calc(100dvh - 80px); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-menu { position: absolute; inset: auto auto calc(100% + 8px) 0; inline-size: min(280px, calc(100vw - 24px)); max-block-size: calc(100dvh - 80px); }
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account,
@@ -177,16 +186,13 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] {
     position: relative;
     grid-template-columns: min(var(--cs-rail-width, 260px), 42vw) minmax(0, 1fr);
-    grid-template-rows: 56px auto minmax(0, 1fr);
-  }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account {
-    grid-column: 1; padding: 6px 8px;
+    grid-template-rows: minmax(0, 1fr) auto 56px;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking {
-    grid-column: 1; grid-row: 2; min-block-size: min-content; overflow: hidden;
+    grid-column: 1; grid-row: 1; min-block-size: min-content; overflow: hidden;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-wiki-composition]) > .cs-org-context-parking {
-    grid-row: 2 / 4; min-block-size: 0; block-size: 100%; border-inline-end: 1px solid var(--cs-line);
+    grid-row: 1 / 3; min-block-size: 0; block-size: 100%; border-inline-end: 1px solid var(--cs-line);
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context { display: block; block-size: auto; max-block-size: calc(100dvh - 340px); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-wiki-composition]) .cs-org-context {
@@ -207,20 +213,17 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
     display: flex; align-items: center; gap: 8px; font-weight: 500;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail {
-    grid-column: 1; grid-row: 3; align-items: stretch; gap: 12px; padding: 8px;
+    grid-column: 1; grid-row: 2; align-items: stretch; gap: 12px; padding: 8px;
     border-block-start: 1px solid var(--cs-line); overflow-y: auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-todo-composition], [data-wiki-composition]) > .cs-org-rail {
     display: none;
   }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail-account {
+    grid-column: 1; grid-row: 3; padding: 6px 8px;
+  }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-rail-products { inline-size: 100%; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-workspace { grid-column: 2; grid-row: 1 / 4; }
-  /* A quiet, decorative brand signature uses the shipped junction-C asset. */
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-rail::after,
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-wiki-composition]) .cs-org-context::after {
-    content: ""; flex: none; inline-size: 24px; block-size: 24px; margin: auto 10px 4px;
-    background: var(--cs-secondary); mask: image-set("/brand/mark.svg" 1x) center / contain no-repeat;
-  }
   /* Slack-style horizontal section tab bar docked right under the workspace header. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > [data-home-workspace-shell] {
     flex: none;
@@ -262,7 +265,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
     inline-size: 15px; block-size: 15px; flex: none;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger:hover { background: var(--cs-rail-hover); }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { flex: 1; font-size: 16px; font-weight: 700; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .dashboard__user-trigger-brand { flex: 1; font-size: 14px; font-weight: 600; }
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__main > .cs-org-rail { display: none; }

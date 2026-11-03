@@ -108,3 +108,28 @@ test("new-workspace form shows the purpose question visibly, keeps both option d
     /purpose:\s*\(previousPurpose === "personal"\s*\?\s*"personal"\s*:\s*"shared"\)\s*as HouseholdPurpose/u,
   );
 });
+
+test("workspace chat composer spans full column width, user avatar/profile sits bottom-left on desktop and top-right on mobile, and workspace switching paints shell + skeleton immediately", async () => {
+  const composerCss = await readFile(new URL("../styles/kylon-composer.css", import.meta.url), "utf8");
+  assert.doesNotMatch(composerCss, /calc\(100%\s*-\s*980px\)/u);
+  assert.match(composerCss, /padding:\s*8px 20px calc\(8px \+ env\(safe-area-inset-bottom\)\);/u);
+
+  const integrationCss = await readFile(new URL("../styles/kylon-layout/integration.css", import.meta.url), "utf8");
+  assert.match(integrationCss, /\.cs-org-phone-account\s*\{\s*margin-inline-start:\s*auto;/u);
+  assert.match(integrationCss, /grid-template-rows:\s*minmax\(0,\s*1fr\)\s+auto\s+56px;/u);
+  assert.match(integrationCss, />\s*\.cs-org-rail-account\s*\{\s*grid-column:\s*1;\s*grid-row:\s*3;/u);
+  assert.match(integrationCss, /\.dashboard__user-menu\s*\{\s*position:\s*absolute;\s*inset:\s*auto auto calc\(100% \+ 8px\) 0;/u);
+
+  const drawerJs = await readFile(new URL("./kylon-shell/drawer.js", import.meta.url), "utf8");
+  assert.match(drawerJs, /move\(media\.matches\s*\?\s*phoneAccount\s*:\s*desktopAccount,\s*account,\s*reason\);/u);
+
+  const dashboard = await readFile(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(dashboard, /data-feed-skeleton/u);
+  assert.match(dashboard, /dashboard__feed-skeleton-row/u);
+  assert.doesNotMatch(dashboard, /Opening the live channel…/u);
+  assert.match(
+    dashboard,
+    /if \(keepShell\) \{\s*renderChannel\(selected, true\);\s*renderHomeShell\(\);\s*renderHomeSide\(\);/u,
+  );
+  assert.match(dashboard, /const claimsRead = homeWorkingOn\(selected\.id\);/u);
+});

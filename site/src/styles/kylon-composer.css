@@ -4,9 +4,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer {
   --home-soft: var(--k-shell-subtle);
   --home-ink: var(--k-shell-ink);
   --home-ink-muted: var(--k-shell-secondary);
+  inline-size: 100%;
   gap: 6px;
-  /* Starts on the message column's edge (its 20px padding) instead of floating centred; capped at 960px. */
-  padding: 8px max(20px, calc(100% - 980px)) calc(8px + env(safe-area-inset-bottom)) 20px;
+  /* Spans the full width of the message column with matching 20px inline padding. */
+  padding: 8px 20px calc(8px + env(safe-area-inset-bottom));
   color: var(--k-shell-ink);
   background: var(--k-shell-surface);
   border-block-start: 0;
