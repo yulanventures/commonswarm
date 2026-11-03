@@ -278,6 +278,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-attach
   }
   live-dashboard.dashboard[data-kylon-shell] :is(.pd-agent[data-attention="true"] .pd-orb, .hm-agent-orb[data-dashed="true"]) { opacity: 0.7; }
   live-dashboard.dashboard[data-kylon-shell] :is(.pd-member-card, .pd-invite, .hm-todos-add-open) { border-color: transparent; }
+  /* Overlapping faces in the header member stack keep their surface-coloured cutout: it separates them, it is not a ring. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces > :is(.hm-agent-orb, .hm-person-avatar, .pd-orb) { box-shadow: 0 0 0 2px var(--k-shell-surface) !important; }
 }
 
 /* Right-click menu (lib/context-menu.ts): a raised panel told apart by fill and shadow, not a border. */
