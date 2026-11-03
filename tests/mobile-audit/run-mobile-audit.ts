@@ -16,6 +16,7 @@ import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -106,11 +107,44 @@ const CHECKS = () => {
   const offenders = doc.scrollWidth > doc.clientWidth + 1
     ? [...document.querySelectorAll("body *")].filter(el => visible(el) && el.getBoundingClientRect().right > width + 1 && !inScroller(el)).slice(0, 15).map(describe) : [];
   const interactive = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=menuitem],[role=tab],[role=option]")].filter(visible);
-  const tapTargets = interactive.map(el => ({ el, rect: el.getBoundingClientRect() }))
+  // The ONLY effective-hitbox rule: a checkbox or radio inside (or named by) a label is tapped
+  // through that label, so it is measured by the label's box. Every such use is listed in
+  // `effective` with both sizes; nothing else is measured by anything but its own box.
+  const labelFor = (el: Element) => el.tagName === "INPUT" && ["checkbox", "radio"].includes((el as HTMLInputElement).type)
+    ? (el.closest("label") ?? (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null)) : null;
+  const measured = interactive.map(el => {
+    const own = el.getBoundingClientRect();
+    const label = labelFor(el)?.getBoundingClientRect();
+    const viaLabel = !!label && label.width * label.height > own.width * own.height;
+    return { el, own, rect: viaLabel ? label! : own, viaLabel };
+  });
+  const effective = measured.filter(m => m.viaLabel).slice(0, 40).map(m => ({ selector: describe(m.el), via: "label",
+    own: { w: Math.round(m.own.width), h: Math.round(m.own.height) }, hit: { w: Math.round(m.rect.width), h: Math.round(m.rect.height) } }));
+  const tapTargets = measured
     .filter(({ el, rect }) => (rect.width < 44 || rect.height < 44) && !(el.tagName === "A" && getComputedStyle(el).display === "inline"))
-    .slice(0, 60).map(({ el, rect }) => ({ selector: describe(el), w: Math.round(rect.width), h: Math.round(rect.height) }));
+    .slice(0, 60).map(({ el, rect, viaLabel }) => ({ selector: describe(el), w: Math.round(rect.width), h: Math.round(rect.height), ...(viaLabel ? { via: "label" } : {}) }));
+  // Hit testing: the centre of each measured box must reach the control (or its label).
+  const reaches = (el: Element, x: number, y: number) => {
+    const hit = document.elementFromPoint(x, y);
+    const label = labelFor(el);
+    return !!hit && (el === hit || el.contains(hit) || (!!label && (label === hit || label.contains(hit))));
+  };
+  const inView = (r: DOMRect) => r.right > 0 && r.bottom > 0 && r.left < width && r.top < window.innerHeight;
+  const obscured = measured.filter(m => inView(m.rect) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
+    .slice(0, 20).map(m => ({ selector: describe(m.el), by: describe(document.elementFromPoint(m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2) ?? document.body) }));
+  // Non-overlap: two different controls whose measured boxes intersect by more than 4px² share taps.
+  const overlaps: { a: string; b: string; area: number }[] = [];
+  for (let i = 0; i < measured.length && overlaps.length < 20; i += 1) {
+    for (let j = i + 1; j < measured.length && overlaps.length < 20; j += 1) {
+      const a = measured[i]!, b = measured[j]!;
+      if (a.el.contains(b.el) || b.el.contains(a.el) || labelFor(a.el)?.contains(b.el) || labelFor(b.el)?.contains(a.el)) continue;
+      const w = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
+      const h = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
+      if (w > 0 && h > 0 && w * h > 4) overlaps.push({ a: describe(a.el), b: describe(b.el), area: Math.round(w * h) });
+    }
+  }
   const offscreen = interactive.filter(el => { const r = el.getBoundingClientRect(); return (r.left < -1 || r.right > width + 1) && !inScroller(el); }).slice(0, 20).map(describe);
-  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen };
+  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps };
 };
 
 async function main(): Promise<void> {
@@ -142,8 +176,8 @@ async function main(): Promise<void> {
 
     // Installed only in the CI job (npm install --no-save), so it stays out of the lockfile and typecheck.
     const playwrightModule = "playwright";
-    const { chromium } = await import(playwrightModule) as { chromium: { launch(): Promise<any> } };
-    const browser = await chromium.launch();
+    const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
+    const browser = await launchPlaywrightChromium<any>(chromium);
     try {
       // Sign in once through the real form (password sign-in, #271); reuse its storage everywhere.
       const signInContext = await browser.newContext();
@@ -203,6 +237,8 @@ async function main(): Promise<void> {
     const summary = { screens: new Set(report.map(r => r.id)).size, items: report.length,
       withOverflow: report.filter(r => ((r.overflow as { offenders?: unknown[] } | undefined)?.offenders?.length ?? 0) > 0).length,
       withSmallTargets: report.filter(r => ((r.tapTargets as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withOverlaps: report.filter(r => ((r.overlaps as unknown[] | undefined)?.length ?? 0) > 0).length,
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
@@ -214,4 +250,7 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+// Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
+test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 50 * 60_000 }, async () => {
+  await main();
+});

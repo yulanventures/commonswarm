@@ -258,3 +258,17 @@ async function launchAttempts(
   const reason = last.timedOut ? `Chrome timed out after ${timeout} ms (SIGKILL)` : "Chrome failed";
   throw new Error(`${reason} (${details}); URL/flags: ${JSON.stringify(args)}${output ? `\n${output}` : ""}`);
 }
+
+/** The interactive Playwright run (the mobile audit) launches through here: CI-gated, the checked
+ *  bundled headless shell from findChrome(), the shared password-store, keychain and sandbox flags,
+ *  and Playwright's own throwaway profile. Callers pass the dynamically imported `chromium`. */
+export async function launchPlaywrightChromium<Browser>(
+  chromium: { launch(options: { headless: true; executablePath: string; args: string[] }): Promise<Browser> },
+): Promise<Browser> {
+  requireBrowserTests();
+  return await chromium.launch({
+    headless: true,
+    executablePath: await findChrome(),
+    args: ["--password-store=basic", "--use-mock-keychain", "--no-sandbox"],
+  });
+}
