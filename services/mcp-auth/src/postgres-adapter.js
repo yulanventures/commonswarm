@@ -37,23 +37,23 @@ export const HOSTED_ROTATION_REPLAY_SECONDS = 300;
 function replayKey(predecessor, salt) {
   return Buffer.from(hkdfSync("sha256", Buffer.from(predecessor, "utf8"), salt, "commonswarm hosted refresh replay v1", 32));
 }
-function replayAad(predecessor, clientId) {
-  return Buffer.from(`${lookupHash(predecessor)}\n${clientId}`, "utf8");
+function replayAad(predecessor, clientId, fingerprint) {
+  return Buffer.from(`${lookupHash(predecessor)}\n${clientId}\n${fingerprint}`, "utf8");
 }
-export function sealRotation(predecessor, clientId, body) {
+export function sealRotation(predecessor, clientId, fingerprint, body) {
   const salt = randomBytes(16), iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", replayKey(predecessor, salt), iv);
-  cipher.setAAD(replayAad(predecessor, clientId));
+  cipher.setAAD(replayAad(predecessor, clientId, fingerprint));
   const ct = Buffer.concat([cipher.update(JSON.stringify(body), "utf8"), cipher.final()]);
   return { v: 1, salt: salt.toString("base64url"), iv: iv.toString("base64url"),
     tag: cipher.getAuthTag().toString("base64url"), ct: ct.toString("base64url") };
 }
-export function openRotation(predecessor, clientId, sealed) {
+export function openRotation(predecessor, clientId, fingerprint, sealed) {
   if (sealed?.v !== 1) return undefined;
   try {
     const decipher = createDecipheriv("aes-256-gcm", replayKey(predecessor, Buffer.from(sealed.salt, "base64url")),
       Buffer.from(sealed.iv, "base64url"));
-    decipher.setAAD(replayAad(predecessor, clientId));
+    decipher.setAAD(replayAad(predecessor, clientId, fingerprint));
     decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
     return JSON.parse(Buffer.concat([decipher.update(Buffer.from(sealed.ct, "base64url")), decipher.final()]).toString("utf8"));
   } catch { return undefined; }
@@ -329,15 +329,18 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
 
   const factory = (model) => ({
     /** After a hosted rotation answered 200: seal that exact response onto the consumed predecessor. */
-    async rememberHostedRotation({ predecessor, successor, clientId, body }) {
+    async rememberHostedRotation({ predecessor, successor, clientId, fingerprint, body }) {
       if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return false;
-      if (typeof predecessor !== "string" || typeof successor !== "string" || predecessor === successor) return false;
+      if (typeof predecessor !== "string" || typeof successor !== "string" || predecessor === successor ||
+          typeof fingerprint !== "string" || fingerprint.length === 0) return false;
       return transaction(pool, async client => {
         const locked = await lockedRotation(client, predecessor, clientId);
         if (!locked || Object.hasOwn(locked.row.payload, ROTATION_REPLAY_FIELD)) return false;
         if (!await successorLive(client, lookupHash(successor), locked.envelope.family)) return false;
-        const sealed = { ...sealRotation(predecessor, clientId, body), successor: lookupHash(successor),
-          at: Math.floor(Date.now() / 1000) };
+        // The fingerprint is of the request the provider just validated and answered (grant_type,
+        // client_id, resource, scope); only an identical request may receive this response again.
+        const sealed = { ...sealRotation(predecessor, clientId, fingerprint, body), successor: lookupHash(successor),
+          fingerprint, at: Math.floor(Date.now() / 1000) };
         const updated = await client.query(`UPDATE ${artifacts} SET payload=payload || jsonb_build_object($3::text,$4::jsonb),
             updated_at=clock_timestamp()
           WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NOT NULL AND NOT (payload ? $3::text)`,
@@ -347,15 +350,15 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     /** An exact repeat inside the window: the same sealed response, while its successor is unused. */
-    async replayHostedRotation({ predecessor, clientId }) {
+    async replayHostedRotation({ predecessor, clientId, fingerprint }) {
       if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return undefined;
-      if (typeof predecessor !== "string" || typeof clientId !== "string") return undefined;
+      if (typeof predecessor !== "string" || typeof clientId !== "string" || typeof fingerprint !== "string") return undefined;
       return transaction(pool, async client => {
         const locked = await lockedRotation(client, predecessor, clientId);
         const sealed = locked?.row.payload[ROTATION_REPLAY_FIELD];
-        if (!sealed || typeof sealed.successor !== "string") return undefined;
+        if (!sealed || typeof sealed.successor !== "string" || sealed.fingerprint !== fingerprint) return undefined;
         if (!await successorLive(client, sealed.successor, locked.envelope.family)) return undefined;
-        const body = openRotation(predecessor, clientId, sealed);
+        const body = openRotation(predecessor, clientId, fingerprint, sealed);
         if (!body || typeof body.refresh_token !== "string" || lookupHash(body.refresh_token) !== sealed.successor) return undefined;
         if (Number.isSafeInteger(body.expires_in) && Number.isSafeInteger(sealed.at)) {
           body.expires_in = Math.max(0, body.expires_in - (Math.floor(Date.now() / 1000) - sealed.at));

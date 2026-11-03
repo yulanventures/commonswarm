@@ -310,6 +310,25 @@ test("hosted refresh repeat inside the window returns the SAME rotation result; 
   } finally { await session.close(); }
 });
 
+test("the replay is bound to the whole validated request: a changed scope or resource never gets the stored pair", async () => {
+  for (const [label, change] of [["scope", { scope: "openid" }], ["resource", { resource: "https://other.example/mcp" }]]) {
+    const session = await hostedSession();
+    try {
+      const R0 = session.initial.body.refresh_token;
+      const first = await session.refresh(R0);
+      assert.equal(first.status, 200);
+      const same = await session.refresh(R0);
+      assert.equal(same.status, 200, `${label}: the unchanged repeat still gets the same pair`);
+      assert.equal(same.body.refresh_token, first.body.refresh_token);
+      const changed = await tokenRequest(session.server, { client_id: session.clientId, grant_type: "refresh_token",
+        refresh_token: R0, resource: RESOURCE, ...change });
+      assert.equal(changed.status, 400, `${label}: ${JSON.stringify(changed.body)}`);
+      assert.equal(changed.body.refresh_token, undefined, `${label}: no stored token is returned`);
+      assert.equal(changed.body.access_token, undefined);
+    } finally { await session.close(); }
+  }
+});
+
 test("a zero replay window keeps the strict reuse fence", async () => {
   const session = await hostedSession({ rotationReplaySeconds: 0 });
   try {
