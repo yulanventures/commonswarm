@@ -163,8 +163,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
    block padding is cancelled by an equal negative margin, so the line and message rhythm
    do not move; only the tappable box (and getBoundingClientRect) grows. */
 @media (width <= 64rem) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.dashboard__message-entity, .dashboard__message-channel) {
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) :is(.dashboard__message-entity, .dashboard__message-channel) {
     min-inline-size: 44px;
+    min-block-size: 44px;
     padding-block: 10px;
     margin-block: -10px;
   }
