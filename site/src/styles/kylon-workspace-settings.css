@@ -244,3 +244,12 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename button[type="submit"]:disabled {
   opacity: .4;
 }
+
+/* These follow the rename rules above so their phone target sizes win. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-settings-title-row { flex-wrap: wrap; }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is([data-workspace-rename-open], [data-workspace-rename-input], .dashboard__workspace-rename button),
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename button[type="submit"] { min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is([data-workspace-rename-open], .dashboard__workspace-rename button) { min-inline-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-rename-input] { font-size: 16px; }
+}

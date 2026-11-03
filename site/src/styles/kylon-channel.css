@@ -124,3 +124,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill {
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill:hover { background: var(--k-shell-selected); }
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill[data-lead-unset] { color: var(--k-shell-secondary); }
 live-dashboard.dashboard[data-kylon-shell] :is(.hm-lead-pill, .dashboard__dm-bar-close):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] :is(.dashboard__dm-bar-close, .hm-lead-pill) { min-inline-size: 44px; min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill { max-inline-size: calc(100% - 10px); white-space: normal; overflow-wrap: anywhere; text-align: start; }
+}

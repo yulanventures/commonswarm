@@ -294,3 +294,20 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) :is(input,textarea):focus {
   outline: none; background: var(--k-shell-hover);
 }
+
+/* Mobile targets follow the borderless and definitions layers above. */
+@media (width <= 52rem) {
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-layout { grid-template-columns: minmax(0, 1fr); }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] { box-sizing: border-box; inline-size: 44px; block-size: 44px; min-inline-size: 44px; min-block-size: 44px; margin: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { box-sizing: border-box; min-inline-size: 44px; min-block-size: 44px; margin: 0; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-create-actions > button,
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions button { min-inline-size: 44px; min-block-size: 44px; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects :is(input:not([type=radio],[type=checkbox]), textarea, select),
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(input:not([type=radio],[type=checkbox]), textarea, select),
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) :is(input,textarea) { font-size: 16px; }
+}
+@media (width <= 52rem) and (forced-colors: none) {
+  /* Keep the 22px check visual while its native button supplies the touch target. */
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle] { background: linear-gradient(var(--k-shell-selected), var(--k-shell-selected)) center / 22px 22px no-repeat; }
+  live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button[data-hh-action=toggle][aria-checked=true] { background: linear-gradient(var(--k-shell-accent), var(--k-shell-accent)) center / 22px 22px no-repeat; }
+}
