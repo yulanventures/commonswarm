@@ -768,6 +768,12 @@ export class AgentCredentialSession {
     return this.renewals > 0;
   }
 
+  /** The newest bearer this session holds (an adopted successor, else the presented token),
+   *  without renewing. For read-only views that must never rotate a credential. */
+  get current(): string {
+    return this.token;
+  }
+
   get horizon(): number | null {
     return this.horizonExpiresAt;
   }
