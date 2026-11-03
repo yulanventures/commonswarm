@@ -994,7 +994,11 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
               : REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status ? "The server reports that this code was already used. Ask the operator to inspect its seats before requesting a new code."
               : errorCode === "forbidden" ? "This code is unknown, expired or no longer valid; this attempt created no seat. Ask the operator for a new code."
               : "The request was refused; this attempt created no seat. Ask the operator for a new code.";
-            if (!current && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || errorCode === "join_credential_seat_cap_reached")) await deleteSecureJsonFile(pendingPath(path));
+            if (!current && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || errorCode === "join_credential_seat_cap_reached")) {
+              // A refused new code must not cost the earlier reconnect its recovery: put that attempt back.
+              if (stored?.reconnect) await writeSecureJsonFile(pendingPath(path), JSON.stringify(stored));
+              else await deleteSecureJsonFile(pendingPath(path));
+            }
             throw new McpConnectError(errorCode, message);
           }
           throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
