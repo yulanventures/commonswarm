@@ -4,7 +4,7 @@
  * cannot supply credentials, storage paths, URLs or verified artifact facts.
  */
 import { type HouseholdContentOperation } from './household-object-policy.d.ts';
-import { type HouseholdObjectType } from './household-object-events.d.ts';
+import { type HouseholdObjectType, type HouseholdRevisionRef } from './household-object-events.d.ts';
 import type { HouseholdObjectCommand, HouseholdReadQuery } from './household-objects.d.ts';
 import type { TodoCommand, Party, TodoComment } from './household-todos.d.ts';
 export declare const HOUSEHOLD_LOCAL_SEAT = "seat_0000000000000000000000";
@@ -430,6 +430,50 @@ export declare const HOUSEHOLD_LIST_TOOL_REGISTRY: ({
     operations: readonly HouseholdContentOperation[];
     effect: Effect;
 })[];
+/** Workspace definitions: certified terms agents answer through. These rows carry
+ * a server-owned 'definition' kind filter; the object tools never return one.
+ * Certifying is a human-only surface command, never a tool. */
+export declare const HOUSEHOLD_DEFINITION_TOOL_REGISTRY: ({
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "definitions_search";
+} | {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "definition_read";
+} | {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "definition_create";
+} | {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "definition_update";
+})[];
 /** Dispatch inventory includes additive variants; local publication stays on the
  * original rows until its own release. No existing definition is rewritten. */
 export declare const HOUSEHOLD_TOOL_REGISTRY: {
@@ -448,11 +492,16 @@ export declare class HouseholdToolInputError extends Error {
     constructor(code: 'unknown_tool' | 'invalid_arguments' | 'revision_binding_mismatch' | 'host_context_required');
 }
 /** Human-only HTTP commands use the same closed schema validator as tools. */
+export type HouseholdDefinitionCertifyCommand = {
+    kind: 'household_definition_certify';
+    object_id: string;
+    revision: HouseholdRevisionRef;
+};
 export declare function validateHouseholdHumanCommand(value: unknown): TodoCommand | {
     kind: 'household_activity';
     since: string;
     limit: number;
-};
+} | HouseholdDefinitionCertifyCommand;
 export declare function validateHouseholdToolArguments(name: string, value: unknown): Arguments;
 export declare function householdToolOperation(name: string, value: unknown): HouseholdContentOperation;
 export type HouseholdToolInvocation = CoreOperation & {

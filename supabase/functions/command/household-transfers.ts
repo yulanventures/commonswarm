@@ -46,7 +46,7 @@ export async function verifiedHouseholdBytes(storage: HouseholdStorage, blob: Ho
   return bytes;
 }
 
-export function decodeHouseholdContent(bytes: Uint8Array, kind: 'list' | 'doc'): HouseholdContent {
+export function decodeHouseholdContent(bytes: Uint8Array, kind: 'list' | 'doc' | 'definition'): HouseholdContent {
   try {
     const content: HouseholdContent = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (content?.kind !== kind || householdCanonical(content) !== new TextDecoder().decode(bytes)) {

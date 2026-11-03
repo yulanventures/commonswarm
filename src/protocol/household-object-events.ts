@@ -1,7 +1,14 @@
 import type { EventEnvelope } from './events.js';
 
+/** Kinds published by the object tools and every released client. */
 export const HOUSEHOLD_OBJECT_TYPES = ['list', 'doc', 'file'] as const;
-export type HouseholdObjectType = typeof HOUSEHOLD_OBJECT_TYPES[number];
+/** Every stored kind. A definition is reachable only through the definition
+ * tools: clients up to 0.1.87 refuse a page holding a kind they don't know. */
+export const HOUSEHOLD_STORED_OBJECT_TYPES = [...HOUSEHOLD_OBJECT_TYPES, 'definition'] as const;
+export type HouseholdObjectType = typeof HOUSEHOLD_STORED_OBJECT_TYPES[number];
+export const HOUSEHOLD_DEFINITION_TERM_MAX = 80;
+export const HOUSEHOLD_DEFINITION_TEXT_MAX = 2000;
+export interface HouseholdDefinitionFields { term: string; meaning: string; source: string }
 
 export interface HouseholdListItem {
   item_id: string;
@@ -14,7 +21,8 @@ export interface HouseholdListItem {
 export type HouseholdContent =
   | { kind: 'list'; items: readonly HouseholdListItem[] }
   | { kind: 'doc'; markdown: string }
-  | { kind: 'file'; name: string; media_type: string };
+  | { kind: 'file'; name: string; media_type: string }
+  | ({ kind: 'definition' } & HouseholdDefinitionFields);
 export type HouseholdFileMetadata = Extract<HouseholdContent, { kind: 'file' }>;
 
 /** Immutable bytes for EVERY revision, including retired versions and drafts.
@@ -57,7 +65,8 @@ export interface HouseholdRevision {
 export type HouseholdPatch =
   | { kind: 'list'; operations: readonly HouseholdListPatch[] }
   | { kind: 'doc'; splices: readonly { start: number; before: string; after: string }[] }
-  | { kind: 'file'; before_sha256: string; replacement: Extract<HouseholdContent, { kind: 'file' }> };
+  | { kind: 'file'; before_sha256: string; replacement: Extract<HouseholdContent, { kind: 'file' }> }
+  | { kind: 'definition'; before: HouseholdDefinitionFields; after: HouseholdDefinitionFields };
 
 export type HouseholdListPatch =
   | { kind: 'add'; item_id: string; text: string; checked: boolean; after_item_id: string | null }
@@ -116,6 +125,7 @@ export interface HouseholdReceipt {
 export const HOUSEHOLD_OBJECT_EVENT_TYPES = [
   'HouseholdObjectCreated', 'HouseholdObjectUpdated', 'HouseholdUploadReserved',
   'HouseholdUploadReleased', 'HouseholdDraftPreserved', 'HouseholdObjectCommandRefused',
+  'HouseholdDefinitionCertified',
 ] as const;
 export type HouseholdObjectEventType = typeof HOUSEHOLD_OBJECT_EVENT_TYPES[number];
 
@@ -126,6 +136,8 @@ type Payloads = {
   HouseholdUploadReleased: { reservation_id: string; receipt: HouseholdReceipt };
   HouseholdDraftPreserved: { draft: HouseholdDraft; reservation_id: string | null; receipt: HouseholdReceipt };
   HouseholdObjectCommandRefused: { receipt: HouseholdReceipt };
+  /** A person pins one exact revision as the version agents answer from. */
+  HouseholdDefinitionCertified: { object_id: string; revision: HouseholdRevisionRef; receipt: HouseholdReceipt };
 };
 export type HouseholdObjectEvent = {
   [K in HouseholdObjectEventType]: EventEnvelope<Payloads[K], K>
@@ -136,6 +148,14 @@ export interface HouseholdObject {
   kind: HouseholdObjectType;
   /** Full committed history. Retirement never deletes a revision or its bytes. */
   history: readonly HouseholdRevision[];
+  /** Definitions only. Later edits leave it on the older revision until recertified. */
+  certification?: HouseholdDefinitionCertification;
+}
+
+export interface HouseholdDefinitionCertification {
+  revision: HouseholdRevisionRef;
+  certified_by: string;
+  certified_at: number;
 }
 
 export interface HouseholdObjectState {

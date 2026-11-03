@@ -62,6 +62,7 @@ tests/listener-grok-model.test.ts
 tests/household-legacy-adapter.test.ts
 tests/household-tool-registry.test.ts
 tests/household-list-registry.test.ts
+tests/household-definitions.test.ts
 tests/household-objects.test.ts
 tests/household-lazy-storage.test.ts
 tests/listener-runtime.test.ts

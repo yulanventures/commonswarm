@@ -251,6 +251,7 @@ test("every household tool, including file tools, receives the unknown-tool refu
     "file_read", "file_upload_begin", "file_upload_commit", "todo_list", "todo_read", "todo_queue",
     "comment_list", "todo_create", "todo_comment", "todo_update", "todo_assign", "todo_start", "todo_set_state",
     "list_list", "list_read", "list_history", "list_create", "list_update",
+    "definitions_search", "definition_read", "definition_create", "definition_update",
   ]);
   for (const { name } of HOUSEHOLD_TOOL_REGISTRY) {
     // Validity of arguments must never reveal a hidden tool's schema.
