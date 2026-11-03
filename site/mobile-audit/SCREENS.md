@@ -266,7 +266,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | R06 | `route.guides.claude-code-subagents` — candidate; other states pending |
 | R07 | `route.guides.claude-connector` — candidate; other states pending |
 | R08 | `route.guides.grok-bot` — candidate; other states pending |
-| R09 | `route.home` — candidate; other states pending |
+| R09 | `route.home` — candidate; `route.home.footer`, `route.home.footer.guides-end` and `route.home.footer.legal-end` provide separate scrolled footer candidates |
 | R10 | `route.invite` — candidate; other states pending |
 | R11 | `route.oauth.c1-controls.callback` — candidate; other states pending |
 | R12 | `route.oauth.c1-smoke.callback` — candidate; other states pending |
@@ -340,4 +340,4 @@ Main-branch addendum: PR #271 added password sign-in after the stated source bas
 
 ## Additional capture candidates (source mapping; CI witness pending)
 
-After the stated baseline, PR #282 adds D15, making 15 dialog families (12 static and 3 dynamic) at this newer source revision. D15 is the Password dialog: `dialog.password` opens `[data-password-open]` and captures the initial form only. It does not type, submit, resend, confirm, or perform an auth mutation; challenge and result states remain pending. Account dialogs and empty Skills use real menu or palette actions. Definitions detail and diff entries require their exact create/certify/update seed steps and scroll the selected detail into the frame. `route.home.footer`, `menu.landing-preview`, and `route.guides.claude-code-subagents.disclosure` explicitly scroll their public targets into view. These candidates are not runtime evidence; thread and Details remain pending.
+After the stated baseline, PR #282 adds D15, making 15 dialog families (12 static and 3 dynamic) at this newer source revision. D15 is the Password dialog: `dialog.password` opens `[data-password-open]` and captures the initial form only. It does not type, submit, resend, confirm, or perform an auth mutation; challenge and result states remain pending. Account dialogs and empty Skills use real menu or palette actions. Definitions detail and diff entries require their exact create/certify/update seed steps and scroll the selected detail into the frame. `route.home.footer`, `route.home.footer.guides-end`, `route.home.footer.legal-end`, `menu.landing-preview`, and `route.guides.claude-code-subagents.disclosure` explicitly scroll their public targets into view. The three footer frames cover distinct positions; CI must still verify their resulting frames. These candidates are not runtime evidence; thread and Details remain pending.

@@ -9,7 +9,7 @@ This is a ranked review of CI screenshots and measurements, with source-backed c
 - Both completed with240 seeded signals,45 accepted seed steps,0 capture errors and0 page overflow. Pending entries are unexecuted coverage, not passes.
 - Artifact `mobile-audit-report` contains `mobile-audit-report.json`, `seed.json`, and `shots/`. Screenshot names are `shots/<id>--<state>--<WxH>--<theme>.png`.
 - Sizes:360×740,390×844,430×932,844×390,768×1024 and1024×1366; two requested themes each.
-- **App light labels are invalid in these two runs.** The app defaults dark regardless of OS preference. Engineer PR#283 at `94786a15` stores `commonswarm:theme`, records `effectiveTheme` and counts `themeMismatches`. No true app-light verification is claimed before run41684449447; its result is pending this review. Public light/dark frames differ correctly.
+- **App light labels are invalid in these two runs.** The app defaults dark regardless of OS preference. Engineer PR#283 at `2068dfd3` stores `commonswarm:theme`, records `effectiveTheme` and counts `themeMismatches`. The corrected runner is at `2068dfd3`; site run41687062207 and mobile audit run41687066907 are the latest Engineer evidence. Their results remain outside this baseline visual review; no new-patch app-light pass is claimed here. Public light/dark frames differ correctly.
 - Run41667674686 is **void**: in-page `__name` exceptions and incomplete seed made its zero findings meaningless. Cancelled intermediate runs are not evidence.
 
 ## Like-for-like comparison
@@ -26,8 +26,8 @@ Slice2 removes984 small-target occurrences on the same312 capture keys. Its two 
 
 | Rank | Finding / evidence | Owner and disposition |
 |---|---|---|
-|1 — high|Receipt sentences wrap one character per line in both chat views, across all six sizes. Full-resolution390×844 general-chat frames reproduce it before and after Slice2. `app.chat.general--dense--390x844--light.png` is an example; its effective app theme is dark.|Engineer A. Reported fixed in#283 `94786a15`: full-width toolbar, receipt column minimum and word wrapping. New collapsed-text check. Await new artifact; old zero overflow cannot close this.|
-|2 — coverage|Requested app-light frames are dark; old theme matrix is mislabeled.|Engineer A `94786a15`; effective-theme and mismatch checks added. Await run41684449447.|
+|1 — high|Receipt sentences wrap one character per line in both chat views, across all six sizes. Full-resolution390×844 general-chat frames reproduce it before and after Slice2. `app.chat.general--dense--390x844--light.png` is an example; its effective app theme is dark.|Engineer A. Reported fixed in#283 `2068dfd3`: full-width toolbar, receipt column minimum and word wrapping. New collapsed-text check. Await new artifact; old zero overflow cannot close this.|
+|2 — coverage|Requested app-light frames are dark; old theme matrix is mislabeled.|Engineer A `2068dfd3`; effective-theme and mismatch checks added. Await run41687066907.|
 |3 — coverage|`app.definitions` screenshots show Lists above the intended Definitions surface. A visible DOM node below fold is insufficient.|PR B scrolls the intended surface into view and selects distinct seeded Definition states. CI witness pending.|
 |4 — medium|App message entity/author/channel controls, workspace trigger, todo labels, form inputs and summaries have undersized hit areas.|Engineer A#283; no app files changed by PR B. Validate effective labels, actual boxes, obscured centres and overlapping controls in the new report.|
 |5 — medium|Footer `.ft__link` width37–39px, height44px:288 occurrences across144 captures/12 route IDs. Preview Lists tab width28–29px, height44px:12 occurrences. Below-fold targets need scrolled screenshots.|PR B: public controls get44px minimums through64rem, including landing secondary links, invite brand, legal TOC and guide disclosures. Styles source-checked; rendered result pending.|
@@ -72,12 +72,12 @@ Counts below are the old Slice2 bounding-box measurement across12 captures per I
 
 ## Capture changes in PR B
 
-The proposed manifest has89 entries:42 source-backed executable candidates and47 pending. The human source inventory crosswalk has73 units, including the new initial Password dialog D15. Counts are source metadata, not executed coverage.
+The proposed manifest has91 entries:44 source-backed executable candidates and47 pending. The human source inventory crosswalk has73 units, including the new initial Password dialog D15. Counts are source metadata, not executed coverage.
 
 - Eleven account/app promotions: account menu; Your agents; Connected apps; initial Password form; sign-out-other-sessions confirmation; empty Skills; resolved todo; proposed/certified/proposal-pending Definitions; selected proposal diff.
 - Password and sign-out captures open only. They never type credentials, submit changes, resend, reauthenticate or confirm sign-out.
 - Seed guards require recorded positive steps for the selected to-do and Definitions. Connected apps has no guaranteed grants; Skills is empty. They are not presented as populated states.
-- Public additions scroll the footer and homepage preview into view and open a guide disclosure. Existing Definitions capture scrolls to its intended surface.
+- Public additions scroll the footer, its Guides and Legal end links, and homepage preview into view and open a guide disclosure; distinct footer frames cover the lower columns on phones. Existing Definitions capture scrolls to its intended surface.
 - Thread, viewport-dependent Details, recovery/challenge flows and nondeterministic states remain explicitly pending. No invented roster dialog or test-only production hook is introduced.
 
 ## Verification ceiling

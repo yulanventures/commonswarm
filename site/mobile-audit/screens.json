@@ -1159,5 +1159,33 @@
     "states": [
       "dense"
     ]
+  },
+  {
+    "id": "route.home.footer.guides-end",
+    "kind": "view",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "footer.ft nav[aria-label=\"Guides\"] a.ft__link[href=\"/alternatives/crewai\"]"
+      }
+    ],
+    "ready": "footer.ft nav[aria-label=\"Guides\"] a.ft__link[href=\"/alternatives/crewai\"]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.home.footer.legal-end",
+    "kind": "view",
+    "path": "/",
+    "setup": [
+      {
+        "scroll": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]"
+      }
+    ],
+    "ready": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]",
+    "states": [
+      "dense"
+    ]
   }
 ]
