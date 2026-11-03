@@ -4899,7 +4899,11 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
     const environment = executeWholeBlock(block, fixture);
     assert.equal(environment.status, 0, environment.stderr);
     // Exercise the real adapter with the admitted checkout and a different owner.
-    const git = (args: string[]) => containedCommand(fixture, join(fixture.bin, "git"), args, { env: fixture.env });
+    // GitHub-hosted runners ship /etc/gitconfig with safe.directory=*, which turns Git's ownership
+    // check off for every repository. Ignore the host's system config so this control measures Git
+    // and the SUDO_UID adapter, not the runner image (confirmed by a CI probe, 2026-11-03).
+    const git = (args: string[]) => containedCommand(fixture, join(fixture.bin, "git"), args,
+      { env: { ...fixture.env, GIT_CONFIG_NOSYSTEM: "1" } });
     const positiveGit = git(["-C", REAL_CHECKOUT, "rev-parse", "HEAD"]);
     assert.equal(positiveGit.status, 0, positiveGit.stderr);
     assert.match(positiveGit.stdout.trim(), /^[0-9a-f]{40}$/);
