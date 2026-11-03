@@ -1,0 +1,979 @@
+[
+  {
+    "id": "app.signin",
+    "kind": "view",
+    "path": "/app",
+    "setup": [],
+    "ready": "[data-panel=\"signed-out\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "signedOut": true
+  },
+  {
+    "id": "app.catchup",
+    "kind": "view",
+    "path": "/app?v=catchup",
+    "setup": [],
+    "ready": "[data-home-catchup]:not([hidden]) .hm-catchup-card-body",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Seeded unread messages do not guarantee the Catch up card; confirm its rule and visible card in the first artifact."
+  },
+  {
+    "id": "app.chat.general",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [],
+    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.chat.group",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.group}",
+    "setup": [],
+    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.chat.dm",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "click": "[data-rail-agent=\"{agent}\"]"
+      }
+    ],
+    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Phone navigation drawer trigger and seeded DM identity binding need confirmation before the rail click."
+  },
+  {
+    "id": "app.todos",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=todos",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-todo-row]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.lists",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-channel-view=\"objects\"]:not([hidden]) [data-household-objects] [data-hh-action=\"select\"]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.definitions",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-channel-view=\"objects\"]:not([hidden]) .household-definitions [data-def-list]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.files",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=files",
+    "setup": [],
+    "ready": "[data-channel-view=\"files\"]:not([hidden]) [data-file-list]:not([hidden]) [data-file-name]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "PR 1 does not seed files; populated Files capture needs a file fixture."
+  },
+  {
+    "id": "app.wiki",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=wiki",
+    "setup": [],
+    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-list]:not([hidden]) [data-brain-topic]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "PR 1 does not seed Wiki pages; populated Wiki index needs topic fixtures."
+  },
+  {
+    "id": "app.people",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-agent-row=\"{agent}\"]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.agent",
+    "kind": "view",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has(.hm-agent__title):has([data-hm-fact=\"model\"])",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "dialog.workspace-settings",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "click": "[data-workspace-settings-item]"
+      }
+    ],
+    "ready": "dialog[data-workspace-details-popover][open]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile menu relocation, opening trigger and workspace settings fixture need CI confirmation."
+  },
+  {
+    "id": "dialog.command-palette",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "press": "ControlOrMeta+k"
+      }
+    ],
+    "ready": "dialog[data-command-palette][open] [data-command-palette-input]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "menu.account",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "click": "[data-user-menu-trigger]"
+      }
+    ],
+    "ready": "[data-user-menu]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Phone drawer and relocated account menu trigger need confirmation."
+  },
+  {
+    "id": "route.acceptable-use",
+    "kind": "route",
+    "path": "/acceptable-use",
+    "setup": [],
+    "ready": ".lgl__head h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.alternatives.crewai",
+    "kind": "route",
+    "path": "/alternatives/crewai",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.alternatives.langgraph",
+    "kind": "route",
+    "path": "/alternatives/langgraph",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.download",
+    "kind": "route",
+    "path": "/download",
+    "setup": [],
+    "ready": "#dl-title",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.guides.claude-code-subagents",
+    "kind": "route",
+    "path": "/guides/claude-code-subagents",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.guides.claude-connector",
+    "kind": "route",
+    "path": "/guides/claude-connector",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.guides.grok-bot",
+    "kind": "route",
+    "path": "/guides/grok-bot",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.home",
+    "kind": "route",
+    "path": "/",
+    "setup": [],
+    "ready": "#consumer-hero-heading",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.invite",
+    "kind": "route",
+    "path": "/invite",
+    "setup": [],
+    "ready": "invite-onramp [data-view=\"unusable\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "signedOut": true
+  },
+  {
+    "id": "route.oauth.c1-controls.callback",
+    "kind": "route",
+    "path": "/oauth/c1-controls/callback",
+    "setup": [],
+    "ready": "body > p",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.oauth.c1-smoke.callback",
+    "kind": "route",
+    "path": "/oauth/c1-smoke/callback",
+    "setup": [],
+    "ready": "body > p",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.orchestration",
+    "kind": "route",
+    "path": "/orchestration",
+    "setup": [],
+    "ready": ".seo-hero h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.privacy",
+    "kind": "route",
+    "path": "/privacy",
+    "setup": [],
+    "ready": ".lgl__head h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.start",
+    "kind": "route",
+    "path": "/start",
+    "setup": [],
+    "ready": "body",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "JavaScript immediately redirects to /app; capture of the handoff or redirect behavior needs a dedicated runner mode."
+  },
+  {
+    "id": "route.support",
+    "kind": "route",
+    "path": "/support",
+    "setup": [],
+    "ready": "#support-title",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "route.terms",
+    "kind": "route",
+    "path": "/terms",
+    "setup": [],
+    "ready": ".lgl__head h1",
+    "states": [
+      "dense"
+    ]
+  },
+  {
+    "id": "app.workspace-new",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.thread",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.composer",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.todo-detail",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.list-conflict",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.wiki-editor",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.agent-chooser",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.agent-connect",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.invite-person",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.entity-detail",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.invitation-inbox",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.update-toast",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.definitions-diff",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.todo-offer",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "app.lists-approval",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+  },
+  {
+    "id": "dialog.public-menu",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.channels",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.connected-apps",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.signout-others",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.account-agents",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.workspace-skills",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.people-confirm",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.admin-access",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.invitation-review",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.navigation-drawer",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.details-sheet",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "dialog.role-confirm",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+  },
+  {
+    "id": "menu.workspace",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.channels",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.assignee",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.mention",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.receipt",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.wiki-version",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.member-actions",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.provider",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.landing-preview",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.download-disclosures",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.resizers",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.context",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.workspace-dock",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "menu.profile-inspector",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+  },
+  {
+    "id": "app.definitions.proposed",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "app.definitions.certified",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "app.definitions.proposal-pending",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "app.definitions.diff",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "app.wiki.topic",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=wiki",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "app.wiki.editor",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=wiki",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "A state-specific seeded identity, trigger and loaded-content readiness are not yet bound."
+  },
+  {
+    "id": "state.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "empty"
+    ],
+    "status": "pending",
+    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
+  },
+  {
+    "id": "state.error",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "error"
+    ],
+    "status": "pending",
+    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
+  },
+  {
+    "id": "state.loading",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "states": [
+      "loading"
+    ],
+    "status": "pending",
+    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
+  },
+  {
+    "id": "app.files.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=files",
+    "setup": [],
+    "ready": "[data-channel-view=\"files\"]:not([hidden]) [data-file-empty]:not([hidden])",
+    "states": [
+      "empty"
+    ]
+  },
+  {
+    "id": "app.wiki.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=wiki",
+    "setup": [],
+    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-empty]:not([hidden]):has-text(\"No wiki pages yet.\")",
+    "states": [
+      "empty"
+    ]
+  },
+  {
+    "id": "app.agent.queue",
+    "kind": "view",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] .hm-agent__queue li",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Selected agent queue visibility and density are not guaranteed; confirm in the first artifact."
+  }
+]
