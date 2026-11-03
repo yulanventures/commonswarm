@@ -4692,6 +4692,12 @@ async function runWhoami(args: Arguments): Promise<void> {
     display_name: displayName,
     workspace_id: identity.workspace_id,
     workspace_name: workspaceName,
+    ...(identity.lead_agent_principal_id !== undefined
+      ? {
+          lead_agent_principal_id: identity.lead_agent_principal_id,
+          is_workspace_lead: identity.is_workspace_lead === true,
+        }
+      : {}),
     owner_user_id: identity.owner_user_id,
     owner_display_name: ownerName,
     credential_metadata_match: artifactMatches,
@@ -4707,6 +4713,9 @@ async function runWhoami(args: Arguments): Promise<void> {
     `You are ${displayName} (${identity.principal_id}).\n` +
       `Credential valid now: yes.\n` +
       `Workspace: ${renderWorkspace(identity.workspace_id, workspaceName)}.\n` +
+      (identity.is_workspace_lead === true
+        ? "Role: workspace lead (untagged channel messages route to you).\n"
+        : "") +
       `Owner: ${ownerName} (${identity.owner_user_id}).\n` +
       (output.renewal_grant === null
         ? "Grant: no current renewal grant is visible. Next step: ask a workspace owner to mint a new credential.\n"

@@ -89,14 +89,30 @@ export function mapCachedCheck(row: SignalRecord): object {
 
 export function mapWhoami(directory: SignalDirectory, principalId: string, workspaceId: string): object {
   const own = directory.agents.find(row => row.principal_id === principalId)!;
-  return { principal_id: principalId, name: own.name, workspace_id: workspaceId,
-    workspace_name: directory.identity?.workspace_name ?? null };
+  return {
+    principal_id: principalId,
+    name: own.name,
+    workspace_id: workspaceId,
+    workspace_name: directory.identity?.workspace_name ?? null,
+    ...(directory.identity?.lead_agent_principal_id !== undefined
+      ? {
+          lead_agent_principal_id: directory.identity.lead_agent_principal_id,
+          is_workspace_lead: directory.identity.is_workspace_lead === true,
+        }
+      : {}),
+  };
 }
 
 export function mapMembers(directory: SignalDirectory, workspaceId: string): object {
-  return { workspace_id: workspaceId, workspace_name: directory.identity?.workspace_name ?? null,
+  return {
+    workspace_id: workspaceId,
+    workspace_name: directory.identity?.workspace_name ?? null,
+    ...(directory.identity?.lead_agent_principal_id !== undefined
+      ? { lead_agent_principal_id: directory.identity.lead_agent_principal_id }
+      : {}),
     members: directory.members.map(row => ({ user_id: row.user_id, name: row.display_name })),
-    agents: directory.agents.map(row => ({ principal_id: row.principal_id, name: row.name })) };
+    agents: directory.agents.map(row => ({ principal_id: row.principal_id, name: row.name })),
+  };
 }
 
 export function mapSignal(result: PostSignalResult): object {

@@ -1344,6 +1344,10 @@ export interface SignalAgentIdentity {
    * carries no name; callers must render the id alone rather than inventing one.
    */
   workspace_name?: string | null;
+  /** The workspace's configured Lead agent, if any. */
+  lead_agent_principal_id?: string | null;
+  /** True when the authenticated agent is the workspace's Lead agent. */
+  is_workspace_lead?: boolean;
 }
 
 export interface SignalDirectory {
@@ -1422,6 +1426,15 @@ function parseAgentIdentity(value: unknown): SignalAgentIdentity {
   if (name !== undefined && name !== null && typeof name !== "string") {
     throw new SignalMalformedError("member read returned a malformed workspace name");
   }
+  const leadId =
+    row.lead_agent_principal_id === undefined
+      ? undefined
+      : row.lead_agent_principal_id === null
+        ? null
+        : checkedUuid(row.lead_agent_principal_id, "identity lead_agent_principal_id");
+  if (row.is_workspace_lead !== undefined && typeof row.is_workspace_lead !== "boolean") {
+    throw new SignalMalformedError("member read returned a malformed is_workspace_lead flag");
+  }
   return {
     credential_valid: true,
     ...(row.run_id === undefined ? {} : { run_id: checkedUuid(row.run_id, "identity run_id") }),
@@ -1429,6 +1442,8 @@ function parseAgentIdentity(value: unknown): SignalAgentIdentity {
     principal_id: checkedUuid(row.principal_id, "identity principal_id"),
     workspace_id: checkedUuid(row.workspace_id, "identity workspace_id"),
     workspace_name: typeof name === "string" ? name : null,
+    ...(leadId === undefined ? {} : { lead_agent_principal_id: leadId }),
+    ...(row.is_workspace_lead === undefined ? {} : { is_workspace_lead: row.is_workspace_lead }),
   };
 }
 

@@ -871,12 +871,13 @@ async function handle(
        * `archived_at IS NULL`, so archiving revokes the agent and the handler returns 403 at
        * the membership gate above. The null branch below is for a deployment that does not
        * send the field, not for archived rows. */
-      const workspaceRows = await tx<{ name: string }[]>`
-        SELECT name
+      const workspaceRows = await tx<{ name: string; lead_agent_principal_id?: string | null }[]>`
+        SELECT *
         FROM swarm_read.workspaces
         WHERE workspace_id = ${agent.principal_workspace_id}::uuid
         LIMIT 1
       `;
+      const leadAgentPrincipalId = workspaceRows[0]?.lead_agent_principal_id ?? null;
       return json(200, {
         members,
         agents: agents.map((row) => {
@@ -899,6 +900,8 @@ async function handle(
           owner_user_id: agent.owner_user_id,
           workspace_id: agent.principal_workspace_id,
           workspace_name: workspaceRows[0]?.name ?? null,
+          lead_agent_principal_id: leadAgentPrincipalId,
+          is_workspace_lead: leadAgentPrincipalId !== null && leadAgentPrincipalId === agent.principal_id,
           managed_at: agent.managed_at,
         },
       });
