@@ -306,3 +306,18 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { backgr
   live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { border: 1px solid CanvasText; }
   live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus) { outline: 2px solid Highlight; }
 }
+
+/* Touch controls follow the more-specific Carbon composer and menu rules. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed-filters button,
+  live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item { min-inline-size: 44px; min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-attach,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within, :hover):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-attach {
+    inline-size: 44px; min-inline-size: 44px; block-size: 44px; min-block-size: 44px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-attach,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within, :hover):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-attach { inset-inline-end: 56px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea { padding-inline-end: 112px; font-size: 16px; }
+}
