@@ -28,6 +28,7 @@ on:
           - server-repeat
           - p1-cli
           - p1-local
+          - mobile-audit
           - site
           - box-dry-run
           - unit
@@ -63,7 +64,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.suite == 'server' && 45 || 30 }}
+    timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 50 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -136,7 +137,7 @@ jobs:
           sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
             "$(command -v npm)" run test:box-dry-run 2>&1 | tee box-dry-run.log
       - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
-        if: matrix.suite == 'server' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         with:
           version: 2.118.0
       - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
@@ -144,11 +145,11 @@ jobs:
         with:
           version: 2.118.0
       - name: Read the pinned edge-runtime image
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         id: edge-runtime-image
         run: node scripts/ci/server-suite.mjs image-metadata >> "$GITHUB_OUTPUT"
       - name: Cache the pinned edge-runtime image
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         id: edge-runtime-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -156,7 +157,7 @@ jobs:
           # The key includes the exact measured manifest digest, not just the tag.
           key: ${{ runner.os }}-${{ runner.arch }}-pinned-images-v2-${{ steps.edge-runtime-image.outputs.key }}
       - name: Prepare the pinned edge-runtime image
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         env:
           PINNED_IMAGE_CACHE: ${{ runner.temp }}/pinned-images
           PINNED_IMAGE_CACHE_HIT: ${{ steps.edge-runtime-cache.outputs.cache-hit }}
@@ -164,7 +165,7 @@ jobs:
           set -euo pipefail
           node scripts/ci/server-suite.mjs prepare-images "$PINNED_IMAGE_CACHE" "$PINNED_IMAGE_CACHE_HIT"
       - name: Start the local stack
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         # The box migrates as supabase_admin (deploy/supabase-stack/migrate/lib.sh).
         # Migrating as postgres made GRANTs on auth.* silent no-ops in run 38302463345.
         # CLI 2.118.0 env flags override root config values for this startup only.
@@ -176,7 +177,7 @@ jobs:
           set -euo pipefail
           supabase start --ignore-health-check >/dev/null
       - name: Apply migrations as the box superuser
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         run: |
           set -euo pipefail
           # Read only the local fixture password; never put it in a URL or GITHUB_ENV.
@@ -203,7 +204,7 @@ jobs:
           psql -X -v ON_ERROR_STOP=1 --dbname postgresql://postgres@127.0.0.1:54322/postgres --file supabase/seed.sql
           psql -X -v ON_ERROR_STOP=1 --dbname postgresql://supabase_admin@127.0.0.1:54322/postgres --command "NOTIFY pgrst, 'reload schema'"
       - name: Check migration ledger and normal connection role
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local'
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         run: |
           set -euo pipefail
           PGPASSWORD=$(supabase status -o json | python3 -c 'import json, sys; from urllib.parse import urlsplit, unquote; u = urlsplit(json.load(sys.stdin)["DB_URL"]); assert (u.hostname, u.port, u.username, u.path) == ("127.0.0.1", 54322, "postgres", "/postgres"); assert u.password; print(unquote(u.password))')
@@ -339,6 +340,30 @@ jobs:
           # Discover Playwright's bundled shell instead of any runner CHROME_BIN.
           unset CHROME_BIN
           npm run test:p1-local 2>&1 | tee p1-local.log
+      - name: Mobile audit (CS-MOBILE-AUDIT-20261103)
+        # Manual only. Seeds a heavy simulated workspace on this local stack, builds the site against
+        # it and records overflow, tap-target and clipping findings plus screenshots. Report-only.
+        if: matrix.suite == 'mobile-audit'
+        env:
+          RUN_BROWSER_TESTS: "1"
+        run: |
+          set -euo pipefail
+          npm run build:command-core
+          npm ci --prefix site
+          npm install --no-save --no-audit --no-fund playwright@1.64.1
+          npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
+          # Point the site build at the local stack; the anon key is a public local fixture.
+          eval "$(supabase status -o json | python3 -c 'import json,sys,shlex; s=json.load(sys.stdin); assert s["API_URL"].startswith("http://127.0.0.1"); print("export PUBLIC_SUPABASE_URL="+shlex.quote(s["API_URL"])); print("export PUBLIC_SUPABASE_ANON_KEY="+shlex.quote(s["ANON_KEY"]))')"
+          npm --prefix site run build
+          unset CHROME_BIN
+          MOBILE_AUDIT_OUT="$RUNNER_TEMP/mobile-audit" npx tsx tests/mobile-audit/run-mobile-audit.ts 2>&1 | tee mobile-audit.log
+      - name: Upload the mobile audit report
+        if: ${{ !cancelled() && matrix.suite == 'mobile-audit' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mobile-audit-report
+          path: ${{ runner.temp }}/mobile-audit
+          if-no-files-found: warn
       - name: p1-cli suite
         if: matrix.suite == 'p1-cli'
         run: |

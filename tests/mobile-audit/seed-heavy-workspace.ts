@@ -1,0 +1,226 @@
+/**
+ * Heavy simulated workspace for the mobile audit (CS-MOBILE-AUDIT-20261103). LOCAL STACK ONLY:
+ * it refuses any API or database URL that is not loopback. It never touches production.
+ *
+ * Real commands build what has a command (workspace, invitations, roles, agents, lead, Lists &
+ * docs, definitions, to-dos), so the data obeys the same invariants as production. SQL is used
+ * only where there is no command and volume or time matters: group chats and 200+ backdated
+ * messages, DMs and threads. Every step records a note instead of aborting, so a partial seed
+ * still produces an audit.
+ */
+import assert from "node:assert/strict";
+import { randomBytes, randomUUID } from "node:crypto";
+import { createClient } from "@supabase/supabase-js";
+import postgres from "postgres";
+
+export interface SeedEnvironment { apiUrl: string; anonKey: string; serviceRoleKey: string; dbUrl: string }
+export interface SeedResult {
+  owner: { email: string; password: string };
+  ids: Record<string, string>;
+  notes: string[];
+  steps: string[];
+}
+
+const LOCAL_SEAT = "seat_0000000000000000000000";
+const loopback = (value: string) => ["127.0.0.1", "localhost", "[::1]"].includes(new URL(value).hostname);
+
+const PEOPLE = [
+  "Dana Rivera",
+  "Kenji Ito",
+  "Priya Ramanathan-Whitfield",
+  "Sam O'Connor",
+  "Alexandria Montgomery-Featherstonehaugh",
+];
+const AGENTS = [
+  "Orbit", "River", "Lumen", "Atlas Research & Long-Running Investigations Agent",
+  "Muse", "Grok-Overnight-Batch-Summarizer-Extremely-Long-Name-v2", "Pixel", "Ledger",
+  "Scout", "Harbor (household logistics)", "Quill", "Relay-0x7f3a9c2e5b1d8f4a6c0e2b9d7f1a3c5e",
+];
+const LONG_URL = "https://example.test/really/long/path/" + "segment-".repeat(18) + "end?query=" + "x".repeat(60);
+const UNBROKEN = "sk_test_" + "A1b2C3d4E5f6G7h8".repeat(8);
+const BODIES = [
+  "Picked up the grocery list; I'll check the pantry before ordering.",
+  "Can someone verify the narrow-screen agent rail before we ship?",
+  "The signup copy is ready for the dashboard handoff.",
+  "Refining the workspace-first dashboard states.",
+  `Build log is here: ${LONG_URL}`,
+  `Rotated the test key ${UNBROKEN} — this is a fake value for layout testing.`,
+  "Short.",
+  "Monthly spend so far: $1,284.17 across 23 card transactions. Groceries are 41% of it, dining out 18%, and utilities 12%. I flagged two duplicate charges for review.",
+  "Working on the school pickup schedule for next week. Tuesday and Thursday are covered; Wednesday still needs someone.",
+  "Done — the dentist appointment moved to 3:30pm on the 14th.",
+  "Can you look at the boiler service quote? It's attached in Files.",
+  "Heads up: the plumber is coming between 8 and 10am tomorrow.",
+];
+
+export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
+  for (const url of [env.apiUrl, env.dbUrl]) assert.ok(loopback(url), `seed refuses non-local target ${new URL(url).hostname}`);
+  const notes: string[] = [];
+  /** Seed steps that were positively accepted; a manifest entry's requiresSeed names these. */
+  const steps: string[] = [];
+  const ids: Record<string, string> = {};
+  const note = (step: string, detail: unknown) => { notes.push(`${step}: ${String(detail).slice(0, 400)}`); };
+  const sql = postgres(env.dbUrl, { prepare: false, max: 4 });
+  const admin = createClient(env.apiUrl, env.serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  try {
+    // People: confirmed GoTrue users with passwords (local fixtures only) and swarm.users rows.
+    const people: { id: string; name: string; email: string; password: string; token: string }[] = [];
+    for (const [index, name] of PEOPLE.entries()) {
+      const email = `audit-${index}-${randomUUID().slice(0, 8)}@example.test`;
+      const password = `Audit-${randomBytes(18).toString("base64url")}!`;
+      const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+      if (created.error || !created.data.user) throw new Error(`createUser ${index}: ${created.error?.message}`);
+      const id = created.data.user.id;
+      await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${id}::uuid, ${name})
+        ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name`;
+      const client = createClient(env.apiUrl, env.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+      const signedIn = await client.auth.signInWithPassword({ email, password });
+      if (signedIn.error || !signedIn.data.session) throw new Error(`sign-in ${index}: ${signedIn.error?.message}`);
+      people.push({ id, name, email, password, token: signedIn.data.session.access_token });
+    }
+    const [owner, adminPerson] = people as [typeof people[number], typeof people[number]];
+    ids.person = people[2]!.id;
+    ids["person.long"] = people[4]!.id;
+
+    const command = async (token: string, body: Record<string, unknown>, workspaceId: string | null, commandId = `audit_${randomBytes(9).toString("base64url")}`) => {
+      const response = await fetch(`${env.apiUrl}/functions/v1/command`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, apikey: env.anonKey, "content-type": "application/json" },
+        body: JSON.stringify({ command_id: commandId, client_version: "0.1.0",
+          ...(workspaceId ? { workspace_id: workspaceId, stream: { kind: "workspace" } } : {}), command: body }),
+      });
+      const text = await response.text();
+      let parsed: Record<string, unknown> = {};
+      try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = { raw: text.slice(0, 200) }; }
+      return { status: response.status, body: parsed, commandId };
+    };
+    const ok = (step: string, result: { status: number; body: Record<string, unknown> }) => {
+      const accepted = result.status === 200 && ["accepted", "committed", "ok"].includes(String(result.body.status));
+      if (!accepted) note(step, `HTTP ${result.status} ${JSON.stringify(result.body).slice(0, 300)}`);
+      else steps.push(step);
+      return accepted;
+    };
+
+    // Workspaces: one dense, one empty.
+    const workspace = randomUUID();
+    const emptyWorkspace = randomUUID();
+    ok("create_workspace", await command(owner.token, { kind: "create_workspace", workspace_id: workspace, name: "Rivera household & studio — shared with everyone, including the agents" }, null));
+    ok("create_workspace empty", await command(owner.token, { kind: "create_workspace", workspace_id: emptyWorkspace, name: "Empty" }, null));
+    ids.workspace = workspace;
+    ids.emptyWorkspace = emptyWorkspace;
+
+    // Members: invite and accept as each person; one admin; one invitation left pending.
+    for (const person of people.slice(1)) {
+      const invited = await command(owner.token, { kind: "invite_member", email: person.email, ttl_ms: 7 * 24 * 3_600_000 }, workspace);
+      const token = String(invited.body.invitation_token ?? "");
+      if (!ok(`invite ${person.name}`, invited) || !token) continue;
+      ok(`accept ${person.name}`, await command(person.token, { kind: "accept_invitation", token }, null));
+    }
+    ok("pending invite", await command(owner.token, { kind: "invite_member", email: "pending.invitee.with.a.long.address@example.test", ttl_ms: 7 * 24 * 3_600_000 }, workspace));
+    ok("change_role admin", await command(owner.token, { kind: "change_role", user_id: adminPerson.id, role: "admin" }, workspace));
+
+    // Agents: twelve, mostly the owner's, two the admin's.
+    for (const [index, name] of AGENTS.entries()) {
+      const by = index >= 10 ? adminPerson : owner;
+      ok(`create_agent_principal ${name}`, await command(by.token, { kind: "create_agent_principal", name, model: "claude-opus-5-5" }, workspace));
+    }
+    const agentRows = await sql<{ principal_id: string; name: string }[]>`
+      SELECT principal_id, name FROM swarm.agent_principals WHERE workspace_id = ${workspace}::uuid ORDER BY name`;
+    const agents = agentRows.map(row => row.principal_id);
+    if (agents.length) {
+      ids.agent = agentRows.find(row => row.name.startsWith("Atlas"))?.principal_id ?? agents[0]!;
+      ids["agent.long"] = agentRows.find(row => row.name.startsWith("Relay"))?.principal_id ?? agents[0]!;
+      ok("set_workspace_lead", await command(owner.token, { kind: "set_workspace_lead", principal_id: agents[0] }, workspace));
+    } else note("agents", "no agent principals were created");
+
+    // Group chats (no channel-create command in this path): SQL rows, as the p1-local chat tests do.
+    const channels = { general: randomUUID(), group: randomUUID(), long: randomUUID() };
+    try {
+      await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind) VALUES
+        (${channels.general}::uuid, ${workspace}::uuid, 'general', 'Everything for the household', ${owner.id}::uuid, 'user'),
+        (${channels.group}::uuid, ${workspace}::uuid, 'design-studio', 'Studio work', ${owner.id}::uuid, 'user'),
+        (${channels.long}::uuid, ${workspace}::uuid, 'household-logistics-long-channel', NULL, ${owner.id}::uuid, 'user')`;
+      ids["channel.general"] = channels.general;
+      ids["channel.group"] = channels.group;
+      ids["channel.long"] = channels.long;
+    } catch (error) { note("channels", error); }
+
+    // 240 messages over three days: workspace feed, group chats, DMs both ways and thread replies.
+    const senders = [...people.map(p => ({ id: p.id, kind: "user" })), ...agents.map(id => ({ id, kind: "agent" }))];
+    const channelChoices = [null, channels.general, channels.group, channels.long];
+    let inserted = 0;
+    const roots: { id: string; channel: string | null }[] = [];
+    for (let i = 0; i < 240; i += 1) {
+      const from = senders[i % senders.length]!;
+      const minutesAgo = (240 - i) * 17;
+      const id = randomUUID();
+      const dmToAgent = from.kind === "user" && i % 9 === 0 && agents.length ? agents[i % agents.length]! : null;
+      const dmToUser = from.kind === "agent" && i % 7 === 0 ? owner.id : null;
+      const channel = dmToAgent || dmToUser ? null : channelChoices[i % channelChoices.length]!;
+      const root = !dmToAgent && !dmToUser && i % 11 === 5 ? roots.filter(r => r.channel === channel).at(-1) : undefined;
+      const kind = i % 13 === 0 ? "ask" : i % 17 === 0 ? "working-on" : "note";
+      try {
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${id}::uuid, ${workspace}::uuid, ${from.id}::uuid, ${from.kind}, ${dmToUser}::uuid, ${dmToAgent}::uuid,
+            ${root?.id ?? null}::uuid, ${i % 5 === 0 ? "site/src/components/app" : null}, ${kind}, ${BODIES[i % BODIES.length]!},
+            statement_timestamp() - (${minutesAgo} * interval '1 minute') + interval '25 days', statement_timestamp() - (${minutesAgo} * interval '1 minute'),
+            ${channel}::uuid, ${root?.id ?? null}::uuid, false)`;
+        inserted += 1;
+        if (!root && !dmToAgent && !dmToUser) roots.push({ id, channel });
+        if (root) ids["message.thread"] ??= root.id;
+      } catch (error) { if (notes.filter(n => n.startsWith("signals")).length < 3) note("signals", error); }
+    }
+    note("signals inserted", inserted);
+
+    // Lists & docs, definitions and to-dos through household_tool, as the owner.
+    ok("household_permissions", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, workspace));
+    // The same owner grant on the empty workspace, so its Lists and to-do empty states are captured without consent clicks.
+    ok("household_permissions empty", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, emptyWorkspace));
+    const tool = async (name: string, args: Record<string, unknown>, write = true) => {
+      const commandId = `audit_${randomBytes(9).toString("base64url")}`;
+      return await command(owner.token, { kind: "household_tool", tool: name,
+        arguments: { seat: LOCAL_SEAT, ...(write ? { request_id: commandId } : {}), ...args } }, workspace, commandId);
+    };
+    const items = Array.from({ length: 36 }, (_, n) => ({ item_id: `item-${n}`, text: n % 9 === 4 ? `Order replacement filter ${UNBROKEN.slice(0, 40)}` : `Grocery item ${n + 1}: ${["oat milk", "sourdough", "eggs", "basil", "limes", "rice"][n % 6]}`, order: n, checked: n % 4 === 0 }));
+    ok("object_create list", await tool("object_create", { object_id: "groceries", title: "Weekly groceries", content: { kind: "list", items } }));
+    ok("object_create doc", await tool("object_create", { object_id: "house-notes", title: "House notes", content: { kind: "doc", markdown: "# House notes\n\n" + BODIES.join("\n\n") } }));
+    const definition = async (object_id: string, term: string, meaning: string, source: string) =>
+      ok(`definition_create ${term}`, await tool("definition_create", { object_id, term, meaning, source }));
+    await definition("def-monthly-spend", "Monthly spend", "Sum of card and cash spending in a calendar month.", "Card statements plus the cash log in Lists.");
+    await definition("def-due-date", "Due date", "The last day a bill can be paid without a fee.", "");
+    await definition("def-active-member", "Active member", "A person who posted or completed a to-do in the last 30 days.", "Workspace activity.");
+    const definitionRevision = async (object_id: string) => {
+      const read = await tool("definition_read", { object_id }, false);
+      return (read.body.current as { revision?: Record<string, unknown> } | undefined)?.revision;
+    };
+    for (const id of ["def-monthly-spend", "def-due-date"]) {
+      const revision = await definitionRevision(id);
+      if (revision) ok(`certify ${id}`, await command(owner.token, { kind: "household_definition_certify", object_id: id, revision }, workspace));
+    }
+    const spend = await tool("definition_read", { object_id: "def-monthly-spend" }, false);
+    const current = spend.body.current as { revision?: unknown; term?: string; meaning?: string; source?: string } | undefined;
+    if (current?.revision) {
+      ok("definition_update pending", await tool("definition_update", { object_id: "def-monthly-spend", base: current.revision,
+        before: { term: current.term, meaning: current.meaning, source: current.source },
+        after: { term: current.term, meaning: "Sum of card, cash and transfer spending in a calendar month, excluding savings.", source: current.source } }));
+    }
+    for (const [n, title] of ["Book the boiler service", "Renew car insurance before the 30th", "Plan the school pickup rota for next week with a much longer title that wraps on phones",
+      "Order replacement water filter", "Sort the receipts folder", "Call the dentist", "Return the library books", "Fix the squeaky hinge"].entries()) {
+      const created = await tool("todo_create", { title, ...(n % 2 === 0 ? { due_on: "2026-11-20" } : {}),
+        ...(agents.length && n % 3 === 0 ? { assign: { to: { kind: "agent", id: agents[n % agents.length] }, start: "queue", gate: { kind: "none" } } } : {}) });
+      ok(`todo_create ${n}`, created);
+      const todo = (created.body.value as { todo_id?: string; version?: number } | undefined);
+      if (todo?.todo_id) {
+        ids.todo ??= todo.todo_id;
+        if (n === 4 && todo.version) ok("todo done", await tool("todo_set_state", { todo_id: todo.todo_id, base_version: todo.version, state: "done" }));
+        if (n === 5) ok("todo start", await tool("todo_start", { todo_id: todo.todo_id }));
+      }
+    }
+    return { owner: { email: owner.email, password: owner.password }, ids, notes, steps };
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
