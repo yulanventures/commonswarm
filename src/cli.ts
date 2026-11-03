@@ -2929,7 +2929,7 @@ async function runTokenRevoke(args: Arguments): Promise<void> {
       : await commandWorkspaceAndCredential(args, cloud);
     const revoked = await revokeAgentToken({
       target: cloud,
-      credential: selected?.bearer ?? agent.token,
+      credential: selected?.bearer ?? await currentAgentBearer(cloud, override, agent),
       workspaceId: selected?.selectedWorkspace ?? override,
       tokenId,
       ...(selected === null ? {} : { fetcher: selected.fetcher }),
@@ -3293,6 +3293,28 @@ async function agentSession(
     listenerMode,
     ...(fetcher ? { fetcher } : {}),
   });
+}
+
+/**
+ * The newest bearer this machine holds for the presented credential, read from the lineage store
+ * WITHOUT renewing. Read-only commands (resume, listen status and canary, session status/stop/start,
+ * the revoke fallback) must never rotate a credential, and must never send a root token that a
+ * renewal already superseded. No store, or a store for another lineage, falls back to the token given.
+ */
+export async function currentAgentBearer(cloud: CloudTarget, workspaceId: string, agent: AgentCredentialInput): Promise<string> {
+  try {
+    const store = await agentCredentialStore({ target: cloud, lineageKey: credentialLineageKey(agent.token), readOnly: true });
+    const session = await AgentCredentialSession.open({
+      target: cloud,
+      workspaceId,
+      presented: { token: agent.token, tokenId: agent.tokenId, principalId: agent.principalId, runId: agent.runId, expiresAt: agent.expiresAt },
+      store,
+      warn: () => {},
+    });
+    return session.current;
+  } catch {
+    return agent.token;
+  }
 }
 
 async function commandWorkspaceAndCredential(
@@ -4750,23 +4772,24 @@ async function runResume(args: Arguments): Promise<void> {
   /* Deliberately bypass commandWorkspaceAndCredential: that helper opens the
    * renewal store and can rotate a credential. Resume is a read-only view. */
   const agent = await agentCredential(args);
+  const bearer = await currentAgentBearer(cloud, workspaceId, agent);
   const report = await inspectResume({
     target: cloud,
     workspaceId,
     credentialFile,
     credentialPathAliases: [...new Set([suppliedCredentialPath, credentialFile])],
-    sessionCredential: agent.token,
+    sessionCredential: bearer,
     sessionTokenFile: credentialFile,
     installedVersion: CLI_BUILD_VERSION,
     ...(listenerStateDirectory(args)
       ? { stateDirectory: listenerStateDirectory(args) }
       : {}),
   }, {
-    readWakeLease: async () => await readAgentWakeLease(cloud, workspaceId, agent.token),
+    readWakeLease: async () => await readAgentWakeLease(cloud, workspaceId, bearer),
     readIdentity: async () => {
       const directory = await readAgentSignalDirectory(
         cloud,
-        agent.token,
+        bearer,
         workspaceId,
       );
       const identity = directory.identity;
@@ -4800,13 +4823,13 @@ async function runResume(args: Arguments): Promise<void> {
     },
     readBrainTopics: async () => brainTopicSnapshots(await listBrainRowsAsAgent(
       cloud,
-      agent.token,
+      bearer,
       workspaceId,
     )),
     readInboxCount: async (principalId, instanceDirectory) => {
       const page = await readAgentSignalPage(
         cloud,
-        { kind: "agent", token: agent.token },
+        { kind: "agent", token: bearer },
         {
           workspaceId,
           inbox: true,
@@ -7875,7 +7898,7 @@ async function runListenStatusOrStop(
   let statusAgentToken: string | null = null;
   if (hasAgentCredential(args)) {
     const agent = await agentCredential(args);
-    statusAgentToken = agent.token;
+    statusAgentToken = await currentAgentBearer(cloud, workspaceId, agent);
     if (agent.principalId === null) {
       throw new Error(
         "listen status/stop needs the complete JSON agent credential so it can select the same listener profile as listen start",
@@ -8016,6 +8039,7 @@ async function runListenCanary(args: Arguments): Promise<void> {
     "workspace-id",
   );
   const agent = await agentCredential(args);
+  const currentBearer = await currentAgentBearer(cloud, workspaceId, agent);
   if (agent.principalId === null) {
     throw new Error(
       "listen canary needs the complete JSON agent credential so it can address the agent and select its listener state",
@@ -8039,7 +8063,7 @@ async function runListenCanary(args: Arguments): Promise<void> {
   let wakeLeaseViewMissing = false;
   if (localWatcherId !== null && !listenerRunning) {
     try {
-      wakeLease = await readAgentWakeLease(cloud, workspaceId, agent.token);
+      wakeLease = await readAgentWakeLease(cloud, workspaceId, currentBearer);
     } catch (error) {
       if (error instanceof WakeLeaseReadError &&
           (error.status === 400 || error.status === 404)) {
@@ -8070,7 +8094,7 @@ async function runListenCanary(args: Arguments): Promise<void> {
         generation: wakeLease?.generation ?? null,
         checkWaitMs: waitMs,
         fetcher: httpClient.fetch,
-        credential: async () => agent.token,
+        credential: async () => currentBearer,
       })
       : await runListenerAttendanceCanary({
         target: cloud,
@@ -8081,7 +8105,7 @@ async function runListenCanary(args: Arguments): Promise<void> {
         fetcher: httpClient.fetch,
         // Canary must remain read-only apart from its one self-note. It therefore
         // uses the presented token and never enters the renewal/mint path.
-        credential: async () => agent.token,
+        credential: async () => currentBearer,
       });
   } finally {
     httpClient.close();
@@ -8151,11 +8175,12 @@ async function runSession(args: Arguments): Promise<void> {
     }
     const cloud = await target(args);
     const agent = await agentCredential(args);
+    const currentBearer = await currentAgentBearer(cloud, args.optional("workspace-id") ?? "", agent);
     const contextPath = args.required("session-context");
     const { status } = await readManagedSessionStatus({
       contextPath,
       target: cloud,
-      credential: agent.token,
+      credential: currentBearer,
     });
     if (args.has("json")) printJson(status);
     else {
@@ -8180,10 +8205,11 @@ async function runSession(args: Arguments): Promise<void> {
     }
     const cloud = await target(args);
     const agent = await agentCredential(args);
+    const currentBearer = await currentAgentBearer(cloud, args.optional("workspace-id") ?? "", agent);
     const contextPath = args.required("session-context");
     const result = await stopManagedSession({
       target: cloud,
-      credential: agent.token,
+      credential: currentBearer,
       contextPath,
     });
     if (args.has("json")) printJson({ ...result.status, state: result.state, next: result.next });
@@ -8224,6 +8250,7 @@ async function runSession(args: Arguments): Promise<void> {
     "workspace-id",
   );
   const agent = await agentCredential(args);
+  const currentBearer = await currentAgentBearer(cloud, selectedWorkspace, agent);
   const tokenFile = args.optional("agent-token-file");
   if (SESSION_START_REFUSED_FLAGS.some(flag => args.has(flag)) || tokenFile === undefined || !isAbsolute(tokenFile)) {
     throw new Error(
@@ -8234,7 +8261,7 @@ async function runSession(args: Arguments): Promise<void> {
   const result = await startManagedSession({
     target: cloud,
     workspaceId: selectedWorkspace,
-    credential: agent.token,
+    credential: currentBearer,
     tokenFile: resolve(tokenFile),
     tokenPrincipalId: agent.principalId,
     mode,
