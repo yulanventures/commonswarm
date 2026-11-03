@@ -21,7 +21,7 @@ import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/clou
 import { mapMcpError, readMcpPutFile, sendWithDeferredCommit } from "../../src/mcp/server.js";
 import { FileCommandRefused, FileTransportError } from "../../src/cloud/files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
-import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, STDIO_MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
+import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, STDIO_MCP_TOOLS, capMcpResult, capFreshCheck, mapMembers, mapWhoami, validateMcpArguments } from "../../src/mcp/tools.js";
 import { Arguments } from "../../src/cli.js";
 import { replaceHandledAsks } from "../../src/cloud/ask-chain-context.js";
 
@@ -1120,4 +1120,35 @@ test("MCP dispatch policy and fold corrections are recorded", { timeout: 5_000 }
   const lane = await readFile("docs/evidence/2026-09-23-mcp-lane2/LANE.md", "utf8");
   assert.match(lane, /"cancellation after send start puts unknown on the stdio wire" \(superseded by Fold 1:/);
   assert.match(lane, /R9 \|[^\n]*without normalization; the 80-character recipient selector bound is MCP-schema only/);
+});
+
+test("MCP whoami and members surface workspace lead identity when present", () => {
+  const dir = {
+    members: [{ user_id: OWNER, display_name: "Tom" }],
+    agents: [{ principal_id: AGENT, name: "Mr. Marketing" }],
+    identity: {
+      credential_valid: true as const,
+      owner_user_id: OWNER,
+      principal_id: AGENT,
+      workspace_id: WS,
+      workspace_name: "Marketing",
+      lead_agent_principal_id: AGENT,
+      is_workspace_lead: true,
+    },
+  };
+  assert.deepEqual(mapWhoami(dir, AGENT, WS), {
+    principal_id: AGENT,
+    name: "Mr. Marketing",
+    workspace_id: WS,
+    workspace_name: "Marketing",
+    lead_agent_principal_id: AGENT,
+    is_workspace_lead: true,
+  });
+  assert.deepEqual(mapMembers(dir, WS), {
+    workspace_id: WS,
+    workspace_name: "Marketing",
+    lead_agent_principal_id: AGENT,
+    members: [{ user_id: OWNER, name: "Tom" }],
+    agents: [{ principal_id: AGENT, name: "Mr. Marketing" }],
+  });
 });
