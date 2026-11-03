@@ -233,6 +233,12 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions {
   margin-block-start: 16px; padding-block-start: 20px; border-block-start: 1px solid var(--k-shell-line);
 }
+/* A definition row carries a nowrap status badge ("Proposal pending", 117px), so two 10rem
+   columns at 390px left the term 25px and it wrapped a few letters per line (2026-11-03 audit,
+   collapsed-text check). Definitions take 14rem columns: one per row on phones. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions nav ul {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+}
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions nav ul button {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%;
 }
