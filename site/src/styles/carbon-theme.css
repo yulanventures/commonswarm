@@ -179,3 +179,22 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-cur
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-current="page"] .hm-rail__badge {
   background: var(--k-shell-accent); color: var(--k-shell-accent-ink);
 }
+
+/* Borderless (Tom, 2026-11-03): areas are told apart by surface colour, not hairlines. The line
+   tokens go transparent; --carbon-line keeps the old value for the few places that need a rule. */
+:is(live-dashboard.dashboard[data-kylon-shell], admin-delegations[data-kylon-account],
+  human-invitation-inbox[data-kylon-invite], invite-onramp[data-kylon-onramp]) {
+  --carbon-line: #e4e4e7;
+  --k-shell-line: transparent;
+  --k-shell-dark-line: transparent;
+  --border: transparent;
+  --border-base: transparent;
+  --home-hairline: transparent;
+  --home-card-border: transparent;
+  --home-rail-divider: transparent;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #27272a; }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #27272a; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__sample-notice .notice { border-color: transparent; }
