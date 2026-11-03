@@ -28,7 +28,7 @@ export function accessRef(value: unknown): string | null {
     ? value.slice(0, 8) : null;
 }
 
-/** Bounded per-key interval gate. Expired keys are pruned when it fills. */
+/** Bounded per-key interval gate. Expired keys are pruned when it fills; if every key is still live, new keys are refused. */
 export class AccessLostLimiter {
   readonly #next = new Map<string, number>();
   constructor(readonly intervalMs = ACCESS_LOST_INTERVAL_MS, readonly maxKeys = MAX_KEYS) {}
@@ -38,8 +38,9 @@ export class AccessLostLimiter {
     this.#next.delete(key);
     if (this.#next.size >= this.maxKeys) {
       for (const [k, at] of this.#next) if (at <= now) this.#next.delete(k);
-      // Still full of live keys: drop the oldest rather than grow.
-      if (this.#next.size >= this.maxKeys) this.#next.delete(this.#next.keys().next().value!);
+      // Still full of live keys: refuse the new key (a hard ceiling) rather than evict a live one,
+      // so key churn can never re-admit a key inside its interval.
+      if (this.#next.size >= this.maxKeys) return false;
     }
     this.#next.set(key, now + this.intervalMs);
     return true;

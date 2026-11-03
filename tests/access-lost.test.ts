@@ -53,8 +53,9 @@ test("one line per (class, ref) per 60 seconds, bounded keys", () => {
   const small = new AccessLostLimiter(60_000, 2);
   assert.equal(small.allow("a", AT), true);
   assert.equal(small.allow("b", AT), true);
-  assert.equal(small.allow("c", AT), true, "full of live keys evicts the oldest");
-  assert.equal(small.allow("c", AT + 1), false);
+  assert.equal(small.allow("c", AT), false, "full of live keys refuses a new key (hard ceiling)");
+  assert.equal(small.allow("a", AT + 1), false, "a live key is never evicted, so it stays inside its interval");
+  assert.equal(small.allow("c", AT + 60_000), true, "expired keys are pruned, then new keys are admitted");
 });
 
 test("hosted seat refusal emits only for a retired provider family", async () => {

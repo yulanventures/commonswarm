@@ -62,7 +62,8 @@ export function accessLostLimiter(intervalMs = ACCESS_LOST_INTERVAL_MS, maxKeys 
     next.delete(key);
     if (next.size >= maxKeys) {
       for (const [k, at] of next) if (at <= now) next.delete(k);
-      if (next.size >= maxKeys) next.delete(next.keys().next().value);
+      // Full of live keys: refuse the new key rather than evict a live one (hard ceiling).
+      if (next.size >= maxKeys) return false;
     }
     next.set(key, now + intervalMs);
     return true;
