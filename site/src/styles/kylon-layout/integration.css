@@ -372,3 +372,19 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
 @media (width > 52rem) and (width <= 64rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: 44px; min-block-size: 44px; }
 }
+
+/* On short landscape screens, reserve bounded tracks for both the Wiki index and product rail. */
+@media (width > 52rem) and (height <= 40rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout][data-wiki-composition] {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 40%) 56px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout][data-wiki-composition] > .cs-org-context-parking {
+    min-block-size: 0; block-size: 100%;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout][data-wiki-composition] .cs-org-context {
+    box-sizing: border-box; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout][data-wiki-composition] .cs-org-context-body {
+    flex: 1 1 auto; min-block-size: 0; max-block-size: none; overflow-y: auto;
+  }
+}
