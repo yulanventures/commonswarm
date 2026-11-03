@@ -8,6 +8,7 @@ import { HOUSEHOLD_TOOLS, HouseholdToolInputError, validateHouseholdToolArgument
 import { HouseholdObjectClient, type HouseholdClientResult, type HouseholdPreparedRequest } from '../cloud/household-objects.js';
 import { MCP_RESULT_MAX_BYTES } from './tools.js';
 import { householdRefusalNextStep } from '../protocol/household-next-steps.js';
+import { householdReadProvenance, withReadProvenance } from '../protocol/read-provenance.js';
 
 export const HOUSEHOLD_MCP_TOOLS: typeof HOUSEHOLD_TOOLS = HOUSEHOLD_TOOLS;
 export interface HouseholdMcpResult {
@@ -22,7 +23,7 @@ export interface HouseholdMcpTools {
 }
 
 /** The client supplies a closed projection with no transfer credentials. */
-function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
+function householdMcpResult(result: HouseholdClientResult, read?: { tool: string; input: unknown }): HouseholdMcpResult {
   const next_action = result.status === 'error' ? 'Retry the read.' : result.status === 'unknown'
     ? result.request_id ? 'Retry identical input with the same request_id to recover the recorded outcome.' : 'Retry the read.'
     : result.status === 'pending' ? 'The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id.'
@@ -32,10 +33,13 @@ function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
     : result.status === 'refused' ? householdRefusalNextStep(result.reason) ?? 'Resolve the refusal before submitting another request.'
     : result.status === 'ok' && result.kind === 'object_read' && result.revision.kind === 'file'
       ? 'File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked.' : null;
-  const output = { ...result, next_action };
-  const raw = JSON.stringify(output);
-  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict' || result.status === 'error',
-    content: [{ type: 'text' as const, text: raw }] };
+  const isError = result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict' || result.status === 'error';
+  const envelope = (value: object) => ({ isError, content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
+  const fits = (value: object) => Buffer.byteLength(JSON.stringify(envelope(value))) <= MCP_RESULT_MAX_BYTES;
+  const provenance = read && read.input && typeof read.input === 'object'
+    ? householdReadProvenance(read.tool, read.input as Record<string, unknown>, result as unknown as Record<string, unknown>) : null;
+  const output = withReadProvenance({ ...result, next_action }, provenance, fits);
+  const response = envelope(output);
   // AM13 budgets the escaped text inside the transport envelope. The server's
   // 28 KiB pages fit this local 32 KiB cap, including cursors and next_action.
   if (Buffer.byteLength(JSON.stringify(response)) <= MCP_RESULT_MAX_BYTES) return response;
@@ -58,7 +62,7 @@ export function createHouseholdMcpTools(client: HouseholdObjectClient): Househol
     async call(name: string, input: unknown, host: Pick<HouseholdToolHostContext, 'upload'> = {}, options: { signal?: AbortSignal } = {}): Promise<HouseholdMcpResult> {
       try {
         validateHouseholdToolArguments(name, input);
-        return householdMcpResult(await client.prepare(name, input, host).send(options));
+        return householdMcpResult(await client.prepare(name, input, host).send(options), { tool: name, input });
       } catch (error) {
         if (!(error instanceof HouseholdToolInputError)) throw error;
         return householdMcpResult({ status: 'refused', reason: error.code });

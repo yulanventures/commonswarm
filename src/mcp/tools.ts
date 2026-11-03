@@ -10,6 +10,7 @@ import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
 import type { SignalDirectory } from "../cloud/signals.js";
 import type { PostSignalResult } from "../cloud/command-client.js";
+import { messageReadProvenance, provenanceForms, withReadProvenance, type ReadProvenance } from "../protocol/read-provenance.js";
 
 /** An unknown argument name is echoed to the caller only up to this length. */
 export const MCP_ARGUMENT_NAME_ECHO_MAX = 64;
@@ -70,7 +71,14 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   return args as Record<string, string>;
 }
 
-export function mapCheck(result: AgentCheckResult): object {
+const CHECK_SCOPE = "new messages addressed to this agent";
+export function checkProvenance(result: AgentCheckResult): ReadProvenance {
+  return messageReadProvenance(result.messages, { tool: "check", scope: CHECK_SCOPE },
+    result.has_more || result.messages.some(row => row.truncated));
+}
+
+/** `provenance` null omits the block; capFreshCheck passes smaller forms near the cap. */
+export function mapCheck(result: AgentCheckResult, provenance: ReadProvenance | null = checkProvenance(result)): object {
   return { checked: true, cached: false, workspace_id: result.workspace_id, workspace_name: result.workspace_name,
     messages: result.messages.map(row => ({ id: row.id, from: row.from, from_kind: row.from_kind,
       sender_owner_relation: row.sender_owner_relation, kind: row.kind, body: row.body,
@@ -78,13 +86,17 @@ export function mapCheck(result: AgentCheckResult): object {
       ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}),
       ...(row.truncated ? { full_text_tool: { name: "check", arguments: { message_id: row.id } } } : {}),
     })), has_more: result.has_more,
-    next_action: result.has_more ? "Call check again for more messages." : null };
+    next_action: result.has_more ? "Call check again for more messages." : null,
+    ...(provenance ? { provenance } : {}) };
 }
 
 export function mapCachedCheck(row: SignalRecord): object {
-  return { checked: true, cached: true, messages: [{ id: row.id, from: row.from, from_kind: row.from_kind,
+  const output = { checked: true, cached: true, messages: [{ id: row.id, from: row.from, from_kind: row.from_kind,
     sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind, body: row.body, created_at: row.created_at,
     ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}) }] };
+  // A cached read returns full text, so provenance must not push it past capMcpResult.
+  return withReadProvenance(output, messageReadProvenance([row], { tool: "check", message_id: row.id }, false),
+    value => Buffer.byteLength(JSON.stringify(value)) <= MCP_RESULT_MAX_BYTES);
 }
 
 export function mapWhoami(directory: SignalDirectory, principalId: string, workspaceId: string): object {
@@ -125,8 +137,12 @@ export function mapSignal(result: PostSignalResult): object {
 export function capFreshCheck(result: AgentCheckResult): { output: object; lastVisibleId: string | null } {
   let visible = result.messages.length;
   while (visible >= 0) {
-    const output = mapCheck({ ...result, messages: result.messages.slice(0, visible), has_more: visible < result.messages.length || result.has_more });
-    if (Buffer.byteLength(JSON.stringify(output)) <= MCP_RESULT_MAX_BYTES) return { output, lastVisibleId: visible ? result.messages[visible - 1]!.id : null };
+    const page = { ...result, messages: result.messages.slice(0, visible), has_more: visible < result.messages.length || result.has_more };
+    // Provenance shrinks, then drops, before any message is withheld for it.
+    for (const provenance of [...provenanceForms(checkProvenance(page)), null]) {
+      const output = mapCheck(page, provenance);
+      if (Buffer.byteLength(JSON.stringify(output)) <= MCP_RESULT_MAX_BYTES) return { output, lastVisibleId: visible ? result.messages[visible - 1]!.id : null };
+    }
     visible--;
   }
   return { output: capMcpResult(mapCheck(result)), lastVisibleId: null };
