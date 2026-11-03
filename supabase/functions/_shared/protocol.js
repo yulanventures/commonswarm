@@ -4676,6 +4676,8 @@ var HOUSEHOLD_DEFINITION_TOOL_REGISTRY = [
     operation: () => "read",
     properties: { query: text2(0, HOUSEHOLD_DEFINITION_TERM_MAX), offset: integer(), limit: { ...integer(1), maximum: 100 } },
     optional: ["query", "offset", "limit"],
+    // The server answers this tool in readDefinitions (sorted, filtered pages); this
+    // whole-set query is not a page and would be refused by the generic page cap.
     toCore: () => ({ query: { kind: "object_list", offset: 0, limit: Number.MAX_SAFE_INTEGER, kind_filter: "definition" } })
   }),
   define({
