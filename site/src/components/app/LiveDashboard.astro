@@ -1131,6 +1131,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { todoView, type TodoStartInput } from "../../lib/home-todo";
   import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
   import { tagOptionRow, tagOptions, personNames } from "../../lib/home-pickers";
+  import { buildOfferCard, pendingOfferCards, type OfferAnswer, type OfferCardVM } from "../../lib/home-stream-approvals";
   import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
@@ -3092,6 +3093,30 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         appendEntityField(runtimeList, "Revoked", details.revokedAt);
         runtime.append(runtimeTitle, runtimeList);
         body.append(live, info, runtime);
+        /* Your own agent without Lists & docs access: allow it here, with the same defaults as the Lists card. */
+        if (!sampleMode && agent.ownerUserId === homeViewerId() && householdConnectionsReadState === "succeeded") {
+          const connection = householdConnections.find(row => row.principal_id === agent.principalId);
+          if (connection && !connectionApproval(connection)) {
+            const access = document.createElement("section");
+            access.className = "dashboard__entity-section dashboard__entity-access";
+            const accessTitle = document.createElement("h3");
+            accessTitle.textContent = "Lists & docs";
+            const allow = document.createElement("button");
+            allow.type = "button";
+            allow.className = "hm-approval-card__button hm-approval-card__button--accept";
+            allow.dataset.entityAllow = "";
+            allow.textContent = "Allow";
+            const allowStatus = document.createElement("p");
+            allowStatus.className = "hm-approval-card__status";
+            allowStatus.setAttribute("role", "status");
+            allow.addEventListener("click", () => {
+              const operations = householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"];
+              void approveAgent(connection, operations, allow, allowStatus).then(() => renderEntityPanel());
+            });
+            access.append(accessTitle, allow, allowStatus);
+            body.append(access);
+          }
+        }
       } else {
         const member = members.find((candidate) => candidate.userId === selectedEntity?.id);
         if (!member) {
@@ -4798,6 +4823,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
       homeRailKey = key;
     };
+    const answerOffer = (card: OfferCardVM, answer: OfferAnswer, controls: { buttons: HTMLButtonElement[]; status: HTMLElement }): void => {
+      const server = homeServer();
+      const workspaceId = activeWorkspaceId;
+      if (!server || !workspaceId) return;
+      const settle = (message: string, retry: boolean): void => {
+        controls.status.textContent = message;
+        for (const button of controls.buttons) button.disabled = !retry;
+      };
+      settle("Saving…", false);
+      void server.answerRequest(workspaceId, { todo_id: card.todoId, offer_id: card.offerId, answer }, uuid()).then(result => {
+        if (workspaceId !== activeWorkspaceId) return;
+        if (result.status === "committed") { settle(answer === "accept" ? "Accepted." : "Declined.", false); void loadHomeWorkspace(); }
+        else settle(result.status === "conflict" ? "This to-do changed. Reload to check." : homeRefusalCopy(result.reason), true);
+      }).catch(() => { if (workspaceId === activeWorkspaceId) settle("The answer may not have been saved. Reload to check.", true); });
+    };
     /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
      *  addressed to them, and their profile in the Details column. */
     const openDirectMessage = async (entity: EntityRef): Promise<void> => {
@@ -6464,6 +6504,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const card = { ...fix, sample: sampleMode };
         row.append(needsYouCard(document, card, () => {})); list.append(row);
       }
+      /* Offers waiting on you, answered in place (Accept / Decline) without leaving Chat. */
+      const offerViewer = typeof homeViewerId === "function" ? homeViewerId() ?? "" : "";
+      const offers = typeof answerOffer === "function" && homeTodosState === "ready"
+        ? pendingOfferCards(homeTodoRows, offerViewer, party => entityName(party.kind === "agent" ? { kind: "agent", id: party.id } : { kind: "person", id: party.id }))
+        : [];
+      for (const offer of offers) {
+        const row = document.createElement("li");
+        row.className = "dashboard__feed-fix dashboard__feed-approval";
+        row.append(buildOfferCard(document, offer, { answer: answerOffer }));
+        list.append(row);
+      }
       if (signals.length === 0) {
         humanSeenReporter.resetVisible();
         humanSeenObserver?.disconnect();
@@ -6536,6 +6587,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
         row.dataset.signalId = signal.id;
+        /* Working-on posts are status, not conversation: a compact activity line. */
+        if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
         markThreadReplyRoot(row);
         if (
           !sampleMode && session && activeWorkspaceId &&
