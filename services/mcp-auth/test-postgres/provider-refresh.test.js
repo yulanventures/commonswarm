@@ -34,7 +34,7 @@ function metadata(clientId) {
   };
 }
 
-async function startProvider(clientId, beforeConsume, database = pool, { permanent = false, refreshTokenTtlSeconds } = {}) {
+async function startProvider(clientId, beforeConsume, database = pool, { permanent = false, refreshTokenTtlSeconds, replayGraceSeconds, hostedStaleReplay } = {}) {
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), stream = randomUUID();
   await database.query("INSERT INTO auth.users(id,aud,role,email) VALUES($1,'authenticated','authenticated',$2)",
     [owner, `${owner}@example.test`]);
@@ -45,7 +45,8 @@ async function startProvider(clientId, beforeConsume, database = pool, { permane
     [workspace, owner]);
   await database.query("INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES($1,$2,'workspace')",
     [stream, workspace]);
-  const adapter = createPostgresAdapter(database, { beforeConsume });
+  const adapter = createPostgresAdapter(database, { beforeConsume, ...(replayGraceSeconds === undefined ? {} : { replayGraceSeconds }),
+    ...(hostedStaleReplay === undefined ? {} : { hostedStaleReplay }) });
   const provider = await createMcpProvider({
     adapter,
     ...(refreshTokenTtlSeconds ? { refreshTokenTtlSeconds } : {}),
@@ -181,7 +182,7 @@ async function authorizeCode(server, clientId) {
   return callbackUrl.searchParams.get("code");
 }
 
-test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and replay tombstones family", async () => {
+test("HTTP refresh race uses two PostgreSQL connections, serves both through the one replay grace, and a later replay is refused without retiring the family", async () => {
   const clientId = `https://postgres-${Date.now()}.example/oauth-client.json`;
   const waiting = [];
   let release;
@@ -227,9 +228,10 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
       tokenRequest(server, refreshParameters),
     ]);
     assert.equal(new Set(waiting).size, 2, "the race must reach two PostgreSQL backend connections");
-    assert.deepEqual(raced.map(({ status }) => status).sort(), [200, 400]);
-    assert.equal(raced.find(({ status }) => status === 400).body.error, "invalid_grant");
-    const winner = raced.find(({ status }) => status === 200).body;
+    // The CAS loser finds the token consumed moments ago: it spends the family's one replay grace and
+    // gets a sibling pair instead of an error, so a client racing itself does not lose its family.
+    assert.deepEqual(raced.map(({ status }) => status), [200, 200]);
+    const winner = raced[0].body;
 
     const rotated = await tokenRequest(server, {
       ...refreshParameters,
@@ -237,6 +239,7 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
     });
     assert.equal(rotated.status, 200, JSON.stringify(rotated.body));
 
+    // The grace is spent and the token is stale: refused, but an active hosted family survives it.
     const replay = await tokenRequest(server, refreshParameters);
     assert.equal(replay.status, 400);
     assert.equal(replay.body.error, "invalid_grant");
@@ -244,8 +247,9 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
       ...refreshParameters,
       refresh_token: rotated.body.refresh_token,
     });
-    assert.equal(afterReplay.status, 400);
-    assert.equal(afterReplay.body.error, "invalid_grant");
+    assert.equal(afterReplay.status, 200, "a stale replay never retires the family its siblings use");
+    const tombstones = await pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1", [grantId]);
+    assert.equal(tombstones.rows[0].n, 0);
   } finally {
     await server.close();
     if (grantId) {
@@ -254,6 +258,80 @@ test("HTTP refresh race uses two PostgreSQL connections, preserves winner, and r
     }
     await pool.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE payload->>'clientId' = $1", [clientId]);
     await server.cleanup();
+  }
+});
+
+test("hosted replay grace: the immediately previous refresh token is served once; a second replay is refused and the family survives", async () => {
+  const clientId = `https://postgres-grace-${Date.now()}.example/oauth-client.json`;
+  const server = await startProvider(clientId, undefined, pool, { permanent: true });
+  let grantId;
+  const tombstoned = async () => (await pool.query(
+    "SELECT count(*)::int AS n FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1", [grantId])).rows[0].n;
+  try {
+    const code = await authorizeCode(server, clientId);
+    const initial = await tokenRequest(server, { client_id: clientId, code, code_verifier: verifier,
+      grant_type: "authorization_code", redirect_uri: redirectUri, resource: RESOURCE });
+    assert.equal(initial.status, 200);
+    grantId = decodeJwt(initial.body.access_token).grant_id;
+    const refresh = (token) => tokenRequest(server, { client_id: clientId, grant_type: "refresh_token", refresh_token: token, resource: RESOURCE });
+
+    const first = await refresh(initial.body.refresh_token);
+    assert.equal(first.status, 200, "ordinary rotation");
+    // GameMaster's case: the client repeats the previous token after a successful rotation.
+    const repeat = await refresh(initial.body.refresh_token);
+    assert.equal(repeat.status, 200, `the immediate repeat is served: ${JSON.stringify(repeat.body)}`);
+    assert.equal(await tombstoned(), 0, "the family survives the repeat");
+    assert.equal(decodeJwt(repeat.body.access_token).grant_id, grantId, "the repeat stays in the same family");
+    assert.equal((await refresh(repeat.body.refresh_token)).status, 200, "the repeat's sibling pair keeps rotating");
+
+    // A second replay of the same token is refused, but never retires an active hosted family.
+    const again = await refresh(initial.body.refresh_token);
+    assert.equal(again.status, 400);
+    assert.equal(again.body.error, "invalid_grant");
+    assert.equal(await tombstoned(), 0, "a stale replay does not retire the family");
+    assert.equal((await refresh(first.body.refresh_token)).status, 200, "the first rotation's token still works");
+  } finally {
+    await server.close();
+    await pool.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE payload->>'clientId' = $1", [clientId]);
+    await server.cleanup();
+  }
+});
+
+test("hosted stale replay: an older token or a zero window is refused without retiring; strict mode still retires", async () => {
+  for (const [label, options, expectTombstone] of [
+    ["older token", {}, 0],
+    ["zero window", { replayGraceSeconds: 0 }, 0],
+    ["strict retire", { replayGraceSeconds: 0, hostedStaleReplay: "retire" }, 1],
+  ]) {
+    const clientId = `https://postgres-grace-${label.replace(" ", "-")}-${Date.now()}.example/oauth-client.json`;
+    const server = await startProvider(clientId, undefined, pool, { permanent: true, ...options });
+    let grantId;
+    try {
+      const code = await authorizeCode(server, clientId);
+      const initial = await tokenRequest(server, { client_id: clientId, code, code_verifier: verifier,
+        grant_type: "authorization_code", redirect_uri: redirectUri, resource: RESOURCE });
+      grantId = decodeJwt(initial.body.access_token).grant_id;
+      const refresh = (token) => tokenRequest(server, { client_id: clientId, grant_type: "refresh_token", refresh_token: token, resource: RESOURCE });
+      const first = await refresh(initial.body.refresh_token);
+      assert.equal(first.status, 200);
+      let latest = first.body.refresh_token;
+      if (label === "older token") {
+        // Rotate once more: the initial token is now two rotations old, outside the one-predecessor grace.
+        const second = await refresh(first.body.refresh_token);
+        assert.equal(second.status, 200);
+        latest = second.body.refresh_token;
+      }
+      const replay = await refresh(initial.body.refresh_token);
+      assert.equal(replay.status, 400, label);
+      assert.equal(replay.body.error, "invalid_grant", label);
+      const n = (await pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1", [grantId])).rows[0].n;
+      assert.equal(n, expectTombstone, `${label}: tombstones`);
+      assert.equal((await refresh(latest)).status, expectTombstone ? 400 : 200, `${label}: the current token after the replay`);
+    } finally {
+      await server.close();
+      await pool.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE payload->>'clientId' = $1", [clientId]);
+      await server.cleanup();
+    }
   }
 });
 

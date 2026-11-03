@@ -24,10 +24,18 @@ function assertIdentifier(value) {
   return value;
 }
 
-function storedPayload(row, recoveredJti) {
+/** Marker stored in a consumed hosted RefreshToken payload once its one replay grace is spent. */
+export const REPLAY_GRACE_MARKER = "cs_replay_grace_at";
+/** Seconds after rotation in which the family's immediately previous refresh token may be presented
+ *  once more without retiring the family. GameMaster (2026-11-03) lost its family to a repeat 43s
+ *  after a successful rotation; clients that miss or fail to persist a rotated pair retry like that. */
+export const HOSTED_REFRESH_REPLAY_GRACE_SECONDS = 300;
+
+function storedPayload(row, recoveredJti, { hideConsumed = false } = {}) {
   const payload = structuredClone(row.payload);
+  delete payload[REPLAY_GRACE_MARKER];
   if (recoveredJti !== undefined && payload.jti === undefined) payload.jti = recoveredJti;
-  if (row.consumed_at !== null) {
+  if (row.consumed_at !== null && !hideConsumed) {
     payload.consumed = Math.floor(new Date(row.consumed_at).getTime() / 1000);
   }
   return payload;
@@ -57,13 +65,31 @@ async function transaction(pool, callback, connection) {
  * the same transaction advisory lock, and a durable tombstone wins before an
  * artifact can be (re)inserted.
  */
-export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", beforeConsume } = {}) {
+export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", beforeConsume,
+  replayGraceSeconds = HOSTED_REFRESH_REPLAY_GRACE_SECONDS, hostedStaleReplay = "refuse" } = {}) {
+  if (!["refuse", "retire"].includes(hostedStaleReplay)) throw new TypeError('hostedStaleReplay must be "refuse" or "retire"');
+  if (!Number.isSafeInteger(replayGraceSeconds) || replayGraceSeconds < 0 || replayGraceSeconds > 3600) {
+    throw new TypeError("replayGraceSeconds must be an integer from 0 to 3600");
+  }
   if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
     throw new TypeError("a pg-compatible pool is required");
   }
   const qualifiedSchema = assertIdentifier(schema);
   const artifacts = `${qualifiedSchema}.provider_artifacts`;
   const tombstones = `${qualifiedSchema}.refresh_family_tombstones`;
+  /* One replay grace for a hosted family's IMMEDIATELY previous RefreshToken: consumed within the
+   * window, its grace not yet spent, and no later RefreshToken consumption in the same family. Callers
+   * already hold the family lock and have checked the policy is active. An older or repeated replay
+   * still reaches oidc-provider's reuse path and retires the family. */
+  async function replayGraceOpen(client, row) {
+    if (replayGraceSeconds === 0 || row.consumed_at === null || row.grant_id === null) return false;
+    return (await client.query(`SELECT ($1::timestamptz > clock_timestamp() - make_interval(secs => $2))
+        AND NOT ($3::jsonb ? '${REPLAY_GRACE_MARKER}')
+        AND NOT EXISTS (SELECT 1 FROM ${artifacts} later WHERE later.model='RefreshToken' AND later.grant_id=$4
+          AND later.consumed_at > $1::timestamptz)
+        AND NOT EXISTS (SELECT 1 FROM ${tombstones} t WHERE t.grant_id=$4) AS open`,
+      [row.consumed_at, replayGraceSeconds, JSON.stringify(row.payload), row.grant_id])).rows[0]?.open === true;
+  }
   const database = pool;
   pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : database.query(...args),
     connect: () => adminTransactionContext(false)
@@ -258,6 +284,18 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         row.payload = normalized.payload;
         return storedPayload(row,recoveredJti);
       }
+      // A hosted client that repeats its immediately previous refresh token soon after rotation
+      // (a lost or unpersisted response, or a sibling worker) is served once instead of losing its
+      // family. consume() spends the grace atomically; this only hides `consumed` for that request.
+      if (model === "RefreshToken" && envelope.binding && policy?.active && row.consumed_at !== null) {
+        if (await replayGraceOpen(client, row)) return storedPayload(row, recoveredJti, { hideConsumed: true });
+        // Any other replay into an ACTIVE hosted family (a stale or idle sibling worker, a second
+        // repeat) is refused as "not found" (invalid_grant) without reaching oidc-provider's reuse
+        // path, so one stale process can never retire the family its siblings are using. The owner's
+        // revoke and every canonical policy check above still end the family. "retire" restores the
+        // strict reuse fence.
+        if (hostedStaleReplay === "refuse") return undefined;
+      }
       const live = (await client.query("SELECT ($1::timestamptz IS NULL OR $1::timestamptz>clock_timestamp()) AS live", [row.expires_at])).rows[0].live;
       return live ? storedPayload(row,recoveredJti) : undefined;
     });
@@ -276,7 +314,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         if (!envelope.binding) return undefined;
         const row = (await client.query(`SELECT * FROM ${artifacts}
           WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`, [model,lookupHash(id)])).rows[0];
-        if (!row || row.consumed_at !== null) return undefined;
+        if (!row || (row.consumed_at !== null && !(await replayGraceOpen(client, row)))) return undefined;
         assertHostedPayload(model,id,row.payload,envelope.binding);
         assertHostedPayload(model,id,predecessor,envelope.binding);
         const target = value => Array.isArray(value) && value.length === 1 ? value[0] : value;
@@ -331,6 +369,18 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
               await client.query(`UPDATE ${artifacts} SET payload=$3::jsonb,expires_at=$4 WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NULL`,
                 [model,lookupHash(id),JSON.stringify(normalized.payload),normalized.expiresAt]);
             }
+          }
+          // The one replay grace (see replayGraceOpen): spend it atomically under the family lock.
+          // The successor saved next is a sibling of the first rotation's, in the same family.
+          if (model === "RefreshToken" && envelope.binding && row.consumed_at !== null && await replayGraceOpen(client, row)) {
+            const spent = await client.query(`UPDATE ${artifacts}
+              SET payload=payload || jsonb_build_object('${REPLAY_GRACE_MARKER}', extract(epoch FROM clock_timestamp())),
+                  updated_at=clock_timestamp()
+              WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NOT NULL
+                AND NOT (payload ? '${REPLAY_GRACE_MARKER}')
+              RETURNING grant_id`, [model,lookupHash(id)]);
+            if (spent.rowCount !== 1) throw new errors.InvalidGrant(`${model} is unavailable or already used`);
+            return;
           }
           const result = await client.query(`UPDATE ${artifacts} AS artifact
             SET consumed_at=clock_timestamp(),updated_at=clock_timestamp()
