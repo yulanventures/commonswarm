@@ -5561,6 +5561,50 @@ async function changeAgentWorkspace(tx:Sql,body:RequestBody,auth:AuthContext,det
   return {status:200,body:{status:'accepted',...response}};
 }
 
+/**
+ * Workspace Lead: owners and admins name the live local agent that an untagged top-level person
+ * post wakes, or clear it with null. Eligibility lives in swarm.set_workspace_lead; triggers clear
+ * the lead when it leaves. No event: the lead is a setting, recorded in the audit log.
+ */
+async function setWorkspaceLead(tx:Sql,body:RequestBody,auth:AuthContext,detail:string|null):Promise<HttpResult> {
+  const kind='set_workspace_lead', command=record(body.command);
+  const refuse=async(status:number,error:string):Promise<HttpResult>=>{
+    await insertAudit(tx,{auth,commandKind:kind,outcome:status===400?'validation':'authz',reason:error,detail});
+    return {status,body:{error}};
+  };
+  if(auth.credentialKind!=='user' || auth.actor.user===null) return await refuse(403,'forbidden');
+  if(!command || !exactKeys(command,['kind','principal_id'])
+    || (command.principal_id!==null && (typeof command.principal_id!=='string' || !UUID_RE.test(command.principal_id)))
+    || typeof body.workspace_id!=='string' || !UUID_RE.test(body.workspace_id)
+    || record(body.stream)?.kind!=='workspace' || !exactKeys(record(body.stream)!,['kind'])
+    || typeof body.client_version!=='string') return await refuse(400,'invalid_request');
+  const [configuration]=await tx<{value:unknown}[]>`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const minimum=configuration?.value;
+  const version=typeof minimum==='string'?compareSemver(body.client_version,minimum):null;
+  if(version===null) return await refuse(400,'invalid_request');
+  if(version<0) return {status:426,body:{error:'upgrade_required',min_client_version:minimum}};
+  const workspace=body.workspace_id, principal=command.principal_id as string|null;
+  const [stream]=await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams
+    WHERE workspace_id=${workspace}::uuid AND kind='workspace' FOR UPDATE`;
+  if(!stream) return await refuse(403,'forbidden');
+  // The pure-core hash over the command, as every ledgered workspace command uses.
+  const hash=requestHash(auth.actor,command as never);
+  const [prior]=await tx<{request_hash:string;workspace_id:string;stream_id:string;response:unknown}[]>`SELECT request_hash,workspace_id,stream_id,response
+    FROM swarm.idempotency_keys WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
+  if(prior) {
+    if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==stream.stream_id) return {status:409,body:{error:'command_id_conflict'}};
+    await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'replayed',hash,detail});
+    return replayResult(storedResponse(prior.response),kind);
+  }
+  const [changed]=await tx<{ok:boolean}[]>`SELECT swarm.set_workspace_lead(${workspace}::uuid,${principal}::uuid,${auth.actor.user}::uuid) AS ok`;
+  if(!changed?.ok) return await refuse(403,'forbidden');
+  const response={ok:true,workspace_id:workspace,lead_agent_principal_id:principal};
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES('user',${auth.actor.user},${body.command_id},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response)})`;
+  await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,detail});
+  return {status:200,body:{status:'accepted',...response}};
+}
+
 async function moveWorkspaceToOrg(
   tx: Sql,
   body: RequestBody,
@@ -11997,6 +12041,7 @@ async function handleTransaction(
 
     if (kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace")
       return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
+    if (kind === "set_workspace_lead") return await setWorkspaceLead(tx,body,auth,ignoredIdentity);
     // Legacy local workspace removal now withdraws membership, preserving the connection.
     if (kind === "revoke_agent_principal" && auth.credentialKind === "user" && typeof rawLocal?.principal_id === "string") {
       const [principal]=await tx<{transport:string;workspace_id:string;member:boolean}[]>`SELECT transport,workspace_id,EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${body.workspace_id}::uuid AND am.revoked_at IS NULL) AS member FROM swarm.agent_principals WHERE principal_id=${rawLocal.principal_id}::uuid`;
@@ -12870,12 +12915,30 @@ async function handleTransaction(
     }
 
     if (command.kind === "post_signal") {
-      const signalTarget = await resolveSignalWriteTarget(
+      const namedTarget = await resolveSignalWriteTarget(
         tx,
         route,
         auth,
         command,
       );
+      /* Workspace Lead: an untagged top-level note or ask from a person wakes the workspace's
+       * lead agent, exactly as if the person had named it. Tags, replies, threads, agent posts
+       * and status kinds are untouched, so agents never route to each other this way. A lead
+       * that is no longer live leaves the post an ordinary broadcast instead of refusing it. */
+      let signalTarget = namedTarget;
+      if (
+        namedTarget !== null && auth.credentialKind === "user" &&
+        (command.signal_kind === "note" || command.signal_kind === "ask") &&
+        command.to === undefined && command.thread_root_id == null &&
+        namedTarget.toUserId === null && namedTarget.toAgentPrincipalId === null &&
+        namedTarget.inReplyTo === null
+      ) {
+        const [lead] = await tx<{ principal_id: string | null }[]>`
+          SELECT swarm.workspace_live_lead(${route.workspaceId}::uuid) AS principal_id`;
+        if (lead?.principal_id && await signalAgentTargetIsLive(tx, route, lead.principal_id)) {
+          signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
+        }
+      }
       if (signalTarget === null) {
         await insertAudit(tx, {
           auth,

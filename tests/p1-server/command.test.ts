@@ -70,6 +70,7 @@ type ConnectCommand =
   | { kind: "remove_member"; user_id: string }
   | { kind: "archive_workspace" }
   | { kind: "move_workspace_to_org"; org_id: string }
+  | { kind: "set_workspace_lead"; principal_id: string | null }
   | { kind: "create_agent_principal"; name: string; model?: string }
   | { kind: "revoke_agent_principal"; principal_id: string }
   | {
@@ -12290,3 +12291,78 @@ test("idle-cost purge honours 2-day claim-class keys and does not delete audit r
     "3-day claim keys go; 3-day non-claim keys go under the 2-day floor; 40-day other keys go",
   );
 });
+
+test("workspace lead: owners and admins set it; an untagged person post wakes it; tags, agents and leads that leave do not", async () => {
+  await scenario(async (f) => {
+    const lead = await createFixtureAgent(f, f.ua, "lead-agent");
+    const other = await createFixtureAgent(f, f.ua, "lead-other");
+    const foreign = await createFixtureAgent(f, f.ub, "lead-foreign", f.workspaceB);
+    const hosted = randomUUID();
+    await sql`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
+      VALUES (${hosted}::uuid, ${f.workspaceA}::uuid, ${f.ua}::uuid, 'lead-hosted', 'hosted_mcp', true)`;
+    const setLead = (jwt: string, principal_id: string | null) =>
+      issueConnect(f, jwt, { kind: "set_workspace_lead", principal_id }, commandId("set_workspace_lead"));
+    const stored = async () => (await sql<{ lead: string | null }[]>`
+      SELECT lead_agent_principal_id AS lead FROM swarm.workspaces WHERE workspace_id = ${f.workspaceA}::uuid`)[0]?.lead ?? null;
+    const post = async (extra: Record<string, unknown> = {}, token = f.uaJwt) => {
+      const posted = await issueSignal(f, token, { kind: "post_signal", signal_kind: "note", body: `lead-${randomUUID()}`, to_user_id: null, about: "workspace-lead", ...extra });
+      assert.equal(posted.status, 200, posted.text);
+      const signal = posted.body.signal as Record<string, unknown>;
+      const woken = await sql<{ recipient: string }[]>`SELECT recipient_agent_principal_id AS recipient
+        FROM swarm.signal_deliveries WHERE signal_id = ${String(signal.id)}::uuid ORDER BY recipient_agent_principal_id`;
+      return { signal, woken: woken.map((row) => row.recipient) };
+    };
+
+    // No lead: today's broadcast.
+    assert.deepEqual((await post()).woken, []);
+
+    // Members, agents, and principals that cannot be woken here are refused; nothing changes.
+    assert.deepEqual((await setLead(f.ua2Jwt, lead.principalId)).body, { error: "forbidden" });
+    const agentAttempt = await issueConnect(f, f.agentToken, { kind: "set_workspace_lead", principal_id: lead.principalId }, commandId("set_workspace_lead"));
+    assert.equal(agentAttempt.status, 403, agentAttempt.text);
+    for (const ineligible of [hosted, foreign.principalId, randomUUID()]) {
+      assert.deepEqual((await setLead(f.uaJwt, ineligible)).body, { error: "forbidden" });
+    }
+    assert.equal(await stored(), null);
+
+    // The owner sets it; an untagged person note or ask then wakes exactly the lead.
+    const set = await setLead(f.uaJwt, lead.principalId);
+    assert.equal(set.status, 200, set.text);
+    assert.equal(set.body.lead_agent_principal_id, lead.principalId);
+    assert.equal(await stored(), lead.principalId);
+    const routed = await post();
+    assert.deepEqual(routed.woken, [lead.principalId]);
+    assert.equal(routed.signal.to_agent, lead.principalId);
+    assert.deepEqual((await post({ signal_kind: "ask" })).woken, [lead.principalId]);
+
+    // A tag wins, a person addressee stays a person, status posts and agent posts never route.
+    assert.deepEqual((await post({ to_agent_principal_id: other.principalId, in_reply_to: null })).woken, [other.principalId]);
+    assert.deepEqual((await post({ to_user_id: f.ua2 })).woken, []);
+    assert.deepEqual((await post({ signal_kind: "working-on" })).woken, []);
+    assert.deepEqual((await post({}, other.token)).woken, [], "an agent's untagged post does not wake the lead");
+
+    // An admin may change it, and clear it with null.
+    await sql`UPDATE swarm.memberships SET role = 'admin' WHERE workspace_id = ${f.workspaceA}::uuid AND user_id = ${f.ua2}::uuid`;
+    assert.equal((await setLead(f.ua2Jwt, other.principalId)).status, 200);
+    assert.equal(await stored(), other.principalId);
+    assert.equal((await setLead(f.ua2Jwt, null)).status, 200);
+    assert.equal(await stored(), null);
+    assert.deepEqual((await post()).woken, []);
+
+    // A lead that leaves is cleared: removed from the workspace, or revoked.
+    assert.equal((await setLead(f.uaJwt, lead.principalId)).status, 200);
+    await sql`UPDATE swarm.agent_workspace_memberships SET revoked_at = statement_timestamp()
+      WHERE principal_id = ${lead.principalId}::uuid AND workspace_id = ${f.workspaceA}::uuid`;
+    assert.equal(await stored(), null, "removal from the workspace clears the lead");
+    assert.deepEqual((await post()).woken, [], "a cleared lead leaves the post a broadcast");
+    assert.equal((await setLead(f.uaJwt, other.principalId)).status, 200);
+    await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${other.principalId}::uuid`;
+    assert.equal(await stored(), null, "revocation clears the lead");
+    assert.deepEqual((await post()).woken, []);
+
+    const audits = await sql<{ outcome: string }[]>`SELECT outcome FROM swarm.audit_log
+      WHERE workspace_id = ${f.workspaceA}::uuid AND command_kind = 'set_workspace_lead' AND outcome = 'accepted'`;
+    assert.equal(audits.length, 5);
+  });
+});
+

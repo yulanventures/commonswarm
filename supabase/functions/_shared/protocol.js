@@ -406,6 +406,7 @@ var RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
 var RENEWAL_IDLE_PAUSE_DAYS = 14;
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
+  "set_workspace_lead",
   "remove_agent_from_workspace",
   "move_workspace_to_org",
   "create_workspace",
