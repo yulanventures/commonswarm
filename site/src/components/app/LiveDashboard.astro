@@ -1052,7 +1052,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { createListsChrome } from "../../lib/lists-chrome";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { buildAccountAgents, addableAccountAgents, buildWorkspaceAgentChoice } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -1322,7 +1322,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type ConnectedApp,
   } from "../../lib/connected-apps";
 
-  interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string }
+  interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string; leadAgentPrincipalId?: string | null }
 
   interface Agent {
     principalId: string;
@@ -2834,6 +2834,37 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       list.append(label, detail);
     };
 
+    const activeWorkspaceLeadAgent = (): Agent | null => {
+      const workspace = workspaces.find((candidate) => candidate.id === activeWorkspaceId);
+      const leadId = workspace?.leadAgentPrincipalId ?? null;
+      if (!leadId) return null;
+      const agent = agents.find((candidate) => candidate.principalId === leadId);
+      if (!agent || agent.transport === "hosted_mcp" || agent.turnOnly === true) return null;
+      return agent;
+    };
+
+    const activeWorkspaceLeadName = (): string | null => activeWorkspaceLeadAgent()?.name ?? null;
+
+    const viewerMaySetWorkspaceLead = (): boolean => {
+      if (sampleMode || !session) return false;
+      const me = members.find((member) => member.userId === session?.user.id);
+      return me?.role === "owner" || me?.role === "admin";
+    };
+
+    const updateWorkspaceLead = async (principalId: string | null): Promise<void> => {
+      if (!session || !activeWorkspaceId || sampleMode) return;
+      const targetWorkspaceId = activeWorkspaceId;
+      const targetUserId = session.user.id;
+      const savedLeadId = await setWorkspaceLead(session, uuid(), targetWorkspaceId, principalId);
+      if (activeWorkspaceId !== targetWorkspaceId || session?.user.id !== targetUserId) return;
+      const workspace = workspaces.find((candidate) => candidate.id === targetWorkspaceId);
+      if (workspace) workspace.leadAgentPrincipalId = savedLeadId;
+      renderEntityPanel();
+      renderHomeSide();
+      renderHomeObjectPane();
+      syncComposerPlacement();
+    };
+
     function renderEntityPanel(): void {
       const body = one<HTMLElement>("[data-entity-panel-body]");
       if (!body || !selectedEntity) return;
@@ -2863,11 +2894,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           people.get(agent.ownerUserId) ?? "Workspace member",
           entityDate,
         );
+        const isWorkspaceLead = activeWorkspaceLeadAgent()?.principalId === details.principalId;
         avatar.textContent = initials(details.name);
         markAgentAvatar(avatar, details.principalId);
         heading.textContent = details.name;
         identityBadge.textContent = "AGENT";
         headingWrap.append(heading, identityBadge);
+        if (isWorkspaceLead) {
+          const leadBadge = document.createElement("span");
+          leadBadge.className = "dashboard__entity-badge dashboard__entity-badge--lead";
+          leadBadge.dataset.workspaceLeadBadge = "";
+          leadBadge.textContent = "LEAD";
+          headingWrap.append(leadBadge);
+        }
         identity.append(avatar, headingWrap);
         body.append(identity);
 
@@ -2876,6 +2915,48 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           revoked.className = "dashboard__entity-revoked";
           revoked.textContent = `Access revoked · ${details.revokedAt}`;
           body.append(revoked);
+        } else if (
+          (isWorkspaceLead || viewerMaySetWorkspaceLead()) &&
+          agent.transport !== "hosted_mcp" &&
+          agent.turnOnly !== true
+        ) {
+          const leadSection = document.createElement("section");
+          leadSection.className = "dashboard__entity-section";
+          leadSection.dataset.workspaceLeadSection = "";
+          const leadTitle = document.createElement("h3");
+          leadTitle.textContent = "Workspace lead";
+          const leadCopy = document.createElement("p");
+          leadCopy.textContent = isWorkspaceLead
+            ? "Responds to untagged messages in channels."
+            : "Make this agent respond to untagged channel messages.";
+          leadSection.append(leadTitle, leadCopy);
+          if (viewerMaySetWorkspaceLead()) {
+            const leadBtn = document.createElement("button");
+            leadBtn.type = "button";
+            leadBtn.className = "dashboard__entity-lead-button";
+            leadBtn.dataset.workspaceLeadToggle = isWorkspaceLead ? "clear" : "set";
+            leadBtn.textContent = isWorkspaceLead ? "Remove as workspace lead" : "Set as workspace lead";
+            const leadError = document.createElement("p");
+            leadError.className = "dashboard__entity-revoked";
+            leadError.dataset.workspaceLeadError = "";
+            leadError.setAttribute("role", "alert");
+            leadError.hidden = true;
+            leadBtn.addEventListener("click", async () => {
+              if (leadBtn.disabled) return;
+              leadBtn.disabled = true;
+              leadError.hidden = true;
+              leadError.textContent = "";
+              try {
+                await updateWorkspaceLead(isWorkspaceLead ? null : details.principalId);
+              } catch (error) {
+                leadError.textContent = readableError(error);
+                leadError.hidden = false;
+                leadBtn.disabled = false;
+              }
+            });
+            leadSection.append(leadBtn, leadError);
+          }
+          body.append(leadSection);
         }
 
         const live = renderAgentActivitySection(details.principalId);
@@ -4272,7 +4353,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const workspace = workspaces.find(row => row.id === activeWorkspaceId);
       if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { layout.refreshTodoContext(() => slot?.replaceChildren()); return; }
       const ctx = homeTodoContext();
+      const leadAgentName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
       const vm = { sample: sampleMode, workspaceName: workspace.name,
+        ...(leadAgentName ? { leadAgentName } : {}),
         sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
           const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
           return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
@@ -4434,6 +4517,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (homePolicies.has(id)) vm.workPolicy = homePolicies.get(id);
         vm.receipt = homeTodoReceipt === "not-found" ? "" : homeTodoReceipt;
         vm.may.remove = detail?.mayManage === true;
+        vm.isWorkspaceLead = activeWorkspaceLeadAgent()?.principalId === id;
+        vm.may.setLead = viewerMaySetWorkspaceLead() && !agent.hosted && rosterAgent?.transport !== "hosted_mcp" && rosterAgent?.turnOnly !== true;
         /* The People & agents page opens on this agent's details; a fix then presses the page's own
            control, so every action keeps its one confirmation and its one server call. */
         const manage = () => openRosterDialog({ kind: "agent", id });
@@ -4442,6 +4527,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key)?.click();
         };
         replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: () => { void manage(); },
+          onToggleLead: nextIsLead => {
+            void updateWorkspaceLead(nextIsLead ? id : null).catch(error => {
+              homeTodoReceipt = readableError(error);
+              renderHomeObjectPane();
+            });
+          },
           onFix: action => {
             if (action === "new-key") void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
               openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id));
@@ -8846,12 +8937,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (broadcastRow) broadcastRow.hidden = true;
       const channel = activeChannel();
       if (!input) return;
+      const leadName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
       if (channel === null) {
-        input.placeholder = "Message…";
+        input.placeholder = leadName ? `Message… (${leadName} leads)` : "Message…";
         input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
-      input.placeholder = `Message ${channelLabel(channel.slug)}`;
+      input.placeholder = leadName ? `Message ${channelLabel(channel.slug)} — ${leadName} leads` : `Message ${channelLabel(channel.slug)}`;
       input.setAttribute("aria-label", `Message in ${channelLabel(channel.slug)}`);
     };
 

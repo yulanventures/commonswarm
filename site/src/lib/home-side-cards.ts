@@ -13,6 +13,13 @@ export interface SideCardsVM {
   workspaceName: string;
   /** The viewer's agents only: the access read is owner-scoped, so other people's agents never appear here. */
   sharedAgents: SideSharedAgentVM[];
+  /** When set, the live local agent that responds to untagged channel messages in this workspace. */
+  leadAgentName?: string | null;
+}
+
+export function workspaceLeadLine(leadAgentName: string | null | undefined): string | null {
+  const trimmed = leadAgentName?.trim() ?? "";
+  return trimmed.length > 0 ? `${trimmed} leads here and responds to untagged channel messages.` : null;
 }
 
 /** "Everyone in Home sees what is posted here, including what agents post." */
@@ -44,6 +51,12 @@ export function buildSharedCard(doc: Document, vm: SideCardsVM): HTMLElement {
   root.setAttribute("aria-labelledby", heading.id);
   const body = node(doc, "div", "hm-side-card__body");
   body.append(node(doc, "p", "hm-side-card__line", sharedEveryoneLine(vm.workspaceName)));
+  const leadLine = workspaceLeadLine(vm.leadAgentName);
+  if (leadLine !== null) {
+    const leadP = node(doc, "p", "hm-side-card__line", leadLine);
+    leadP.dataset.sideLeadLine = "";
+    body.append(leadP);
+  }
   for (const line of sharedAgentLines(vm.sharedAgents)) body.append(node(doc, "p", "hm-side-card__line", line));
   root.append(heading, body);
   return root;

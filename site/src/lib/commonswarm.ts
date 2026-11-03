@@ -1401,6 +1401,31 @@ export async function addAgentToWorkspace(session:Session,commandId:string,works
   if(status!==200 || body.status!=='accepted') throw new Error('The agent could not be added to this workspace.');
 }
 
+export async function setWorkspaceLead(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  principalId: string | null,
+): Promise<string | null> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "set_workspace_lead", principal_id: principalId },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 403) {
+    throw new Error(
+      "Only workspace owners and admins can set a live local agent as the workspace lead.",
+    );
+  }
+  if (status !== 200 || body.status !== "accepted") {
+    throw new Error("The workspace lead could not be updated.");
+  }
+  return typeof body.lead_agent_principal_id === "string" && body.lead_agent_principal_id.length > 0
+    ? body.lead_agent_principal_id
+    : null;
+}
+
 /**
  * Removes workspace access. Local account connections remain available in other workspaces.
  * Browser surface is principal-only — there is no per-token UI.
@@ -3262,14 +3287,14 @@ export async function myAccountAgents(): Promise<AccountAgent[]> {
  * an empty set rather than an error: no one can probe whether a workspace id exists.
  * archived_at is filtered here because an archived workspace is not somewhere you can work.
  */
-export async function myWorkspaces(): Promise<{ id: string; name: string; orgId: string; orgName: string }[]> {
+export async function myWorkspaces(): Promise<{ id: string; name: string; orgId: string; orgName: string; leadAgentPrincipalId: string | null }[]> {
   const c = client();
   if (!c) throw new NoDeployment();
-  const workspaces: { id: string; name: string; orgId: string; orgName: string }[] = [];
+  const workspaces: { id: string; name: string; orgId: string; orgName: string; leadAgentPrincipalId: string | null }[] = [];
   const pageSize = 50;
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await readWithDeadline("your workspaces", signal => c
-      .schema("swarm_read").from("workspaces").select("workspace_id,name,archived_at,org_id,org_display_name")
+      .schema("swarm_read").from("workspaces").select("*")
       .is("archived_at", null).order("name", { ascending: true }).order("workspace_id", { ascending: true })
       .range(offset, offset + pageSize - 1).abortSignal(signal));
     if (error) throw new Error(error.message);
@@ -3277,7 +3302,10 @@ export async function myWorkspaces(): Promise<{ id: string; name: string; orgId:
     workspaces.push(...page.map(row => ({ id: String(row.workspace_id ?? ""),
       name: String(row.name ?? row.workspace_id ?? ""),
       orgId: String(row.org_id ?? row.workspace_id ?? ""),
-      orgName: String(row.org_display_name ?? row.name ?? "") })).filter(workspace => workspace.id.length > 0));
+      orgName: String(row.org_display_name ?? row.name ?? ""),
+      leadAgentPrincipalId: typeof row.lead_agent_principal_id === "string" && row.lead_agent_principal_id.length > 0
+        ? row.lead_agent_principal_id
+        : null })).filter(workspace => workspace.id.length > 0));
     if (page.length < pageSize) return workspaces;
   }
 }

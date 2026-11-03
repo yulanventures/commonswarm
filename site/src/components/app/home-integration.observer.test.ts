@@ -31,6 +31,7 @@ import { wakePathMark } from '../../lib/wake-path';
 import { identityDisplayLabel } from '../../lib/identity-label';
 import { isTaggable } from '../../lib/mention-address';
 import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage } from '../../lib/household-access';
+import { workspaceLeadLine, buildSharedCard } from '../../lib/home-side-cards';
 import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
@@ -462,6 +463,14 @@ test('workspace and channel composers keep their own addresses when a thread clo
   label.textContent = '';
   runInContext('syncComposerPlacement()', context);
   assert.equal(attributes.get('aria-label'), 'Message', 'initial missing context has a plain fallback');
+  runInContext(`
+    var activeWorkspaceLeadName = () => 'Mr. Marketing';
+    channel = null; threadReplyRoot = null;
+    syncComposerPlacement();
+  `, context);
+  assert.equal(input.placeholder, 'Message… (Mr. Marketing leads)');
+  runInContext("channel={slug:'marketing'}; syncComposerPlacement();", context);
+  assert.equal(input.placeholder, 'Message #marketing — Mr. Marketing leads');
 });
 
 /** Record the row builder's tree operations. Sanitizing and topic parsing are separate
@@ -1633,4 +1642,52 @@ test('phone account menu exposes Your agents for a signed-in person and dispatch
   assert.equal(opened, 1);
   runInContext('sampleMode=true', context);
   assert.equal(runInContext('accountMenuState()', context), null);
+});
+
+test('workspace lead helpers resolve live local lead agents, gate owner/admin updates, and render side details', async () => {
+  assert.equal(workspaceLeadLine(null), null);
+  assert.equal(workspaceLeadLine('   '), null);
+  assert.equal(workspaceLeadLine('Mr. Marketing'), 'Mr. Marketing leads here and responds to untagged channel messages.');
+
+  const doc = { createElement: (tag: string) => new RowNode(tag) } as unknown as Document;
+  const withoutLead = buildSharedCard(doc, { sample: false, workspaceName: 'Marketing', sharedAgents: [] }) as unknown as RowNode;
+  assert.equal(withoutLead.querySelector('[data-side-lead-line]'), null);
+  const withLead = buildSharedCard(doc, { sample: false, workspaceName: 'Marketing', leadAgentName: 'Mr. Marketing', sharedAgents: [] }) as unknown as RowNode;
+  assert.equal(withLead.children[1]?.children[1]?.textContent, 'Mr. Marketing leads here and responds to untagged channel messages.');
+
+  const calls: Array<{ workspaceId: string; principalId: string | null }> = [];
+  const paints: string[] = [];
+  const context = createContext({
+    uuid: () => 'cmd-lead-1',
+    setWorkspaceLead: async (_s: unknown, _c: string, workspaceId: string, principalId: string | null) => {
+      calls.push({ workspaceId, principalId });
+      return principalId;
+    },
+    renderEntityPanel: () => paints.push('entity'),
+    renderHomeSide: () => paints.push('side'),
+    renderHomeObjectPane: () => paints.push('object'),
+    syncComposerPlacement: () => paints.push('composer'),
+  });
+  runInContext(`
+    let sampleMode = false, session = { user: { id: 'u1' } }, activeWorkspaceId = 'w1';
+    let workspaces = [{ id: 'w1', name: 'Marketing', leadAgentPrincipalId: 'a-local' }];
+    let agents = [
+      { principalId: 'a-local', name: 'Mr. Marketing', model: 'Claude', transport: 'local', turnOnly: false, ownerUserId: 'u1' },
+      { principalId: 'a-hosted', name: 'Hosted Claude', model: 'Claude', transport: 'hosted_mcp', turnOnly: true, ownerUserId: 'u1' }
+    ];
+    let members = [{ userId: 'u1', name: 'Tom', role: 'owner' }];
+  `, context);
+  runInContext(await dashboardFunctions(['activeWorkspaceLeadAgent', 'activeWorkspaceLeadName', 'viewerMaySetWorkspaceLead', 'updateWorkspaceLead']), context);
+  assert.equal(runInContext('activeWorkspaceLeadName()', context), 'Mr. Marketing');
+  assert.equal(runInContext('viewerMaySetWorkspaceLead()', context), true);
+  runInContext("workspaces[0].leadAgentPrincipalId = 'a-hosted';", context);
+  assert.equal(runInContext('activeWorkspaceLeadName()', context), null, 'hosted turn-only agents never resolve as live workspace lead');
+  runInContext("members = [{ userId: 'u1', name: 'Tom', role: 'member' }];", context);
+  assert.equal(runInContext('viewerMaySetWorkspaceLead()', context), false, 'ordinary members cannot change the workspace lead');
+  runInContext("members = [{ userId: 'u1', name: 'Tom', role: 'admin' }];", context);
+  assert.equal(runInContext('viewerMaySetWorkspaceLead()', context), true);
+  await (runInContext("updateWorkspaceLead('a-local')", context) as Promise<void>);
+  assert.deepEqual(calls, [{ workspaceId: 'w1', principalId: 'a-local' }]);
+  assert.equal(runInContext('workspaces[0].leadAgentPrincipalId', context), 'a-local');
+  assert.deepEqual(paints, ['entity', 'side', 'object', 'composer']);
 });
