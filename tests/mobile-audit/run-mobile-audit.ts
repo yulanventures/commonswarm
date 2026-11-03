@@ -144,7 +144,19 @@ const CHECKS = () => {
     }
   }
   const offscreen = interactive.filter(el => { const r = el.getBoundingClientRect(); return (r.left < -1 || r.right > width + 1) && !inScroller(el); }).slice(0, 20).map(describe);
-  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps };
+  // Collapsed text: a visible element holding a sentence but squeezed into a sliver, so it
+  // wraps a character or two per line (overflow cannot see it). Leaf text containers only.
+  const collapsed = [...document.querySelectorAll("body *")].filter(el => {
+    if (!visible(el) || el.children.length > 2) return false;
+    const text = (el.textContent ?? "").trim();
+    if (text.length < 12 || !/\s/u.test(text)) return false;
+    const r = el.getBoundingClientRect();
+    const line = parseFloat(getComputedStyle(el).lineHeight) || 16;
+    return r.width < 48 && r.height > line * 4;
+  }).slice(0, 10).map(el => ({ selector: describe(el), w: Math.round(el.getBoundingClientRect().width), h: Math.round(el.getBoundingClientRect().height) }));
+  const root = document.documentElement.getAttribute("data-theme");
+  const effectiveTheme = root === "light" || root === "dark" ? root : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps, collapsed, effectiveTheme };
 };
 
 async function main(): Promise<void> {
@@ -198,6 +210,12 @@ async function main(): Promise<void> {
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+        // The app is dark-first: with no stored preference it opens dark whatever the OS says
+        // (app.astro). Store this theme explicitly so light captures are really light; each item
+        // also records the effective theme, so a mismatch is visible rather than silent.
+        for (const c of [context, signedIn]) {
+          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); } catch {}` });
+        }
         for (const screen of screens()) {
           const size = `${viewport.width}x${viewport.height}`;
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
@@ -239,6 +257,8 @@ async function main(): Promise<void> {
       withSmallTargets: report.filter(r => ((r.tapTargets as unknown[] | undefined)?.length ?? 0) > 0).length,
       withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
       withOverlaps: report.filter(r => ((r.overlaps as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withCollapsedText: report.filter(r => ((r.collapsed as unknown[] | undefined)?.length ?? 0) > 0).length,
+      themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
