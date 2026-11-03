@@ -91,6 +91,15 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions
   max-inline-size: calc(100% - 8px); padding: 4px; border: 1px solid var(--k-shell-line); border-radius: 8px;
   background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
+/* Anchor the menu to its own trigger, not the row: with a wrapped name the trigger sits lower
+   than 44px, and the row-anchored menu covered it (2026-11-03 audit, 390x844). The details
+   element is the trigger's box, so the menu opens right under it, right-aligned; its width
+   is bounded by the viewport because the details box itself is only 44px wide. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions { position: relative; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions[open] > .pd-agent-actions {
+  inset: 100% 0 auto auto;
+  max-inline-size: calc(100vw - 32px);
+}
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > * { padding-inline: 12px; font-size: 15px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > :hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > .pd-member-remove { color: var(--home-danger); }

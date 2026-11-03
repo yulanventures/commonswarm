@@ -30,7 +30,9 @@ export const VIEWPORTS = [
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
-type Step = { click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
+/** One setup step; fields run in this order: waitFor, click, type (with text), press, scroll, wait.
+ *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
+type Step = { waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[] }
@@ -93,6 +95,10 @@ const CHECKS = () => {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return false;
     const style = getComputedStyle(el);
+    // Content of a closed <details> (anything but its own summary) is not shown, even when the
+    // engine still reports a box for it (::details-content).
+    const closed = el.closest("details:not([open])");
+    if (closed && !closed.querySelector(":scope > summary")?.contains(el)) return false;
     return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05 && !el.closest("[hidden],[inert]");
   };
   const inScroller = (el: Element) => {
@@ -129,22 +135,57 @@ const CHECKS = () => {
     const label = labelFor(el);
     return !!hit && (el === hit || el.contains(hit) || (!!label && (label === hit || label.contains(hit))));
   };
-  const inView = (r: DOMRect) => r.right > 0 && r.bottom > 0 && r.left < width && r.top < window.innerHeight;
-  const obscured = measured.filter(m => inView(m.rect) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
+  // While a modal dialog is open, only its own controls can be tapped: judge those alone.
+  const modal = [...document.querySelectorAll("dialog[open]")].find(d => d.matches(":modal"));
+  const tappable = modal ? measured.filter(m => modal.contains(m.el)) : measured;
+  const centreInView = (r: DOMRect) => { const x = r.left + r.width / 2, y = r.top + r.height / 2; return x >= 0 && y >= 0 && x < width && y < window.innerHeight; };
+  // Scrolling, not a defect: a centre clipped by the target's own scroll container, or content
+  // passing under a fixed or sticky bar. Both are skipped; anything else covering a target counts.
+  const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
+  const clipped = (el: Element, x: number, y: number) => {
+    for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (/(auto|scroll|hidden|clip)/u.test(st.overflowX + st.overflowY)) {
+        const r = n.getBoundingClientRect();
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return true;
+      }
+    }
+    return false;
+  };
+  const scrolledAway = (m: { el: Element; rect: DOMRect }) => {
+    const x = m.rect.left + m.rect.width / 2, y = m.rect.top + m.rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return clipped(m.el, x, y) || (pinned(hit) && !pinned(m.el));
+  };
+  const obscured = tappable.filter(m => centreInView(m.rect) && !scrolledAway(m) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
     .slice(0, 20).map(m => ({ selector: describe(m.el), by: describe(document.elementFromPoint(m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2) ?? document.body) }));
   // Non-overlap: two different controls whose measured boxes intersect by more than 4px² share taps.
+  const pin = new Map(tappable.map(m => [m.el, pinned(m.el)] as const));
   const overlaps: { a: string; b: string; area: number }[] = [];
-  for (let i = 0; i < measured.length && overlaps.length < 20; i += 1) {
-    for (let j = i + 1; j < measured.length && overlaps.length < 20; j += 1) {
-      const a = measured[i]!, b = measured[j]!;
+  for (let i = 0; i < tappable.length && overlaps.length < 20; i += 1) {
+    for (let j = i + 1; j < tappable.length && overlaps.length < 20; j += 1) {
+      const a = tappable[i]!, b = tappable[j]!;
       if (a.el.contains(b.el) || b.el.contains(a.el) || labelFor(a.el)?.contains(b.el) || labelFor(b.el)?.contains(a.el)) continue;
+      if (pin.get(a.el) !== pin.get(b.el)) continue; // scrolling content under a fixed or sticky bar
       const w = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
       const h = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
       if (w > 0 && h > 0 && w * h > 4) overlaps.push({ a: describe(a.el), b: describe(b.el), area: Math.round(w * h) });
     }
   }
   const offscreen = interactive.filter(el => { const r = el.getBoundingClientRect(); return (r.left < -1 || r.right > width + 1) && !inScroller(el); }).slice(0, 20).map(describe);
-  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps };
+  // Collapsed text: a visible element holding a sentence but squeezed into a sliver, so it
+  // wraps a character or two per line (overflow cannot see it). Leaf text containers only.
+  const collapsed = [...document.querySelectorAll("body *")].filter(el => {
+    if (!visible(el) || el.children.length > 2) return false;
+    const text = (el.textContent ?? "").trim();
+    if (text.length < 12 || !/\s/u.test(text)) return false;
+    const r = el.getBoundingClientRect();
+    const line = parseFloat(getComputedStyle(el).lineHeight) || 16;
+    return r.width < 48 && r.height > line * 4;
+  }).slice(0, 10).map(el => ({ selector: describe(el), w: Math.round(el.getBoundingClientRect().width), h: Math.round(el.getBoundingClientRect().height) }));
+  const root = document.documentElement.getAttribute("data-theme");
+  const effectiveTheme = root === "light" || root === "dark" ? root : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps, collapsed, effectiveTheme };
 };
 
 async function main(): Promise<void> {
@@ -165,6 +206,7 @@ async function main(): Promise<void> {
   const closeSite = await serveDist();
   const report: Record<string, unknown>[] = [];
   let seedNotes: string[] = [];
+  let captureErrors = -1;
   try {
     for (const fn of ["command", "read"]) {
       await awaitFunctionRunning({ url: `${env.apiUrl}/functions/v1/${fn}`, fetcher: fetch, timeoutMs: 60_000,
@@ -198,6 +240,12 @@ async function main(): Promise<void> {
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+        // The app is dark-first: with no stored preference it opens dark whatever the OS says
+        // (app.astro). Store this theme explicitly so light captures are really light; each item
+        // also records the effective theme, so a mismatch is visible rather than silent.
+        for (const c of [context, signedIn]) {
+          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); } catch {}` });
+        }
         for (const screen of screens()) {
           const size = `${viewport.width}x${viewport.height}`;
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
@@ -212,6 +260,7 @@ async function main(): Promise<void> {
             await page.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
             await page.waitForTimeout(800);
             for (const step of screen.setup ?? []) {
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
               if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
@@ -239,15 +288,21 @@ async function main(): Promise<void> {
       withSmallTargets: report.filter(r => ((r.tapTargets as unknown[] | undefined)?.length ?? 0) > 0).length,
       withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
       withOverlaps: report.filter(r => ((r.overlaps as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withCollapsedText: report.filter(r => ((r.collapsed as unknown[] | undefined)?.length ?? 0) > 0).length,
+      themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
+    captureErrors = summary.errors;
     await closeSite();
     functions.kill();
     await delay(1_000);
     if (functions.exitCode === null) functions.kill("SIGKILL");
     rmSync(envDir, { recursive: true, force: true });
   }
+  // Fail after the report and screenshots are written (the upload step still runs), so a green
+  // workflow can never hide a missing capture. Pending entries are not errors.
+  assert.equal(captureErrors, 0, `${captureErrors} capture(s) failed; see mobile-audit-report.json items[].error`);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).

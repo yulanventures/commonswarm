@@ -74,13 +74,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
     min-inline-size: 44px;
     min-block-size: 44px;
   }
-  /* Explicit density exception: inline identity/profile links are24px.
-     They retain full labels, distinct spacing and keyboard access. */
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-entity,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-channel {
-    min-inline-size: 24px;
-    min-block-size: 24px;
-  }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-reply-broadcast {
     min-block-size: 44px;
   }
@@ -163,5 +156,37 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread-replies {
     border-inline-start-color: CanvasText;
+  }
+}
+
+/* Author and channel buttons: a real 44px box through tablets. The extra block padding is
+   cancelled by an equal negative margin, so the line and message rhythm do not move; they sit
+   above neighbouring text so the whole box takes the tap. Mentions inside message text keep
+   the 24px WCAG 2.5.8 minimum: a 44px box there would cover the next line and the receipt. */
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) :is(.dashboard__message-author, .dashboard__message-channel) {
+    position: relative;
+    z-index: 1;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    padding-block: 10px;
+    margin-block: -10px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-frame, [data-command-palette]) .dashboard__message-entity:not(.dashboard__message-author) {
+    min-inline-size: 24px;
+    min-block-size: 24px;
+  }
+}
+
+/* Tablets and short landscape phones (844×390, 1024) use touch too: the same 44px
+   message controls as phones. */
+@media (width > 52rem) and (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
+    .dashboard__message-reply, .dashboard__message-toggle,
+    .dashboard__message summary, .dashboard__thread-toggle,
+    .dashboard__composer button
+  ) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
   }
 }

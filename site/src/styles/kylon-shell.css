@@ -298,3 +298,12 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
 @media (width > 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-ws-header .hm-menu__trigger { min-inline-size: 36px; }
 }
+
+/* Touch sizes through tablets: the workspace menu trigger is the main way to the workspace menu;
+   the account menu rows were 36px from 52rem to 64rem (844x390 and 1024). */
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
+    .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
+  ) { min-block-size: 44px; }
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-menu__trigger, .hm-ws-header .hm-menu__trigger) { min-inline-size: 44px; min-block-size: 44px; }
+}
