@@ -105,12 +105,12 @@ const {
 } = commandModule;
 const { authenticateHostedGrantCapability, authenticateHostedSeatCapability } = authModule;
 
-const commandInput = (workspaceId, name, commandId) => ({
+const commandInput = (workspaceId, name, commandId, agentId) => ({
   command_id: commandId,
   client_version: "0.1.0",
   workspace_id: workspaceId,
   stream: { kind: "workspace" },
-  command: { kind: "claim_hosted_seat", name },
+  command: { kind: "claim_hosted_seat", ...(name === undefined ? {} : { name }), ...(agentId === undefined ? {} : { agent_id: agentId }) },
 });
 
 async function capability(grantId, ownerUserId, workspaceId) {
@@ -142,7 +142,7 @@ async function claim(spec, existingCapability) {
   );
   if (cap === null) return { status: 403, body: { error: "hosted_grant_forbidden" } };
   return reportNon2xx("hosted", await handleHostedCommand(
-    commandInput(spec.workspaceId, spec.name, spec.commandId),
+    commandInput(spec.workspaceId, spec.name, spec.commandId, spec.agentId),
     cap,
   ));
 }
@@ -1806,7 +1806,18 @@ test("reconnect inherits hosted agents stranded by a retired refresh family: sam
   const [eligible] = await sql<{ ok: boolean }[]>`SELECT swarm.hosted_binding_eligible(${fixture.grantB}::uuid,
     ${fixture.workspaceA}::uuid, ${String(agent.body.principal_id)}::uuid) AS ok`;
   assert.equal(eligible?.ok, true, "claim_seat with agent_id is eligible on the new grant");
+  const [oldSeat] = await sql<{ seat: Date | null; handle: Date | null }[]>`SELECT s.revoked_at AS seat, h.revoked_at AS handle
+    FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_seat_handles h USING (seat_id) WHERE s.seat_id=${String(agent.body.seat_id)}::uuid`;
+  assert.ok(oldSeat?.seat && oldSeat.handle, "the stranded seat and handle on the retired grant are closed, freeing the live name");
+  const [principal] = await sql<{ revoked_at: Date | null }[]>`SELECT revoked_at FROM swarm.agent_principals WHERE principal_id=${String(agent.body.principal_id)}::uuid`;
+  assert.equal(principal?.revoked_at, null, "the agent itself stays");
   assert.equal(await inherit(fixture.grantB), 0, "idempotent");
+  // GameMaster's exact recovery: claim_seat with agent_id on the reconnected grant.
+  const reclaimed = runHostedHarness<HarnessResult>({ operation: "claim", claim: { grantId: fixture.grantB,
+    ownerUserId: fixture.owner, workspaceId: fixture.workspaceA, agentId: String(agent.body.principal_id), commandId: randomUUID() } });
+  assert.equal(reclaimed.status, 200, JSON.stringify(reclaimed.body));
+  assert.equal(reclaimed.body.principal_id, agent.body.principal_id, "the same agent, on a new seat");
+  assert.notEqual(reclaimed.body.seat_id, agent.body.seat_id);
 
   // A different OAuth client, or a grant the owner revoked, is not inherited.
   const other = await seedHostedFixture();

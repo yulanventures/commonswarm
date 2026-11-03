@@ -3,7 +3,8 @@
 -- bound only to grants from the SAME OAuth client whose refresh family was retired
 -- (refresh_family_tombstones) while the grant itself was never revoked or expired. Those agents
 -- otherwise could never be claimed again. Revoked or expired grants are owner intent and are not
--- inherited; an agent with any still-usable binding is left alone. Additive; no backfill.
+-- inherited; an agent with any still-usable binding is left alone. The stranded agent's live seats on
+-- the retired grants are closed so its name is free to claim again. Additive; no backfill.
 SET search_path = swarm, pg_catalog, public;
 
 CREATE FUNCTION swarm.inherit_stranded_hosted_agents(p_grant uuid) RETURNS integer
@@ -32,6 +33,22 @@ BEGIN
    AND swarm.hosted_binding_eligible(g.grant_id,p.workspace_id,NULL)
  ON CONFLICT DO NOTHING;
  GET DIAGNOSTICS n = ROW_COUNT;
+ -- A stranded agent's live seat on a retired-family grant still holds its live name
+ -- (hosted_mcp_seats_live_name), so claiming on the new grant would collide. That grant can never
+ -- mint again; close only its seats and handles for agents now bound to this grant, as the claim
+ -- path's name reclaim does. Principal, memberships and history are untouched.
+ WITH closed AS (
+  UPDATE swarm.hosted_mcp_seats s SET revoked_at=clock_timestamp()
+  FROM swarm.hosted_mcp_grants g, swarm.hosted_mcp_grants o
+  WHERE g.grant_id=p_grant AND o.grant_id=s.grant_id AND o.grant_id<>g.grant_id
+    AND o.owner_user_id=g.owner_user_id AND o.client_id=g.client_id AND s.owner_user_id=g.owner_user_id
+    AND s.revoked_at IS NULL
+    AND EXISTS(SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones t WHERE t.grant_id=o.provider_grant_id)
+    AND EXISTS(SELECT 1 FROM swarm.hosted_mcp_grant_agents ga WHERE ga.grant_id=g.grant_id AND ga.principal_id=s.principal_id AND ga.revoked_at IS NULL)
+    AND swarm.hosted_binding_eligible(g.grant_id,s.workspace_id,s.principal_id)
+  RETURNING s.seat_id)
+ UPDATE swarm.hosted_mcp_seat_handles h SET revoked_at=clock_timestamp()
+ FROM closed WHERE h.seat_id=closed.seat_id AND h.revoked_at IS NULL;
  RETURN n;
 END $$;
 ALTER FUNCTION swarm.inherit_stranded_hosted_agents(uuid) OWNER TO swarm_admin;
