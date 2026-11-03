@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 
 import { errors } from "oidc-provider";
 import { adminTransactionContext, adminQuery, joinAdminTransaction, AdminTransactionError } from "./admin-transaction.js";
@@ -24,18 +24,46 @@ function assertIdentifier(value) {
   return value;
 }
 
-/** Marker stored in a consumed hosted RefreshToken payload once its one replay grace is spent. */
-export const REPLAY_GRACE_MARKER = "cs_replay_grace_at";
-/** Seconds after rotation in which the family's immediately previous refresh token may be presented
- *  once more without retiring the family. GameMaster (2026-11-03) lost its family to a repeat 43s
- *  after a successful rotation; clients that miss or fail to persist a rotated pair retry like that. */
-export const HOSTED_REFRESH_REPLAY_GRACE_SECONDS = 300;
+/** Payload field on a consumed hosted RefreshToken that holds its rotation's sealed response. */
+export const ROTATION_REPLAY_FIELD = "cs_rotation_replay";
+/** Seconds after a hosted rotation in which an exact repeat of the predecessor gets the SAME
+ *  response back (GameMaster, 2026-11-03: a 200 lost in transit, retried 43s later). One lineage:
+ *  nothing new is minted. Outside the window, or once the successor is used, the repeat reaches
+ *  oidc-provider's reuse path and the family is retired as before. */
+export const HOSTED_ROTATION_REPLAY_SECONDS = 300;
 
-function storedPayload(row, recoveredJti, { hideConsumed = false } = {}) {
+/* The sealing key derives from the presented predecessor itself, so the database (which holds only
+ * sha256 lookups of tokens) cannot open a sealed response, and no new server secret exists. */
+function replayKey(predecessor, salt) {
+  return Buffer.from(hkdfSync("sha256", Buffer.from(predecessor, "utf8"), salt, "commonswarm hosted refresh replay v1", 32));
+}
+function replayAad(predecessor, clientId) {
+  return Buffer.from(`${lookupHash(predecessor)}\n${clientId}`, "utf8");
+}
+export function sealRotation(predecessor, clientId, body) {
+  const salt = randomBytes(16), iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", replayKey(predecessor, salt), iv);
+  cipher.setAAD(replayAad(predecessor, clientId));
+  const ct = Buffer.concat([cipher.update(JSON.stringify(body), "utf8"), cipher.final()]);
+  return { v: 1, salt: salt.toString("base64url"), iv: iv.toString("base64url"),
+    tag: cipher.getAuthTag().toString("base64url"), ct: ct.toString("base64url") };
+}
+export function openRotation(predecessor, clientId, sealed) {
+  if (sealed?.v !== 1) return undefined;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", replayKey(predecessor, Buffer.from(sealed.salt, "base64url")),
+      Buffer.from(sealed.iv, "base64url"));
+    decipher.setAAD(replayAad(predecessor, clientId));
+    decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(sealed.ct, "base64url")), decipher.final()]).toString("utf8"));
+  } catch { return undefined; }
+}
+
+function storedPayload(row, recoveredJti) {
   const payload = structuredClone(row.payload);
-  delete payload[REPLAY_GRACE_MARKER];
+  delete payload[ROTATION_REPLAY_FIELD];
   if (recoveredJti !== undefined && payload.jti === undefined) payload.jti = recoveredJti;
-  if (row.consumed_at !== null && !hideConsumed) {
+  if (row.consumed_at !== null) {
     payload.consumed = Math.floor(new Date(row.consumed_at).getTime() / 1000);
   }
   return payload;
@@ -66,10 +94,9 @@ async function transaction(pool, callback, connection) {
  * artifact can be (re)inserted.
  */
 export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", beforeConsume,
-  replayGraceSeconds = HOSTED_REFRESH_REPLAY_GRACE_SECONDS, hostedStaleReplay = "refuse" } = {}) {
-  if (!["refuse", "retire"].includes(hostedStaleReplay)) throw new TypeError('hostedStaleReplay must be "refuse" or "retire"');
-  if (!Number.isSafeInteger(replayGraceSeconds) || replayGraceSeconds < 0 || replayGraceSeconds > 3600) {
-    throw new TypeError("replayGraceSeconds must be an integer from 0 to 3600");
+  rotationReplaySeconds = HOSTED_ROTATION_REPLAY_SECONDS } = {}) {
+  if (!Number.isSafeInteger(rotationReplaySeconds) || rotationReplaySeconds < 0 || rotationReplaySeconds > 600) {
+    throw new TypeError("rotationReplaySeconds must be an integer from 0 to 600");
   }
   if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
     throw new TypeError("a pg-compatible pool is required");
@@ -77,19 +104,6 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
   const qualifiedSchema = assertIdentifier(schema);
   const artifacts = `${qualifiedSchema}.provider_artifacts`;
   const tombstones = `${qualifiedSchema}.refresh_family_tombstones`;
-  /* One replay grace for a hosted family's IMMEDIATELY previous RefreshToken: consumed within the
-   * window, its grace not yet spent, and no later RefreshToken consumption in the same family. Callers
-   * already hold the family lock and have checked the policy is active. An older or repeated replay
-   * still reaches oidc-provider's reuse path and retires the family. */
-  async function replayGraceOpen(client, row) {
-    if (replayGraceSeconds === 0 || row.consumed_at === null || row.grant_id === null) return false;
-    return (await client.query(`SELECT ($1::timestamptz > clock_timestamp() - make_interval(secs => $2))
-        AND NOT ($3::jsonb ? '${REPLAY_GRACE_MARKER}')
-        AND NOT EXISTS (SELECT 1 FROM ${artifacts} later WHERE later.model='RefreshToken' AND later.grant_id=$4
-          AND later.consumed_at > $1::timestamptz)
-        AND NOT EXISTS (SELECT 1 FROM ${tombstones} t WHERE t.grant_id=$4) AS open`,
-      [row.consumed_at, replayGraceSeconds, JSON.stringify(row.payload), row.grant_id])).rows[0]?.open === true;
-  }
   const database = pool;
   pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : database.query(...args),
     connect: () => adminTransactionContext(false)
@@ -284,24 +298,72 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         row.payload = normalized.payload;
         return storedPayload(row,recoveredJti);
       }
-      // A hosted client that repeats its immediately previous refresh token soon after rotation
-      // (a lost or unpersisted response, or a sibling worker) is served once instead of losing its
-      // family. consume() spends the grace atomically; this only hides `consumed` for that request.
-      if (model === "RefreshToken" && envelope.binding && policy?.active && row.consumed_at !== null) {
-        if (await replayGraceOpen(client, row)) return storedPayload(row, recoveredJti, { hideConsumed: true });
-        // Any other replay into an ACTIVE hosted family (a stale or idle sibling worker, a second
-        // repeat) is refused as "not found" (invalid_grant) without reaching oidc-provider's reuse
-        // path, so one stale process can never retire the family its siblings are using. The owner's
-        // revoke and every canonical policy check above still end the family. "retire" restores the
-        // strict reuse fence.
-        if (hostedStaleReplay === "refuse") return undefined;
-      }
       const live = (await client.query("SELECT ($1::timestamptz IS NULL OR $1::timestamptz>clock_timestamp()) AS live", [row.expires_at])).rows[0].live;
       return live ? storedPayload(row,recoveredJti) : undefined;
     });
   }
 
-  return (model) => ({
+  /* Under the family locks: the consumed hosted predecessor, its live unused successor in the same
+   * family, and an active policy. Returns the locked predecessor row or undefined. */
+  async function lockedRotation(client, predecessor, clientId) {
+    const model = "RefreshToken";
+    const initial = (await client.query(`SELECT payload FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2`,
+      [model,lookupHash(predecessor)])).rows[0];
+    if (!initial || initial.payload?.clientId !== clientId) return undefined;
+    await requireBoundContext(model,predecessor,initial.payload,client);
+    const envelope = await lockFamily(client,model,predecessor,initial.payload);
+    if (!envelope.binding || !envelope.policy?.active || envelope.binding.client_id !== clientId) return undefined;
+    const row = (await client.query(`SELECT *, consumed_at > clock_timestamp() - make_interval(secs => $3) AS within
+      FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`,
+      [model,lookupHash(predecessor),rotationReplaySeconds])).rows[0];
+    if (!row || row.consumed_at === null || row.within !== true || row.grant_id !== envelope.family) return undefined;
+    assertHostedPayload(model,predecessor,row.payload,envelope.binding);
+    if ((await client.query(`SELECT 1 FROM ${tombstones} WHERE grant_id=$1`, [envelope.family])).rowCount) return undefined;
+    return { row, envelope };
+  }
+  async function successorLive(client, successorHash, family) {
+    return (await client.query(`SELECT 1 FROM ${artifacts} WHERE model='RefreshToken' AND artifact_id_hash=$1
+      AND grant_id=$2 AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())`,
+      [successorHash, family])).rowCount === 1;
+  }
+
+  const factory = (model) => ({
+    /** After a hosted rotation answered 200: seal that exact response onto the consumed predecessor. */
+    async rememberHostedRotation({ predecessor, successor, clientId, body }) {
+      if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return false;
+      if (typeof predecessor !== "string" || typeof successor !== "string" || predecessor === successor) return false;
+      return transaction(pool, async client => {
+        const locked = await lockedRotation(client, predecessor, clientId);
+        if (!locked || Object.hasOwn(locked.row.payload, ROTATION_REPLAY_FIELD)) return false;
+        if (!await successorLive(client, lookupHash(successor), locked.envelope.family)) return false;
+        const sealed = { ...sealRotation(predecessor, clientId, body), successor: lookupHash(successor),
+          at: Math.floor(Date.now() / 1000) };
+        const updated = await client.query(`UPDATE ${artifacts} SET payload=payload || jsonb_build_object($3::text,$4::jsonb),
+            updated_at=clock_timestamp()
+          WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NOT NULL AND NOT (payload ? $3::text)`,
+          [model,lookupHash(predecessor),ROTATION_REPLAY_FIELD,JSON.stringify(sealed)]);
+        return updated.rowCount === 1;
+      });
+    },
+
+    /** An exact repeat inside the window: the same sealed response, while its successor is unused. */
+    async replayHostedRotation({ predecessor, clientId }) {
+      if (model !== "RefreshToken" || adminTransactionContext(false) || rotationReplaySeconds === 0) return undefined;
+      if (typeof predecessor !== "string" || typeof clientId !== "string") return undefined;
+      return transaction(pool, async client => {
+        const locked = await lockedRotation(client, predecessor, clientId);
+        const sealed = locked?.row.payload[ROTATION_REPLAY_FIELD];
+        if (!sealed || typeof sealed.successor !== "string") return undefined;
+        if (!await successorLive(client, sealed.successor, locked.envelope.family)) return undefined;
+        const body = openRotation(predecessor, clientId, sealed);
+        if (!body || typeof body.refresh_token !== "string" || lookupHash(body.refresh_token) !== sealed.successor) return undefined;
+        if (Number.isSafeInteger(body.expires_in) && Number.isSafeInteger(sealed.at)) {
+          body.expires_in = Math.max(0, body.expires_in - (Math.floor(Date.now() / 1000) - sealed.at));
+        }
+        return body;
+      });
+    },
+
     async proveHostedRefreshToken(predecessor, clientId) {
       if (model !== "RefreshToken" || adminTransactionContext(false)) return undefined;
       const id = predecessor.jti;
@@ -314,7 +376,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
         if (!envelope.binding) return undefined;
         const row = (await client.query(`SELECT * FROM ${artifacts}
           WHERE model=$1 AND artifact_id_hash=$2 FOR UPDATE`, [model,lookupHash(id)])).rows[0];
-        if (!row || (row.consumed_at !== null && !(await replayGraceOpen(client, row)))) return undefined;
+        if (!row || row.consumed_at !== null) return undefined;
         assertHostedPayload(model,id,row.payload,envelope.binding);
         assertHostedPayload(model,id,predecessor,envelope.binding);
         const target = value => Array.isArray(value) && value.length === 1 ? value[0] : value;
@@ -369,18 +431,6 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
               await client.query(`UPDATE ${artifacts} SET payload=$3::jsonb,expires_at=$4 WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NULL`,
                 [model,lookupHash(id),JSON.stringify(normalized.payload),normalized.expiresAt]);
             }
-          }
-          // The one replay grace (see replayGraceOpen): spend it atomically under the family lock.
-          // The successor saved next is a sibling of the first rotation's, in the same family.
-          if (model === "RefreshToken" && envelope.binding && row.consumed_at !== null && await replayGraceOpen(client, row)) {
-            const spent = await client.query(`UPDATE ${artifacts}
-              SET payload=payload || jsonb_build_object('${REPLAY_GRACE_MARKER}', extract(epoch FROM clock_timestamp())),
-                  updated_at=clock_timestamp()
-              WHERE model=$1 AND artifact_id_hash=$2 AND consumed_at IS NOT NULL
-                AND NOT (payload ? '${REPLAY_GRACE_MARKER}')
-              RETURNING grant_id`, [model,lookupHash(id)]);
-            if (spent.rowCount !== 1) throw new errors.InvalidGrant(`${model} is unavailable or already used`);
-            return;
           }
           const result = await client.query(`UPDATE ${artifacts} AS artifact
             SET consumed_at=clock_timestamp(),updated_at=clock_timestamp()
@@ -534,4 +584,5 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
       });
     },
   });
+  return factory;
 }

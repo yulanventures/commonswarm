@@ -53,6 +53,12 @@ export function subscribeProviderErrors(provider, logger) {
       logProviderError(logger, event, ctx?.res?.getHeader("x-request-id"), error, ctx);
     });
   }
+  // A hosted refresh repeat answered with its earlier rotation's response (no new tokens).
+  provider.on?.("grant.replayed", (ctx) => {
+    const clientId = ctx?.state?.replayedClientId;
+    logger.info({ event: "grant.replayed", request_id: ctx?.res?.getHeader("x-request-id"), grant_type: "refresh_token",
+      client_ref: typeof clientId === "string" ? createHash("sha256").update(clientId).digest("hex").slice(0, 8) : null });
+  });
   // Successful token grants too, so a refused refresh can be paired with the rotation before it.
   provider.on?.("grant.success", (ctx) => {
     logger.info({ event: "grant.success", request_id: ctx?.res?.getHeader("x-request-id"), ...tokenEventFields(ctx) });

@@ -37,6 +37,20 @@ async function signingJwk() {
   };
 }
 
+const TOKEN_BODY_LIMIT = 56 * 1024;
+/** Drain a token request body within oidc-provider's own limit; it then parses ctx.req.body. */
+async function readTokenBody(req, length) {
+  if (length !== undefined && length > TOKEN_BODY_LIMIT) throw new errors.InvalidRequest("failed to parse the request body");
+  const chunks = [];
+  let received = 0;
+  for await (const chunk of req) {
+    received += chunk.length;
+    if (received > TOKEN_BODY_LIMIT) throw new errors.InvalidRequest("failed to parse the request body");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, received).toString("utf8");
+}
+
 export async function createMcpProvider({
   adapter = createAtomicMemoryAdapter(),
   fetch: injectedFetch,
@@ -315,6 +329,41 @@ export async function createMcpProvider({
   provider.proxy = true;
   // RFC 7591 errors are JSON regardless of Accept. Capture the typed error at
   // the provider boundary; never serialize an exception or reflected URI value.
+  // Hosted refresh replay (GameMaster, 2026-11-03): an exact repeat of a just-rotated hosted refresh
+  // token gets the SAME response back instead of oidc-provider's reuse revoke. Nothing new is minted;
+  // the adapter decides eligibility under the family locks and returns nothing otherwise.
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== "POST" || ctx.path !== "/token" || !ctx.is("application/x-www-form-urlencoded") ||
+        typeof adapter("RefreshToken").replayHostedRotation !== "function") return next();
+    const raw = await readTokenBody(ctx.req, ctx.request.length);
+    ctx.req.body = raw; // oidc-provider's body parser reads this once the stream is drained.
+    const params = new URLSearchParams(raw);
+    const presented = params.getAll("refresh_token");
+    const clientId = params.getAll("client_id");
+    const eligible = params.get("grant_type") === "refresh_token" && presented.length === 1 && clientId.length === 1 &&
+      !params.getAll("resource").includes(ADMIN_RESOURCE) && !ctx.get("authorization") && !ctx.get("dpop");
+    if (eligible) {
+      // Any doubt falls through to the provider's ordinary refresh (and its reuse fence).
+      const replayed = await adapter("RefreshToken").replayHostedRotation({ predecessor: presented[0], clientId: clientId[0] })
+        .catch(() => undefined);
+      if (replayed) {
+        ctx.status = 200;
+        ctx.set("cache-control", "no-store");
+        ctx.set("pragma", "no-cache");
+        ctx.body = replayed;
+        ctx.state.replayedClientId = clientId[0];
+        provider.emit("grant.replayed", ctx);
+        return;
+      }
+    }
+    await next();
+    if (eligible && ctx.status === 200 && typeof ctx.body?.refresh_token === "string" &&
+        ctx.body.refresh_token !== presented[0]) {
+      // Best effort: a failure only means a later repeat takes the ordinary reuse path.
+      await adapter("RefreshToken").rememberHostedRotation({ predecessor: presented[0],
+        successor: ctx.body.refresh_token, clientId: clientId[0], body: ctx.body }).catch(() => false);
+    }
+  });
   for (const event of ["registration_create.error", "server_error"]) {
     provider.on(event, (ctx, error) => {
       if (ctx.path === "/reg") ctx.state.registrationFailure = registrationErrorResponse(error);
