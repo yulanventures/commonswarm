@@ -56,9 +56,17 @@ export interface HouseholdSaveRequest {
   base: HouseholdRevisionRef;
   patch: HouseholdPatch;
 }
+export interface HouseholdCreateRequest {
+  request_id: string;
+  workspace_id: string;
+  object_id: string;
+  title: string;
+  content: HouseholdContent;
+}
 type SaveOutcome = Exclude<HouseholdOutcome, { status: 'released' }> | { status: 'unknown' };
 export interface HouseholdActions {
   save(request: HouseholdSaveRequest): Promise<SaveOutcome>;
+  create?(request: HouseholdCreateRequest): Promise<SaveOutcome>;
   readRevision(revision: HouseholdRevisionRef): Promise<HouseholdContent>;
   recoverDraft(workspaceId: string, draftId: string): Promise<HouseholdConflictView>;
   readHistory?(workspaceId: string, objectId: string, cursor: string): Promise<{
@@ -90,6 +98,9 @@ const bound = (ref: HouseholdRevisionRef, workspaceId: string, objectId: string)
   ref.workspace_id === workspaceId && ref.object_id === objectId && !!ref.token;
 export function householdCanUpdate(workspace: HouseholdWorkspaceView): boolean {
   return workspace.content_role === 'editor' && workspace.operations.includes('read') && workspace.operations.includes('update');
+}
+export function householdCanCreate(workspace: HouseholdWorkspaceView): boolean {
+  return workspace.content_role === 'editor' && workspace.operations.includes('read') && workspace.operations.includes('create');
 }
 function authorizedWorkspace(input: HouseholdWorkspaceView): HouseholdWorkspaceView {
   const workspace = structuredClone(input);
@@ -173,25 +184,32 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const object = selectedHouseholdObject(state);
   const busy = state.save_state === 'saving' || state.save_state === 'pending' || state.save_state === 'unknown';
   const canEdit = householdCanUpdate(workspace) && !busy && state.save_state !== 'conflict';
+  const canCreate = householdCanCreate(workspace) && !busy && state.save_state !== 'conflict';
   const content = state.opened_version?.content ?? object?.current.content ?? null;
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
-  return `<header><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2>
-    <p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
+  const createControls = canCreate ? `<div class="hh-create-bar">
+    <input type="text" class="hh-create-input" data-hh-create-title placeholder="New list or doc title…" aria-label="New list or doc title" />
+    <div class="hh-create-actions">${button('create-list', '+ New list', '', busy)}${button('create-doc', '+ New doc', '', busy)}</div>
+  </div>` : '';
+  return `<header><div class="hh-workspace-identity"><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2></div>
+    <div class="hh-workspace-meta"><p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
     <p>Content role: <strong>${esc(workspace.content_role === 'editor' ? 'Editor' : workspace.content_role === 'reader' ? 'Reader' : 'Not confirmed')}</strong>. You can ${esc(capabilities.length === 0 ? 'not open them yet'
-      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p>
-    <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
+      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p></div></header>
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
-    <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
-      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy, item.object_id === state.selected_id)}</li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
+    <div class="hh-layout"><nav aria-label="Household objects">${createControls}${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
+      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy, item.object_id === state.selected_id)}</li>`).join('')}</ul>` : '<p class="hh-empty-note">No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
     <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
       <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
-      ${renderHouseholdContent(content)}
+      ${canEdit && !state.opened_version && content?.kind === 'list'
+        ? `${content.items.length ? `<ol class="hh-list hh-list--editable">${[...content.items].sort((a, b) => a.order - b.order).map((item) =>
+          `<li><span class="hh-list-row"><button type="button" data-hh-action="toggle" data-hh-value="${esc(item.item_id)}" role="checkbox" aria-checked="${item.checked}" aria-label="${esc(item.text.trim() ? item.text : 'List item')}"><span aria-hidden="true">${item.checked ? '☑' : '☐'}</span></button><span class="hh-list-text${item.checked ? ' hh-list-text--checked' : ''}">${esc(item.text)}</span><button type="button" class="hh-list-remove" data-hh-action="remove-item" data-hh-value="${esc(item.item_id)}" aria-label="${esc(`Remove ${item.text.trim() || 'item'}`)}">Remove</button></span></li>`).join('')}</ol>` : '<p class="hh-list-empty">No items in this list yet.</p>'}
+          <div class="hh-add-item"><input type="text" class="hh-add-item-input" data-hh-new-item placeholder="Add an item…" aria-label="New list item" />${button('add-item', 'Add item')}</div>`
+        : renderHouseholdContent(content)}
       ${!content ? button('revision', 'Open current revision', object.current.revision.token, busy) : ''}
       ${canEdit && !state.opened_version && content?.kind === 'doc' ? `<label class="hh-editor">Edit document
         <textarea data-hh-document rows="8">${esc(state.proposed?.kind === 'doc' ? state.proposed.markdown : content.markdown)}</textarea></label>${button('save', 'Save document')}` : ''}
-      ${canEdit && !state.opened_version && content?.kind === 'list' ? content.items.map((item) => button('toggle', `${item.checked ? 'Uncheck' : 'Check'} ${item.text}`, item.item_id)).join('') : ''}
       ${!householdCanUpdate(workspace) ? '<p>You can read objects and history. Saving requires an editor content role and update permission.</p>' : ''}
       ${state.opened_version ? button('current', 'Back to current revision', '', busy) : ''}
       ${renderHouseholdConflict(state)}
@@ -388,6 +406,97 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
         object.next_history_cursor = page.next_cursor; publish(); return true;
       } catch { if (active === generation && read === readGeneration) { state.notice = 'More history could not be loaded. Try again.'; publish(); } return false; }
     },
+    async addItem(rawText: string) {
+      const text = rawText.trim();
+      const content = selectedHouseholdObject(state)?.current.content;
+      if (!text || content?.kind !== 'list' || !householdCanUpdate(state.workspace) || locked() || state.opened_version) return false;
+      const sorted = [...content.items].sort((a, b) => a.order - b.order);
+      const baseSlug = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'item';
+      let itemId = baseSlug;
+      let suffix = 2;
+      while (sorted.some((item) => item.item_id === itemId)) {
+        itemId = `${baseSlug}-${suffix++}`;
+      }
+      const nextItems = sorted.map((item, index) => ({ ...item, order: index }));
+      nextItems.push({ item_id: itemId, text, checked: false, order: nextItems.length });
+      if (!stage({ kind: 'list', items: nextItems })) return false;
+      return this.save();
+    },
+    async removeItem(itemId: string) {
+      const content = selectedHouseholdObject(state)?.current.content;
+      if (!itemId || content?.kind !== 'list' || !householdCanUpdate(state.workspace) || locked() || state.opened_version) return false;
+      const remaining = [...content.items]
+        .sort((a, b) => a.order - b.order)
+        .filter((item) => item.item_id !== itemId)
+        .map((item, index) => ({ ...item, order: index }));
+      if (remaining.length === content.items.length) return false;
+      if (!stage({ kind: 'list', items: remaining })) return false;
+      return this.save();
+    },
+    async create(kind: 'list' | 'doc', rawTitle: string) {
+      if (!householdCanCreate(state.workspace) || locked() || !actions.create) return false;
+      const title = rawTitle.trim();
+      if (!title) {
+        state.notice = 'Enter a title before creating a list or doc.';
+        publish();
+        return false;
+      }
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || kind;
+      let objectId = baseSlug;
+      let suffix = 2;
+      while (state.workspace.objects.some((object) => object.object_id === objectId)) {
+        objectId = `${baseSlug}-${suffix++}`;
+      }
+      const content: HouseholdContent = kind === 'list' ? { kind: 'list', items: [] } : { kind: 'doc', markdown: '' };
+      const active = generation;
+      readGeneration++;
+      state.save_state = 'saving';
+      state.notice = `Creating ${kind}…`;
+      publish();
+      let outcome: SaveOutcome;
+      try {
+        outcome = await actions.create({
+          request_id: requestId(),
+          workspace_id: state.workspace.workspace_id,
+          object_id: objectId,
+          title,
+          content,
+        });
+      } catch {
+        outcome = { status: 'unknown' };
+      }
+      if (active !== generation) return false;
+      if (outcome.status === 'committed') {
+        const reloaded = actions.reloadObject
+          ? await actions.reloadObject(state.workspace.workspace_id, objectId).catch(() => null)
+          : null;
+        if (active !== generation) return false;
+        if (reloaded && reloaded.object_id === objectId && bound(reloaded.current.revision, state.workspace.workspace_id, objectId)
+          && reloaded.history.every((version) => bound(version.revision, state.workspace.workspace_id, objectId))) {
+          state.workspace.objects = [...state.workspace.objects.filter((entry) => entry.object_id !== objectId), structuredClone(reloaded)];
+          state.selected_id = objectId;
+          state.opened_version = null;
+          state.proposed = null;
+          state.conflict = null;
+          state.draft_id = null;
+          state.conflict_current = null;
+          state.save_state = 'committed';
+          state.notice = 'Saved.';
+          publish();
+          return true;
+        }
+        state.save_state = 'committed';
+        state.notice = 'Created. Reload to open the new item.';
+        publish();
+        return true;
+      }
+      state.save_state = outcome.status === 'refused' ? 'refused' : 'idle';
+      state.notice = outcome.status === 'refused'
+        ? householdSaveRefusalNotice(outcome.reason)
+        : 'Could not create this item right now. Try again.';
+      publish();
+      return false;
+    },
   };
 }
 export type HouseholdObjectsController = ReturnType<typeof createHouseholdObjectsController>;
@@ -429,14 +538,42 @@ export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdOb
           item.item_id === value ? { ...item, checked: !item.checked } : item) })) void controller.save();
         break;
       }
+      case 'add-item': {
+        const inputEl = root.querySelector<HTMLInputElement>('[data-hh-new-item]');
+        if (inputEl) void controller.addItem(inputEl.value);
+        break;
+      }
+      case 'remove-item':
+        void controller.removeItem(value);
+        break;
+      case 'create-list': {
+        const inputEl = root.querySelector<HTMLInputElement>('[data-hh-create-title]');
+        if (inputEl) void controller.create('list', inputEl.value);
+        break;
+      }
+      case 'create-doc': {
+        const inputEl = root.querySelector<HTMLInputElement>('[data-hh-create-title]');
+        if (inputEl) void controller.create('doc', inputEl.value);
+        break;
+      }
     }
   };
   const input = (event: Event) => {
     if (event.target instanceof HTMLTextAreaElement && event.target.matches('[data-hh-document]'))
       controller.stage({ kind: 'doc', markdown: event.target.value });
   };
-  root.addEventListener('click', click); root.addEventListener('input', input);
-  return () => { unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.replaceChildren(); };
+  const keydown = (event: KeyboardEvent) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+    if (event.target instanceof HTMLInputElement && event.target.matches('[data-hh-new-item]')) {
+      event.preventDefault();
+      void controller.addItem(event.target.value);
+    } else if (event.target instanceof HTMLInputElement && event.target.matches('[data-hh-create-title]')) {
+      event.preventDefault();
+      void controller.create('list', event.target.value);
+    }
+  };
+  root.addEventListener('click', click); root.addEventListener('input', input); root.addEventListener('keydown', keydown);
+  return () => { unsubscribe(); root.removeEventListener('click', click); root.removeEventListener('input', input); root.removeEventListener('keydown', keydown); root.replaceChildren(); };
 }
 
 /** Synthetic fixture factory; never enabled by default in a product component. */

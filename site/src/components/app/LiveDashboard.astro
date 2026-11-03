@@ -4480,7 +4480,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeRoute.view === "chat") renderFeed();
       if (live()) {
         renderHomeSide();
-        if (!sampleMode) void loadHouseholdConnections().then(() => { if (live()) { renderHomeSide(); renderHomeObjectPane(); } });
+        if (!sampleMode) void loadHouseholdConnections().then(() => {
+          if (live()) {
+            renderHomeSide();
+            renderHomeObjectPane();
+            if (typeof autoEnsureDefaultHouseholdAccess === "function") void autoEnsureDefaultHouseholdAccess();
+          }
+        });
       }
     };
     const renderHomeSide = (): void => {
@@ -8506,7 +8512,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       /* Nothing shows until household_access answers for this workspace, so a confirmed
          person never sees the access card flash before their lists. */
       if (card) card.hidden = !current || confirmed;
-      if (approvals) approvals.hidden = !confirmed;
+      if (approvals) approvals.hidden = !confirmed || !listsAllowLanding;
       const notice = one<HTMLElement>("[data-household-consent-result]");
       if (notice && current && householdAccess.status === "unknown") {
         notice.textContent = "Lists & docs could not check your access. Open it again to retry.";
@@ -8845,6 +8851,82 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         void content.then(() => {
           if (listsAllowLanding === landing && landing.content === content) renderHouseholdAccess("content");
         });
+      }
+    };
+
+    const autoApprovedHouseholdConnections = new Set<string>();
+    const autoEnsureDefaultHouseholdAccess = async (): Promise<void> => {
+      const scope = householdScope();
+      if (!scope || sampleMode) return;
+      if (householdAccess.workspaceId !== scope.workspaceId || householdAccess.status === "unknown") {
+        const currentAccess = await readHouseholdAccess(scope);
+        if (!householdCurrent(scope)) return;
+        if (currentAccess.status === "ok" || householdAccess.workspaceId !== scope.workspaceId) {
+          householdAccess = currentAccess;
+        }
+      }
+      if (
+        householdAccess.workspaceId === scope.workspaceId &&
+        householdAccess.status === "refused" &&
+        !needsHouseholdSetup(scope.session.user.id, scope.workspaceId) &&
+        !autoApprovedHouseholdConnections.has(`access:${scope.workspaceId}`)
+      ) {
+        autoApprovedHouseholdConnections.add(`access:${scope.workspaceId}`);
+        const role = viewerRole();
+        const reply = await postCommand(
+          scope.session,
+          uuid(),
+          { kind: "household_permissions", ...(role === "owner" ? { purpose: "shared" } : {}), content_role: "editor" },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+        ).catch(() => null);
+        if (!householdCurrent(scope)) return;
+        if (reply && (reply.body as { status?: unknown }).status === "committed") {
+          await refreshHouseholdAccess();
+          if (!householdCurrent(scope)) return;
+        }
+      }
+      if (householdConnectionsReadState !== "succeeded" || householdAccess.workspaceId !== scope.workspaceId || householdAccess.status !== "ok") {
+        return;
+      }
+      let changed = false;
+      const operations = householdAccess.contentRole === "reader" ? ["read"] : ["read", "create", "update"];
+      for (const connection of householdConnections) {
+        if (connectionApproval(connection) !== null) continue;
+        const effective = connection.effective_access as { source?: string; restrictions?: unknown[] } | undefined;
+        if (effective && (effective.source !== "none" || (Array.isArray(effective.restrictions) && effective.restrictions.length > 0))) continue;
+        const principalId = String(connection.principal_id ?? "");
+        const connectionId = String(connection.connection_id ?? "");
+        const grantId = String(connection.grant_id ?? "");
+        if (!principalId || !connectionId || !grantId || householdReceipts.has(principalId)) continue;
+        const key = `${scope.workspaceId}:${connectionId}`;
+        if (autoApprovedHouseholdConnections.has(key)) continue;
+        autoApprovedHouseholdConnections.add(key);
+        const reply = await postCommand(
+          scope.session,
+          uuid(),
+          {
+            kind: "household_approve_connection",
+            connection: {
+              kind: connection.kind === "hosted" ? "hosted" : "local",
+              connection_id: connectionId,
+              grant_id: grantId,
+              principal_id: principalId,
+              operations,
+            },
+          },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+        ).catch(() => null);
+        if (!householdCurrent(scope)) return;
+        if (reply && (reply.body as { status?: unknown }).status === "committed") {
+          changed = true;
+        }
+      }
+      if (changed && householdCurrent(scope)) {
+        await loadHouseholdConnections();
+        if (householdCurrent(scope)) {
+          renderHomeSide();
+          renderHomeObjectPane();
+        }
       }
     };
 
@@ -11989,6 +12071,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderPendingAccess();
         const refresh = one<HTMLButtonElement>("[data-refresh]");
         if (refresh) refresh.hidden = agents.length === 0;
+        if (typeof autoEnsureDefaultHouseholdAccess === "function") {
+          void loadHouseholdConnections().then(() => autoEnsureDefaultHouseholdAccess());
+        }
       } catch {
         /* The mint result remains on screen; a roster refresh must never erase its secret. */
       }

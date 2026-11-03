@@ -70,6 +70,12 @@ export function createHouseholdDashboard(root: HTMLElement) {
             if (active !== generation) return { status: 'unknown' };
             return result as unknown as Exclude<HouseholdOutcome, { status: 'released' }>;
           },
+          create: async request => {
+            const result = await tool('object_create', { object_id: request.object_id, title: request.title, content: request.content, request_id: request.request_id }, request.request_id);
+            if (active !== generation) return { status: 'unknown' };
+            if ((result as { status?: unknown }).status === 'committed') kinds.set(request.object_id, request.content.kind);
+            return result as unknown as Exclude<HouseholdOutcome, { status: 'released' }>;
+          },
           readRevision: async revision => {
             const result = await tool('object_read', { object_id: revision.object_id, revision });
             if (active !== generation || result.status !== 'ok' || !result.content) throw new Error('household read refused');
@@ -93,7 +99,9 @@ export function createHouseholdDashboard(root: HTMLElement) {
           },
         };
         if (active === generation) {
-          const unmountObjects = mountHouseholdObjects(root, createHouseholdObjectsController(workspace, actions));
+          const controller = createHouseholdObjectsController(workspace, actions);
+          if (workspace.objects[0]) controller.select(workspace.objects[0].object_id);
+          const unmountObjects = mountHouseholdObjects(root, controller);
           const unmountSkills = root.parentElement && root.ownerDocument
             ? mountWorkspaceSkills(root.parentElement, root, householdCanUpdate(workspace), call)
             : undefined;
