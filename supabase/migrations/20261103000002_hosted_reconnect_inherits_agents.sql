@@ -20,6 +20,7 @@ BEGIN
    AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp())
    AND commonswarm_oauth.provider_family_active(g.provider_grant_id)
    AND o.state='active' AND o.revoked_at IS NULL AND o.connection_expired_at IS NULL
+   AND (o.connection_expires_at IS NULL OR o.connection_expires_at>clock_timestamp())
    AND EXISTS(SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones t WHERE t.grant_id=o.provider_grant_id)
    AND p.transport='hosted_mcp' AND p.turn_only AND p.revoked_at IS NULL
    AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='principal' AND z.target_id=p.principal_id)

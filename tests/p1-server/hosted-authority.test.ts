@@ -1818,6 +1818,15 @@ test("reconnect inherits hosted agents stranded by a retired refresh family: sam
   await sql`UPDATE swarm.hosted_mcp_grants SET state='revoked', revoked_at=clock_timestamp() WHERE grant_id=${other.grantA}::uuid`;
   assert.equal(await inherit(other.grantB), 0, "an owner-revoked grant's agents stay revoked");
   assert.equal(await bound(other.grantB, otherAgent.body.principal_id), 0);
+
+  // A connection deadline that has passed, with the expired marker still NULL, is owner policy too.
+  const expired = await seedHostedFixture();
+  const expiredAgent = claimSeat(expired, expired.grantA, `stranded-${randomUUID()}`);
+  await retireFamily(expired.grantA);
+  await sql`UPDATE swarm.hosted_mcp_grants SET connection_expires_at=clock_timestamp() - interval '1 minute'
+    WHERE grant_id=${expired.grantA}::uuid AND connection_expired_at IS NULL`;
+  assert.equal(await inherit(expired.grantB), 0, "a passed deadline with a NULL marker is not inherited");
+  assert.equal(await bound(expired.grantB, expiredAgent.body.principal_id), 0);
 });
 
 test("historical orphan is reclaimable at the hosted seat limit while new names are refused", { timeout: 180_000 }, async () => {
