@@ -791,15 +791,6 @@ interface CommandResult {
   body: Record<string, unknown>;
 }
 
-export class FreshLoginRequired extends Error {
-  constructor(
-    message = "Sign in again, then press Remove once more. CommonSwarm did not remove anyone.",
-  ) {
-    super(message);
-    this.name = "FreshLoginRequired";
-  }
-}
-
 interface RequestDeadline {
   controller: AbortController;
   clear(): void;
@@ -974,11 +965,6 @@ export async function inviteWorkspaceMember(
     { workspace_id: workspaceId, stream: { kind: "workspace" } },
     "CommonSwarm lost the invitation result. Check Pending access before creating another link.",
   );
-  if (status === 401 && body.error === "fresh_auth_required") {
-    throw new FreshLoginRequired(
-      "Sign in again, then create the invitation once more. CommonSwarm did not create a link.",
-    );
-  }
   if (status !== 200 || body.status !== "accepted") {
     const limit = Number(body.limit);
     throw new Error(

@@ -348,8 +348,6 @@ dialog.dashboard__roster-dialog .pd-detail-identity .pd-orb { inline-size: 52px;
   color: var(--home-ink-muted);
   font-size: 12px;
 }
-.dashboard__roster-dialog .dashboard__roster-dialog-members:has(> p:not([hidden])),
-.dashboard__roster-dialog .dashboard__roster-dialog-members:has(> div:not([hidden])) { background: var(--home-card); }
 
 /* Role: a pill select (the canvas "Member ⌄" control) and a Save pill. */
 .hm-role { margin-block-end: var(--s-3); }
