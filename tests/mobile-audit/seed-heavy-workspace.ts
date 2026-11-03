@@ -139,7 +139,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind) VALUES
         (${channels.general}::uuid, ${workspace}::uuid, 'general', 'Everything for the household', ${owner.id}::uuid, 'user'),
         (${channels.group}::uuid, ${workspace}::uuid, 'design-studio', 'Studio work', ${owner.id}::uuid, 'user'),
-        (${channels.long}::uuid, ${workspace}::uuid, 'household-logistics-and-a-deliberately-long-channel-name', NULL, ${owner.id}::uuid, 'user')`;
+        (${channels.long}::uuid, ${workspace}::uuid, 'household-logistics-and-a-long-channel-name', NULL, ${owner.id}::uuid, 'user')`;
       ids["channel.general"] = channels.general;
       ids["channel.group"] = channels.group;
       ids["channel.long"] = channels.long;
@@ -166,7 +166,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           ) VALUES (
             ${id}::uuid, ${workspace}::uuid, ${from.id}::uuid, ${from.kind}, ${dmToUser}::uuid, ${dmToAgent}::uuid,
             ${root?.id ?? null}::uuid, ${i % 5 === 0 ? "site/src/components/app" : null}, ${kind}, ${BODIES[i % BODIES.length]!},
-            statement_timestamp() + interval '30 days', statement_timestamp() - (${minutesAgo} * interval '1 minute'),
+            statement_timestamp() - (${minutesAgo} * interval '1 minute') + interval '30 days', statement_timestamp() - (${minutesAgo} * interval '1 minute'),
             ${channel}::uuid, ${root?.id ?? null}::uuid, false)`;
         inserted += 1;
         if (!root && !dmToAgent && !dmToUser) roots.push({ id, channel });

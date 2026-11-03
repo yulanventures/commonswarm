@@ -162,6 +162,8 @@ async function main(): Promise<void> {
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
+        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
         for (const screen of screens()) {
           const size = `${viewport.width}x${viewport.height}`;
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
