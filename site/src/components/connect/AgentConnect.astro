@@ -1432,6 +1432,11 @@ const {
     gap: var(--gap-inline);
   }
 
+  @media (width <= 64rem) {
+    .ac__btn, .ac__control, .ac__advanced > summary { min-inline-size: 44px; min-block-size: 44px; }
+    .ac__control { font-size: 16px; }
+  }
+
   @media (max-width: 30rem) {
     .ac {
       padding: var(--pad-card);

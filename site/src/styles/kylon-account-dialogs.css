@@ -207,3 +207,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] [data-si
 live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] [data-signout-others-confirm]:hover:not(:disabled) {
   background: color-mix(in oklab, var(--k-shell-danger, #dc2626) 88%, #000);
 }
+
+@media (width <= 64rem) {
+  :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(input, select) { font-size: 16px; }
+}

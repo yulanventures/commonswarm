@@ -75,3 +75,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] 
   live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary:focus-visible { outline: 3px solid Highlight; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-wiki-composition] .cs-wiki-context .dashboard__brain-index button:focus-visible { outline: 3px solid Highlight; }
 }
+
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-wiki-tools > summary { min-inline-size: 44px; min-block-size: 44px; }
+}

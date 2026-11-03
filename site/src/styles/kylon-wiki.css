@@ -292,3 +292,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
     outline: 3px solid Highlight; outline-offset: 2px;
   }
 }
+
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view :is(button, summary, .dashboard__brain-history a) { min-inline-size: 44px; min-block-size: 44px; }
+}

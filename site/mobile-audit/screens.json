@@ -947,7 +947,7 @@
   {
     "id": "app.files.empty",
     "kind": "view",
-    "path": "/app?w={workspace}&v=files",
+    "path": "/app?w={emptyWorkspace}&v=files",
     "setup": [],
     "ready": "[data-channel-view=\"files\"]:not([hidden]) [data-file-empty]:not([hidden])",
     "states": [
@@ -957,7 +957,7 @@
   {
     "id": "app.wiki.empty",
     "kind": "view",
-    "path": "/app?w={workspace}&v=wiki",
+    "path": "/app?w={emptyWorkspace}&v=wiki",
     "setup": [],
     "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-empty]:not([hidden]):has-text(\"No wiki pages yet.\")",
     "states": [
@@ -975,5 +975,31 @@
     ],
     "status": "pending",
     "reason": "Selected agent queue visibility and density are not guaranteed; confirm in the first artifact."
+  },
+  {
+    "id": "app.todos.empty",
+    "kind": "view",
+    "path": "/app?w={emptyWorkspace}&v=todos",
+    "setup": [],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-home-todos]:not([aria-busy=\"true\"]):not(:has([data-todo-row])) > p.hm-todo-quiet:has-text(\"Nothing open here.\")",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "household_permissions empty"
+    ]
+  },
+  {
+    "id": "app.lists.empty",
+    "kind": "view",
+    "path": "/app?w={emptyWorkspace}&v=lists",
+    "setup": [],
+    "ready": "[data-channel-view=\"objects\"]:not([hidden]) [data-household-objects] nav[aria-label=\"Household objects\"]:not(:has([data-hh-action=\"select\"])) > .hh-empty-note:has-text(\"No lists or docs yet.\")",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "household_permissions empty"
+    ]
   }
 ]

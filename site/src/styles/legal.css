@@ -468,3 +468,7 @@
   .lgl__contents[open] .lgl__toc-summary::after { content: '−'; }
   .lgl__contents[open] .lgl__toc-list { padding-block: 0 var(--s-4); }
 }
+
+@media (width <= 64rem) {
+  .lgl__peers a { display: inline-flex; align-items: center; min-block-size: 44px; }
+}

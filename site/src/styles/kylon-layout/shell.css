@@ -57,12 +57,13 @@
   .cs-ui.cs-org-shell .cs-org-workspace { flex: 1; }
   .cs-ui.cs-org-shell .cs-org-phone-bar {
     display: flex; align-items: center; gap: 8px; flex: none; min-block-size: 64px;
-    padding: 8px; border-block-end: 1px solid var(--cs-line); background: var(--cs-surface);
+    padding: 8px max(0.75rem, env(safe-area-inset-right)) 8px max(0.75rem, env(safe-area-inset-left)); border-block-end: 1px solid var(--cs-line); background: var(--cs-surface);
   }
   .cs-ui.cs-org-shell .cs-org-phone-title { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
   .cs-ui.cs-org-shell .cs-org-drawer[open] {
     display: flex; position: fixed; inset: 0 auto 0 0; inline-size: min(390px, calc(100vw - 24px));
     block-size: 100dvh; max-inline-size: none; max-block-size: none; overflow: hidden;
+    box-sizing: border-box; padding-block-end: max(0.75rem, env(safe-area-inset-bottom));
     border-inline-end: 1px solid var(--cs-line); box-shadow: var(--cs-shadow-popover);
   }
   .cs-ui.cs-org-shell .cs-org-context { gap: 12px; padding: 12px; inline-size: 100%; }
