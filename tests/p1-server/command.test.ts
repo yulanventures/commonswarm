@@ -12336,7 +12336,7 @@ test("workspace lead: owners and admins set it; an untagged person post wakes it
     assert.deepEqual((await post({ signal_kind: "ask" })).woken, [lead.principalId]);
 
     // A tag wins, a person addressee stays a person, status posts and agent posts never route.
-    assert.deepEqual((await post({ to_agent_principal_id: other.principalId })).woken, [other.principalId]);
+    assert.deepEqual((await post({ to_agent_principal_id: other.principalId, in_reply_to: null })).woken, [other.principalId]);
     assert.deepEqual((await post({ to_user_id: f.ua2 })).woken, []);
     assert.deepEqual((await post({ signal_kind: "working-on" })).woken, []);
     assert.deepEqual((await post({}, other.token)).woken, [], "an agent's untagged post does not wake the lead");
