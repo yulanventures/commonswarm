@@ -30,7 +30,9 @@ export const VIEWPORTS = [
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
-type Step = { click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
+/** One setup step; fields run in this order: waitFor, click, type (with text), press, scroll, wait.
+ *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
+type Step = { waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[] }
@@ -238,6 +240,7 @@ async function main(): Promise<void> {
             await page.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
             await page.waitForTimeout(800);
             for (const step of screen.setup ?? []) {
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
               if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
