@@ -249,3 +249,88 @@ These exact declarations supplement stable IDs above; use them to match harness 
 | 17 | `* panel is a real <dialog> opened with showModal(), which buys the focus trap, the Escape` |
 | 130 | `<dialog class="mnav" id="site-menu" aria-label="Menu" data-menu>` |
 | 562 | `/* <dialog> ships with width/height: fit-content and margin: auto. All four are reset` |
+
+## Manifest crosswalk and current capture limits
+
+`screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry is a source-backed candidate, not a verified capture; the first integration run belongs in CI. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Empty, error and loading need per-surface fixture support (`state.empty`, `state.error`, `state.loading` are pending). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
+
+The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Those detail captures are pending until identities, triggers and loaded-content readiness are bound. Public and diagnostic routes are pending because the current runner waits for the dashboard; redirects, invitation states and native-platform behavior also need their own support. No actual captures or runtime verification are claimed.
+
+| Inventory unit | Manifest disposition |
+| --- | --- |
+| R01 | `route.acceptable-use` — pending |
+| R02 | `route.alternatives.crewai` — pending |
+| R03 | `route.alternatives.langgraph` — pending |
+| R04 | `app.signin` — app families below; candidate sign-in |
+| R05 | `route.download` — pending |
+| R06 | `route.guides.claude-code-subagents` — pending |
+| R07 | `route.guides.claude-connector` — pending |
+| R08 | `route.guides.grok-bot` — pending |
+| R09 | `route.home` — pending |
+| R10 | `route.invite` — pending |
+| R11 | `route.oauth.c1-controls.callback` — pending |
+| R12 | `route.oauth.c1-smoke.callback` — pending |
+| R13 | `route.orchestration` — pending |
+| R14 | `route.privacy` — pending |
+| R15 | `route.start` — pending |
+| R16 | `route.support` — pending |
+| R17 | `route.terms` — pending |
+| V01 | `app.signin` — candidate; other states pending |
+| V02 | `app.catchup` — candidate; other states pending |
+| V03 | `app.workspace-new` — pending |
+| V04 | `app.chat.general` — candidate; other states pending |
+| V05 | `app.chat.group` — candidate; other states pending |
+| V06 | `app.thread` — pending |
+| V07 | `app.composer` — pending |
+| V08 | `app.people` — candidate; other states pending |
+| V09 | `app.agent` — candidate; other states pending |
+| V10 | `app.todos` — candidate; other states pending |
+| V11 | `app.todo-detail` — pending |
+| V12 | `app.lists` — pending |
+| V13 | `app.list-conflict` — pending |
+| V14 | `app.files` — candidate; other states pending |
+| V15 | `app.wiki` — candidate; other states pending |
+| V16 | `app.wiki-editor` — pending |
+| V17 | `app.agent-chooser` — pending |
+| V18 | `app.agent-connect` — pending |
+| V19 | `app.invite-person` — pending |
+| V20 | `app.entity-detail` — pending |
+| V21 | `app.invitation-inbox` — pending |
+| V22 | `app.update-toast` — pending |
+| V23 | `app.definitions` — candidate; other states pending |
+| V24 | `app.definitions-diff` — pending |
+| V25 | `app.todo-offer` — pending |
+| V26 | `app.lists-approval` — pending |
+| D01 | `dialog.public-menu` — pending |
+| D02 | `dialog.workspace-settings` — pending |
+| D03 | `dialog.channels` — pending |
+| D04 | `dialog.connected-apps` — pending |
+| D05 | `dialog.signout-others` — pending |
+| D06 | `dialog.account-agents` — pending |
+| D07 | `dialog.command-palette` — candidate; other states pending |
+| D08 | `dialog.workspace-skills` — pending |
+| D09 | `dialog.people-confirm` — pending |
+| D10 | `dialog.admin-access` — pending |
+| D11 | `dialog.invitation-review` — pending |
+| D12 | `dialog.navigation-drawer` — pending |
+| D13 | `dialog.details-sheet` — pending |
+| D14 | `dialog.role-confirm` — pending |
+| M01 | `menu.account` — pending |
+| M02 | `menu.workspace` — pending |
+| M03 | `menu.channels` — pending |
+| M04 | `menu.assignee` — pending |
+| M05 | `menu.mention` — pending |
+| M06 | `menu.receipt` — pending |
+| M07 | `menu.wiki-version` — pending |
+| M08 | `menu.member-actions` — pending |
+| M09 | `menu.provider` — pending |
+| M10 | `menu.landing-preview` — pending |
+| M11 | `menu.download-disclosures` — pending |
+| M12 | `menu.resizers` — pending |
+| M13 | `menu.context` — pending |
+| M14 | `menu.workspace-dock` — pending |
+| M15 | `menu.profile-inspector` — pending |
+
+Additional pending detail captures: `app.definitions.proposed`, `app.definitions.certified`, `app.definitions.proposal-pending`, `app.definitions.diff`, `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
+
+Main-branch addendum: PR #271 added password sign-in after the stated source baseline. The future Account PR B remains unimplemented; this manifest does not claim a password-flow capture.
