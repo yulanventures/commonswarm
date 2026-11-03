@@ -165,7 +165,7 @@ test('only the to-do/list server gate enables its hosted catalog and calls', asy
 
   const enabled = await hostedProtocol({}, true);
   const restored = (await enabled.rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
-  assert.equal(restored.length, 27);
+  assert.equal(restored.length, 28);
   assert.deepEqual(restored, [...core, ...HOSTED_TODO_LIST_TOOLS.map(row => row.name)]);
   assert.ok((await enabled.rpc('tools/call', { name: 'list_list', arguments: { seat: 'seat_' + 'a'.repeat(22), offset: 0, limit: 10 } })).result);
   assert.deepEqual(enabled.calls, ['list_list'], 'enabled control restores admission as well as discovery');

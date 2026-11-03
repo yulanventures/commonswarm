@@ -71,6 +71,7 @@ function fixture() {
 }
 
 
+const fetched: string[] = [];
 function storage(t: { after: (fn: () => void) => void; mock: { method: (...args: any[]) => unknown } }) {
   const settings: Record<string, string> = { SUPABASE_URL: 'https://storage.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-storage-key' };
   const prior = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
@@ -80,6 +81,7 @@ function storage(t: { after: (fn: () => void) => void; mock: { method: (...args:
     const key = url.replace('https://storage.invalid/storage/v1/object/authenticated/swarm-files/', '');
     const bytes = blobs.get(key);
     assert.ok(bytes, `unexpected blob ${key}`);
+    fetched.push(key);
     return new Response(new Uint8Array(bytes));
   });
 }
@@ -119,4 +121,20 @@ test('an agent credential cannot certify, before any database read', async () =>
   assert.deepEqual(await executeHouseholdSurface(tx, workspace, identity, 'certify_001',
     { kind: 'household_definition_certify', object_id: 'spend', revision: spend2.revision }, async () => true),
     { status: 'refused', reason: 'human_confirmation_required' });
+});
+
+test('check_answerable names certified terms with meaning and source, reading only their blobs', async (t) => {
+  storage(t);
+  const { tool } = fixture();
+  fetched.length = 0;
+  assert.deepEqual(await tool('check_answerable', { question: 'What was our MONTHLY spend in October?' }), { status: 'ok', answerable: true,
+    terms: [{ object_id: 'spend', term: 'Monthly spend', revision: spend1.revision, meaning: 'Card spend per month.', source: 'Statements' }],
+    proposed: [], matched_count: 1, reason: null });
+  assert.deepEqual(fetched, [spend1.blob.storage_key], 'only the certified revision is read');
+  fetched.length = 0;
+  assert.deepEqual(await tool('check_answerable', { question: 'When is the due date for rent?' }), { status: 'ok', answerable: false,
+    terms: [], proposed: [{ object_id: 'due', term: 'Due date' }], matched_count: 0, reason: 'only_proposed_terms' });
+  assert.deepEqual(await tool('check_answerable', { question: 'Will it rain tomorrow?' }), { status: 'ok', answerable: false,
+    terms: [], proposed: [], matched_count: 0, reason: 'no_certified_term' });
+  assert.deepEqual(fetched, [], 'no blob is read without a certified match');
 });

@@ -430,6 +430,9 @@ export declare const HOUSEHOLD_LIST_TOOL_REGISTRY: ({
     operations: readonly HouseholdContentOperation[];
     effect: Effect;
 })[];
+export declare const HOUSEHOLD_ANSWERABLE_QUESTION_MAX = 500;
+/** check_answerable returns at most this many certified (and proposed) terms. */
+export declare const HOUSEHOLD_ANSWERABLE_TERM_LIMIT = 5;
 /** Workspace definitions: certified terms agents answer through. These rows carry
  * a server-owned 'definition' kind filter; the object tools never return one.
  * Certifying is a human-only surface command, never a tool. */
@@ -453,6 +456,16 @@ export declare const HOUSEHOLD_DEFINITION_TOOL_REGISTRY: ({
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "definition_read";
+} | {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "check_answerable";
 } | {
     inputSchema: Schema;
     description: string;
@@ -532,7 +545,7 @@ export declare const HOUSEHOLD_TOOLS: {
 /** Definition tools for both MCP catalogs. Agents read certified terms and may
  * propose; certifying stays a human-only surface command. */
 export declare const HOUSEHOLD_DEFINITION_TOOLS: {
-    name: "definitions_search" | "definition_read" | "definition_create" | "definition_update";
+    name: "definitions_search" | "definition_read" | "check_answerable" | "definition_create" | "definition_update";
     title: string;
     description: string;
     inputSchema: Schema;

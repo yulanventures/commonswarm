@@ -136,6 +136,17 @@ const sameDefinition = (a: HouseholdDefinitionFields, b: HouseholdDefinitionFiel
   a.term === b.term && a.meaning === b.meaning && a.source === b.source;
 /** Terms are unique per workspace, ignoring case. */
 export const householdDefinitionKey = (term: string): string => term.normalize('NFKC').toLocaleLowerCase('en-US');
+const definitionWords = (text: string): string[] => householdDefinitionKey(text).match(/[\p{L}\p{N}]+/gu) ?? [];
+/** A question uses a term when it contains the term as a phrase, or every word
+ * of three or more characters in the term. Matching never reads content. */
+export function householdQuestionUsesTerm(question: string, term: string): boolean {
+  const words = definitionWords(term);
+  if (!words.length) return false;
+  const asked = definitionWords(question);
+  if (` ${asked.join(' ')} `.includes(` ${words.join(' ')} `)) return true;
+  const significant = words.filter(word => Array.from(word).length >= 3);
+  return significant.length > 0 && significant.every(word => asked.includes(word));
+}
 
 function sameContent(a: HouseholdContent, b: HouseholdContent): boolean {
   if (a.kind !== b.kind) return false;

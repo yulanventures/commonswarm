@@ -4,7 +4,7 @@
  * to that host's protected attachment channel, never a model-visible URL.
  */
 import {
-  HOUSEHOLD_DEFINITION_TOOL_REGISTRY, householdToolInvocation, validateHouseholdToolArguments,
+  HOUSEHOLD_ANSWERABLE_TERM_LIMIT, HOUSEHOLD_DEFINITION_TOOL_REGISTRY, householdToolInvocation, validateHouseholdToolArguments,
   type HouseholdToolHostContext, type HouseholdToolInvocation,
 } from '../protocol/household-tool-registry.js';
 import { HOUSEHOLD_DEFINITION_TERM_MAX, HOUSEHOLD_DEFINITION_TEXT_MAX } from '../protocol/household-object-events.js';
@@ -48,7 +48,11 @@ export type HouseholdClientResult =
   | { status: 'ok'; kind: 'object_read'; revision: HouseholdRevisionView; live: boolean; content?: HouseholdContent }
   | { status: 'ok'; kind: 'definitions_search'; definitions: readonly HouseholdDefinitionSummary[]; next_offset: number | null }
   | { status: 'ok'; kind: 'definition_read'; object_id: string; current: HouseholdDefinitionVersion;
-      certified: HouseholdDefinitionCertifiedVersion | null; proposal_pending: boolean };
+      certified: HouseholdDefinitionCertifiedVersion | null; proposal_pending: boolean }
+  | { status: 'ok'; kind: 'check_answerable'; answerable: boolean;
+      terms: readonly (HouseholdDefinitionText & { object_id: string; revision: HouseholdRevisionRef })[];
+      proposed: readonly { object_id: string; term: string }[]; matched_count: number;
+      reason: null | 'no_certified_term' | 'only_proposed_terms' };
 
 export interface HouseholdDefinitionCertificationView { revision: HouseholdRevisionRef; certified_by: string; certified_at: number }
 export interface HouseholdDefinitionSummary { object_id: string; term: string; revision: HouseholdRevisionRef;
@@ -196,6 +200,29 @@ function decodeDefinitionRead(data: Row, invocation: HouseholdClientInvocation):
       definitions.push({ object_id: entry.object_id, term: entry.term, revision: ref, certification: certified });
     }
     return { status: 'ok', kind: 'definitions_search', definitions, next_offset: data.next_offset };
+  }
+  if (tool === 'check_answerable') {
+    const limit = HOUSEHOLD_ANSWERABLE_TERM_LIMIT;
+    if (typeof data.answerable !== 'boolean' || !Array.isArray(data.terms) || !Array.isArray(data.proposed)
+      || data.terms.length > limit || data.proposed.length > limit || !count(data.matched_count) || data.matched_count < data.terms.length
+      || !(data.reason === null || data.reason === 'no_certified_term' || data.reason === 'only_proposed_terms')
+      || data.answerable !== (data.terms.length > 0) || (data.reason === null) !== data.answerable) return null;
+    const terms = [];
+    for (const value of data.terms) {
+      const entry = row(value);
+      const fields = definitionText(entry);
+      const ref = entry && id(entry.object_id) ? revision(entry.revision, workspace, entry.object_id) : null;
+      if (!fields || !ref) return null;
+      terms.push({ object_id: entry!.object_id as string, revision: ref, ...fields });
+    }
+    const proposed = [];
+    for (const value of data.proposed) {
+      const entry = row(value);
+      if (!entry || !id(entry.object_id) || !id(entry.term)) return null;
+      proposed.push({ object_id: entry.object_id, term: entry.term });
+    }
+    return { status: 'ok', kind: 'check_answerable', answerable: data.answerable, terms, proposed,
+      matched_count: data.matched_count, reason: data.reason };
   }
   if (tool !== 'definition_read' || !id(data.object_id) || typeof data.proposal_pending !== 'boolean') return null;
   const objectId = data.object_id;

@@ -81,3 +81,18 @@ test('proposals are ordinary committed writes; certify is not a tool', async () 
   assert.equal(sent[0]!.tool, 'definition_create');
   assert.ok(!tools.tools.some(tool => /certif/i.test(tool.name)));
 });
+
+test('check_answerable decodes closed and marks provenance truncated past the shown terms', async () => {
+  const answer = { status: 'ok', answerable: true, matched_count: 6, reason: null, proposed: [{ object_id: 'due', term: 'Due date' }],
+    terms: [{ object_id: 'spend', term: 'Monthly spend', revision: ref('spend', 1), meaning: 'Card spend per month.', source: 'Statements', extra: 'x' }] };
+  const { tools, sent } = host({ check_answerable: answer });
+  const { body } = await output(tools, 'check_answerable', { question: 'monthly spend?' });
+  assert.deepEqual(sent[0], { tool: 'check_answerable', arguments: { seat, question: 'monthly spend?' } });
+  assert.deepEqual(body.terms, [{ object_id: 'spend', revision: ref('spend', 1), term: 'Monthly spend', meaning: 'Card spend per month.', source: 'Statements' }]);
+  assert.deepEqual(body.provenance, { sources: [{ kind: 'definition', id: 'spend', title: 'Monthly spend', revision: ref('spend', 1).token }],
+    query: { tool: 'check_answerable', question: 'monthly spend?' }, row_count: 1, truncated: true });
+  for (const bad of [{ ...answer, answerable: false }, { ...answer, reason: 'no_certified_term' }, { ...answer, matched_count: 0 }]) {
+    const { tools: other } = host({ check_answerable: bad });
+    assert.equal((await output(other, 'check_answerable', { question: 'x' })).body.status, 'unknown');
+  }
+});

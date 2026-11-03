@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { HOSTED_TODO_LIST_TOOLS, HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, householdToolInvocation, validateHouseholdHumanCommand,
   validateHouseholdToolArguments } from '../src/protocol/household-tool-registry.js';
 import { emptyHouseholdObjectState, decideHouseholdObject, reduceHouseholdObjectStream, readHouseholdObjects,
-  validDefinition, type HouseholdObjectCommand, type HouseholdVerifiedContent } from '../src/protocol/household-objects.js';
+  validDefinition, householdQuestionUsesTerm, type HouseholdObjectCommand, type HouseholdVerifiedContent } from '../src/protocol/household-objects.js';
 import type { HouseholdContent, HouseholdObjectEvent, HouseholdObjectState } from '../src/protocol/household-object-events.js';
 import type { HouseholdAccessFacts } from '../src/protocol/household-object-policy.js';
 
@@ -131,4 +131,17 @@ test('the certify surface command is closed and binds its revision; no catalog o
   const names = [...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS, ...HOSTED_TODO_LIST_TOOLS].map(tool => tool.name);
   for (const name of ['definitions_search', 'definition_read', 'definition_create', 'definition_update']) assert.ok(names.includes(name));
   assert.ok(!names.some(name => /certif/i.test(name)));
+});
+
+test('a question uses a term as a phrase or through all its significant words', () => {
+  const uses = (question: string, term: string) => householdQuestionUsesTerm(question, term);
+  assert.equal(uses('What is our monthly spend?', 'Monthly spend'), true);
+  assert.equal(uses('Spend for the month, monthly?', 'Monthly spend'), true, 'all significant words, any order');
+  assert.equal(uses('How much did we spend?', 'Monthly spend'), false);
+  assert.equal(uses('ＭＯＮＴＨＬＹ ＳＰＥＮＤ', 'monthly spend'), true, 'NFKC and case');
+  assert.equal(uses('Who is an active member?', 'Active member'), true);
+  assert.equal(uses('Is the A/C on?', 'A/C'), true, 'short words still match as a phrase');
+  assert.equal(uses('Is the AC on?', 'A/C'), false);
+  assert.equal(uses('monthly spending', 'Monthly spend'), false, 'whole words only');
+  assert.equal(uses('anything', '!!'), false);
 });
