@@ -48,6 +48,12 @@ live-dashboard [data-account-agents-dialog] :is(button, a):focus-visible {
 
 @media (width <= 64rem) {
   live-dashboard [data-account-agents-dialog] :is(input, select) { font-size: 16px; }
+  live-dashboard [data-account-agents-dialog] .account-agents__workspace-name {
+    display: inline-flex;
+    align-items: center;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
 }
 @media (width <= 30rem) {
   live-dashboard [data-account-agents-dialog] { padding: 16px; }
