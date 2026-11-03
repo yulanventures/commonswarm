@@ -96,3 +96,22 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:is(:hov
   min-inline-size: 0;
   max-inline-size: 100%;
 }
+
+/* Touch widths: the receipt rendered one character per line ("Seen by ..." as a vertical
+   strip, 2026-11-03 audit). Its column was minmax(0, 1fr) and its text could break anywhere,
+   so a narrow toolbar collapsed it to a sliver. Give the toolbar the full message width, the
+   receipt column a real minimum, and break only between words. */
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:is(:hover, :focus-within, :has(.dashboard__message-receipt[open])) .dashboard__message-body > .dashboard__message-tools {
+    flex: 1 1 100%;
+    inline-size: 100%;
+    max-inline-size: 100%;
+    grid-template-columns: minmax(min(12rem, 100%), 1fr) fit-content(50%);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt > summary {
+    min-inline-size: min(12rem, 100%);
+    overflow-wrap: break-word;
+  }
+}

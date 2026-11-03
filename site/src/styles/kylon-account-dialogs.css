@@ -1,5 +1,5 @@
 /* Native dialogs keep their lifecycle, data, permissions and action handlers. */
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) {
   margin: auto;
   inline-size: min(640px, calc(100% - 32px));
   max-inline-size: calc(100% - 32px);
@@ -16,10 +16,10 @@
   color-scheme: var(--k-shell-scheme);
   overflow-wrap: anywhere;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog)::backdrop {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog)::backdrop {
   background: rgb(0 0 0 / 32%);
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) > header {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) > header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -28,30 +28,30 @@
   margin-block-end: 16px;
   border: 0;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) > header > div {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) > header > div {
   min-inline-size: 0;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) h2 {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) h2 {
   margin: 0;
   font: 600 20px/28px var(--k-shell-font);
   letter-spacing: -.4px;
   color: var(--k-shell-ink);
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__eyebrow, .eyebrow) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__eyebrow, .eyebrow) {
   margin: 0 0 4px;
   color: var(--k-shell-secondary);
   font: 400 12px/18px var(--k-shell-font);
   letter-spacing: 0;
   text-transform: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(button, input, select) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) :is(button, input, select) {
   min-block-size: 44px;
   max-inline-size: 100%;
   font: 400 13px/20px var(--k-shell-font);
   letter-spacing: 0;
   border-radius: 6px;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) button {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) button {
   padding: 8px 12px;
   color: var(--k-shell-ink);
   background: var(--k-shell-surface);
@@ -60,15 +60,15 @@
   overflow-wrap: anywhere;
   cursor: pointer;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) button:hover:not(:disabled) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) button:hover:not(:disabled) {
   background: var(--k-shell-hover);
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) button:focus-visible {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) button:focus-visible {
   outline: 2px solid var(--k-shell-focus);
   outline-offset: 2px;
   box-shadow: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) > header > button {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) > header > button {
   flex: none;
   min-inline-size: 44px;
   padding-inline: 8px;
@@ -130,7 +130,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats button {
   flex: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]) {
   justify-self: start;
   color: var(--danger);
   border-color: transparent;
@@ -138,7 +138,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
   font-weight: 400;
   text-decoration: none;
 }
-:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]):hover:not(:disabled) {
+:is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) :is(.dashboard__button--danger, .dashboard__text-button--danger, button[data-tone="danger"]):hover:not(:disabled) {
   color: var(--danger);
   background: var(--danger-dim);
   border-color: transparent;
@@ -176,7 +176,7 @@ admin-delegations[data-kylon-account] > dialog :is(article, li) {
   border-radius: 8px;
 }
 @media (width <= 440px) {
-  :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) {
+  :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) {
     padding: 20px;
   }
   live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats > li {
@@ -209,5 +209,5 @@ live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] [data-si
 }
 
 @media (width <= 64rem) {
-  :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], admin-delegations[data-kylon-account] > dialog) :is(input, select) { font-size: 16px; }
+  :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], admin-delegations[data-kylon-account] > dialog) :is(input, select) { font-size: 16px; }
 }
