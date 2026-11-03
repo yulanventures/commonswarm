@@ -317,7 +317,7 @@ function syntheticLivePair(): JsonObject {
           {
             handler: "reverse_proxy",
             upstreams: [{ dial: "127.0.0.1:9000" }],
-            headers: { request: { set: { "X-Forwarded-For": ["{http.request.client_ip}"] } } },
+            headers: { request: { set: { "X-Forwarded-For": ["{http.vars.client_ip}"] } } },
             transport: { response_header_timeout: 165_000_000_000 },
           },
         ],

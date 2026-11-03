@@ -14,7 +14,7 @@
 			header_up Host {host}
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s
@@ -31,7 +31,7 @@
 			header_up Host {host}
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s
@@ -48,7 +48,7 @@
 			header_up Host {host}
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s
@@ -68,7 +68,7 @@
 			header_up Host {host}
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s
@@ -85,7 +85,7 @@
 			header_up Host {host}
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s
@@ -107,7 +107,7 @@
 		}
 		rewrite * /functions/v1/mcp
 		reverse_proxy 127.0.0.1:9000 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 165s
@@ -122,7 +122,7 @@
 	handle @mcp_metadata {
 		rewrite * /functions/v1/mcp/.well-known/oauth-protected-resource/mcp
 		reverse_proxy 127.0.0.1:9000 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 15s

@@ -272,7 +272,7 @@ function assertProxyDetails(proxies) {
   );
   assert.ok(functions, "functions route");
   assert.deepEqual(functions.headers?.request?.set?.["X-Forwarded-For"], [
-    "{http.request.client_ip}",
+    "{http.vars.client_ip}",
   ]);
   assert.equal(functions.transport?.response_header_timeout, 165_000_000_000);
 

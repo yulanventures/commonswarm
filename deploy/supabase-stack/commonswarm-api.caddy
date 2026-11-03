@@ -48,7 +48,7 @@ api.commonswarm.com {
 	@edge_functions path /functions/v1 /functions/v1/*
 	handle @edge_functions {
 		reverse_proxy 127.0.0.1:9000 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			transport http {
 				response_header_timeout 165s
 			}
@@ -70,7 +70,7 @@ api.commonswarm.com {
 		# trusted_proxies_strict), as the functions proxy does, and drop any inbound SBFF, so a
 		# caller cannot choose its own rate-limit key.
 		reverse_proxy 127.0.0.1:18001 {
-			header_up X-Forwarded-For {http.request.client_ip}
+			header_up X-Forwarded-For {http.vars.client_ip}
 			header_up -Sb-Forwarded-For
 		}
 	}
