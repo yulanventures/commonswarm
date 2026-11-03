@@ -93,6 +93,10 @@ const CHECKS = () => {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return false;
     const style = getComputedStyle(el);
+    // Content of a closed <details> (anything but its own summary) is not shown, even when the
+    // engine still reports a box for it (::details-content).
+    const closed = el.closest("details:not([open])");
+    if (closed && !closed.querySelector(":scope > summary")?.contains(el)) return false;
     return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05 && !el.closest("[hidden],[inert]");
   };
   const inScroller = (el: Element) => {
