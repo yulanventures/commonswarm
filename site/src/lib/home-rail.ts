@@ -23,6 +23,8 @@ export interface RailCallbacks {
   openAgent: (agentId: Id) => void;
   /** Lets the page keep the "Show N more" state across rebuilds. */
   toggleWorkspaces?: (expanded: boolean) => void;
+  /** Right-click (or Shift+F10 / the Menu key) on a Direct messages row. The page decides the actions. */
+  contextMenu?: (target: { kind: "person" | "agent"; id: Id }, event: MouseEvent, row: HTMLElement) => void;
 }
 
 /** The rail model plus the agent whose page is open (home-types.ts RailVM is frozen). */
@@ -206,6 +208,7 @@ function interactiveRow(doc: Document, className: string, sample: boolean, open:
 function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: RailCallbacks, currentDmId?: Id): HTMLElement {
   const row = interactiveRow(doc, "hm-rail__person", sample, () => callbacks.openPerson(person.id));
   row.dataset.railPerson = person.id;
+  if (!sample && callbacks.contextMenu) row.addEventListener("contextmenu", event => callbacks.contextMenu?.({ kind: "person", id: person.id }, event, row));
   if (currentDmId === person.id) row.setAttribute("aria-current", "page");
   row.setAttribute("aria-label", railPersonName(person));
   const face = node(doc, "span", "hm-rail__face");
@@ -222,6 +225,7 @@ function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: Rai
   const item = node(doc, "li", "hm-rail__agent-item");
   const row = interactiveRow(doc, "hm-rail__agent", sample, () => callbacks.openAgent(agent.id));
   row.dataset.railAgent = agent.id;
+  if (!sample && callbacks.contextMenu) row.addEventListener("contextmenu", event => callbacks.contextMenu?.({ kind: "agent", id: agent.id }, event, row));
   if (currentAgentId === agent.id || currentDmId === agent.id) row.setAttribute("aria-current", "page");
   row.dataset.agentState = agent.state.kind;
   row.setAttribute("aria-label", railAgentName(agent));
