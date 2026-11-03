@@ -5587,7 +5587,8 @@ async function setWorkspaceLead(tx:Sql,body:RequestBody,auth:AuthContext,detail:
   const [stream]=await tx<{stream_id:string}[]>`SELECT stream_id FROM swarm.streams
     WHERE workspace_id=${workspace}::uuid AND kind='workspace' FOR UPDATE`;
   if(!stream) return await refuse(403,'forbidden');
-  const hash=await hostedRequestHash('user',auth.actor.user,body);
+  // The pure-core hash over the command, as every ledgered workspace command uses.
+  const hash=requestHash(auth.actor,command as never);
   const [prior]=await tx<{request_hash:string;workspace_id:string;stream_id:string;response:unknown}[]>`SELECT request_hash,workspace_id,stream_id,response
     FROM swarm.idempotency_keys WHERE principal_kind='user' AND principal_id=${auth.actor.user} AND command_id=${body.command_id}`;
   if(prior) {
