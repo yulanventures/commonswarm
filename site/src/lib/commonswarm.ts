@@ -763,6 +763,98 @@ export async function signOutOtherDevices(
   throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
 }
 
+/** Minimum password length; GoTrue enforces the same (GOTRUE_PASSWORD_MIN_LENGTH=12, #273). */
+export const PASSWORD_MIN_LENGTH = 12;
+
+/** GoTrue needs a reauthentication code before this password change (the session is older than
+ *  a day). sendPasswordCode() emails one; pass it to setPassword() as the nonce. */
+export class PasswordCodeRequired extends Error {
+  constructor() {
+    super("Enter the code we just emailed you to confirm the change.");
+    this.name = "PasswordCodeRequired";
+  }
+}
+
+function passwordError(status: number, code: string, fallback: string): Error {
+  if (code === "reauthentication_needed") return new PasswordCodeRequired();
+  if (code === "reauthentication_not_valid") return new Error("That code is wrong or expired. Send a new code and try again.");
+  if (code === "weak_password") return new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters, and avoid common passwords.`);
+  if (code === "same_password") return new Error("That is already your password. Choose a different one.");
+  if (status === 429 || code === "over_request_rate_limit" || code === "over_email_send_rate_limit") {
+    return new Error("Too many attempts. Wait a few minutes and try again.");
+  }
+  if (status === 401 || status === 403 || code === "session_not_found" || code === "bad_jwt") {
+    return new Error("Your sign-in could not be confirmed. Sign in again, then try once more.");
+  }
+  return new Error(fallback);
+}
+
+interface PasswordRequestOptions { fetcher?: typeof fetch; target?: Deployment | null }
+
+/* Both password calls go to GoTrue with THIS session's own access token (and the public anon key),
+ * never the SDK's current session, so a dialog opened as one account can never act as another. */
+async function passwordRequest(
+  session: Pick<Session, "access_token"> | null, path: string, init: RequestInit,
+  fallback: string, options: PasswordRequestOptions,
+): Promise<void> {
+  const target = options.target === undefined ? deployment() : options.target;
+  if (!target) throw new NoDeployment();
+  if (!session || typeof session.access_token !== "string" || !session.access_token) {
+    throw new Error("Sign in again, then try once more.");
+  }
+  const deadline = requestDeadline();
+  let response: Response;
+  try {
+    response = await (options.fetcher ?? fetch)(`${target.url}/auth/v1/${path}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${session.access_token}`, apikey: target.anonKey },
+      signal: deadline.controller.signal,
+    });
+  } catch {
+    throw new Error(fallback);
+  } finally {
+    deadline.clear();
+  }
+  if (response.status === 200) return;
+  let code = "";
+  try {
+    const body = await response.json() as { error_code?: unknown; code?: unknown };
+    code = typeof body.error_code === "string" ? body.error_code : typeof body.code === "string" ? body.code : "";
+  } catch { /* no JSON: status alone decides */ }
+  throw passwordError(response.status, code, fallback);
+}
+
+/**
+ * Set or change the password of the account `session` belongs to (CS-E17 part B). Sessions older
+ * than a day must pass the emailed reauthentication code as `nonce`
+ * (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION); without one GoTrue refuses and this
+ * throws PasswordCodeRequired. GoTrue's text never reaches the page.
+ */
+export async function setPassword(
+  session: Pick<Session, "access_token"> | null,
+  password: string,
+  nonce?: string,
+  options: PasswordRequestOptions = {},
+): Promise<void> {
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters.`);
+  }
+  const code = nonce?.trim();
+  await passwordRequest(session, "user", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(code ? { password, nonce: code } : { password }),
+  }, "Your password was not changed. Try again.", options);
+}
+
+/** Email the account `session` belongs to a reauthentication code for setPassword(). */
+export async function sendPasswordCode(
+  session: Pick<Session, "access_token"> | null,
+  options: PasswordRequestOptions = {},
+): Promise<void> {
+  await passwordRequest(session, "reauthenticate", { method: "GET" }, "The code could not be sent. Try again.", options);
+}
+
 export async function signOut(): Promise<void> {
   deadSession = false;
   await client()?.auth.signOut();
