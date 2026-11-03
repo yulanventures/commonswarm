@@ -600,6 +600,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     </label>
                   ))}
                 </fieldset>
+                <label class="dashboard__approval-default">
+                  <input type="checkbox" data-household-allow-own-agents checked />
+                  <span>Let my connected agents use Lists &amp; docs</span>
+                </label>
                 <div class="dashboard__access-actions">
                   <button class="dashboard__button dashboard__button--primary" type="button" data-household-confirm>
                     Confirm
@@ -8831,6 +8835,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           rememberPurpose(scope.workspaceId, purpose);
           say("Your access is confirmed.");
           await refreshHouseholdAccess();
+          if (
+            householdCurrent(scope) &&
+            one<HTMLInputElement>("[data-household-allow-own-agents]")?.checked === true &&
+            typeof approveOwnUnapprovedAgents === "function"
+          ) {
+            await approveOwnUnapprovedAgents(scope, role);
+          }
           if (householdCurrent(scope) && activeWorkspaceView === "objects") void openHouseholdView();
         } else {
           say(!owner && result.body.reason === "workspace_boundary_mismatch"
@@ -8882,6 +8893,74 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (listsAllowLanding === landing && landing.content === content) renderHouseholdAccess("content");
         });
       }
+    };
+
+    /** Approve only the viewer's own unapproved connections after an explicit consent click
+     *  or an explicit agent-key mint click. Never runs on page load and never sends
+     *  household_permissions automatically.
+     */
+    const approveOwnUnapprovedAgents = async (
+      scope: HouseholdScope,
+      role: "editor" | "reader",
+      filterPrincipalId?: string,
+      filterTokenId?: string | null,
+    ): Promise<void> => {
+      if (!householdCurrent(scope) || sampleMode) return;
+      await loadHouseholdConnections();
+      if (!householdCurrent(scope) || householdConnectionsReadState !== "succeeded") return;
+      const operations = role === "reader" ? ["read"] : ["read", "create", "update"];
+      let changed = false;
+      for (const connection of householdConnections) {
+        if (connectionApproval(connection) !== null) continue;
+        const effective = connection.effective_access as { source?: string; restrictions?: unknown[] } | undefined;
+        if (effective && (effective.source !== "none" || (Array.isArray(effective.restrictions) && effective.restrictions.length > 0))) continue;
+        const principalId = String(connection.principal_id ?? "");
+        const connectionId = String(connection.connection_id ?? "");
+        const grantId = String(connection.grant_id ?? "");
+        if (!principalId || !connectionId || !grantId || householdReceipts.has(principalId)) continue;
+        if (filterPrincipalId && principalId !== filterPrincipalId) continue;
+        if (filterTokenId && connectionId !== filterTokenId) continue;
+        if (!agents.some((agent) => agent.principalId === principalId && agent.ownerUserId === scope.session.user.id)) continue;
+        const reply = await postCommand(
+          scope.session,
+          uuid(),
+          {
+            kind: "household_approve_connection",
+            connection: {
+              kind: connection.kind === "hosted" ? "hosted" : "local",
+              connection_id: connectionId,
+              grant_id: grantId,
+              principal_id: principalId,
+              operations,
+            },
+          },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+        ).catch(() => null);
+        if (!householdCurrent(scope)) return;
+        if (reply && (reply.body as { status?: unknown }).status === "committed") {
+          changed = true;
+        }
+      }
+      if (changed && householdCurrent(scope)) {
+        await loadHouseholdConnections();
+        if (householdCurrent(scope)) {
+          renderHomeSide();
+          renderHomeObjectPane();
+        }
+      }
+    };
+
+    const approveMintedOwnAgent = async (workspaceId: string, principalId: string, tokenId: string | null): Promise<void> => {
+      const scope = householdScope();
+      if (!scope || scope.workspaceId !== workspaceId || sampleMode) return;
+      if (!agents.some((agent) => agent.principalId === principalId && agent.ownerUserId === scope.session.user.id)) return;
+      if (householdAccess.workspaceId !== scope.workspaceId || householdAccess.status === "unknown") {
+        const next = await readHouseholdAccess(scope);
+        if (!householdCurrent(scope)) return;
+        if (next.status === "ok") householdAccess = next;
+      }
+      if (householdAccess.workspaceId !== scope.workspaceId || householdAccess.status !== "ok" || !householdAccess.contentRole) return;
+      await approveOwnUnapprovedAgents(scope, householdAccess.contentRole, principalId, tokenId);
     };
 
     /** The setup checklist, from current reads and a reminder of unsettled creation setup. */
@@ -12025,6 +12104,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderPendingAccess();
         const refresh = one<HTMLButtonElement>("[data-refresh]");
         if (refresh) refresh.hidden = agents.length === 0;
+        if (typeof detail?.principalId === "string" && typeof approveMintedOwnAgent === "function") {
+          const tokenId = typeof (detail as { tokenId?: unknown }).tokenId === "string"
+            ? String((detail as { tokenId?: unknown }).tokenId)
+            : null;
+          void approveMintedOwnAgent(workspaceId, detail.principalId, tokenId);
+        }
       } catch {
         /* The mint result remains on screen; a roster refresh must never erase its secret. */
       }
