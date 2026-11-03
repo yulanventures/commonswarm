@@ -323,7 +323,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M05 | `menu.mention` — pending |
 | M06 | `menu.receipt` — pending |
 | M07 | `menu.wiki-version` — pending |
-| M08 | `menu.member-actions` — pending |
+| M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action |
 | M09 | `menu.provider` — pending |
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
@@ -341,3 +341,5 @@ Main-branch addendum: PR #271 added password sign-in after the stated source bas
 ## Additional capture candidates (source mapping; CI witness pending)
 
 After the stated baseline, PR #282 adds D15, making 15 dialog families (12 static and 3 dynamic) at this newer source revision. D15 is the Password dialog: `dialog.password` opens `[data-password-open]` and captures the initial form only. It does not type, submit, resend, confirm, or perform an auth mutation; challenge and result states remain pending. Account dialogs and empty Skills use real menu or palette actions. Definitions detail and diff entries require their exact create/certify/update seed steps and scroll the selected detail into the frame. `route.home.footer`, `route.home.footer.guides-end`, `route.home.footer.legal-end`, `menu.landing-preview`, and `route.guides.claude-code-subagents.disclosure` explicitly scroll their public targets into view. The three footer frames cover distinct positions; CI must still verify their resulting frames. These candidates are not runtime evidence; thread and Details remain pending.
+
+`menu.member-actions` opens and scrolls the seeded Atlas agent row actions in People; `{agent}` is Atlas, guarded by its exact creation step. It does not activate Remove or another menu action. CI must confirm the open menu frame.

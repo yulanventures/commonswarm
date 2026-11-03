@@ -793,14 +793,26 @@
   {
     "id": "menu.member-actions",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"])"
+      },
+      {
+        "click": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) summary.pd-actions-toggle"
+      },
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) .pd-row-actions[open] .pd-agent-actions"
+      }
+    ],
+    "ready": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) .pd-row-actions[open] .pd-agent-actions",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
   },
   {
     "id": "menu.provider",

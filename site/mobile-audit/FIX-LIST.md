@@ -72,9 +72,10 @@ Counts below are the old Slice2 bounding-box measurement across12 captures per I
 
 ## Capture changes in PR B
 
-The proposed manifest has91 entries:44 source-backed executable candidates and47 pending. The human source inventory crosswalk has73 units, including the new initial Password dialog D15. Counts are source metadata, not executed coverage.
+The proposed manifest has91 entries:45 source-backed executable candidates and46 pending. The human source inventory crosswalk has73 units, including the new initial Password dialog D15. Counts are source metadata, not executed coverage.
 
 - Eleven account/app promotions: account menu; Your agents; Connected apps; initial Password form; sign-out-other-sessions confirmation; empty Skills; resolved todo; proposed/certified/proposal-pending Definitions; selected proposal diff.
+- The seeded Atlas agent row actions capture opens the menu only; it never selects Remove or another action.
 - Password and sign-out captures open only. They never type credentials, submit changes, resend, reauthenticate or confirm sign-out.
 - Seed guards require recorded positive steps for the selected to-do and Definitions. Connected apps has no guaranteed grants; Skills is empty. They are not presented as populated states.
 - Public additions scroll the footer, its Guides and Legal end links, and homepage preview into view and open a guide disclosure; distinct footer frames cover the lower columns on phones. Existing Definitions capture scrolls to its intended surface.
