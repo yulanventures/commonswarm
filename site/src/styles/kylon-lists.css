@@ -66,8 +66,8 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__button
   padding: 8px 12px; border: 1px solid var(--k-shell-control); color: var(--k-shell-ink); background: var(--k-shell-surface); box-shadow: none;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__button,.household-objects button):hover:enabled { background: var(--k-shell-hover); }
-live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list]) { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
-live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
+live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list],[data-def-action=certify],[data-def-action=save],[data-def-action=update],[data-def-action=create]) { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+live-dashboard[data-kylon-shell] .dashboard__objects-view button:is(.dashboard__button--primary,[data-hh-action=save],[data-hh-action=reviewed-save],[data-hh-action=add-item],[data-hh-action=create-list],[data-def-action=certify],[data-def-action=save],[data-def-action=update],[data-def-action=create]):hover:enabled { background: var(--accent-bright); border-color: var(--accent-bright); }
 live-dashboard[data-kylon-shell] .dashboard__objects-view button:disabled { color: var(--k-shell-secondary); background: var(--k-shell-subtle); border-color: var(--k-shell-control); opacity: 1; cursor: default; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(p,.hh-eyebrow) { margin: 0 0 4px; color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font); letter-spacing: 0; text-transform: none; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects > header :is(.hh-workspace-identity,.hh-workspace-meta) {
@@ -228,4 +228,69 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice
   @media (hover: none) {
     live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-list-row > button.hh-list-remove { opacity: 1; }
   }
+}
+
+/* Workspace Definitions (C2 semantic layer): certified terms, meanings, sources and proposal diffs. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions {
+  margin-block-start: 16px; padding-block-start: 20px; border-block-start: 1px solid var(--k-shell-line);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions nav ul button {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-block-end: 4px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-head > h3 {
+  margin: 0; font: 600 16px/1.35 var(--k-shell-font); letter-spacing: -.2px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-badge {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  font: 500 11px/1.4 var(--k-shell-font); white-space: nowrap;
+  color: var(--k-shell-secondary); background: var(--k-shell-subtle);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-badge--certified {
+  color: var(--k-shell-accent-ink); background: var(--k-shell-accent);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-badge--pending {
+  color: var(--k-shell-ink); background: var(--k-shell-selected);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-meta {
+  margin: 0 0 12px; color: var(--k-shell-secondary); font: 400 12px/1.55 var(--k-shell-font);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-fields {
+  display: grid; gap: 10px; margin: 12px 0;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-fields > div {
+  padding: 10px 12px; border-radius: 8px; background: var(--k-shell-subtle);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-fields dt {
+  margin: 0 0 2px; color: var(--k-shell-secondary); font: 500 11px/1.4 var(--k-shell-font);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-fields dd {
+  margin: 0; color: var(--k-shell-ink); font: 400 14px/1.5 var(--k-shell-font); white-space: pre-wrap;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-diff {
+  margin-block-start: 16px; padding: 14px; border-radius: 10px; background: var(--k-shell-subtle);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-diff .hh-comparison {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 12px; margin-block: 8px 12px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-diff .hh-comparison > section {
+  padding: 10px 12px; border-radius: 8px; background: var(--k-shell-surface);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions .hh-def-certify-bar {
+  margin-block: 12px;
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) {
+  display: grid; gap: 10px; margin-block-start: 16px; padding-block-start: 14px; border-block-start: 1px solid var(--k-shell-line);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) > label {
+  display: grid; gap: 4px; color: var(--k-shell-secondary); font: 500 12px/1.4 var(--k-shell-font);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) :is(input,textarea) {
+  box-sizing: border-box; inline-size: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px;
+  color: var(--k-shell-ink); background: var(--k-shell-subtle); font: 400 13px/1.45 var(--k-shell-font);
+}
+live-dashboard[data-kylon-shell] .dashboard__objects-view .household-definitions :is(.hh-def-edit,.hh-def-form) :is(input,textarea):focus {
+  outline: none; background: var(--k-shell-hover);
 }
