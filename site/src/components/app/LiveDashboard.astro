@@ -1111,6 +1111,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { greetingName } from "../../lib/greeting-name";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
+  import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
@@ -4800,24 +4801,59 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
+      /* People and agents open a 1:1 Direct Message in this workspace's Chat. Yourself, or someone not in
+         this workspace, keeps the People & agents page. */
+      const personHere = (id: string): boolean => homeRoute.view !== "catchup" && id !== homeViewerId() && members.some(member => member.userId === id);
+      const openRailPerson = (id: string): void => {
+        if (personHere(id)) void openDirectMessage({ kind: "person", id });
+        else void selectHomePerson(id);
+      };
+      /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
+         workspace whose roster names it. */
+      const railAgentWorkspace = (id: string): string | null => {
+        const has = (people: HomePeople | undefined): boolean => !!people &&
+          (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
+        return homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
+          : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
+      };
+      const openRailAgent = (id: string): void => {
+        const workspaceId = railAgentWorkspace(id);
+        if (workspaceId && workspaceId === activeWorkspaceId && homeRoute.view !== "catchup") void openDirectMessage({ kind: "agent", id });
+        else if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
+      };
+      /* Right-click on a Direct messages row: the same opens as a click, plus the row's other places and,
+         for owners and admins, the workspace Lead. Every action is an existing control's own call. */
+      const railContextMenu = (target: { kind: "person" | "agent"; id: string }, event: MouseEvent, row: HTMLElement): void => {
+        const name = row.querySelector(".hm-rail__name")?.textContent?.trim() ?? "";
+        const copyName: ContextMenuItem = { label: "Copy name", run: () => { void navigator.clipboard?.writeText(name).catch(() => {}); } };
+        if (target.kind === "person") {
+          openContextMenu(event, row, [
+            ...(personHere(target.id) ? [{ label: "Message", run: () => { void openDirectMessage({ kind: "person", id: target.id }); } }] : []),
+            { label: "View profile", run: () => { void selectHomePerson(target.id); } },
+            null, copyName,
+          ], name);
+          return;
+        }
+        const workspaceId = railAgentWorkspace(target.id);
+        const here = !!workspaceId && workspaceId === activeWorkspaceId && homeRoute.view !== "catchup";
+        const rosterAgent = agents.find(agent => agent.principalId === target.id);
+        const mayLead = here && viewerMaySetWorkspaceLead() && !!rosterAgent && rosterAgent.transport !== "hosted_mcp" && rosterAgent.turnOnly !== true;
+        const isLead = activeWorkspaceLeadAgent()?.principalId === target.id;
+        openContextMenu(event, row, [
+          ...(here ? [{ label: "Message", run: () => { void openDirectMessage({ kind: "agent", id: target.id }); } }] : []),
+          ...(workspaceId ? [{ label: "Open agent", run: () => { void navigateHome({ view: "agent", workspaceId, agentId: target.id }, "push"); } }] : []),
+          ...(here ? [{ label: "Manage", run: () => { void openRosterDialog({ kind: "agent", id: target.id }); } }] : []),
+          ...(mayLead ? [null, { label: isLead ? "Remove as workspace lead" : "Make workspace lead", run: () => {
+            void updateWorkspaceLead(isLead ? null : target.id).catch(error => setComposerStatus(readableError(error), "error"));
+          } }] : []),
+          null, copyName,
+        ], name);
+      };
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
-        /* People and agents open a 1:1 Direct Message in this workspace's Chat. Yourself, or someone not in
-           this workspace, keeps the People & agents page. */
-        openPerson: id => {
-          if (homeRoute.view !== "catchup" && id !== homeViewerId() && members.some(member => member.userId === id)) void openDirectMessage({ kind: "person", id });
-          else void selectHomePerson(id);
-        },
-        /* As for a person: an agent opens in this workspace when it is here, otherwise in the first
-           workspace whose roster names it. */
-        openAgent: id => {
-          const has = (people: HomePeople | undefined): boolean => !!people &&
-            (people.groups.some(group => group.agents.some(agent => agent.id === id)) || people.other.some(agent => agent.id === id));
-          const workspaceId = homeRoute.view !== "catchup" && has(currentHomePeople()) ? activeWorkspaceId
-            : catchUpData.find(entry => has(entry.detail?.people))?.workspace.id ?? null;
-          if (workspaceId && workspaceId === activeWorkspaceId && homeRoute.view !== "catchup") void openDirectMessage({ kind: "agent", id });
-          else if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
-        },
+        openPerson: openRailPerson,
+        openAgent: openRailAgent,
+        contextMenu: railContextMenu,
         toggleWorkspaces: expanded => { railExpanded = expanded; },
       }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
         ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
