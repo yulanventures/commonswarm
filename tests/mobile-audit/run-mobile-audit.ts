@@ -168,7 +168,6 @@ async function main(): Promise<void> {
           try {
             await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
             await page.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
-            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
             await page.waitForTimeout(800);
             for (const step of screen.setup ?? []) {
               if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
@@ -177,6 +176,8 @@ async function main(): Promise<void> {
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
               if (step.wait) await page.waitForTimeout(step.wait);
             }
+            // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
+            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
