@@ -349,6 +349,10 @@ const year = new Date().getFullYear();
     transition: color var(--dur-1) var(--ease-standard);
   }
 
+  @media (width <= 64rem) {
+    .ft__link { min-inline-size: 44px; }
+  }
+
   .ft__link:hover {
     color: var(--text);
   }

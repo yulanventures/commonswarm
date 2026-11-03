@@ -416,3 +416,9 @@
   .lp-knowhow__inner { grid-template-columns: 1fr; gap: 28px; }
   .lp-knowhow__card { padding: 23px; }
 }
+
+@media (width <= 64rem) {
+  .lp-close__login { min-inline-size: 44px; min-block-size: 44px; justify-content: center; }
+  .lp-fine a { min-height: 44px; }
+  .lp-preview-tabs button { min-inline-size: 44px; min-block-size: 44px; padding-inline: 8px; }
+}

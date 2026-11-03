@@ -254,7 +254,7 @@ These exact declarations supplement stable IDs above; use them to match harness 
 
 `screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry is a source-backed candidate, not a verified capture; the first integration run belongs in CI. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Other empty, error and loading captures need per-surface fixture support (`state.empty`, `state.error`, `state.loading` are pending). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
 
-The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Those detail captures are pending until identities, triggers and loaded-content readiness are bound. Public and diagnostic route candidates have source-backed readiness; the tokenless invitation candidate uses a signed-out context. The /start handoff redirects immediately and remains pending. Invitation variants and native-platform behavior need their own support. Command Palette integration remains conditional on the runner fixing its ready-before-setup ordering. No actual captures or runtime verification are claimed.
+The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Definitions detail captures use bound seed identities and selected-state readiness; Wiki detail and editor remain pending. Public and diagnostic route candidates have source-backed readiness; the tokenless invitation candidate uses a signed-out context. The /start handoff redirects immediately and remains pending. Invitation variants and native-platform behavior need their own support. The runner checks readiness after setup; capture integration on this patch remains pending CI. No actual captures or runtime verification are claimed.
 
 | Inventory unit | Manifest disposition |
 | --- | --- |
@@ -285,7 +285,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V08 | `app.people` — candidate; other states pending |
 | V09 | `app.agent` — candidate; other states pending |
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
-| V11 | `app.todo-detail` — pending |
+| V11 | `app.todo-detail` — candidate; `todo_create 0` required |
 | V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
 | V13 | `app.list-conflict` — pending |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
@@ -297,25 +297,26 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V20 | `app.entity-detail` — pending |
 | V21 | `app.invitation-inbox` — pending |
 | V22 | `app.update-toast` — pending |
-| V23 | `app.definitions` — candidate; other states pending |
-| V24 | `app.definitions-diff` — pending |
+| V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
+| V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate; `app.definitions-diff` remains pending |
 | V25 | `app.todo-offer` — pending |
 | V26 | `app.lists-approval` — pending |
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |
-| D04 | `dialog.connected-apps` — pending |
-| D05 | `dialog.signout-others` — pending |
-| D06 | `dialog.account-agents` — pending |
+| D04 | `dialog.connected-apps` — candidate; other states pending |
+| D05 | `dialog.signout-others` — candidate; other states pending |
+| D06 | `dialog.account-agents` — candidate; other states pending |
 | D07 | `dialog.command-palette` — candidate; other states pending |
-| D08 | `dialog.workspace-skills` — pending |
+| D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — pending |
 | D11 | `dialog.invitation-review` — pending |
 | D12 | `dialog.navigation-drawer` — pending |
 | D13 | `dialog.details-sheet` — pending |
 | D14 | `dialog.role-confirm` — pending |
-| M01 | `menu.account` — pending |
+| D15 | `dialog.password` — initial open-only candidate; challenge and submission pending |
+| M01 | `menu.account` — candidate; other states pending |
 | M02 | `menu.workspace` — pending |
 | M03 | `menu.channels` — pending |
 | M04 | `menu.assignee` — pending |
@@ -324,7 +325,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M07 | `menu.wiki-version` — pending |
 | M08 | `menu.member-actions` — pending |
 | M09 | `menu.provider` — pending |
-| M10 | `menu.landing-preview` — pending |
+| M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — pending |
 | M13 | `menu.context` — pending |
@@ -333,6 +334,10 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 
 The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
 
-Additional pending detail captures: `app.definitions.proposed`, `app.definitions.certified`, `app.definitions.proposal-pending`, `app.definitions.diff`, `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
+Additional pending detail captures: `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
-Main-branch addendum: PR #271 added password sign-in after the stated source baseline. The future Account PR B remains unimplemented; this manifest does not claim a password-flow capture.
+Main-branch addendum: PR #271 added password sign-in after the stated source baseline. PR #282 subsequently added the separate Password dialog; the initial open-only candidate is D15 below, while password challenge and submission flows remain outside this audit.
+
+## Additional capture candidates (source mapping; CI witness pending)
+
+After the stated baseline, PR #282 adds D15, making 15 dialog families (12 static and 3 dynamic) at this newer source revision. D15 is the Password dialog: `dialog.password` opens `[data-password-open]` and captures the initial form only. It does not type, submit, resend, confirm, or perform an auth mutation; challenge and result states remain pending. Account dialogs and empty Skills use real menu or palette actions. Definitions detail and diff entries require their exact create/certify/update seed steps and scroll the selected detail into the frame. `route.home.footer`, `menu.landing-preview`, and `route.guides.claude-code-subagents.disclosure` explicitly scroll their public targets into view. These candidates are not runtime evidence; thread and Details remain pending.

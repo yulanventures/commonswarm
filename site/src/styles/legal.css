@@ -472,3 +472,11 @@
 @media (width <= 64rem) {
   .lgl__peers a { display: inline-flex; align-items: center; min-block-size: 44px; }
 }
+
+@media (width <= 64rem) {
+  .lgl__toc-summary { display: flex; align-items: center; min-inline-size: 44px; min-block-size: 44px; }
+}
+
+@media (max-width: 47.999rem) {
+  .lgl__toc-summary { min-block-size: 48px; }
+}
