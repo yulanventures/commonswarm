@@ -308,7 +308,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { backgr
 }
 
 /* Touch controls follow the more-specific Carbon composer and menu rules. */
-@media (width <= 52rem) {
+@media (width <= 64rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed-filters button,
   live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item { min-inline-size: 44px; min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send,

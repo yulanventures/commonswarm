@@ -45,3 +45,10 @@ live-dashboard [data-account-agents-dialog] :is(button, a):focus-visible {
 .account-agents__workspace { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; padding-block: 4px; }
 .account-agents__workspace-name { color: inherit; }
 .account-agents__org, .account-agents__state { color: var(--k-shell-secondary, var(--text-muted)); }
+
+@media (width <= 64rem) {
+  live-dashboard [data-account-agents-dialog] :is(input, select) { font-size: 16px; }
+}
+@media (width <= 30rem) {
+  live-dashboard [data-account-agents-dialog] { padding: 16px; }
+}

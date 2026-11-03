@@ -284,9 +284,9 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V07 | `app.composer` — pending |
 | V08 | `app.people` — candidate; other states pending |
 | V09 | `app.agent` — candidate; other states pending |
-| V10 | `app.todos` — candidate; other states pending |
+| V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — pending |
-| V12 | `app.lists` — candidate; other states pending |
+| V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
 | V13 | `app.list-conflict` — pending |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
@@ -331,7 +331,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M14 | `menu.workspace-dock` — pending |
 | M15 | `menu.profile-inspector` — pending |
 
-The seeded workspace has no files or Wiki topics in PR 1; the two empty candidates wait for the actual empty text or marker. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
+The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
 
 Additional pending detail captures: `app.definitions.proposed`, `app.definitions.certified`, `app.definitions.proposal-pending`, `app.definitions.diff`, `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
