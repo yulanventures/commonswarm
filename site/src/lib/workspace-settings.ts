@@ -7,6 +7,8 @@ export interface WorkspaceSettingsOptions {
   /** Owners and admins may rename; the server decides. */
   canRename?: boolean;
   onRename?(name: string): Promise<void>;
+  /** Owners and admins: open the Clean up dialog. Absent for everyone else. */
+  onCleanup?(): void;
   moveDestinations?: readonly { id: string; name: string }[];
   onMove?(orgId: string): Promise<void>;
   onCopy(): Promise<void>;
@@ -69,6 +71,21 @@ export function renderWorkspaceSettings(
       copyStatus.textContent = "Could not copy";
     }
   });
+
+  const cleanup = document.createElement("section");
+  cleanup.className = "dashboard__workspace-cleanup";
+  if (options.onCleanup) {
+    const cleanupButton = document.createElement("button");
+    cleanupButton.type = "button";
+    cleanupButton.className = "dashboard__text-button";
+    cleanupButton.dataset.workspaceCleanupOpen = "";
+    cleanupButton.textContent = "Clean up agents and files";
+    const open = options.onCleanup;
+    cleanupButton.addEventListener("click", () => open());
+    cleanup.append(cleanupButton);
+  } else {
+    cleanup.hidden = true;
+  }
 
   const danger = document.createElement("section");
   danger.className = "dashboard__workspace-danger";
@@ -143,7 +160,7 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
-  root.replaceChildren(titleRow, counts, identity);
+  root.replaceChildren(titleRow, counts, identity, cleanup);
   if (options.moveDestinations?.length && options.onMove) {
     const form = document.createElement("form");
     form.className = "dashboard__workspace-move";
