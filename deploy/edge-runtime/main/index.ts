@@ -40,7 +40,7 @@ declare const EdgeRuntime: {
 
 const FUNCTIONS_ROOT = "/var/tmp/commonswarm-functions";
 
-// Eight workers at 96 MiB use at most 768 MiB of the 2 GiB container limit.
+// Four workers at 96 MiB use at most 384 MiB of the 2 GiB container limit.
 const USER_WORKER_MEMORY_MB = 96;
 
 // Default 150 s; SWARM_EDGE_WORKER_TIMEOUT_MS sets 150 s to 1 h (router.ts workerTimeoutMs).
