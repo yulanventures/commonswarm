@@ -206,7 +206,7 @@ function postInside(container: string, token: string, body: Buffer): { status: n
   return { status, body: Buffer.from(raw.slice(raw.indexOf("\r\n\r\n") + 4), "latin1").toString("utf8") };
 }
 
-test("the PDF text worker runs only on main's loopback path with the token, and a heavy PDF never stalls other work", { timeout: 600_000 }, async (t) => {
+test("the PDF text worker runs only on main's internal path with the token, and a heavy PDF never stalls other work", { timeout: 600_000 }, async (t) => {
   if (!dockerAvailable()) {
     t.skip(DOCKER_UNAVAILABLE);
     return;
@@ -225,13 +225,14 @@ test("the PDF text worker runs only on main's loopback path with the token, and 
   const viaPublicRoute = await fetch(`${runtime.baseUrl}/functions/v1/file-text`, { method: "POST", body: "{}" });
   assert.equal(viaPublicRoute.status, 404, "never publicly routed");
   await viaPublicRoute.body?.cancel();
-  const fromHost = await fetch(`${runtime.baseUrl}/__internal/file-text`, {
-    method: "POST", headers: { [FILE_TEXT_TOKEN_HEADER]: token, "content-type": "application/pdf" }, body: new Uint8Array(pdf),
+  // Token-only (HezSec 07:19Z): the pinned runtime gives main no socket peer address.
+  // Reachability is the host-loopback port plus the token; Caddy/Kong route only /functions/v1.
+  const fromHostNoToken = await fetch(`${runtime.baseUrl}/__internal/file-text`, {
+    method: "POST", headers: { "content-type": "application/pdf" }, body: new Uint8Array(pdf),
   });
-  assert.equal(fromHost.status, 404, "the host's published port is not a loopback peer inside the container");
-  await fromHost.body?.cancel();
-
-  assert.equal(postInside(runtime.container, "x".repeat(48), pdf).status, 404, "loopback without the token");
+  assert.equal(fromHostNoToken.status, 404, "no token, no parser");
+  await fromHostNoToken.body?.cancel();
+  assert.equal(postInside(runtime.container, "x".repeat(48), pdf).status, 404, "a wrong token is refused");
   const good = postInside(runtime.container, token, pdf);
   assert.equal(good.status, 200, good.body);
   const parsed = JSON.parse(good.body) as { text: string; pages_read: number; page_count: number; truncated: boolean };

@@ -1,9 +1,12 @@
 /** Internal PDF text gateway (MCP parity 1b). Not a public function: it is served by main
  * on FILE_TEXT_PATH only, outside /functions/v1, so Kong never forwards to it.
  *
- * Every request must come from a loopback peer (the real socket address, never a header)
- * AND carry the token shared only by main and the mcp function. Both are checked before
- * the body is read or any worker exists. At most ONE parser isolate is alive at a time,
+ * Every request must carry the token shared only by main and the mcp function, checked
+ * before the body is read or any worker exists. There is no peer-address check: the pinned
+ * runtime's Deno.serve shim hands main the listen address, not the socket peer
+ * (edge-runtime v1.73.13 ext/runtime/js/http.js), so such a check would mean nothing.
+ * Reachability stays limited: the path is outside /functions/v1 (Caddy and Kong route only
+ * that) and the container port is published only on the host's loopback. At most ONE parser isolate is alive at a time,
  * counted until the runtime no longer lists it (not merely until it answered); excess work
  * gets a fixed busy answer, never a queue. The parser gets the bounded bytes and nothing
  * else: no env, no token, no caller headers, network/filesystem/process access denied. */
@@ -57,10 +60,6 @@ export interface FileTextGatewayDeps {
 const json = (status: number, body: Record<string, unknown>) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const notFound = () => json(404, { error: "not_found" });
-
-export function isLoopbackPeer(hostname: string | null | undefined): boolean {
-  return hostname === "127.0.0.1" || hostname === "::1" || hostname === "::ffff:127.0.0.1";
-}
 
 function sameToken(given: string, expected: string): boolean {
   const a = new TextEncoder().encode(given);
@@ -143,9 +142,9 @@ export function createFileTextGateway(deps: FileTextGatewayDeps) {
     return live === null;
   }
 
-  return async function handleFileText(request: Request, peerHostname: string | null | undefined): Promise<Response> {
+  return async function handleFileText(request: Request): Promise<Response> {
     const discard = () => { request.body?.cancel().catch(() => {}); };
-    if (token === null || !isLoopbackPeer(peerHostname) || request.method !== "POST" ||
+    if (token === null || request.method !== "POST" ||
         !sameToken(request.headers.get(FILE_TEXT_TOKEN_HEADER) ?? "", token)) {
       discard();
       return notFound();

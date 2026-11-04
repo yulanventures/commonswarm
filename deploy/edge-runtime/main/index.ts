@@ -139,11 +139,8 @@ async function handle(request: Request): Promise<Response> {
     });
 }
 
-Deno.serve((request, info) =>
-  (new URL(request.url).pathname === FILE_TEXT_PATH
-    // The real socket peer, never a forwarded header.
-    ? fileText(request, (info?.remoteAddr as { hostname?: string } | undefined)?.hostname ?? null)
-    : handle(request)
+Deno.serve((request) =>
+  (new URL(request.url).pathname === FILE_TEXT_PATH ? fileText(request) : handle(request)
   ).catch((error: unknown) => {
     if (isWorkerLimitError(error)) {
       return mainJsonResponse(WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY);

@@ -96,27 +96,26 @@ function post(headers: Record<string, string> = {}, body: BodyInit | null = pdf 
   });
 }
 
-test("loopback and the token are both required, before the body is read or a worker exists", async () => {
+test("the token is required before the body is read or a worker exists", async () => {
   const { handle, created } = gateway();
-  for (const [request, peer] of [
-    [post(), "10.0.0.5"],
-    [post(), null],
-    [post({ [FILE_TEXT_TOKEN_HEADER]: "wrong" }), "127.0.0.1"],
-    [post({ [FILE_TEXT_TOKEN_HEADER]: "" }), "127.0.0.1"],
-    [new Request("http://127.0.0.1:9000/__internal/file-text", { method: "GET", headers: { [FILE_TEXT_TOKEN_HEADER]: token } }), "127.0.0.1"],
-  ] as const) {
-    const response = await handle(request, peer);
-    assert.equal(response.status, 404, String(peer));
+  for (const request of [
+    post({ [FILE_TEXT_TOKEN_HEADER]: "wrong" }),
+    post({ [FILE_TEXT_TOKEN_HEADER]: "" }),
+    post({ [FILE_TEXT_TOKEN_HEADER]: token.slice(0, -1) }),
+    new Request("http://127.0.0.1:9000/__internal/file-text", { method: "GET", headers: { [FILE_TEXT_TOKEN_HEADER]: token } }),
+  ]) {
+    const response = await handle(request);
+    assert.equal(response.status, 404);
   }
   assert.equal(created.length, 0);
   const short = createFileTextGateway({ token: "short", servicePath: "x", workers: { create: async () => { throw new Error("no"); }, memStats: async () => ({}) }, isWorkerLimitError: () => false, applyTag: () => {} });
-  assert.equal((await short(post({ [FILE_TEXT_TOKEN_HEADER]: "short" }), "127.0.0.1")).status, 404, "a weak token disables the path");
+  assert.equal((await short(post({ [FILE_TEXT_TOKEN_HEADER]: "short" }))).status, 404, "a weak token disables the path");
 });
 
 test("the parser gets a fresh, limited, permission-denied worker and none of the caller's headers", async () => {
   const { handle, created, forwarded, tagged } = gateway();
   const original = post();
-  const response = await handle(original, "127.0.0.1");
+  const response = await handle(original);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { text: "hello", truncated: false, pages_read: 1, page_count: 1 });
   assert.equal(created.length, 1);
@@ -153,31 +152,31 @@ test("one live parser at a time, counted until the runtime no longer lists it; n
       return new Response(JSON.stringify({ text: "x", truncated: false, pages_read: 1, page_count: 1 }), { status: 200 });
     },
   });
-  const first = handle(post(), "127.0.0.1");
+  const first = handle(post());
   await new Promise((resolve) => setTimeout(resolve, 5));
   present = new Set(["parser-1"]);
-  assert.deepEqual(await (await handle(post(), "127.0.0.1")).json(), { error: "busy" }, "busy while the first parses");
+  assert.deepEqual(await (await handle(post())).json(), { error: "busy" }, "busy while the first parses");
   releaseFirst();
   assert.equal((await first).status, 200);
-  assert.equal((await handle(post(), "127.0.0.1")).status, 503, "still busy while its isolate lingers after answering");
+  assert.equal((await handle(post())).status, 503, "still busy while its isolate lingers after answering");
   assert.equal(created.length, 1);
   present = new Set();
-  assert.equal((await handle(post(), "127.0.0.1")).status, 200, "free once the isolate is gone");
+  assert.equal((await handle(post())).status, 200, "free once the isolate is gone");
   assert.equal(created.length, 2);
 });
 
 test("bounded input, fixed errors, and the limit kill maps to pdf_too_complex", async () => {
   const { handle, created } = gateway();
-  assert.equal((await handle(post({ "content-length": String(FILE_TEXT_MAX_INPUT_BYTES + 1) }), "127.0.0.1")).status, 413);
-  assert.equal((await handle(post({ "content-length": "abc" }), "127.0.0.1")).status, 413);
-  assert.equal((await handle(post({ "content-length": "2" }), "127.0.0.1")).status, 413, "more bytes than declared");
+  assert.equal((await handle(post({ "content-length": String(FILE_TEXT_MAX_INPUT_BYTES + 1) }))).status, 413);
+  assert.equal((await handle(post({ "content-length": "abc" }))).status, 413);
+  assert.equal((await handle(post({ "content-length": "2" }))).status, 413, "more bytes than declared");
   assert.equal(created.length, 0);
   const killed = gateway({ limitError: true });
-  assert.deepEqual(await (await killed.handle(post(), "127.0.0.1")).json(), { error: "pdf_too_complex" });
+  assert.deepEqual(await (await killed.handle(post())).json(), { error: "pdf_too_complex" });
   const garbled = gateway({ workerFetch: async () => new Response("{\"text\":1}", { status: 200 }) });
-  assert.deepEqual(await (await garbled.handle(post(), "127.0.0.1")).json(), { error: "pdf_unreadable" });
+  assert.deepEqual(await (await garbled.handle(post())).json(), { error: "pdf_unreadable" });
   const refused = gateway({ workerFetch: async () => new Response("parser said: secret text", { status: 422 }) });
-  const body = await (await refused.handle(post(), "127.0.0.1")).text();
+  const body = await (await refused.handle(post())).text();
   assert.equal(body, JSON.stringify({ error: "pdf_unreadable" }), "parser output never passes through on error");
 });
 
