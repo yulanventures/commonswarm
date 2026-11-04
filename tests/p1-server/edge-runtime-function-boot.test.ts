@@ -15,6 +15,8 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { FILE_TEXT_TOKEN_HEADER } from "../../deploy/edge-runtime/main/file-text.js";
 import { test } from "node:test";
 import { KONG_FUNCTION_NOT_FOUND_BODY } from "../../deploy/edge-runtime/main/router.js";
 import { createClient } from "@supabase/supabase-js";
@@ -170,4 +172,152 @@ test("a function with a bare unmapped specifier fails the boot check", { timeout
     /c1-27-unmapped-specifier/,
     `negative control failed without naming c1-27-unmapped-specifier: HTTP ${result.status} body=${result.body.slice(0, 200)}`,
   );
+});
+
+/** A minimal text PDF, one content stream per page. */
+function textPdf(pages: string[]): Buffer {
+  const objects: string[] = ["<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${pages.map((_, i) => `${3 + i * 2} 0 R`).join(" ")}] /Count ${pages.length} >>`];
+  const font = 3 + pages.length * 2;
+  pages.forEach((content, i) => {
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${4 + i * 2} 0 R /Resources << /Font << /F1 ${font} 0 R >> >> >>`);
+    objects.push(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`);
+  });
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(out)); out += `${i + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(out);
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
+/** POST from inside the container (a real loopback peer, like the mcp worker). */
+function postInside(container: string, token: string, body: Buffer): { status: number; body: string } {
+  const head = `POST /__internal/file-text HTTP/1.0\r\nHost: 127.0.0.1\r\n${FILE_TEXT_TOKEN_HEADER}: ${token}\r\n` +
+    `Content-Type: application/pdf\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
+  const result = spawnSync("docker", ["exec", "-i", container, "bash", "-c",
+    "exec 3<>/dev/tcp/127.0.0.1/9000; cat >&3; cat <&3"], {
+    input: Buffer.concat([Buffer.from(head, "latin1"), body]), encoding: "latin1", timeout: 60_000,
+  });
+  const raw = String(result.stdout ?? "");
+  const status = Number(raw.match(/^HTTP\/1\.[01] (\d{3})/)?.[1] ?? 0);
+  return { status, body: Buffer.from(raw.slice(raw.indexOf("\r\n\r\n") + 4), "latin1").toString("utf8") };
+}
+
+test("the PDF text worker runs only on main's internal path with the token, and a heavy PDF never stalls other work", { timeout: 600_000 }, async (t) => {
+  if (!dockerAvailable()) {
+    t.skip(DOCKER_UNAVAILABLE);
+    return;
+  }
+  const token = randomBytes(24).toString("hex");
+  const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "edge-runtime-file-text.")));
+  let runtime: EdgeRuntimeHandle | undefined;
+  t.after(() => {
+    runtime?.close();
+    guardedRemove(workDir);
+  });
+  runtime = await startComposeEdgeRuntime({ workDir, envText: `${dummyEdgeEnv()}SWARM_FILE_TEXT_TOKEN=${token}\n` });
+  await awaitHealth(runtime.baseUrl);
+  const pdf = textPdf(["BT /F1 12 Tf 72 720 Td (Hello from page one) Tj ET", "BT /F1 12 Tf 72 720 Td (Second page text) Tj ET"]);
+
+  const viaPublicRoute = await fetch(`${runtime.baseUrl}/functions/v1/file-text`, { method: "POST", body: "{}" });
+  assert.equal(viaPublicRoute.status, 404, "never publicly routed");
+  await viaPublicRoute.body?.cancel();
+  // Token-only (HezSec 07:19Z): the pinned runtime gives main no socket peer address.
+  // Reachability is the host-loopback port plus the token; Caddy/Kong route only /functions/v1.
+  const fromHostNoToken = await fetch(`${runtime.baseUrl}/__internal/file-text`, {
+    method: "POST", headers: { "content-type": "application/pdf" }, body: new Uint8Array(pdf),
+  });
+  assert.equal(fromHostNoToken.status, 404, "no token, no parser");
+  await fromHostNoToken.body?.cancel();
+  assert.equal(postInside(runtime.container, "x".repeat(48), pdf).status, 404, "a wrong token is refused");
+  const good = postInside(runtime.container, token, pdf);
+  assert.equal(good.status, 200, good.body);
+  const parsed = JSON.parse(good.body) as { text: string; pages_read: number; page_count: number; truncated: boolean };
+  assert.equal(parsed.text.includes("Hello from page one"), true, good.body);
+  assert.equal(parsed.text.includes("Second page text"), true, good.body);
+  assert.deepEqual([parsed.pages_read, parsed.page_count, parsed.truncated], [2, 2, false]);
+
+  // Memory: five sequential extractions, each waiting for the previous parser isolate to be
+  // gone (busy until then). Container memory is measured before and after; isolates being
+  // absent from memStats is not by itself proof that memory came back.
+  const memory = () => {
+    const out = spawnSync("docker", ["stats", "--no-stream", "--format", "{{.MemUsage}}", runtime!.container], { encoding: "utf8" });
+    const match = String(out.stdout).match(/([\d.]+)\s*(KiB|MiB|GiB)/u);
+    assert.ok(match, String(out.stdout));
+    const scale = match[2] === "KiB" ? 1 / 1024 : match[2] === "GiB" ? 1024 : 1;
+    return Number(match[1]) * scale;
+  };
+  const extractWhenFree = async (body: Buffer) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const result = postInside(runtime!.container, token, body);
+      if (result.status !== 503) return result;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+    }
+    assert.fail("the parser slot never freed");
+  };
+  const before = memory();
+  for (let run = 0; run < 5; run++) assert.equal((await extractWhenFree(pdf)).status, 200);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 12_000));
+  const afterRuns = memory();
+  t.diagnostic(`edge container memory: ${before.toFixed(1)} MiB before, ${afterRuns.toFixed(1)} MiB after five extractions`);
+  assert.ok(afterRuns - before < 96, `memory grew ${(afterRuns - before).toFixed(1)} MiB over five extractions`);
+
+  // A heavy page: ~6 MiB of text operators in one content stream. Whatever the parser
+  // manages (capped text, or killed at its CPU or memory limit), it never stalls other workers.
+  const heavy = textPdf(["BT /F1 1 Tf " + "(abcdefghijklmnopqrstuvwxyz) Tj 0 -1 Td ".repeat(150_000) + "ET"]);
+  const parse = new Promise<{ status: number; body: string }>((resolveParse) => {
+    setImmediate(() => resolveParse(postInside(runtime!.container, token, heavy)));
+  });
+  const concurrent = await bootFunction(runtime, "read");
+  assert.equal(concurrent.classification.ok, true, `a concurrent worker must still boot: ${concurrent.body.slice(0, 200)}`);
+  const heavyResult = await parse;
+  assert.ok([200, 422, 503].includes(heavyResult.status), heavyResult.body.slice(0, 200));
+  if (heavyResult.status === 200) {
+    const text = (JSON.parse(heavyResult.body) as { text: string; truncated: boolean });
+    assert.ok(Buffer.byteLength(text.text) <= 512 * 1024, "output stays within the cap");
+  } else {
+    assert.match(heavyResult.body, /^\{"error":"(pdf_too_complex|pdf_unreadable|busy)"\}$/u, "fixed errors only");
+  }
+  const health = await fetch(`${runtime.baseUrl}/health`);
+  assert.equal(health.status, 200, "main stays healthy");
+  await health.body?.cancel();
+  assert.equal(runtime.logs().includes("Hello from page one"), false, "extracted text never reaches the logs");
+});
+
+test("the PDF parser worker really runs with network, filesystem, process, env and system access denied", { timeout: 600_000 }, async (t) => {
+  if (!dockerAvailable()) {
+    t.skip(DOCKER_UNAVAILABLE);
+    return;
+  }
+  const token = randomBytes(24).toString("hex");
+  const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "edge-runtime-file-text-probe.")));
+  let runtime: EdgeRuntimeHandle | undefined;
+  t.after(() => {
+    runtime?.close();
+    guardedRemove(workDir);
+  });
+  // The same name and the same main-created worker options, with a probe in place of the parser.
+  const copy = join(workDir, "functions");
+  cpSync(functionsRoot, copy, { recursive: true });
+  // The same probe the release gate installs (deploy/edge-runtime/file-text-probe.sh).
+  cpSync(new URL("../../deploy/edge-runtime/file-text-probe/index.ts", import.meta.url), join(copy, "file-text", "index.ts"));
+  runtime = await startComposeEdgeRuntime({ workDir, functionsRoot: copy, envText: `${dummyEdgeEnv()}SWARM_FILE_TEXT_TOKEN=${token}\n` });
+  await awaitHealth(runtime.baseUrl);
+  const probe = postInside(runtime.container, token, textPdf(["BT ET"]));
+  assert.equal(probe.status, 200, probe.body);
+  const results = JSON.parse((JSON.parse(probe.body) as { text: string }).text) as Record<string, string>;
+  t.diagnostic(`parser sandbox probe: ${JSON.stringify(results)}`);
+  // The release gate's exact pass rule: network, env and write denied by the permission set;
+  // every secret-bearing path unreadable (denied, or absent from the worker's view); no
+  // subprocess. deny_read/deny_sys are not claimed: the runtime does not enforce them here.
+  const reads = ["read_own_source", "read_proc_self_environ", "read_proc_1_environ", "read_staged_mcp",
+    "read_source_mcp", "read_main", "read_repo_src", "read_bootstrap"];
+  assert.deepEqual(Object.keys(results).sort(), ["env", "net", "run", "write", ...reads].sort(),
+    "the complete, exact outcome set: a missing key never passes");
+  assert.deepEqual([results.net, results.env, results.write], ["denied", "denied", "denied"], JSON.stringify(results));
+  for (const key of reads) assert.ok(["denied", "error:NotFound"].includes(results[key]!), `${key}: ${JSON.stringify(results)}`);
+  assert.ok(results.run === "denied" || results.run!.startsWith("error:"), `run must explicitly fail: ${results.run}`);
 });

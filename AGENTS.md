@@ -36,7 +36,7 @@ Run from the repository root unless shown otherwise.
 | Install | `npm ci`; `npm --prefix site ci`; `npm --prefix services/mcp-auth ci` |
 | Develop | `npm run dev` (TypeScript watch); `npm --prefix site run dev`; `npm --prefix services/mcp-auth start` |
 | Build | `npm run build`; `npm --prefix site run build` |
-| Typecheck | `npm run check:tests` (source/tests); `npm run check:edge` (seven functions plus the edge router) |
+| Typecheck | `npm run check:tests` (source/tests); `npm run check:edge` (seven functions, the PDF text worker and the edge router) |
 | Unit/contracts | `npm test` (literal file list) |
 | CLI | `npm run build`, then `npm run test:p1-cli` (CLI glob; some tests start Docker) |
 | Integration | `npm run test:p1-local` (ten explicit files); `npm run test:p1-server` (server glob, regenerates protocol); local Supabase/Docker required |

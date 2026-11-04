@@ -14,6 +14,7 @@ import {
   withWorkerRetiredRetry,
 } from "./router.ts";
 import { createWorkerObserver, logRuntimeMetrics } from "./observability.ts";
+import { createFileTextGateway, FILE_TEXT_PATH, FILE_TEXT_TOKEN_ENV } from "./file-text.ts";
 
 declare const EdgeRuntime: {
   applySupabaseTag(original: Request, cloned: Request): void;
@@ -25,6 +26,11 @@ declare const EdgeRuntime: {
       workerTimeoutMs: number;
       noModuleCache: boolean;
       envVars: Array<[string, string]>;
+      forceCreate?: boolean;
+      allowRemoteModules?: boolean;
+      cpuTimeSoftLimitMs?: number;
+      cpuTimeHardLimitMs?: number;
+      permissions?: Record<string, unknown>;
     }): Promise<{ key: string; fetch(request: Request): Promise<Response> }>;
     memStats(): Promise<Map<string, unknown> | Record<string, unknown>>;
   };
@@ -40,6 +46,19 @@ const USER_WORKER_MEMORY_MB = 96;
 // the planned 50-second H0 poll while still ending stuck work.
 const USER_WORKER_TIMEOUT_MS = 150_000;
 const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
+// The PDF parser is created here, not through the public function router. Its token is
+// read only by main and handed only to the mcp worker (router.ts MCP_ENV_NAMES).
+const fileText = createFileTextGateway({
+  token: Deno.env.get(FILE_TEXT_TOKEN_ENV),
+  servicePath: `${FUNCTIONS_ROOT}/file-text`,
+  workers: {
+    create: (options) => EdgeRuntime.userWorkers.create(options as Parameters<typeof EdgeRuntime.userWorkers.create>[0]),
+    memStats: () => EdgeRuntime.userWorkers.memStats(),
+  },
+  isWorkerLimitError,
+  applyTag: (original, forwarded) => EdgeRuntime.applySupabaseTag(original, forwarded),
+  log: console.log,
+});
 const mcpPublicEnvironmentValue = Deno.env.get(MCP_PUBLIC_ENABLED_ENV);
 const mcpPublicEnabled = isMcpPublicEnabled(mcpPublicEnvironmentValue);
 
@@ -121,7 +140,8 @@ async function handle(request: Request): Promise<Response> {
 }
 
 Deno.serve((request) =>
-  handle(request).catch((error: unknown) => {
+  (new URL(request.url).pathname === FILE_TEXT_PATH ? fileText(request) : handle(request)
+  ).catch((error: unknown) => {
     if (isWorkerLimitError(error)) {
       return mainJsonResponse(WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY);
     }

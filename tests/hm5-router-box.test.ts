@@ -136,6 +136,7 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
     "SWARM_MCP_CLOCK_SKEW_SECONDS",
     "SWARM_MCP_PUBLIC_ENABLED",
     "SWARM_MCP_TODOS_LISTS_ENABLED",
+    "SWARM_FILE_TEXT_TOKEN",
   ];
   const allowlists = {
     command, admin: command,

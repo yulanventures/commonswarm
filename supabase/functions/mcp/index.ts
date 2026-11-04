@@ -25,6 +25,8 @@ import {
   FileContentUnavailable,
   fitTextPage,
   isTextContentType,
+  PDF_TEXT_MAX_INPUT_BYTES,
+  pdfTextFor,
   readObjectPage,
 } from "./file-content.ts";
 import { executeFilePut } from "./file-put.ts";
@@ -346,7 +348,7 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       },
     }, capability);
     if (result.status !== 200) throw new HostedToolFailure(result.body.error);
-    return await fileGetOutput(result.body, Number(args.offset ?? 0));
+    return await fileGetOutput(result.body, Number(args.offset ?? 0), binding.workspaceId);
   }
   if (call.name === "seat_release") {
     const result = await handleHostedCommand({
@@ -482,7 +484,7 @@ function fileListOutput(output: Record<string, unknown>, args: HostedToolArgumen
  * Metadata from the resolved version, plus one bounded text page for declared text types.
  * The signed path in `body.download_path` is consumed here and never returned.
  */
-async function fileGetOutput(body: Record<string, unknown>, offset: number): Promise<Record<string, unknown>> {
+async function fileGetOutput(body: Record<string, unknown>, offset: number, workspaceId: string): Promise<Record<string, unknown>> {
   const meta = {
     file_id: String(body.file_id),
     version_n: Number(body.version_n),
@@ -497,6 +499,9 @@ async function fileGetOutput(body: Record<string, unknown>, offset: number): Pro
     truncated: nextOffset !== null,
   });
   const base = { ...meta, content_warning: body.content_warning };
+  if (meta.content_type === "application/pdf") {
+    return await pdfGetOutput(body, meta, base, offset, workspaceId, provenance);
+  }
   if (!isTextContentType(meta.content_type)) {
     return { ...base, text: null, next_action: FILE_METADATA_ONLY, provenance: provenance(null, 0) };
   }
@@ -520,6 +525,54 @@ async function fileGetOutput(body: Record<string, unknown>, offset: number): Pro
     if (error instanceof FileContentUnavailable) throw new HostedToolFailure("file_content_unavailable");
     throw error;
   }
+}
+
+const PDF_NEXT_ACTION = {
+  busy: "PDF text extraction is busy. Retry file_get in a few seconds.",
+  too_complex: "This PDF is too large or complex to extract text from here. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.",
+  too_large: "This PDF is larger than 8 MiB, so its text is not extracted here. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.",
+  unavailable: "PDF text is unavailable right now. Retry later, or ask a workspace member to open the file in the CommonSwarm web app.",
+} as const;
+
+/**
+ * PDF text, extracted in an isolated worker by the edge main service and paged like text.
+ * This runs only after this call's own file authorization (the hosted file_download_url
+ * command), so the per-version cache never widens access. Extracted text stays untrusted.
+ */
+async function pdfGetOutput(
+  body: Record<string, unknown>,
+  meta: { file_id: string; version_n: number; name: string; content_type: string; size_bytes: number },
+  base: Record<string, unknown>,
+  offset: number,
+  workspaceId: string,
+  provenance: (nextOffset: number | null, pageOffset: number) => Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const metadataOnly = (reason: keyof typeof PDF_NEXT_ACTION) =>
+    ({ ...base, text: null, next_action: PDF_NEXT_ACTION[reason], provenance: provenance(null, 0) });
+  if (meta.size_bytes > PDF_TEXT_MAX_INPUT_BYTES) return metadataOnly("too_large");
+  const baseUrl = Deno.env.get("SUPABASE_URL");
+  if (!baseUrl) return metadataOnly("unavailable");
+  const result = await pdfTextFor(
+    `${workspaceId}:${meta.file_id}:${meta.version_n}`,
+    () => readObjectPage(baseUrl, String(body.download_path), 0, meta.size_bytes),
+    Deno.env.get("SWARM_FILE_TEXT_TOKEN"),
+  );
+  if (result.kind !== "text") return metadataOnly(result.kind);
+  const total = result.bytes.byteLength;
+  const extracted = { pages_read: result.pages_read, page_count: result.page_count, truncated: result.truncated };
+  if (offset >= total) {
+    return { ...base, encoding: "extracted_text", text: "", offset, next_offset: null, ...extracted, provenance: provenance(null, offset) };
+  }
+  const page = fitTextPage(result.bytes.subarray(offset), offset, total, limits.maxResponseBytes, (cut) => ({
+    ...base,
+    encoding: "extracted_text",
+    text: cut.text,
+    offset: cut.offset,
+    next_offset: cut.next_offset,
+    ...extracted,
+    provenance: provenance(cut.next_offset, cut.offset),
+  }));
+  return page ?? metadataOnly("unavailable");
 }
 
 function serviceUpdating(body: Record<string, unknown>): boolean {
