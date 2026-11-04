@@ -26,9 +26,11 @@ const SELF_ADDRESSED = "55555555-5555-4555-8555-555555555555";
 const REPLY = "99999999-9999-4999-8999-999999999999";
 const TOKEN = `swm_agt_${"C".repeat(43)}`;
 async function eventually(check: () => boolean | Promise<boolean>, timeout = 10_000) {
+  // Name the waiting line on failure: callers rewrap errors, which hides the stack.
+  const caller = new Error().stack?.split("\n")[2]?.trim() ?? "unknown caller";
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { if (await check()) return; await delay(50); }
-  assert.fail("condition did not become true before the deadline");
+  assert.fail(`condition did not become true within ${timeout} ms (${caller})`);
 }
 
 test("teammate notices state the server-derived owner relation before untrusted input", () => {
@@ -409,8 +411,12 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await eventually(() => stalledReplyStarted);
     const stopStarted = performance.now();
     await configureAgentReceive({ ...options, mode: "turn", previewChannel: false });
-    await eventually(async () => !receiveStatus(await readReceiveBinding(profile, "host-session")).channel_running, 700);
-    assert.ok(performance.now() - stopStarted < 700, "channel cancellation does not wait through reply retries");
+    // The stalled reply never completes on its own, so stopping at all proves cancellation does not
+    // wait for it. The channel loop notices the mode change within one wake wait (up to 1 s) plus
+    // its 250 ms pause and a binding read; 700 ms was tighter than that and flaked on CI.
+    const STOP_BOUND_MS = 2_500;
+    await eventually(async () => !receiveStatus(await readReceiveBinding(profile, "host-session")).channel_running, STOP_BOUND_MS);
+    assert.ok(performance.now() - stopStarted < STOP_BOUND_MS, "channel cancellation does not wait through reply retries");
     await stalled;
     assert.equal(receiveStatus(await readReceiveBinding(profile, "host-session")).wake_verified, false);
     assert.equal(stderr.includes(TOKEN), false);
