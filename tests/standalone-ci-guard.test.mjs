@@ -257,6 +257,19 @@ test('all suites aggregate failures and retain exact source provenance and log c
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))), {unowned: {label:'some-other-run'}});
 });
 
+test('the nightly selection runs only box-dry-run and site, at one resolved SHA', async () => {
+  const f = fixture();
+  const result = await start(f, f.args('nightly'));
+  assert.equal(result.status, 0, result.stderr);
+  const receipts = f.receipts();
+  assert.deepEqual(receipts.map(r => r.suite), ['box-dry-run', 'site']);
+  for (const r of receipts) {
+    assert.equal(r.resolved_sha, f.sha);
+    assert.equal(r.exit_code, 0);
+    assert.equal(r.timed_out, false);
+  }
+});
+
 test('concurrent invocations serialize actual worker lifetimes through the shared queue', async () => {
   const f = fixture({sleep: 0.3});
   const results = await Promise.all([start(f), start(f)]);

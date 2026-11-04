@@ -6,17 +6,24 @@ Nothing here deploys to Yulan VPS or dispatches GitHub Actions.
 
 The controller is installed from one reviewed commit. The service resolves `main`
 once under `/var/lib/commonswarm-ci/queue.lock` using `flock(2)` (queue wait
-capped at 600 seconds), then runs box-dry-run,
-server, p1-cli, site and unit serially at that exact SHA. Manual invocations
-use the same queue:
+capped at 600 seconds), then runs `--suite nightly`: box-dry-run and site,
+serially at that exact SHA. Those two are what only this host can prove (the root
+box dry run and the Linux/root rendered-swap site checks). server, p1-cli and unit
+are the same test lists the GitHub-hosted suites run, and since the dispatch
+workflow posts `server suite / <suite>` on the exact tested commit, the nightly no
+longer repeats them; they kept ending in the 1800-second budget (exit 124) while
+waiting for the shared host. Manual invocations use the same queue and still accept
+every suite, including `all`:
 
 ```sh
 bash /opt/commonswarm-ci/scripts/run.sh --sha <40-lowercase-hex> --suite all
+bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite nightly
 bash /opt/commonswarm-ci/scripts/run.sh --sha <40-lowercase-hex> --suite p1-cli
 bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite all
 ```
 
-`--suite` accepts only `all`, `server`, `p1-cli`, `site`, `box-dry-run`, `unit`.
+`--suite` accepts only `all`, `nightly`, `server`, `p1-cli`, `site`, `box-dry-run`, `unit`
+(and the `server-permanence` profile).
 `--ref` accepts only `main`; all other refs/extra arguments fail before work.
 
 Every suite gets a fresh detached checkout, private bridge, disposable privileged

@@ -18,16 +18,19 @@ import uuid
 
 SUITES = ('box-dry-run', 'server', 'p1-cli', 'site', 'unit')
 PROFILES = ('server-permanence',)
+# The nightly runs only what this host alone can prove. server, p1-cli and unit are the same
+# test lists the GitHub-hosted suites run, and those post their result on the tested commit.
+NIGHTLY = ('box-dry-run', 'site')
 def refuse(message):
     sys.exit('REFUSE: ' + message)
 
 args = sys.argv[1:]
 if len(args) != 4 or args[0] not in ('--sha', '--ref') or args[2] != '--suite':
-    refuse('use --sha <40hex> or --ref main, followed by --suite all|server|p1-cli|site|box-dry-run|unit|server-permanence')
+    refuse('use --sha <40hex> or --ref main, followed by --suite all|nightly|server|p1-cli|site|box-dry-run|unit|server-permanence')
 requested, selection = args[1], args[3]
 if (args[0] == '--sha' and not re.fullmatch('[0-9a-f]{40}', requested)) or (args[0] == '--ref' and requested != 'main'):
     refuse('only an exact lowercase SHA or --ref main is accepted')
-if selection not in (*SUITES, *PROFILES, 'all'):
+if selection not in (*SUITES, *PROFILES, 'all', 'nightly'):
     refuse('unknown suite')
 cfg_path = Path(os.environ.get('COMMONSWARM_CI_CONFIG', '/opt/commonswarm-ci/config.json'))
 cfg = json.loads(cfg_path.read_text())
@@ -261,7 +264,7 @@ with (state / 'queue.lock').open('a') as lock:
     if not re.fullmatch('[0-9a-f]{40}', resolved) or (requested != 'main' and resolved != requested):
         refuse('fetch did not resolve the requested commit')
     cmd(git + ['update-ref', 'refs/heads/ci-input', resolved], interruptible=True)
-    suites = SUITES if selection == 'all' else (selection,)
+    suites = SUITES if selection == 'all' else NIGHTLY if selection == 'nightly' else (selection,)
     overall = 0
     for suite in suites:
         if stopping:
