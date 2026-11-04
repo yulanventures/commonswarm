@@ -5,7 +5,7 @@ const ACCESS_MESSAGE = "Workspace access is missing or no longer authorized. Ask
 const SEAT_MESSAGE = "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.";
 export const TOOL_FAILURE_MESSAGE = "Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com";
 
-// Only codes returned by the hosted claim/check/read/post_signal paths belong here.
+// Only codes returned by the hosted claim/check/read/post_signal/file paths belong here.
 // Never forward backend prose, arbitrary codes, or exception messages to a client.
 const MESSAGES = {
   hosted_grant_forbidden: ACCESS_MESSAGE,
@@ -26,6 +26,11 @@ const MESSAGES = {
   payload_too_large: "The request is too large. Shorten body to at most 8000 characters and retry with a new request_id.",
   upgrade_required: "This hosted connection needs a service update. Contact support@commonswarm.com, then retry with the same request_id.",
   rate_limited: "Too many requests. Retry after the current rate-limit window resets; reuse the same request_id.",
+  file_not_found: "No readable version of that file exists in this seat's workspace. Use file_ls or the attachments from check to get a current file_id and version_n.",
+  file_tombstoned: "That file was removed from the workspace. Ask a workspace member to restore it if you still need it.",
+  household_managed_file: "That file belongs to a shared list or doc and cannot be read with file_get.",
+  signal_unavailable: "That message is unavailable to this seat. Use a signal_id from this seat's check output, or call file_ls without signal_id.",
+  file_content_unavailable: "The file's content could not be read right now. Retry later; the metadata from file_ls is still valid.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;

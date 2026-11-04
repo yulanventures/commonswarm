@@ -20,6 +20,13 @@ import {
   type VerifiedMcpToken,
 } from "./auth.ts";
 import { executeClaimSeat } from "./claim-seat.ts";
+import {
+  FILE_PAGE_MAX_BYTES,
+  FileContentUnavailable,
+  fitTextPage,
+  isTextContentType,
+  readObjectPage,
+} from "./file-content.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
@@ -198,7 +205,10 @@ async function seatCapability(
   tool: Exclude<HostedToolName, "claim_seat">,
 ): Promise<HostedSeatCapability | null> {
   const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
-  const use = tool === "whoami" || tool === "members" || content?.effect === "read" ? "read" : "command";
+  // file_get resolves its version through the command path (live-state checks under
+  // the hosted locks), so only file_ls joins the read-role tools.
+  const use = tool === "whoami" || tool === "members" || tool === "file_ls" ||
+    content?.effect === "read" ? "read" : "command";
   return await authDb.begin("isolation level read committed", async (tx) => {
     await setRole(tx, use === "read" ? "swarm_read" : "swarm_command");
     return await authenticateHostedSeatCapability(tx, {
@@ -292,6 +302,32 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     return { ...output, ...householdRefusalDetails(output.reason, binding.workspaceId),
       ...(next_action === undefined ? {} : { next_action }) };
   }
+  if (call.name === "file_ls") {
+    const output = readOutput(await handleHostedRead({
+      resource: "files",
+      workspace_id: binding.workspaceId,
+      ...(args.signal_id === undefined ? {} : { signal_id: String(args.signal_id) }),
+      ...(args.offset === undefined ? {} : { offset: Number(args.offset) }),
+      ...(args.limit === undefined ? {} : { limit: Number(args.limit) }),
+    }, capability));
+    return fileListOutput(output, args);
+  }
+  if (call.name === "file_get") {
+    const result = await handleHostedCommand({
+      // A fresh id per call: no ledger replay carries a signed path back out.
+      command_id: `mcpfile_${crypto.randomUUID()}`,
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: {
+        kind: "file_download_url",
+        file_id: String(args.file_id),
+        version_n: args.version_n === undefined ? null : Number(args.version_n),
+      },
+    }, capability);
+    if (result.status !== 200) throw new HostedToolFailure(result.body.error);
+    return await fileGetOutput(result.body, Number(args.offset ?? 0));
+  }
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
       resource: call.name,
@@ -363,6 +399,91 @@ const handleProtocolRequest = createMcpProtocolHandler({
   verifyToken: (token, signal) => verifier.verify(token, signal),
   executeTool,
 });
+
+const FILE_METADATA_ONLY = "This file type is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.";
+const FILE_NOT_TEXT = "This file is not valid UTF-8 text, so it is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.";
+
+function fileProvenanceSource(row: Record<string, unknown>) {
+  return {
+    kind: "file",
+    id: String(row.file_id),
+    title: String(row.name).slice(0, 120),
+    revision: `v${String(row.version_n)}`,
+  };
+}
+
+/** Only listed fields leave the function; the view's other columns stay behind. */
+function fileListOutput(output: Record<string, unknown>, args: HostedToolArguments): Record<string, unknown> {
+  const files = Array.isArray(output.files) ? output.files as Record<string, unknown>[] : [];
+  const listed = files.map((row) => ({
+    file_id: row.file_id,
+    version_n: row.version_n,
+    name: row.name,
+    content_type: row.content_type,
+    size_bytes: row.size_bytes === null || row.size_bytes === undefined ? null : Number(row.size_bytes),
+    ...(row.committed_at === undefined ? {} : { committed_at: row.committed_at }),
+  }));
+  const nextOffset = typeof output.next_offset === "number" ? output.next_offset : null;
+  return {
+    context: output.context,
+    ...(args.signal_id === undefined ? {} : { signal_id: args.signal_id }),
+    files: listed,
+    next_offset: nextOffset,
+    content_warning: output.content_warning,
+    provenance: {
+      sources: listed.map(fileProvenanceSource),
+      query: args.signal_id === undefined
+        ? { tool: "file_ls", scope: "workspace files", offset: Number(args.offset ?? 0) }
+        : { tool: "file_ls", scope: "attachments on one message addressed to this seat", signal_id: args.signal_id },
+      row_count: listed.length,
+      truncated: nextOffset !== null,
+    },
+  };
+}
+
+/**
+ * Metadata from the resolved version, plus one bounded text page for declared text types.
+ * The signed path in `body.download_path` is consumed here and never returned.
+ */
+async function fileGetOutput(body: Record<string, unknown>, offset: number): Promise<Record<string, unknown>> {
+  const meta = {
+    file_id: String(body.file_id),
+    version_n: Number(body.version_n),
+    name: String(body.name),
+    content_type: String(body.content_type),
+    size_bytes: Number(body.size_bytes),
+  };
+  const provenance = (nextOffset: number | null, pageOffset: number) => ({
+    sources: [fileProvenanceSource(meta)],
+    query: { tool: "file_get", file_id: meta.file_id, version_n: meta.version_n, offset: pageOffset },
+    row_count: 1,
+    truncated: nextOffset !== null,
+  });
+  const base = { ...meta, content_warning: body.content_warning };
+  if (!isTextContentType(meta.content_type)) {
+    return { ...base, text: null, next_action: FILE_METADATA_ONLY, provenance: provenance(null, 0) };
+  }
+  if (offset >= meta.size_bytes) {
+    return { ...base, encoding: "utf-8", text: "", offset, next_offset: null, provenance: provenance(null, offset) };
+  }
+  const baseUrl = Deno.env.get("SUPABASE_URL");
+  if (!baseUrl) throw new HostedToolFailure("file_content_unavailable");
+  try {
+    const bytes = await readObjectPage(baseUrl, String(body.download_path), offset, FILE_PAGE_MAX_BYTES);
+    const page = fitTextPage(bytes, offset, meta.size_bytes, limits.maxResponseBytes, (cut) => ({
+      ...base,
+      encoding: "utf-8",
+      text: cut.text,
+      offset: cut.offset,
+      next_offset: cut.next_offset,
+      provenance: provenance(cut.next_offset, cut.offset),
+    }));
+    return page ?? { ...base, text: null, next_action: FILE_NOT_TEXT, provenance: provenance(null, offset) };
+  } catch (error) {
+    if (error instanceof FileContentUnavailable) throw new HostedToolFailure("file_content_unavailable");
+    throw error;
+  }
+}
 
 function serviceUpdating(body: Record<string, unknown>): boolean {
   return body.error === "household_content_service_updating" && body.retryable === true && body.retry_after_seconds === 1;
