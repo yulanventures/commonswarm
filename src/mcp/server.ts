@@ -10,7 +10,7 @@ import { AgentSetupError, openProfileCredential, privatePath, profileSessionCont
 import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
-import { readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
+import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { signalDuration } from "../cloud/signal-duration.js";
 import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
@@ -169,6 +169,12 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           break;
         }
         case "members": output = tool.mapResult(await directory(), profile.workspace_id); break;
+        case "roster": {
+          const auth = await authenticated();
+          await directory(auth);
+          output = tool.mapResult(await readAgentRoster(profileTarget(profile), auth.token, profile.workspace_id, auth.fetcher));
+          break;
+        }
         case "check": {
           if (args.message_id) {
             await directory();

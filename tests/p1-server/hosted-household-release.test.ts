@@ -19,7 +19,7 @@ import { MCP_ISSUER, MCP_JWKS_URL, MCP_RESOURCE } from "../../supabase/functions
 import { DOCKER_UNAVAILABLE, awaitHealth, dockerAvailable, functionsRoot, startComposeEdgeRuntime, type EdgeRuntimeHandle } from "../support/edge-runtime-function-boot.js";
 
 const KEY = "SUPABASE_SERVICE_ROLE_KEY", OAUTH = "MCP_OAUTH_SIGNING_KEYS_FILE", MARKER = "H6ListItemMarker";
-const coreNames = ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members", "file_ls", "file_get", "file_put", "seat_list", "seat_release"];
+const coreNames = ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members", "roster", "file_ls", "file_get", "file_put", "seat_list", "seat_release"];
 const hostedNames = [...coreNames, ...HOSTED_TODO_LIST_TOOLS.map((tool) => tool.name)];
 const b64 = (value: Uint8Array) => Buffer.from(value).toString("base64url");
 const guardedRemove = (directory: string) => {

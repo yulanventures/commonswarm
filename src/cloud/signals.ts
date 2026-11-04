@@ -1447,6 +1447,113 @@ function parseAgentIdentity(value: unknown): SignalAgentIdentity {
   };
 }
 
+export const ROSTER_STATUSES = ["active", "idle", "inactive", "not_picking_up", "off"] as const;
+export type RosterStatus = typeof ROSTER_STATUSES[number];
+export interface RosterEntry {
+  principal_id: string;
+  name: string;
+  transport: string;
+  turn_only: boolean;
+  owner: { user_id: string; display_name: string | null };
+  status: RosterStatus;
+  connection: string;
+  last_activity_at: string | null;
+  /** text is set only for a workspace-wide working-on; it is agent-written, untrusted data. */
+  open_work: { since: string; text: string | null } | null;
+  /** Open asks from this agent to people: a count and the oldest time, never their content. */
+  waiting_on_people: { count: number; since: string | null };
+  platform: string | null;
+  job: string | null;
+  reports_to: string | null;
+  parent: string | null;
+  source: string;
+}
+export interface AgentRoster {
+  workspace_id: string;
+  generated_at: string | null;
+  lead_agent_principal_id: string | null;
+  truncated: boolean;
+  agents: RosterEntry[];
+}
+
+function nullableText(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new SignalMalformedError(`roster read returned malformed ${field}`);
+  return value;
+}
+
+function parseRosterEntry(value: unknown): RosterEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new SignalMalformedError("roster read returned a malformed agent");
+  const row = value as Record<string, unknown>;
+  const owner = row.owner as Record<string, unknown> | null;
+  const waiting = row.waiting_on_people as Record<string, unknown> | null;
+  const work = row.open_work as Record<string, unknown> | null;
+  if (typeof row.name !== "string" || typeof row.transport !== "string" || typeof row.turn_only !== "boolean" ||
+    !owner || typeof owner !== "object" || !waiting || typeof waiting !== "object" ||
+    !(ROSTER_STATUSES as readonly unknown[]).includes(row.status) || typeof row.connection !== "string" ||
+    !Number.isSafeInteger(waiting.count) || (waiting.count as number) < 0 || typeof row.source !== "string" ||
+    (work !== null && (typeof work !== "object" || typeof work.since !== "string"))) {
+    throw new SignalMalformedError("roster read returned a malformed agent");
+  }
+  return {
+    principal_id: checkedUuid(row.principal_id, "roster principal_id"),
+    name: row.name,
+    transport: row.transport,
+    turn_only: row.turn_only,
+    owner: { user_id: checkedUuid(owner.user_id, "roster owner user_id"), display_name: nullableText(owner.display_name, "owner name") },
+    status: row.status as RosterStatus,
+    connection: row.connection,
+    last_activity_at: nullableText(row.last_activity_at, "last_activity_at"),
+    open_work: work === null ? null : { since: work.since as string, text: nullableText(work.text, "open_work text") },
+    waiting_on_people: { count: waiting.count as number, since: nullableText(waiting.since, "waiting since") },
+    platform: nullableText(row.platform, "platform"),
+    job: nullableText(row.job, "job"),
+    reports_to: nullableText(row.reports_to, "reports_to"),
+    parent: nullableText(row.parent, "parent"),
+    source: row.source,
+  };
+}
+
+/** Roster R1a: every agent in the bound workspace, derived from activity. */
+export async function readAgentRoster(
+  target: CloudTarget,
+  token: string,
+  workspaceId: string,
+  fetcherOrOptions: typeof fetch | SignalReadOptions = fetch,
+): Promise<AgentRoster> {
+  const options = normalizeReadOptions(fetcherOrOptions);
+  let result: { response: Response; body: unknown } | null;
+  try {
+    result = await fetchSignalReadRetrying(options.fetcher, readEndpoint(target), {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, apikey: target.anonKey, "content-type": "application/json" },
+      body: JSON.stringify({ resource: "roster", workspace_id: workspaceId }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }, perReadTimeoutMs(options));
+  } catch (error) {
+    if (error instanceof SignalReadTimeoutError) {
+      if (options.deadlineMs !== undefined) throw error;
+      throw new SignalTransportError("roster read could not reach the cloud service");
+    }
+    throw error;
+  }
+  if (result === null) throw new SignalTransportError("roster read could not reach the cloud service");
+  const { response, body } = result;
+  if (!response.ok) throwSignalHttp(response, body, "roster read failed");
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new SignalMalformedError("roster read returned malformed JSON");
+  const payload = body as Record<string, unknown>;
+  if (!Array.isArray(payload.agents) || typeof payload.truncated !== "boolean") {
+    throw new SignalMalformedError("roster read returned malformed JSON");
+  }
+  return {
+    workspace_id: checkedUuid(payload.workspace_id, "roster workspace_id"),
+    generated_at: nullableText(payload.generated_at, "generated_at"),
+    lead_agent_principal_id: payload.lead_agent_principal_id == null ? null : checkedUuid(payload.lead_agent_principal_id, "roster lead"),
+    truncated: payload.truncated,
+    agents: payload.agents.map(parseRosterEntry),
+  };
+}
+
 export async function readAgentSignalDirectory(
   target: CloudTarget,
   token: string,
