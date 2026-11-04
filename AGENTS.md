@@ -69,3 +69,5 @@ Production on `yulan-vps-1`: `commonswarm-supabase-stack`, `commonswarm-edge`, `
 Environment-name inventories: `deploy/{supabase-stack,edge-runtime,mcp-auth}/env.example`; runtime files `/home/commonswarm/.env`, `/etc/commonswarm-oauth/service.env`. Site `.env` names: `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `PUBLIC_H0_LINK_JOIN`.
 
 `docs/org/`, `docs/evidence/`, and completed cutover runbooks are history, not instructions; code plus this file are the source of truth.
+
+Write role names ("the owner") instead of the owner's personal name in PR titles and bodies, commits, issues, docs and swarm posts. Leave existing history as it is (owner, 2026-11-04).
