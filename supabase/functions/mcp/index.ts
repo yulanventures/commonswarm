@@ -28,6 +28,7 @@ import {
   readObjectPage,
 } from "./file-content.ts";
 import { executeFilePut } from "./file-put.ts";
+import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
@@ -152,6 +153,7 @@ interface GrantBinding {
 interface SeatBinding extends GrantBinding {
   workspaceId: string;
   handle: string;
+  seatId: string;
 }
 
 async function handleHostedCommand(
@@ -181,8 +183,9 @@ async function resolveSeatBinding(
       owner_user_id: string;
       workspace_id: string;
       handle: string;
+      seat_id: string;
     }[]>`
-      SELECT g.grant_id, g.owner_user_id, h.workspace_id, h.handle
+      SELECT g.grant_id, g.owner_user_id, h.workspace_id, h.handle, h.seat_id
       FROM swarm.hosted_mcp_grants AS g
       JOIN swarm.hosted_mcp_seat_handles AS h ON h.grant_id = g.grant_id
       WHERE g.provider_grant_id = ${token.providerGrantId}
@@ -196,6 +199,7 @@ async function resolveSeatBinding(
       ownerUserId: row.owner_user_id,
       workspaceId: row.workspace_id,
       handle: row.handle,
+      seatId: row.seat_id,
     };
   }) as unknown as SeatBinding | null;
 }
@@ -284,6 +288,16 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       handleCommand: handleHostedCommand,
     }));
   }
+  if (call.name === "seat_list") {
+    return await executeSeatList(call.token, {
+      withAuthTransaction: async <T>(run: (tx: Sql) => Promise<T>): Promise<T> =>
+        await authDb.begin("isolation level read committed", async (tx) => {
+          await setRole(tx, "swarm_command");
+          return await run(tx);
+        }) as unknown as T,
+      providerStatus,
+    });
+  }
   const handle = String(args.seat);
   const binding = await resolveSeatBinding(call.token, handle);
   if (binding === null) throw new HostedToolFailure("hosted_seat_forbidden");
@@ -333,6 +347,17 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     }, capability);
     if (result.status !== 200) throw new HostedToolFailure(result.body.error);
     return await fileGetOutput(result.body, Number(args.offset ?? 0));
+  }
+  if (call.name === "seat_release") {
+    const result = await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: { kind: "release_hosted_mcp_seat", grant_id: binding.grantId, seat_id: binding.seatId },
+    }, capability);
+    if (result.status !== 200) throw new HostedToolFailure(result.body.error);
+    return { released: true, seat: binding.handle, note: SEAT_RELEASED_NOTE };
   }
   if (call.name === "file_put") {
     return await executeFilePut(args, binding, capability, {

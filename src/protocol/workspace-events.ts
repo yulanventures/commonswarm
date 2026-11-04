@@ -39,6 +39,7 @@ export type WorkspaceEventType = AdminRoutineEventType
   | 'HostedMcpGrantRevoked'
   | 'HostedMcpSeatClaimed'
   | 'HostedMcpSeatRevoked'
+  | 'HostedMcpSeatReleased'
   | 'CommandRejected';
 
 export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
@@ -66,6 +67,7 @@ export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   'HostedMcpGrantRevoked',
   'HostedMcpSeatClaimed',
   'HostedMcpSeatRevoked',
+  'HostedMcpSeatReleased',
   'CommandRejected',
 ] as const;
 

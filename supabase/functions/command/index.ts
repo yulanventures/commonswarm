@@ -1045,6 +1045,7 @@ const HOSTED_MANAGEMENT_KINDS = new Set([
   "activate_hosted_mcp_grant",
   "revoke_hosted_mcp_grant",
   "revoke_hosted_mcp_seat",
+  "release_hosted_mcp_seat",
   "set_connection_expiry",
 ]);
 
@@ -10438,6 +10439,11 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
       (command?.kind === FILE_VERSION_COMMIT_KIND &&
         exactKeys(command, ["kind", "file_id", "version_id", "sha256"]));
   }
+  if (tool === "seat_release") {
+    return command?.kind === "release_hosted_mcp_seat" &&
+      exactKeys(command, ["kind", "grant_id", "seat_id"]);
+  }
+  if (command?.kind === "release_hosted_mcp_seat") return false;
   if (command?.kind === FILE_DOWNLOAD_URL_KIND || command?.kind === FILE_VERSION_CREATE_KIND ||
       command?.kind === FILE_VERSION_COMMIT_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
@@ -10503,6 +10509,7 @@ type HostedManagementCommand =
   | { kind: "activate_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_grant"; grant_id: string }
   | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string }
+  | { kind: "release_hosted_mcp_seat"; grant_id: string; seat_id: string }
   | { kind: "set_connection_expiry"; connection_kind: "hosted" | "renewal"; grant_id: string;
       connection_expires_at: string | null };
 
@@ -10595,7 +10602,7 @@ function parseHostedManagementCommand(value: unknown): HostedManagementCommand |
       ? command as HostedManagementCommand
       : null;
   }
-  if (command.kind === "revoke_hosted_mcp_seat") {
+  if (command.kind === "revoke_hosted_mcp_seat" || command.kind === "release_hosted_mcp_seat") {
     return exactKeys(command, ["kind", "grant_id", "seat_id"]) &&
         typeof command.grant_id === "string" && UUID_RE.test(command.grant_id) &&
         typeof command.seat_id === "string" && UUID_RE.test(command.seat_id)
@@ -10761,9 +10768,16 @@ async function handleHostedManagement(
   tx: Sql,
   body: RequestBody,
   auth: AuthContext,
+  seatCapability: HostedSeatCapability | null = null,
 ): Promise<HttpResult> {
   const command = parseHostedManagementCommand(body.command);
-  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+  // Hosted seats enter only to release themselves: the exact seat their
+  // capability resolved, never another seat, grant operation or owner action.
+  const seatRelease = command?.kind === "release_hosted_mcp_seat";
+  if (auth.actor.user === null ||
+      (auth.credentialKind === "user" ? seatRelease
+        : auth.credentialKind !== "hosted_seat" || !seatRelease || seatCapability === null ||
+          auth.credentialId === null || command?.seat_id !== auth.credentialId)) {
     return { status: 403, body: { error: "forbidden" } };
   }
   if (command === null ||
@@ -10795,7 +10809,7 @@ async function handleHostedManagement(
     ? command.home_workspace_id
     : command.kind === "consent_hosted_mcp_workspace"
     ? command.workspace_id
-    : command.kind === "revoke_hosted_mcp_seat"
+    : command.kind === "revoke_hosted_mcp_seat" || command.kind === "release_hosted_mcp_seat"
     ? (await tx<{ workspace_id: string }[]>`
         SELECT workspace_id FROM swarm.hosted_mcp_seats
         WHERE seat_id = ${command.seat_id}::uuid
@@ -10820,7 +10834,7 @@ async function handleHostedManagement(
     if (current && current.owner_user_id!==auth.actor.user) return null;
     if (!current && command.kind!=='begin_hosted_mcp_grant') return null;
     if (current && preliminaryGrant && current.home_workspace_id!==preliminaryGrant.home_workspace_id) throw new LocalAuthDiscoveryChanged();
-    const seats=command.kind==='revoke_hosted_mcp_seat' ? await tx<{workspace_id:string;principal_id:string}[]>`
+    const seats=command.kind==='revoke_hosted_mcp_seat' || command.kind==='release_hosted_mcp_seat' ? await tx<{workspace_id:string;principal_id:string}[]>`
       SELECT workspace_id,principal_id FROM swarm.hosted_mcp_seats
       WHERE seat_id=${command.seat_id}::uuid AND grant_id=${command.grant_id}::uuid` : [];
     if (seats.some(seat=>seat.workspace_id!==routeWorkspaceId)) throw new LocalAuthDiscoveryChanged();
@@ -10882,12 +10896,12 @@ async function handleHostedManagement(
 
   const consentWorkspaceIds = command.kind==='activate_hosted_mcp_grant'
     ? grant?.selected_workspace_ids ?? []
-    : ['consent_hosted_mcp_workspace','revoke_hosted_mcp_seat','set_connection_expiry'].includes(command.kind)
+    : ['consent_hosted_mcp_workspace','revoke_hosted_mcp_seat','release_hosted_mcp_seat','set_connection_expiry'].includes(command.kind)
     ? [routeWorkspaceId] : [];
   if (grant !== null && consentWorkspaceIds.length) await tx`SELECT workspace_id FROM swarm.hosted_mcp_grant_workspaces
     WHERE grant_id=${grant.grant_id}::uuid AND workspace_id=ANY(${consentWorkspaceIds}::uuid[])
     ORDER BY workspace_id FOR UPDATE`;
-  const seatRows = command.kind === "revoke_hosted_mcp_seat"
+  const seatRows = command.kind === "revoke_hosted_mcp_seat" || command.kind === "release_hosted_mcp_seat"
     ? await tx<{
       seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
       principal_id: string; name: string; handle: string; created_at: Date;
@@ -10974,7 +10988,10 @@ async function handleHostedManagement(
   const finalAuthorization = async () => {
     if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix &&
         command.kind !== 'begin_hosted_mcp_grant') throw new LocalAuthDiscoveryChanged();
-    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat') return;
+    // A release was revalidated under these locks before its projection; after it,
+    // the seat is intentionally revoked, so there is nothing further to re-prove.
+    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat' ||
+        command.kind==='release_hosted_mcp_seat') return;
     const required=command.kind==='activate_hosted_mcp_grant' ? grant!.selected_workspace_ids : [route.workspaceId];
     const [fresh]=await tx<{ok:boolean}[]>`SELECT
       NOT EXISTS (SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
@@ -11038,8 +11055,8 @@ async function handleHostedManagement(
   }[]>`
     SELECT request_hash, workspace_id, stream_id, response
     FROM swarm.idempotency_keys
-    WHERE principal_kind = 'user'
-      AND principal_id = ${auth.actor.user}
+    WHERE principal_kind = ${auth.ledgerCredentialKind}
+      AND principal_id = ${auth.ledgerPrincipalId}
       AND command_id = ${body.command_id}
     LIMIT 1
   `;
@@ -11068,6 +11085,17 @@ async function handleHostedManagement(
     await finalAuthorization();
     return replayResult(storedResponse(replay.response), command.kind);
   }
+  if (command.kind === "release_hosted_mcp_seat") {
+    // Same locks as revocation are held. Re-prove the seat's complete hosted
+    // authority (grant, client, owner, provider family, connection expiry,
+    // workspace) immediately before deciding and projecting its own release.
+    const fresh = seatCapability === null ? null : await revalidateHostedSeatCommand(tx, seatCapability);
+    if (fresh === null || fresh.seat_id !== command.seat_id || fresh.grant_id !== command.grant_id ||
+        fresh.owner_user_id !== auth.actor.user || fresh.principal_id !== auth.agent?.principal_id ||
+        fresh.workspace_id !== route.workspaceId) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+  }
   let nextSeq = frame.headSeq;
   const decision: Decision = command.kind === "set_connection_expiry"
     // Policy has no workspace-core event type. Its typed before/after receipt
@@ -11089,7 +11117,7 @@ async function handleHostedManagement(
   }, {
     now: frame.now,
     actor: auth.actor,
-    credential_kind: "human",
+    credential_kind: auth.credentialKind === "hosted_seat" ? "hosted_seat" : "human",
     command_id: body.command_id,
     workspace_id: route.workspaceId,
     stream_id: route.streamId,
@@ -11177,6 +11205,19 @@ async function handleHostedManagement(
         SET state = ${folded.state}, revoked_at = ${new Date(folded.revoked_at)}
         WHERE grant_id = ${command.grant_id}::uuid AND state <> 'revoked'
       `;
+    } else if (event.type === "HostedMcpSeatReleased") {
+      if (command.kind !== "release_hosted_mcp_seat" || seat === null || grant === null) {
+        throw new Error("seat release event did not match its command facts");
+      }
+      const folded = reduceHostedAuthority(hostedProjectionBefore(grant, seat), event);
+      const foldedSeat = folded.seats[command.seat_id];
+      const foldedPrincipal = folded.principals[seat.principal_id];
+      // Seat-only: the seat and handle end; the principal must still be live.
+      if (!foldedSeat || foldedSeat.revoked_at === null || foldedSeat.handle_revoked_at === null ||
+          !foldedPrincipal || foldedPrincipal.revoked_at !== null) {
+        throw new Error("seat release event did not fold to a seat-only release");
+      }
+      await projectHostedSeatRevocation(tx, command.seat_id, new Date(foldedSeat.revoked_at), auth.actor.user);
     } else if (event.type === "HostedMcpSeatRevoked") {
       if (command.kind !== "revoke_hosted_mcp_seat" || seat === null) {
         throw new Error("seat revoke event did not match its command facts");
@@ -11208,7 +11249,8 @@ async function handleHostedManagement(
     event_ids: decision.events.map((entry) => entry.event_id),
     grant_id: command.grant_id,
     workspace_id: route.workspaceId,
-    ...(command.kind === "revoke_hosted_mcp_seat" ? { seat_id: command.seat_id } : {}),
+    ...(command.kind === "revoke_hosted_mcp_seat" || command.kind === "release_hosted_mcp_seat"
+      ? { seat_id: command.seat_id } : {}),
     ...(command.kind === "set_connection_expiry" ? {
       previous_connection_expires_at: grant?.connection_expires_at?.toISOString() ?? null,
       connection_expires_at: command.connection_expires_at,
@@ -11219,7 +11261,7 @@ async function handleHostedManagement(
       principal_kind, principal_id, command_id, workspace_id, stream_id,
       request_hash, response
     ) VALUES (
-      'user', ${auth.actor.user}, ${body.command_id},
+      ${auth.ledgerCredentialKind}, ${auth.ledgerPrincipalId}, ${body.command_id},
       ${route.workspaceId}::uuid, ${route.streamId}::uuid, ${hash},
       ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
     )
@@ -12029,7 +12071,7 @@ async function handleTransaction(
           ? { user_id: auth.actor.user, email: auth.email, verified: auth.identityVerified } : null);
     }
     if (HOSTED_MANAGEMENT_KINDS.has(kind)) {
-      return await handleHostedManagement(tx, body, auth);
+      return await handleHostedManagement(tx, body, auth, hostedSeatCapability);
     }
     // Hosted turns do not advertise listener presence or touch local delivery
     // state. Their durable authorization was reloaded above for this call.

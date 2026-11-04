@@ -514,6 +514,7 @@ export function reduceWorkspace(
     case 'HostedMcpWorkspaceConsented':
     case 'HostedMcpGrantActivated':
     case 'HostedMcpGrantRevoked':
+    case 'HostedMcpSeatReleased':
       // These events affect the hosted-authority projection, not workspace
       // membership/principal state. Their reducer validates their full shape.
       next = s;

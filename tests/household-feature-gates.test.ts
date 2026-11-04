@@ -152,7 +152,7 @@ async function hostedProtocol(flags: Record<string, string | undefined> = {}, en
 
 test('only the to-do/list server gate enables its hosted catalog and calls', async (t) => {
   t.mock.method(console, 'error', () => undefined);
-  const core = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members', 'file_ls', 'file_get', 'file_put'];
+  const core = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members', 'file_ls', 'file_get', 'file_put', 'seat_list', 'seat_release'];
   const { rpc, calls } = await hostedProtocol({ [transportGate]: '1', [legacyGate]: '1', [redirectGate]: '1' });
   assert.deepEqual((await rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name), core);
   const unknown = await rpc('tools/call', { name: 'unknown_tool', arguments: {} }, 400);
@@ -165,7 +165,7 @@ test('only the to-do/list server gate enables its hosted catalog and calls', asy
 
   const enabled = await hostedProtocol({}, true);
   const restored = (await enabled.rpc('tools/list')).result.tools.map((tool: { name: string }) => tool.name);
-  assert.equal(restored.length, 31);
+  assert.equal(restored.length, 33);
   assert.deepEqual(restored, [...core, ...HOSTED_TODO_LIST_TOOLS.map(row => row.name)]);
   assert.ok((await enabled.rpc('tools/call', { name: 'list_list', arguments: { seat: 'seat_' + 'a'.repeat(22), offset: 0, limit: 10 } })).result);
   assert.deepEqual(enabled.calls, ['list_list'], 'enabled control restores admission as well as discovery');
