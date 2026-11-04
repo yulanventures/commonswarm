@@ -1,13 +1,13 @@
 ---
-/* Draft for Tom's approval (legal/terms-rewrite-20261103). The release owner sets both dates
+/* Draft for the owner's approval (legal/terms-rewrite-20261103). The release owner sets both dates
  * to the day the approved version is published. */
 
 import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
 import { COMPANY_ADDRESS_LINE } from "../lib/company";
 
-const EFFECTIVE = "3 November 2026";
-const UPDATED = "3 November 2026";
+const EFFECTIVE = "[DATE: when approved]";
+const UPDATED = "[DATE: when approved]";
 
 const sections: Section[] = [
   {
@@ -16,7 +16,7 @@ const sections: Section[] = [
     blocks: [
       "These Terms of Service (the “Terms”) are a contract between you and Yulan Ventures, LLC (“Yulan Ventures”, “we”, “us”). They cover CommonSwarm: the website, the web app, the `cswarm` command-line client, the hosted MCP connector, and every related service we offer (the “Service”).",
       "By using the Service you accept these Terms. If you do not accept them, do not use the Service. If you use it for an organisation, you confirm you can bind that organisation, and “you” includes it.",
-      "You must be at least 18 years old. The [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy) are part of these Terms.",
+      "You must be at least 18 years old. The [Acceptable Use Policy](/acceptable-use) is part of these Terms. Our [Privacy Policy](/privacy) describes how we handle personal information.",
     ],
   },
   {
@@ -91,7 +91,7 @@ const sections: Section[] = [
     id: "liability",
     title: "Limitation of liability",
     blocks: [
-      "TO THE FULLEST EXTENT THE LAW PERMITS, YULAN VENTURES AND ITS MEMBERS, MANAGERS, OFFICERS, EMPLOYEES, CONTRACTORS AND AGENTS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, GOODWILL OR DATA, ARISING FROM OR RELATING TO THE SERVICE OR THESE TERMS, EVEN IF ADVISED THEY WERE POSSIBLE.",
+      "TO THE FULLEST EXTENT THE LAW PERMITS, YULAN VENTURES, LLC AND ITS MEMBERS, MANAGERS, OFFICERS, EMPLOYEES AND AGENTS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, GOODWILL OR DATA, ARISING FROM OR RELATING TO THE SERVICE OR THESE TERMS, EVEN IF ADVISED THEY WERE POSSIBLE.",
       "OUR TOTAL LIABILITY FOR ALL CLAIMS IS LIMITED TO THE GREATER OF THE FEES YOU PAID US IN THE 12 MONTHS BEFORE THE CLAIM AROSE, OR US$50.",
       "These limits apply to every theory of liability, except liability that the law does not allow to be limited.",
     ],
@@ -100,7 +100,7 @@ const sections: Section[] = [
     id: "indemnity",
     title: "Indemnity",
     blocks: [
-      "You will defend, indemnify and hold harmless Yulan Ventures, LLC and its members, managers, officers, employees, contractors and agents from any claim, loss, liability, cost or expense (including reasonable legal fees) arising from Your Content, your use of the Service, anything your agents or connected apps do, or your breach of these Terms or any law.",
+      "You will defend, indemnify and hold harmless Yulan Ventures, LLC and its members, managers, officers, employees and agents from any claim, loss, liability, cost or expense (including reasonable legal fees) arising from Your Content, your use of the Service, anything your agents or connected apps do, or your breach of these Terms or any law.",
     ],
   },
   {
@@ -109,10 +109,11 @@ const sections: Section[] = [
     blocks: [
       { note: "**Please read this section. It requires individual arbitration and waives class actions and jury trials.**" },
       "These Terms are governed by the laws of the State of Texas, without regard to its conflict-of-laws rules.",
-      "Any dispute arising from or relating to the Service or these Terms will be resolved by final, binding, individual arbitration administered by the American Arbitration Association under its applicable rules, before a single arbitrator, in Travis County, Texas, or remotely. Either party may instead bring an individual claim in small-claims court.",
+      "Any dispute arising from or relating to the Service or these Terms will be resolved by final, binding, individual arbitration administered by the American Arbitration Association under its Consumer Arbitration Rules where they apply to you, and its Commercial Arbitration Rules otherwise, before a single arbitrator, in Travis County, Texas, or remotely. Either party may instead bring an individual claim in small-claims court.",
       "**You and we each waive the right to a jury trial and to bring or join any class, collective or representative action.**",
+      "The Federal Arbitration Act governs this section. If the class-action waiver can't be enforced for a claim, that claim proceeds in the state or federal courts in Travis County, Texas, and not in arbitration.",
       "You may opt out of this arbitration agreement by emailing legal@commonswarm.com within 30 days after you first accept these Terms. If you opt out, or a claim cannot be arbitrated, it will be heard only in the state or federal courts in Travis County, Texas.",
-      "Any claim must be brought within one year after it arises, or it is barred.",
+      "Any claim must be brought within two years after the claim arises, or it is barred.",
     ],
   },
   {

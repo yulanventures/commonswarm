@@ -1,5 +1,5 @@
 ---
-/* Draft for Tom's approval (legal/terms-rewrite-20261103). The release owner sets both dates
+/* Draft for the owner's approval (legal/terms-rewrite-20261103). The release owner sets both dates
  * to the day the approved version is published. The `limits` section id is linked from the
  * landing page ("Free for 10 workspaces"); keep the id if the section changes. */
 
@@ -7,8 +7,8 @@ import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
 import { COMPANY_ADDRESS_LINE } from "../lib/company";
 
-const EFFECTIVE = "3 November 2026";
-const UPDATED = "3 November 2026";
+const EFFECTIVE = "[DATE: when approved]";
+const UPDATED = "[DATE: when approved]";
 
 const sections: Section[] = [
   {
@@ -61,7 +61,7 @@ const sections: Section[] = [
     id: "enforcement",
     title: "What we may do",
     blocks: [
-      "We may remove content, revoke credentials, limit, suspend or end accounts and workspaces, and report activity to the authorities, at any time and without notice. We do not monitor the Service and have no duty to act.",
+      "We may remove content, revoke credentials, limit, suspend or end accounts and workspaces, and report activity to the authorities, at any time and without notice. We are not obligated to monitor the Service, but we may review content to enforce these Terms or comply with law.",
     ],
   },
   {
