@@ -250,7 +250,8 @@ import "../../styles/kylon-command-palette.css";
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          {/* The organization switcher shares its account menu with the phone control. */}
+          <div data-workspace-picker-root></div>
+          {/* The account control is moved into the navigation shell. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -1172,7 +1173,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
+    buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
@@ -4871,6 +4872,15 @@ import "../../styles/kylon-command-palette.css";
           const menu = one<HTMLElement>("[data-user-menu]"); if (menu) menu.hidden = true;
           const trigger = one<HTMLElement>("[data-user-menu-trigger]");
           trigger?.setAttribute("aria-expanded", "false"); trigger?.focus({ preventScroll: true });
+          void navigateHome({ view: "chat", workspaceId }, "push");
+        }));
+      }
+      const pickerRoot = one<HTMLElement>("[data-workspace-picker-root]");
+      const pickerKey = JSON.stringify([workspaces.map(({ id, name, archived }) => [id, name, archived]), activeWorkspaceId]);
+      if (pickerRoot && pickerRoot.dataset.pickerKey !== pickerKey) {
+        pickerRoot.dataset.pickerKey = pickerKey;
+        pickerRoot.replaceChildren(buildWorkspacePicker(document, workspaces, activeWorkspaceId, workspaceId => {
+          layout.closeNavigation();
           void navigateHome({ view: "chat", workspaceId }, "push");
         }));
       }

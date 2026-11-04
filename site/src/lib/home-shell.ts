@@ -130,6 +130,40 @@ export function buildOrganizationMenu(doc: Document, items: readonly Organizatio
   return group;
 }
 
+/** A workspace picker lists every readable workspace, including siblings in one organization. */
+export function buildWorkspacePicker(
+  doc: Document,
+  workspaces: readonly { id: string; name: string; archived: boolean }[],
+  workspaceId: string,
+  select: (workspaceId: string) => void,
+): HTMLElement {
+  const picker = node(doc, "details", "cs-workspace-picker");
+  picker.dataset.workspacePicker = "";
+  const current = workspaces.find(workspace => !workspace.archived && workspace.id === workspaceId);
+  const trigger = node(doc, "summary", "cs-workspace-picker__trigger");
+  trigger.setAttribute("aria-label", `Switch workspace, ${current?.name ?? "Workspaces"}`);
+  trigger.append(node(doc, "span", "cs-workspace-picker__name", current?.name ?? "Workspaces"));
+  const chevron = node(doc, "span", "cs-workspace-picker__chevron", "⌄");
+  chevron.setAttribute("aria-hidden", "true"); trigger.append(chevron);
+  const list = node(doc, "div", "cs-workspace-picker__list");
+  list.setAttribute("role", "group"); list.setAttribute("aria-label", "Workspaces");
+  for (const workspace of workspaces) {
+    if (workspace.archived) continue;
+    const item = node(doc, "button", "cs-workspace-picker__item", workspace.name);
+    item.type = "button"; item.value = workspace.id;
+    if (workspace.id === workspaceId) item.setAttribute("aria-current", "page");
+    item.addEventListener("click", () => { picker.open = false; select(item.value); });
+    list.append(item);
+  }
+  picker.append(trigger, list);
+  picker.addEventListener("keydown", event => {
+    if (event.key === "Escape" && picker.open) {
+      event.preventDefault(); event.stopPropagation(); picker.open = false; trigger.focus();
+    }
+  });
+  return picker;
+}
+
 export type FeedFilterValue = "all" | "broadcast" | "direct-to-you";
 export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];

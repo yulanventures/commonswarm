@@ -176,3 +176,62 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// Exercise the production shell's moved nodes and native drawer, rather than a copied event handler.
+test("the workspace picker and account survive drawer movement and shell teardown", { timeout: 90_000 }, async () => {
+  const bundle = await build({
+    absWorkingDir: siteRoot, bundle: true, format: "iife", globalName: "NavOwners", platform: "browser", write: false,
+    stdin: { contents: 'export { createOrgShell } from "./src/lib/kylon-shell/shell.js"; export { buildWorkspacePicker } from "./src/lib/home-shell.ts";', resolveDir: siteRoot, loader: "ts" },
+  });
+  const styles = await css("../../styles/kylon-layout/shell.css");
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-nav-owner-"));
+  const fixture = join(directory, "index.html");
+  try {
+    await writeFile(fixture, `<!doctype html><html><head><meta charset="utf-8"><style>*{box-sizing:border-box} body{margin:0} #host{height:720px} ${styles}</style></head><body>
+      <div id="original"><div id="context"></div><div id="main"></div><button id="account">Account</button><div id="picker"></div></div><div id="host"></div>
+      <script>${bundle.outputFiles[0]?.text}</script><script>
+      (() => {
+        try {
+          const original = document.querySelector('#original'), account = document.querySelector('#account'), picker = document.querySelector('#picker');
+          const context = document.querySelector('#context'), main = document.querySelector('#main');
+          const choices = [], accounts = [];
+          account.addEventListener('click', () => accounts.push('open'));
+          picker.append(NavOwners.buildWorkspacePicker(document, [
+            {id:'a', name:'First', orgId:'same', archived:false}, {id:'b', name:'Second', orgId:'same', archived:false},
+            {id:'c', name:'Other', orgId:'other', archived:false}, {id:'z', name:'Archived', archived:true}
+          ], 'b', id => choices.push(id)));
+          const shell = NavOwners.createOrgShell(document, {nodes:{context, main, account, workspacePicker:picker}});
+          document.querySelector('#host').append(shell.root);
+          const phone = matchMedia('(max-width:52rem)').matches;
+          const opener = shell.root.querySelector('[aria-label="Open navigation"]');
+          let accountInDrawer = null, closed = null, focusBack = null, inertDuring = null;
+          if (phone) {
+            opener.focus(); shell.openDrawer();
+            accountInDrawer = shell.root.querySelector('dialog[open] .cs-org-drawer-account')?.contains(account) === true;
+            inertDuring = [...shell.root.children].filter(el => el.tagName !== 'DIALOG').every(el => el.inert);
+          }
+          picker.querySelector('summary').click();
+          const offered = [...picker.querySelectorAll('.cs-workspace-picker__item')].map(el => el.value);
+          picker.querySelector('.cs-workspace-picker__item[value="a"]').click(); account.click();
+          if (phone) { shell.closeDrawer('test'); closed = !shell.isDrawerOpen(); focusBack = document.activeElement === opener; }
+          shell.destroy();
+          const restored = [account, picker, context, main].every(node => node.parentElement === original);
+          document.documentElement.dataset.navResult = btoa(JSON.stringify({phone, accountInDrawer, closed, focusBack, inertDuring, offered, choices, accounts, restored}));
+        } catch (error) { document.documentElement.dataset.navError = String(error && error.stack || error); }
+      })();</script></body></html>`, "utf8");
+    const chrome = await findChrome();
+    for (const width of [390, 1440]) {
+      const { stdout } = await launchChrome(chrome, ["--allow-file-access-from-files", `--window-size=${width},900`, "--dump-dom", `file://${fixture}`],
+        { maxBuffer: 20 * 1024 * 1024, timeout: 20_000, killSignal: "SIGKILL" });
+      const encoded = stdout.match(/\bdata-nav-result="([A-Za-z0-9+/]+={0,2})"/u)?.[1];
+      assert.ok(encoded, `${width}px: shell lifecycle must complete`);
+      const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+      assert.deepEqual(result.offered, ["a", "b", "c"]); assert.deepEqual(result.choices, ["a"]);
+      assert.deepEqual(result.accounts, ["open"]); assert.equal(result.restored, true);
+      if (width === 390) {
+        assert.equal(result.phone, true); assert.equal(result.accountInDrawer, true);
+        assert.equal(result.inertDuring, true); assert.equal(result.closed, true); assert.equal(result.focusBack, true);
+      } else assert.equal(result.phone, false);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

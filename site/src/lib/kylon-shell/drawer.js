@@ -9,7 +9,7 @@ export function connectDrawer(parts, callbacks = {}) {
     .filter(el => el.tabIndex >= 0 && el.getClientRects().length && !el.closest('[hidden],[inert]'));
   function position(reason) {
     move(opened ? phoneProducts : railProducts, products, reason);
-    move(media.matches ? phoneAccount : desktopAccount, account, reason);
+    move(media.matches ? drawerAccount : desktopAccount, account, reason);
   }
   function finish(reason, restoreFocus = true) {
     if (!opened) return;

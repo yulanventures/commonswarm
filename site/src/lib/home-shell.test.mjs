@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOrganizationMenu, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
+import { buildOrganizationMenu, buildWorkspacePicker, capsuleSubline, organizationMenuItems, joinNames, menuFocusIndex, organizationWorkspaces, shellDoors, workspaceMenuItems, workspaceNavItems } from "./home-shell.ts";
 
 const person = (id, name, you = false) => ({ id, name, firstName: name.split(" ")[0], initials: "XX", you, role: "member" });
 const agent = (id, nestedLabel) => ({ id, name: nestedLabel, label: nestedLabel, nestedLabel, ownerId: null, ownerFirstName: null, ownerInitial: "",
@@ -128,4 +128,30 @@ test("organization rail keeps siblings and excludes other and archived workspace
   assert.deepEqual(organizationWorkspaces([a,b,c,closed],"one"),[a,b]);
   assert.deepEqual(organizationWorkspaces([a,{...b,orgId:"two"},c,closed],"two"),[{...b,orgId:"two"},c]);
   assert.deepEqual(organizationWorkspaces([{id:"sample",archived:false}],"sample"),[{id:"sample",archived:false}]);
+});
+
+
+test("workspace picker retains sibling workspaces, excludes archived entries and selects the requested workspace", () => {
+  const element = tag => ({ tag, children: [], attrs: {}, listeners: {}, dataset: {}, open: false,
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    focus() { this.focused = true; },
+  });
+  const selected = [];
+  const picker = buildWorkspacePicker({ createElement: element }, [
+    { id: "one", name: "First", orgId: "same", archived: false },
+    { id: "two", name: "Second", orgId: "same", archived: false },
+    { id: "three", name: "Third", orgId: "other", archived: false },
+    { id: "gone", name: "Archived", orgId: "same", archived: true },
+  ], "two", id => selected.push(id));
+  const [trigger, list] = picker.children;
+  assert.equal(trigger.children[0].textContent, "Second");
+  assert.deepEqual(list.children.map(item => [item.value, item.attrs["aria-current"]]),
+    [["one", undefined], ["two", "page"], ["three", undefined]]);
+  picker.open = true; list.children[0].listeners.click();
+  assert.deepEqual(selected, ["one"]); assert.equal(picker.open, false);
+  picker.open = true; let prevented = false, stopped = false;
+  picker.listeners.keydown({ key: "Escape", preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(picker.open, false); assert.equal(trigger.focused, true); assert.ok(prevented && stopped);
 });

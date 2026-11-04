@@ -192,7 +192,9 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
   },
   {
     "id": "route.acceptable-use",
@@ -581,7 +583,9 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
   },
   {
     "id": "dialog.signout-others",
@@ -601,7 +605,9 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
   },
   {
     "id": "dialog.account-agents",
@@ -622,7 +628,9 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Orbit"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
   },
   {
     "id": "dialog.workspace-skills",
@@ -1151,7 +1159,9 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
   },
   {
     "id": "route.home.footer",
@@ -1213,6 +1223,51 @@
     "ready": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]",
     "states": [
       "dense"
+    ]
+  },
+  {
+    "id": "nav.workspace-picker",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-workspace-picker]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Responsive setup must open the phone drawer before opening the workspace picker.",
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "nav.workspace-switch",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": ".cs-workspace-picker__item[value=\"{emptyWorkspace}\"]",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Responsive setup and a selected-workspace route witness are required to verify the switch.",
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "nav.phone-header",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": ".cs-org-phone-bar",
+    "states": [
+      "dense"
+    ],
+    "status": "pending",
+    "reason": "Phone header and desktop navigation need viewport-specific capture setup.",
+    "requiresSeed": [
+      "create_workspace"
     ]
   }
 ]
