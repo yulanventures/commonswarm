@@ -50,6 +50,7 @@ async function presence(workspace: string, agent: Agent, watcherAgo: string | nu
       ${watcherAgo === null ? null : sql`statement_timestamp() - ${watcherAgo}::interval`})`;
 }
 
+/** The signal insert fans out its own delivery row; set its queue time and ack state. */
 async function waiting(workspace: string, owner: string, agent: Agent, ago: string, acked = false) {
   const signal = randomUUID();
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, about, kind, body, until, created_at)
@@ -57,7 +58,10 @@ async function waiting(workspace: string, owner: string, agent: Agent, ago: stri
       statement_timestamp() + interval '1 day', statement_timestamp() - ${ago}::interval)`;
   await sql`INSERT INTO swarm.signal_deliveries (signal_id, workspace_id, recipient_agent_principal_id, enqueued_at, delivered_at, acked_at, ack_outcome)
     VALUES (${signal}::uuid, ${workspace}::uuid, ${agent.principal}::uuid, statement_timestamp() - ${ago}::interval,
-      ${acked ? sql`statement_timestamp()` : null}, ${acked ? sql`statement_timestamp()` : null}, ${acked ? "acked" : null})`;
+      ${acked ? sql`statement_timestamp()` : null}, ${acked ? sql`statement_timestamp()` : null}, ${acked ? "acked" : null})
+    ON CONFLICT (signal_id, recipient_agent_principal_id) DO UPDATE SET
+      enqueued_at = EXCLUDED.enqueued_at, delivered_at = EXCLUDED.delivered_at,
+      acked_at = EXCLUDED.acked_at, ack_outcome = EXCLUDED.ack_outcome`;
 }
 
 async function quiet(workspace: string): Promise<Array<Record<string, unknown>>> {
