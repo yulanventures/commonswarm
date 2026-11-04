@@ -125,6 +125,16 @@ else if (op === "wrong-kind") {
       result = { status: 409, body: { error: error?.code ?? "threw" } };
     }
   }
+} else if (op === "reserve-only") {
+  // Reserve with file_put's own ids for one content, then stop before upload and commit.
+  const cap = await capability(input.handle, "file_put", "command");
+  const bytes = new TextEncoder().encode(input.args.content);
+  const ids = await content.putIds(input.workspace, input.handle, input.args.request_id, await content.sha256Hex(bytes));
+  result = await command.handleHostedCommand({ command_id: ids.create_command_id, client_version: "0.1.80",
+    workspace_id: input.workspace, stream: { kind: "workspace" },
+    command: { kind: "file_version_create", file_id: ids.file_id, version_id: ids.version_id,
+      name: input.args.name, declared_size_bytes: bytes.length, content_type: "text/plain" } }, cap);
+  result = { status: result.status, body: { reserved: result.status === 200 } };
 } else if (op === "seat-note") {
   const cap = await capability(input.handle, "note", "command");
   result = await command.handleHostedCommand({ command_id: crypto.randomUUID(), client_version: "0.1.80",
@@ -351,6 +361,14 @@ test("file_put uploads as the seat's agent, replays on retry and conflicts on a 
   assert.deepEqual(replay, first, "the same request_id and content replay the same version");
   const changed = run<Result>(f, { operation: "put", handle: f.handleA, args: { ...args, content: "# Plan\nSomething else." } });
   assert.deepEqual(changed, { status: 409, body: { error: "command_id_conflict" } });
+
+  // Before any commit, a same-size changed retry must not reuse the reservation either.
+  const pending = { seat: f.handleA, name: "pending.txt", content: "AAAA", request_id: "put_pending_01" };
+  assert.deepEqual(run<Result>(f, { operation: "reserve-only", handle: f.handleA, args: pending }), { status: 200, body: { reserved: true } });
+  assert.deepEqual(run<Result>(f, { operation: "put", handle: f.handleA, args: { ...pending, content: "BBBB" } }),
+    { status: 409, body: { error: "command_id_conflict" } });
+  const resumed = run<Result>(f, { operation: "put", handle: f.handleA, args: pending });
+  assert.equal(resumed.status, 200, "the original content still completes its own reservation");
 
   const again = run<Result>(f, { operation: "put", handle: f.handleA, args: { ...args, content: "# Plan v2", request_id: "put_plan_0002" } });
   assert.equal(again.status, 200, JSON.stringify(again.body));

@@ -1,9 +1,10 @@
 /** file_put for the hosted MCP: reserve, upload and commit one version inside the function.
  *
- * The reservation's signed upload path and token are consumed here and never returned. Ids
- * derive from (workspace, seat, request_id), so a retry replays the ledger and a retry with
- * changed arguments is a command_id_conflict. Commit measures the stored object, so an upload
- * that did not land cannot commit. */
+ * The reservation's signed upload path and token are consumed here and never returned. Command
+ * ids derive from (workspace, seat, request_id) and the reserved ids also bind the content
+ * digest, so a retry replays the ledger and a retry with changed content is refused at reserve
+ * as command_id_conflict. Commit measures the stored object, so an upload that did not land
+ * cannot commit. */
 import type { CommandResult, HostedCommandInput } from "../command/contract.d.ts";
 import type { HostedSeatCapability } from "../_shared/hosted-seat-auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
@@ -38,7 +39,8 @@ export async function executeFilePut(
     ? new TextEncoder().encode(String(args.content))
     : decodeBase64(String(args.content_base64));
   if (!deps.baseUrl) throw new HostedToolFailure("file_content_unavailable");
-  const ids = await putIds(binding.workspaceId, binding.handle, String(args.request_id));
+  const sha256 = await sha256Hex(bytes);
+  const ids = await putIds(binding.workspaceId, binding.handle, String(args.request_id), sha256);
   const envelope = (commandId: string, command: Record<string, unknown>) => ({
     command_id: commandId,
     client_version: "0.1.80",
@@ -67,7 +69,7 @@ export async function executeFilePut(
     kind: "file_version_commit",
     file_id: fileId,
     version_id: ids.version_id,
-    sha256: await sha256Hex(bytes),
+    sha256,
   }), capability);
   if (committed.status !== 200) throw new HostedToolFailure(committed.body.error, committed.body.resets_at);
   return {

@@ -164,13 +164,21 @@ test("file_put takes exactly one bounded content form and an allowed name; posts
     /Unknown tool argument/u);
 });
 
-test("file_put ids are stable per seat and request, and distinct otherwise", async () => {
+test("file_put ids are stable per seat, request and content, and distinct otherwise", async () => {
   const { putIds } = await import("../supabase/functions/mcp/file-content.ts");
-  const a = await putIds("ws-1", "seat_a", "req_1");
-  assert.deepEqual(await putIds("ws-1", "seat_a", "req_1"), a);
-  for (const other of [await putIds("ws-1", "seat_a", "req_2"), await putIds("ws-1", "seat_b", "req_1"), await putIds("ws-2", "seat_a", "req_1")]) {
+  const a = await putIds("ws-1", "seat_a", "req_1", "aa");
+  assert.deepEqual(await putIds("ws-1", "seat_a", "req_1", "aa"), a);
+  for (const other of [await putIds("ws-1", "seat_a", "req_2", "aa"), await putIds("ws-1", "seat_b", "req_1", "aa"), await putIds("ws-2", "seat_a", "req_1", "aa")]) {
     assert.notEqual(other.file_id, a.file_id);
+    assert.notEqual(other.create_command_id, a.create_command_id);
   }
+  // Changed content keeps the command ids (so the ledger sees the same id) but changes the
+  // reserved ids (so the reserve command differs): command_id_conflict, never a reused slot.
+  const changed = await putIds("ws-1", "seat_a", "req_1", "bb");
+  assert.equal(changed.create_command_id, a.create_command_id);
+  assert.equal(changed.commit_command_id, a.commit_command_id);
+  assert.notEqual(changed.version_id, a.version_id);
+  assert.notEqual(changed.file_id, a.file_id);
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
   for (const value of Object.values(a)) assert.match(value, uuid);
   assert.equal(new Set(Object.values(a)).size, 4);

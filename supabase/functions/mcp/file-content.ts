@@ -212,25 +212,27 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 /**
- * Deterministic ids for one file_put: the same seat, workspace and request_id always name
- * the same file, version and command ids, so a retry is a ledger replay and a changed
- * retry is a command_id_conflict. Version nibble 8 (custom), RFC 4122 variant.
+ * Deterministic ids for one file_put. Command ids bind (workspace, seat, request_id); the
+ * file and version ids also bind the content digest. So a retry with the same content is a
+ * ledger replay, and a retry with any changed content changes the reserve command itself and
+ * is refused as command_id_conflict before a reservation can be reused. Version nibble 8
+ * (custom), RFC 4122 variant.
  */
-export async function putIds(workspaceId: string, seatHandle: string, requestId: string): Promise<{
+export async function putIds(workspaceId: string, seatHandle: string, requestId: string, sha256: string): Promise<{
   file_id: string; version_id: string; create_command_id: string; commit_command_id: string;
 }> {
-  const id = async (label: string) => {
+  const id = async (label: string, content: string) => {
     const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256",
-      new TextEncoder().encode(["hosted-file-put", workspaceId, seatHandle, requestId, label].join("\0"))));
+      new TextEncoder().encode(["hosted-file-put", workspaceId, seatHandle, requestId, content, label].join("\0"))));
     bytes[6] = (bytes[6]! & 0x0f) | 0x80;
     bytes[8] = (bytes[8]! & 0x3f) | 0x80;
     const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
   };
   return {
-    file_id: await id("file"),
-    version_id: await id("version"),
-    create_command_id: await id("create"),
-    commit_command_id: await id("commit"),
+    file_id: await id("file", sha256),
+    version_id: await id("version", sha256),
+    create_command_id: await id("create", ""),
+    commit_command_id: await id("commit", ""),
   };
 }
