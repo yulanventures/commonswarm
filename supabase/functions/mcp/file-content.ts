@@ -236,3 +236,102 @@ export async function putIds(workspaceId: string, seatHandle: string, requestId:
     commit_command_id: await id("commit", ""),
   };
 }
+
+/* PDF text (1b). The bytes go to the edge main service's internal path, which runs the
+ * parser in an isolated, limited worker. This module never parses a PDF itself. */
+
+export const PDF_TEXT_MAX_INPUT_BYTES = 8 * 1024 * 1024;
+const PDF_TEXT_URL = "http://127.0.0.1:9000/__internal/file-text";
+const PDF_TEXT_TIMEOUT_MS = 20_000;
+const PDF_CACHE_TTL_MS = 10 * 60_000;
+const PDF_CACHE_MAX_ENTRIES = 8;
+const PDF_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+
+export type PdfTextResult =
+  | { kind: "text"; bytes: Uint8Array; truncated: boolean; pages_read: number; page_count: number }
+  | { kind: "busy" | "too_complex" | "too_large" | "unavailable" };
+
+interface CacheEntry { at: number; result: PdfTextResult }
+const pdfCache = new Map<string, CacheEntry>();
+const pdfInFlight = new Map<string, Promise<PdfTextResult>>();
+
+function cacheBytes(): number {
+  let total = 0;
+  for (const entry of pdfCache.values()) if (entry.result.kind === "text") total += entry.result.bytes.byteLength;
+  return total;
+}
+
+function remember(key: string, result: PdfTextResult, now: number): void {
+  // Cache text and known-complex PDFs; never transient answers (busy, unavailable).
+  if (result.kind !== "text" && result.kind !== "too_complex") return;
+  pdfCache.delete(key);
+  pdfCache.set(key, { at: now, result });
+  while (pdfCache.size > PDF_CACHE_MAX_ENTRIES || cacheBytes() > PDF_CACHE_MAX_BYTES) {
+    const oldest = pdfCache.keys().next().value;
+    if (oldest === undefined) break;
+    pdfCache.delete(oldest);
+  }
+}
+
+/**
+ * Text for one authorized (workspace, file, version). Callers must have completed that
+ * call's own file authorization first: the cache is never an access path. Concurrent calls
+ * for the same version share one extraction.
+ */
+export async function pdfTextFor(
+  key: string,
+  loadBytes: () => Promise<Uint8Array>,
+  token: string | null | undefined,
+  fetchImpl: typeof fetch = fetch,
+  now: () => number = Date.now,
+): Promise<PdfTextResult> {
+  const cached = pdfCache.get(key);
+  if (cached && now() - cached.at < PDF_CACHE_TTL_MS) return cached.result;
+  if (cached) pdfCache.delete(key);
+  const running = pdfInFlight.get(key);
+  if (running) return await running;
+  const work = (async (): Promise<PdfTextResult> => {
+    if (!token) return { kind: "unavailable" };
+    let bytes: Uint8Array;
+    try { bytes = await loadBytes(); } catch { return { kind: "unavailable" }; }
+    let response: Response;
+    try {
+      response = await fetchImpl(PDF_TEXT_URL, {
+        method: "POST",
+        headers: { "x-commonswarm-file-text": token, "content-type": "application/pdf" },
+        body: bytes as Uint8Array<ArrayBuffer>,
+        redirect: "error",
+        signal: AbortSignal.timeout(PDF_TEXT_TIMEOUT_MS),
+      });
+    } catch {
+      return { kind: "unavailable" };
+    }
+    let body: Record<string, unknown> | null = null;
+    try { body = await response.json() as Record<string, unknown>; } catch { body = null; }
+    if (response.status === 503) return { kind: "busy" };
+    if (response.status === 413) return { kind: "too_large" };
+    if (response.status === 422 && body?.error === "pdf_too_complex") return { kind: "too_complex" };
+    if (response.status !== 200 || body === null || typeof body.text !== "string") return { kind: "unavailable" };
+    return {
+      kind: "text",
+      bytes: new TextEncoder().encode(body.text),
+      truncated: body.truncated === true,
+      pages_read: Number(body.pages_read) || 0,
+      page_count: Number(body.page_count) || 0,
+    };
+  })();
+  pdfInFlight.set(key, work);
+  try {
+    const result = await work;
+    remember(key, result, now());
+    return result;
+  } finally {
+    pdfInFlight.delete(key);
+  }
+}
+
+/** For tests only: the cache is process-local and starts empty in every worker. */
+export function resetPdfTextCache(): void {
+  pdfCache.clear();
+  pdfInFlight.clear();
+}

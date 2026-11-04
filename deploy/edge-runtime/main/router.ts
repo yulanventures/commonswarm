@@ -291,6 +291,8 @@ export const MCP_ENV_NAMES = [
   "SWARM_MCP_CLOCK_SKEW_SECONDS",
   MCP_PUBLIC_ENABLED_ENV,
   MCP_TODOS_LISTS_ENABLED_ENV,
+  // Shared only by main and mcp: it authenticates mcp to main's internal PDF text path.
+  "SWARM_FILE_TEXT_TOKEN",
 ] as const;
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {

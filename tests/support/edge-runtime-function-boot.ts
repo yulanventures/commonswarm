@@ -26,6 +26,8 @@ export const edgeRuntimeDir = resolve(repoRoot, "deploy/edge-runtime");
 export const composePath = resolve(edgeRuntimeDir, "compose.yaml");
 export const functionsRoot = resolve(repoRoot, "supabase/functions");
 export const SKIP_FUNCTION_DIRS = new Set(["_shared"]);
+/** Workers main creates itself on an internal path; never publicly routed or booted here. */
+export const INTERNAL_FUNCTION_DIRS = new Set(["file-text"]);
 export const DOCKER_UNAVAILABLE = "Docker unavailable";
 export const WORKER_BOOT_ERROR = "worker boot error";
 
@@ -60,7 +62,8 @@ export function composeEdgeRuntimeImage(source = readFileSync(composePath, "utf8
 
 export function listFunctionDirectories(root = functionsRoot): string[] {
   return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !SKIP_FUNCTION_DIRS.has(entry.name))
+    .filter((entry) => entry.isDirectory() && !SKIP_FUNCTION_DIRS.has(entry.name) &&
+      !INTERNAL_FUNCTION_DIRS.has(entry.name))
     .map((entry) => entry.name)
     .sort();
 }
