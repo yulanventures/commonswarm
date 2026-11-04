@@ -399,11 +399,13 @@ jobs:
 
   # A workflow_dispatch run attaches its checks to the dispatching branch, not to the commit
   # under test, so a PR head shows none. Post one commit status per suite on the exact SHA
-  # the run checked out (inputs.ref), so reviewers and audits see the result on the head.
+  # the run checked out, so reviewers and audits see the result on the head. A status is
+  # posted only when inputs.ref IS a full commit SHA: every checkout in the run used that
+  # immutable SHA, so the status can never land on a commit pushed to a branch mid-run.
   report-status:
     name: report status on the tested commit
     needs: [suite, server-results]
-    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.repository == 'yulanventures/commonswarm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -420,10 +422,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # The ref is an input: allow only a commit SHA or a plain branch name.
-          [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ && "$REF" != *..* ]] || { echo "refusing ref"; exit 1; }
-          sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "no commit for ref"; exit 1; }
+          # Only a full 40-hex SHA carries a status; a branch name could move during the run.
+          if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "inputs.ref is not a full commit SHA: no status posted"
+            exit 0
+          fi
+          case "$SUITE" in
+            server|server-repeat|p1-cli|p1-local|mobile-audit|site|box-dry-run|unit) ;;
+            *) echo "refusing suite"; exit 1 ;;
+          esac
+          sha="$REF"
           state=failure
           if [ "$SUITE_RESULT" = success ] && { [ "$SUITE" != server ] || [ "$RESULTS_RESULT" = success ]; }; then
             state=success
