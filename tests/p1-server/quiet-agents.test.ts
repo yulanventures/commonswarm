@@ -44,9 +44,9 @@ async function seed(): Promise<{ workspace: string; owner: string; agent: (name:
   };
 }
 
-async function presence(workspace: string, agent: Agent, watcherAgo: string | null) {
+async function presence(workspace: string, agent: Agent, watcherAgo: string | null, callAgo = "15 minutes") {
   await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at, watcher_at)
-    VALUES (${workspace}::uuid, ${agent.principal}::uuid, statement_timestamp(),
+    VALUES (${workspace}::uuid, ${agent.principal}::uuid, statement_timestamp() - ${callAgo}::interval,
       ${watcherAgo === null ? null : sql`statement_timestamp() - ${watcherAgo}::interval`})`;
 }
 
@@ -72,40 +72,45 @@ async function quiet(workspace: string): Promise<Array<Record<string, unknown>>>
     (await tx.unsafe(query)).filter((row: Record<string, unknown>) => row.workspace_id === workspace));
 }
 
-test("a dead watcher with a waiting message alerts; live, idle, hosted, revoked and long-retired agents do not", async () => {
+test("an agent alerts only after a message waited 10 minutes and it has not called for 10 minutes", async () => {
   const { workspace, owner, agent } = await seed();
   const dead = await agent("Watcher died");
-  await presence(workspace, dead, "10 minutes");
-  await waiting(workspace, owner, dead, "8 minutes");
-  await waiting(workspace, owner, dead, "5 minutes");
+  await presence(workspace, dead, "15 minutes", "15 minutes");
+  await waiting(workspace, owner, dead, "12 minutes");
+  await waiting(workspace, owner, dead, "11 minutes");
+
+  // The false alarm of 2026-11-04: a message 3 minutes old to an agent that answers every few minutes.
+  const slowButAlive = await agent("Answers every few minutes");
+  await presence(workspace, slowButAlive, "15 minutes", "2 minutes");
+  await waiting(workspace, owner, slowButAlive, "12 minutes");
+
+  const shortWait = await agent("Message only 5 minutes old");
+  await presence(workspace, shortWait, "15 minutes", "15 minutes");
+  await waiting(workspace, owner, shortWait, "5 minutes");
 
   const live = await agent("Watcher live");
-  await presence(workspace, live, "30 seconds");
-  await waiting(workspace, owner, live, "8 minutes");
+  await presence(workspace, live, "30 seconds", "15 minutes");
+  await waiting(workspace, owner, live, "12 minutes");
 
   const nothingWaiting = await agent("Stopped cleanly");
-  await presence(workspace, nothingWaiting, "10 minutes");
-  await waiting(workspace, owner, nothingWaiting, "8 minutes", true);
-
-  const justSent = await agent("Message just sent");
-  await presence(workspace, justSent, "10 minutes");
-  await waiting(workspace, owner, justSent, "1 minute");
+  await presence(workspace, nothingWaiting, "15 minutes", "15 minutes");
+  await waiting(workspace, owner, nothingWaiting, "12 minutes", true);
 
   const retired = await agent("Gone for days");
-  await presence(workspace, retired, "3 days");
+  await presence(workspace, retired, "3 days", "3 days");
   await waiting(workspace, owner, retired, "2 days");
 
   const turnOnly = await agent("Never had a route");
-  await presence(workspace, turnOnly, null);
-  await waiting(workspace, owner, turnOnly, "8 minutes");
+  await presence(workspace, turnOnly, null, "15 minutes");
+  await waiting(workspace, owner, turnOnly, "12 minutes");
 
   const hosted = await agent("Hosted seat", { hosted: true });
-  await presence(workspace, hosted, "10 minutes");
-  await waiting(workspace, owner, hosted, "8 minutes");
+  await presence(workspace, hosted, "15 minutes", "15 minutes");
+  await waiting(workspace, owner, hosted, "12 minutes");
 
   const revoked = await agent("Revoked");
-  await presence(workspace, revoked, "10 minutes");
-  await waiting(workspace, owner, revoked, "8 minutes");
+  await presence(workspace, revoked, "15 minutes", "15 minutes");
+  await waiting(workspace, owner, revoked, "12 minutes");
   await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${revoked.principal}::uuid`;
 
   const rows = await quiet(workspace);
@@ -115,7 +120,7 @@ test("a dead watcher with a waiting message alerts; live, idle, hosted, revoked 
   assert.equal(row!.principal_id, dead.principal);
   assert.equal(row!.owner_user_id, owner);
   assert.equal(row!.workspace, "Quiet test");
-  assert.deepEqual(Object.keys(row!).sort(), ["agent", "last_route_at", "oldest_waiting_at", "owner_user_id",
+  assert.deepEqual(Object.keys(row!).sort(), ["agent", "last_call_at", "last_route_at", "oldest_waiting_at", "owner_user_id",
     "principal_id", "waiting", "workspace", "workspace_id"], "names, refs, times and counts only; never message text");
 });
 
