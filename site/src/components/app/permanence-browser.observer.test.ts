@@ -122,6 +122,10 @@ function installConnectionFixture() {
         if (c.kind === "todo_list") return Response.json({ status: "ok", todos: [], next_offset: null });
         // Read-only activity/queue requests have no write effects in this UI fixture.
       }
+      // Roster R1b: Catch up reads each workspace's decision queue for its asks.
+      if (url.pathname === "/rest/v1/rpc/decision_queue") {
+        return Response.json({ workspace_id: (body as { p_workspace_id?: string } | null)?.p_workspace_id ?? workspace, generated_at: new Date().toISOString(), total: 0, truncated: false, asks: [] });
+      }
       if (url.pathname === "/rest/v1/rpc/home_overview") {
         if (scenario === "absent-home") return Response.json({ error: "unavailable" }, { status: 503 });
         f.overviewReads++;
