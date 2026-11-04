@@ -5,7 +5,7 @@ import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check", "file_get", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check", "file_get", "file_put", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
 export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", "file_ls", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
@@ -90,7 +90,7 @@ function seatTool(value: string): value is HostedSeatTool {
 function sqlSeatTool(tool: string, use: "command" | "read"): string {
   if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool)) return use === "command" ? "note" : "members";
   if (tool === "file_ls") return "members";
-  if (tool === "file_get") return "note";
+  if (tool === "file_get" || tool === "file_put") return "note";
   return tool;
 }
 

@@ -130,3 +130,48 @@ test("the reader refuses foreign paths and hides storage failures", async () => 
   await assert.rejects(readObjectPage(base, signed, 0, 10, thrown.impl), (error: unknown) =>
     error instanceof FileContentUnavailable && !(error as Error).message.includes("token"));
 });
+
+test("file_put takes exactly one bounded content form and an allowed name; posts take bounded attachments", async () => {
+  const { FILE_PUT_MAX_BYTES } = await import("../supabase/functions/mcp/tools.ts");
+  const ok = { seat, name: "notes.md", content: "# Notes", request_id: "put_request_1" };
+  assert.deepEqual(validateHostedToolArguments("file_put", ok), ok);
+  assert.ok(validateHostedToolArguments("file_put", { seat, name: "scan.pdf", content_base64: "JVBERi0=", request_id: "put_request_2" }));
+  const refused: Array<[string, Record<string, unknown>, RegExp]> = [
+    ["file_put", { seat, name: "notes.md", request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "notes.md", content: "a", content_base64: "YQ==", request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "notes.md", content: "é".repeat(FILE_PUT_MAX_BYTES / 2 + 1), request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "x.pdf", content_base64: "A".repeat(4 * Math.ceil((FILE_PUT_MAX_BYTES + 3) / 3)), request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "x.pdf", content_base64: "not base64!", request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "x.pdf", content_base64: "YQ=", request_id: "put_request_1" }, /Invalid content/u],
+    ["file_put", { seat, name: "run.exe", content: "x", request_id: "put_request_1" }, /Invalid name/u],
+    ["file_put", { seat, name: "../notes.md", content: "x", request_id: "put_request_1" }, /Invalid name/u],
+    ["file_put", { seat, name: " notes.md", content: "x", request_id: "put_request_1" }, /Invalid name/u],
+    ["file_put", { seat, name: "notes.md", content: "x", request_id: "!" }, /Invalid request_id/u],
+    ["file_put", { seat, name: "notes.md", content: "x", request_id: "put_request_1", path: "/etc/passwd" }, /Unknown tool argument/u],
+  ];
+  for (const [name, args, pattern] of refused) {
+    assert.throws(() => validateHostedToolArguments(name as "file_put", args),
+      (error: unknown) => error instanceof HostedToolInputError && pattern.test(error.message), JSON.stringify(args).slice(0, 120));
+  }
+  const note = { seat, body: "see attached", request_id: "note_request_1" };
+  const pair = { file_id: fileId, version_n: 1 };
+  assert.ok(validateHostedToolArguments("note", { ...note, attachments: [pair] }));
+  for (const attachments of [[], [pair, pair], Array.from({ length: 9 }, (_, n) => ({ file_id: fileId, version_n: n + 1 })),
+    [{ ...pair, name: "x" }], [{ file_id: "x", version_n: 1 }], [{ file_id: fileId, version_n: 0 }]]) {
+    assert.throws(() => validateHostedToolArguments("note", { ...note, attachments }), /Invalid attachments/u, JSON.stringify(attachments).slice(0, 80));
+  }
+  assert.throws(() => validateHostedToolArguments("working_on", { seat, body: "x", request_id: "work_request_1", attachments: [pair] }),
+    /Unknown tool argument/u);
+});
+
+test("file_put ids are stable per seat and request, and distinct otherwise", async () => {
+  const { putIds } = await import("../supabase/functions/mcp/file-content.ts");
+  const a = await putIds("ws-1", "seat_a", "req_1");
+  assert.deepEqual(await putIds("ws-1", "seat_a", "req_1"), a);
+  for (const other of [await putIds("ws-1", "seat_a", "req_2"), await putIds("ws-1", "seat_b", "req_1"), await putIds("ws-2", "seat_a", "req_1")]) {
+    assert.notEqual(other.file_id, a.file_id);
+  }
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+  for (const value of Object.values(a)) assert.match(value, uuid);
+  assert.equal(new Set(Object.values(a)).size, 4);
+});

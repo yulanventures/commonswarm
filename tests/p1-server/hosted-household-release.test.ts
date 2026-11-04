@@ -19,7 +19,7 @@ import { MCP_ISSUER, MCP_JWKS_URL, MCP_RESOURCE } from "../../supabase/functions
 import { DOCKER_UNAVAILABLE, awaitHealth, dockerAvailable, functionsRoot, startComposeEdgeRuntime, type EdgeRuntimeHandle } from "../support/edge-runtime-function-boot.js";
 
 const KEY = "SUPABASE_SERVICE_ROLE_KEY", OAUTH = "MCP_OAUTH_SIGNING_KEYS_FILE", MARKER = "H6ListItemMarker";
-const coreNames = ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members", "file_ls", "file_get"];
+const coreNames = ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members", "file_ls", "file_get", "file_put"];
 const hostedNames = [...coreNames, ...HOSTED_TODO_LIST_TOOLS.map((tool) => tool.name)];
 const b64 = (value: Uint8Array) => Buffer.from(value).toString("base64url");
 const guardedRemove = (directory: string) => {
@@ -142,7 +142,7 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   await probe(off, "mcp", secret, false, null); await probe(off, "read", secret, true);
   await probe(off, "h0", secret, false); await probe(off, "command", secret, true);
   assert.equal((await rpc(off, token, secret, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "h6", version: "0" } })).status, 200);
-  const listed = await rpc(off, token, secret, "tools/list", {}); assert.deepEqual([listed.status, listed.json.result?.tools?.length, listed.json.result?.tools?.map((tool) => tool.name)], [200, 10, coreNames]);
+  const listed = await rpc(off, token, secret, "tools/list", {}); assert.deepEqual([listed.status, listed.json.result?.tools?.length, listed.json.result?.tools?.map((tool) => tool.name)], [200, 11, coreNames]);
   assert.equal((await call(off, token, "whoami", { seat: approved })).handle, approved);
   const unknown = await rpc(off, token, secret, "tools/call", { name: "todo_read", arguments: { seat: approved, todo_id: randomUUID() } }); assert.equal(unknown.status, 400); assert.equal(unknown.json.error?.code, -32602);
   const on = await boot(true), live = await issue(owner, grantId);

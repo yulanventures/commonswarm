@@ -10430,7 +10430,16 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
     return command?.kind === FILE_DOWNLOAD_URL_KIND &&
       exactKeys(command, ["kind", "file_id", "version_n"]);
   }
-  if (command?.kind === FILE_DOWNLOAD_URL_KIND) return false;
+  // file_put reserves and commits one version; the hosted MCP uploads the bytes
+  // in between and never returns the signed upload path.
+  if (tool === "file_put") {
+    return (command?.kind === FILE_VERSION_CREATE_KIND &&
+        exactKeys(command, ["kind", "file_id", "version_id", "name", "declared_size_bytes", "content_type"])) ||
+      (command?.kind === FILE_VERSION_COMMIT_KIND &&
+        exactKeys(command, ["kind", "file_id", "version_id", "sha256"]));
+  }
+  if (command?.kind === FILE_DOWNLOAD_URL_KIND || command?.kind === FILE_VERSION_CREATE_KIND ||
+      command?.kind === FILE_VERSION_COMMIT_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
@@ -13315,7 +13324,9 @@ async function handleTransaction(
 
     if ((FILE_COMMAND_KINDS as readonly string[]).includes(command.kind)) {
       const fileCommand = command as FileCommand;
-      const fileActor = auth.credentialKind === "agent"
+      // A hosted seat acts as its own agent principal, never as the owner who
+      // connected it: created_by/uploaded_by and tombstone rights follow the seat.
+      const fileActor = auth.credentialKind === "agent" || auth.credentialKind === "hosted_seat"
         ? { kind: "agent" as const, id: auth.agent!.principal_id }
         : { kind: "user" as const, id: auth.actor.user! };
       /* Called by handlers AFTER their row locks: a same-command-id request
@@ -13408,7 +13419,7 @@ async function handleTransaction(
         // Humans key by user id — credentialId is null for every human, which
         // was one shared global bucket; agents key by PRINCIPAL, because a
         // token id rotates and each rotation would reset the meter.
-        const rateIdentity = auth.credentialKind === "agent"
+        const rateIdentity = auth.credentialKind === "agent" || auth.credentialKind === "hosted_seat"
           ? auth.agent!.principal_id
           : auth.actor.user;
         if (rateIdentity === null) {
