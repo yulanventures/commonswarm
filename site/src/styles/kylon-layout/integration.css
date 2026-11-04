@@ -421,6 +421,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker :i
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { box-sizing: border-box; min-block-size: 0; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-account { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .cs-org-identity-slot { padding-inline-end: 52px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-heading { z-index: 31; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account { order: 0; inline-size: 100%; justify-content: start; padding: 8px 0 0; border-block-start: 1px solid var(--cs-line); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account .dashboard__user-trigger { display: flex; align-items: center; gap: 10px; inline-size: 100%; min-block-size: 44px; padding: 6px 8px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account .dashboard__user-trigger-brand { display: block; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

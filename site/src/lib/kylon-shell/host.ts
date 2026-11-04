@@ -159,7 +159,7 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
       syncMenu();
     },
     syncMenu,
-    closeNavigation() { shell?.closeDrawer("navigation", false); },
+    closeNavigation() { shell?.closeDrawer("navigation", true); },
     refreshTodoContext: (replace: () => void) => todoContext.refresh(() => wikiContext.refresh(replace)),
     peopleContext(roster: HTMLElement | null) {
       peopleContext.set(roster);

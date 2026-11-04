@@ -235,3 +235,78 @@ test("the workspace picker and account survive drawer movement and shell teardow
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+// CI-only geometry witness: the production host and styles own placement and hit testing.
+test("the applied navigation layout keeps the drawer close, picker and account reachable", { timeout: 90_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-nav-layout-"));
+  const fixture = join(directory, "index.html");
+  const bundle = await build({ absWorkingDir: siteRoot, bundle: true, format: "iife", globalName: "NavLayout", platform: "browser", write: false,
+    stdin: { contents: 'export { createKylonHost } from "./src/lib/kylon-shell/host.ts"; export { buildWorkspacePicker, buildPhoneTopBar } from "./src/lib/home-shell.ts";', resolveDir: siteRoot, loader: "ts" } });
+  const styles = await build({ absWorkingDir: siteRoot, bundle: true,
+    stdin: { contents: ["global.css", "home/index.css", "kylon-shell.css", "kylon-layout/index.css"].map(file => `@import "./src/styles/${file}";`).join("\n"), loader: "css", resolveDir: siteRoot },
+    loader: { ".woff2": "dataurl" }, write: false,
+    plugins: [{ name: "local-fonts", setup(builder) { builder.onResolve({ filter: /^\/fonts\// }, args => ({ path: join(siteRoot, "public", args.path.slice(1)) })); } }] });
+  try {
+    await writeFile(fixture, `<!doctype html><html><head><meta charset="utf-8"><style>${styles.outputFiles[0]?.text}
+      * { box-sizing: border-box; } body { margin: 0; } live-dashboard { display: block; height: min(720px, 100dvh); }
+      .dashboard__root, [data-panel=channel], .hm-frame { height: 100%; min-height: 0; }
+    </style></head><body><live-dashboard class="dashboard" data-kylon-shell><div class="dashboard__root"><section data-panel="channel">
+      <div class="hm-frame"><aside class="hm-frame__rail"><div data-workspace-picker-root></div>
+      <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button">Account</button></div>
+      <div class="hm-frame__rail-content" data-home-rail-slot><nav class="hm-rail">${'<button class="hm-rail__link">Workspace</button>'.repeat(30)}</nav></div></aside>
+      <div class="hm-frame__main"><div data-home-workspace-shell></div></div><aside class="hm-frame__side" data-home-side-slot><div class="hm-side"></div></aside></div>
+    </section></div></live-dashboard><script>${bundle.outputFiles[0]?.text}</script><script>
+    (() => {
+      try {
+        const app = document.querySelector('live-dashboard'), pickerRoot = app.querySelector('[data-workspace-picker-root]');
+        const switched = [], account = app.querySelector('[data-user-menu-trigger]'); let accountOpens = 0;
+        account.addEventListener('click', () => accountOpens++);
+        pickerRoot.append(NavLayout.buildWorkspacePicker(document, [{id:'a',name:'First workspace',archived:false}, {id:'b',name:'Second workspace',archived:false}], 'a', id => switched.push(id)));
+        const vm = {sample:false, workspaceId:'a', name:'First workspace', people:[], pane:'chat', todosAvailable:true,
+          hrefs:{chat:'?w=a',todos:'?w=a&v=todos',lists:'?w=a&v=lists',files:'?w=a&v=files',wiki:'?w=a&v=wiki',workspaces:'?v=catchup'},menu:{settings:true,adminAccess:false}};
+        app.querySelector('[data-home-workspace-shell]').append(NavLayout.buildPhoneTopBar(document, vm, {openPeople(){},menu(){}}));
+        const host = NavLayout.createKylonHost(app, () => {});
+        host.sync({enabled:true,title:'Workspaces',workspaceName:'First workspace',navigation:[{id:'chat',label:'Chat',href:'?w=a',current:true,icon:'M4 4h16v16H4z'}]});
+        const shell = app.querySelector('.cs-org-shell'), phone = matchMedia('(max-width:52rem)').matches;
+        const point = el => { const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,w:r.width,h:r.height,top:r.top,bottom:r.bottom}; };
+        const hit = el => { const r=point(el), target=document.elementFromPoint(r.x,r.y); return { ...r, target, owns: !!target && (target===el || el.contains(target)) }; };
+        // Hit-test by coordinates first; dispatch to the element that a pointer would actually reach.
+        const pointer = el => { const h=hit(el); if (!h.owns) throw Error('covered: '+el.className); for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) h.target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,clientX:h.x,clientY:h.y,button:0})); return h; };
+        const opener=shell.querySelector('[aria-label="Open navigation"]'); let close=null, returned=null, header=null;
+        if (phone) {
+          opener.focus(); pointer(opener);
+          const bar=shell.querySelector('.cs-org-phone-bar'), closeButton=shell.querySelector('[aria-label="Close navigation"]');
+          header=[...bar.children].filter(el=>el.getBoundingClientRect().width>0 && getComputedStyle(el).display!=='none').map(el=>el.className);
+          close=hit(closeButton); pointer(closeButton); returned=document.activeElement===opener;
+          pointer(opener);
+        }
+        const identity=shell.querySelector('.cs-org-identity-slot'), scroll=shell.querySelector('.cs-org-context-scroll');
+        const summary=pickerRoot.querySelector('summary'), item=pickerRoot.querySelector('button[value="b"]');
+        const summaryBox=hit(summary); pointer(summary); const choiceBox=hit(item); pointer(item);
+        const accountBox=hit(account); pointer(account);
+        const scrollBefore=scroll.scrollTop; scroll.scrollTop=100; const scrollMoved=scroll.scrollTop>scrollBefore;
+        const output={phone,header,close:close && {w:close.w,h:close.h,owns:close.owns},returned,
+          identity:point(identity),summary:{w:summaryBox.w,h:summaryBox.h,owns:summaryBox.owns},choice:{w:choiceBox.w,h:choiceBox.h,owns:choiceBox.owns},
+          account:{w:accountBox.w,h:accountBox.h,owns:accountBox.owns,bottom:accountBox.bottom},scroll:{top:point(scroll).top,bottom:point(scroll).bottom,client:scroll.clientHeight,total:scroll.scrollHeight,moved:scrollMoved},switched,accountOpens,
+          overflow:document.documentElement.scrollWidth>innerWidth};
+        document.documentElement.dataset.navGeometry=btoa(JSON.stringify(output)); host.suspend();
+      } catch (error) { document.documentElement.dataset.navError=String(error && error.stack || error); }
+    })();</script></body></html>`, "utf8");
+    const chrome = await findChrome();
+    for (const [width, height] of [[390, 900], [844, 390], [1440, 900]]) {
+      const { stdout } = await launchChrome(chrome, ["--allow-file-access-from-files", `--window-size=${width},${height}`, "--dump-dom", `file://${fixture}`],
+        { maxBuffer: 20 * 1024 * 1024, timeout: 20_000, killSignal: "SIGKILL" });
+      const encoded = stdout.match(/\bdata-nav-geometry="([A-Za-z0-9+/]+={0,2})"/u)?.[1];
+      assert.ok(encoded, `${width}px: applied host geometry must complete`);
+      const g = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+      assert.equal(g.overflow, false); assert.deepEqual(g.switched, ["b"]); assert.equal(g.accountOpens, 1);
+      for (const control of [g.summary, g.choice, g.account]) { assert.equal(control.owns, true); assert.ok(control.w >= 43.5 && control.h >= 43.5); }
+      assert.ok(g.scroll.total > g.scroll.client && g.scroll.moved); assert.ok(g.identity.bottom <= g.scroll.top + 1);
+      assert.ok(g.account.bottom >= g.scroll.bottom - 1);
+      if (width === 390) {
+        assert.deepEqual(g.header, ["cs-icon-button", "cs-org-phone-title", "hm-details-toggle"]);
+        assert.equal(g.close.owns, true); assert.ok(g.close.w >= 43.5 && g.close.h >= 43.5); assert.equal(g.returned, true);
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
