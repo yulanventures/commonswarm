@@ -211,6 +211,11 @@ export function describeRenewalGrant(grant: RenewalGrantStatus): string[] {
     `Grant: ${grant.kind}${grant.horizon_expires_at === null ? "." : ` — technical renewal horizon ${grant.horizon_expires_at}.`}`,
     describeConnectionPolicy(grant),
   ];
+  // token_expires_at on a live standing grant is when cswarm rotates the bearer, not when access ends.
+  if (grant.kind === "standing" && grant.revoked_at === null && grant.suspended_at === null &&
+      grant.token_revoked_at === null && grant.token_expires_at !== null) {
+    lines.push(`Token rotates automatically at ${grant.token_expires_at}. That is not when access ends.`);
+  }
   if (grant.suspended_at !== null) {
     lines.push(`PAUSED since ${grant.suspended_at}. Renewal is blocked by the server; ask a workspace owner to check the cause.`);
     if (grant.revoked_at === null && grant.connection_expired_at == null) {

@@ -3173,7 +3173,7 @@ import "../../styles/kylon-command-palette.css";
         const runtimeList = document.createElement("dl");
         appendEntityId(runtimeList, "Token ID", details.tokenId);
         appendEntityField(runtimeList, "Issued", details.issuedAt);
-        appendEntityField(runtimeList, "Expires", details.expiresAt);
+        appendEntityField(runtimeList, details.expiresLabel, details.expiresAt);
         appendEntityField(runtimeList, "First used", details.firstUsedAt);
         appendEntityField(runtimeList, "Revoked", details.revokedAt);
         runtime.append(runtimeTitle, runtimeList);
