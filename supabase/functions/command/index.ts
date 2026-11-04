@@ -10988,16 +10988,10 @@ async function handleHostedManagement(
   const finalAuthorization = async () => {
     if ((await prefix.rediscover()).hostedPrefix !== prefix.snapshot.hostedPrefix &&
         command.kind !== 'begin_hosted_mcp_grant') throw new LocalAuthDiscoveryChanged();
-    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat') return;
-    if (command.kind==='release_hosted_mcp_seat') {
-      // Same locks as revocation, then the seat's complete hosted authority again
-      // (grant, client, owner, provider family, connection expiry, workspace).
-      const fresh = seatCapability === null ? null : await revalidateHostedSeatCommand(tx, seatCapability);
-      if (fresh === null || fresh.seat_id !== command.seat_id || fresh.grant_id !== command.grant_id ||
-          fresh.owner_user_id !== auth.actor.user || fresh.principal_id !== auth.agent?.principal_id ||
-          fresh.workspace_id !== route.workspaceId) throw new LocalAuthDiscoveryChanged();
-      return;
-    }
+    // A release was revalidated under these locks before its projection; after it,
+    // the seat is intentionally revoked, so there is nothing further to re-prove.
+    if (command.kind==='revoke_hosted_mcp_grant' || command.kind==='revoke_hosted_mcp_seat' ||
+        command.kind==='release_hosted_mcp_seat') return;
     const required=command.kind==='activate_hosted_mcp_grant' ? grant!.selected_workspace_ids : [route.workspaceId];
     const [fresh]=await tx<{ok:boolean}[]>`SELECT
       NOT EXISTS (SELECT 1 FROM unnest(${required}::uuid[]) r(workspace_id)
@@ -11090,6 +11084,17 @@ async function handleHostedManagement(
     }
     await finalAuthorization();
     return replayResult(storedResponse(replay.response), command.kind);
+  }
+  if (command.kind === "release_hosted_mcp_seat") {
+    // Same locks as revocation are held. Re-prove the seat's complete hosted
+    // authority (grant, client, owner, provider family, connection expiry,
+    // workspace) immediately before deciding and projecting its own release.
+    const fresh = seatCapability === null ? null : await revalidateHostedSeatCommand(tx, seatCapability);
+    if (fresh === null || fresh.seat_id !== command.seat_id || fresh.grant_id !== command.grant_id ||
+        fresh.owner_user_id !== auth.actor.user || fresh.principal_id !== auth.agent?.principal_id ||
+        fresh.workspace_id !== route.workspaceId) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
   }
   let nextSeq = frame.headSeq;
   const decision: Decision = command.kind === "set_connection_expiry"

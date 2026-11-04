@@ -4248,6 +4248,11 @@ test("seat_release ends only that seat: the sibling seat works, the agent stays,
 
   const released = release(seatA.handle, seatA.seatId);
   assert.equal(released.status, 200, JSON.stringify(released.body));
+  // HezSec HOLD on 889fcf00: a post-effect fence rolled every release back. Read the
+  // committed row from a separate connection, right after the call returned.
+  const [committed] = await sql<{ revoked_at: Date | null }[]>`SELECT revoked_at FROM swarm.hosted_mcp_seats
+    WHERE seat_id=${seatA.seatId}::uuid`;
+  assert.ok(committed?.revoked_at, "the release committed");
   assert.equal(note(seatA.handle, fixture.workspaceA).status, 403, "the released handle stops working");
   assert.equal(release(seatA.handle, seatA.seatId).status, 403, "a released seat cannot act again, release included");
   assertAcceptedSeatNote(note(seatB.handle, fixture.workspaceB), principal);
@@ -4277,5 +4282,6 @@ test("seat_release ends only that seat: the sibling seat works, the agent stays,
       AND workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL) AS live_in_a,
       (SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${seatA.seatId}::uuid) AS released`;
   assert.equal(after?.live_in_a, 0, "no seat in workspace A comes back on reconnect");
-  assert.ok(after?.released, "the released seat stays revoked");
+  assert.ok(after?.released, "the release stayed committed through later commands and the reconnect");
+  assert.equal(after?.released?.getTime(), committed?.revoked_at?.getTime(), "and was not rewritten");
 });
