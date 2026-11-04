@@ -24,6 +24,10 @@ function good(command, args, options) {
 test('existing installer inventories and absence rollback use real disposable files', () => {
   good('python3', [join(repo, 'tests/standalone-ci-install.test.py')], {timeout:30000});
 });
+// The PE runner UID must differ from the service UID (this process) and the status reader,
+// as on the real host. GitHub runners run as UID 1001, so never hard-code it.
+const PE_UID = [1001, 1002, 1004, 1005].find((uid) => uid !== process.getuid() && uid !== 65534);
+
 function fixture(control = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-ci-test.')));
   const source = join(root, 'source');
@@ -122,11 +126,11 @@ import pathlib,sys
 args=sys.argv[1:]
 processes=[(0,'systemd'),(1003,'Runner.Worker')]
 busy=pathlib.Path(${JSON.stringify(join(root,'pe-active'))})
-if busy.exists(): processes.append((1001,'Runner.Worker'))
+if busy.exists(): processes.append((${PE_UID},'Runner.Worker'))
 uid=args[args.index('-u')+1] if '-u' in args else None
 uid=0 if uid=='root' else int(uid) if uid is not None else None
 name=args[args.index('-x')+1]
-if name=='Runner.Worker' and uid==1001:
+if name=='Runner.Worker' and uid==${PE_UID}:
     (busy.parent/'pe-probed').write_text('yes')
     if busy.exists():
         value=busy.read_text()
@@ -141,7 +145,7 @@ if busy.read_text()=='unknown': sys.exit(1)
 for pid in sys.argv[-1].split(','):
     identity=busy.parent/'pe-identity'
     second=identity.read_text() if pid=='5000' and identity.exists() else '00'
-    print(pid+' 1001 Tue Oct 21 00:00:'+second+' 2026 Runner.Worker')
+    print(pid+' ${PE_UID} Tue Oct 21 00:00:'+second+' 2026 Runner.Worker')
 `); chmodSync(join(bin,'ps'),0o755);
   const realGit = good('which', ['git']);
   // Only the external source transport is replaced; git still resolves/clones
@@ -178,7 +182,7 @@ os.execv(${JSON.stringify(realGit)},[${JSON.stringify(realGit)},*args])
   const cfg = {state, controller: installed, service_uid:process.getuid(), service_gid:process.getgid(),
     controller_checksums:Object.fromEntries(['run.sh','suite.sh','retain.py','publish-status.py'].map(name=>[name,createHash('sha256').update(readFileSync(join(installed,name))).digest('hex')])), source_url: 'https://github.com/yulanventures/commonswarm.git', allowed_hostname: good('hostname',['-s']),
     controller_sha: 'a'.repeat(40), worker_image: 'sha256:' + '1'.repeat(64),
-    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, pe_worker_grace_seconds: 1, pe_runner_uid: 1001, status_reader_uid: process.platform === 'linux' ? 65534 : null};
+    dind_image: 'fixture@sha256:' + '2'.repeat(64), timeout_seconds: 10, pe_worker_grace_seconds: 1, pe_runner_uid: PE_UID, status_reader_uid: process.platform === 'linux' ? 65534 : null};
   const config = join(root, 'config.json');
   writeFileSync(config, JSON.stringify(cfg), {mode:0o600});
   const env = {...process.env, PATH: `${bin}:${process.env.PATH}`, COMMONSWARM_CI_CONFIG: config};
@@ -255,6 +259,36 @@ test('all suites aggregate failures and retain exact source provenance and log c
     assert.equal(existsSync(join(runDir,'scratch')), false);
   }
   assert.deepEqual(JSON.parse(readFileSync(join(f.root,'containers.json'))), {unowned: {label:'some-other-run'}});
+});
+
+test('the nightly selection runs only box-dry-run and site, at one resolved SHA', async () => {
+  const f = fixture();
+  const result = await start(f, f.args('nightly'));
+  assert.equal(result.status, 0, result.stderr);
+  const receipts = f.receipts();
+  assert.deepEqual(receipts.map(r => r.suite).sort(), ['box-dry-run', 'site']);
+  for (const r of receipts) {
+    assert.equal(r.resolved_sha, f.sha);
+    assert.equal(r.exit_code, 0);
+    assert.equal(r.timed_out, false);
+  }
+});
+
+test('a host that never goes quiet defers as contention, never exit 124, and publishes nothing', async () => {
+  const f = fixture(); f.cfg.timeout_seconds = 2; f.cfg.contention_wait_seconds = 3;
+  writeFileSync(f.config, JSON.stringify(f.cfg));
+  writeFileSync(join(f.root, 'pe-active'), 'active');
+  const result = await start(f, f.args('nightly'));
+  assert.equal(result.status, 75, result.stderr);
+  const receipts = f.receipts();
+  assert.deepEqual(receipts.map(r => r.suite).sort(), ['box-dry-run', 'site'], 'one give-up per suite, no retry loop');
+  for (const r of receipts) {
+    assert.equal(r.state, 'deferred'); assert.equal(r.reason, 'contention'); assert.equal(r.gave_up, true);
+    assert.equal(r.timed_out, false); assert.equal(r.exit_code, 75); assert.equal(r.github_status, undefined);
+    assert.ok(r.deferred_wait_seconds >= 3, 'the wait is recorded and exceeds the 2-second suite budget');
+  }
+  assert.equal(existsSync(join(f.root, 'events.jsonl')) && readFileSync(join(f.root, 'events.jsonl'), 'utf8').includes('-worker'), false,
+    'no suite work started');
 });
 
 test('concurrent invocations serialize actual worker lifetimes through the shared queue', async () => {
@@ -433,14 +467,14 @@ test('deferred wait longer than the active budget permits completion but preserv
 test('PE runner UID requires a positive integer distinct from service and reader before work', async () => {
   const f=fixture();
   const reader=f.cfg.status_reader_uid;
-  for (const uid of [undefined,null,true,false,0,-1,1.5,'1001',process.getuid()]) {
+  for (const uid of [undefined,null,true,false,0,-1,1.5,String(PE_UID),process.getuid()]) {
     f.cfg.pe_runner_uid=uid; writeFileSync(f.config,JSON.stringify(f.cfg));
     const r=await start(f);
     assert.notEqual(r.status,0); assert.match(r.stderr,/invalid PE runner UID/);
     assert.equal(existsSync(join(f.root,'fetches.jsonl')),false);
     assert.equal(existsSync(join(f.root,'events.jsonl')),false);
   }
-  f.cfg.pe_runner_uid=1001; f.cfg.status_reader_uid=1001;
+  f.cfg.pe_runner_uid=PE_UID; f.cfg.status_reader_uid=PE_UID;
   writeFileSync(f.config,JSON.stringify(f.cfg));
   const overlap=await start(f);
   assert.notEqual(overlap.status,0); assert.match(overlap.stderr,/invalid PE runner UID/);

@@ -6,17 +6,24 @@ Nothing here deploys to Yulan VPS or dispatches GitHub Actions.
 
 The controller is installed from one reviewed commit. The service resolves `main`
 once under `/var/lib/commonswarm-ci/queue.lock` using `flock(2)` (queue wait
-capped at 600 seconds), then runs box-dry-run,
-server, p1-cli, site and unit serially at that exact SHA. Manual invocations
-use the same queue:
+capped at 600 seconds), then runs `--suite nightly`: box-dry-run and site,
+serially at that exact SHA. Those two are what only this host can prove (the root
+box dry run and the Linux/root rendered-swap site checks). server, p1-cli and unit
+are the same test lists the GitHub-hosted suites run, and since the dispatch
+workflow posts `server suite / <suite>` on the exact tested commit, the nightly no
+longer repeats them; they kept ending in the 1800-second budget (exit 124) while
+waiting for the shared host. Manual invocations use the same queue and still accept
+every suite, including `all`:
 
 ```sh
 bash /opt/commonswarm-ci/scripts/run.sh --sha <40-lowercase-hex> --suite all
+bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite nightly
 bash /opt/commonswarm-ci/scripts/run.sh --sha <40-lowercase-hex> --suite p1-cli
 bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite all
 ```
 
-`--suite` accepts only `all`, `server`, `p1-cli`, `site`, `box-dry-run`, `unit`.
+`--suite` accepts only `all`, `nightly`, `server`, `p1-cli`, `site`, `box-dry-run`, `unit`
+(and the `server-permanence` profile).
 `--ref` accepts only `main`; all other refs/extra arguments fail before work.
 
 Every suite gets a fresh detached checkout, private bridge, disposable privileged
@@ -42,8 +49,12 @@ it terminates its own process and removes only exact-name, matching-label owned
 containers/network. The attempt receipt says `state=deferred`, `pending=true`,
 exit 75; this is unfinished work. After PE becomes quiet the same resolved SHA
 retries from a fresh checkout, under the same queue lock and suite deadline.
-Cleanup failures stop retrying. Persistent contention fails with timeout 124;
-no PE job is cancelled. Polling is reactive, so Root must still measure withdrawal
+Cleanup failures stop retrying. Persistent contention is not a failure: after
+`contention_wait_seconds` (default 600) without a quiet moment, the suite gives
+up with `state=deferred`, `reason=contention`, `gave_up=true`, exit 75, and no
+status is published; the next run tries again. The nightly unit treats 75 as
+success, and a real failure in another suite still sets the exit code. No PE job
+is cancelled. Polling is reactive, so Root must still measure withdrawal
 latency and memory headroom during a controlled PE overlap before activation.
 
 The checkout's sole runtime patch is its unique Supabase `project_id`, retained
@@ -127,8 +138,10 @@ Root installation, after independent review and contention coordination:
    and manual GHA interfaces, runners and fleet labels remain as before.
 
 Suite time is capped at 1800 seconds across all attempts, including checkout,
-startup, installation, PE quiet waiting and elapsed cleanup. Deadline expiry
-fails with 124; bounded teardown can extend wall time beyond that budget.
+startup, installation and elapsed cleanup. Waiting for other jobs to go quiet
+(before the suite, between steps and before a retry) extends the deadline by
+the time waited, so a busy host never spends the budget. Deadline expiry fails
+with 124; bounded teardown can extend wall time beyond that budget.
 On PE deferral the active process gets one second to terminate before SIGKILL;
 other termination gets up to 60 seconds. The controller removes only exact-name,
 matching-label containers, their anonymous volumes and the matching network.
