@@ -12,6 +12,8 @@ import {
   rewriteFunctionRequest,
   resolveFunctionRoute,
   resolveGatewayRequest,
+  WORKER_TIMEOUT_ENV,
+  workerTimeoutMs,
 } from "../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
@@ -176,4 +178,21 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
     }
   }
   assert.deepEqual(environmentFor("read", () => undefined), [], "undefined host names are omitted");
+});
+
+test("the worker wall clock comes from main's env, bounded, and no function receives it", () => {
+  assert.equal(workerTimeoutMs(undefined), 150_000);
+  assert.equal(workerTimeoutMs("1800000"), 1_800_000);
+  assert.equal(workerTimeoutMs("150000"), 150_000);
+  assert.equal(workerTimeoutMs("3600000"), 3_600_000);
+  for (const bad of ["", "149999", "3600001", "0", "-1800000", "1800000.0", "1e6", " 1800000", "1800000 ",
+    "0x1B7740", "01800000", "1800000ms", "99999999999"]) {
+    assert.equal(workerTimeoutMs(bad), 150_000, JSON.stringify(bad));
+  }
+  for (const name of FUNCTION_NAMES) {
+    const env = environmentFor(name, () => "1800000");
+    const names = env.map(([key]) => key);
+    assert.ok(names.length > 0, `${name} control: its own names are forwarded`);
+    assert.equal(names.includes(WORKER_TIMEOUT_ENV), false, name);
+  }
 });

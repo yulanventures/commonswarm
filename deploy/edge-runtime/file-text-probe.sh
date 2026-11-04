@@ -47,7 +47,7 @@ container="$(docker run -d --name "$name" --init --memory 2g \
   -v "$work/functions:/home/deno/functions-source:ro" \
   -v "$repo/src:/var/src:ro" \
   --entrypoint /bin/bash "$image" /home/deno/deploy/bootstrap.sh \
-  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 8)" \
+  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 4)" \
   || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
 [[ "$container" =~ ^[0-9a-f]{12,64}$ ]] || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
 

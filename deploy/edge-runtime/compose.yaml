@@ -12,12 +12,11 @@ services:
       - "9000"
       - --policy
       - per_worker
-      # One worker slot per function (command, read, capability, activity, h0,
-      # mcp, admin, file-text). With 4 slots the hot functions evicted each other:
-      # ~217 retirements an hour, none older than 80 s, and RSS grew with every
-      # retired isolate (CS-E21). 8 × 96 MiB = 768 MiB, well inside the 2 GiB limit.
+      # 4 workers × 96 MiB = 384 MiB of the 2 GiB limit. Worker churn does not come
+      # from this: 8 slots retired workers just as often (CS-E21). per_worker retires
+      # each worker at half its wall clock; see SWARM_EDGE_WORKER_TIMEOUT_MS.
       - --max-parallelism
-      - "8"
+      - "4"
       # Function bodies are capped at 128 KiB. File bytes up to 25 MiB go to
       # Storage, not a function. 60 s permits the max body at about 2.2 KiB/s.
       - --request-read-timeout
