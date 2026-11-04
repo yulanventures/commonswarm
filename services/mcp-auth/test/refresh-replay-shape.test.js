@@ -27,10 +27,13 @@ test("replay fingerprint changes with scope or resource and ignores parameter or
 });
 
 test("a sealed rotation opens only with the same token, client and fingerprint", () => {
-  const sealed = sealRotation("R0", "c", "f", { refresh_token: "R1" });
-  assert.deepEqual(openRotation("R0", "c", "f", sealed), { refresh_token: "R1" });
+  // A long successor value: a two-character one ("R1") appears in random ciphertext by chance
+  // about 1 in 50 runs, which made the plaintext check below flaky.
+  const successor = "successor-refresh-token-plaintext-marker";
+  const sealed = sealRotation("R0", "c", "f", { refresh_token: successor });
+  assert.deepEqual(openRotation("R0", "c", "f", sealed), { refresh_token: successor });
   assert.equal(openRotation("R0", "c", "g", sealed), undefined);
   assert.equal(openRotation("R0", "d", "f", sealed), undefined);
-  assert.equal(openRotation("R1", "c", "f", sealed), undefined);
-  assert.ok(!JSON.stringify(sealed).includes("R1"));
+  assert.equal(openRotation(successor, "c", "f", sealed), undefined);
+  assert.ok(!JSON.stringify(sealed).includes(successor));
 });
