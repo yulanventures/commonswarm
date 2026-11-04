@@ -225,6 +225,19 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           }
           break;
         }
+        case "reraise": {
+          const { fetcher, token } = await authenticated();
+          const client = new ThinCommandClient(profileTarget(profile), fetcher);
+          try {
+            output = tool.mapResult(await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
+              command: { kind: "reraise_ask", signal_id: args.signal_id!.toLowerCase() },
+              commandId: args.request_id!, signal: extra.signal }));
+          } catch (error) {
+            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) throw error;
+            output = { outcome: "unknown", retry_with_same_request_id: true };
+          }
+          break;
+        }
         default: {
           const { fetcher, token } = await authenticated();
           let parentSignalId: string | undefined;

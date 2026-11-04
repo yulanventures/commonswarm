@@ -615,14 +615,21 @@ test("to-do feature detection distinguishes missing tools from a content refusal
 
 import { homeAskAnswered } from "./home-map.ts";
 test("asks accept thread and directed answers from the viewer or their agents only", () => {
-  const ask = "ask";
-  for (const link of [{threadRootId:ask}, {inReplyTo:ask}]) {
+  const ask = { id: "ask", from: "amy", fromKind: "user" };
+  for (const link of [{threadRootId:ask.id}, {inReplyTo:ask.id}]) {
     assert.equal(homeAskAnswered(ask, [{...link, from:"tom", fromKind:"user"}], "tom", ["orbit"]), true);
     assert.equal(homeAskAnswered(ask, [{...link, from:"orbit", fromKind:"agent"}], "tom", ["orbit"]), true);
     assert.equal(homeAskAnswered(ask, [{...link, from:"nikki", fromKind:"user"}], "tom", ["orbit"]), false);
     assert.equal(homeAskAnswered(ask, [{...link, from:"muse", fromKind:"agent"}], "tom", ["orbit"]), false);
   }
   assert.equal(homeAskAnswered(ask, [{inReplyTo:"other",from:"tom",fromKind:"user"}], "tom", []), false);
+});
+test("the ask's own sender never answers it, even when that sender is the viewer's agent", () => {
+  const ask = { id: "ask", from: "orbit", fromKind: "agent" };
+  for (const link of [{threadRootId:ask.id}, {inReplyTo:ask.id}]) {
+    assert.equal(homeAskAnswered(ask, [{...link, from:"orbit", fromKind:"agent"}], "tom", ["orbit"]), false);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"tom", fromKind:"user"}], "tom", ["orbit"]), true);
+  }
 });
 const directedAsk = { id: "ask", kind: "ask", from: "amy", fromKind: "user", to: "zoe", body: "Call the plumber?", until: "2026-10-06T12:00:00Z", createdAt: "2026-10-05T11:00:00Z" };
 const viewerReply = { id: "reply", kind: "note", from: "zoe", fromKind: "user", to: "amy", body: "On it.", inReplyTo: directedAsk.id, until: null, createdAt: "2026-10-05T11:30:00Z" };

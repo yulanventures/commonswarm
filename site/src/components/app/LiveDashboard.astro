@@ -6838,7 +6838,7 @@ import "../../styles/kylon-command-palette.css";
           meta.append(author, identityBadge, addressed, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal.id, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {

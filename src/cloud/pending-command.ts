@@ -10,6 +10,7 @@ import {
   type ConnectCommand,
   type ConnectCommandResult,
   type PostSignalCommand,
+  type ReraiseAskCommand,
   type PostSignalResult,
   type ThinCommandClient,
 } from "./command-client.js";
@@ -187,7 +188,7 @@ export async function sendCapabilityWithPending(
 
 function signalIntentHash(
   workspace: string,
-  command: PostSignalCommand,
+  command: PostSignalCommand | ReraiseAskCommand,
   credentialIdentity: string,
 ): string {
   return createHash("sha256")
@@ -202,7 +203,7 @@ function signalIntentHash(
 async function pendingSignalCommandId(
   credentials: PendingProfileStore,
   workspace: string,
-  command: PostSignalCommand,
+  command: PostSignalCommand | ReraiseAskCommand,
   credentialIdentity: string,
 ): Promise<{ intent: string; commandId: string }> {
   const intent = signalIntentHash(workspace, command, credentialIdentity);
@@ -260,7 +261,7 @@ export async function sendSignalWithPending(
     store: PendingProfileStore;
   },
   workspace: string,
-  command: PostSignalCommand,
+  command: PostSignalCommand | ReraiseAskCommand,
 ): Promise<PostSignalResult> {
   const pending = await pendingSignalCommandId(
     session.store,

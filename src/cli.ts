@@ -89,6 +89,7 @@ import {
   type ConnectCommandResult,
   type ChannelCommand,
   type PostSignalCommand,
+  type ReraiseAskCommand,
   type PostSignalResult,
   type SignalKind,
   type SignalRecord,
@@ -3668,7 +3669,7 @@ async function signalAuthorLabels(
 async function postSignalCommand(
   cloud: CloudTarget,
   credential: Awaited<ReturnType<typeof commandWorkspaceAndCredential>>,
-  command: PostSignalCommand,
+  command: PostSignalCommand | ReraiseAskCommand,
 ): Promise<PostSignalResult> {
   const client = new ThinCommandClient(cloud, credential.fetcher);
   if (credential.kind === "human") {
@@ -4551,6 +4552,33 @@ export const RUN_ROSTER_ACCEPTED_FLAGS = [
     "json",
     ...SESSION_CONTEXT_FLAGS,
   ] as const;
+
+export const RUN_RERAISE_ACCEPTED_FLAGS = [
+    ...TARGET_FLAGS,
+    "workspace-id",
+    ...CREDENTIAL_FLAGS,
+    "json",
+    ...SESSION_CONTEXT_FLAGS,
+  ] as const;
+
+/** Roster R1b: the ask's sender sends one reminder to the same people, at most once a day per ask. */
+async function runReraise(args: Arguments): Promise<void> {
+  args.assertShape(RUN_RERAISE_ACCEPTED_FLAGS, 2);
+  const signalId = args.positionals[1];
+  if (signalId === undefined || !UUID_RE.test(signalId)) {
+    throw new UsageError("reraise requires the UUID of an ask you sent");
+  }
+  const cloud = await target(args);
+  const credential = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const result = await postSignalCommand(cloud, credential, { kind: "reraise_ask", signal_id: signalId.toLowerCase() });
+  const reraise = (result.response as { reraise?: { count?: number; next_allowed_at?: string } }).reraise;
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify({ signal_id: result.response.signal?.id ?? null,
+      reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null }, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Re-raised. You can re-raise it again after ${reraise?.next_allowed_at ?? "24 hours"}.\n`);
+}
 
 function rosterAge(at: string | null): string {
   if (at === null) return "never";
@@ -10472,6 +10500,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 9,
     refusalTrace: "runBrain",
   }),
+  reraise: commandEntry({ tool: "reraise", mcp: true, handler: traced("runReraise", runReraise), description: "Re-raise an open ask you sent: one reminder to the same people, at most once every 24 hours.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 17, visible: true, help: ["cswarm reraise <ask-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
@@ -10575,6 +10604,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
   roster: RUN_ROSTER_ACCEPTED_FLAGS,
+  reraise: RUN_RERAISE_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
   note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
   ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,

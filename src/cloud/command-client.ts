@@ -360,9 +360,15 @@ export const SIGNAL_WRITE_MAX_ATTEMPTS = 3;
 
 export const SIGNAL_WRITE_RETRY_BASE_MS = 500;
 
+/** Roster R1b: the ask's sender re-raises it. The server derives the note and its audience. */
+export interface ReraiseAskCommand {
+  kind: "reraise_ask";
+  signal_id: string;
+}
+
 export interface PostSignalRequest {
   workspaceId: string;
-  command: PostSignalCommand;
+  command: PostSignalCommand | ReraiseAskCommand;
   credential: string;
   commandId?: string;
   /**
@@ -1243,7 +1249,9 @@ export class ThinCommandClient {
 
   async sendSignal(request: PostSignalRequest): Promise<PostSignalResult> {
     const commandId = request.commandId ?? newCommandId();
-    const command: PostSignalCommand = {
+    const command: PostSignalCommand | ReraiseAskCommand = request.command.kind === "reraise_ask"
+      ? { kind: "reraise_ask", signal_id: request.command.signal_id }
+      : {
       kind: "post_signal",
       signal_kind: request.command.signal_kind,
       body: request.command.body,

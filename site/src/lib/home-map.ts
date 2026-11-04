@@ -321,9 +321,11 @@ export function homeAgentFixCards(people: HomePeople, workspace: NeedsYouVM['wor
     primary: { label: 'What to do', href: routeHref({ view: 'agent', workspaceId: workspace.id, agentId: agent.id }) },
   }));
 }
-/** Mirrors overview SQL: answers from the viewer or their agents, in threads or directed replies. */
-export function homeAskAnswered(askId: string, signals: readonly Signal[], viewerId: string | null, ownAgentIds: readonly string[]): boolean {
-  return signals.some(reply => (reply.threadRootId === askId || reply.inReplyTo === askId)
+/** Mirrors overview SQL: answers from the viewer or their agents, in threads or directed replies.
+ * The ask's own sender never answers it, so a follow-up or re-raise from the asking agent keeps it open. */
+export function homeAskAnswered(ask: Pick<Signal, "id" | "from" | "fromKind">, signals: readonly Signal[], viewerId: string | null, ownAgentIds: readonly string[]): boolean {
+  return signals.some(reply => (reply.threadRootId === ask.id || reply.inReplyTo === ask.id)
+    && !(reply.fromKind === ask.fromKind && reply.from === ask.from)
     && (reply.fromKind === "user" ? reply.from === viewerId : reply.fromKind === "agent" && ownAgentIds.includes(reply.from)));
 }
 function detailNeeds(entry: CatchUpData): NeedsYouVM[] {
