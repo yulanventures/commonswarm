@@ -1046,6 +1046,17 @@ import "../../styles/kylon-command-palette.css";
       </div>
     </form>
   </dialog>
+  <dialog
+    class="dashboard__connected-apps-dialog dashboard__cleanup-dialog"
+    data-cleanup-dialog
+    aria-labelledby="dashboard-cleanup-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <h2 id="dashboard-cleanup-title">Clean up</h2>
+      <button type="button" data-cleanup-close aria-label="Close Clean up">×</button>
+    </header>
+    <div class="dashboard__cleanup-body" data-cleanup-body></div>
+  </dialog>
 
   <dialog
     class="dashboard__connected-apps-dialog dashboard__signout-others-dialog"
@@ -1165,6 +1176,7 @@ import "../../styles/kylon-command-palette.css";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
+  import { cleanupAgentRows, cleanupFileRows, mountCleanup } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
@@ -7896,6 +7908,59 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    /* Clean up (owners and admins): remove agents from this workspace, or tombstone files, in
+       bulk through the existing commands (src/lib/cleanup.ts). A pass is bound to the account
+       and workspace that opened it; scheduling stops if either changes or the role is lost. */
+    const openCleanupDialog = (workspaceId: string): void => {
+      const dialog = one<HTMLDialogElement>("[data-cleanup-dialog]");
+      const body = one<HTMLElement>("[data-cleanup-body]");
+      if (!dialog || !body || !session || sampleMode) return;
+      const opened = { userId: session.user.id, workspaceId };
+      const context = () => {
+        const me = members.find((member) => member.userId === session?.user.id);
+        return session?.user.id === opened.userId && activeWorkspaceId === opened.workspaceId &&
+          (me?.role === "owner" || me?.role === "admin") ? { ...opened } : null;
+      };
+      const memberName = (userId: string) => members.find((member) => member.userId === userId)?.name ?? "someone";
+      mountCleanup(body, {
+        context,
+        agents: () => cleanupAgentRows(agents.map((agent) => ({
+          principalId: agent.principalId, name: agent.name, transport: agent.transport,
+          ownerUserId: agent.ownerUserId, lastActiveAt: agent.presence?.last_command_at ?? null,
+        })), memberName),
+        files: async (filter) => {
+          const files = await workspaceFiles(opened.workspaceId);
+          return cleanupFileRows(files, filter, (kind, id) => kind === "user"
+            ? members.find((member) => member.userId === id)?.name ?? null
+            : agents.find((agent) => agent.principalId === id)?.name ?? null);
+        },
+        send: async (item, command, bound) => {
+          // The opening account only: postCommand itself refuses a recovered session for another user.
+          if (!session || session.user.id !== bound.userId) return "lost";
+          try {
+            const result = await postCommand(session, item.commandId, command,
+              { workspace_id: bound.workspaceId, stream: { kind: "workspace" } });
+            return { status: result.status, body: result.body };
+          } catch {
+            return "lost";
+          }
+        },
+        newId: uuid,
+        onFinished: (operation) => {
+          if (operation !== "remove_agent" || context() === null) return;
+          void Promise.all([roster(opened.workspaceId), memberRoster(opened.workspaceId)]).then(([nextAgents, nextRoster]) => {
+            if (activeWorkspaceId !== opened.workspaceId || session?.user.id !== opened.userId) return;
+            agents = nextAgents;
+            people = nextRoster.names;
+            members = nextRoster.members;
+            renderRoster();
+          }).catch(() => { /* The roster refreshes on its own schedule. */ });
+        },
+      });
+      if (!dialog.open) dialog.showModal();
+    };
+    one<HTMLButtonElement>("[data-cleanup-close]")?.addEventListener("click", () => one<HTMLDialogElement>("[data-cleanup-dialog]")?.close());
+
     const renderWorkspaceSettingsPanel = (workspace: Workspace): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
       if (!root) return;
@@ -7907,6 +7972,8 @@ import "../../styles/kylon-command-palette.css";
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
         canRename: !sampleMode && (me?.role === "owner" || me?.role === "admin"),
+        onCleanup: !sampleMode && (me?.role === "owner" || me?.role === "admin")
+          ? () => { closeWorkspaceDetailsDialog(); openCleanupDialog(workspace.id); } : undefined,
         onRename: async name => {
           if (!session || sampleMode) return;
           await renameWorkspace(session, uuid(), workspace.id, name);
