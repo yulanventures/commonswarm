@@ -56,13 +56,16 @@ test("GoTrue refusals map to fixed copy and never echo GoTrue text", async () =>
   const cases = [
     [400, "reauthentication_not_valid", /wrong or expired/],
     [422, "weak_password", /at least 12 characters, and avoid common/],
+    [422, "weak_password", /appeared in a known data breach/, ["pwned"]],
+    [422, "weak_password", /at least 12 characters, and avoid common/, ["length"]],
     [422, "same_password", /already your password/],
     [429, "over_request_rate_limit", /Too many attempts/],
     [401, "bad_jwt", /Sign in again/],
     [500, "unexpected_failure", /was not changed/],
   ];
-  for (const [status, error_code, copy] of cases) {
-    await assert.rejects(setPassword(mine, good, "123456", respond(status, { code: status, error_code, msg: "secret detail" }).options),
+  for (const [status, error_code, copy, reasons] of cases) {
+    const body = { code: status, error_code, msg: "secret detail", ...(reasons ? { weak_password: { reasons } } : {}) };
+    await assert.rejects(setPassword(mine, good, "123456", respond(status, body).options),
       (thrown) => copy.test(thrown.message) && !thrown.message.includes("secret"), error_code);
   }
   await assert.rejects(sendPasswordCode(mine, respond(429, { error_code: "over_email_send_rate_limit", msg: "secret" }).options), /Too many attempts/);

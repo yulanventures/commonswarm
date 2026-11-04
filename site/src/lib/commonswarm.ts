@@ -775,9 +775,14 @@ export class PasswordCodeRequired extends Error {
   }
 }
 
-function passwordError(status: number, code: string, fallback: string): Error {
+function passwordError(status: number, code: string, fallback: string, reasons: readonly string[] = []): Error {
   if (code === "reauthentication_needed") return new PasswordCodeRequired();
   if (code === "reauthentication_not_valid") return new Error("That code is wrong or expired. Send a new code and try again.");
+  // GOTRUE_PASSWORD_HIBP_ENABLED: GoTrue checks new passwords against known breaches (k-anonymity
+  // range query) and answers weak_password with the reason "pwned".
+  if (code === "weak_password" && reasons.includes("pwned")) {
+    return new Error("This password has appeared in a known data breach. Choose a different one.");
+  }
   if (code === "weak_password") return new Error(`Use at least ${PASSWORD_MIN_LENGTH} characters, and avoid common passwords.`);
   if (code === "same_password") return new Error("That is already your password. Choose a different one.");
   if (status === 429 || code === "over_request_rate_limit" || code === "over_email_send_rate_limit") {
@@ -817,11 +822,14 @@ async function passwordRequest(
   }
   if (response.status === 200) return;
   let code = "";
+  let reasons: string[] = [];
   try {
-    const body = await response.json() as { error_code?: unknown; code?: unknown };
+    const body = await response.json() as { error_code?: unknown; code?: unknown; weak_password?: { reasons?: unknown } };
     code = typeof body.error_code === "string" ? body.error_code : typeof body.code === "string" ? body.code : "";
+    const listed = body.weak_password?.reasons;
+    if (Array.isArray(listed)) reasons = listed.filter((reason): reason is string => typeof reason === "string");
   } catch { /* no JSON: status alone decides */ }
-  throw passwordError(response.status, code, fallback);
+  throw passwordError(response.status, code, fallback, reasons);
 }
 
 /**
