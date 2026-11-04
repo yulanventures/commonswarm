@@ -285,10 +285,14 @@ test("the applied navigation layout keeps the drawer close, picker and account r
         const summaryBox=hit(summary); pointer(summary); const choiceBox=hit(item); pointer(item);
         const accountBox=hit(account); pointer(account);
         const scrollBefore=scroll.scrollTop; scroll.scrollTop=100; const scrollMoved=scroll.scrollTop>scrollBefore;
+        const scrollNodes=['.cs-org-context', '.cs-org-context-scroll', '.cs-org-context-body', '.hm-frame__rail-content', '.hm-rail'].map(selector => {
+          const el=shell.querySelector(selector), style=getComputedStyle(el);
+          return {selector, client:el.clientHeight, total:el.scrollHeight, top:el.scrollTop, overflowY:style.overflowY, display:style.display};
+        });
         const output={phone,header,close:close && {w:close.w,h:close.h,owns:close.owns},returned,
           identity:point(identity),summary:{w:summaryBox.w,h:summaryBox.h,owns:summaryBox.owns},choice:{w:choiceBox.w,h:choiceBox.h,owns:choiceBox.owns},
           account:{w:accountBox.w,h:accountBox.h,owns:accountBox.owns,bottom:accountBox.bottom},scroll:{top:point(scroll).top,bottom:point(scroll).bottom,client:scroll.clientHeight,total:scroll.scrollHeight,moved:scrollMoved},switched,accountOpens,
-          overflow:document.documentElement.scrollWidth>innerWidth};
+          overflow:document.documentElement.scrollWidth>innerWidth, viewport:{width:innerWidth,height:innerHeight}, scrollNodes};
         document.documentElement.dataset.navGeometry=btoa(JSON.stringify(output)); host.suspend();
       } catch (error) { document.documentElement.dataset.navError=String(error && error.stack || error); }
     })();</script></body></html>`, "utf8");
@@ -301,7 +305,7 @@ test("the applied navigation layout keeps the drawer close, picker and account r
       const g = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
       assert.equal(g.overflow, false); assert.deepEqual(g.switched, ["b"]); assert.equal(g.accountOpens, 1);
       for (const control of [g.summary, g.choice, g.account]) { assert.equal(control.owns, true); assert.ok(control.w >= 43.5 && control.h >= 43.5); }
-      assert.ok(g.scroll.total > g.scroll.client && g.scroll.moved); assert.ok(g.identity.bottom <= g.scroll.top + 1);
+      assert.ok(g.scroll.total > g.scroll.client && g.scroll.moved, `middle scroll failed at ${width}×${height}: ${JSON.stringify({viewport:g.viewport,scroll:g.scroll,nodes:g.scrollNodes})}`); assert.ok(g.identity.bottom <= g.scroll.top + 1);
       assert.ok(g.account.bottom >= g.scroll.bottom - 1);
       if (width === 390) {
         assert.deepEqual(g.header, ["cs-icon-button", "cs-org-phone-title", "hm-details-toggle"]);

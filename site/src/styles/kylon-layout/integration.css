@@ -416,7 +416,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker :i
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { min-block-size: 0; block-size: 100%; overflow: visible; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context { box-sizing: border-box; display: flex; flex-direction: column; block-size: 100%; max-block-size: none; min-block-size: 0; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context-scroll { display: flex; flex-direction: column; flex: 1 1 auto; min-block-size: 0; overflow-y: auto; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context-body { flex: none; max-block-size: none; overflow: visible; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-wiki-composition]) .cs-org-context-body { flex: none; max-block-size: none; overflow: visible; }
 }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { box-sizing: border-box; min-block-size: 0; }

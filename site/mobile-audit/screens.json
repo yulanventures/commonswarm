@@ -765,10 +765,23 @@
         "click": "button[aria-label=\"Open navigation\"]"
       },
       {
+        "media": "(width <= 52rem)",
         "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu .hm-menu__list:not([hidden])"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header .hm-menu__list:not([hidden])"
       }
     ],
-    "ready": ".cs-kylon-workspace-menu .hm-menu__trigger[aria-expanded=\"true\"]",
+    "ready": ":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])",
     "states": [
       "dense"
     ],
