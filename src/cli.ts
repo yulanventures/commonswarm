@@ -10574,6 +10574,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "brain.get": BRAIN_GET_ACCEPTED_FLAGS,
   "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  roster: RUN_ROSTER_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
   note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
   ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,
