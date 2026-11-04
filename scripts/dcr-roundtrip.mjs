@@ -15,7 +15,7 @@ const VERSION = '2025-06-18';
 const SCOPES = new Set(['openid', 'offline_access', 'mcp']);
 // Must match supabase/functions/mcp/tools.ts after this release. The service-free
 // DCR exercise test compares this explicit release inventory with the hosted table.
-const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members', 'file_ls', 'file_get', 'file_put']);
+const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members', 'file_ls', 'file_get', 'file_put', 'seat_list', 'seat_release']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HANDLE = /^seat_[A-Za-z0-9_-]{22,64}$/u;
 const SHAPE_KEYS = new Set(['grant_id', 'seat_id', 'handle', 'workspace_id', 'principal_id',

@@ -48,6 +48,7 @@ const MESSAGES = {
   signal_attachment_duplicate: "The same file version is attached twice. List each file_id and version_n once.",
   signal_attachment_unavailable: "An attached file is missing, removed, or outside this workspace. Use file_ls to pick current files.",
   signal_attachment_version_unavailable: "An attached version does not exist in this workspace. Use the version_n from file_put or file_ls.",
+  hosted_seat_unavailable: "That seat is unavailable to this connection. Call seat_list to see the seats this connection still holds.",
   signal_attachment_not_live: "An attached version is not committed and live. Use the version_n from file_put or file_ls.",
 } as const;
 

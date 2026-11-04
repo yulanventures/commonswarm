@@ -363,3 +363,49 @@ test("reclaim still requires capacity, active grant, consent, membership and an 
     if (!refused.ok) assert.equal(refused.reason, reason);
   }
 });
+
+test("a hosted seat releases only itself, and the fold keeps its principal live", () => {
+  const liveSeat = {
+    seat_id: seatId, grant_id: grantId, workspace_id: workspace, owner_user_id: owner,
+    principal_id: principal, name: "Claude", handle: claim.handle, transport: "hosted_mcp" as const,
+    turn_only: true as const, created_at: 10, revoked_at: null, handle_revoked_at: null, principal_revoked_at: null,
+  };
+  const release = { kind: "release_hosted_mcp_seat" as const, grant_id: grantId, seat_id: seatId };
+  const seatCtx = () => ({ ...context("hosted_seat"), actor: { user: owner, agent_principal: principal, run: null } });
+
+  const decision = decideHostedAuthority(release, facts({ seat: liveSeat }), seatCtx());
+  assert.equal(decision.ok, true);
+  if (!decision.ok) return;
+  assert.equal(decision.events[0]?.type, "HostedMcpSeatReleased");
+  assert.deepEqual(decision.events[0]?.payload, { grant_id: grantId, seat_id: seatId, principal_id: principal, released_at: 1234 });
+
+  const claimed = decideHostedAuthority(claim, facts(), context("hosted_grant"));
+  assert.equal(claimed.ok, true);
+  if (!claimed.ok) return;
+  const folded = reduceHostedAuthorityStream([...claimed.events, { ...decision.events[0]!, seq: claimed.events.length + 1 }]);
+  assert.equal(folded.seats[seatId]?.revoked_at, 1234);
+  assert.equal(folded.seats[seatId]?.handle_revoked_at, 1234);
+  assert.equal(folded.principals[principal]?.revoked_at, null, "release never retires the agent principal");
+
+  // Already released: an idempotent no-op.
+  const again = decideHostedAuthority(release, facts({ seat: { ...liveSeat, revoked_at: 1, handle_revoked_at: 1 } }), seatCtx());
+  assert.deepEqual(again, { ok: true, events: [] });
+
+  // Only the seat itself, on its own grant and workspace.
+  const refusals: Array<[HostedAuthorityFacts, DecideHostedAuthorityCtx]> = [
+    [facts({ seat: liveSeat }), context("human")],
+    [facts({ seat: liveSeat }), context("hosted_grant")],
+    [facts({ seat: liveSeat }), { ...seatCtx(), actor: { user: owner, agent_principal: "50000000-0000-4000-8000-000000000099", run: null } }],
+    [facts({ seat: { ...liveSeat, grant_id: "20000000-0000-4000-8000-000000000099" } }), seatCtx()],
+    [facts({ seat: { ...liveSeat, workspace_id: "30000000-0000-4000-8000-000000000099" } }), seatCtx()],
+    [facts({ seat: { ...liveSeat, seat_id: "60000000-0000-4000-8000-000000000099" } }), seatCtx()],
+    [facts({ seat: null }), seatCtx()],
+  ];
+  for (const [given, ctx] of refusals) {
+    const refused = decideHostedAuthority(release, given, ctx);
+    assert.equal(refused.ok, false, JSON.stringify({ credential: ctx.credential_kind, seat: given.seat?.seat_id }));
+  }
+  // A hosted seat still cannot revoke a seat the way the owner does.
+  assert.equal(decideHostedAuthority({ kind: "revoke_hosted_mcp_seat", grant_id: grantId, seat_id: seatId },
+    facts({ seat: liveSeat }), seatCtx()).ok, false);
+});

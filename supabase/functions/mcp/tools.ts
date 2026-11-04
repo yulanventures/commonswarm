@@ -131,6 +131,20 @@ export const CORE_TOOL_TABLE = [
     // some clients refuse top-level oneOf in tool input schemas.
     inputSchema: objectSchema({ seat: handle, name: text(1, 255), content: text(1, FILE_PUT_MAX_BYTES), content_base64: text(4, FILE_PUT_BASE64_MAX, "^[A-Za-z0-9+/]+={0,2}$"), request_id: requestId }, ["seat", "name", "request_id"]),
   },
+  {
+    name: "seat_list", effect: "read", title: "List this connection's seats",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "List the live seats this connection holds, with each seat's handle, name and workspace. Use it to find an old seat to release.",
+    annotations: { title: "List this connection's seats", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({}, []),
+  },
+  {
+    name: "seat_release", effect: "write", title: "Release one of this connection's seats",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "End one seat this connection holds; its handle stops working. The agent stays listed in members until the workspace owner retires it, and can get a seat again only through claim_seat. Retry with the same request_id.",
+    annotations: { title: "Release one of this connection's seats", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, request_id: requestId }, ["seat", "request_id"]),
+  },
 ] as const;
 
 // Effects describe behavior for catalog review; they are not MCP wire fields.
@@ -250,6 +264,8 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   file_ls: { allowed: ["seat", "signal_id", "offset", "limit"], required: ["seat"] },
   file_get: { allowed: ["seat", "file_id", "version_n", "offset"], required: ["seat", "file_id"] },
   file_put: { allowed: ["seat", "name", "content", "content_base64", "request_id"], required: ["seat", "name", "request_id"] },
+  seat_list: { allowed: [], required: [] },
+  seat_release: { allowed: ["seat", "request_id"], required: ["seat", "request_id"] },
 };
 
 export class HostedToolInputError extends Error {
@@ -305,6 +321,7 @@ export function validateHostedToolArguments(
   const invalid = (key: string): never => {
     throw new HostedToolInputError(`Invalid ${key}: ${EXPECTED[key]}.`);
   };
+  if (name === "seat_list") return args;
   if (name === "claim_seat") {
     if (Object.hasOwn(args, "workspace_id") &&
         (!validUuid(args.workspace_id) || claimWorkspace.not.enum.includes(args.workspace_id))) invalid("workspace_id");
@@ -321,6 +338,10 @@ export function validateHostedToolArguments(
     return args;
   }
   if (name === "whoami" || name === "members") return args;
+  if (name === "seat_release") {
+    if (!validRequestId(args.request_id)) invalid("request_id");
+    return args;
+  }
   if (name === "file_ls") {
     if (args.signal_id !== undefined && !validUuid(args.signal_id)) {
       throw new HostedToolInputError("Invalid signal_id: provide the signal UUID from check whose attachments you want.");

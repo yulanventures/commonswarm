@@ -51,6 +51,9 @@ export type HostedAuthorityCommand =
   | { kind: 'activate_hosted_mcp_grant'; grant_id: string }
   | { kind: 'revoke_hosted_mcp_grant'; grant_id: string }
   | { kind: 'revoke_hosted_mcp_seat'; grant_id: string; seat_id: string }
+  // A hosted seat ending itself (MCP seat_release). Seat-only: the agent
+  // principal, its grant binding, the grant family and sibling seats stay live.
+  | { kind: 'release_hosted_mcp_seat'; grant_id: string; seat_id: string }
   | {
       kind: 'claim_hosted_seat';
       grant_id: string;
@@ -68,7 +71,8 @@ export type HostedAuthorityEventType =
   | 'HostedMcpGrantActivated'
   | 'HostedMcpGrantRevoked'
   | 'HostedMcpSeatClaimed'
-  | 'HostedMcpSeatRevoked';
+  | 'HostedMcpSeatRevoked'
+  | 'HostedMcpSeatReleased';
 
 export type HostedAuthorityEvent = EventEnvelope<
   Record<string, unknown>,
@@ -248,6 +252,10 @@ export function decideHostedAuthority(
     if (ctx.credential_kind !== 'hosted_grant') {
       return refuse('authz', 'credential_kind_forbidden', 'claim_hosted_seat requires a hosted grant credential');
     }
+  } else if (command.kind === 'release_hosted_mcp_seat') {
+    if (ctx.credential_kind !== 'hosted_seat') {
+      return refuse('authz', 'credential_kind_forbidden', 'release_hosted_mcp_seat requires the hosted seat itself');
+    }
   } else if (HUMAN_COMMANDS.has(command.kind) && ctx.credential_kind !== 'human') {
     return refuse('authz', 'credential_kind_forbidden', 'hosted connection management requires a human credential');
   }
@@ -337,6 +345,23 @@ export function decideHostedAuthority(
       seat_id: seat.seat_id,
       principal_id: seat.principal_id,
       revoked_at: ctx.now,
+    })] };
+  }
+
+  if (command.kind === 'release_hosted_mcp_seat') {
+    const seat = facts.seat;
+    // Only the seat's own agent, on its own grant and workspace, may release it.
+    if (seat === null || seat.grant_id !== grant.grant_id || seat.workspace_id !== ctx.workspace_id ||
+        seat.seat_id !== command.seat_id || ctx.actor.agent_principal !== seat.principal_id ||
+        ctx.actor.user !== grant.owner_user_id) {
+      return refuse('authz', 'hosted_seat_unavailable', 'hosted seat is unavailable');
+    }
+    if (seat.revoked_at !== null) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, 'HostedMcpSeatReleased', {
+      grant_id: grant.grant_id,
+      seat_id: seat.seat_id,
+      principal_id: seat.principal_id,
+      released_at: ctx.now,
     })] };
   }
 
@@ -501,6 +526,18 @@ export function reduceHostedAuthority(
         revoked_at: null,
       } },
     };
+  }
+  if (event.type === 'HostedMcpSeatReleased') {
+    // Seat and handle end; the principal does not.
+    const p = requiredPayload(event, ['grant_id', 'seat_id', 'principal_id', 'released_at']);
+    const id = String(p.seat_id);
+    const seat = state.seats[id];
+    if (!seat) throw new Error(`unknown hosted seat "${id}"`);
+    if (seat.principal_id !== String(p.principal_id)) throw new Error(`hosted seat "${id}" principal mismatch`);
+    const releasedAt = Number(p.released_at);
+    return { ...state, seats: { ...state.seats, [id]: {
+      ...seat, revoked_at: releasedAt, handle_revoked_at: releasedAt,
+    } } };
   }
   const p = requiredPayload(event, ['seat_id', 'revoked_at']);
   const id = String(p.seat_id);

@@ -4218,3 +4218,64 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
     }
   }
 });
+
+test("seat_release ends only that seat: the sibling seat works, the agent stays, and a reconnect brings nothing back", { timeout: 180_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const first = claimSeat(fixture, fixture.grantA, `release-${randomUUID()}`);
+  const principal = String(first.body.principal_id);
+  const seatA = { seatId: String(first.body.seat_id), handle: String(first.body.handle) };
+  const added = runHostedHarness<HarnessResult>({ operation: "management", ownerUserId: fixture.owner,
+    workspaceId: fixture.workspaceB, command: { kind: "add_agent_to_workspace", principal_id: principal }, commandId: randomUUID() });
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  const sibling = runHostedHarness<HarnessResult>({ operation: "claim", claim: { grantId: fixture.grantA,
+    ownerUserId: fixture.owner, workspaceId: fixture.workspaceB, agentId: principal, commandId: randomUUID() } });
+  assert.equal(sibling.status, 200, JSON.stringify(sibling.body));
+  assert.equal(sibling.body.principal_id, principal, "the same agent holds a sibling seat in workspace B");
+  const seatB = { handle: String(sibling.body.handle) };
+
+  const note = (handle: string, workspaceId: string) => runHostedHarness<HarnessResult>({ operation: "seat-command",
+    seat: { grantId: fixture.grantA, handle, workspaceId } });
+  const release = (handle: string, seatId: string) => runHostedHarness<HarnessResult>({ operation: "seat-command",
+    seat: { grantId: fixture.grantA, handle, workspaceId: fixture.workspaceA, tool: "seat_release" },
+    command: { kind: "release_hosted_mcp_seat", grant_id: fixture.grantA, seat_id: seatId } });
+
+  // A seat cannot release a seat other than its own, and a person cannot use the seat path.
+  const foreign = release(seatA.handle, randomUUID());
+  assert.equal(foreign.status, 403, JSON.stringify(foreign.body));
+  const human = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "release_hosted_mcp_seat", grant_id: fixture.grantA, seat_id: seatA.seatId } });
+  assert.ok([400, 403].includes(human.status), JSON.stringify(human));
+
+  const released = release(seatA.handle, seatA.seatId);
+  assert.equal(released.status, 200, JSON.stringify(released.body));
+  assert.equal(note(seatA.handle, fixture.workspaceA).status, 403, "the released handle stops working");
+  assert.equal(release(seatA.handle, seatA.seatId).status, 403, "a released seat cannot act again, release included");
+  assertAcceptedSeatNote(note(seatB.handle, fixture.workspaceB), principal);
+
+  const [state] = await sql<{ seat: Date | null; handle: Date | null; principal: Date | null; binding: Date | null; tombstones: number; events: number }[]>`
+    SELECT s.revoked_at AS seat, h.revoked_at AS handle, p.revoked_at AS principal,
+      (SELECT revoked_at FROM swarm.hosted_mcp_grant_agents WHERE grant_id=${fixture.grantA}::uuid AND principal_id=${principal}::uuid) AS binding,
+      (SELECT count(*)::int FROM swarm.revocation_tombstones WHERE kind='hosted_seat' AND target_id=${seatA.seatId}::uuid) AS tombstones,
+      (SELECT count(*)::int FROM swarm.events WHERE workspace_id=${fixture.workspaceA}::uuid AND type='HostedMcpSeatReleased') AS events
+    FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_seat_handles h USING (seat_id)
+    JOIN swarm.agent_principals p ON p.principal_id = s.principal_id
+    WHERE s.seat_id=${seatA.seatId}::uuid`;
+  assert.ok(state?.seat && state.handle, "the seat and its handle are revoked");
+  assert.equal(state?.principal, null, "the agent principal stays live");
+  assert.equal(state?.binding, null, "the grant-agent binding stays live for the sibling seat");
+  assert.equal(state?.tombstones, 1, "the released seat keeps its deny tombstone");
+  assert.equal(state?.events, 1, "the release is one logged event");
+
+  // Reconnect: retire grant A's family and inherit onto grant B. Bindings carry over; seats never do.
+  await sql`INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES (${`provider-${fixture.grantA}`}, clock_timestamp())`;
+  await sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    await tx`SELECT swarm.inherit_stranded_hosted_agents(${fixture.grantB}::uuid)`;
+  });
+  const [after] = await sql<{ live_in_a: number; released: Date | null }[]>`
+    SELECT (SELECT count(*)::int FROM swarm.hosted_mcp_seats WHERE principal_id=${principal}::uuid
+      AND workspace_id=${fixture.workspaceA}::uuid AND revoked_at IS NULL) AS live_in_a,
+      (SELECT revoked_at FROM swarm.hosted_mcp_seats WHERE seat_id=${seatA.seatId}::uuid) AS released`;
+  assert.equal(after?.live_in_a, 0, "no seat in workspace A comes back on reconnect");
+  assert.ok(after?.released, "the released seat stays revoked");
+});
