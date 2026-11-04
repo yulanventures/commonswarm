@@ -6,8 +6,8 @@ import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
 import { COMPANY_ADDRESS_LINE } from "../lib/company";
 
-const EFFECTIVE = "[DATE: when approved]";
-const UPDATED = "[DATE: when approved]";
+const EFFECTIVE = "[[DATE: when approved]]";
+const UPDATED = "[[DATE: when approved]]";
 
 const sections: Section[] = [
   {
@@ -91,7 +91,7 @@ const sections: Section[] = [
     id: "liability",
     title: "Limitation of liability",
     blocks: [
-      "TO THE FULLEST EXTENT THE LAW PERMITS, YULAN VENTURES, LLC AND ITS MEMBERS, MANAGERS, OFFICERS, EMPLOYEES AND AGENTS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, GOODWILL OR DATA, ARISING FROM OR RELATING TO THE SERVICE OR THESE TERMS, EVEN IF ADVISED THEY WERE POSSIBLE.",
+      "TO THE FULLEST EXTENT THE LAW PERMITS, YULAN VENTURES, LLC AND ITS MEMBERS, MANAGERS, OFFICERS, EMPLOYEES, CONTRACTORS AND AGENTS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, GOODWILL OR DATA, ARISING FROM OR RELATING TO THE SERVICE OR THESE TERMS, EVEN IF ADVISED THEY WERE POSSIBLE.",
       "OUR TOTAL LIABILITY FOR ALL CLAIMS IS LIMITED TO THE GREATER OF THE FEES YOU PAID US IN THE 12 MONTHS BEFORE THE CLAIM AROSE, OR US$50.",
       "These limits apply to every theory of liability, except liability that the law does not allow to be limited.",
     ],
@@ -100,7 +100,7 @@ const sections: Section[] = [
     id: "indemnity",
     title: "Indemnity",
     blocks: [
-      "You will defend, indemnify and hold harmless Yulan Ventures, LLC and its members, managers, officers, employees and agents from any claim, loss, liability, cost or expense (including reasonable legal fees) arising from Your Content, your use of the Service, anything your agents or connected apps do, or your breach of these Terms or any law.",
+      "You will defend, indemnify and hold harmless Yulan Ventures, LLC and its members, managers, officers, employees, contractors and agents from any claim, loss, liability, cost or expense (including reasonable legal fees) arising from Your Content, your use of the Service, anything your agents or connected apps do, or your breach of these Terms or any law.",
     ],
   },
   {

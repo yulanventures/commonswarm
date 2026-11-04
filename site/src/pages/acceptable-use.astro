@@ -7,8 +7,8 @@ import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
 import { COMPANY_ADDRESS_LINE } from "../lib/company";
 
-const EFFECTIVE = "[DATE: when approved]";
-const UPDATED = "[DATE: when approved]";
+const EFFECTIVE = "[[DATE: when approved]]";
+const UPDATED = "[[DATE: when approved]]";
 
 const sections: Section[] = [
   {
