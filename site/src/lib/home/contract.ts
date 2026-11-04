@@ -96,6 +96,14 @@ export interface WorkspaceCatchUp {
   };
 }
 export interface HomeOverview { viewer_user_id: Uuid; generated_at: IsoTime; workspaces: WorkspaceCatchUp[] }
+/** One open ask addressed to the viewer. `body` is untrusted text. */
+export interface DecisionAsk {
+  signal_id: Uuid; from: { kind: 'agent' | 'user'; id: Uuid; name: string | null };
+  body: string; created_at: IsoTime; until: IsoTime;
+  reraised: { count: number; last_at: IsoTime } | null;
+}
+/** The viewer's open asks in one workspace, oldest first, at most 100 (`truncated` when more). */
+export interface DecisionQueue { workspace_id: Uuid; generated_at: IsoTime; total: number; truncated: boolean; asks: DecisionAsk[] }
 
 export type ActivityEvent = 'created' | 'updated' | 'assigned' | 'requested' | 'accepted' | 'declined'
   | 'started' | 'done' | 'dropped' | 'reopened' | 'commented';
@@ -110,6 +118,7 @@ export type SteerAction = { kind: 'move'; after_todo_id: Uuid | null } | { kind:
 
 export interface HomeServer {
   overview(): Promise<HomeOverview>;                                   // rpc swarm_read.home_overview
+  decisionQueue(workspaceId: Uuid): Promise<DecisionQueue | null>;    // rpc swarm_read.decision_queue; null for a non-member
   activity(workspaceId: Uuid, since: IsoTime, limit: number): Promise<ActivityItem[]>; // newest first
   listTodos(workspaceId: Uuid, q: { scope: 'open' | 'all'; assignee?: Party; offset: number; limit: number /* <= 50 */ }):
     Promise<{ todos: TodoSummary[]; next_offset: number | null }>;

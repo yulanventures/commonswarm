@@ -113,13 +113,14 @@ export function catchUpWorkspaceCheckTotals(workspaces: CatchUpWorkspaceCardVM[]
 export function catchUpSubline(vm: CatchUpVM): string {
   const { checked, total, anyFailed, anyPending } = catchUpWorkspaceCheckTotals(vm.workspaces);
   if (anyFailed) return `Checked ${checked} of ${total} ${plural(total, "workspace")}.`;
-  const count = vm.needsYou.length;
+  const count = vm.needsYou.filter(item => !item.unavailable).length;
+  const unread = vm.needsYou.some(item => item.unavailable);
   if (count > 0) {
     const workspaces = vm.workspaces.length;
     const verb = count === 1 ? "needs" : "need";
     return `${count} ${plural(count, "thing")} ${verb} you across ${workspaces} ${plural(workspaces, "workspace")}.`;
   }
-  if (anyPending || checked < total) return `Checked ${checked} of ${total} ${plural(total, "workspace")}.`;
+  if (anyPending || unread || checked < total) return `Checked ${checked} of ${total} ${plural(total, "workspace")}.`;
   return "Nothing needs you right now.";
 }
 

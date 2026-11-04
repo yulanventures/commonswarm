@@ -317,6 +317,12 @@ interface SignalCommand {
   to?: SignalRecipient[];
 }
 
+/** Roster R1b: the ask's own sender re-raises an open ask. Everything else is server-derived. */
+interface ReraiseAskCommand {
+  kind: "reraise_ask";
+  signal_id: string;
+}
+
 /** Channel authority. Self-contained like post_signal: emits no protocol event. */
 type ChannelCommand =
   | { kind: "channel_create"; slug: string; purpose: string | null }
@@ -379,6 +385,7 @@ type ValidatedCommand =
   | ConnectCommand
   | RegisterAgentSeatCommand
   | SignalCommand
+  | ReraiseAskCommand
   | ChannelCommand
   | SignalsSeenCommand
   | DeliveryCommand
@@ -622,6 +629,7 @@ interface StoredResponse {
   renewal_grant_id?: string;
   resumed_at?: string;
   signal?: SignalRecord;
+  reraise?: ReraiseRecord;
   channel?: ChannelRecord;
   grant_id?: string;
   seat_id?: string;
@@ -1092,6 +1100,7 @@ const COMMAND_KINDS = [
   "declare_agent_model",
   "submit_feedback",
   "post_signal",
+  "reraise_ask",
   ...CHANNEL_COMMAND_KINDS,
   SIGNALS_SEEN_KIND,
   CLAIM_AGENT_INBOX_KIND,
@@ -2037,6 +2046,24 @@ function validateCommand(
         kind: "channel_archive",
         channel_id: (cmd.channel_id as string).toLowerCase(),
       },
+    };
+  }
+
+  if (cmd.kind === "reraise_ask") {
+    const keysOk = exactKeys(cmd, ["kind", "signal_id"]);
+    const idOk = typeof cmd.signal_id === "string" && UUID_RE.test(cmd.signal_id);
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: keysOk
+          ? "signal_id must be the UUID of an ask you sent"
+          : commandFieldsMessage("reraise_ask", ["signal_id"]),
+      };
+    }
+    return {
+      ok: true,
+      command: { kind: "reraise_ask", signal_id: (cmd.signal_id as string).toLowerCase() },
     };
   }
 
@@ -3075,6 +3102,9 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.signal) === null
       ? {}
       : { signal: response.signal as unknown as SignalRecord }),
+    ...(record(response.reraise) === null
+      ? {}
+      : { reraise: response.reraise as unknown as ReraiseRecord }),
     ...(typeof response.file_id === "string" ? { file_id: response.file_id } : {}),
     ...(typeof response.version_id === "string" ? { version_id: response.version_id } : {}),
     ...(typeof response.version_n === "number" ? { version_n: response.version_n } : {}),
@@ -10371,6 +10401,245 @@ async function postSignal(
   } };
 }
 
+interface ReraiseRecord {
+  signal_id: string;
+  count: number;
+  last_raised_at: string;
+  next_allowed_at: string;
+}
+
+const RERAISE_NOTE_PREFIX = "Still waiting: ";
+
+/**
+ * Re-raise (roster R1b). Only the ask's exact sender (kind and principal; another agent of the
+ * same person is not the sender), only while the ask is open and unexpired, and at most once
+ * per 24 hours per ask, by server time. One note goes to the ask's own audience, copied here
+ * from the stored ask and its recipient rows in their order, in reply to the ask and in the
+ * ask's own channel and thread, with an until no later than the ask's. No caller-supplied
+ * recipient, body or horizon exists. A broadcast ask is refused, never widened.
+ *
+ * Everything shares the command's transaction: the per-ask lock, the open and cap checks, the
+ * normal recipient liveness and rate checks, the note and its recipients, the cap ledger, the
+ * command ledger and the audit. A refusal writes no note and charges no cap; any failed write
+ * rolls all of it back. An exact retry of a settled command id replays its stored result
+ * (before dispatch, or here after the lock when the first request was still running), so it
+ * never writes a second note or charges the cap again; a changed retry conflicts.
+ */
+async function reraiseAsk(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: ReraiseAskCommand,
+  ctx: {
+    commandId: string;
+    hash: string;
+    kind: string;
+    minClientVersion: string;
+    ignoredIdentity: string | null;
+    decided: (result: HttpResult) => HttpResult;
+  },
+  hostedCapability: HostedSeatCapability | null,
+): Promise<HttpResult> {
+  const { commandId, hash, kind, decided } = ctx;
+  const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
+    insertAudit(tx, {
+      auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+      outcome, reason, detail, hash,
+    });
+  await tx`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`reraise_ask:${route.workspaceId}:${command.signal_id}`}, 0)
+    )
+  `;
+  const [prior] = await tx<{
+    request_hash: string; workspace_id: string; stream_id: string; response: unknown;
+  }[]>`
+    SELECT request_hash, workspace_id, stream_id, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind}
+      AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  if (prior !== undefined) {
+    const matches = prior.request_hash === hash &&
+      prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
+    await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
+    return decided(matches
+      ? replayResult(storedResponse(prior.response), kind)
+      : { status: 409, body: { error: "command_id_conflict" } });
+  }
+  const senderKind: SignalCredentialKind = auth.credentialKind === "user" ? "user" : "agent";
+  const [ask] = await tx<{
+    id: string;
+    to_user_id: string | null;
+    to_agent_principal_id: string | null;
+    body: string;
+    about: string | null;
+    until: Date;
+    channel_id: string | null;
+    thread_root_id: string | null;
+    live: boolean;
+    answered: boolean;
+    too_soon: boolean;
+    next_allowed_at: Date | null;
+  }[]>`
+    SELECT s.id, s.to_user_id, s.to_agent_principal_id, s.body, s.about, s.until,
+      s.channel_id, s.thread_root_id,
+      s.until > statement_timestamp() AS live,
+      swarm.ask_answered(s.workspace_id, s.id) AS answered,
+      coalesce(x.last_raised_at > statement_timestamp() - interval '24 hours', false) AS too_soon,
+      x.last_raised_at + interval '24 hours' AS next_allowed_at
+    FROM swarm.signals s
+    LEFT JOIN swarm.ask_reraises x ON x.workspace_id = s.workspace_id AND x.signal_id = s.id
+    WHERE s.workspace_id = ${route.workspaceId}::uuid
+      AND s.id = ${command.signal_id}::uuid
+      AND s.kind = 'ask'
+      AND s.from_kind = ${senderKind}
+      AND s.from_principal = ${canonicalPrincipal(auth.actor)}::uuid
+    LIMIT 1
+  `;
+  if (ask === undefined) {
+    // Missing, not an ask, or sent by someone else: one answer, so nothing is disclosed.
+    await audit("authz", "reraise_not_own_ask");
+    return { status: 404, body: { error: "not_found", message: "No ask of yours with that id." } };
+  }
+  if (!ask.live) {
+    await audit("domain", "reraise_ask_expired");
+    return decided({ status: 409, body: { error: "ask_expired",
+      message: "That ask has expired, so it can't be re-raised. Send a new ask if it still matters." } });
+  }
+  if (ask.answered) {
+    await audit("domain", "reraise_ask_answered");
+    return decided({ status: 409, body: { error: "ask_answered",
+      message: "That ask already has an answer, so there's nothing to re-raise." } });
+  }
+  if (ask.too_soon) {
+    const next = ask.next_allowed_at!.toISOString();
+    await audit("domain", "reraise_too_soon");
+    return decided({ status: 429, body: { error: "reraise_too_soon",
+      message: `An ask can be re-raised once every 24 hours. Next: ${next}.`, retry_after: next } });
+  }
+  const recipientRows = await tx<{
+    recipient_user_id: string | null; recipient_agent_principal_id: string | null;
+  }[]>`
+    SELECT recipient_user_id, recipient_agent_principal_id
+    FROM swarm.signal_recipients
+    WHERE workspace_id = ${route.workspaceId}::uuid AND signal_id = ${ask.id}::uuid
+    ORDER BY position
+  `;
+  const to: SignalRecipient[] = recipientRows.map((row) => row.recipient_user_id !== null
+    ? { kind: "user", id: row.recipient_user_id }
+    : { kind: "agent", id: row.recipient_agent_principal_id! });
+  if (ask.to_user_id === null && ask.to_agent_principal_id === null && to.length === 0) {
+    await audit("domain", "reraise_unaddressed_ask");
+    return decided({ status: 409, body: { error: "reraise_unsupported",
+      message: "Only an ask sent to someone can be re-raised; this one went to the whole workspace." } });
+  }
+  // The normal current-recipient check: every addressee must still be live, or nothing is sent.
+  const audience = to.length > 0 ? to : [
+    ...(ask.to_user_id === null ? [] : [{ kind: "user" as const, id: ask.to_user_id }]),
+    ...(ask.to_agent_principal_id === null ? [] : [{ kind: "agent" as const, id: ask.to_agent_principal_id }]),
+  ];
+  for (const recipient of audience) {
+    const live = recipient.kind === "user"
+      ? await signalUserTargetIsLive(tx, route, recipient.id)
+      : await signalAgentTargetIsLive(tx, route, recipient.id);
+    if (!live) {
+      await audit("authz", "reraise_recipient_not_live");
+      return { status: 403, body: { error: "forbidden" } };
+    }
+  }
+  const target: SignalWriteTarget = {
+    toUserId: ask.to_user_id,
+    toAgentPrincipalId: ask.to_agent_principal_id,
+    inReplyTo: ask.id,
+  };
+  let body = RERAISE_NOTE_PREFIX + ask.body;
+  if (body.length > SIGNAL_BODY_MAX) {
+    body = body.slice(0, SIGNAL_BODY_MAX - 1);
+    if (/[\uD800-\uDBFF]$/.test(body)) body = body.slice(0, -1);
+    body += "…";
+  }
+  const note: SignalCommand = {
+    kind: "post_signal",
+    signal_kind: "note",
+    body,
+    to_user_id: ask.to_user_id,
+    to_agent_principal_id: ask.to_agent_principal_id,
+    in_reply_to: ask.id,
+    about: ask.about,
+    ...(to.length > 0 ? { to } : {}),
+  };
+  const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, note, target);
+  if (rateLimit !== null) {
+    const detail = `${rateLimit.bucket} limit ${rateLimit.description}; resets at ${rateLimit.resetsAt}`;
+    await audit("rate_limit", "rate_limited", detail);
+    return decided({ status: 429, body: { error: "rate_limited",
+      message: `Signal refused: ${detail}.`, limit: rateLimit.limit, resets_at: rateLimit.resetsAt } });
+  }
+  const posted = await postSignal(tx, route, auth, note, target, [], {
+    channelId: ask.channel_id,
+    threadRootId: ask.thread_root_id,
+    broadcastToChannel: false,
+    untilMs: SIGNAL_DEFAULT_UNTIL_MS.note,
+    // The note never outlives the ask, so a reminder can't extend the ask's visibility.
+    untilCeiling: ask.until.toISOString(),
+    untilExplicit: false,
+  }, hostedCapability);
+  if (posted.status === "hosted_refused") return { status: 403, body: { error: "forbidden" } };
+  if (posted.status === "thread_horizon") {
+    await audit("domain", "reraise_ask_expired");
+    return { status: 409, body: { error: "ask_expired",
+      message: "That ask expires too soon to re-raise. Send a new ask if it still matters." } };
+  }
+  if (posted.status !== "inserted") throw new Error("re-raise note returned an unexpected outcome");
+  const [slot] = await tx<{ raise_count: number; last_raised_at: Date }[]>`
+    INSERT INTO swarm.ask_reraises AS x (workspace_id, signal_id, raise_count, last_raised_at, last_note_id)
+    VALUES (${route.workspaceId}::uuid, ${ask.id}::uuid, 1, statement_timestamp(), ${posted.signal.id}::uuid)
+    ON CONFLICT (workspace_id, signal_id) DO UPDATE
+      SET raise_count = x.raise_count + 1,
+          last_raised_at = EXCLUDED.last_raised_at,
+          last_note_id = EXCLUDED.last_note_id
+      WHERE x.last_raised_at <= statement_timestamp() - interval '24 hours'
+    RETURNING raise_count, last_raised_at
+  `;
+  // The cap was checked under this ask's lock, so losing the slot here is a bug: roll back.
+  if (slot === undefined) throw new Error("re-raise cap slot lost under its lock");
+  const reraise: ReraiseRecord = {
+    signal_id: ask.id,
+    count: slot.raise_count,
+    last_raised_at: slot.last_raised_at.toISOString(),
+    next_allowed_at: new Date(slot.last_raised_at.getTime() + 24 * 3600_000).toISOString(),
+  };
+  const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal, reraise };
+  const inserted = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.ledgerCredentialKind},
+      ${auth.ledgerPrincipalId},
+      ${commandId},
+      ${route.workspaceId}::uuid,
+      ${route.streamId}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (inserted.length === 0) {
+    throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+  }
+  await audit("accepted", null);
+  await chargeSpend(tx, "signal_post");
+  return {
+    status: 200,
+    body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion },
+  };
+}
+
 /**
  * The recipient set a reader sees, derived the way swarm_read.signals derives
  * it: the rows the caller named when there are any, and otherwise the row's own
@@ -12600,7 +12869,11 @@ async function handleTransaction(
         ) ||
         !Array.isArray(auth.agent.scopes) ||
         !auth.agent.scopes.every((scope) => typeof scope === "string") ||
-        !auth.agent.scopes.includes(validation.command.kind)
+        /* A re-raise posts one note, so it needs the post_signal scope, which every
+         * signal-capable token already carries. */
+        !auth.agent.scopes.includes(
+          validation.command.kind === "reraise_ask" ? "post_signal" : validation.command.kind,
+        )
       )
     ) {
       const audit: Audit = {
@@ -13027,6 +13300,12 @@ async function handleTransaction(
           min_client_version: minClientVersion,
         },
       };
+    }
+
+    if (command.kind === "reraise_ask") {
+      return await reraiseAsk(tx, route, auth, command, {
+        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+      }, hostedSeatCapability);
     }
 
     if (command.kind === "post_signal") {

@@ -41,6 +41,11 @@ const hostedHelpers = [
 // Keep its exact signature and grantability literal; no OAuth/issuer allowance.
 const literal = JSON.stringify([
   ...allowlist.map((entry: unknown[]) => entry.slice(0, 5)),
+  // Roster R1b: re-raise reads the shared answer rule and writes its per-ask cap ledger.
+  ['swarm_command', 'FUNCTION', 'swarm.ask_answered(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'INSERT', false],
+  ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'UPDATE', false],
   ['swarm_command', 'COLUMN', 'swarm.agent_workspace_memberships.principal_id', 'UPDATE', false],
   ['swarm_command', 'COLUMN', 'swarm.hosted_mcp_agent_workspace_adds.revoked_at', 'UPDATE', false],
   ['swarm_command', 'FUNCTION', 'swarm.activate_local_workspace_session(uuid,uuid,uuid,bigint,bytea)', 'EXECUTE', false],

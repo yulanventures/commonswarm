@@ -7,6 +7,8 @@ import type {
   AssignInput,
   Comment,
   CommentTarget,
+  DecisionAsk,
+  DecisionQueue,
   HomeOverview,
   HomeServer,
   LocalDate,
@@ -158,6 +160,37 @@ async function householdSurface(
   return checkedCommandBody(status, body);
 }
 
+const isoTime = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
+const count = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
+function decisionAsk(value: unknown): DecisionAsk {
+  if (!record(value) || typeof value.signal_id !== 'string' || !record(value.from)
+    || (value.from.kind !== 'agent' && value.from.kind !== 'user') || typeof value.from.id !== 'string'
+    || (value.from.name !== null && typeof value.from.name !== 'string') || typeof value.body !== 'string'
+    || !isoTime(value.created_at) || !isoTime(value.until)) throw new Error('home_decision_queue_malformed');
+  const reraised = value.reraised;
+  if (reraised !== null && !(record(reraised) && count(reraised.count) && reraised.count > 0 && isoTime(reraised.last_at))) {
+    throw new Error('home_decision_queue_malformed');
+  }
+  return {
+    signal_id: value.signal_id,
+    from: { kind: value.from.kind, id: value.from.id, name: value.from.name },
+    body: value.body, created_at: value.created_at, until: value.until,
+    reraised: reraised === null ? null : { count: reraised.count as number, last_at: reraised.last_at as string },
+  };
+}
+
+/** Validates swarm_read.decision_queue. NULL (not a member) stays null; anything else malformed throws. Server order is kept. */
+export function parseDecisionQueue(data: unknown, workspaceId: Uuid): DecisionQueue | null {
+  if (data === null) return null;
+  if (!record(data) || data.workspace_id !== workspaceId || !isoTime(data.generated_at) || !count(data.total)
+    || typeof data.truncated !== 'boolean' || !Array.isArray(data.asks) || data.asks.length > data.total) {
+    throw new Error('home_decision_queue_malformed');
+  }
+  return { workspace_id: workspaceId, generated_at: data.generated_at, total: data.total, truncated: data.truncated,
+    asks: data.asks.map(decisionAsk) };
+}
+
 export class HomeToolsUnavailable extends Error {
   constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
 }
@@ -186,6 +219,15 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
       if (error) throw new Error('home_overview_failed');
       if (!record(data) || typeof data.viewer_user_id !== 'string' || typeof data.generated_at !== 'string' || !Array.isArray(data.workspaces)) throw new Error('home_overview_malformed');
       return data as unknown as HomeOverview;
+    },
+
+    async decisionQueue(workspaceId): Promise<DecisionQueue | null> {
+      const c = resolved.client();
+      if (!c) throw new Error('home_no_deployment');
+      const { data, error } = await c.schema('swarm_read').rpc('decision_queue', { p_workspace_id: workspaceId });
+      if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
+      if (error) throw new Error('home_decision_queue_failed');
+      return parseDecisionQueue(data, workspaceId);
     },
 
     async activity(workspaceId, since, limit): Promise<ActivityItem[]> {
@@ -380,6 +422,15 @@ export function createFixtureHomeServer(fixtures: HomeFixtures): HomeServer {
   return {
     async overview() {
       return fixtures.overview;
+    },
+
+    async decisionQueue(workspaceId) {
+      const row = fixtures.overview.workspaces.find((workspace) => workspace.workspace_id === workspaceId);
+      if (!row) return null;
+      const asks = [...row.needs_you.asks].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.signal_id.localeCompare(b.signal_id));
+      return { workspace_id: workspaceId, generated_at: fixtures.overview.generated_at, total: asks.length, truncated: false,
+        asks: asks.map((ask) => ({ signal_id: ask.signal_id, from: { ...ask.from, name: null }, body: '', created_at: ask.created_at,
+          until: ask.until, reraised: null })) };
     },
 
     async activity(workspaceId, since, limit) {

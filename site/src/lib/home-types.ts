@@ -17,7 +17,9 @@ export interface ObjectCardVM { kind: "todo" | "list" | "doc" | "file"; id: Id; 
   who: PersonVM | AgentVM | null; done?: boolean }
 export interface NeedsYouVM { id: Id; kind: "ask" | "agent-fix" | "todo" | "request"; workspace: { id: Id; name: string; href: string };
   from: PersonVM | AgentVM; what: string; when: string; primary: { label: string; href?: string; action?: string };
-  secondary?: { label: string; href?: string; action?: string } }
+  secondary?: { label: string; href?: string; action?: string };
+  /** A read that couldn't load (shown with Retry). It is not a thing that needs the person, so it isn't counted. */
+  unavailable?: true }
 export interface ChoiceVM<V extends string> { name: string; legend: string; value: V | null;
   options: { value: V; label: string; hint?: string; disabled?: boolean }[] }
 export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on" | "off" | "always" | "never" | "unavailable"; busy?: boolean; disabled?: boolean }

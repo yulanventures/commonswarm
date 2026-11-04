@@ -1180,7 +1180,7 @@ import "../../styles/kylon-command-palette.css";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { buildAccountAgents, addableAccountAgents, buildWorkspaceAgentChoice } from "../../lib/account-agents";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -1202,7 +1202,7 @@ import "../../styles/kylon-command-palette.css";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
   import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
-  import { homeAskAnswered } from "../../lib/home-map";
+  import { homeAskAnswered, ASKS_UNAVAILABLE_ACTION } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import { mountWorkspaceSkills } from "../../lib/workspace-skills-view";
   import {
@@ -5096,7 +5096,10 @@ import "../../styles/kylon-command-palette.css";
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
       }
       const view = buildCatchUp(document, vm, {
-        onNeedsYouAction: (_action, item) => { if (item.primary.href) navigateHomeHref(item.primary.href); },
+        onNeedsYouAction: (action, item) => {
+          if (action === ASKS_UNAVAILABLE_ACTION) { void loadHomeCatchUp(); return; }
+          if (item.primary.href) navigateHomeHref(item.primary.href);
+        },
         onShowMoreNeedsYou: () => { catchUpExpanded = true; renderHomeCatchUp(); },
       });
       // A chat/roster fallback has no complete to-do/ask read, so it cannot claim all is clear.
@@ -5136,10 +5139,11 @@ import "../../styles/kylon-command-palette.css";
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
         if (overview && previous) {
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
-          // A missing preview still leaves a Reply card. Assigned cards name nobody, so this does not read each to-do.
-          const asks = await homeOverviewAsks(workspace.id, row.needs_you.asks.map(ask => ask.signal_id)).catch(() => [] as Signal[]);
+          // Waiting on you: the decision queue lists every open ask, oldest first, with its body. If it can't be read, the
+          // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
+          const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
-          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks), signals: latest };
+          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable"), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
@@ -6838,7 +6842,7 @@ import "../../styles/kylon-command-palette.css";
           meta.append(author, identityBadge, addressed, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal.id, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {

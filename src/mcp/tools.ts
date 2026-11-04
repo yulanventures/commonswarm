@@ -36,6 +36,7 @@ export const MCP_TOOL_TABLE = [
   { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
+  { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
   { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
   { name: "roster", description: "Every agent in this workspace: owner, derived status (active, idle, inactive, not_picking_up, off), last activity, current work, and how many asks to people it has open and since when. Ask contents are never included.", inputSchema: schema({}), mapResult: mapRoster },
@@ -136,6 +137,11 @@ export function mapSignal(result: PostSignalResult): object {
   const row = result.response.signal!;
   return { signal_id: row.id, kind: row.kind, created_at: row.created_at,
     in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null };
+}
+
+export function mapReraise(result: PostSignalResult): object {
+  const reraise = (result.response as { reraise?: { count?: unknown; next_allowed_at?: unknown } }).reraise;
+  return { ...mapSignal(result), reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null };
 }
 
 /** Only message prefixes the model received may advance the cursor. */

@@ -1,7 +1,7 @@
 /** Map Home wire facts to UI models using shared copy formatting.
  * Input: membership/overview facts; output: view models. DOM builders never interpret wire facts. */
 import { connectionPolicyFields } from "./standing-grants";
-import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
+import { homeAgentState, peopleAgentActivityTime, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { greetingName } from "./greeting-name";
 import { foldIdentityName } from "./identity-label";
@@ -10,8 +10,9 @@ import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./par
 import { parseRoute, routeHref, type HomeRoute } from "./home-route";
 import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } from "./home-catchup";
 import { railAgentOwnerPhrase, type HomeRailVM } from "./home-rail";
+import { askExcerpt } from "./home-stream";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
-import type { AgentWorkStatus, HomeOverview, WorkspaceCatchUp } from "./home/contract";
+import type { AgentWorkStatus, DecisionAsk, DecisionQueue, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
 
 export interface HomeWorkspace { id: string; name: string }
@@ -263,25 +264,36 @@ function pushNeed(needsYou: NeedsYouVM[], item: NeedsYouVM, replaceAssignment = 
   if (index < 0) needsYou.push(item);
   else if (replaceAssignment && needsYou[index].kind === "todo") needsYou[index] = item;
 }
-/** Quote the ask only when its body was read. A missing preview or a departed author still gets a Reply card. */
-function askNeedsYouCard(ask: WorkspaceCatchUp["needs_you"]["asks"][number], people: HomePeople, workspace: NeedsYouVM["workspace"], signals: readonly Signal[], now: number): NeedsYouVM | null {
-  if (Date.parse(ask.until) <= now) return null;
+/** Waiting on you: a decision-queue ask with its body, how long it has waited, and a compact re-raise count. */
+function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: NeedsYouVM["workspace"], now: number): NeedsYouVM {
   const author = ask.from.kind === "agent" ? homeAgent(people, ask.from.id) : homePerson(people, ask.from.id);
-  const message = signals.find(signal => signal.id === ask.signal_id && signal.kind === "ask" && signal.from === ask.from.id);
-  const from = author ?? unnamedMember();
+  const from = author ?? (ask.from.name ? { ...unnamedMember(), name: ask.from.name, firstName: ask.from.name } : unnamedMember());
   const name = "label" in from ? from.label : from.name;
-  return { id: ask.signal_id, kind: "ask", workspace, from, when: formatWhen(ask.created_at, now),
-    what: message ? `${name} asked you: ‘${message.body}’` : `${name} asked you.`,
+  const raised = ask.reraised ? `re-raised ×${ask.reraised.count}` : "";
+  const excerpt = askExcerpt(ask.body);
+  return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
+    what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) } };
 }
-function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
+/** The queue couldn't be read: say so, with Retry. Never an empty or resolved list, and never the overview's asks. */
+export const ASKS_UNAVAILABLE_ACTION = "retry-asks";
+function asksUnavailableCard(workspace: NeedsYouVM["workspace"]): NeedsYouVM {
+  return { id: `${workspace.id}:asks-unavailable`, kind: "ask", workspace, from: unnamedMember(), when: "",
+    what: "Asks waiting on you couldn't load.", primary: { label: "Retry", action: ASKS_UNAVAILABLE_ACTION }, unavailable: true };
+}
+/** "loading": the queue hasn't arrived yet; "unavailable": it couldn't be read. Neither is a count of zero. */
+export type CatchUpAsks = DecisionQueue | "loading" | "unavailable";
+function countedNeedIds(row: WorkspaceCatchUp, queue: CatchUpAsks): Set<string> {
   return new Set([
-    ...row.needs_you.asks.filter(ask => Date.parse(ask.until) > now).map(ask => ask.signal_id),
+    ...(typeof queue === "string" ? [] : queue.asks.map(ask => ask.signal_id)),
     ...row.needs_you.assigned.map(todo => todo.todo_id),
     ...row.needs_you.waiting.map(todo => todo.todo_id),
   ]);
 }
-export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
+/** Asks come only from the decision queue (all of them, oldest first). The overview's own ask list is never shown: its
+ * answer rule lets an asker's own follow-up close an ask. Until the queue arrives the asks are unmeasured; if it can't
+ * be read they show as unavailable with Retry. */
+export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = [], queue: CatchUpAsks = "loading"): CatchUpDetail {
   const roster: HomePeopleInput = { workspaceId: row.workspace_id, viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
@@ -291,20 +303,20 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const people = mapHomePeople({ ...roster, agents: roster.agents.filter(agent => agent.work?.facts.connection !== "removed") });
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
-  for (const ask of row.needs_you.asks) {
-    const card = askNeedsYouCard(ask, historicalPeople, workspace, signals, now);
-    if (card) pushNeed(needsYou, card);
-  }
+  if (queue === "unavailable") pushNeed(needsYou, asksUnavailableCard(workspace));
+  else if (queue !== "loading") for (const ask of queue.asks) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now));
   for (const todo of row.needs_you.assigned) pushNeed(needsYou, assignedNeedsYouCard(todo, workspace));
   for (const todo of row.needs_you.waiting) {
     const card = waitingNeedsYouCard(todo, historicalPeople, workspace);
     pushNeed(needsYou, card, card.kind === "request");
   }
-  const counted = countedNeedIds(row, now);
+  const counted = countedNeedIds(row, queue);
+  const unlisted = typeof queue === "string" ? 0 : queue.total - queue.asks.length;
   return { people, signals, openTodos: row.content?.open_todos ?? null, lists: row.content?.lists ?? null,
     files: row.content?.files ?? null, newMessages: row.last_seen_at === null ? null : row.new_messages, needsYou,
-    needsYouComplete: [...counted].every(id => needsYou.some(item => item.id === id)),
-    measuredNeedsYou: needsYou.length + homeAgentFixCards(people, workspace).length };
+    needsYouComplete: typeof queue !== "string" && unlisted === 0 && [...counted].every(id => needsYou.some(item => item.id === id)),
+    // An unread queue is an unmeasured count, never zero.
+    ...(typeof queue === "string" ? {} : { measuredNeedsYou: needsYou.length + unlisted + homeAgentFixCards(people, workspace).length }) };
 }
 /** Reconcile against the membership list, never let an overview add an unauthorized address. */
 export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map()): CatchUpData[] {
@@ -321,9 +333,11 @@ export function homeAgentFixCards(people: HomePeople, workspace: NeedsYouVM['wor
     primary: { label: 'What to do', href: routeHref({ view: 'agent', workspaceId: workspace.id, agentId: agent.id }) },
   }));
 }
-/** Mirrors overview SQL: answers from the viewer or their agents, in threads or directed replies. */
-export function homeAskAnswered(askId: string, signals: readonly Signal[], viewerId: string | null, ownAgentIds: readonly string[]): boolean {
-  return signals.some(reply => (reply.threadRootId === askId || reply.inReplyTo === askId)
+/** Mirrors overview SQL: answers from the viewer or their agents, in threads or directed replies.
+ * The ask's own sender never answers it, so a follow-up or re-raise from the asking agent keeps it open. */
+export function homeAskAnswered(ask: Pick<Signal, "id" | "from" | "fromKind">, signals: readonly Signal[], viewerId: string | null, ownAgentIds: readonly string[]): boolean {
+  return signals.some(reply => (reply.threadRootId === ask.id || reply.inReplyTo === ask.id)
+    && !(reply.fromKind === ask.fromKind && reply.from === ask.from)
     && (reply.fromKind === "user" ? reply.from === viewerId : reply.fromKind === "agent" && ownAgentIds.includes(reply.from)));
 }
 function detailNeeds(entry: CatchUpData): NeedsYouVM[] {
