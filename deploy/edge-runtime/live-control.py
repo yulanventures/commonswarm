@@ -93,7 +93,7 @@ def start(name, main, stub, deploy):
         args += ["-e", key + "=" + value]
     args += [IMAGE, "/home/deno/deploy/bootstrap.sh", "start", "--main-service",
              "/home/deno/main", "--port", "9000", "--policy", "per_worker",
-             "--max-parallelism", "4", "--graceful-exit-timeout", "70"]
+             "--max-parallelism", "8", "--graceful-exit-timeout", "70"]
     run(*args)
     NAMES.append(name)
     mapping = run("docker", "port", name, "9000/tcp", check=False)

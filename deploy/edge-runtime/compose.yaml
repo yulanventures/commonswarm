@@ -12,10 +12,12 @@ services:
       - "9000"
       - --policy
       - per_worker
-      # 4 workers × 96 MiB = 384 MiB. The last 128 MiB of the 512 MiB
-      # container budget remains for the main runtime and overhead.
+      # One worker slot per function (command, read, capability, activity, h0,
+      # mcp, admin, file-text). With 4 slots the hot functions evicted each other:
+      # ~217 retirements an hour, none older than 80 s, and RSS grew with every
+      # retired isolate (CS-E21). 8 × 96 MiB = 768 MiB, well inside the 2 GiB limit.
       - --max-parallelism
-      - "4"
+      - "8"
       # Function bodies are capped at 128 KiB. File bytes up to 25 MiB go to
       # Storage, not a function. 60 s permits the max body at about 2.2 KiB/s.
       - --request-read-timeout
@@ -47,7 +49,9 @@ services:
       - ../../supabase/functions:/home/deno/functions-source:ro
       - ../../src:/var/src:ro
       - edge-runtime-cache:/root/.cache/deno
-    mem_limit: 512m
+    # Production has run at 2 GiB since 2026-09-22 (see compose.override.yaml);
+    # the repository now carries the same limit.
+    mem_limit: 2g
     init: true
     # The runtime can spend 70 s draining workers after SIGTERM. Give Compose
     # another 10 s before SIGKILL so that configured graceful exit can finish.

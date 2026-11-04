@@ -39,7 +39,7 @@ printf 'SWARM_FILE_TEXT_TOKEN=%s\n' "$token" > "$work/token.env"
 
 # The same image, entrypoint, command, mounts and memory limit as compose.yaml. No port is
 # published and the default bridge is used: the probe needs neither the database nor Kong.
-container="$(docker run -d --name "$name" --init --memory 512m \
+container="$(docker run -d --name "$name" --init --memory 2g \
   --env-file "$env_file" --env-file "$work/token.env" \
   -v "$here/main:/home/deno/main:ro" \
   -v "$here/bootstrap.sh:/home/deno/deploy/bootstrap.sh:ro" \
@@ -47,7 +47,7 @@ container="$(docker run -d --name "$name" --init --memory 512m \
   -v "$work/functions:/home/deno/functions-source:ro" \
   -v "$repo/src:/var/src:ro" \
   --entrypoint /bin/bash "$image" /home/deno/deploy/bootstrap.sh \
-  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 4)" \
+  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 8)" \
   || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
 [[ "$container" =~ ^[0-9a-f]{12,64}$ ]] || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
 
