@@ -1882,3 +1882,25 @@ test("reraise_ask: only the exact sender, only an open addressed ask", async () 
   const extra = await send(f.agentToken, { kind: "reraise_ask", signal_id: ask.id, to: [{ kind: "user", id: f.ownerId }] });
   assert.equal(extra.status, 400);
 });
+
+test("reraise_ask is refused in an archived channel, like any new message there", async () => {
+  const slug = `reraise-${randomBytes(4).toString("hex")}`;
+  const created = await send(f.ownerJwt, { kind: "channel_create", slug });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channel = created.body.channel as Record<string, unknown>;
+  const asked = await send(f.agentToken, installedPost({
+    signal_kind: "ask", body: `R1b channel ask ${randomUUID()}`, channel: slug,
+    to: [{ kind: "user", id: f.ownerId }],
+  }));
+  assert.equal(asked.status, 200, JSON.stringify(asked.body));
+  const askId = signalOf(asked.body).id as string;
+  const archived = await send(f.ownerJwt, { kind: "channel_archive", channel_id: channel.channel_id });
+  assert.equal(archived.status, 200, JSON.stringify(archived.body));
+  const refused = await send(f.agentToken, { kind: "reraise_ask", signal_id: askId });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "channel_archived");
+  assert.equal((await notesInReplyTo(askId)).length, 0, "no note is written");
+  const [ledger] = await sql`SELECT count(*)::int AS n FROM swarm.ask_reraises
+    WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${askId}::uuid`;
+  assert.equal(ledger?.n, 0, "and the cap isn't charged");
+});
