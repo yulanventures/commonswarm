@@ -313,9 +313,11 @@ test("the PDF parser worker really runs with network, filesystem, process, env a
   // The release gate's exact pass rule: network, env and write denied by the permission set;
   // every secret-bearing path unreadable (denied, or absent from the worker's view); no
   // subprocess. deny_read/deny_sys are not claimed: the runtime does not enforce them here.
+  const reads = ["read_own_source", "read_proc_self_environ", "read_proc_1_environ", "read_staged_mcp",
+    "read_source_mcp", "read_main", "read_repo_src", "read_bootstrap"];
+  assert.deepEqual(Object.keys(results).sort(), ["env", "net", "run", "write", ...reads].sort(),
+    "the complete, exact outcome set: a missing key never passes");
   assert.deepEqual([results.net, results.env, results.write], ["denied", "denied", "denied"], JSON.stringify(results));
-  const reads = Object.keys(results).filter((key) => key.startsWith("read_"));
-  assert.ok(reads.length >= 8, JSON.stringify(results));
   for (const key of reads) assert.ok(["denied", "error:NotFound"].includes(results[key]!), `${key}: ${JSON.stringify(results)}`);
-  assert.notEqual(results.run, "allowed");
+  assert.ok(results.run === "denied" || results.run!.startsWith("error:"), `run must explicitly fail: ${results.run}`);
 });

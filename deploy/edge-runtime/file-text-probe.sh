@@ -22,8 +22,10 @@ image="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(public\.ecr\.aws\/supabase\/
 
 work="$(mktemp -d /tmp/file-text-probe.XXXXXX)"
 name="file-text-probe-$(basename "$work" | tr -dc 'a-zA-Z0-9')"
+container=""
 cleanup() {
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  # Only a container this run created, by its ID: never by name, which another run could own.
+  if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
   # Only the directory this script created.
   if [[ "$work" == /tmp/file-text-probe.* && -d "$work" ]]; then rm -rf -- "$work"; fi
 }
@@ -37,7 +39,7 @@ printf 'SWARM_FILE_TEXT_TOKEN=%s\n' "$token" > "$work/token.env"
 
 # The same image, entrypoint, command, mounts and memory limit as compose.yaml. No port is
 # published and the default bridge is used: the probe needs neither the database nor Kong.
-docker run -d --name "$name" --init --memory 512m \
+container="$(docker run -d --name "$name" --init --memory 512m \
   --env-file "$env_file" --env-file "$work/token.env" \
   -v "$here/main:/home/deno/main:ro" \
   -v "$here/bootstrap.sh:/home/deno/deploy/bootstrap.sh:ro" \
@@ -45,12 +47,13 @@ docker run -d --name "$name" --init --memory 512m \
   -v "$work/functions:/home/deno/functions-source:ro" \
   -v "$repo/src:/var/src:ro" \
   --entrypoint /bin/bash "$image" /home/deno/deploy/bootstrap.sh \
-  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 4 \
-  >/dev/null
+  start --main-service /home/deno/main --port 9000 --policy per_worker --max-parallelism 4)" \
+  || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
+[[ "$container" =~ ^[0-9a-f]{12,64}$ ]] || { container=""; echo '{"probe":"container_not_created"}'; exit 2; }
 
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$name" /usr/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf "GET /health HTTP/1.0\r\n\r\n" >&3 && IFS= read -r s <&3 && [[ "$s" == *" 200 "* ]]' >/dev/null 2>&1; then
+  if docker exec "$container" /usr/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf "GET /health HTTP/1.0\r\n\r\n" >&3 && IFS= read -r s <&3 && [[ "$s" == *" 200 "* ]]' >/dev/null 2>&1; then
     ready=1; break
   fi
   sleep 1
@@ -60,7 +63,7 @@ done
 # A one-page PDF; the probe ignores its content.
 pdf=$'%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n'
 raw="$(printf 'POST /__internal/file-text HTTP/1.0\r\nHost: 127.0.0.1\r\nx-commonswarm-file-text: %s\r\nContent-Type: application/pdf\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
-  "$token" "${#pdf}" "$pdf" | docker exec -i "$name" /usr/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000; cat >&3; cat <&3')"
+  "$token" "${#pdf}" "$pdf" | docker exec -i "$container" /usr/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000; cat >&3; cat <&3')"
 
 python3 - "$raw" <<'PY'
 import json, sys
@@ -72,11 +75,22 @@ try:
 except Exception:
     print(json.dumps({"probe": "no_result", "status": status}))
     sys.exit(2)
+# The complete, exact outcome set: a missing key never passes.
+READS = ["read_own_source", "read_proc_self_environ", "read_proc_1_environ", "read_staged_mcp",
+         "read_source_mcp", "read_main", "read_repo_src", "read_bootstrap"]
+EXPECTED = set(["net", "env", "write", "run"] + READS)
 labels = {k: v for k, v in results.items() if isinstance(v, str) and len(v) <= 40}
 unreadable = ("denied", "error:NotFound")
-failures = [k for k in ("net", "env", "write") if labels.get(k) != "denied"]
-failures += [k for k in labels if k.startswith("read_") and labels[k] not in unreadable]
-if labels.get("run") == "allowed":
+failures = []
+if status != "200":
+    failures.append("status")
+if set(results) != EXPECTED or set(labels) != EXPECTED:
+    failures.append("outcome_keys")
+failures += [k for k in ("net", "env", "write") if labels.get(k) != "denied"]
+failures += [k for k in READS if labels.get(k) not in unreadable]
+# Subprocesses must explicitly fail: denied, or an error from an unsupported API.
+run = labels.get("run")
+if run is None or not (run == "denied" or run.startswith("error:")):
     failures.append("run")
 print(json.dumps({"probe": "pass" if not failures else "fail", "outcomes": labels, "failures": failures}, sort_keys=True))
 sys.exit(0 if not failures else 3)
