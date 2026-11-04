@@ -183,6 +183,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       }
     ],
@@ -192,9 +196,7 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ],
-    "status": "pending",
-    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
+    ]
   },
   {
     "id": "route.acceptable-use",
@@ -571,6 +573,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       },
       {
@@ -583,15 +589,17 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ],
-    "status": "pending",
-    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
+    ]
   },
   {
     "id": "dialog.signout-others",
     "kind": "dialog",
     "path": "/app?w={workspace}",
     "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
       {
         "click": "[data-user-menu-trigger]"
       },
@@ -605,15 +613,17 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ],
-    "status": "pending",
-    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
+    ]
   },
   {
     "id": "dialog.account-agents",
     "kind": "dialog",
     "path": "/app?w={workspace}",
     "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
       {
         "click": "[data-user-menu-trigger]"
       },
@@ -628,9 +638,7 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Orbit"
-    ],
-    "status": "pending",
-    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
+    ]
   },
   {
     "id": "dialog.workspace-skills",
@@ -709,13 +717,31 @@
     "id": "dialog.details-sheet",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-channel-details-toggle]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-channel-details-sheet[open] [data-channel-details-close]:focus"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-channel-details-toggle]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-frame:not([data-channel-details-collapsed]) #cs-channel-details .hm-side"
+      }
+    ],
+    "ready": "#cs-channel-details .hm-side",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "dialog.role-confirm",
@@ -733,13 +759,22 @@
     "id": "menu.workspace",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      }
+    ],
+    "ready": ".cs-kylon-workspace-menu .hm-menu__trigger[aria-expanded=\"true\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "menu.channels",
@@ -1147,6 +1182,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       },
       {
@@ -1159,9 +1198,7 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ],
-    "status": "pending",
-    "reason": "Phone account control is inside the navigation drawer; responsive setup support is required before this six-size capture can run."
+    ]
   },
   {
     "id": "route.home.footer",
@@ -1229,13 +1266,19 @@
     "id": "nav.workspace-picker",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-workspace-picker]",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      }
+    ],
+    "ready": "[data-workspace-picker][open] .cs-workspace-picker__item[aria-current=\"page\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Responsive setup must open the phone drawer before opening the workspace picker.",
     "requiresSeed": [
       "create_workspace"
     ]
@@ -1244,28 +1287,56 @@
     "id": "nav.workspace-switch",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": ".cs-workspace-picker__item[value=\"{emptyWorkspace}\"]",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      },
+      {
+        "click": ".cs-workspace-picker__item[value=\"{emptyWorkspace}\"]"
+      },
+      {
+        "waitFor": "live-dashboard:has([data-home-workspace-header=\"{emptyWorkspace}\"]) :is(#hm-ws-title:focus, .cs-org-phone-title #hm-phone-title:focus)"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      }
+    ],
+    "ready": "[data-workspace-picker][open] .cs-workspace-picker__item[value=\"{emptyWorkspace}\"][aria-current=\"page\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Responsive setup and a selected-workspace route witness are required to verify the switch.",
     "requiresSeed": [
-      "create_workspace"
+      "create_workspace",
+      "create_workspace empty",
+      "household_permissions empty"
     ]
   },
   {
     "id": "nav.phone-header",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": ".cs-org-phone-bar",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header"
+      }
+    ],
+    "ready": "live-dashboard",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Phone header and desktop navigation need viewport-specific capture setup.",
     "requiresSeed": [
       "create_workspace"
     ]

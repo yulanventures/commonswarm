@@ -304,20 +304,20 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |
-| D04 | `dialog.connected-apps` — pending responsive drawer setup |
-| D05 | `dialog.signout-others` — pending responsive drawer setup |
-| D06 | `dialog.account-agents` — pending responsive drawer setup |
+| D04 | `dialog.connected-apps` — candidate with responsive drawer setup |
+| D05 | `dialog.signout-others` — candidate with responsive drawer setup |
+| D06 | `dialog.account-agents` — candidate with responsive drawer setup |
 | D07 | `dialog.command-palette` — candidate; other states pending |
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — pending |
 | D11 | `dialog.invitation-review` — pending |
 | D12 | `dialog.navigation-drawer` — pending |
-| D13 | `dialog.details-sheet` — pending |
+| D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
 | D14 | `dialog.role-confirm` — pending |
-| D15 | `dialog.password` — pending responsive drawer setup |
-| M01 | `menu.account` — pending responsive drawer setup |
-| M02 | `menu.workspace` — pending |
+| D15 | `dialog.password` — candidate with responsive drawer setup |
+| M01 | `menu.account` — candidate with responsive drawer setup |
+| M02 | `menu.workspace` — candidate with responsive drawer setup |
 | M03 | `menu.channels` — pending |
 | M04 | `menu.assignee` — pending |
 | M05 | `menu.mention` — pending |
@@ -356,4 +356,4 @@ Capture success is not an all-app visual pass. Account writes, full authenticati
 
 ## Navigation capture update
 
-The account trigger is inside the phone drawer and remains separate at the desktop sidebar bottom. The existing account-menu and account-dialog captures are pending until the runner supports viewport-conditional drawer setup; they must not click a hidden trigger. `nav.workspace-picker`, `nav.workspace-switch`, and `nav.phone-header` are pending for the same responsive witness. The picker lists every readable, non-archived workspace, including siblings in one organization. No new capture coverage is claimed before CI.
+The account trigger is inside the phone drawer and remains separate at the desktop sidebar bottom. Responsive setup opens the drawer only at phone widths before the account menu, its four dialogs, and workspace actions. The picker and workspace-switch candidates open the same drawer conditionally; the switch waits for useful focus and then confirms the selected empty workspace using `aria-current`. The phone-header candidate checks the phone header or desktop workspace header as appropriate. Details opens a focused phone sheet or the expanded desktop pane. The picker lists every readable, non-archived workspace, including siblings in one organization. These are 50 candidates and 44 pending entries in the 94-entry manifest; no new capture coverage is claimed before CI. Inline 24 px mentions remain reported separately from navigation targets.
