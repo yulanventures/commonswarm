@@ -119,8 +119,25 @@ export interface CleanupDeps {
   onFinished?(operation: CleanupOperation): void;
 }
 
-export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
+export interface CleanupHandle {
+  /** End this mount for good: scrub the DOM, stop scheduling, drop every later callback. */
+  dispose(): void;
+  readonly disposed: boolean;
+}
+
+/**
+ * Mount the dialog body. The returned handle is the ticket for this mount: the dashboard
+ * disposes it on every account or workspace boundary and on close, and a later mount gets a
+ * new ticket. Every async continuation re-checks its own ticket (and, for lists, its own
+ * generation) before it paints, so a late reply never repaints an old account's names and
+ * going away and back cannot revive an old pass.
+ */
+export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandle {
   const document = root.ownerDocument;
+  let disposed = false;
+  let generation = 0;
+  // Disposal reads as a lost context, so runPass stops scheduling at once.
+  const context = (): CleanupContext | null => (disposed ? null : deps.context());
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -208,7 +225,7 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
     count.textContent = n > CLEANUP_MAX_ITEMS ? `${n} selected; one pass takes at most ${CLEANUP_MAX_ITEMS}.` : `${n} selected`;
     act.textContent = operation === "remove_agent"
       ? `Remove ${n} from this workspace…` : `Tombstone ${n} ${n === 1 ? "file" : "files"}…`;
-    act.disabled = n === 0 || n > CLEANUP_MAX_ITEMS || deps.context() === null;
+    act.disabled = n === 0 || n > CLEANUP_MAX_ITEMS || context() === null;
   };
 
   const renderRows = () => {
@@ -229,6 +246,8 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
   };
 
   const show = async (op: CleanupOperation) => {
+    if (disposed) return;
+    const mine = ++generation;
     operation = op;
     pass = null;
     results = null;
@@ -245,16 +264,25 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
     renderRows();
     if (op === "tombstone_file") {
       list.replaceChildren(el("li", "cleanup__empty", "Loading files…"));
-      try { rows = await deps.files(filter); } catch { rows = []; list.replaceChildren(el("li", "cleanup__empty", "Files could not be loaded. Try again.")); return; }
-      if (operation === "tombstone_file") renderRows();
+      let loaded: CleanupRow[];
+      try { loaded = await deps.files(filter); } catch {
+        if (disposed || mine !== generation) return;
+        rows = [];
+        list.replaceChildren(el("li", "cleanup__empty", "Files could not be loaded. Try again."));
+        return;
+      }
+      // A stale load (another tab, filter, reset or a disposed mount) never repaints.
+      if (disposed || mine !== generation || context() === null) return;
+      rows = loaded;
+      renderRows();
     }
   };
 
   act.addEventListener("click", () => {
     const chosen = rows.filter((row) => selected.has(row.id));
-    const context = deps.context();
-    if (chosen.length === 0 || context === null) return;
-    pass = freezePass(context, operation, chosen, deps.newId);
+    const opened = context();
+    if (disposed || chosen.length === 0 || opened === null) return;
+    pass = freezePass(opened, operation, chosen, deps.newId);
     consequence.textContent = cleanupConsequence(operation);
     names.textContent = confirmNames(pass.items.map((item) => item.label));
     list.hidden = true;
@@ -266,26 +294,29 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
   back.addEventListener("click", () => { pass = null; confirm.hidden = true; list.hidden = false; footer.hidden = false; filters.hidden = operation !== "tombstone_file"; });
 
   const execute = async (only?: ReadonlySet<string>) => {
-    if (pass === null) return;
+    if (disposed || pass === null) return;
     const frozen = pass;
+    const mine = generation;
     confirm.hidden = true;
     report.hidden = false;
     retry.hidden = true;
     go.disabled = true;
     reportSummary.textContent = "Working…";
-    const outcome = await runPass(frozen, deps.send, deps.context, {
+    const outcome = await runPass(frozen, deps.send, context, {
       only,
-      onProgress: () => { reportSummary.textContent = "Working…"; },
+      onProgress: () => { if (!disposed && mine === generation) reportSummary.textContent = "Working…"; },
     });
+    // In-flight commands may finish after a boundary; their outcomes are never painted then.
+    if (disposed || mine !== generation) return;
     results = new Map([...(results ?? new Map()), ...outcome]);
     const labels = new Map(frozen.items.map((item) => [item.id, item.label]));
     reportSummary.textContent = `${summaryText(results)}. ${cleanupConsequence(frozen.operation)}`;
     reportList.replaceChildren(...[...results]
       .filter(([, value]) => value !== "accepted" && value !== "already_done")
       .map(([id, value]) => el("li", undefined, `${labels.get(id) ?? id}: ${OUTCOME_LABEL[value]}`)));
-    const context = deps.context();
-    retry.hidden = retryable(results).size === 0 || context === null ||
-      context.userId !== frozen.context.userId || context.workspaceId !== frozen.context.workspaceId;
+    const now = context();
+    retry.hidden = retryable(results).size === 0 || now === null ||
+      now.userId !== frozen.context.userId || now.workspaceId !== frozen.context.workspaceId;
     go.disabled = false;
     deps.onFinished?.(frozen.operation);
   };
@@ -293,4 +324,17 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): void {
   retry.addEventListener("click", () => { if (results) void execute(retryable(results)); });
 
   void show("remove_agent");
+  return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      generation++;
+      pass = null;
+      results = null;
+      selected.clear();
+      rows = [];
+      root.replaceChildren();
+    },
+    get disposed() { return disposed; },
+  };
 }

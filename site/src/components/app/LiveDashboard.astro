@@ -1176,7 +1176,7 @@ import "../../styles/kylon-command-palette.css";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
-  import { cleanupAgentRows, cleanupFileRows, mountCleanup } from "../../lib/cleanup-view";
+  import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
@@ -1749,6 +1749,17 @@ import "../../styles/kylon-command-palette.css";
     const householdRoot = one<HTMLElement>("[data-household-objects]");
     const householdDashboard = householdRoot ? createHouseholdDashboard(householdRoot) : null;
     let activeWorkspaceId = "";
+    /* The open Clean up mount (src/lib/cleanup-view.ts). Disposed on every account or workspace
+       boundary and on close: its DOM is scrubbed at once, scheduling stops, and late replies are
+       dropped. A new open always gets a new ticket. */
+    let cleanupHandle: CleanupHandle | null = null;
+    const disposeCleanup = (): void => {
+      cleanupHandle?.dispose();
+      cleanupHandle = null;
+      const dialog = document.querySelector<HTMLDialogElement>("[data-cleanup-dialog]");
+      document.querySelector<HTMLElement>("[data-cleanup-body]")?.replaceChildren();
+      if (dialog?.open) dialog.close();
+    };
     let requestVersion = 0;
     let sampleMode = false;
     let signalCursor: SignalCursor | null = null;
@@ -4430,7 +4441,7 @@ import "../../styles/kylon-command-palette.css";
          on the same id could not reach that moment, and the defect hiding in it wedged the
          composer for the rest of the session. */
       const reopen = activeWorkspaceId === workspace.id;
-      if (!reopen) resetComposer();
+      if (!reopen) { resetComposer(); disposeCleanup(); }
       requestVersion += 1;
       activeWorkspaceId = workspace.id;
       agents = [];
@@ -7416,6 +7427,7 @@ import "../../styles/kylon-command-palette.css";
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      disposeCleanup();
       listsAllowLanding = null;
       syncStandalonePage(true);
       catchUpGeneration += 1;
@@ -7462,6 +7474,7 @@ import "../../styles/kylon-command-palette.css";
       one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
       connectFocusObserver?.disconnect();
       connectFocusObserver = null;
+      disposeCleanup();
       activeWorkspaceId = "";
       delete app.dataset.adminWorkspace;
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
@@ -7922,7 +7935,8 @@ import "../../styles/kylon-command-palette.css";
           (me?.role === "owner" || me?.role === "admin") ? { ...opened } : null;
       };
       const memberName = (userId: string) => members.find((member) => member.userId === userId)?.name ?? "someone";
-      mountCleanup(body, {
+      disposeCleanup();
+      cleanupHandle = mountCleanup(body, {
         context,
         agents: () => cleanupAgentRows(agents.map((agent) => ({
           principalId: agent.principalId, name: agent.name, transport: agent.transport,
@@ -7959,7 +7973,13 @@ import "../../styles/kylon-command-palette.css";
       });
       if (!dialog.open) dialog.showModal();
     };
-    one<HTMLButtonElement>("[data-cleanup-close]")?.addEventListener("click", () => one<HTMLDialogElement>("[data-cleanup-dialog]")?.close());
+    one<HTMLButtonElement>("[data-cleanup-close]")?.addEventListener("click", disposeCleanup);
+    // Escape and any other native close end the mount too.
+    one<HTMLDialogElement>("[data-cleanup-dialog]")?.addEventListener("close", () => {
+      cleanupHandle?.dispose();
+      cleanupHandle = null;
+      one<HTMLElement>("[data-cleanup-body]")?.replaceChildren();
+    });
 
     const renderWorkspaceSettingsPanel = (workspace: Workspace): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
@@ -8018,6 +8038,7 @@ import "../../styles/kylon-command-palette.css";
             renderWorkspaceList(closed.nextWorkspace!);
             return;
           }
+          disposeCleanup();
           activeWorkspaceId = "";
           delete app.dataset.adminWorkspace;
           window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
@@ -8190,6 +8211,7 @@ import "../../styles/kylon-command-palette.css";
       settledUnknownAgents.clear();
       const keepShell = app.dataset.state === "channel";
       stopPendingPoll();
+      if (activeWorkspaceId !== selected.id) disposeCleanup();
       activeWorkspaceId = selected.id;
       resetHomeWorkspace();
       homeWorkClaims = [];
