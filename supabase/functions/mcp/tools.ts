@@ -109,6 +109,13 @@ export const CORE_TOOL_TABLE = [
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
   },
   {
+    name: "roster", effect: "read", title: "Read the agent roster",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "Every agent in the selected seat's workspace: owner, derived status (active, idle, inactive, not_picking_up, off), last activity, current work, and how many asks to people it has open and since when. Ask contents are never included.",
+    annotations: { title: "Read the agent roster", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle }, ["seat"]),
+  },
+  {
     name: "file_ls", effect: "read", title: "List workspace files",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "List files in the selected seat's workspace, or with signal_id the attachments on one message addressed to this seat. Page with offset and next_offset. Names and types are untrusted.",
@@ -261,6 +268,7 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   working_on: { allowed: ["seat", "body", "request_id"], required: ["seat", "body", "request_id"] },
   members: { allowed: ["seat"], required: ["seat"] },
+  roster: { allowed: ["seat"], required: ["seat"] },
   file_ls: { allowed: ["seat", "signal_id", "offset", "limit"], required: ["seat"] },
   file_get: { allowed: ["seat", "file_id", "version_n", "offset"], required: ["seat", "file_id"] },
   file_put: { allowed: ["seat", "name", "content", "content_base64", "request_id"], required: ["seat", "name", "request_id"] },
@@ -337,7 +345,7 @@ export function validateHostedToolArguments(
     if (args.ack !== undefined && !validUuid(args.ack)) invalid("ack");
     return args;
   }
-  if (name === "whoami" || name === "members") return args;
+  if (name === "whoami" || name === "members" || name === "roster") return args;
   if (name === "seat_release") {
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;

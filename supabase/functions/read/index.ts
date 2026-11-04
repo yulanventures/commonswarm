@@ -252,7 +252,8 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} | null {
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} |
+  {resource:"roster";workspace_id:string} | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -306,6 +307,14 @@ function parseBody(
       resource: "members",
       workspace_id: body.workspace_id.toLowerCase(),
     };
+  }
+  if (
+    body.resource === "roster" &&
+    exactKeys(body, ["resource", "workspace_id"]) &&
+    typeof body.workspace_id === "string" &&
+    UUID_RE.test(body.workspace_id)
+  ) {
+    return { resource: "roster", workspace_id: body.workspace_id.toLowerCase() };
   }
   if (
     body.resource === "files" &&
@@ -634,6 +643,9 @@ async function handle(
       if (body.resource === "members") {
         return json(200, { members: [], agents: [] });
       }
+      if (body.resource === "roster") {
+        return json(200, { workspace_id: body.workspace_id, agents: [], truncated: false });
+      }
       if (body.resource === "files") {
         return json(200, {
           files: [],
@@ -907,6 +919,9 @@ async function handle(
         },
       });
     }
+    if (body.resource === "roster") {
+      return json(200, await workspaceRoster(tx, agent.principal_workspace_id));
+    }
     if (body.resource === "files") {
       // File artifacts list (FILE-ARTIFACTS.md §7): the membership-gated view
       // carries one row per file with its current LIVE version's facts. sha256
@@ -1104,6 +1119,7 @@ export type HostedReadInput =
   | { resource: "household"; workspace_id: string; tool: string; arguments: Record<string, unknown> }
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
+  | { resource: "roster"; workspace_id: string }
   | {
       resource: "files";
       workspace_id: string;
@@ -1122,6 +1138,22 @@ export type HostedReadInput =
 /** file_ls pages: small enough that a full page of metadata fits the MCP response cap. */
 export const HOSTED_FILE_PAGE_LIMIT = 50;
 const HOSTED_FILE_MAX_OFFSET = 100_000;
+
+/**
+ * Roster R1a. Callers reach this only after their own live authorization (local token and
+ * session checks, or the hosted seat, grant, owner and membership revalidation) bound this
+ * workspace and installed the owner's claims with agent_principal_id. The definer then
+ * re-checks membership and the agent's own admission, and returns counts and times for
+ * others' asks, never their ids, text or recipients.
+ */
+async function workspaceRoster(tx: Sql, workspaceId: string): Promise<Record<string, unknown>> {
+  const rows = await tx<{ roster: Record<string, unknown> | null }[]>`
+    SELECT swarm_read.workspace_roster(${workspaceId}::uuid) AS roster
+  `;
+  const roster = rows[0]?.roster;
+  if (!roster || !Array.isArray(roster.agents)) throw new Error("roster unavailable for an authorized caller");
+  return roster;
+}
 
 export interface ReadResult {
   status: number;
@@ -1166,6 +1198,7 @@ export async function handleHostedRead(
   }
   if ((input.resource === "whoami" && tool !== "whoami") ||
       (input.resource === "members" && tool !== "members") ||
+      (input.resource === "roster" && tool !== "roster") ||
       (input.resource === "files" && tool !== "file_ls") ||
       (input.resource === "signals" && tool !== "check")) {
     return { status: 403, body: { error: "forbidden" } };
@@ -1221,6 +1254,9 @@ export async function handleHostedRead(
         ORDER BY principal_id
       `;
       return { status: 200, body: { members, agents, context } };
+    }
+    if (input.resource === "roster") {
+      return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
     }
     if (input.resource === "files") {
       return await hostedFileList(tx, seat, input, context);

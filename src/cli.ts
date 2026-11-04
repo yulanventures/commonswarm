@@ -271,6 +271,7 @@ import {
   readDirectedInboxSince,
   type SignalCursor,
   SINCE_OFFSET_GUIDANCE,
+  readAgentRoster,
   readAgentSignalDirectory,
   readSignals,
   renderSignalStatus,
@@ -4542,6 +4543,47 @@ export const RUN_MEMBERS_1_ACCEPTED_FLAGS = [
     "json",
     ...SESSION_CONTEXT_FLAGS,
   ] as const;
+
+export const RUN_ROSTER_ACCEPTED_FLAGS = [
+    ...TARGET_FLAGS,
+    "workspace-id",
+    ...CREDENTIAL_FLAGS,
+    "json",
+    ...SESSION_CONTEXT_FLAGS,
+  ] as const;
+
+function rosterAge(at: string | null): string {
+  if (at === null) return "never";
+  const minutes = Math.floor(Math.max(0, Date.now() - Date.parse(at)) / 60_000);
+  if (!Number.isFinite(minutes)) return "unknown";
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} h ago`;
+  return `${Math.floor(minutes / 1440)} d ago`;
+}
+
+async function runRoster(args: Arguments): Promise<void> {
+  args.assertShape(RUN_ROSTER_ACCEPTED_FLAGS, 1);
+  const cloud = await target(args);
+  const selected = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  if (selected.kind !== "agent") {
+    throw new Error("roster is read with an agent credential; people see agents in the web app");
+  }
+  const roster = await readAgentRoster(cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher);
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify(roster, null, 2)}\n`);
+    return;
+  }
+  for (const row of roster.agents) {
+    const waiting = row.waiting_on_people.count === 0 ? ""
+      : ` · waiting on people: ${row.waiting_on_people.count} (oldest ${rosterAge(row.waiting_on_people.since)})`;
+    const work = row.open_work?.text ? ` · ${sanitizeDisplayLabel(row.open_work.text, "")}` : "";
+    process.stdout.write(`${sanitizeDisplayLabel(row.name, "Unnamed agent")} · ${row.status.replaceAll("_", " ")} · `
+      + `${sanitizeDisplayLabel(row.owner.display_name ?? "", "Unnamed member")} · active ${rosterAge(row.last_activity_at)}`
+      + `${waiting}${work}\n`);
+  }
+  if (roster.truncated) process.stdout.write("Showing the first 200 agents.\n");
+}
 
 async function runMembers(args: Arguments): Promise<void> {
   args.assertShape(RUN_MEMBERS_1_ACCEPTED_FLAGS, 1);
@@ -10430,6 +10472,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 9,
     refusalTrace: "runBrain",
   }),
+  roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
@@ -10531,6 +10574,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "brain.get": BRAIN_GET_ACCEPTED_FLAGS,
   "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  roster: RUN_ROSTER_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
   note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
   ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,
