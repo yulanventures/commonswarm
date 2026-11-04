@@ -77,7 +77,9 @@ export function createOrgShell(doc, options = {}) {
   const phoneProducts = node(doc, 'div', 'cs-org-phone-products'), contextBody = node(doc, 'div', 'cs-org-context-body');
   contextBody.dataset.scroll = options.contextScroll === 'pane' ? 'pane' : 'host';
   const drawerAccount = node(doc, 'div', 'cs-org-drawer-account'), contextScroll = node(doc, 'div', 'cs-org-context-scroll');
-  contextScroll.append(identitySlot, phoneProducts, contextBody); context.append(heading, contextScroll, drawerAccount); parking.append(context);
+  const workspaceActions = node(doc, 'div', 'cs-org-workspace-actions');
+  contextScroll.append(phoneProducts, workspaceActions, contextBody); context.append(heading, identitySlot, contextScroll, drawerAccount); parking.append(context);
+  if (options.nodes?.workspacePicker) { identitySlot.replaceChildren(); mount(identitySlot, options.nodes.workspacePicker); }
   const workspace = node(doc, 'div', 'cs-org-workspace'), phoneBar = node(doc, 'nav', 'cs-org-phone-bar');
   phoneBar.setAttribute('aria-label', 'Workspace controls');
   const opener = button(doc, 'Open navigation', 'M4 6h16M4 12h16M4 18h16'); opener.setAttribute('aria-controls', `${prefix}-drawer`); opener.setAttribute('aria-expanded', 'false');
@@ -90,7 +92,7 @@ export function createOrgShell(doc, options = {}) {
   mount(contextBody, options.nodes?.context); mount(main, options.nodes?.main); mount(account, options.nodes?.account);
   const drawer = connectDrawer({ root, rail, workspace, parking, context, dialog, opener, closeButton,
     products, railProducts, phoneProducts, account, desktopAccount, phoneAccount, drawerAccount, move }, callbacks);
-  return { root, slots: { rail, products, brand, context: contextBody, identity: identitySlot, main, account, phoneHeader: phoneBar },
+  return { root, slots: { rail, products, brand, context: contextBody, identity: identitySlot, workspaceActions, main, account, phoneHeader: phoneBar },
     openDrawer: drawer.open, closeDrawer: drawer.close, isDrawerOpen: drawer.isOpen,
     setIdentity, setNavigation, setTitle, mount,
     destroy() {

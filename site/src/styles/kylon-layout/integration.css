@@ -84,6 +84,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__profile, .hm-frame__side) { grid-column: 1; grid-row: 1; z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { max-block-size: 100%; overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-active]:not([data-channel-details-collapsed]):not(:has(> .hm-frame__profile:not([hidden]))) > .hm-frame__side { display: block; }
   /* The profile overlays the conversation; on its own row it pushed the conversation below it. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__main, .hm-frame__profile) { grid-row: 1; }
 }
@@ -298,7 +299,11 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg { inline-size: 14px; block-size: 14px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg > path:not(.cs-org-switcher-chevron) { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .cs-org-switcher-chevron { display: block; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: calc(100% + 8px) auto auto 0; max-block-size: calc(100dvh - 80px); }
+  /* Reserve context padding, the 28px mark, footer border/padding, 44px trigger, gap and top clearance. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu {
+    inset: auto auto calc(100% + 8px) 0; box-sizing: border-box;
+    max-block-size: max(0px, calc(100dvh - max(0.75rem, env(safe-area-inset-bottom)) - 114px)); overflow-y: auto;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty,
 live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty + .hm-menu__separator { display: none; }
@@ -389,3 +394,46 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
     flex: 1 1 auto; min-block-size: 0; max-block-size: none; overflow-y: auto;
   }
 }
+
+/* The workspace picker and account remain at opposite ends of the navigation. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-identity-slot { position: relative; z-index: 30; display: block; flex: none; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker { position: relative; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__trigger {
+  display: flex; align-items: center; gap: 8px; min-block-size: 44px; padding: 8px 10px;
+  border-radius: 6px; cursor: pointer; color: var(--cs-ink); font-weight: 600; list-style: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__trigger::-webkit-details-marker { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__trigger:hover { background: var(--cs-rail-hover); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__chevron { flex: none; font-size: 18px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__list {
+  position: absolute; inset: calc(100% + 4px) 0 auto; z-index: 30; display: grid; gap: 2px;
+  max-block-size: min(50dvh, 24rem); overflow-y: auto; padding: 4px; border: 1px solid var(--cs-line);
+  border-radius: 8px; background: var(--cs-surface); box-shadow: var(--cs-shadow-popover);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item {
+  min-inline-size: 44px; min-block-size: 44px; padding: 8px 10px; border: 0; border-radius: 5px;
+  color: var(--cs-ink); background: transparent; font: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item:is(:hover, [aria-current="page"]) { background: var(--cs-selected); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker :is(summary, button):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+@media (width > 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { min-block-size: 0; block-size: 100%; overflow: visible; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context { box-sizing: border-box; display: flex; flex-direction: column; block-size: 100%; max-block-size: none; min-block-size: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-context-scroll { display: flex; flex-direction: column; flex: 1 1 auto; min-block-size: 0; overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-wiki-composition]) .cs-org-context-body { flex: none; max-block-size: none; overflow: visible; }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context { box-sizing: border-box; min-block-size: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-account { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .cs-org-identity-slot { padding-inline-end: 52px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-heading { z-index: 31; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account { order: 0; inline-size: 100%; justify-content: start; padding: 8px 0 0; border-block-start: 1px solid var(--cs-line); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account .dashboard__user-trigger { display: flex; align-items: center; gap: 10px; inline-size: 100%; min-block-size: 44px; padding: 6px 8px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer-account .dashboard__user-trigger-brand { display: block; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-workspace-actions .hm-phone-bar__people { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-bar > .hm-details-toggle { flex: none; min-inline-size: 44px; min-block-size: 44px; font-size: 0; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-bar > .hm-details-toggle::before { content: "ⓘ"; font-size: 20px; line-height: 1; }
+}
+/* The borrowed picker is shown by the navigation shell, not the legacy create rail. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail > [data-workspace-picker-root] { display: none; }

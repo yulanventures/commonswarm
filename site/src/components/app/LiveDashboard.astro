@@ -250,7 +250,8 @@ import "../../styles/kylon-command-palette.css";
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          {/* The organization switcher shares its account menu with the phone control. */}
+          <div data-workspace-picker-root></div>
+          {/* The account control is moved into the navigation shell. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -1172,7 +1173,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
+    buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
@@ -4873,6 +4874,28 @@ import "../../styles/kylon-command-palette.css";
           trigger?.setAttribute("aria-expanded", "false"); trigger?.focus({ preventScroll: true });
           void navigateHome({ view: "chat", workspaceId }, "push");
         }));
+      }
+      const pickerRoot = one<HTMLElement>("[data-workspace-picker-root]");
+      const pickerKey = JSON.stringify([workspaces.map(({ id, name, archived }) => [id, name, archived]), activeWorkspaceId]);
+      if (pickerRoot && pickerRoot.dataset.pickerKey !== pickerKey) {
+        const previous = pickerRoot.querySelector<HTMLDetailsElement>("[data-workspace-picker]");
+        const focused = pickerRoot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+        const choice = focused instanceof HTMLButtonElement ? focused.value : null;
+        const wasOpen = previous?.open ?? false;
+        pickerRoot.dataset.pickerKey = pickerKey;
+        const picker = buildWorkspacePicker(document, workspaces, activeWorkspaceId, workspaceId => {
+          layout.closeNavigation();
+          const trigger = pickerRoot.querySelector<HTMLElement>("summary");
+          if (trigger?.getClientRects().length && !trigger.closest("[hidden], [inert]")) trigger.focus({ preventScroll: true });
+          void navigateHome({ view: "chat", workspaceId }, "push");
+        }) as HTMLDetailsElement;
+        picker.open = wasOpen;
+        pickerRoot.replaceChildren(picker);
+        if (focused) {
+          const target = (choice === null ? null : [...picker.querySelectorAll<HTMLButtonElement>("button")].find(item => item.value === choice))
+            ?? picker.querySelector<HTMLElement>("summary");
+          if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });
+        }
       }
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;

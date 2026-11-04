@@ -183,6 +183,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       }
     ],
@@ -569,6 +573,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       },
       {
@@ -589,6 +597,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       },
       {
@@ -608,6 +620,10 @@
     "kind": "dialog",
     "path": "/app?w={workspace}",
     "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
       {
         "click": "[data-user-menu-trigger]"
       },
@@ -701,13 +717,31 @@
     "id": "dialog.details-sheet",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-org-phone-bar [data-channel-details-toggle]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": "dialog#cs-channel-details-sheet[open] [data-channel-details-close]:focus"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-channel-details-toggle]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-frame:not([data-channel-details-collapsed]) #cs-channel-details .hm-side"
+      }
+    ],
+    "ready": "#cs-channel-details .hm-side",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "dialog.role-confirm",
@@ -725,13 +759,35 @@
     "id": "menu.workspace",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu .hm-menu__list:not([hidden])"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header .hm-menu__list:not([hidden])"
+      }
+    ],
+    "ready": ":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "menu.channels",
@@ -1139,6 +1195,10 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
         "click": "[data-user-menu-trigger]"
       },
       {
@@ -1213,6 +1273,110 @@
     "ready": "footer.ft nav[aria-label=\"Legal\"] a.ft__link[href=\"/support\"]",
     "states": [
       "dense"
+    ]
+  },
+  {
+    "id": "nav.workspace-picker",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      }
+    ],
+    "ready": "[data-workspace-picker][open] .cs-workspace-picker__item[aria-current=\"page\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "nav.workspace-switch",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      },
+      {
+        "click": ".cs-workspace-picker__item[value=\"{emptyWorkspace}\"]"
+      },
+      {
+        "waitFor": "live-dashboard:has([data-home-workspace-header=\"{emptyWorkspace}\"]) :is(#hm-ws-title:focus, .cs-org-phone-title #hm-phone-title:focus)"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-workspace-picker] summary"
+      }
+    ],
+    "ready": "[data-workspace-picker][open] .cs-workspace-picker__item[value=\"{emptyWorkspace}\"][aria-current=\"page\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_workspace empty",
+      "household_permissions empty"
+    ]
+  },
+  {
+    "id": "nav.phone-header",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-org-phone-bar [aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header"
+      }
+    ],
+    "ready": "live-dashboard",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "nav.scrolled",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-sidebar-participant-list] > .hm-rail__group:last-child"
+      },
+      {
+        "scroll": "[data-sidebar-participant-list] > .hm-rail__group:last-child .hm-rail__agent-item:last-child .hm-rail__agent, [data-sidebar-participant-list] > .hm-rail__group:last-child:not(:has(.hm-rail__agent)) > .hm-rail__person"
+      }
+    ],
+    "ready": "[data-user-menu-trigger]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
     ]
   }
 ]

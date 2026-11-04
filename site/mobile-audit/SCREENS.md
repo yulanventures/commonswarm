@@ -304,20 +304,20 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |
-| D04 | `dialog.connected-apps` — candidate; other states pending |
-| D05 | `dialog.signout-others` — candidate; other states pending |
-| D06 | `dialog.account-agents` — candidate; other states pending |
+| D04 | `dialog.connected-apps` — candidate with responsive drawer setup |
+| D05 | `dialog.signout-others` — candidate with responsive drawer setup |
+| D06 | `dialog.account-agents` — candidate with responsive drawer setup |
 | D07 | `dialog.command-palette` — candidate; other states pending |
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — pending |
 | D11 | `dialog.invitation-review` — pending |
 | D12 | `dialog.navigation-drawer` — pending |
-| D13 | `dialog.details-sheet` — pending |
+| D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
 | D14 | `dialog.role-confirm` — pending |
-| D15 | `dialog.password` — initial open-only candidate; challenge and submission pending |
-| M01 | `menu.account` — candidate; other states pending |
-| M02 | `menu.workspace` — pending |
+| D15 | `dialog.password` — candidate with responsive drawer setup |
+| M01 | `menu.account` — candidate with responsive drawer setup |
+| M02 | `menu.workspace` — candidate with responsive drawer setup |
 | M03 | `menu.channels` — pending |
 | M04 | `menu.assignee` — pending |
 | M05 | `menu.mention` — pending |
@@ -353,3 +353,7 @@ For the 91-entry manifest at `9faf26ab`, 45 candidates have 540 unique successfu
 The earlier menu run [41692336621](https://github.com/yulanventures/commonswarm/actions/runs/41692336621) showed its trigger obscured. The fixed run on Engineer `f47971c2` has zero small-target, collapsed-text, overflow or theme-mismatch findings and no obscured own trigger across all twelve frames. Definitions capture is not a visual pass: ten findings show the same collapsed Monthly spend span at 390 px across five states and both themes; Engineer fix `f2297abc` awaits a witness. Named 24 px inline mentions remain reported.
 
 Capture success is not an all-app visual pass. Account writes, full authentication, recovery, native-device behavior and keyboard interactions were not validated. Independent source review of `9faf26ab` was clean conditional on Engineer #283 `b08271fa` or newer merging first for `waitFor`. Public styles are unchanged from `7c3a1290`, where site CI [41686605215](https://github.com/yulanventures/commonswarm/actions/runs/41686605215) passed.
+
+## Navigation capture update
+
+The account trigger is inside the phone drawer and remains separate at the desktop sidebar bottom. Responsive setup opens the drawer only at phone widths before the account menu, its four dialogs, and workspace actions. The picker and workspace-switch candidates open the same drawer conditionally; the switch waits for useful focus and then confirms the selected empty workspace using `aria-current`. The phone-header candidate checks the phone header or desktop workspace header as appropriate. Details opens a focused phone sheet or the expanded desktop pane. The picker lists every readable, non-archived workspace, including siblings in one organization. `nav.scrolled` scrolls the actual participant list to its last agent or person with the account control still present; the resulting frame needs visual inspection for reachability and overlap. These are 51 candidates and 44 pending entries in the 95-entry manifest; no new capture coverage is claimed before CI. Inline 24 px mentions remain reported separately from navigation targets.
