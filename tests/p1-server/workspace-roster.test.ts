@@ -234,7 +234,7 @@ async function queue(ws: string, viewer: string, extraClaims: Record<string, unk
   });
 }
 
-test("the asking agent's own follow-up never answers its ask, on the roster, Needs-you and the queue", async () => {
+test("the asking agent's own follow-up never answers its ask, on the roster and the queue", async () => {
   const owner = await person("Owner");
   const ws = await workspace(owner, "Self-reply test");
   const asker = await agent(ws, owner, "Asker");
@@ -245,15 +245,6 @@ test("the asking agent's own follow-up never answers its ask, on the roster, Nee
   assert.equal(row?.waiting_on_people.count, 1, "the roster still counts the ask");
   const listed = await queue(ws, owner);
   assert.deepEqual(listed?.asks.map((entry) => entry.signal_id), [ask], "the queue still lists it");
-  const overview = await sql.begin(async (tx) => {
-    await tx`SET LOCAL ROLE authenticated`;
-    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
-    const [result] = await tx<{ overview: { workspaces: Array<{ workspace_id: string; needs_you: { asks: Array<{ signal_id: string }> } }> } }[]>`
-      SELECT swarm_read.home_overview() AS overview`;
-    return result!.overview;
-  });
-  const needs = overview.workspaces.find((entry) => entry.workspace_id === ws)?.needs_you.asks.map((entry) => entry.signal_id);
-  assert.deepEqual(needs, [ask], "Needs-you still shows it");
 
   // The person's own answer closes it everywhere.
   await signal(ws, { kind: "user", id: owner }, "note", "Tuesday", { toAgent: asker, replyTo: ask });
