@@ -296,6 +296,27 @@ test("grant read preserves absent policy and validates canonical deadlines befor
   }
 });
 
+test("a live standing grant names token_expires_at as a rotation, not an end of access", () => {
+  const grant: RenewalGrantStatus = {
+    renewal_grant_id: "00000000-0000-4000-8000-000000000010",
+    principal_id: PRINCIPAL, kind: "standing", horizon_expires_at: null,
+    connection_expires_at: null, connection_expired_at: null,
+    bound_device_id: DEVICE, last_used_at: null, last_used_device_id: null,
+    last_used_from: null, new_host_at: null, suspended_at: null, revoked_at: null,
+    token_id: "00000000-0000-4000-8000-000000000011", issued_at: "2026-10-08T18:04:54Z",
+    token_expires_at: "2026-11-07T18:04:54Z", token_revoked_at: null,
+  };
+  const rotation = /Token rotates automatically at 2026-11-07T18:04:54Z\. That is not when access ends\./;
+  assert.match(describeRenewalGrant(grant).join("\n"), rotation);
+  for (const fields of [
+    { kind: "timeboxed" as const, horizon_expires_at: "2026-12-01T00:00:00Z" },
+    { suspended_at: "2026-11-01T00:00:00Z" },
+    { revoked_at: "2026-11-01T00:00:00Z" },
+    { token_revoked_at: "2026-11-01T00:00:00Z" },
+    { token_expires_at: null },
+  ]) assert.doesNotMatch(describeRenewalGrant({ ...grant, ...fields }).join("\n"), /Token rotates/);
+});
+
 /** Historical idle suspension remains readable and its privileged resume gate is retained.
  * The permanent-default Site does not mirror this legacy technical idle window. */
 test("legacy idle suspension and its resume gate retain their SQL and CLI contract", async () => {

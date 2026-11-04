@@ -12,6 +12,9 @@ interface EntityAccessStatus {
   expiresAt: string;
   firstUsedAt: string | null;
   revokedAt: string | null;
+  grantKind?: "timeboxed" | "standing";
+  grantRevokedAt?: string | null;
+  suspendedAt?: string | null;
 }
 
 export interface AgentEntityView {
@@ -24,10 +27,16 @@ export interface AgentEntityView {
   tokenId: string;
   issuedAt: string;
   expiresAt: string;
+  /** A live standing grant renews its token, so the token's end is a rotation, not an expiry. */
+  expiresLabel: "Token rotates" | "Expires";
   firstUsedAt: string;
   revokedAt: string;
   revoked: boolean;
 }
+
+const rotates = (status: EntityAccessStatus | undefined): boolean =>
+  status?.grantKind === "standing" && status.revokedAt === null &&
+  status.grantRevokedAt == null && status.suspendedAt == null;
 
 /** Keeps access-state fallbacks explicit so missing data cannot masquerade as live data. */
 export const agentEntityView = (
@@ -45,6 +54,7 @@ export const agentEntityView = (
   tokenId: status?.tokenId ?? "Not available",
   issuedAt: status ? formatDate(status.issuedAt) : "Not available",
   expiresAt: status ? formatDate(status.expiresAt) : "Not available",
+  expiresLabel: rotates(status) ? "Token rotates" : "Expires",
   firstUsedAt: status
     ? status.firstUsedAt === null
       ? "Never used"
