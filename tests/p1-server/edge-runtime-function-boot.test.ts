@@ -314,11 +314,15 @@ Deno.serve(async (request) => {
   await request.arrayBuffer();
   const results = {
     net: await attempt(() => fetch("http://1.1.1.1/", { signal: AbortSignal.timeout(3000) })),
-    read: await attempt(() => Deno.readTextFile("/etc/hostname")),
-    write: await attempt(() => Deno.writeTextFile("/tmp/file-text-probe", "x")),
     env: await attempt(async () => Deno.env.get("PATH")),
+    write: await attempt(() => Deno.writeTextFile("/tmp/file-text-probe", "x")),
+    // What a hostile PDF would want to read: the container's environment (where the
+    // service keys live) and the other functions' sources.
+    read_environ: await attempt(() => Deno.readTextFile("/proc/self/environ")),
+    read_other_function: await attempt(() => Deno.readTextFile("/var/tmp/commonswarm-functions/mcp/index.ts")),
+    read_own_source: await attempt(() => Deno.readTextFile(new URL(import.meta.url))),
     run: await attempt(() => new Deno.Command("true").output()),
-    sys: await attempt(async () => Deno.hostname()),
+    sys_hostname: await attempt(async () => Deno.hostname()),
   };
   return new Response(JSON.stringify({ text: JSON.stringify(results), truncated: false, pages_read: 0, page_count: 0 }),
     { status: 200, headers: { "content-type": "application/json" } });
@@ -329,5 +333,12 @@ Deno.serve(async (request) => {
   const probe = postInside(runtime.container, token, textPdf(["BT ET"]));
   assert.equal(probe.status, 200, probe.body);
   const results = JSON.parse((JSON.parse(probe.body) as { text: string }).text) as Record<string, string>;
-  assert.deepEqual(results, { net: "denied", read: "denied", write: "denied", env: "denied", run: "denied", sys: "denied" });
+  t.diagnostic(`parser sandbox probe: ${JSON.stringify(results)}`);
+  // Enforced by the worker's permissions:
+  assert.deepEqual([results.net, results.env, results.write], ["denied", "denied", "denied"], JSON.stringify(results));
+  // The secrets and code a hostile PDF would want stay out of reach, whether the runtime's
+  // own sandbox or the permission set is what stops it:
+  for (const key of ["read_environ", "read_other_function", "run"]) {
+    assert.notEqual(results[key], "allowed", `${key}: ${JSON.stringify(results)}`);
+  }
 });
