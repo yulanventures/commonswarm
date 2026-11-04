@@ -64,6 +64,22 @@ export function workerTimeoutMs(raw: string | undefined): number {
   return value >= MIN_WORKER_TIMEOUT_MS && value <= MAX_WORKER_TIMEOUT_MS ? value : DEFAULT_WORKER_TIMEOUT_MS;
 }
 
+// Read by the main service only; no function receives it. per_worker sums a worker's CPU over
+// its whole life and retires it at the soft limit (CS-E21: the main cause of churn). Unset keeps
+// the runtime's compiled-in limits (1 s soft, 2 s hard). Set, the hard limit is twice the soft:
+// the hard limit ends a worker's in-flight work, so it stays the runaway-code guard.
+export const WORKER_CPU_SOFT_ENV = "SWARM_EDGE_WORKER_CPU_SOFT_MS";
+export const MIN_WORKER_CPU_SOFT_MS = 1_000;
+export const MAX_WORKER_CPU_SOFT_MS = 10_000;
+
+/** Unset, malformed or out-of-range values keep the runtime's own limits (null). */
+export function workerCpuLimits(raw: string | undefined): { cpuTimeSoftLimitMs: number; cpuTimeHardLimitMs: number } | null {
+  if (raw === undefined || !/^[1-9][0-9]{0,5}$/.test(raw)) return null;
+  const soft = Number(raw);
+  if (soft < MIN_WORKER_CPU_SOFT_MS || soft > MAX_WORKER_CPU_SOFT_MS) return null;
+  return { cpuTimeSoftLimitMs: soft, cpuTimeHardLimitMs: soft * 2 };
+}
+
 export const REQUIRED_MAIN_ENV = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",

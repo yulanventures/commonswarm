@@ -14,6 +14,8 @@ import {
   resolveGatewayRequest,
   WORKER_TIMEOUT_ENV,
   workerTimeoutMs,
+  WORKER_CPU_SOFT_ENV,
+  workerCpuLimits,
 } from "../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
@@ -194,5 +196,19 @@ test("the worker wall clock comes from main's env, bounded, and no function rece
     const names = env.map(([key]) => key);
     assert.ok(names.length > 0, `${name} control: its own names are forwarded`);
     assert.equal(names.includes(WORKER_TIMEOUT_ENV), false, name);
+  }
+});
+
+test("the worker CPU limits come from main's env, bounded, hard twice soft, and no function receives it", () => {
+  assert.equal(workerCpuLimits(undefined), null, "unset keeps the runtime's own limits");
+  assert.deepEqual(workerCpuLimits("10000"), { cpuTimeSoftLimitMs: 10_000, cpuTimeHardLimitMs: 20_000 });
+  assert.deepEqual(workerCpuLimits("1000"), { cpuTimeSoftLimitMs: 1_000, cpuTimeHardLimitMs: 2_000 });
+  for (const bad of ["", "999", "10001", "0", "-5000", "5000.0", "5e3", " 5000", "05000", "5000ms", "9999999"]) {
+    assert.equal(workerCpuLimits(bad), null, JSON.stringify(bad));
+  }
+  for (const name of FUNCTION_NAMES) {
+    const names = environmentFor(name, () => "5000").map(([key]) => key);
+    assert.ok(names.length > 0, `${name} control: its own names are forwarded`);
+    assert.equal(names.includes(WORKER_CPU_SOFT_ENV), false, name);
   }
 });

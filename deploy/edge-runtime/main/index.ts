@@ -13,6 +13,8 @@ import {
   WORKER_LIMIT_STATUS,
   withWorkerRetiredRetry,
   WORKER_TIMEOUT_ENV,
+  WORKER_CPU_SOFT_ENV,
+  workerCpuLimits,
   workerTimeoutMs,
 } from "./router.ts";
 import { createWorkerObserver, logRuntimeMetrics } from "./observability.ts";
@@ -45,7 +47,11 @@ const USER_WORKER_MEMORY_MB = 96;
 
 // Default 150 s; SWARM_EDGE_WORKER_TIMEOUT_MS sets 150 s to 1 h (router.ts workerTimeoutMs).
 const USER_WORKER_TIMEOUT_MS = workerTimeoutMs(Deno.env.get(WORKER_TIMEOUT_ENV));
-console.log(JSON.stringify({ event: "edge_worker_timeout", workerTimeoutMs: USER_WORKER_TIMEOUT_MS }));
+// Unset keeps the runtime's compiled-in CPU limits; SWARM_EDGE_WORKER_CPU_SOFT_MS sets 1 s to 10 s.
+const USER_WORKER_CPU_LIMITS = workerCpuLimits(Deno.env.get(WORKER_CPU_SOFT_ENV));
+console.log(JSON.stringify({ event: "edge_worker_timeout", workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
+  cpuTimeSoftLimitMs: USER_WORKER_CPU_LIMITS?.cpuTimeSoftLimitMs ?? null,
+  cpuTimeHardLimitMs: USER_WORKER_CPU_LIMITS?.cpuTimeHardLimitMs ?? null }));
 const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
 // The PDF parser is created here, not through the public function router. Its token is
 // read only by main and handed only to the mcp worker (router.ts MCP_ENV_NAMES).
@@ -129,6 +135,7 @@ async function handle(request: Request): Promise<Response> {
           servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
           memoryLimitMb: USER_WORKER_MEMORY_MB,
           workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
+          ...(USER_WORKER_CPU_LIMITS ?? {}),
           noModuleCache: false,
           envVars: environmentFor(route.functionName, (name) => name === MCP_PUBLIC_ENABLED_ENV
             ? mcpPublicEnvironmentValue : Deno.env.get(name)),
