@@ -1,4 +1,5 @@
 import { retryLocalAuthTransaction } from "../_shared/agent-auth.ts";
+import { readBoundedJson } from "../_shared/bounded-json.ts";
 import { HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import {
   commandAllowedOrigins,
@@ -474,7 +475,10 @@ async function handle(
   }
 
   setPhase("parse");
-  const parsed = await request.json().catch(() => null);
+  // Bounded before parsing: this runs before the bearer is validated.
+  const bounded = await readBoundedJson(request);
+  if (!bounded.ok) return json(413, { error: "payload_too_large" });
+  const parsed = bounded.value;
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
       ["hosted_capability", "hosted_grant_id", "hosted_seat_handle", "seat_handle"]
         .some((key) => Object.hasOwn(parsed, key))) {

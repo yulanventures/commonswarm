@@ -22,6 +22,7 @@ tests/hosted-mcp-errors.test.ts
 tests/hosted-mcp-files.test.ts
 tests/file-text.test.ts
 tests/hm5-router-box.test.ts
+tests/bounded-json.test.ts
 tests/protocol-hosted-authority.test.ts
 tests/protocol-hosted-check.test.ts
 tests/release-proof-format.test.ts
