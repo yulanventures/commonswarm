@@ -7347,3 +7347,34 @@ test("upgrade_required also stops a prepared acknowledgement", { timeout: 15_000
   if (stop.reason === "fatal") assert.equal((stop.error as DeliveryHttpError).code, "upgrade_required");
   assert.equal(isRestartableListenerStop(stop), false);
 });
+
+test("a process holding a predecessor adopts a newer generation another process stored, before presenting", async () => {
+  const now = Date.parse("2026-07-30T00:00:00.000Z");
+  const store = renewalMemoryStore();
+  let fetches = 0;
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: now + 6 * 60 * 60_000 },
+    store, listenerMode: true, now: () => now, warn: () => {},
+    fetcher: (async () => { fetches++; throw new Error("no renewal is due"); }) as typeof fetch,
+  });
+  assert.equal(await session.bearer(), "swm_agt_" + "A".repeat(43), "control: nothing newer stored");
+  // Another process on the same profile renewed and stored generation 1.
+  await store.write({
+    version: 1, token: "swm_agt_" + "B".repeat(43), tokenId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    rootTokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation: 1, issuedAt: now,
+    expiresAt: now + 8 * 60 * 60_000, horizonExpiresAt: null, successorsRemaining: null, pendingRenewal: null,
+  });
+  assert.equal(await session.bearer(), "swm_agt_" + "B".repeat(43), "the stored successor is presented, not the predecessor");
+  // A record from another lineage is never adopted.
+  await store.write({
+    version: 1, token: "swm_agt_" + "C".repeat(43), tokenId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    principalId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    rootTokenId: "ffffffff-ffff-4fff-8fff-ffffffffffff", generation: 9, issuedAt: now,
+    expiresAt: now + 8 * 60 * 60_000, horizonExpiresAt: null, successorsRemaining: null, pendingRenewal: null,
+  });
+  assert.equal(await session.bearer(), "swm_agt_" + "B".repeat(43), "another lineage's record is ignored");
+  assert.equal(fetches, 0, "no network call was needed");
+});

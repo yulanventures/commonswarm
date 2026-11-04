@@ -825,6 +825,11 @@ export class AgentCredentialSession {
    * unknown outcomes and samples recognized authentication refusals.
    */
   async bearer(): Promise<string> {
+    // Another process on this profile may have rotated and used a successor while this one
+    // still holds the predecessor in memory (seats never expire: presenting a spent
+    // predecessor is how an agent got locked out). A strictly newer generation in the shared
+    // store wins. The store publishes atomically, so this read needs no lock.
+    await this.adoptNewerStored();
     if (!this.due()) {
       if (this.expired()) throw new RenewalUnsupported(
         "The bearer has expired and no usable local renewal session is available; ordinary work was not sent.",
@@ -1005,6 +1010,13 @@ export class AgentCredentialSession {
     } catch {
       throw new RenewalOutcomeUnknown("Renewal state could not be durably saved and verified; the successor was not used.");
     }
+  }
+
+  private async adoptNewerStored(): Promise<void> {
+    const store = this.options.store;
+    if (!store) return;
+    const record = await store.read().catch(() => null);
+    if (record && this.sameLineage(record) && record.generation > this.generation) this.adopt(record);
   }
 
   private async adoptStored(): Promise<void> {
