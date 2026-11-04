@@ -24,17 +24,19 @@ export const FILE_TEXT_WORKER_LIMITS = Object.freeze({
   workerTimeoutMs: 10_000,
 });
 
-/** Deno permission sets: an empty deny list denies everything of that kind. (An empty
- * allow list would allow everything, so none is used.) */
+/** Deno permission sets for the pinned runtime. The nested keys are snake_case:
+ * v1.73.13 JsPermissionsOptions (ext/workers/lib.rs) has no serde rename, unlike the
+ * camelCase outer create options. An empty deny list denies everything of that kind; an
+ * empty allow list would allow everything, so none is used. */
 export const FILE_TEXT_PERMISSIONS = Object.freeze({
-  allowAll: false,
-  denyNet: [] as string[],
-  denyRead: [] as string[],
-  denyWrite: [] as string[],
-  denyRun: [] as string[],
-  denyEnv: [] as string[],
-  denySys: [] as string[],
-  denyFfi: [] as string[],
+  allow_all: false,
+  deny_net: [] as string[],
+  deny_read: [] as string[],
+  deny_write: [] as string[],
+  deny_run: [] as string[],
+  deny_env: [] as string[],
+  deny_sys: [] as string[],
+  deny_ffi: [] as string[],
 });
 
 interface ParserWorker { key: string; fetch(request: Request): Promise<Response> }
@@ -46,6 +48,9 @@ export interface FileTextGatewayDeps {
     memStats(): Promise<Map<string, unknown> | Record<string, unknown>>;
   };
   isWorkerLimitError: (error: unknown) => boolean;
+  /** EdgeRuntime.applySupabaseTag: the runtime needs its internal tag on any request it
+   * forwards to a user worker. Only the tag is copied; headers, token and URL are not. */
+  applyTag: (original: Request, forwarded: Request) => void;
   log?: (line: string) => void;
 }
 
@@ -173,12 +178,15 @@ export function createFileTextGateway(deps: FileTextGatewayDeps) {
       });
       slot.key = worker.key;
       held = true;
-      // A fresh request: the parser never sees the caller's headers, token or URL.
-      const response = await worker.fetch(new Request("http://file-text.internal/", {
+      // A fresh request: the parser never sees the caller's headers, token or URL. Only the
+      // runtime's internal tag is carried over, which worker.fetch requires.
+      const forwarded = new Request("http://file-text.internal/", {
         method: "POST",
         headers: { "content-type": "application/pdf" },
         body: bytes as Uint8Array<ArrayBuffer>,
-      }));
+      });
+      deps.applyTag(request, forwarded);
+      const response = await worker.fetch(forwarded);
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => {});
         return json(422, { error: "pdf_unreadable" });

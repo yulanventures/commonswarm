@@ -56,6 +56,7 @@ const fileText = createFileTextGateway({
     memStats: () => EdgeRuntime.userWorkers.memStats(),
   },
   isWorkerLimitError,
+  applyTag: (original, forwarded) => EdgeRuntime.applySupabaseTag(original, forwarded),
   log: console.log,
 });
 const mcpPublicEnvironmentValue = Deno.env.get(MCP_PUBLIC_ENABLED_ENV);

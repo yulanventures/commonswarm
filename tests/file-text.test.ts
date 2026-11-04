@@ -60,6 +60,7 @@ const token = "t".repeat(40);
 function gateway(options: { present?: () => Set<string>; workerFetch?: (request: Request) => Promise<Response>; limitError?: boolean } = {}) {
   const created: Array<Record<string, unknown>> = [];
   const forwarded: Request[] = [];
+  const tagged: Array<[Request, Request]> = [];
   let next = 0;
   const handle = createFileTextGateway({
     token,
@@ -81,8 +82,9 @@ function gateway(options: { present?: () => Set<string>; workerFetch?: (request:
       memStats: async () => new Map([...(options.present?.() ?? new Set<string>())].map((key) => [key, {}])),
     },
     isWorkerLimitError: (error) => error instanceof Error && error.name === "WorkerLimit",
+    applyTag: (original, next) => { tagged.push([original, next]); },
   });
-  return { handle, created, forwarded };
+  return { handle, created, forwarded, tagged };
 }
 
 const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
@@ -107,13 +109,14 @@ test("loopback and the token are both required, before the body is read or a wor
     assert.equal(response.status, 404, String(peer));
   }
   assert.equal(created.length, 0);
-  const short = createFileTextGateway({ token: "short", servicePath: "x", workers: { create: async () => { throw new Error("no"); }, memStats: async () => ({}) }, isWorkerLimitError: () => false });
+  const short = createFileTextGateway({ token: "short", servicePath: "x", workers: { create: async () => { throw new Error("no"); }, memStats: async () => ({}) }, isWorkerLimitError: () => false, applyTag: () => {} });
   assert.equal((await short(post({ [FILE_TEXT_TOKEN_HEADER]: "short" }), "127.0.0.1")).status, 404, "a weak token disables the path");
 });
 
 test("the parser gets a fresh, limited, permission-denied worker and none of the caller's headers", async () => {
-  const { handle, created, forwarded } = gateway();
-  const response = await handle(post(), "127.0.0.1");
+  const { handle, created, forwarded, tagged } = gateway();
+  const original = post();
+  const response = await handle(original, "127.0.0.1");
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { text: "hello", truncated: false, pages_read: 1, page_count: 1 });
   assert.equal(created.length, 1);
@@ -123,11 +126,16 @@ test("the parser gets a fresh, limited, permission-denied worker and none of the
   assert.equal(options.allowRemoteModules, false);
   assert.deepEqual(options.permissions, FILE_TEXT_PERMISSIONS);
   for (const [key, value] of Object.entries(FILE_TEXT_WORKER_LIMITS)) assert.equal(options[key], value, key);
-  for (const kind of ["Net", "Read", "Write", "Run", "Env", "Sys", "Ffi"]) {
-    assert.deepEqual((FILE_TEXT_PERMISSIONS as Record<string, unknown>)[`deny${kind}`], [], `deny${kind} denies all`);
+  // v1.73.13 JsPermissionsOptions keys are snake_case (no serde rename).
+  assert.deepEqual(Object.keys(FILE_TEXT_PERMISSIONS).sort(), ["allow_all", "deny_env", "deny_ffi", "deny_net",
+    "deny_read", "deny_run", "deny_sys", "deny_write"]);
+  assert.equal((FILE_TEXT_PERMISSIONS as Record<string, unknown>).allow_all, false);
+  for (const kind of ["net", "read", "write", "run", "env", "sys", "ffi"]) {
+    assert.deepEqual((FILE_TEXT_PERMISSIONS as Record<string, unknown>)[`deny_${kind}`], [], `deny_${kind} denies all`);
   }
-  assert.equal(Object.keys(FILE_TEXT_PERMISSIONS).some((key) => key.startsWith("allow") && key !== "allowAll"), false,
-    "no allow list (an empty allow list would allow everything)");
+  assert.equal(tagged.length, 1, "the runtime tag is copied onto the forwarded request");
+  assert.equal(tagged[0]![0], original);
+  assert.equal(tagged[0]![1], forwarded[0]);
   const sent = forwarded[0]!;
   assert.equal(sent.headers.get(FILE_TEXT_TOKEN_HEADER), null, "the token never reaches the parser");
   assert.equal(sent.headers.get("x-caller"), null);

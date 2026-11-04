@@ -239,6 +239,31 @@ test("the PDF text worker runs only on main's loopback path with the token, and 
   assert.equal(parsed.text.includes("Second page text"), true, good.body);
   assert.deepEqual([parsed.pages_read, parsed.page_count, parsed.truncated], [2, 2, false]);
 
+  // Memory: five sequential extractions, each waiting for the previous parser isolate to be
+  // gone (busy until then). Container memory is measured before and after; isolates being
+  // absent from memStats is not by itself proof that memory came back.
+  const memory = () => {
+    const out = spawnSync("docker", ["stats", "--no-stream", "--format", "{{.MemUsage}}", runtime!.container], { encoding: "utf8" });
+    const match = String(out.stdout).match(/([\d.]+)\s*(KiB|MiB|GiB)/u);
+    assert.ok(match, String(out.stdout));
+    const scale = match[2] === "KiB" ? 1 / 1024 : match[2] === "GiB" ? 1024 : 1;
+    return Number(match[1]) * scale;
+  };
+  const extractWhenFree = async (body: Buffer) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const result = postInside(runtime!.container, token, body);
+      if (result.status !== 503) return result;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+    }
+    assert.fail("the parser slot never freed");
+  };
+  const before = memory();
+  for (let run = 0; run < 5; run++) assert.equal((await extractWhenFree(pdf)).status, 200);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 12_000));
+  const afterRuns = memory();
+  t.diagnostic(`edge container memory: ${before.toFixed(1)} MiB before, ${afterRuns.toFixed(1)} MiB after five extractions`);
+  assert.ok(afterRuns - before < 96, `memory grew ${(afterRuns - before).toFixed(1)} MiB over five extractions`);
+
   // A heavy page: ~6 MiB of text operators in one content stream. Whatever the parser
   // manages (capped text, or killed at its CPU or memory limit), it never stalls other workers.
   const heavy = textPdf(["BT /F1 1 Tf " + "(abcdefghijklmnopqrstuvwxyz) Tj 0 -1 Td ".repeat(150_000) + "ET"]);
@@ -259,4 +284,49 @@ test("the PDF text worker runs only on main's loopback path with the token, and 
   assert.equal(health.status, 200, "main stays healthy");
   await health.body?.cancel();
   assert.equal(runtime.logs().includes("Hello from page one"), false, "extracted text never reaches the logs");
+});
+
+test("the PDF parser worker really runs with network, filesystem, process, env and system access denied", { timeout: 600_000 }, async (t) => {
+  if (!dockerAvailable()) {
+    t.skip(DOCKER_UNAVAILABLE);
+    return;
+  }
+  const token = randomBytes(24).toString("hex");
+  const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "edge-runtime-file-text-probe.")));
+  let runtime: EdgeRuntimeHandle | undefined;
+  t.after(() => {
+    runtime?.close();
+    guardedRemove(workDir);
+  });
+  // The same name and the same main-created worker options, with a probe in place of the parser.
+  const copy = join(workDir, "functions");
+  cpSync(functionsRoot, copy, { recursive: true });
+  writeFileSync(join(copy, "file-text", "index.ts"), `
+const attempt = async (run: () => Promise<unknown>) => {
+  try { await run(); return "allowed"; }
+  catch (error) {
+    const name = (error as { name?: string })?.name ?? "unknown";
+    return name === "NotCapable" || name === "PermissionDenied" ? "denied" : "error:" + name;
+  }
+};
+Deno.serve(async (request) => {
+  await request.arrayBuffer();
+  const results = {
+    net: await attempt(() => fetch("http://1.1.1.1/", { signal: AbortSignal.timeout(3000) })),
+    read: await attempt(() => Deno.readTextFile("/etc/hostname")),
+    write: await attempt(() => Deno.writeTextFile("/tmp/file-text-probe", "x")),
+    env: await attempt(async () => Deno.env.get("PATH")),
+    run: await attempt(() => new Deno.Command("true").output()),
+    sys: await attempt(async () => Deno.hostname()),
+  };
+  return new Response(JSON.stringify({ text: JSON.stringify(results), truncated: false, pages_read: 0, page_count: 0 }),
+    { status: 200, headers: { "content-type": "application/json" } });
+});
+`);
+  runtime = await startComposeEdgeRuntime({ workDir, functionsRoot: copy, envText: `${dummyEdgeEnv()}SWARM_FILE_TEXT_TOKEN=${token}\n` });
+  await awaitHealth(runtime.baseUrl);
+  const probe = postInside(runtime.container, token, textPdf(["BT ET"]));
+  assert.equal(probe.status, 200, probe.body);
+  const results = JSON.parse((JSON.parse(probe.body) as { text: string }).text) as Record<string, string>;
+  assert.deepEqual(results, { net: "denied", read: "denied", write: "denied", env: "denied", run: "denied", sys: "denied" });
 });
