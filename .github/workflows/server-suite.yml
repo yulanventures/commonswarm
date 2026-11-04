@@ -389,6 +389,12 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee unit.log
+      - name: Standalone CI controller
+        # The self-hosted nightly no longer runs `unit`, so the controller's own tests run here.
+        if: matrix.suite == 'unit'
+        run: |
+          set -o pipefail
+          node --test --test-concurrency=1 tests/standalone-ci-guard.test.mjs tests/standalone-ci-publisher.test.mjs 2>&1 | tee standalone-controls.log
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

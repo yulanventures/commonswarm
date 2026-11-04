@@ -15,6 +15,8 @@ Environment=COMMONSWARM_CI_CONFIG=/opt/commonswarm-ci/config.json
 ExecStart=/bin/bash /opt/commonswarm-ci/scripts/run.sh --ref main --suite nightly
 # Queue wait plus two serial 30m bounds and owned-service cleanup.
 TimeoutStartSec=7200
+# 75 = deferred for contention (the host stayed busy): not a failure of the nightly.
+SuccessExitStatus=75
 TimeoutStopSec=900
 # SIGTERM reaches the controller; SIGKILL still bounds the whole cgroup.
 KillMode=mixed

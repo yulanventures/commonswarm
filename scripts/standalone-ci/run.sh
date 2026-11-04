@@ -137,6 +137,10 @@ server_timeout = cfg.get('server_timeout_seconds', 6000)
 if type(server_timeout) is not int or not 1 <= server_timeout <= 6000:
     refuse('server timeout must be 1..6000 seconds')
 worker_grace = cfg.get('pe_worker_grace_seconds', 60)
+# Waiting for other jobs on the shared host to go quiet never spends the suite budget.
+# After this long without a quiet moment, the suite gives up as deferred/contention
+# (exit 75, no published status) instead of failing with 124.
+contention_wait = cfg.get('contention_wait_seconds', 600)
 if type(worker_grace) is not int or not 1 <= worker_grace <= 60:
     refuse('PE worker grace must be 1..60 seconds')
 for key in ('worker_image', 'dind_image'):
@@ -266,6 +270,7 @@ with (state / 'queue.lock').open('a') as lock:
     cmd(git + ['update-ref', 'refs/heads/ci-input', resolved], interruptible=True)
     suites = SUITES if selection == 'all' else NIGHTLY if selection == 'nightly' else (selection,)
     overall = 0
+    contended = False
     for suite in suites:
         if stopping:
             overall = 130
@@ -281,6 +286,8 @@ with (state / 'queue.lock').open('a') as lock:
         # older worker's clock. Keep this across attempts, not per subprocess.
         worker_seen = {}
         class Deferred(Exception):
+            pass
+        class Contention(Exception):
             pass
         def capacity():
             check_stopping()
@@ -352,16 +359,29 @@ with (state / 'queue.lock').open('a') as lock:
             suite_command = None
             with (run / 'suite.log').open('wb') as log:
                 def check_capacity():
-                    while capacity():
-                        if time.monotonic() >= deadline:
-                            raise sp.TimeoutExpired(['active-budget'], timeout)
-                        if any(time.monotonic() - since >= worker_grace for since in worker_seen.values()):
-                            raise Deferred()
-                        # An existing child keeps doing useful work. Otherwise
-                        # wait before allocating the next owned subprocess.
-                        if active is not None and active.poll() is None:
-                            return
-                        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                    global deadline, deferred_wait
+                    waiting_since = None
+                    try:
+                        while capacity():
+                            if any(time.monotonic() - since >= worker_grace for since in worker_seen.values()):
+                                raise Deferred()
+                            # An existing child keeps doing useful work. Otherwise
+                            # wait before allocating the next owned subprocess. That wait
+                            # is contention, not suite work: it extends the deadline.
+                            if active is not None and active.poll() is None:
+                                return
+                            now = time.monotonic()
+                            if waiting_since is None:
+                                waiting_since = now
+                            if now - waiting_since >= contention_wait:
+                                raise Contention()
+                            time.sleep(0.25)
+                    finally:
+                        if waiting_since is not None:
+                            waited = time.monotonic() - waiting_since
+                            deadline += waited
+                            deferred_wait += waited
+                            receipt['deferred_wait_seconds'] = round(deferred_wait, 3)
                 def bounded(argv):
                     global active
                     if time.monotonic() >= deadline:
@@ -393,12 +413,12 @@ with (state / 'queue.lock').open('a') as lock:
                 try:
                     if attempt == 1:
                         quiet_started = time.monotonic()
-                        quiet_deadline = quiet_started + 600
+                        quiet_deadline = quiet_started + contention_wait
                         try:
                             while True:
                                 check_stopping()
                                 if time.monotonic() >= quiet_deadline:
-                                    raise sp.TimeoutExpired(['initial-quiet'], 600)
+                                    raise Contention()
                                 try:
                                     busy = capacity()
                                 except Deferred:
@@ -454,6 +474,9 @@ with (state / 'queue.lock').open('a') as lock:
                     code = 0
                 except Deferred:
                     receipt.update(state='deferred', deferred_at=stamp(), reason='PromptEden worker active')
+                    code = 75
+                except Contention:
+                    receipt.update(state='deferred', deferred_at=stamp(), reason='contention')
                     code = 75
                 except sp.TimeoutExpired:
                     receipt['timed_out'] = True
@@ -575,19 +598,35 @@ with (state / 'queue.lock').open('a') as lock:
                 # setup, interrupted attempts and cleanup remain charged. The
                 # independent queue ceiling still bounds a continuously busy PE.
                 quiet_started = time.monotonic()
-                quiet_deadline = quiet_started + 600
+                quiet_deadline = quiet_started + contention_wait
                 try:
+                    if receipt.get('reason') == 'contention':
+                        raise Contention()  # already waited contention_wait without a quiet moment
                     if quiet_started >= deadline:
                         raise sp.TimeoutExpired(['active-budget'], timeout)
                     while True:
                         if time.monotonic() >= quiet_deadline:
-                            raise sp.TimeoutExpired(['quiet-retry'], 600)
+                            raise Contention()
                         try:
                             if capacity():
                                 raise Deferred()
                             break
                         except Deferred:
                             time.sleep(min(0.25, max(0, quiet_deadline - time.monotonic())))
+                except Contention:
+                    # A busy host is not a failure: record the give-up, publish nothing,
+                    # and leave this suite for the next run.
+                    code = 75
+                    receipt.update(state='deferred', pending=True, reason='contention', gave_up=True,
+                                   exit_code=code, ended_at=stamp(),
+                                   elapsed_seconds=round(time.monotonic() - suite_clock, 3),
+                                   active_elapsed_seconds=round(quiet_started - suite_clock - deferred_wait, 3),
+                                   deferred_wait_seconds=round(deferred_wait + time.monotonic() - quiet_started, 3))
+                    persist_receipt(run, receipt)
+                    print(json.dumps({'receipt': str(run / 'receipt.json'), 'suite': suite, 'state': 'deferred',
+                                      'reason': 'contention', 'exit_code': code}), flush=True)
+                    contended = True
+                    break
                 except sp.TimeoutExpired:
                     code = 124
                     receipt.update(state='failed', pending=False, timed_out=True, exit_code=code, ended_at=stamp(),
@@ -630,5 +669,6 @@ with (state / 'queue.lock').open('a') as lock:
         if stopping or code == 130:
             break
     cmd([sys.executable, str(controller / 'retain.py'), '--root', str(state)], timeout=60)
-    sys.exit(130 if stopping else overall)
+    # A real failure outranks a contention give-up; 75 only when nothing else failed.
+    sys.exit(130 if stopping else overall or (75 if contended else 0))
 PY

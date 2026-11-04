@@ -49,8 +49,12 @@ it terminates its own process and removes only exact-name, matching-label owned
 containers/network. The attempt receipt says `state=deferred`, `pending=true`,
 exit 75; this is unfinished work. After PE becomes quiet the same resolved SHA
 retries from a fresh checkout, under the same queue lock and suite deadline.
-Cleanup failures stop retrying. Persistent contention fails with timeout 124;
-no PE job is cancelled. Polling is reactive, so Root must still measure withdrawal
+Cleanup failures stop retrying. Persistent contention is not a failure: after
+`contention_wait_seconds` (default 600) without a quiet moment, the suite gives
+up with `state=deferred`, `reason=contention`, `gave_up=true`, exit 75, and no
+status is published; the next run tries again. The nightly unit treats 75 as
+success, and a real failure in another suite still sets the exit code. No PE job
+is cancelled. Polling is reactive, so Root must still measure withdrawal
 latency and memory headroom during a controlled PE overlap before activation.
 
 The checkout's sole runtime patch is its unique Supabase `project_id`, retained
@@ -134,8 +138,10 @@ Root installation, after independent review and contention coordination:
    and manual GHA interfaces, runners and fleet labels remain as before.
 
 Suite time is capped at 1800 seconds across all attempts, including checkout,
-startup, installation, PE quiet waiting and elapsed cleanup. Deadline expiry
-fails with 124; bounded teardown can extend wall time beyond that budget.
+startup, installation and elapsed cleanup. Waiting for other jobs to go quiet
+(before the suite, between steps and before a retry) extends the deadline by
+the time waited, so a busy host never spends the budget. Deadline expiry fails
+with 124; bounded teardown can extend wall time beyond that budget.
 On PE deferral the active process gets one second to terminate before SIGKILL;
 other termination gets up to 60 seconds. The controller removes only exact-name,
 matching-label containers, their anonymous volumes and the matching network.

@@ -262,12 +262,29 @@ test('the nightly selection runs only box-dry-run and site, at one resolved SHA'
   const result = await start(f, f.args('nightly'));
   assert.equal(result.status, 0, result.stderr);
   const receipts = f.receipts();
-  assert.deepEqual(receipts.map(r => r.suite), ['box-dry-run', 'site']);
+  assert.deepEqual(receipts.map(r => r.suite).sort(), ['box-dry-run', 'site']);
   for (const r of receipts) {
     assert.equal(r.resolved_sha, f.sha);
     assert.equal(r.exit_code, 0);
     assert.equal(r.timed_out, false);
   }
+});
+
+test('a host that never goes quiet defers as contention, never exit 124, and publishes nothing', async () => {
+  const f = fixture(); f.cfg.timeout_seconds = 2; f.cfg.contention_wait_seconds = 3;
+  writeFileSync(f.config, JSON.stringify(f.cfg));
+  writeFileSync(join(f.root, 'pe-active'), 'active');
+  const result = await start(f, f.args('nightly'));
+  assert.equal(result.status, 75, result.stderr);
+  const receipts = f.receipts();
+  assert.deepEqual(receipts.map(r => r.suite).sort(), ['box-dry-run', 'site'], 'one give-up per suite, no retry loop');
+  for (const r of receipts) {
+    assert.equal(r.state, 'deferred'); assert.equal(r.reason, 'contention'); assert.equal(r.gave_up, true);
+    assert.equal(r.timed_out, false); assert.equal(r.exit_code, 75); assert.equal(r.github_status, undefined);
+    assert.ok(r.deferred_wait_seconds >= 3, 'the wait is recorded and exceeds the 2-second suite budget');
+  }
+  assert.equal(existsSync(join(f.root, 'events.jsonl')) && readFileSync(join(f.root, 'events.jsonl'), 'utf8').includes('-worker'), false,
+    'no suite work started');
 });
 
 test('concurrent invocations serialize actual worker lifetimes through the shared queue', async () => {
