@@ -59,6 +59,12 @@ test("pages never split a UTF-8 character and never loop in place", () => {
   assert.equal(utf8BoundaryLength(bytes, 4), 2);
   assert.equal(utf8BoundaryLength(bytes, 5), 5);
   assert.equal(utf8BoundaryLength(bytes, 99), bytes.length);
+  // The fetch itself can end mid-character: trim it instead of rejecting valid text.
+  assert.equal(utf8BoundaryLength(bytes.subarray(0, 4), 99), 2);
+  assert.deepEqual(textPage(bytes.subarray(0, 4), 0, bytes.length, 99), { text: "ab", offset: 0, next_offset: 2 });
+  const emoji = encoder.encode("a😀"); // four-byte character
+  assert.equal(utf8BoundaryLength(emoji.subarray(0, 4), 99), 1);
+  assert.equal(utf8BoundaryLength(emoji, 99), 5);
   const first = textPage(bytes, 0, bytes.length, 3);
   assert.deepEqual(first, { text: "ab", offset: 0, next_offset: 2 });
   const second = textPage(bytes.subarray(2), 2, bytes.length, 99);

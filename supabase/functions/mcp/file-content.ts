@@ -43,15 +43,20 @@ function leadingContinuations(bytes: Uint8Array): number {
   return skip;
 }
 
-/** Length of the longest prefix that ends on a UTF-8 character boundary. */
+/**
+ * Length of the longest prefix (up to `limit`) that ends on a complete UTF-8 character.
+ * A page can be cut by our own limit or by the fetch itself, so the last character is
+ * always checked against its lead byte rather than trusted when the buffer ends.
+ */
 export function utf8BoundaryLength(bytes: Uint8Array, limit: number): number {
-  let end = Math.min(limit, bytes.length);
-  if (end === bytes.length) return end;
-  // Step back over continuation bytes, then drop the lead byte whose character is cut.
-  let back = end;
-  while (back > 0 && end - back < 3 && (bytes[back]! & 0xc0) === 0x80) back--;
-  if (back === end) return end; // bytes[end] starts a character: the cut is clean.
-  return back;
+  const end = Math.min(limit, bytes.length);
+  let lead = end - 1;
+  while (lead >= 0 && end - lead <= 3 && (bytes[lead]! & 0xc0) === 0x80) lead--;
+  if (lead < 0) return end; // Only continuation bytes: let the strict decoder reject them.
+  const first = bytes[lead]!;
+  const need = first < 0x80 ? 1 : (first & 0xe0) === 0xc0 ? 2 : (first & 0xf0) === 0xe0 ? 3 :
+    (first & 0xf8) === 0xf0 ? 4 : 1;
+  return end - lead >= need ? end : lead;
 }
 
 /**

@@ -82,6 +82,18 @@ function seatTool(value: string): value is HostedSeatTool {
     (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(value);
 }
 
+/**
+ * The SQL resolvers know only the original tool categories. Newer tools reuse the narrowest
+ * existing category, as the household tools do; the opaque capability keeps the real tool
+ * name, so the command allowlist still binds file_get to an exact file_download_url.
+ */
+function sqlSeatTool(tool: string, use: "command" | "read"): string {
+  if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool)) return use === "command" ? "note" : "members";
+  if (tool === "file_ls") return "members";
+  if (tool === "file_get") return "note";
+  return tool;
+}
+
 async function providerActive(binding: GrantBinding | SeatBinding): Promise<boolean> {
   const status = await binding.providerStatus(binding.providerGrantId);
   return status.active === true;
@@ -115,8 +127,7 @@ async function resolveSeat(
     ? (HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes(binding.tool)
     : (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(binding.tool);
   if (!allowed || !seatTool(binding.tool) || !await providerActive(binding)) return null;
-  const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === binding.tool);
-  const databaseTool = content ? (use === "command" ? "note" : "members") : binding.tool;
+  const databaseTool = sqlSeatTool(binding.tool, use);
   const rows = use === "command" && binding.tool === "check"
     ? await tx<ResolvedHostedSeat[]>`
       SELECT * FROM swarm.resolve_hosted_mcp_check_authorization(
@@ -273,7 +284,8 @@ export async function resolveHostedConnectionContext(
     return await tx.savepoint(async (scope: postgres.TransactionSql<Record<string, unknown>>) => {
       const rows = await scope<{ context: HostedConnectionContext | null }[]>`
         SELECT swarm.resolve_hosted_mcp_connection_context(
-          ${binding.grantId}::uuid, ${binding.providerGrantId}, ${binding.tool},
+          ${binding.grantId}::uuid, ${binding.providerGrantId},
+          ${binding.kind === "hosted_seat" && binding.tool === "file_ls" ? "members" : binding.tool},
           ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
         ) AS context
       `;
