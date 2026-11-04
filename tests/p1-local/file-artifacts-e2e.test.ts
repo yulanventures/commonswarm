@@ -22,7 +22,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli, type FunctionCliObserver } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -36,6 +36,7 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
+let functionCliState: FunctionCliObserver | undefined;
 let envDir: string | undefined;
 
 function localEnvironment(): LocalEnvironment {
@@ -60,6 +61,7 @@ async function waitForFunctions(): Promise<void> {
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
       diagnostics: () => `${fn} function logs:\n${functionLogs.slice(-4000)}`,
+      cliState: functionCliState,
     });
   }
 }
@@ -153,6 +155,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  functionCliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };

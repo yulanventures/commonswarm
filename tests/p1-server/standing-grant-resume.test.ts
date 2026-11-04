@@ -31,7 +31,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -191,6 +191,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -214,6 +215,7 @@ before(async () => {
     sleep: (ms) => delay(ms),
     now: () => Date.now(),
     diagnostics: () => `command function logs:\n${functionLogs.slice(-4000)}`,
+    cliState,
   });
   const [config]=await sql`SELECT value FROM swarm.config WHERE key='min_client_version'`;
   assert.equal(typeof config?.value,'string');

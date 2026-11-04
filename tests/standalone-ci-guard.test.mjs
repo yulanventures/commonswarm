@@ -52,6 +52,10 @@ function fixture(control = {}) {
 import json,pathlib,sys,time,subprocess,os,signal
 root=pathlib.Path(${JSON.stringify(root)})
 p=root/'containers.json'
+# The controller polls 'docker ps' while another call rewrites the store; replace it
+# atomically so a reader never sees the truncated file.
+def save(store):
+    staged=root/('containers.json.'+str(os.getpid())+'.tmp'); staged.write_text(json.dumps(store)); os.replace(staged,p)
 args=sys.argv[1:]
 assert 'synthetic-status-only-token' not in json.dumps(args)+json.dumps(dict(os.environ))
 for i,a in enumerate(args):
@@ -74,7 +78,7 @@ if args[0]=='run':
     name=args[args.index('--name')+1]
     label=args[args.index('--label')+1].split('=',1)[1]
     if name.endswith('-worker') and ${control.workerLaunch ?? 0}: sys.exit(${control.workerLaunch ?? 0})
-    store=json.loads(p.read_text()); store[name]=dict(label=label); p.write_text(json.dumps(store))
+    store=json.loads(p.read_text()); store[name]=dict(label=label); save(store)
     event('start',name)
     if name.endswith('-worker'):
         assert store.get(name.replace('-worker','-docker'),{}).get('ingress_policy'), 'worker started without ingress policy'
@@ -86,7 +90,7 @@ if args[0]=='run':
         subprocess.run(['git','-C',str(work),'rev-parse','--verify','refs/tags/fixture-tag'],check=True)
         time.sleep(control.get('sleep',0))
         if control.get('tamper'):
-            store=json.loads(p.read_text()); store[name.replace('-worker','-docker')]['label']='unowned'; p.write_text(json.dumps(store))
+            store=json.loads(p.read_text()); store[name.replace('-worker','-docker')]['label']='unowned'; save(store)
         event('finish',name)
         sys.exit(control.get('exit',{}).get(args[-1],0))
     sys.exit(0)
@@ -94,7 +98,7 @@ if args[0]=='exec':
     name=args[1]
     store=json.loads(p.read_text()); assert name in store
     if ${control.policyFail ? "True" : "False"}: sys.exit(42)
-    store[name]['ingress_policy']=True; p.write_text(json.dumps(store)); event('policy',name); sys.exit(0)
+    store[name]['ingress_policy']=True; save(store); event('policy',name); sys.exit(0)
 if args[0]=='inspect':
     if args[-1].endswith('-worker') and ${control.killInspect ? "True" : "False"}:
         os.kill(os.getppid(),signal.SIGTERM)
@@ -105,16 +109,16 @@ if args[0]=='inspect':
 if args[0]=='rm':
     if args[-1].endswith('-worker') and ${control.signalCleanup ? "True" : "False"}:
         os.kill(os.getppid(),signal.SIGTERM)
-    store=json.loads(p.read_text()); store.pop(args[-1],None); p.write_text(json.dumps(store)); event('remove',args[-1]); sys.exit(0)
+    store=json.loads(p.read_text()); store.pop(args[-1],None); save(store); event('remove',args[-1]); sys.exit(0)
 if args[0]=='info': sys.exit(0)
 if args[0]=='network':
     store=json.loads(p.read_text())
-    if args[1]=='create': store[args[-1]]=dict(label=args[args.index('--label')+1].split('=',1)[1]); p.write_text(json.dumps(store)); sys.exit(0)
+    if args[1]=='create': store[args[-1]]=dict(label=args[args.index('--label')+1].split('=',1)[1]); save(store); sys.exit(0)
     if args[1]=='inspect':
         found=store.get(args[-1])
         if found: print(found['label']); sys.exit(0)
         sys.exit(1)
-    if args[1]=='rm': store.pop(args[-1],None); p.write_text(json.dumps(store)); sys.exit(0)
+    if args[1]=='rm': store.pop(args[-1],None); save(store); sys.exit(0)
 sys.exit(2)
 `;
   writeFileSync(join(bin, 'docker'), docker); chmodSync(join(bin, 'docker'), 0o755);
@@ -688,7 +692,8 @@ async function waitFor(predicate) {
 }
 function events(f) {
   const path=join(f.root,'events.jsonl');
-  return existsSync(path) ? readFileSync(path,'utf8').trim().split('\n').map(JSON.parse) : [];
+  // Only newline-terminated records: the fake docker creates the file before its write lands.
+  return existsSync(path) ? readFileSync(path,'utf8').split('\n').slice(0,-1).map(JSON.parse) : [];
 }
 async function workerEntered(f) {await waitFor(()=>events(f).some(e=>e.action==='start' && e.name.endsWith('-worker')));}
 function cleanResult(f) {

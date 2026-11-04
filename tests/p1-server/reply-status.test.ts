@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { REPLY_STATUSES, type ReplyStatus } from "../../src/cloud/reply-status.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -118,6 +118,7 @@ before(async () => {
     env: { ...process.env, SWARM_ENV: "test" },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const cliState = observeFunctionCli(edge);
   const capture = (chunk: Buffer) => {
     edgeLogs = (edgeLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -135,6 +136,7 @@ before(async () => {
     sleep: (ms) => delay(ms),
     now: Date.now,
     diagnostics: () => edgeLogs,
+    cliState,
   });
   fixture = await seedFixture();
 });

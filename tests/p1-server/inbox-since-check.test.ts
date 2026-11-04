@@ -12,7 +12,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { readSignals } from "../../src/cloud/signals.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
@@ -107,6 +107,7 @@ before(async () => {
     cwd: process.cwd(), env: { ...process.env, SWARM_ENV: "test" },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
+  const cliState = observeFunctionCli(functionProcess);
   let startupOutput = "";
   let startupSeen = false;
   const observeStartup = (chunk: Buffer) => {
@@ -124,7 +125,7 @@ before(async () => {
   }
   await awaitFunctionRunning({ url: `${local.API_URL}/functions/v1/command`, fetcher: fetch,
     timeoutMs: 30_000, sleep: ms => delay(ms), now: () => Date.now(),
-    diagnostics: () => "local command function was not ready" });
+    diagnostics: () => "local command function was not ready", cliState });
   functionReady = true;
   owner = await createUser();
   workspace = randomUUID();

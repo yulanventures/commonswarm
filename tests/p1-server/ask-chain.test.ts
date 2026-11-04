@@ -17,7 +17,7 @@ import {
   CHAIN_MAX_CHILDREN,
   CHAIN_MAX_HOPS,
 } from "../../src/cloud/ask-chain-constants.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -279,6 +279,7 @@ before(async () => {
     ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
     { cwd: process.cwd(), env: { ...process.env, SWARM_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"] },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-30_000);
   };
@@ -294,6 +295,7 @@ before(async () => {
     url: `${local.API_URL}/functions/v1/command`, fetcher: fetch, timeoutMs: 30_000,
     sleep: (ms) => delay(ms), now: () => Date.now(),
     diagnostics: () => "command readiness failed; private command diagnostics retained",
+    cliState,
   });
 });
 

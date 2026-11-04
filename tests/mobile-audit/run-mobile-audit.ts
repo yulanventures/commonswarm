@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 
@@ -204,6 +204,7 @@ async function main(): Promise<void> {
   let functionLogs = "";
   const functions = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
     { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+  const cliState = observeFunctionCli(functions);
   const capture = (chunk: Buffer) => { functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000); };
   functions.stdout?.on("data", capture); functions.stderr?.on("data", capture);
   const closeSite = await serveDist();
@@ -213,7 +214,7 @@ async function main(): Promise<void> {
   try {
     for (const fn of ["command", "read"]) {
       await awaitFunctionRunning({ url: `${env.apiUrl}/functions/v1/${fn}`, fetcher: fetch, timeoutMs: 60_000,
-        sleep: ms => delay(ms), now: () => Date.now(), diagnostics: () => functionLogs.slice(-4000) });
+        sleep: ms => delay(ms), now: () => Date.now(), diagnostics: () => functionLogs.slice(-4000), cliState });
     }
     const seed = await seedHeavyWorkspace(env);
     seedNotes = seed.notes;
