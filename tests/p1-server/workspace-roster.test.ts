@@ -56,10 +56,12 @@ async function signal(ws: string, from: { kind: "user" | "agent"; id: string }, 
   opts: { toUser?: string; toAgent?: string; recipients?: string[]; replyTo?: string; ago?: string; expired?: boolean } = {}): Promise<string> {
   const id = randomUUID();
   const ago = opts.ago ?? "1 minute";
+  // The recipient guard requires recipient 0 to be the row's own scalar addressee.
+  const toUser = opts.toUser ?? opts.recipients?.[0] ?? null;
   // Recipients can be added only in the transaction that creates the signal.
   await sql.begin(async (tx) => {
   await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to, kind, body, until, created_at)
-    VALUES (${id}::uuid, ${ws}::uuid, ${from.id}::uuid, ${from.kind}, ${opts.toUser ?? null}, ${opts.toAgent ?? null}, ${opts.replyTo ?? null},
+    VALUES (${id}::uuid, ${ws}::uuid, ${from.id}::uuid, ${from.kind}, ${toUser}, ${opts.toAgent ?? null}, ${opts.replyTo ?? null},
       ${kind}, ${body},
       ${opts.expired ? tx`statement_timestamp() - ${ago}::interval + interval '1 second'` : tx`statement_timestamp() + interval '1 day'`},
       statement_timestamp() - ${ago}::interval)`;

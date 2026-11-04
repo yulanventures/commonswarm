@@ -142,7 +142,7 @@ test("edge router admits hosted to-do and list tools only with the storage brief
   await probe(off, "mcp", secret, false, null); await probe(off, "read", secret, true);
   await probe(off, "h0", secret, false); await probe(off, "command", secret, true);
   assert.equal((await rpc(off, token, secret, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "h6", version: "0" } })).status, 200);
-  const listed = await rpc(off, token, secret, "tools/list", {}); assert.deepEqual([listed.status, listed.json.result?.tools?.length, listed.json.result?.tools?.map((tool) => tool.name)], [200, 13, coreNames]);
+  const listed = await rpc(off, token, secret, "tools/list", {}); assert.deepEqual([listed.status, listed.json.result?.tools?.length, listed.json.result?.tools?.map((tool) => tool.name)], [200, 14, coreNames]);
   assert.equal((await call(off, token, "whoami", { seat: approved })).handle, approved);
   const unknown = await rpc(off, token, secret, "tools/call", { name: "todo_read", arguments: { seat: approved, todo_id: randomUUID() } }); assert.equal(unknown.status, 400); assert.equal(unknown.json.error?.code, -32602);
   const on = await boot(true), live = await issue(owner, grantId);
