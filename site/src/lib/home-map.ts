@@ -1,7 +1,7 @@
 /** Map Home wire facts to UI models using shared copy formatting.
  * Input: membership/overview facts; output: view models. DOM builders never interpret wire facts. */
 import { connectionPolicyFields } from "./standing-grants";
-import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
+import { homeAgentState, peopleAgentActivityTime, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { greetingName } from "./greeting-name";
 import { foldIdentityName } from "./identity-label";
@@ -10,8 +10,9 @@ import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./par
 import { parseRoute, routeHref, type HomeRoute } from "./home-route";
 import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } from "./home-catchup";
 import { railAgentOwnerPhrase, type HomeRailVM } from "./home-rail";
+import { askExcerpt } from "./home-stream";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
-import type { AgentWorkStatus, HomeOverview, WorkspaceCatchUp } from "./home/contract";
+import type { AgentWorkStatus, DecisionAsk, DecisionQueue, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
 
 export interface HomeWorkspace { id: string; name: string }
@@ -274,14 +275,26 @@ function askNeedsYouCard(ask: WorkspaceCatchUp["needs_you"]["asks"][number], peo
     what: message ? `${name} asked you: ‘${message.body}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) } };
 }
-function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
+/** Waiting on you: a decision-queue ask with its body, how long it has waited, and a compact re-raise count. */
+function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: NeedsYouVM["workspace"], now: number): NeedsYouVM {
+  const author = ask.from.kind === "agent" ? homeAgent(people, ask.from.id) : homePerson(people, ask.from.id);
+  const from = author ?? (ask.from.name ? { ...unnamedMember(), name: ask.from.name, firstName: ask.from.name } : unnamedMember());
+  const name = "label" in from ? from.label : from.name;
+  const raised = ask.reraised ? `re-raised ×${ask.reraised.count}` : "";
+  const excerpt = askExcerpt(ask.body);
+  return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
+    what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
+    primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) } };
+}
+function countedNeedIds(row: WorkspaceCatchUp, now: number, queue?: DecisionQueue): Set<string> {
   return new Set([
-    ...row.needs_you.asks.filter(ask => Date.parse(ask.until) > now).map(ask => ask.signal_id),
+    ...(queue ? queue.asks.map(ask => ask.signal_id) : row.needs_you.asks.filter(ask => Date.parse(ask.until) > now).map(ask => ask.signal_id)),
     ...row.needs_you.assigned.map(todo => todo.todo_id),
     ...row.needs_you.waiting.map(todo => todo.todo_id),
   ]);
 }
-export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
+/** With a decision queue, its asks (all of them, oldest first) replace the overview's ten newest. */
+export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = [], queue?: DecisionQueue): CatchUpDetail {
   const roster: HomePeopleInput = { workspaceId: row.workspace_id, viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
@@ -291,7 +304,8 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const people = mapHomePeople({ ...roster, agents: roster.agents.filter(agent => agent.work?.facts.connection !== "removed") });
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
-  for (const ask of row.needs_you.asks) {
+  if (queue) for (const ask of queue.asks) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now));
+  else for (const ask of row.needs_you.asks) {
     const card = askNeedsYouCard(ask, historicalPeople, workspace, signals, now);
     if (card) pushNeed(needsYou, card);
   }
@@ -300,11 +314,12 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
     const card = waitingNeedsYouCard(todo, historicalPeople, workspace);
     pushNeed(needsYou, card, card.kind === "request");
   }
-  const counted = countedNeedIds(row, now);
+  const counted = countedNeedIds(row, now, queue);
+  const unlisted = queue ? queue.total - queue.asks.length : 0;
   return { people, signals, openTodos: row.content?.open_todos ?? null, lists: row.content?.lists ?? null,
     files: row.content?.files ?? null, newMessages: row.last_seen_at === null ? null : row.new_messages, needsYou,
-    needsYouComplete: [...counted].every(id => needsYou.some(item => item.id === id)),
-    measuredNeedsYou: needsYou.length + homeAgentFixCards(people, workspace).length };
+    needsYouComplete: unlisted === 0 && [...counted].every(id => needsYou.some(item => item.id === id)),
+    measuredNeedsYou: needsYou.length + unlisted + homeAgentFixCards(people, workspace).length };
 }
 /** Reconcile against the membership list, never let an overview add an unauthorized address. */
 export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map()): CatchUpData[] {
