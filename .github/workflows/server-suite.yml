@@ -397,6 +397,44 @@ jobs:
           path: ${{ matrix.suite }}.log
           retention-days: 14
 
+  # A workflow_dispatch run attaches its checks to the dispatching branch, not to the commit
+  # under test, so a PR head shows none. Post one commit status per suite on the exact SHA
+  # the run checked out (inputs.ref), so reviewers and audits see the result on the head.
+  report-status:
+    name: report status on the tested commit
+    needs: [suite, server-results]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Post the suite result as a commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+          SUITE: ${{ inputs.suite }}
+          SUITE_RESULT: ${{ needs.suite.result }}
+          RESULTS_RESULT: ${{ needs.server-results.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # The ref is an input: allow only a commit SHA or a plain branch name.
+          [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ && "$REF" != *..* ]] || { echo "refusing ref"; exit 1; }
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "no commit for ref"; exit 1; }
+          state=failure
+          if [ "$SUITE_RESULT" = success ] && { [ "$SUITE" != server ] || [ "$RESULTS_RESULT" = success ]; }; then
+            state=success
+          elif [ "$SUITE_RESULT" = cancelled ]; then
+            state=error
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+            -f state="$state" -f context="server suite / ${SUITE}" \
+            -f target_url="$RUN_URL" -f description="dispatch run ${GITHUB_RUN_ID}: ${state}" >/dev/null
+          echo "posted ${state} for ${SUITE} on ${sha}"
+
   server-results:
     name: server results
     needs: suite
