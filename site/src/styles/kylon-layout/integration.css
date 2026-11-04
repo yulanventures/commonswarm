@@ -84,6 +84,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__profile, .hm-frame__side) { grid-column: 1; grid-row: 1; z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > .hm-frame__side { max-block-size: 100%; overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-active]:not([data-channel-details-collapsed]):not(:has(> .hm-frame__profile:not([hidden]))) > .hm-frame__side { display: block; }
   /* The profile overlays the conversation; on its own row it pushed the conversation below it. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame > :is(.hm-frame__main, .hm-frame__profile) { grid-row: 1; }
 }
@@ -298,7 +299,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg { inline-size: 14px; block-size: 14px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .dashboard__user-trigger > svg > path:not(.cs-org-switcher-chevron) { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer .cs-org-switcher-chevron { display: block; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: calc(100% + 8px) auto auto 0; max-block-size: calc(100dvh - 80px); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-drawer[open] .dashboard__user-menu { inset: auto auto calc(100% + 8px) 0; max-block-size: calc(100dvh - 80px); overflow-y: auto; }
 }
 live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty,
 live-dashboard.dashboard[data-kylon-shell] [data-org-menu]:empty + .hm-menu__separator { display: none; }

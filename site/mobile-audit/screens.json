@@ -1353,5 +1353,30 @@
     "requiresSeed": [
       "create_workspace"
     ]
+  },
+  {
+    "id": "nav.scrolled",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-sidebar-participant-list] > .hm-rail__group:last-child"
+      },
+      {
+        "scroll": "[data-sidebar-participant-list] > .hm-rail__group:last-child .hm-rail__agent-item:last-child .hm-rail__agent, [data-sidebar-participant-list] > .hm-rail__group:last-child:not(:has(.hm-rail__agent)) > .hm-rail__person"
+      }
+    ],
+    "ready": "[data-user-menu-trigger]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
   }
 ]

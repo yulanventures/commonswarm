@@ -252,7 +252,7 @@ test("the applied navigation layout keeps the drawer close, picker and account r
       .dashboard__root, [data-panel=channel], .hm-frame { height: 100%; min-height: 0; }
     </style></head><body><live-dashboard class="dashboard" data-kylon-shell><div class="dashboard__root"><section data-panel="channel">
       <div class="hm-frame"><aside class="hm-frame__rail"><div data-workspace-picker-root></div>
-      <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button">Account</button></div>
+      <div class="dashboard__rail-foot" data-user-menu-root><button class="dashboard__user-trigger" data-user-menu-trigger type="button">Account</button><div class="dashboard__user-menu" hidden>${'<button class="hm-rail__link">Account item</button>'.repeat(12)}</div></div>
       <div class="hm-frame__rail-content" data-home-rail-slot><nav class="hm-rail">${'<button class="hm-rail__link">Workspace</button>'.repeat(30)}</nav></div></aside>
       <div class="hm-frame__main"><div data-home-workspace-shell></div></div><aside class="hm-frame__side" data-home-side-slot><div class="hm-side"></div></aside></div>
     </section></div></live-dashboard><script>${bundle.outputFiles[0]?.text}</script><script>
@@ -260,7 +260,8 @@ test("the applied navigation layout keeps the drawer close, picker and account r
       try {
         const app = document.querySelector('live-dashboard'), pickerRoot = app.querySelector('[data-workspace-picker-root]');
         const switched = [], account = app.querySelector('[data-user-menu-trigger]'); let accountOpens = 0;
-        account.addEventListener('click', () => accountOpens++);
+        const popup=app.querySelector('.dashboard__user-menu');
+        account.addEventListener('click', () => { accountOpens++; popup.hidden=!popup.hidden; });
         pickerRoot.append(NavLayout.buildWorkspacePicker(document, [{id:'a',name:'First workspace',archived:false}, {id:'b',name:'Second workspace',archived:false}], 'a', id => switched.push(id)));
         const vm = {sample:false, workspaceId:'a', name:'First workspace', people:[], pane:'chat', todosAvailable:true,
           hrefs:{chat:'?w=a',todos:'?w=a&v=todos',lists:'?w=a&v=lists',files:'?w=a&v=files',wiki:'?w=a&v=wiki',workspaces:'?v=catchup'},menu:{settings:true,adminAccess:false}};
@@ -284,6 +285,9 @@ test("the applied navigation layout keeps the drawer close, picker and account r
         const summary=pickerRoot.querySelector('summary'), item=pickerRoot.querySelector('button[value="b"]');
         const summaryBox=hit(summary); pointer(summary); const choiceBox=hit(item); pointer(item);
         const accountBox=hit(account); pointer(account);
+        const popupBox=point(popup), popupScroll={client:popup.clientHeight,total:popup.scrollHeight};
+        popup.scrollTop=popup.scrollHeight; popupScroll.moved=popup.scrollTop>0;
+        const popupLast=hit(popup.lastElementChild); popup.hidden=true;
         const scrollBefore=scroll.scrollTop; scroll.scrollTop=100; const scrollMoved=scroll.scrollTop>scrollBefore;
         const scrollNodes=['.cs-org-context', '.cs-org-context-scroll', '.cs-org-context-body', '.hm-frame__rail-content', '.hm-rail'].map(selector => {
           const el=shell.querySelector(selector), style=getComputedStyle(el);
@@ -292,12 +296,12 @@ test("the applied navigation layout keeps the drawer close, picker and account r
         const output={phone,header,close:close && {w:close.w,h:close.h,owns:close.owns},returned,
           identity:point(identity),summary:{w:summaryBox.w,h:summaryBox.h,owns:summaryBox.owns},choice:{w:choiceBox.w,h:choiceBox.h,owns:choiceBox.owns},
           account:{w:accountBox.w,h:accountBox.h,owns:accountBox.owns,bottom:accountBox.bottom},scroll:{top:point(scroll).top,bottom:point(scroll).bottom,client:scroll.clientHeight,total:scroll.scrollHeight,moved:scrollMoved},switched,accountOpens,
-          overflow:document.documentElement.scrollWidth>innerWidth, viewport:{width:innerWidth,height:innerHeight}, scrollNodes};
+          popup:{top:popupBox.top,bottom:popupBox.bottom,scroll:popupScroll,lastOwns:popupLast.owns}, overflow:document.documentElement.scrollWidth>innerWidth, viewport:{width:innerWidth,height:innerHeight}, scrollNodes};
         document.documentElement.dataset.navGeometry=btoa(JSON.stringify(output)); host.suspend();
       } catch (error) { document.documentElement.dataset.navError=String(error && error.stack || error); }
     })();</script></body></html>`, "utf8");
     const chrome = await findChrome();
-    for (const [width, height] of [[390, 900], [844, 390], [1440, 900]]) {
+    for (const [width, height] of [[390, 500], [390, 900], [844, 390], [1440, 900]]) {
       const { stdout } = await launchChrome(chrome, ["--allow-file-access-from-files", `--window-size=${width},${height}`, "--dump-dom", `file://${fixture}`],
         { maxBuffer: 20 * 1024 * 1024, timeout: 20_000, killSignal: "SIGKILL" });
       const encoded = stdout.match(/\bdata-nav-geometry="([A-Za-z0-9+/]+={0,2})"/u)?.[1];
@@ -305,6 +309,8 @@ test("the applied navigation layout keeps the drawer close, picker and account r
       const g = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
       assert.equal(g.overflow, false); assert.deepEqual(g.switched, ["b"]); assert.equal(g.accountOpens, 1);
       for (const control of [g.summary, g.choice, g.account]) { assert.equal(control.owns, true); assert.ok(control.w >= 43.5 && control.h >= 43.5); }
+      assert.ok(g.popup.top >= -1 && g.popup.bottom <= g.account.bottom && g.popup.lastOwns, `popup geometry at ${width}×${height}: ${JSON.stringify(g.popup)}`);
+      if (g.popup.scroll.total > g.popup.scroll.client) assert.equal(g.popup.scroll.moved, true);
       assert.ok(g.scroll.total > g.scroll.client && g.scroll.moved, `middle scroll failed at ${width}×${height}: ${JSON.stringify({viewport:g.viewport,scroll:g.scroll,nodes:g.scrollNodes})}`); assert.ok(g.identity.bottom <= g.scroll.top + 1);
       assert.ok(g.account.bottom >= g.scroll.bottom - 1);
       if (width === 390) {
