@@ -1768,3 +1768,117 @@ test("an archived channel is listed to an agent, with the date that says so", as
     "and it carries the date that says it is archived",
   );
 });
+
+/* -------------------------------------------------------------------------
+ * Roster R1b: reraise_ask. Only the ask's exact sender, while the ask is open
+ * and unexpired, once per 24 hours per ask; one note to the ask's own
+ * audience, in reply to the ask, never outliving it. Exact retries replay.
+ * ------------------------------------------------------------------------- */
+
+async function sendWithId(
+  bearer: string,
+  commandId: string,
+  command: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      command_id: commandId, client_version: "0.1.0", workspace_id: f.workspace,
+      stream: { kind: "workspace" }, command,
+    }),
+  });
+  return { status: response.status, body: await response.json() as Record<string, unknown> };
+}
+
+async function askToPeople(): Promise<{ id: string; until: string; body: string }> {
+  const body = `R1b ask ${randomUUID()}`;
+  const posted = await send(f.agentToken, installedPost({
+    signal_kind: "ask", body,
+    to: [{ kind: "user", id: f.ownerId }, { kind: "user", id: f.otherId }],
+  }));
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const signal = signalOf(posted.body);
+  return { id: signal.id as string, until: signal.until as string, body };
+}
+
+async function notesInReplyTo(askId: string): Promise<Array<{ id: string; from_principal: string; body: string; until: Date; to_user_id: string | null }>> {
+  return await sql`SELECT id, from_principal, body, until, to_user_id FROM swarm.signals
+    WHERE workspace_id = ${f.workspace}::uuid AND in_reply_to = ${askId}::uuid ORDER BY created_at`;
+}
+
+test("reraise_ask sends one note to the ask's own audience, no later than the ask, and an exact retry replays it", async () => {
+  const ask = await askToPeople();
+  const commandId = randomUUID();
+  const raised = await sendWithId(f.agentToken, commandId, { kind: "reraise_ask", signal_id: ask.id });
+  assert.equal(raised.status, 200, JSON.stringify(raised.body));
+  const note = signalOf(raised.body);
+  assert.equal(note.kind, "note");
+  assert.equal(note.in_reply_to, ask.id);
+  assert.equal(note.body, `Still waiting: ${ask.body}`);
+  assert.ok(Date.parse(note.until as string) <= Date.parse(ask.until), "the note never outlives the ask");
+  const reraise = raised.body.reraise as Record<string, unknown>;
+  assert.equal(reraise.count, 1);
+  const recipients = await sql`SELECT recipient_user_id FROM swarm.signal_recipients
+    WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${note.id as string}::uuid ORDER BY position`;
+  assert.deepEqual(recipients.map((row) => row.recipient_user_id), [f.ownerId, f.otherId],
+    "the audience is the ask's recipient rows, copied in order");
+
+  const replay = await sendWithId(f.agentToken, commandId, { kind: "reraise_ask", signal_id: ask.id });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(signalOf(replay.body).id, note.id, "the same command id answers with the stored note");
+  assert.equal((await notesInReplyTo(ask.id)).length, 1, "a replay writes no second note");
+  const [ledger] = await sql`SELECT raise_count FROM swarm.ask_reraises
+    WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${ask.id}::uuid`;
+  assert.equal(ledger?.raise_count, 1, "a replay charges no second re-raise");
+
+  const changed = await sendWithId(f.agentToken, commandId, { kind: "reraise_ask", signal_id: (await askToPeople()).id });
+  assert.equal(changed.status, 409);
+  assert.equal(changed.body.error, "command_id_conflict");
+
+  const tooSoon = await send(f.agentToken, { kind: "reraise_ask", signal_id: ask.id });
+  assert.equal(tooSoon.status, 429, JSON.stringify(tooSoon.body));
+  assert.equal(tooSoon.body.error, "reraise_too_soon");
+  assert.equal(typeof tooSoon.body.retry_after, "string");
+  const [unchanged] = await sql`SELECT raise_count, last_raised_at FROM swarm.ask_reraises
+    WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${ask.id}::uuid`;
+  assert.equal(unchanged?.raise_count, 1, "a refused attempt doesn't advance the cap");
+  assert.equal((await notesInReplyTo(ask.id)).length, 1);
+
+  // A day later the slot opens again.
+  await sql`UPDATE swarm.ask_reraises SET last_raised_at = last_raised_at - interval '25 hours'
+    WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${ask.id}::uuid`;
+  const again = await send(f.agentToken, { kind: "reraise_ask", signal_id: ask.id });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal((again.body.reraise as Record<string, unknown>).count, 2);
+});
+
+test("reraise_ask: only the exact sender, only an open addressed ask", async () => {
+  const ask = await askToPeople();
+  // Another agent of the same person is not the sender; a person is not the sender either.
+  for (const bearer of [f.agentTokenTwo, f.ownerJwt]) {
+    const refused = await send(bearer, { kind: "reraise_ask", signal_id: ask.id });
+    assert.equal(refused.status, 404, JSON.stringify(refused.body));
+  }
+  // The sender's own follow-up keeps the ask open (it never answers its own ask).
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, in_reply_to, kind, body, until, created_at)
+    VALUES (${randomUUID()}::uuid, ${f.workspace}::uuid, ${f.principal}::uuid, 'agent', ${ask.id}::uuid, 'note', 'more context',
+      statement_timestamp() + interval '1 hour', statement_timestamp())`;
+  const [open] = await sql`SELECT swarm.ask_answered(${f.workspace}::uuid, ${ask.id}::uuid) AS answered`;
+  assert.equal(open?.answered, false);
+  // An addressed person's answer closes it.
+  const answered = await send(f.otherJwt, installedPost({ in_reply_to: ask.id, body: "Tuesday" }));
+  assert.equal(answered.status, 200, JSON.stringify(answered.body));
+  const late = await send(f.agentToken, { kind: "reraise_ask", signal_id: ask.id });
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, "ask_answered");
+  // A broadcast ask has no audience to copy, so it is refused rather than widened.
+  const broadcast = await send(f.agentToken, installedPost({ signal_kind: "ask", body: `R1b broadcast ${randomUUID()}` }));
+  assert.equal(broadcast.status, 200, JSON.stringify(broadcast.body));
+  const wide = await send(f.agentToken, { kind: "reraise_ask", signal_id: signalOf(broadcast.body).id });
+  assert.equal(wide.status, 409);
+  assert.equal(wide.body.error, "reraise_unsupported");
+  // Unknown fields are refused: no caller-supplied audience or body.
+  const extra = await send(f.agentToken, { kind: "reraise_ask", signal_id: ask.id, to: [{ kind: "user", id: f.ownerId }] });
+  assert.equal(extra.status, 400);
+});

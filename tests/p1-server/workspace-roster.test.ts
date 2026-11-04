@@ -219,3 +219,77 @@ test("connection state matches home_overview's for the same agents", async () =>
     assert.equal(rows.find((entry) => entry.principal_id === id)!.connection, homeConnection.get(id), id);
   }
 });
+
+/** Roster R1b: the person's own queue, read the way the web app reads it (PostgREST role
+ * authenticated with that person's claims). */
+async function queue(ws: string, viewer: string, extraClaims: Record<string, unknown> = {}, role = "authenticated"): Promise<{
+  total: number; truncated: boolean;
+  asks: Array<{ signal_id: string; body: string; from: { kind: string; id: string; name: string | null }; reraised: unknown }>;
+} | null> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${role}`);
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewer, role: "authenticated", ...extraClaims })}, true)`;
+    const [row] = await tx<{ queue: never }[]>`SELECT swarm_read.decision_queue(${ws}::uuid) AS queue`;
+    return row!.queue;
+  });
+}
+
+test("the asking agent's own follow-up never answers its ask, on the roster, Needs-you and the queue", async () => {
+  const owner = await person("Owner");
+  const ws = await workspace(owner, "Self-reply test");
+  const asker = await agent(ws, owner, "Asker");
+  const ask = await signal(ws, { kind: "agent", id: asker }, "ask", "PICK-A-DATE", { toUser: owner, ago: "10 minutes" });
+  await signal(ws, { kind: "agent", id: asker }, "note", "more context", { toUser: owner, replyTo: ask });
+
+  const row = (await roster(ws, owner, asker))?.agents.find((entry) => entry.principal_id === asker);
+  assert.equal(row?.waiting_on_people.count, 1, "the roster still counts the ask");
+  const listed = await queue(ws, owner);
+  assert.deepEqual(listed?.asks.map((entry) => entry.signal_id), [ask], "the queue still lists it");
+  const overview = await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
+    const [result] = await tx<{ overview: { workspaces: Array<{ workspace_id: string; needs_you: { asks: Array<{ signal_id: string }> } }> } }[]>`
+      SELECT swarm_read.home_overview() AS overview`;
+    return result!.overview;
+  });
+  const needs = overview.workspaces.find((entry) => entry.workspace_id === ws)?.needs_you.asks.map((entry) => entry.signal_id);
+  assert.deepEqual(needs, [ask], "Needs-you still shows it");
+
+  // The person's own answer closes it everywhere.
+  await signal(ws, { kind: "user", id: owner }, "note", "Tuesday", { toAgent: asker, replyTo: ask });
+  assert.equal((await roster(ws, owner, asker))?.agents.find((entry) => entry.principal_id === asker)?.waiting_on_people.count, 0);
+  assert.deepEqual((await queue(ws, owner))?.asks, []);
+});
+
+test("decision_queue: the person's own open asks, oldest first; never for an agent's claims or a non-member", async () => {
+  const owner = await person("Owner");
+  const helper = await person("Helper");
+  const outsider = await person("Outsider");
+  const ws = await workspace(owner, "Queue test");
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${ws}::uuid, ${helper}::uuid, 'member')`;
+  const asker = await agent(ws, helper, "Helper's agent");
+  const from = { kind: "agent" as const, id: asker };
+  const newer = await signal(ws, from, "ask", "NEWER", { toUser: owner, ago: "5 minutes" });
+  const older = await signal(ws, from, "ask", "OLDER", { recipients: [owner, helper], ago: "2 hours" });
+  await signal(ws, from, "ask", "FOR-HELPER-ONLY", { toUser: helper, ago: "1 hour" });
+  await signal(ws, from, "ask", "EXPIRED", { toUser: owner, ago: "3 hours", expired: true });
+  const answered = await signal(ws, from, "ask", "ANSWERED", { toUser: owner, ago: "4 hours" });
+  await signal(ws, { kind: "user", id: owner }, "note", "done", { toAgent: asker, replyTo: answered });
+
+  const listed = await queue(ws, owner);
+  assert.ok(listed);
+  assert.deepEqual(listed.asks.map((entry) => entry.signal_id), [older, newer], "oldest first; only this person's open asks");
+  assert.equal(listed.total, 2);
+  assert.equal(listed.truncated, false);
+  assert.equal(listed.asks[0]!.body, "OLDER");
+  assert.deepEqual(listed.asks[0]!.from, { kind: "agent", id: asker, name: "Helper's agent" });
+  assert.equal(listed.asks[0]!.reraised, null);
+
+  // An agent's claims (sub is its owner) are never a person; neither is an outsider.
+  assert.equal(await queue(ws, owner, { agent_principal_id: asker }), null);
+  assert.equal(await queue(ws, outsider), null);
+  // The read and command roles can't execute it at all.
+  for (const role of ["swarm_read", "swarm_command"]) {
+    await assert.rejects(() => queue(ws, owner, {}, role), /permission denied/);
+  }
+});
