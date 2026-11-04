@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { catchUpNeedsYouMoreCount, catchUpNeedsYouVisible, catchUpSubline } from "./home-catchup.ts";
 import { homeBootRoute, resolveHomeRoute, homeViewTitle, mapHomePeople, mapHomeRail,
-  initialCatchUpData, mapCatchUp, fillCatchUpDetails, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNeedsYouCount, homeNotFound, homeFileCount } from "./home-map.ts";
+  initialCatchUpData, mapCatchUp, fillCatchUpDetails, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNeedsYouCount, homeNotFound, homeFileCount, ASKS_UNAVAILABLE_ACTION } from "./home-map.ts";
 const now = Date.parse("2026-10-05T12:00:00Z");
 const workspaces = [{ id: "W", name: "Home" }, { id: "X", name: "Trip" }];
 const input = { viewerId: "zoe", now, sample: false, access: [], signals: [],
@@ -97,14 +97,32 @@ const overviewRow = { workspace_id: "W", name: "Home", role: "owner", last_seen_
   people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [] },
     { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] }],
   needs_you: { asks: [{ signal_id: "ask", from: { kind: "user", id: "amy" }, created_at: "2026-10-05T11:59:00Z", until: "2026-10-06T12:00:00Z" }], assigned: [], waiting: [] } };
-test("overview asks use their immutable body; a missing preview still has a Reply card and invents no quote", () => {
+/** A decision_queue read holding these asks, in the order given (the server sends oldest first). */
+const askQueue = (asks, workspaceId = "W") => ({ workspace_id: workspaceId, generated_at: new Date(now).toISOString(),
+  total: asks.length, truncated: false, asks: asks.map(ask => ({ signal_id: ask.signal_id, from: { name: null, ...ask.from },
+    body: ask.body ?? "", created_at: ask.created_at, until: ask.until, reraised: null })) });
+const noAsks = askQueue([]);
+const overviewAsk = (body, from = overviewRow.needs_you.asks[0].from) => ({ ...overviewRow.needs_you.asks[0], from, body });
+test("queued asks use their body; an empty body or a departed author still has a Reply card and invents no quote", () => {
   const message = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "<img> Call the plumber?", createdAt: "2026-10-05T11:59:00Z" };
-  const detail = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [message]);
+  const detail = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [], askQueue([overviewAsk("<img> Call the plumber?")]));
   assert.equal(detail.needsYou[0].what, "Amy asked you: ‘<img> Call the plumber?’");
   assert.equal(detail.needsYou[0].from.id, "amy");
   assert.equal(detail.needsYou[0].primary.href, "/app?w=W&m=ask");
   assert.equal(detail.needsYouComplete, true);
-  const missing = catchUpDetailFromOverview(overviewRow, "zoe", now, false);
+  // Without the queue the overview's own ask never shows, even when its body was read: it is unmeasured, not clear.
+  for (const signals of [[], [message]]) {
+    const loading = catchUpDetailFromOverview(overviewRow, "zoe", now, false, signals);
+    assert.deepEqual(loading.needsYou, []);
+    assert.equal(loading.needsYouComplete, false);
+    assert.equal(loading.measuredNeedsYou, undefined);
+    const unavailable = catchUpDetailFromOverview(overviewRow, "zoe", now, false, signals, "unavailable");
+    assert.deepEqual(unavailable.needsYou.map(item => [item.id, item.what, item.primary.label, item.primary.action]),
+      [["W:asks-unavailable", "Asks waiting on you couldn't load.", "Retry", ASKS_UNAVAILABLE_ACTION]]);
+    assert.equal(unavailable.needsYouComplete, false);
+    assert.equal(unavailable.measuredNeedsYou, undefined);
+  }
+  const missing = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [], askQueue([overviewAsk("")]));
   assert.equal(missing.needsYou.length, 1);
   assert.equal(missing.needsYou[0].what, "Amy asked you.");
   assert.equal(missing.needsYou[0].primary.label, "Reply");
@@ -113,22 +131,21 @@ test("overview asks use their immutable body; a missing preview still has a Repl
   assert.equal(missing.needsYouComplete, true);
   assert.equal(missing.measuredNeedsYou, 1);
   const departed = { ...overviewRow, people: overviewRow.people.filter(person => person.user_id === "zoe"),
-    needs_you: { asks: [{ ...overviewRow.needs_you.asks[0], from: { kind: "user", id: "left" } }], assigned: [], waiting: [] } };
-  const unnamed = catchUpDetailFromOverview(departed, "zoe", now, false, []);
+    needs_you: { asks: [], assigned: [], waiting: [] } };
+  const unnamed = catchUpDetailFromOverview(departed, "zoe", now, false, [], askQueue([overviewAsk("", { kind: "user", id: "left" })]));
   assert.equal(unnamed.needsYou[0].what, "Workspace member asked you.");
   assert.equal(unnamed.needsYou[0].from.name, "Workspace member");
   assert.equal(unnamed.needsYou[0].primary.label, "Reply");
   assert.equal(unnamed.measuredNeedsYou, 1);
-  const quoted = catchUpDetailFromOverview(departed, "zoe", now, false, [
-    { id: "ask", kind: "ask", from: "left", fromKind: "user", body: "Sign this?", createdAt: "2026-10-05T11:59:00Z" }]);
+  const quoted = catchUpDetailFromOverview(departed, "zoe", now, false, [], askQueue([overviewAsk("Sign this?", { kind: "user", id: "left" })]));
   assert.equal(quoted.needsYou[0].what, "Workspace member asked you: ‘Sign this?’");
-  const removedAgent = catchUpDetailFromOverview({ ...departed, needs_you: { asks: [{ ...overviewRow.needs_you.asks[0], from: { kind: "agent", id: "gone-agent" } }], assigned: [], waiting: [] } }, "zoe", now, false, []);
+  const removedAgent = catchUpDetailFromOverview(departed, "zoe", now, false, [], askQueue([overviewAsk("", { kind: "agent", id: "gone-agent" })]));
   assert.equal(removedAgent.needsYou[0].what, "Workspace member asked you.");
   assert.equal(removedAgent.needsYou[0].primary.href, "/app?w=W&m=ask");
 });
 test("overview to-do references without assignment authors never name the reader as sender or claim all-clear", () => {
   const row = { ...overviewRow, needs_you: { asks: [], assigned: [{ todo_id: "T", title: "Call plumber", state: "open", due_on: null }], waiting: [] } };
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], noAsks);
   assert.equal(detail.needsYou.length, 1);
   assert.equal(detail.needsYou[0].kind, "todo");
   assert.equal(detail.needsYou[0].what, "‘Call plumber’ is assigned to you.");
@@ -140,6 +157,11 @@ test("overview to-do references without assignment authors never name the reader
   assert.equal(vm.emptySummary, null);
   assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
   assert.equal(homeNeedsYouCount({ workspace: workspaces[0], state: "ready", detail }), 1);
+  // Before the ask queue arrives the to-do still shows, but nothing claims the list or the count is complete.
+  const loading = catchUpDetailFromOverview(row, "zoe", now, false);
+  assert.deepEqual(loading.needsYou.map(item => item.id), ["T"]);
+  assert.equal(loading.needsYouComplete, false);
+  assert.equal(homeNeedsYouCount({ workspace: workspaces[0], state: "ready", detail: loading }), null);
 });
 test("one needs-you list feeds the badge, the subline and the cards, including Show N more", () => {
   const disconnected = { work: "disconnected", facts: { transport: "local", turn_only: false, connection: "key_off",
@@ -149,7 +171,7 @@ test("one needs-you list feeds the badge, the subline and the cards, including S
       { principal_id: "A", name: "Claude", status: disconnected, queue: null }] },
     { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
   ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: "T", title: "Call the plumber", state: "open", due_on: null }] } };
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], noAsks);
   const entry = { workspace: workspaces[0], state: "ready", detail };
   const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
   assert.equal(homeNeedsYouCount(entry), 2);
@@ -166,7 +188,7 @@ test("one needs-you list feeds the badge, the subline and the cards, including S
   assert.equal(rail.workspaces[0].needsYou, 2);
   const titles = ["One", "Two", "Three", "Four"];
   const many = catchUpDetailFromOverview({ ...overviewRow, needs_you: { asks: [], waiting: [],
-    assigned: titles.map((title, index) => ({ todo_id: `t${index}`, title, state: "open", due_on: null })) } }, "zoe", now, false);
+    assigned: titles.map((title, index) => ({ todo_id: `t${index}`, title, state: "open", due_on: null })) } }, "zoe", now, false, [], noAsks);
   const manyEntry = { workspace: workspaces[0], state: "ready", detail: many };
   const manyVm = mapCatchUp([manyEntry], "zoe", "Zoe", now, false);
   assert.equal(homeNeedsYouCount(manyEntry), 4);
@@ -177,7 +199,7 @@ test("one needs-you list feeds the badge, the subline and the cards, including S
   assert.deepEqual(catchUpNeedsYouVisible(manyVm.needsYou, true).map(item => item.what), titles.map(title => `‘${title}’ is assigned to you.`));
   assert.equal(catchUpNeedsYouMoreCount(manyVm.needsYou, true), 0);
   const asks = ["a", "b", "c", "d"].map(id => ({ signal_id: id, from: { kind: "user", id: "amy" }, created_at: "2026-10-05T11:00:00Z", until: "2026-10-06T12:00:00Z" }));
-  const askDetail = catchUpDetailFromOverview({ ...overviewRow, needs_you: { asks, assigned: [], waiting: [] } }, "zoe", now, false, []);
+  const askDetail = catchUpDetailFromOverview({ ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] } }, "zoe", now, false, [], askQueue(asks));
   const askEntry = { workspace: workspaces[0], state: "ready", detail: askDetail };
   const askVm = mapCatchUp([askEntry], "zoe", "Zoe", now, false);
   assert.equal(homeNeedsYouCount(askEntry), 4);
@@ -187,7 +209,7 @@ test("one needs-you list feeds the badge, the subline and the cards, including S
   assert.equal(catchUpNeedsYouMoreCount(askVm.needsYou, false), 1);
   assert.equal(askVm.needsYou.every(item => item.what === "Amy asked you." && item.primary.label === "Reply"), true);
 });
-test("a failed ask preview, an assigned to-do and a disconnected agent share one count", () => {
+test("a queued ask, an assigned to-do and a disconnected agent share one count; an unread queue leaves the count unmeasured", () => {
   const disconnected = { work: "disconnected", facts: { transport: "local", turn_only: false, connection: "key_off",
     last_activity_at: "2026-10-05T11:00:00Z", messages_waiting_since: null, doing: null, working_on: null } };
   const row = { ...overviewRow, people: [
@@ -196,7 +218,7 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
     { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] },
   ], needs_you: { asks: overviewRow.needs_you.asks, waiting: [], assigned: [
     { todo_id: "T", title: "Call the plumber", state: "open", due_on: null }] } };
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false, []);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], askQueue([overviewAsk("")]));
   const entry = { workspace: workspaces[0], state: "ready", detail };
   const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
   assert.equal(homeNeedsYouCount(entry), 3);
@@ -209,8 +231,7 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
   ]);
   assert.equal(vm.needsYou[0].what.includes("‘"), false);
   assert.equal(vm.needsYou[0].primary.href, "/app?w=W&m=ask");
-  const preview = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "Sign this?", createdAt: "2026-10-05T11:59:00Z" };
-  const drawn = catchUpDetailFromOverview(row, "zoe", now, false, [preview]);
+  const drawn = catchUpDetailFromOverview(row, "zoe", now, false, [], askQueue([overviewAsk("Sign this?")]));
   const drawnEntry = { workspace: workspaces[0], state: "ready", detail: drawn };
   const drawnVm = mapCatchUp([drawnEntry], "zoe", "Zoe", now, false);
   assert.equal(drawn.needsYou[0].what, "Amy asked you: ‘Sign this?’");
@@ -221,6 +242,21 @@ test("a failed ask preview, an assigned to-do and a disconnected agent share one
   const rail = mapHomeRail([workspaces[0]], { view: "catchup" }, null, false, new Map([["W", count]]));
   assert.equal(rail.catchUp.needsYou, 3);
   assert.equal(rail.workspaces[0].needsYou, 3);
+  // The queue couldn't be read: Retry stands in for the asks, the to-do and the fix still show, and no count is claimed.
+  const unread = catchUpDetailFromOverview(row, "zoe", now, false, [], "unavailable");
+  const unreadEntry = { workspace: workspaces[0], state: "ready", detail: unread };
+  const unreadVm = mapCatchUp([unreadEntry], "zoe", "Zoe", now, false);
+  assert.deepEqual(unreadVm.needsYou.map(item => [item.kind, item.what, item.primary.label]), [
+    ["ask", "Asks waiting on you couldn't load.", "Retry"],
+    ["todo", "‘Call the plumber’ is assigned to you.", "Open"],
+    ["agent-fix", "Your Claude is disconnected: key turned off.", "What to do"],
+  ]);
+  assert.equal(unreadVm.needsYou[0].primary.href, undefined);
+  assert.equal(unreadVm.needsYou[0].primary.action, ASKS_UNAVAILABLE_ACTION);
+  assert.equal(homeNeedsYouCount(unreadEntry), null);
+  const unreadRail = mapHomeRail([workspaces[0]], { view: "catchup" }, null, false, new Map([["W", homeNeedsYouCount(unreadEntry)]]));
+  assert.equal(unreadRail.catchUp.needsYou, null);
+  assert.equal(unreadRail.workspaces[0].needsYou, null);
 });
 test("overview credentials retain each measured fault and last activity without an access or presence row", () => {
   const facts = { transport: "hosted_mcp", turn_only: true, last_activity_at: "2026-10-05T10:00:00Z", messages_waiting_since: null, doing: null, working_on: null };
@@ -243,7 +279,7 @@ test("confirmed not-found links use the exact Home copy and Catch up address; re
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-test("live Catch up keeps a successful overview when ask previews fail, without claiming all-clear", async () => {
+test("live Catch up keeps a successful overview when the ask queue fails, without claiming all-clear", async () => {
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
   let loader;
@@ -255,50 +291,89 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
   const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
   const row = { ...overviewRow, content: { open_todos: 4, lists: 3, files: 2 } };
   const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] };
-  const ask = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "Call the plumber?", createdAt: "2026-10-05T11:59:00Z" };
   const latest = { id: "note", kind: "note", from: "amy", fromKind: "user", body: "Quotes arrived.", until: null, createdAt: "2026-10-05T11:58:00Z" };
-  const outcomes = [null, Object.assign(new Error("Read failed"), { status: 500 }),
+  // "ok" reads the queue; null is a NULL read; the rest are an HTTP 500, a timeout and a failed fetch.
+  const outcomes = ["ok", null, Object.assign(new Error("Read failed"), { status: 500 }),
     new DOMException("Deadline", "TimeoutError"), new TypeError("Failed to fetch")];
-  for (const failure of outcomes) {
+  for (const outcome of outcomes) {
     const paints = []; const reads = [];
     const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
-      homeOverviewAsks: async (workspaceId, ids) => {
-        reads.push("asks"); assert.equal(workspaceId, "W"); assert.deepEqual(Array.from(ids), ["ask"]);
-        if (failure) throw failure;
-        return [ask];
-      },
+      homeOverviewAsks: async () => { reads.push("overview-asks"); return []; },
+      homeServer: () => ({ decisionQueue: async workspaceId => {
+        reads.push("queue"); assert.equal(workspaceId, "W");
+        if (outcome === "ok") return askQueue([overviewAsk("Call the plumber?")]);
+        if (outcome === null) return null;
+        throw outcome;
+      } }),
       feed: async (workspaceId, limit) => {
         reads.push("latest"); assert.equal(workspaceId, "W"); assert.equal(limit, 50); return [latest];
       },
-      renderHomeCatchUp: () => paints.push(mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false)),
+      renderHomeCatchUp: () => paints.push({ vm: mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false),
+        count: context.homeOverviewCounts.get("W"), complete: context.catchUpData[0]?.detail?.needsYouComplete }),
     };
     await runInNewContext(script, context);
-    assert.equal(paints[0].workspaces[0].state, "loading", "membership cards paint before detail reads");
-    assert.ok(paints.slice(1).every(vm => vm.workspaces[0].state === "ready"), "a preview failure cannot discard a loaded overview");
-    const vm = paints.at(-1);
+    assert.equal(paints[0].vm.workspaces[0].state, "loading", "membership cards paint before detail reads");
+    assert.ok(paints.slice(1).every(paint => paint.vm.workspaces[0].state === "ready"), "a queue failure cannot discard a loaded overview");
+    const { vm, count, complete } = paints.at(-1);
     assert.equal(vm.workspaces[0].peopleSummary, "You and Amy");
     assert.deepEqual([vm.workspaces[0].openTodos, vm.workspaces[0].lists, vm.workspaces[0].files], [4, 3, 2]);
-    assert.deepEqual(reads, ["asks", "latest"], "both positive and failed previews reach the real loading path");
+    assert.deepEqual(reads, ["queue", "latest"], "every outcome reaches the real loading path, with no read of the overview's asks");
     assert.equal(vm.latest[0].excerpt, "Quotes arrived.");
     assert.equal(vm.latest[0].author?.id, "amy", "a Latest row carries the member who posted it, for its picture");
     assert.equal(vm.latest[0].author?.name, "Amy");
-    assert.equal(context.homeOverviewCounts.get("W"), 1, "a failed ask preview keeps the overview's measured count");
-    assert.equal(context.catchUpData[0].detail.needsYouComplete, true);
+    // The overview's first paint: its own ask is not shown, and neither the list nor the count is claimed.
+    assert.deepEqual(paints[1].vm.needsYou, []);
+    assert.equal(paints[1].count, null);
+    assert.equal(paints[1].complete, false);
+    assert.equal(paints[1].vm.emptySummary, "Checked 1 of 1 workspace.", "the loading paint replaces the all-clear subline");
     assert.equal(vm.needsYou.length, 1);
-    assert.equal(vm.needsYou[0].what, failure ? "Amy asked you." : "Amy asked you: ‘Call the plumber?’");
-    assert.equal(vm.needsYou[0].primary.label, "Reply");
-    assert.equal(vm.needsYou[0].primary.href, "/app?w=W&m=ask");
-    assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
-    assert.equal(vm.emptySummary, null);
-    assert.equal(paints[1].needsYou.length, 1);
-    assert.equal(paints[1].needsYou[0].what, "Amy asked you.");
-    assert.equal(catchUpSubline(paints[1]), "1 thing needs you across 1 workspace.");
-    assert.equal(context.homeOverviewCounts.get("W"), paints[1].needsYou.length);
+    if (outcome === "ok") {
+      assert.equal(count, 1);
+      assert.equal(complete, true);
+      assert.equal(vm.needsYou[0].what, "Amy asked you: ‘Call the plumber?’");
+      assert.equal(vm.needsYou[0].primary.label, "Reply");
+      assert.equal(vm.needsYou[0].primary.href, "/app?w=W&m=ask");
+      assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
+      assert.equal(vm.emptySummary, null);
+    } else {
+      assert.equal(count, null, "a failed queue read is an unmeasured count, not the overview's");
+      assert.equal(complete, false);
+      assert.equal(vm.needsYou[0].id, "W:asks-unavailable");
+      assert.equal(vm.needsYou[0].what, "Asks waiting on you couldn't load.");
+      assert.equal(vm.needsYou[0].primary.label, "Retry");
+      assert.equal(vm.needsYou[0].primary.action, ASKS_UNAVAILABLE_ACTION);
+    }
   }
+});
+test("Catch up's Retry on unavailable asks reloads Catch up; other actions follow their link", () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let render;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "renderHomeCatchUp") render = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.ok(render);
+  const script = ts.transpile(`const ${render.getText(file)}; renderHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
+  let callbacks; const reloads = []; const navigations = [];
+  const detail = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [], "unavailable");
+  const context = { homeRoute: { view: "catchup" }, one: () => ({ childElementCount: 0 }), members: [], session: null,
+    catchUpData: [{ workspace: workspaces[0], state: "ready", detail }], homeViewerId: () => "zoe", greetingName: () => "Zoe",
+    sampleMode: false, catchUpExpanded: false, SAMPLE_ROSTERS: {}, Date: { now: () => now }, mapCatchUp,
+    homeStructureKey: () => "key", homeCatchUpKey: "", refreshHomeCatchUpTimes: () => {}, renderHomeRail: () => {},
+    document: {}, replaceHomeRegion: () => {}, ASKS_UNAVAILABLE_ACTION,
+    buildCatchUp: (_doc, _vm, given) => { callbacks = given; return { querySelector: () => null }; },
+    loadHomeCatchUp: async () => { reloads.push(true); }, navigateHomeHref: href => navigations.push(href) };
+  runInNewContext(script, context);
+  const retry = detail.needsYou[0];
+  callbacks.onNeedsYouAction(retry.primary.action, retry);
+  assert.deepEqual([reloads.length, navigations], [1, []]);
+  callbacks.onNeedsYouAction("open", { primary: { label: "Reply", href: "/app?w=W&m=ask" } });
+  assert.deepEqual([reloads.length, navigations], [1, ["/app?w=W&m=ask"]]);
 });
 // The to-do reducer is the assignment record. These helpers only run it; they do not describe the card.
 import { createHash } from "node:crypto";
@@ -365,7 +440,7 @@ test("an accepted offer records the accepter, and the needs-you card names nobod
     { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [] },
     { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
   ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: accepted.todo_id, title: accepted.title, state: "open", due_on: null, assigned_by: accepted.assigned_by }] } };
-  const acceptedDetail = catchUpDetailFromOverview(acceptedRow, "zoe", now, false);
+  const acceptedDetail = catchUpDetailFromOverview(acceptedRow, "zoe", now, false, [], noAsks);
   const acceptedEntry = { workspace: workspaces[0], state: "ready", detail: acceptedDetail };
   const acceptedVm = mapCatchUp([acceptedEntry], "zoe", "Zoe", now, false);
   assert.equal(acceptedDetail.needsYou[0].what, "‘Call the plumber’ is assigned to you.");
@@ -384,7 +459,7 @@ test("an accepted offer records the accepter, and the needs-you card names nobod
         last_activity_at: "2026-10-05T11:59:00Z", messages_waiting_since: null, doing: null, working_on: null } }, queue: null }] },
     { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
   ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: direct.todo_id, title: direct.title, state: "open", due_on: null, assigned_by: direct.assigned_by }] } };
-  const directDetail = catchUpDetailFromOverview(directRow, "zoe", now, false);
+  const directDetail = catchUpDetailFromOverview(directRow, "zoe", now, false, [], noAsks);
   const directEntry = { workspace: workspaces[0], state: "ready", detail: directDetail };
   const directVm = mapCatchUp([directEntry], "zoe", "Zoe", now, false);
   assert.equal(directDetail.needsYou[0].what, "‘Call the plumber’ is assigned to you.");
@@ -405,7 +480,7 @@ test("a pending request opens the to-do and does not answer it on the card", () 
   ], needs_you: { asks: [], assigned: [], waiting: [
     { todo_id: "dinner", title: "Book dinner", state: "open", due_on: null, reason: "request", agent_id: "A" },
   ] } };
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], noAsks);
   const card = detail.needsYou[0];
   const entry = { workspace: workspaces[0], state: "ready", detail };
   const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
@@ -435,7 +510,7 @@ test("a pending request on a to-do the viewer already holds replaces the assignm
   ], needs_you: { asks: [],
     assigned: [ref, { todo_id: "plumber", title: "Call the plumber", state: "open", due_on: null }],
     waiting: [{ ...ref, reason: "request", agent_id: pending.offer.to.id }] } };
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], noAsks);
   const entry = { workspace: workspaces[0], state: "ready", detail };
   const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
   const dinner = detail.needsYou.filter(item => item.id === pending.todo_id);
@@ -483,21 +558,19 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
     { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
     { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] },
   ], needs_you: { asks: overviewRow.needs_you.asks, waiting: [], assigned: [assigned] } };
-  const ask = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "Call the plumber?", createdAt: "2026-10-05T11:59:00Z" };
-  const load = async (askFailure, todoFailure) => {
+  const load = async (queueOutcome, todoFailure) => {
     const paints = []; const todoReads = [];
     const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => ({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }),
-      homeOverviewAsks: async () => { if (askFailure) throw askFailure; return [ask]; },
       feed: async () => [],
       homeServer: () => ({ readTodo: async (workspaceId, todoId) => {
         todoReads.push([workspaceId, todoId]);
         if (todoFailure) throw todoFailure;
         return { todo: { todo_id: todoId, assigned_by: recorded } };
-      } }),
+      }, decisionQueue: async () => { if (queueOutcome instanceof Error) throw queueOutcome; return queueOutcome; } }),
       renderHomeCatchUp: () => paints.push({
         vm: mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false),
         count: context.homeOverviewCounts.get("W"),
@@ -506,33 +579,45 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
     await runInNewContext(script, context);
     return { paints, todoReads };
   };
+  const todoCard = (paint, sentence) => {
+    const card = paint.vm.needsYou.find(item => item.kind === "todo");
+    assert.equal(card.what, sentence);
+    assert.equal(card.primary.label, "Open");
+    assert.equal(card.primary.href, "/app?w=W&todo=T");
+    assert.equal(card.what.includes("Nikki"), false);
+  };
   const agree = (paint, sentence) => {
     assert.equal(paint.count, 3);
     assert.equal(paint.vm.needsYou.length, 3);
     assert.equal(catchUpSubline(paint.vm), "3 things need you across 1 workspace.");
-    assert.equal(paint.vm.needsYou[1].what, sentence);
-    assert.equal(paint.vm.needsYou[1].primary.label, "Open");
-    assert.equal(paint.vm.needsYou[1].primary.href, "/app?w=W&todo=T");
+    todoCard(paint, sentence);
   };
-  const named = await load(new Error("Read failed"), null);
+  // The overview's first paint shows the to-do and the fix, never the overview's ask, and claims no count.
+  const firstPaint = paint => {
+    todoCard(paint, "‘Call the plumber’ is assigned to you.");
+    assert.deepEqual(paint.vm.needsYou.map(item => item.kind), ["todo", "agent-fix"]);
+    assert.equal(paint.count, null);
+  };
+  const named = await load(askQueue([overviewAsk("")]), null);
   assert.deepEqual(named.todoReads, []);
-  agree(named.paints[1], "‘Call the plumber’ is assigned to you.");
-  assert.equal(named.paints[1].vm.needsYou[0].what, "Amy asked you.");
+  firstPaint(named.paints[1]);
   agree(named.paints.at(-1), "‘Call the plumber’ is assigned to you.");
-  assert.equal(named.paints.at(-1).vm.needsYou[1].what.includes("Nikki"), false);
   assert.equal(named.paints.at(-1).vm.needsYou[0].what, "Amy asked you.");
   assert.equal(named.paints.at(-1).vm.needsYou[0].what.includes("‘"), false);
   assert.equal(named.paints.at(-1).vm.needsYou[2].what, "Your Claude is disconnected: key turned off.");
   const unnamed = await load(new TypeError("Failed to fetch"), new DOMException("Deadline", "TimeoutError"));
   assert.deepEqual(unnamed.todoReads, []);
-  agree(unnamed.paints[1], "‘Call the plumber’ is assigned to you.");
-  agree(unnamed.paints.at(-1), "‘Call the plumber’ is assigned to you.");
-  assert.equal(unnamed.paints.at(-1).vm.needsYou[0].what, "Amy asked you.");
-  const quoted = await load(null, null);
+  firstPaint(unnamed.paints[1]);
+  const failed = unnamed.paints.at(-1);
+  todoCard(failed, "‘Call the plumber’ is assigned to you.");
+  assert.deepEqual(failed.vm.needsYou.map(item => [item.kind, item.primary.label]), [["ask", "Retry"], ["todo", "Open"], ["agent-fix", "What to do"]]);
+  assert.equal(failed.vm.needsYou[0].what, "Asks waiting on you couldn't load.");
+  assert.equal(failed.count, null);
+  const quoted = await load(askQueue([overviewAsk("Call the plumber?")]), null);
   assert.deepEqual(quoted.todoReads, []);
   agree(quoted.paints.at(-1), "‘Call the plumber’ is assigned to you.");
   assert.equal(quoted.paints.at(-1).vm.needsYou[0].what, "Amy asked you: ‘Call the plumber?’");
-  assert.equal(quoted.paints[1].vm.needsYou.length, quoted.paints.at(-1).vm.needsYou.length);
+  assert.equal(quoted.paints[1].vm.needsYou.length + 1, quoted.paints.at(-1).vm.needsYou.length, "the queue adds exactly its ask");
 });
 test("optional working-on reads keep loaded chat usable on returned errors, timeouts and thrown network errors", async () => {
   const source = readFileSync(new URL("./commonswarm.ts", import.meta.url), "utf8");
@@ -650,19 +735,23 @@ function overviewAnswered(askId, table, viewerId, ownedAgentIds) {
     ? row.from === viewerId : row.fromKind === "agent" && ownedAgentIds.includes(row.from)));
 }
 const askIds = vm => vm.needsYou.filter(item => item.kind === "ask").map(item => item.id);
-test("an overview's needs-you list stays the list when a feed page still holds the ask", () => {
+test("the decision queue stays the ask list when a feed page still holds the ask", () => {
   const people = mapHomePeople(input);
   const excluded = { ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] } };
   const feed = [directedAsk];
   const hidden = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: {
-    ...catchUpDetailFromOverview(excluded, "zoe", now, false, []), signals: feed } }], "zoe", "Zoe", now, false);
+    ...catchUpDetailFromOverview(excluded, "zoe", now, false, [], noAsks), signals: feed } }], "zoe", "Zoe", now, false);
   assert.equal(feed.some(signal => signal.id === directedAsk.id), true);
-  assert.deepEqual(askIds(hidden), excluded.needs_you.asks.map(ask => ask.signal_id));
+  assert.deepEqual(askIds(hidden), []);
   const other = { ...directedAsk, id: "other", body: "Bring the ladder?" };
   const kept = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: {
-    ...catchUpDetailFromOverview(overviewRow, "zoe", now, false, [directedAsk]), signals: [directedAsk, other, viewerReply] } }], "zoe", "Zoe", now, false);
-  assert.deepEqual(askIds(kept), overviewRow.needs_you.asks.map(ask => ask.signal_id));
+    ...catchUpDetailFromOverview(overviewRow, "zoe", now, false, [], askQueue([overviewAsk(directedAsk.body)])), signals: [directedAsk, other, viewerReply] } }], "zoe", "Zoe", now, false);
+  assert.deepEqual(askIds(kept), [directedAsk.id]);
   assert.equal(kept.needsYou.find(item => item.id === directedAsk.id).what, `Amy asked you: ‘${directedAsk.body}’`);
+  // The overview's own list is no substitute: without the queue its ask is not shown, even with the ask in the feed.
+  const unqueued = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: {
+    ...catchUpDetailFromOverview(overviewRow, "zoe", now, false, [directedAsk]), signals: [directedAsk] } }], "zoe", "Zoe", now, false);
+  assert.deepEqual(askIds(unqueued), []);
   const fanOut = detail => mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: { people, signals: [], openTodos: null, lists: null, files: null, newMessages: null, ...detail } }], "zoe", "Zoe", now, false);
   const answeredTable = [directedAsk, viewerReply];
   const visible = answeredTable.filter(row => visibleInRead(row, "zoe", ownedAgents));
@@ -681,7 +770,7 @@ test("an overview's needs-you list stays the list when a feed page still holds t
   assert.deepEqual(askIds(fanOut({ signals: [directedAsk], signalsComplete: true })), []);
   assert.deepEqual(askIds(fanOut({ signals: [directedAsk, viewerReply] })), []);
 });
-test("the live loader keeps the overview list and does not treat a short feed as an open ask", async () => {
+test("the live loader keeps the queue's list and does not treat a short feed as an open ask", async () => {
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
   let loader;
@@ -692,14 +781,14 @@ test("the live loader keeps the overview list and does not treat a short feed as
   visit(file);
   assert.ok(loader);
   const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
-  const load = async (overview, pageFor) => {
+  const load = async (overview, pageFor, decisionQueue = async () => noAsks) => {
     const paints = []; const pages = [];
     const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
       homeOverview: async () => overview,
-      homeOverviewAsks: async (_workspaceId, ids) => ids.length ? [directedAsk] : [],
+      homeServer: () => ({ decisionQueue }),
       feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },
       memberRoster: async () => ({ members: input.members }), roster: async () => input.agents,
       agentAccessStatuses: async () => [], homeWorkingOn: async () => [], workspaceFiles: async () => [],
@@ -707,16 +796,19 @@ test("the live loader keeps the overview list and does not treat a short feed as
     await runInNewContext(script, context);
     return { vm: paints.at(-1), pages };
   };
-  const serverList = row => row.needs_you.asks.map(ask => ask.signal_id);
   const excluded = { ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] } };
   const hidden = await load({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [excluded] },
     () => [directedAsk, { ...directedAsk, id: "other", body: "Bring the ladder?" }]);
   assert.equal(hidden.pages[0].rows >= 1, true);
-  assert.deepEqual(askIds(hidden.vm), serverList(excluded));
+  assert.deepEqual(askIds(hidden.vm), []);
   const kept = await load({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [overviewRow] },
-    () => [directedAsk, { ...directedAsk, id: "other", body: "Bring the ladder?" }, viewerReply]);
-  assert.deepEqual(askIds(kept.vm), serverList(overviewRow));
+    () => [directedAsk, { ...directedAsk, id: "other", body: "Bring the ladder?" }, viewerReply], async () => askQueue([overviewAsk(directedAsk.body)]));
+  assert.deepEqual(askIds(kept.vm), [directedAsk.id]);
   assert.equal(kept.vm.needsYou.find(item => item.id === directedAsk.id).what, `Amy asked you: ‘${directedAsk.body}’`);
+  // A NULL queue read shows Retry, never the overview's ask, even with the ask on the feed page.
+  const unread = await load({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [overviewRow] },
+    () => [directedAsk], async () => null);
+  assert.deepEqual(askIds(unread.vm), ["W:asks-unavailable"]);
   const full = await load(null, limit => [directedAsk, ...Array.from({ length: limit - 1 }, (_, index) => ({ id: `n${index}`, kind: "note", from: "amy", fromKind: "user", body: "note", until: null, createdAt: "2026-10-05T10:00:00Z" }))]);
   assert.equal(full.pages[0].rows, full.pages[0].limit);
   assert.deepEqual(askIds(full.vm), []);

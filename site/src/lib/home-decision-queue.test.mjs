@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHomeServer, parseDecisionQueue, HomeToolsUnavailable } from "./home/client.ts";
-import { catchUpDetailFromOverview, homeNeedsYouCount, mapCatchUp } from "./home-map.ts";
+import { ASKS_UNAVAILABLE_ACTION, catchUpDetailFromOverview, homeNeedsYouCount, mapCatchUp } from "./home-map.ts";
 import { needsYouCard } from "./home-primitives.ts";
+import { catchUpSubline } from "./home-catchup.ts";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -98,7 +99,7 @@ test("a queued ask body renders as text, never markup", () => {
   assert.equal(find(card, "hm-eyebrow").textContent, "Needs you · Home · 1 hour ago");
 });
 
-test("the live Catch up loader takes asks from the queue and skips the preview read; without it, the overview stands", async () => {
+test("the live Catch up loader takes asks from the queue; when the queue can't be read, asks show as unavailable with Retry, never the overview's list", async () => {
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
   let loader;
@@ -129,9 +130,30 @@ test("the live Catch up loader takes asks from the queue and skips the preview r
   assert.deepEqual(queued.vm.needsYou.map(item => item.id), ["old", "new"]);
   assert.equal(queued.count, 2);
   for (const missing of [async () => { throw new HomeToolsUnavailable(); }, async () => null]) {
-    const fallback = await load(missing);
-    assert.deepEqual(fallback.reads, ["queue:W", "asks"]);
-    assert.deepEqual(fallback.vm.needsYou.map(item => item.id), ["new"]);
-    assert.equal(fallback.vm.workspaces[0].state, "ready");
+    const failed = await load(missing);
+    assert.deepEqual(failed.reads, ["queue:W"], "no fallback read of the overview's asks");
+    assert.deepEqual(failed.vm.needsYou.map(item => item.id), ["W:asks-unavailable"], "never the overview's ask, never empty");
+    assert.equal(failed.vm.needsYou[0].primary.label, "Retry");
+    assert.equal(failed.vm.needsYou[0].primary.action, ASKS_UNAVAILABLE_ACTION);
+    assert.equal(failed.count, null, "an unread queue is an unmeasured count, not zero");
+    assert.equal(failed.vm.workspaces[0].state, "ready", "the rest of the workspace still shows");
   }
+});
+
+test("an unread queue never shows the overview's asks, and the count is unmeasured", () => {
+  const withOverviewAsk = { ...row, needs_you: { ...row.needs_you, asks: [{ signal_id: "legacy", from: { kind: "user", id: "amy" }, created_at: "2026-11-04T11:30:00Z", until: "2026-11-05T12:00:00Z" }] } };
+  const detail = catchUpDetailFromOverview(withOverviewAsk, "zoe", now, false, [], "unavailable");
+  assert.deepEqual(detail.needsYou.map(item => item.id), [`${row.workspace_id}:asks-unavailable`]);
+  assert.equal(detail.needsYouComplete, false);
+  assert.equal(detail.measuredNeedsYou, undefined);
+});
+
+test("the Retry card isn't counted as a thing that needs you, and unread asks never read as all clear", () => {
+  const entry = detail => [{ workspace: { id: "W", name: "Home" }, state: "ready", detail }];
+  const unread = mapCatchUp(entry(catchUpDetailFromOverview(row, "zoe", now, false, [], "unavailable")), "zoe", "Zoe", now, false);
+  assert.equal(unread.needsYou.length, 1, "the Retry card shows");
+  assert.notEqual(catchUpSubline(unread), "Nothing needs you right now.");
+  assert.equal(catchUpSubline(unread), "Checked 1 of 1 workspace.");
+  const read = mapCatchUp(entry(catchUpDetailFromOverview(row, "zoe", now, false, [], queue([ask("x", "2026-11-04T11:00:00Z")]))), "zoe", "Zoe", now, false);
+  assert.equal(catchUpSubline(read), "1 thing needs you across 1 workspace.");
 });
