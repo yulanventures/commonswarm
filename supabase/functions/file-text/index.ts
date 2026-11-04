@@ -1,6 +1,9 @@
 /** Isolated PDF text worker. Created fresh by the edge main service for each extraction,
- * with no environment, denied network/filesystem/process permissions and its own memory and
- * CPU limits (deploy/edge-runtime/main/file-text.ts). It never sees a URL, credential, token
+ * with no environment and its own memory and CPU limits (deploy/edge-runtime/main/file-text.ts).
+ * Network, env and write are denied by its permission set. Reads of the container's
+ * secret-bearing paths are unreachable from its view, measured by the sandbox probe in CI and
+ * by the release gate (deploy/edge-runtime/file-text-probe.sh); deny_read/deny_sys are not
+ * relied on, since the pinned runtime does not enforce them for these calls. It never sees a URL, credential, token
  * or caller header: only the PDF bytes main already bounded. Errors are fixed and silent. */
 import { getDocumentProxy } from "npm:unpdf@1.9.1";
 import { extractSequential, type PdfDocument, type PdfTextItem } from "./extract.ts";

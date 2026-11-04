@@ -302,43 +302,20 @@ test("the PDF parser worker really runs with network, filesystem, process, env a
   // The same name and the same main-created worker options, with a probe in place of the parser.
   const copy = join(workDir, "functions");
   cpSync(functionsRoot, copy, { recursive: true });
-  writeFileSync(join(copy, "file-text", "index.ts"), `
-const attempt = async (run: () => Promise<unknown>) => {
-  try { await run(); return "allowed"; }
-  catch (error) {
-    const name = (error as { name?: string })?.name ?? "unknown";
-    return name === "NotCapable" || name === "PermissionDenied" ? "denied" : "error:" + name;
-  }
-};
-Deno.serve(async (request) => {
-  await request.arrayBuffer();
-  const results = {
-    net: await attempt(() => fetch("http://1.1.1.1/", { signal: AbortSignal.timeout(3000) })),
-    env: await attempt(async () => Deno.env.get("PATH")),
-    write: await attempt(() => Deno.writeTextFile("/tmp/file-text-probe", "x")),
-    // What a hostile PDF would want to read: the container's environment (where the
-    // service keys live) and the other functions' sources.
-    read_environ: await attempt(() => Deno.readTextFile("/proc/self/environ")),
-    read_other_function: await attempt(() => Deno.readTextFile("/var/tmp/commonswarm-functions/mcp/index.ts")),
-    read_own_source: await attempt(() => Deno.readTextFile(new URL(import.meta.url))),
-    run: await attempt(() => new Deno.Command("true").output()),
-    sys_hostname: await attempt(async () => Deno.hostname()),
-  };
-  return new Response(JSON.stringify({ text: JSON.stringify(results), truncated: false, pages_read: 0, page_count: 0 }),
-    { status: 200, headers: { "content-type": "application/json" } });
-});
-`);
+  // The same probe the release gate installs (deploy/edge-runtime/file-text-probe.sh).
+  cpSync(new URL("../../deploy/edge-runtime/file-text-probe/index.ts", import.meta.url), join(copy, "file-text", "index.ts"));
   runtime = await startComposeEdgeRuntime({ workDir, functionsRoot: copy, envText: `${dummyEdgeEnv()}SWARM_FILE_TEXT_TOKEN=${token}\n` });
   await awaitHealth(runtime.baseUrl);
   const probe = postInside(runtime.container, token, textPdf(["BT ET"]));
   assert.equal(probe.status, 200, probe.body);
   const results = JSON.parse((JSON.parse(probe.body) as { text: string }).text) as Record<string, string>;
   t.diagnostic(`parser sandbox probe: ${JSON.stringify(results)}`);
-  // Enforced by the worker's permissions:
+  // The release gate's exact pass rule: network, env and write denied by the permission set;
+  // every secret-bearing path unreadable (denied, or absent from the worker's view); no
+  // subprocess. deny_read/deny_sys are not claimed: the runtime does not enforce them here.
   assert.deepEqual([results.net, results.env, results.write], ["denied", "denied", "denied"], JSON.stringify(results));
-  // The secrets and code a hostile PDF would want stay out of reach, whether the runtime's
-  // own sandbox or the permission set is what stops it:
-  for (const key of ["read_environ", "read_other_function", "run"]) {
-    assert.notEqual(results[key], "allowed", `${key}: ${JSON.stringify(results)}`);
-  }
+  const reads = Object.keys(results).filter((key) => key.startsWith("read_"));
+  assert.ok(reads.length >= 8, JSON.stringify(results));
+  for (const key of reads) assert.ok(["denied", "error:NotFound"].includes(results[key]!), `${key}: ${JSON.stringify(results)}`);
+  assert.notEqual(results.run, "allowed");
 });

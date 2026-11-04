@@ -9,7 +9,9 @@
  * that) and the container port is published only on the host's loopback. At most ONE parser isolate is alive at a time,
  * counted until the runtime no longer lists it (not merely until it answered); excess work
  * gets a fixed busy answer, never a queue. The parser gets the bounded bytes and nothing
- * else: no env, no token, no caller headers, network/filesystem/process access denied. */
+ * else: no env, no token, no caller headers. Network, env and write are denied by the
+ * permission set; secret-bearing paths being unreachable is measured, not assumed from
+ * deny_read (see deploy/edge-runtime/file-text-probe.sh). */
 
 export const FILE_TEXT_PATH = "/__internal/file-text";
 export const FILE_TEXT_TOKEN_ENV = "SWARM_FILE_TEXT_TOKEN";
