@@ -12,6 +12,8 @@ import {
   WORKER_LIMIT_BODY,
   WORKER_LIMIT_STATUS,
   withWorkerRetiredRetry,
+  WORKER_TIMEOUT_ENV,
+  workerTimeoutMs,
 } from "./router.ts";
 import { createWorkerObserver, logRuntimeMetrics } from "./observability.ts";
 import { createFileTextGateway, FILE_TEXT_PATH, FILE_TEXT_TOKEN_ENV } from "./file-text.ts";
@@ -38,13 +40,12 @@ declare const EdgeRuntime: {
 
 const FUNCTIONS_ROOT = "/var/tmp/commonswarm-functions";
 
-// Four workers at 96 MiB use at most 384 MiB. The 512 MiB container limit keeps
-// 128 MiB for the main runtime, module cache, and process overhead.
+// Eight workers at 96 MiB use at most 768 MiB of the 2 GiB container limit.
 const USER_WORKER_MEMORY_MB = 96;
 
-// The hosted free-plan wall-clock limit is 150 seconds. This is long enough for
-// the planned 50-second H0 poll while still ending stuck work.
-const USER_WORKER_TIMEOUT_MS = 150_000;
+// Default 150 s; SWARM_EDGE_WORKER_TIMEOUT_MS sets 150 s to 1 h (router.ts workerTimeoutMs).
+const USER_WORKER_TIMEOUT_MS = workerTimeoutMs(Deno.env.get(WORKER_TIMEOUT_ENV));
+console.log(JSON.stringify({ event: "edge_worker_timeout", workerTimeoutMs: USER_WORKER_TIMEOUT_MS }));
 const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
 // The PDF parser is created here, not through the public function router. Its token is
 // read only by main and handed only to the mcp worker (router.ts MCP_ENV_NAMES).

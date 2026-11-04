@@ -47,6 +47,23 @@ export const FUNCTION_DISABLED_BODY = {
 export const FUNCTION_DISABLED_STATUS = 503;
 export const MCP_PUBLIC_ENABLED_ENV = "SWARM_MCP_PUBLIC_ENABLED";
 export const MCP_TODOS_LISTS_ENABLED_ENV = "SWARM_MCP_TODOS_LISTS_ENABLED";
+// Read by the main service only; no function receives it. Under --policy per_worker the
+// runtime retires every worker at half this wall clock, whatever its traffic, and each
+// retirement leaves a few MiB of native memory behind until a restart (CS-E21). Requests
+// stay bounded by --user-worker-request-idle-timeout (150 s) and Caddy's 165 s.
+export const WORKER_TIMEOUT_ENV = "SWARM_EDGE_WORKER_TIMEOUT_MS";
+export const DEFAULT_WORKER_TIMEOUT_MS = 150_000;
+// Never shorter than the 150 s request-idle limit, so a valid request is not cut short.
+export const MIN_WORKER_TIMEOUT_MS = 150_000;
+export const MAX_WORKER_TIMEOUT_MS = 3_600_000;
+
+/** Unset, malformed or out-of-range values keep the 150 s default. */
+export function workerTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || !/^[1-9][0-9]{0,9}$/.test(raw)) return DEFAULT_WORKER_TIMEOUT_MS;
+  const value = Number(raw);
+  return value >= MIN_WORKER_TIMEOUT_MS && value <= MAX_WORKER_TIMEOUT_MS ? value : DEFAULT_WORKER_TIMEOUT_MS;
+}
+
 export const REQUIRED_MAIN_ENV = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
