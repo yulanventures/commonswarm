@@ -169,3 +169,70 @@ export async function readObjectPage(
   }
   return out.subarray(0, kept);
 }
+
+/** Upload `bytes` to a server-resolved, signed upload path. Returns false on any refusal, a
+ * duplicate included: commit measures the stored object, so the caller always tries commit
+ * and lets that decide. Never echoes the path, the token or a storage error. */
+export async function putObjectBytes(
+  baseUrl: string,
+  signedPath: string,
+  bytes: Uint8Array,
+  contentType: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  if (!signedPath.startsWith("/storage/v1/object/upload/sign/")) throw new FileContentUnavailable();
+  const url = new URL(signedPath, baseUrl);
+  if (url.origin !== new URL(baseUrl).origin) throw new FileContentUnavailable();
+  try {
+    const response = await fetchImpl(url, {
+      method: "PUT",
+      headers: { "content-type": contentType },
+      body: bytes as Uint8Array<ArrayBuffer>,
+      redirect: "error",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    await response.body?.cancel().catch(() => {});
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Strict standard base64 to bytes; the tool validator already capped the decoded size. */
+export function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const out = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) out[index] = binary.charCodeAt(index);
+  return out;
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Deterministic ids for one file_put. Command ids bind (workspace, seat, request_id); the
+ * file and version ids also bind the content digest. So a retry with the same content is a
+ * ledger replay, and a retry with any changed content changes the reserve command itself and
+ * is refused as command_id_conflict before a reservation can be reused. Version nibble 8
+ * (custom), RFC 4122 variant.
+ */
+export async function putIds(workspaceId: string, seatHandle: string, requestId: string, sha256: string): Promise<{
+  file_id: string; version_id: string; create_command_id: string; commit_command_id: string;
+}> {
+  const id = async (label: string, content: string) => {
+    const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(["hosted-file-put", workspaceId, seatHandle, requestId, content, label].join("\0"))));
+    bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+    const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  };
+  return {
+    file_id: await id("file", sha256),
+    version_id: await id("version", sha256),
+    create_command_id: await id("create", ""),
+    commit_command_id: await id("commit", ""),
+  };
+}

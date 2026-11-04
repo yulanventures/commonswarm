@@ -18,6 +18,7 @@ const commandUrl = new URL("../../supabase/functions/command/index.ts", import.m
 const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
 const authUrl = new URL("../../supabase/functions/_shared/hosted-seat-auth.ts", import.meta.url);
 const contentUrl = new URL("../../supabase/functions/mcp/file-content.ts", import.meta.url);
+const putUrl = new URL("../../supabase/functions/mcp/file-put.ts", import.meta.url);
 
 interface LocalEnvironment { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string }
 interface Fixture {
@@ -38,6 +39,7 @@ const command = await import(${JSON.stringify(commandUrl.href)});
 const read = await import(${JSON.stringify(readUrl.href)});
 const auth = await import(${JSON.stringify(authUrl.href)});
 const content = await import(${JSON.stringify(contentUrl.href)});
+const filePut = await import(${JSON.stringify(putUrl.href)});
 
 async function capability(handle, tool, use) {
   return await command.db.begin(async (tx) => await auth.authenticateHostedSeatCapability(tx, {
@@ -109,6 +111,51 @@ else if (op === "wrong-kind") {
       command: { kind: "file_download_url", file_id: input.fileId, version_n: null, url: "x" } }, fileCap),
     viaNote: await command.handleHostedCommand({ ...base, command_id: crypto.randomUUID(),
       command: { kind: "file_download_url", file_id: input.fileId, version_n: null } }, noteCap),
+  };
+} else if (op === "put") {
+  // The real hosted file_put flow; the capability is file_put's own.
+  const cap = await capability(input.handle, "file_put", "command");
+  if (cap === null) result = { status: 403, body: { error: "forbidden" } };
+  else {
+    try {
+      const body = await filePut.executeFilePut(input.args, { workspaceId: input.workspace, handle: input.handle }, cap,
+        { handleHostedCommand: command.handleHostedCommand, baseUrl: input.apiUrl });
+      result = { status: 200, body };
+    } catch (error) {
+      result = { status: 409, body: { error: error?.code ?? "threw" } };
+    }
+  }
+} else if (op === "reserve-only") {
+  // Reserve with file_put's own ids for one content, then stop before upload and commit.
+  const cap = await capability(input.handle, "file_put", "command");
+  const bytes = new TextEncoder().encode(input.args.content);
+  const ids = await content.putIds(input.workspace, input.handle, input.args.request_id, await content.sha256Hex(bytes));
+  result = await command.handleHostedCommand({ command_id: ids.create_command_id, client_version: "0.1.80",
+    workspace_id: input.workspace, stream: { kind: "workspace" },
+    command: { kind: "file_version_create", file_id: ids.file_id, version_id: ids.version_id,
+      name: input.args.name, declared_size_bytes: bytes.length, content_type: "text/plain" } }, cap);
+  result = { status: result.status, body: { reserved: result.status === 200 } };
+} else if (op === "seat-note") {
+  const cap = await capability(input.handle, "note", "command");
+  result = await command.handleHostedCommand({ command_id: crypto.randomUUID(), client_version: "0.1.80",
+    workspace_id: input.workspace, stream: { kind: "workspace" },
+    command: { kind: "post_signal", signal_kind: "note", body: "attached", to_user_id: null,
+      to_agent_principal_id: null, in_reply_to: null, about: null,
+      to: [{ kind: "agent", id: input.to }], attachments: input.attachments } }, cap);
+} else if (op === "put-kinds") {
+  const putCap = await capability(input.handle, "file_put", "command");
+  const noteCap = await capability(input.handle, "note", "command");
+  const base = { client_version: "0.1.80", workspace_id: input.workspace, stream: { kind: "workspace" } };
+  const create = { kind: "file_version_create", file_id: crypto.randomUUID(), version_id: crypto.randomUUID(),
+    name: "kinds.txt", declared_size_bytes: 3, content_type: "text/plain" };
+  result = {
+    download: await command.handleHostedCommand({ ...base, command_id: crypto.randomUUID(),
+      command: { kind: "file_download_url", file_id: input.fileId, version_n: null } }, putCap),
+    tombstone: await command.handleHostedCommand({ ...base, command_id: crypto.randomUUID(),
+      command: { kind: "file_tombstone", file_id: input.fileId } }, putCap),
+    ifVersion: await command.handleHostedCommand({ ...base, command_id: crypto.randomUUID(),
+      command: { ...create, if_version: 0 } }, putCap),
+    viaNote: await command.handleHostedCommand({ ...base, command_id: crypto.randomUUID(), command: create }, noteCap),
   };
 } else throw new Error("unknown operation");
 console.log("HOSTED_FILES_RESULT:" + JSON.stringify(result));
@@ -293,4 +340,72 @@ test("a file_get capability carries only an exact download, and no other tool ca
   assert.deepEqual(result.tombstone, { status: 403, body: { error: "forbidden" } });
   assert.deepEqual(result.extraKey, { status: 403, body: { error: "forbidden" } });
   assert.deepEqual(result.viaNote, { status: 403, body: { error: "forbidden" } });
+});
+
+test("file_put uploads as the seat's agent, replays on retry and conflicts on a changed retry", async () => {
+  const f = await seedFixture("hosted-files-put");
+  const args = { seat: f.handleA, name: "plan.md", content: "# Plan\nShip phase 2.", request_id: "put_plan_0001" };
+  const first = run<Result>(f, { operation: "put", handle: f.handleA, args });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  noSecret(first.body);
+  assert.deepEqual(Object.keys(first.body).sort(), ["content_type", "file_id", "name", "size_bytes", "version_n"]);
+  assert.equal(first.body.content_type, "text/markdown");
+  const [row] = await sql<{ created_by_kind: string; created_by: string; uploaded_by_kind: string; uploaded_by: string }[]>`
+    SELECT f.created_by_kind, f.created_by::text, v.uploaded_by_kind, v.uploaded_by::text
+    FROM swarm.files AS f JOIN swarm.file_versions AS v ON v.file_id = f.file_id AND v.version_n = f.current_version
+    WHERE f.file_id = ${String(first.body.file_id)}::uuid`;
+  assert.deepEqual(row, { created_by_kind: "agent", created_by: f.principalA, uploaded_by_kind: "agent", uploaded_by: f.principalA },
+    "a hosted seat uploads as its own agent principal, never as the owner");
+
+  const replay = run<Result>(f, { operation: "put", handle: f.handleA, args });
+  assert.deepEqual(replay, first, "the same request_id and content replay the same version");
+  const changed = run<Result>(f, { operation: "put", handle: f.handleA, args: { ...args, content: "# Plan\nSomething else." } });
+  assert.deepEqual(changed, { status: 409, body: { error: "command_id_conflict" } });
+
+  // Before any commit, a same-size changed retry must not reuse the reservation either.
+  const pending = { seat: f.handleA, name: "pending.txt", content: "AAAA", request_id: "put_pending_01" };
+  assert.deepEqual(run<Result>(f, { operation: "reserve-only", handle: f.handleA, args: pending }), { status: 200, body: { reserved: true } });
+  assert.deepEqual(run<Result>(f, { operation: "put", handle: f.handleA, args: { ...pending, content: "BBBB" } }),
+    { status: 409, body: { error: "command_id_conflict" } });
+  const resumed = run<Result>(f, { operation: "put", handle: f.handleA, args: pending });
+  assert.equal(resumed.status, 200, "the original content still completes its own reservation");
+
+  const again = run<Result>(f, { operation: "put", handle: f.handleA, args: { ...args, content: "# Plan v2", request_id: "put_plan_0002" } });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.file_id, first.body.file_id, "an existing name gets a new version");
+  assert.equal(again.body.version_n, Number(first.body.version_n) + 1);
+
+  const read = run<Result>(f, { operation: "get", handle: f.handleB, fileId: String(again.body.file_id) });
+  assert.equal((read.body.page as { text: string }).text, "# Plan v2");
+  const pdf = run<Result>(f, { operation: "put", handle: f.handleA, args: { seat: f.handleA, name: "scan.pdf", content_base64: Buffer.from("%PDF-1.4").toString("base64"), request_id: "put_scan_0001" } });
+  assert.equal(pdf.status, 200, JSON.stringify(pdf.body));
+  assert.equal(pdf.body.content_type, "application/pdf");
+});
+
+test("a seat attaches its upload to a note, and the recipient lists it by signal_id", async () => {
+  const f = await seedFixture("hosted-files-attach");
+  const put = run<Result>(f, { operation: "put", handle: f.handleA, args: { seat: f.handleA, name: "brief.txt", content: "Brief", request_id: "put_brief_0001" } });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const pair = { file_id: String(put.body.file_id), version_n: Number(put.body.version_n) };
+  const note = run<Result>(f, { operation: "seat-note", handle: f.handleA, to: f.principalB, attachments: [pair] });
+  assert.equal(note.status, 200, JSON.stringify(note.body));
+  const signalId = String((note.body.signal as { id: string }).id);
+  const listed = run<Result>(f, { operation: "ls", handle: f.handleB, extra: { signal_id: signalId } });
+  assert.deepEqual((listed.body.files as Array<Record<string, unknown>>).map((row) => [row.file_id, row.version_n]),
+    [[pair.file_id, pair.version_n]]);
+
+  const foreign = await seedFixture("hosted-files-attach-foreign");
+  const theirs = uploaded(foreign, "theirs.txt", "not yours");
+  const refused = run<Result>(f, { operation: "seat-note", handle: f.handleA, to: f.principalB, attachments: [theirs] });
+  assert.equal(refused.status, 404, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "signal_attachment_unavailable");
+});
+
+test("a file_put capability carries only an exact create or commit, and no other tool can create", async () => {
+  const f = await seedFixture("hosted-files-put-kinds");
+  const file = uploaded(f, "kinds-base.txt", "base");
+  const result = run<Record<string, Result>>(f, { operation: "put-kinds", handle: f.handleA, fileId: file.file_id });
+  for (const key of ["download", "tombstone", "ifVersion", "viaNote"]) {
+    assert.deepEqual(result[key], { status: 403, body: { error: "forbidden" } }, key);
+  }
 });

@@ -27,6 +27,7 @@ import {
   isTextContentType,
   readObjectPage,
 } from "./file-content.ts";
+import { executeFilePut } from "./file-put.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
@@ -233,6 +234,10 @@ function hostedCommand(
   workspaceId: string,
 ) {
   const addressed = recipients(args);
+  const attached = name !== "working_on" && Array.isArray(args.attachments)
+    ? (args.attachments as Array<{ file_id: string; version_n: number }>)
+      .map((row) => ({ file_id: row.file_id.toLowerCase(), version_n: row.version_n }))
+    : null;
   return {
     command_id: args.request_id,
     client_version: "0.1.80",
@@ -247,6 +252,7 @@ function hostedCommand(
       in_reply_to: name === "reply" ? args.signal_id : null,
       about: null,
       ...(addressed === null ? {} : { to: addressed }),
+      ...(attached === null ? {} : { attachments: attached }),
     },
   };
 }
@@ -327,6 +333,12 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     }, capability);
     if (result.status !== 200) throw new HostedToolFailure(result.body.error);
     return await fileGetOutput(result.body, Number(args.offset ?? 0));
+  }
+  if (call.name === "file_put") {
+    return await executeFilePut(args, binding, capability, {
+      handleHostedCommand,
+      baseUrl: Deno.env.get("SUPABASE_URL") ?? null,
+    });
   }
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
