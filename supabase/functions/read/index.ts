@@ -31,6 +31,7 @@ import {
   revalidateHostedSeatRead,
   resolveHostedConnectionContext,
   type HostedSeatCapability,
+  type ResolvedHostedSeat,
 } from "../_shared/hosted-seat-auth.ts";
 
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -1104,12 +1105,23 @@ export type HostedReadInput =
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
   | {
+      resource: "files";
+      workspace_id: string;
+      signal_id?: string;
+      offset?: number;
+      limit?: number;
+    }
+  | {
       resource: "signals";
       workspace_id: string;
       after_created_at?: string | null;
       after_id?: string | null;
       limit?: number;
     };
+
+/** file_ls pages: small enough that a full page of metadata fits the MCP response cap. */
+export const HOSTED_FILE_PAGE_LIMIT = 50;
+const HOSTED_FILE_MAX_OFFSET = 100_000;
 
 export interface ReadResult {
   status: number;
@@ -1118,6 +1130,13 @@ export interface ReadResult {
 
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
+  if (input.resource === "files") {
+    const offset = input.offset ?? 0;
+    const limit = input.limit ?? HOSTED_FILE_PAGE_LIMIT;
+    return (input.signal_id === undefined || UUID_RE.test(input.signal_id)) &&
+      Number.isSafeInteger(offset) && offset >= 0 && offset <= HOSTED_FILE_MAX_OFFSET &&
+      Number.isSafeInteger(limit) && limit >= 1 && limit <= HOSTED_FILE_PAGE_LIMIT;
+  }
   if (input.resource !== "signals") return true;
   const limit = input.limit ?? 50;
   const cursorAbsent = input.after_created_at === undefined && input.after_id === undefined;
@@ -1147,6 +1166,7 @@ export async function handleHostedRead(
   }
   if ((input.resource === "whoami" && tool !== "whoami") ||
       (input.resource === "members" && tool !== "members") ||
+      (input.resource === "files" && tool !== "file_ls") ||
       (input.resource === "signals" && tool !== "check")) {
     return { status: 403, body: { error: "forbidden" } };
   }
@@ -1202,6 +1222,9 @@ export async function handleHostedRead(
       `;
       return { status: 200, body: { members, agents, context } };
     }
+    if (input.resource === "files") {
+      return await hostedFileList(tx, seat, input, context);
+    }
     const limit = input.limit ?? 50;
     const afterCreatedAt = typeof input.after_created_at === "string"
       ? input.after_created_at
@@ -1238,6 +1261,72 @@ export async function handleHostedRead(
     `;
     return { status: 200, body: { signals: rows, capabilities: SIGNAL_CAPABILITIES } };
   });
+}
+
+/**
+ * file_ls for a hosted seat. Runs only after revalidateHostedSeatRead accepted the
+ * live seat, agent, grant and workspace, and every query carries the seat's own
+ * workspace predicate: the files view gates on the owner's membership only.
+ *
+ * Without signal_id this is the workspace-wide file list (the same contract as the
+ * CLI and web app). With signal_id the message must pass the hosted message ACL
+ * (addressed to this seat's agent) before any of its attachments are listed.
+ */
+async function hostedFileList(
+  tx: Sql,
+  seat: ResolvedHostedSeat,
+  input: Extract<HostedReadInput, { resource: "files" }>,
+  context: unknown,
+): Promise<ReadResult> {
+  if (input.signal_id !== undefined) {
+    const rows = await tx<{ attachments: unknown }[]>`
+      SELECT s.attachments
+      FROM swarm.hosted_mcp_check_visible_signals(
+        ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+        ARRAY[${input.signal_id}::uuid]
+      ) AS s
+      WHERE s.workspace_id = ${seat.workspace_id}::uuid
+    `;
+    // One answer for missing, foreign and unaddressed messages: no existence oracle.
+    if (rows.length !== 1) return { status: 403, body: { error: "signal_unavailable" } };
+    const attachments = Array.isArray(rows[0]!.attachments) ? rows[0]!.attachments : [];
+    return { status: 200, body: {
+      context,
+      signal_id: input.signal_id,
+      files: attachments.map((value) => {
+        const row = value as Record<string, unknown>;
+        return {
+          file_id: row.file_id,
+          version_n: row.version_n,
+          name: row.name,
+          content_type: row.content_type,
+          size_bytes: row.size_bytes,
+        };
+      }),
+      next_offset: null,
+      content_warning: FILE_CONTENT_WARNING,
+    } };
+  }
+  const offset = input.offset ?? 0;
+  const limit = input.limit ?? HOSTED_FILE_PAGE_LIMIT;
+  const rows = await tx<Record<string, unknown>[]>`
+    SELECT file_id, name, current_version AS version_n, size_bytes, content_type,
+           uploaded_by_kind, uploaded_by, committed_at
+    FROM swarm_read.files
+    WHERE workspace_id = ${seat.workspace_id}::uuid
+      AND tombstoned_at IS NULL
+      AND committed_at IS NOT NULL
+    ORDER BY lower(name), file_id
+    OFFSET ${offset}
+    LIMIT ${limit + 1}
+  `;
+  const page = rows.slice(0, limit);
+  return { status: 200, body: {
+    context,
+    files: page,
+    next_offset: rows.length > limit ? offset + limit : null,
+    content_warning: FILE_CONTENT_WARNING,
+  } };
 }
 
 /* The dashboard became this function's first BROWSER caller (renewal_grants,

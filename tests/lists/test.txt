@@ -19,6 +19,7 @@ tests/hosted-mcp-protocol.test.ts
 tests/hosted-todo-tools.test.ts
 tests/hosted-list-tools.test.ts
 tests/hosted-mcp-errors.test.ts
+tests/hosted-mcp-files.test.ts
 tests/hm5-router-box.test.ts
 tests/protocol-hosted-authority.test.ts
 tests/protocol-hosted-check.test.ts

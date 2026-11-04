@@ -10424,6 +10424,13 @@ export interface HostedHumanManagementIdentity {
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
   const command = record(body.command);
   if (command?.kind === "household_tool") return command.tool === tool;
+  // file_get resolves a version and its storage object only; the hosted MCP
+  // reads the bytes itself and never returns the signed path.
+  if (tool === "file_get") {
+    return command?.kind === FILE_DOWNLOAD_URL_KIND &&
+      exactKeys(command, ["kind", "file_id", "version_n"]);
+  }
+  if (command?.kind === FILE_DOWNLOAD_URL_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
