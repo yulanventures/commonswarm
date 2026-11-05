@@ -3504,6 +3504,33 @@ export async function homeOverview(): Promise<HomeOverview | null> {
   return result.data as HomeOverview;
 }
 
+/** Channels C1b: per-channel unread for the signed-in person. `null` is unknown (no read position yet),
+ * never "read". Keyed by channel id; general (unfiled) has `channelId: null`. */
+export interface ChannelUnread { channelId: string | null; slug: string; unread: boolean | null }
+
+export function parseChannelUnread(data: unknown): ChannelUnread[] | null {
+  if (data === null || typeof data !== "object" || !Array.isArray((data as { channels?: unknown }).channels)) return null;
+  const rows: ChannelUnread[] = [];
+  for (const row of (data as { channels: unknown[] }).channels) {
+    if (row === null || typeof row !== "object") return null;
+    const { channel_id, slug, unread } = row as Record<string, unknown>;
+    if ((channel_id !== null && typeof channel_id !== "string") || typeof slug !== "string" ||
+        (unread !== null && typeof unread !== "boolean")) return null;
+    rows.push({ channelId: channel_id, slug, unread });
+  }
+  return rows;
+}
+
+/** Unknown for every channel when the read is unavailable or malformed: never fabricated as read. */
+export async function channelUnread(workspaceId: string): Promise<ChannelUnread[] | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const result = await readWithDeadline("Channel unread", signal =>
+    api.schema("swarm_read").rpc("channel_unread", { p_workspace_id: workspaceId }).abortSignal(signal));
+  if (result.error) return null;
+  return parseChannelUnread(result.data);
+}
+
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */
 export async function homeOverviewAsks(workspaceId: string, ids: readonly string[]): Promise<Signal[]> {
   const api = client();
