@@ -370,7 +370,9 @@ test("channel_messages: whole-workspace messages in that channel only, never add
   assert.equal(await channelPage(ws, owner, outsider, "design"), null);
   await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${reader}::uuid`;
   assert.equal(await channelPage(ws, owner, reader, "design"), null);
+});
 
+/* -------------------------------------------------------------------------
  * Channels C1b: swarm_read.channel_unread, the person's own per-channel unread
  * from the seen receipts the app writes. Read the way the web app reads it.
  * ------------------------------------------------------------------------- */
@@ -394,8 +396,9 @@ async function post(ws: string, from: { kind: "user" | "agent"; id: string }, ch
   return id;
 }
 
-async function seen(ws: string, viewer: string, signalId: string): Promise<void> {
-  await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id) VALUES (${ws}::uuid, ${signalId}::uuid, ${viewer}::uuid)`;
+async function seen(ws: string, viewer: string, signalId: string, ago = "0 seconds"): Promise<void> {
+  await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id, first_seen_at)
+    VALUES (${ws}::uuid, ${signalId}::uuid, ${viewer}::uuid, statement_timestamp() - ${ago}::interval)`;
 }
 
 test("channel_unread: unknown without receipts, unread until seen, unread again for a newer message", async () => {
@@ -407,10 +410,11 @@ test("channel_unread: unknown without receipts, unread until seen, unread again 
   const channelId = design!.channel_id;
   const state = async () => Object.fromEntries((await unread(ws, owner))!.channels.map((c) => [c.slug, c.unread]));
 
-  const first = await post(ws, writer, null, "10 minutes");
+  const first = await post(ws, writer, null, "30 minutes");
   assert.deepEqual(await state(), { general: null, design: null }, "no receipts yet: unknown, never read");
 
-  await seen(ws, owner, first);
+  // The first receipt sets the read position; later messages are newer than it.
+  await seen(ws, owner, first, "20 minutes");
   assert.deepEqual(await state(), { general: false, design: false });
 
   const inDesign = await post(ws, writer, channelId, "5 minutes");
