@@ -8,7 +8,7 @@
 -- workspace. Paged oldest first by (created_at, id), at most 50 rows.
 
 CREATE OR REPLACE FUNCTION swarm_read.channel_messages(
-  p_workspace_id uuid, p_channel text, p_after_created_at timestamptz, p_after_id uuid, p_limit integer
+  p_workspace_id uuid, p_channel text, p_after_id uuid, p_limit integer
 ) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog AS $$
@@ -20,6 +20,7 @@ DECLARE
  is_general boolean := lower(coalesce(p_channel, '')) = 'general';
  target_channel uuid;
  target_archived timestamptz;
+ after_at timestamptz;
  page_limit integer := least(greatest(coalesce(p_limit, 50), 1), 50);
  page_rows jsonb;
  more boolean;
@@ -44,7 +45,13 @@ BEGIN
   END IF;
  END IF;
 
- IF p_channel IS NULL OR (p_after_created_at IS NULL) <> (p_after_id IS NULL) THEN RETURN NULL; END IF;
+ IF p_channel IS NULL THEN RETURN NULL; END IF;
+ -- The cursor is the last message of the previous page, looked up here (workspace-pinned) so its
+ -- time never round-trips through JSON.
+ IF p_after_id IS NOT NULL THEN
+  SELECT s.created_at INTO after_at FROM swarm.signals s WHERE s.workspace_id = p_workspace_id AND s.id = p_after_id;
+  IF after_at IS NULL THEN RETURN jsonb_build_object('error', 'cursor_not_found'); END IF;
+ END IF;
  IF NOT is_general THEN
   SELECT c.channel_id, c.archived_at INTO target_channel, target_archived
   FROM swarm.channels c
@@ -74,7 +81,7 @@ BEGIN
      AND root.chain_root_id IS NULL AND root.chain_participants IS NULL
      AND NOT EXISTS (SELECT 1 FROM swarm.signal_recipients rr
       WHERE rr.workspace_id = root.workspace_id AND rr.signal_id = root.id)))
-   AND (p_after_created_at IS NULL OR (s.created_at, s.id) > (p_after_created_at, p_after_id))
+   AND (p_after_id IS NULL OR (s.created_at, s.id) > (after_at, p_after_id))
   ORDER BY s.created_at, s.id
   LIMIT page_limit + 1
  ), shown AS (
@@ -106,12 +113,11 @@ BEGIN
   'archived', target_archived IS NOT NULL,
   'messages', page_rows,
   'next', CASE WHEN more THEN jsonb_build_object(
-    'after_created_at', page_rows->(jsonb_array_length(page_rows) - 1)->'created_at',
     'after_id', page_rows->(jsonb_array_length(page_rows) - 1)->'signal_id') ELSE NULL END);
 END;
 $$;
-ALTER FUNCTION swarm_read.channel_messages(uuid, text, timestamptz, uuid, integer) OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm_read.channel_messages(uuid, text, timestamptz, uuid, integer)
+ALTER FUNCTION swarm_read.channel_messages(uuid, text, uuid, integer) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.channel_messages(uuid, text, uuid, integer)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 -- swarm_read only: the read function's agent and hosted paths, after their own live authorization.
-GRANT EXECUTE ON FUNCTION swarm_read.channel_messages(uuid, text, timestamptz, uuid, integer) TO swarm_read;
+GRANT EXECUTE ON FUNCTION swarm_read.channel_messages(uuid, text, uuid, integer) TO swarm_read;

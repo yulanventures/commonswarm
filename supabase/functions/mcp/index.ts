@@ -343,7 +343,6 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     const output = readOutput(await handleHostedRead({
       resource: "channel_messages", workspace_id: binding.workspaceId,
       channel: String(args.channel).toLowerCase(),
-      after_created_at: typeof args.after_created_at === "string" ? args.after_created_at : null,
       after_id: typeof args.after_id === "string" ? args.after_id.toLowerCase() : null,
       limit: typeof args.limit === "number" ? args.limit : 50,
     }, capability));

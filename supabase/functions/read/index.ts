@@ -177,36 +177,36 @@ interface ChannelMessagesReadRequest {
   resource: "channel_messages";
   workspace_id: string;
   channel: string;
-  after_created_at: string | null;
   after_id: string | null;
   limit: number;
 }
 
-const CHANNEL_MESSAGES_KEYS = ["resource", "workspace_id", "channel", "after_created_at", "after_id", "limit"];
+const CHANNEL_MESSAGES_KEYS = ["resource", "workspace_id", "channel", "after_id", "limit"];
 
 function parseChannelMessages(body: Record<string, unknown>): ChannelMessagesReadRequest | null {
   if (body.resource !== "channel_messages" || Object.keys(body).some(key => !CHANNEL_MESSAGES_KEYS.includes(key)) ||
       typeof body.workspace_id !== "string" || !UUID_RE.test(body.workspace_id) || typeof body.channel !== "string") return null;
   const channel = normalizeChannelSlug(body.channel);
   if (channel !== "general" && channelSlugProblem(channel) !== null) return null;
-  const after = body.after_created_at ?? null, afterId = body.after_id ?? null;
-  if ((after === null) !== (afterId === null)) return null;
-  if (after !== null && (typeof after !== "string" || !Number.isFinite(Date.parse(after)))) return null;
+  const afterId = body.after_id ?? null;
   if (afterId !== null && (typeof afterId !== "string" || !UUID_RE.test(afterId))) return null;
   const limit = body.limit ?? 50;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 50) return null;
   return { resource: "channel_messages", workspace_id: body.workspace_id.toLowerCase(), channel,
-    after_created_at: after as string | null, after_id: afterId === null ? null : (afterId as string).toLowerCase(), limit };
+    after_id: afterId === null ? null : (afterId as string).toLowerCase(), limit };
 }
 
 /** The definer returns only messages every member can already read; see 20261105000002. */
 async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessagesReadRequest): Promise<{ status: number; body: Record<string, unknown> }> {
   const [row] = await tx<{ page: Record<string, unknown> | null }[]>`
     SELECT swarm_read.channel_messages(${workspaceId}::uuid, ${input.channel},
-      ${input.after_created_at}::timestamptz, ${input.after_id}::uuid, ${input.limit}) AS page
+      ${input.after_id}::uuid, ${input.limit}) AS page
   `;
   const page = row?.page;
   if (!page) throw new Error("channel messages unavailable for an authorized caller");
+  if (page.error === "cursor_not_found") {
+    return { status: 400, body: { error: "invalid_request", message: "after_id must be next.after_id from the previous page." } };
+  }
   if (page.error === "channel_not_found") {
     return { status: 404, body: { error: "channel_not_found", message: "There is no channel with that name in this workspace." } };
   }
@@ -227,7 +227,7 @@ function boundChannelPage(page: Record<string, unknown>): Record<string, unknown
   if (kept === messages.length) return page;
   const last = messages[kept - 1]!;
   return { ...page, messages: messages.slice(0, kept),
-    next: { after_created_at: last.created_at, after_id: last.signal_id } };
+    next: { after_id: last.signal_id } };
 }
 interface WakeLeaseReadRequest {
   resource: "agent_wake_lease";

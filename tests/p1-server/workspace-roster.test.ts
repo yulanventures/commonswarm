@@ -292,16 +292,16 @@ test("decision_queue: the person's own open asks, oldest first; never for an age
  * function calls it (swarm_read, the owner's claims plus the agent).
  * ------------------------------------------------------------------------- */
 
-type ChannelPage = { channel: string; archived: boolean; next: { after_created_at: string; after_id: string } | null;
+type ChannelPage = { channel: string; archived: boolean; next: { after_id: string } | null;
   messages: Array<{ signal_id: string; body: string; thread_root_id: string | null }>; error?: string } | null;
 
 async function channelPage(ws: string, owner: string, agentId: string, channel: string,
-  after: { after_created_at: string; after_id: string } | null = null, limit = 50): Promise<ChannelPage> {
+  after: { after_id: string } | null = null, limit = 50): Promise<ChannelPage> {
   return await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE swarm_read`;
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated", agent_principal_id: agentId })}, true)`;
     const [row] = await tx<{ page: ChannelPage }[]>`SELECT swarm_read.channel_messages(${ws}::uuid, ${channel},
-      ${after?.after_created_at ?? null}::timestamptz, ${after?.after_id ?? null}::uuid, ${limit}) AS page`;
+      ${after?.after_id ?? null}::uuid, ${limit}) AS page`;
     return row!.page;
   });
 }

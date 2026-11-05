@@ -135,9 +135,9 @@ export const CORE_TOOL_TABLE = [
   {
     name: "channel_read", effect: "read", title: "Read a channel",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Messages posted to the whole workspace in one channel (general for unfiled), oldest first, 50 at a time. Pass next's after_created_at and after_id to continue. Addressed messages aren't included; use check for those.",
+    description: "Messages posted to the whole workspace in one channel (general for unfiled), oldest first, 50 at a time. Pass next.after_id to continue. Addressed messages aren't included; use check for those.",
     annotations: { title: "Read a channel", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, channel, after_created_at: text(20, 40), after_id: uuid, limit: { type: "integer" as const, minimum: 1, maximum: 50 } }, ["seat", "channel"]),
+    inputSchema: objectSchema({ seat: handle, channel, after_id: uuid, limit: { type: "integer" as const, minimum: 1, maximum: 50 } }, ["seat", "channel"]),
   },
   {
     name: "file_ls", effect: "read", title: "List workspace files",
@@ -295,7 +295,7 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   members: { allowed: ["seat"], required: ["seat"] },
   roster: { allowed: ["seat"], required: ["seat"] },
   channel_ls: { allowed: ["seat"], required: ["seat"] },
-  channel_read: { allowed: ["seat", "channel", "after_created_at", "after_id", "limit"], required: ["seat", "channel"] },
+  channel_read: { allowed: ["seat", "channel", "after_id", "limit"], required: ["seat", "channel"] },
   file_ls: { allowed: ["seat", "signal_id", "offset", "limit"], required: ["seat"] },
   file_get: { allowed: ["seat", "file_id", "version_n", "offset"], required: ["seat", "file_id"] },
   file_put: { allowed: ["seat", "name", "content", "content_base64", "request_id"], required: ["seat", "name", "request_id"] },
@@ -325,8 +325,7 @@ const EXPECTED: Record<string, string> = {
   recipients: "provide 1 to 20 objects with only kind (user or agent) and id (UUID); use members to find recipients",
   signal_id: "provide the signal UUID from check that you want to reply to",
   channel: "provide a channel name from channel_ls, or general for the main channel",
-  after_created_at: "pass next.after_created_at from the previous channel_read page, together with after_id",
-  after_id: "pass next.after_id from the previous channel_read page, together with after_created_at",
+  after_id: "pass next.after_id from the previous channel_read page",
   file_id: "provide the file UUID from check attachments or file_ls",
   version_n: "provide the positive version number from check attachments or file_ls, or omit it for the current version",
   offset: "provide a whole number from 0, or the next_offset returned by the previous page",
@@ -378,10 +377,7 @@ export function validateHostedToolArguments(
   if (name === "whoami" || name === "members" || name === "roster" || name === "channel_ls") return args;
   if (name === "channel_read") {
     if (!validChannel(args.channel)) invalid("channel");
-    const hasAfter = args.after_created_at !== undefined, hasId = args.after_id !== undefined;
-    if (hasAfter !== hasId) invalid(hasAfter ? "after_id" : "after_created_at");
-    if (hasAfter && (typeof args.after_created_at !== "string" || !Number.isFinite(Date.parse(args.after_created_at)))) invalid("after_created_at");
-    if (hasId && !validUuid(args.after_id)) invalid("after_id");
+    if (args.after_id !== undefined && !validUuid(args.after_id)) invalid("after_id");
     if (args.limit !== undefined && !wholeNumber(args.limit, 1, 50)) invalid("limit");
     return args;
   }
