@@ -231,8 +231,8 @@ test("every table row that accepts --profile refuses B and parses A's id", { tim
     const accepting = rows.filter(({ command, entry }) => command.join(" ") !== "mcp connect" && entry.flags.includes("profile") && entry.profile !== "refuse");
     // The ten to-do/comment commands and workspaces join the existing 47 profile openers,
     // then the five definition commands (object definitions_search ... check_answerable).
-    // roster (R1a) makes 64; reraise (R1b) makes 65. Keep the count literal and exercise binding for every row below.
-    assert.equal(accepting.length, 65, "reconcile the generated profile rows when the command table changes");
+    // roster (R1a) makes 64; reraise (R1b) makes 65; channel read (C3 CLI) makes 66. Keep the count literal and exercise binding for every row below.
+    assert.equal(accepting.length, 66, "reconcile the generated profile rows when the command table changes");
     for (const { command, entry } of accepting) {
       const extra = [
         ...(entry.flags.includes("connection-file") ? ["--connection-file", f.input] : []),
