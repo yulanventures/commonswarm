@@ -159,7 +159,10 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
       syncMenu();
     },
     syncMenu,
-    closeNavigation() { shell?.closeDrawer("navigation", true); },
+    closeNavigation(restoreFocus = true) { shell?.closeDrawer("navigation", restoreFocus); },
+    /** Reopens the phone drawer (a cancelled channel dialog returns to it). False where there is no drawer. */
+    openNavigation(): boolean { return shell?.openDrawer() ?? false; },
+    navigationOpen(): boolean { return shell?.isDrawerOpen() ?? false; },
     refreshTodoContext: (replace: () => void) => todoContext.refresh(() => wikiContext.refresh(replace)),
     peopleContext(roster: HTMLElement | null) {
       peopleContext.set(roster);

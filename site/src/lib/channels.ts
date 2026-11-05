@@ -57,7 +57,7 @@ export type ActiveChannel = WorkspaceChannel | null;
 
 /**
  * The rail and the head write a channel the same way. Channels read as "#slug"; the
- * unfiltered view reads "All messages" (Tom's plain-words rule, 2026-09-11: a person sees
+ * unfiltered view reads "All messages" (plain-words rule, 2026-09-11: a person sees
  * messages, not signals).
  * The wire name stays ALL_SIGNALS_SLUG, which the edge reserves; only the label changed.
  */
@@ -65,13 +65,111 @@ export const ALL_MESSAGES_LABEL = "All messages";
 export const channelLabel = (slug: string): string =>
   slug === ALL_SIGNALS_SLUG ? ALL_MESSAGES_LABEL : `#${slug}`;
 
-/** Live channels only, in the order a reader scans them. */
+/* ── Three views of one feed (Channels C1) ──────────────────────────────────────────
+ * The dashboard keeps ONE string for what the feed shows, and it means one of three things:
+ *   null              All messages: filed and unfiled together (links with no `?c=`).
+ *   GENERAL_CHANNEL_ID #general: the unfiled messages only (`channel_id IS NULL`), `?c=general`.
+ *   a channel id      that channel's messages, `?c=<uuid>`; the id survives a rename.
+ * `general` is a reserved slug on the server, so no real channel carries it, and a real
+ * channel id is a UUID, so the virtual id cannot collide with one. */
+
+/** The slug and the view id of the virtual channel that holds unfiled messages. */
+export const GENERAL_CHANNEL_SLUG = "general";
+export const GENERAL_CHANNEL_ID = "general";
+
+export type ChannelView =
+  | { kind: "all" }
+  | { kind: "general" }
+  | { kind: "channel"; channelId: string };
+
+export const channelViewOf = (viewId: string | null): ChannelView =>
+  viewId === null || viewId === ""
+    ? { kind: "all" }
+    : viewId === GENERAL_CHANNEL_ID
+    ? { kind: "general" }
+    : { kind: "channel", channelId: viewId };
+
+/** What the feed query adds to its WHERE for a view. The narrowing is the query's, never the page's. */
+export type ChannelSignalFilter =
+  | { kind: "none" }
+  | { kind: "unfiled" }
+  | { kind: "channel"; channelId: string };
+
+export const channelSignalFilter = (viewId: string | null): ChannelSignalFilter => {
+  const view = channelViewOf(viewId);
+  return view.kind === "all"
+    ? { kind: "none" }
+    : view.kind === "general"
+    ? { kind: "unfiled" }
+    : { kind: "channel", channelId: view.channelId };
+};
+
+/** Would a row the server filed in `signalChannelId` show in this view? Same question the query asks. */
+export const signalInChannelView = (signalChannelId: string | null, viewId: string | null): boolean => {
+  const filter = channelSignalFilter(viewId);
+  return filter.kind === "none" ||
+    (filter.kind === "unfiled" ? signalChannelId === null : signalChannelId === filter.channelId);
+};
+
+/**
+ * Where a `?c=` lands. A link names a view by id, so `general` is the virtual channel even if
+ * a stale real row was once called that, and an id this workspace does not have stays
+ * UNRESOLVED: it is never coerced into #general or All messages.
+ */
+export const resolveChannelParam = (
+  requested: string | null,
+  channels: readonly WorkspaceChannel[],
+): { activeChannelId: string | null; unknownChannelId: string | null } => {
+  if (requested === null || requested === "") return { activeChannelId: null, unknownChannelId: null };
+  if (requested === GENERAL_CHANNEL_ID) return { activeChannelId: GENERAL_CHANNEL_ID, unknownChannelId: null };
+  const found = channelById(channels, requested);
+  return found === null
+    ? { activeChannelId: null, unknownChannelId: requested }
+    : { activeChannelId: found.channelId, unknownChannelId: null };
+};
+
+/**
+ * Where a top-level message written in this view is filed: `null` is unfiled (the command
+ * carries no `channel` key), a string is that channel. `undefined` means nowhere: the view is
+ * an archived or unknown channel, and posting there must be refused rather than redirected.
+ */
+export const composerChannelFor = (
+  viewId: string | null,
+  channels: readonly WorkspaceChannel[],
+): string | null | undefined => {
+  const view = channelViewOf(viewId);
+  if (view.kind !== "channel") return null;
+  const channel = channelById(channels, view.channelId);
+  return channel === null || channel.archivedAt !== null ? undefined : channel.channelId;
+};
+
+/** The name of a view: "All messages", "#general" or "#slug"; null for an id this list lacks. */
+export const channelViewLabel = (
+  viewId: string | null,
+  channels: readonly WorkspaceChannel[],
+): string | null => {
+  const view = channelViewOf(viewId);
+  if (view.kind === "all") return ALL_MESSAGES_LABEL;
+  if (view.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
+  const channel = channelById(channels, view.channelId);
+  return channel === null ? null : channelLabel(channel.slug);
+};
+
+const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+const compareChannels = (left: WorkspaceChannel, right: WorkspaceChannel): number =>
+  compareText(left.slug, right.slug) || compareText(left.channelId, right.channelId);
+
+/** Live channels only, in the order a reader scans them: by slug, the id breaking a tie. */
 export const liveChannels = (
   channels: readonly WorkspaceChannel[],
 ): WorkspaceChannel[] =>
-  channels
-    .filter((channel) => channel.archivedAt === null)
-    .sort((a, b) => a.slug.localeCompare(b.slug));
+  channels.filter((channel) => channel.archivedAt === null).sort(compareChannels);
+
+/** Archived channels, in the same order. */
+export const archivedChannels = (
+  channels: readonly WorkspaceChannel[],
+): WorkspaceChannel[] =>
+  channels.filter((channel) => channel.archivedAt !== null).sort(compareChannels);
 
 export const channelById = (
   channels: readonly WorkspaceChannel[],
@@ -81,35 +179,88 @@ export const channelById = (
     ? null
     : channels.find((channel) => channel.channelId === channelId) ?? null;
 
-/**
- * The rule text a reader sees before typing a name, built from the same two
- * constants the validator refuses with.
- */
-export const channelNameHint = (): string =>
-  `${CHANNEL_SLUG_RULE_TEXT} ${RESERVED_CHANNEL_SLUG_TEXT}`;
-
-/** The purpose bound, built from the bound the validator applies. */
-export const channelPurposeHint = (): string =>
-  `Optional. What this channel is for, in ${CHANNEL_PURPOSE_MAX} characters or fewer.`;
+/** Rows the compact rail shows: #general plus up to five named channels. */
+export const CHANNEL_RAIL_ROWS = 6;
 
 /**
- * What a channel is, said once and honestly. Two facts the design requires in
- * the UI rather than in a help page: every member reads every channel, and
- * filing a message in one changes nothing about who is woken.
+ * The compact rail. #general is always the first row, so named channels get the other five
+ * slots. A selected channel past them takes the fifth slot in its own position, so the rows
+ * shown keep their relative order; the count is every live channel left out.
  */
-export const CHANNEL_REACH_TEXT =
-  "Every member of this workspace reads every channel, and messages in a channel expire the same way they do anywhere else. A channel is the address of a message, not who gets woken.";
+export function railChannelSlice(
+  live: readonly WorkspaceChannel[],
+  selectedId: string | null,
+  expanded: boolean,
+): { rows: { channel: WorkspaceChannel; overflow: boolean; hidden: boolean }[]; hiddenCount: number } {
+  const selectedIndex = selectedId === null ? -1 : live.findIndex((channel) => channel.channelId === selectedId);
+  const { rows, hiddenCount } = railSlice(live, selectedIndex, expanded);
+  return { rows: rows.map(({ row, overflow, hidden }) => ({ channel: row, overflow, hidden })), hiddenCount };
+}
+
+/** The same rule over any row type: the rail builder applies it to its own row models. */
+export function railSlice<T>(
+  live: readonly T[],
+  selectedIndex: number,
+  expanded: boolean,
+): { rows: { row: T; overflow: boolean; hidden: boolean }[]; hiddenCount: number } {
+  const slots = CHANNEL_RAIL_ROWS - 1;
+  const leading = selectedIndex >= slots ? slots - 1 : slots;
+  const rows = live.map((row, index) => ({ row, overflow: index >= leading && index !== selectedIndex }));
+  const hiddenCount = rows.filter((entry) => entry.overflow).length;
+  return { rows: rows.map((entry) => ({ ...entry, hidden: entry.overflow && !expanded })), hiddenCount };
+}
+
+export type WorkspaceRole = "owner" | "admin" | "member";
 
 /**
- * Signals written before channels existed carry no channel and can never be
- * moved into one, because a signal row is immutable. Say so where the reader
- * meets an empty channel rather than letting them conclude it is broken.
+ * May this viewer rename or archive this channel? The server's rule, mirrored to decide which
+ * actions to SHOW (`applyChannelCommand` answers 403 channel_forbidden otherwise): the person
+ * who created it, or a workspace owner or admin. Owning the agent that created it does not
+ * count. An archived channel has no actions (archive is one-way).
  */
-export const CHANNEL_EMPTY_TEXT =
-  `Nothing has been posted here yet. Messages written before this channel existed stay in ${ALL_SIGNALS_SLUG}.`;
+export const mayManageChannel = (
+  channel: Pick<WorkspaceChannel, "createdByKind" | "createdByPrincipal" | "archivedAt">,
+  viewer: { userId: string | null; role: WorkspaceRole | null },
+): boolean => {
+  if (channel.archivedAt !== null) return false;
+  if (viewer.role === "owner" || viewer.role === "admin") return true;
+  return channel.createdByKind === "user" && viewer.userId !== null && viewer.userId !== "" &&
+    channel.createdByPrincipal === viewer.userId;
+};
 
-export const CHANNEL_ARCHIVED_TEXT =
-  "This channel is archived. Its messages still read, and nothing new can be posted to it.";
+/** One row of the per-channel unread read (`channelUnread` in commonswarm.ts). */
+export interface ChannelUnreadState { channelId: string | null; unread: boolean | null }
+
+/**
+ * Unread for one view, exactly as the read reported it. `null` is unknown: no read, a failed
+ * read, no row for this channel, or the server's own null. Never derived from anything else.
+ */
+export const channelUnreadFor = (
+  rows: readonly ChannelUnreadState[] | null,
+  viewId: string,
+): boolean | null => {
+  if (rows === null) return null;
+  const key = viewId === GENERAL_CHANNEL_ID ? null : viewId;
+  const row = rows.find((entry) => entry.channelId === key);
+  return row === undefined ? null : row.unread;
+};
+
+/** The row's accessible name: the full "#slug", plus "unread" only when the read said so. */
+export const channelRowName = (slug: string, unread: boolean | null): string =>
+  `${channelLabel(slug)}${unread === true ? ", unread" : ""}`;
+
+/* Visible copy (Channels C1 spec, "Visible copy inventory"). */
+export const CHANNELS_TITLE = "Channels";
+export const NEW_CHANNEL_LABEL = "New channel";
+export const RENAME_CHANNEL_LABEL = "Rename channel";
+export const ARCHIVE_CHANNEL_LABEL = "Archive channel";
+export const ARCHIVED_CHANNELS_LABEL = "Archived channels";
+export const CHANNEL_UNAVAILABLE_TITLE = "Channel unavailable";
+export const GO_TO_GENERAL_LABEL = `Go to ${channelLabel(GENERAL_CHANNEL_SLUG)}`;
+export const CHANNELS_LOAD_FAILED = "Couldn’t load channels";
+export const CHANNEL_ARCHIVED_STATE = "Archived";
+export const ARCHIVE_CHANNEL_CONSEQUENCE = "Messages stay available. New messages stop.";
+export const archiveChannelTitle = (slug: string): string => `Archive ${channelLabel(slug)}?`;
 
 /**
  * The refusal a reader sees. The server's own `message` is used whenever it
@@ -117,24 +268,6 @@ export const CHANNEL_ARCHIVED_TEXT =
  * this reads `body.message` as text to show and branches only on the numeric
  * status when the server sent no message at all.
  */
-/**
- * What a `?c=` that resolves to nothing actually means. There is no such thing as a channel
- * this reader may not read: every member of a workspace reads every channel in it, so the
- * only honest causes are that the id names no channel HERE, or that the channel list did not
- * load. An earlier version said "or one you cannot read", which named a read permission this
- * product does not have; both review arms caught it.
- */
-export const unknownChannelText = (channelListFailed: boolean): string =>
-  channelListFailed
-    ? `The list of channels did not load, so this link cannot be resolved yet. Every channel in a workspace is readable by every member of it. Reload, or open ${ALL_SIGNALS_SLUG} to read every message.`
-    : `No channel in this workspace has that id. It may belong to another workspace, or it may have been created after this link was made. Every channel in a workspace is readable by every member of it.`;
-
-/** The head's own line for that state, shorter because the feed carries the rest. */
-export const unknownChannelHeadText = (channelListFailed: boolean): string =>
-  channelListFailed
-    ? "The list of channels did not load, so this link cannot be resolved yet."
-    : `No channel in this workspace has that id. Open ${ALL_SIGNALS_SLUG} to read every message.`;
-
 export const channelRefusalMessage = (
   status: number,
   body: Record<string, unknown>,

@@ -30,7 +30,7 @@ import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-t
 /* The name of the unfiltered view, in the markup as well as in the script. It was typed in
    three places and generated in the script, so the static "# all-signals" even carried a
    space the rendered one does not. Both review arms called it. */
-import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
+import { ALL_SIGNALS_SLUG, CHANNEL_ARCHIVED_STATE, GO_TO_GENERAL_LABEL, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
@@ -737,6 +737,11 @@ import "../../styles/kylon-command-palette.css";
                 tag, which is the defect this row exists to remove. The 80px resting budget it
                 bought is renegotiated in composer-polish.observer.test.ts against a measured
                 number, not deleted. */}
+            {/* An archived channel's conversation stays readable; this replaces the composer. */}
+            <div class="dashboard__channel-archived" data-channel-archived hidden>
+              <span>{CHANNEL_ARCHIVED_STATE}</span>
+              <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-go-general>{GO_TO_GENERAL_LABEL}</button>
+            </div>
             <form class="dashboard__composer" data-composer hidden>
               {/* THE REPLY BAR. Hidden until a reply is in progress, so the composer at rest is
                   the bar the mobile budget was measured against. It names the message being
@@ -926,37 +931,19 @@ import "../../styles/kylon-command-palette.css";
     <div class="dashboard__workspace-details-dialog-body" data-workspace-details-content></div>
   </dialog>
 
-  {/* Channels: switch, create, rename, archive. A native <dialog> for the same reasons the
-      roster is one — Escape, modal focus containment, focus restore — and it lives outside
-      every panel so a view switch cannot display:none it out from under an open session.
-      On a phone this is the ONLY channel surface: the rail's list is hidden there, so the
-      toolbar chip opens this. Refusals show the server's own sentence. */}
+  {/* Channels: create, rename, archive. One native <dialog> in three modes (data-channel-mode), for the
+      same reasons the roster is one: Escape, modal focus containment and focus restore, outside every
+      panel so a view switch cannot hide it mid-command. Refusals show the server's own sentence and
+      keep what was typed. */}
   <dialog
     class="dashboard__channel-dialog"
     id="dashboard-channel-dialog"
     data-channel-dialog
+    data-channel-mode="create"
     aria-labelledby="dashboard-channel-dialog-title"
   >
-    <div class="dashboard__channel-dialog-head">
-      <h2 id="dashboard-channel-dialog-title">Channels</h2>
-      <button
-        class="dashboard__icon-button"
-        type="button"
-        data-channel-dialog-close
-        aria-label="Close channels"
-        title="Close channels"
-      >
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <path d="M6 6l12 12M18 6L6 18"></path>
-        </svg>
-      </button>
-    </div>
-    <p class="dashboard__channel-dialog-reach" data-channel-reach></p>
-    <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
-    <p class="dashboard__channel-dialog-status" role="status" aria-live="polite" data-channel-dialog-status></p>
-    <div class="dashboard__channel-dialog-list" data-channel-dialog-list></div>
+    <h2 id="dashboard-channel-dialog-title" data-channel-dialog-title>New channel</h2>
     <form class="dashboard__channel-form" data-channel-create-form>
-      <h3>New channel</h3>
       <label for="dashboard-channel-new-slug">Name</label>
       <input
         id="dashboard-channel-new-slug"
@@ -966,21 +953,22 @@ import "../../styles/kylon-command-palette.css";
         spellcheck="false"
         required
       />
-      <p class="dashboard__channel-hint" data-channel-name-hint></p>
-      <label for="dashboard-channel-new-purpose">Purpose</label>
+      <label for="dashboard-channel-new-purpose">Purpose (optional)</label>
       <input
         id="dashboard-channel-new-purpose"
         type="text"
         data-channel-new-purpose
         autocomplete="off"
       />
-      <p class="dashboard__channel-hint" data-channel-purpose-hint></p>
-      <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-create-submit>
-        Create channel
-      </button>
+      <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
+      <div class="dashboard__channel-form-actions">
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-create-submit>
+          Create channel
+        </button>
+      </div>
     </form>
-    <form class="dashboard__channel-form" data-channel-manage-form hidden>
-      <h3 data-channel-manage-title>Manage</h3>
+    <form class="dashboard__channel-form" data-channel-rename-form hidden>
       <label for="dashboard-channel-rename-slug">Name</label>
       <input
         id="dashboard-channel-rename-slug"
@@ -990,16 +978,23 @@ import "../../styles/kylon-command-palette.css";
         spellcheck="false"
         required
       />
-      <p class="dashboard__channel-hint" data-channel-rename-hint></p>
+      <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-rename-submit>
-          Rename
-        </button>
-        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-archive>
-          Archive
+          Rename channel
         </button>
       </div>
-      <p class="dashboard__channel-hint" data-channel-archive-hint></p>
+    </form>
+    <form class="dashboard__channel-form" data-channel-archive-form hidden>
+      <p data-channel-archive-consequence></p>
+      <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
+      <div class="dashboard__channel-form-actions">
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-archive-submit>
+          Archive channel
+        </button>
+      </div>
     </form>
   </dialog>
 
@@ -1170,7 +1165,7 @@ import "../../styles/kylon-command-palette.css";
   import { greetingName } from "../../lib/greeting-name";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
-  import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
+  import { buildHomeRail, type RailChannelsVM } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
@@ -1310,6 +1305,8 @@ import "../../styles/kylon-command-palette.css";
     BROWSER_SIGNAL_COLUMNS,
     workspaceFiles,
     workspaceChannels,
+    channelUnread,
+    type ChannelUnread,
     createChannel,
     renameChannel,
     archiveChannel,
@@ -1378,21 +1375,32 @@ import "../../styles/kylon-command-palette.css";
     type ThreadReplyRoot,
   } from "../../lib/thread-reply";
   import {
+    ALL_MESSAGES_LABEL,
     ALL_SIGNALS_SLUG,
-    CHANNEL_ARCHIVED_TEXT,
-    CHANNEL_EMPTY_TEXT,
-    CHANNEL_REACH_TEXT,
+    ARCHIVE_CHANNEL_CONSEQUENCE,
+    ARCHIVE_CHANNEL_LABEL,
+    CHANNEL_ARCHIVED_STATE,
+    CHANNEL_UNAVAILABLE_TITLE,
+    GENERAL_CHANNEL_ID,
+    GENERAL_CHANNEL_SLUG,
+    GO_TO_GENERAL_LABEL,
+    NEW_CHANNEL_LABEL,
+    RENAME_CHANNEL_LABEL,
+    archiveChannelTitle,
+    archivedChannels,
     channelById,
     channelLabel,
-    channelNameHint,
-    channelPurposeHint,
     channelPurposeInputMax,
+    channelSignalFilter,
     channelSlugInputMax,
     channelSubmitProblem,
     channelSubmitSlug,
+    channelUnreadFor,
+    channelViewLabel,
     liveChannels,
-    unknownChannelHeadText,
-    unknownChannelText,
+    mayManageChannel,
+    resolveChannelParam,
+    signalInChannelView,
   } from "../../lib/channels";
   import {
     pendingAccessRows,
@@ -1613,8 +1621,16 @@ import "../../styles/kylon-command-palette.css";
        resolve for a permalink and still names the messages already in it. The rail lists the
        live ones only. */
     let channels: WorkspaceChannel[] = [];
-    /** The channel the feed is narrowed to. `null` is all-signals, the whole feed. */
+    /** What the feed shows (channels.ts): `null` is All messages (filed and unfiled),
+        GENERAL_CHANNEL_ID is #general (unfiled only), anything else is a channel id. */
     let activeChannelId: string | null = null;
+    /** True once this workspace's channel list has been read (the rail shows skeletons until then). */
+    let channelsLoaded = false;
+    /** The per-channel unread read for this workspace (C1b). `null` is unknown, never "read". */
+    let channelUnreadRows: ChannelUnread[] | null = null;
+    let channelUnreadGeneration = 0;
+    /** The Archived channels disclosure, kept open across rail rebuilds. */
+    let railArchivedOpen = false;
     /** A ?c= that resolves to no channel here. Held so the empty state can say so. */
     let unknownChannelId: string | null = null;
     /**
@@ -1695,7 +1711,8 @@ import "../../styles/kylon-command-palette.css";
      */
     const rowShowsOnScreen = (row: Signal): boolean =>
       unknownChannelId === null &&
-      (activeChannelId === null || row.channelId === activeChannelId);
+      (activeChannelId === null ||
+        row.channelId === (activeChannelId === GENERAL_CHANNEL_ID ? null : activeChannelId));
     /**
      * One generation per channel READ, because a channel command does not bump requestVersion
      * (it is not a workspace change). Archive and Create are different buttons and each only
@@ -1941,6 +1958,8 @@ import "../../styles/kylon-command-palette.css";
           signalIds,
         );
         if (workspaceId !== activeWorkspaceId) return;
+        /* Unread clears only on the server's read acknowledgement, never on a click. */
+        void refreshChannelUnread(workspaceId, true);
         for (const signalId of signalIds) {
           const cached = deliveryReceiptCache.get(signalId);
           if (cached) deliveryReceiptCache.set(signalId, { ...cached, checkedAt: 0 });
@@ -2084,6 +2103,9 @@ import "../../styles/kylon-command-palette.css";
         closeMentionPicker();
       }
       app.dataset.channelView = name;
+      /* An archived channel: the composer gives way to its state (renderChannelBlocked). Guarded for
+         the fixtures that run this view switch without the channel functions. */
+      if (typeof renderChannelBlocked === "function") renderChannelBlocked();
       syncListsChrome();
       syncStandalonePage();
       /* The Live chip is true exactly while armLiveFeed is allowed to run. */
@@ -2104,8 +2126,11 @@ import "../../styles/kylon-command-palette.css";
        renders no doors), so it keeps both rows. */
     const syncFeedChrome = (): void => {
       const frame = one<HTMLElement>(".hm-frame");
+      /* The header's title names the channel now, so the stream head is quiet in every view that
+         resolved; it speaks for an unresolved link, an archived channel and a narrowed filter. */
       const quiet = !sampleMode && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
-        activeChannelId === null && unknownChannelId === null && signalFilter === "all";
+        unknownChannelId === null && signalFilter === "all" &&
+        !(typeof activeChannelArchived === "function" && activeChannelArchived());
       frame?.toggleAttribute("data-feed-quiet", quiet);
       const liveChip = one<HTMLElement>("[data-live-chip]");
       for (const dot of all<HTMLElement>("[data-home-live-dot]")) dot.hidden = sampleMode || !liveChip || liveChip.hidden;
@@ -2117,8 +2142,9 @@ import "../../styles/kylon-command-palette.css";
       const count = one<HTMLElement>("[data-update-count]");
       const refreshLabel = refresh?.getAttribute("aria-label") ?? "Refresh";
       return {
-        channels: [{ id: "", label: channelLabel(ALL_SIGNALS_SLUG), current: activeChannelId === null && unknownChannelId === null },
-          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channel.slug,
+        channels: [{ id: "", label: ALL_MESSAGES_LABEL, current: activeChannelId === null && unknownChannelId === null },
+          { id: GENERAL_CHANNEL_ID, label: channelLabel(GENERAL_CHANNEL_SLUG), current: activeChannelId === GENERAL_CHANNEL_ID && unknownChannelId === null },
+          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channelLabel(channel.slug),
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
         mayCreateChannel: !sampleMode,
         filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
@@ -2132,7 +2158,7 @@ import "../../styles/kylon-command-palette.css";
     };
     const feedMenuAction = (action: FeedMenuAction): void => {
       if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
-      else if (action.kind === "new-channel") openChannelDialog();
+      else if (action.kind === "new-channel") openChannelDialog("create");
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
       else one<HTMLButtonElement>("[data-refresh]")?.click();
     };
@@ -2354,7 +2380,7 @@ import "../../styles/kylon-command-palette.css";
       panel.setAttribute("aria-labelledby", "hm-new-workspace-title");
       const mount = () => {
         const replacement = buildNewWorkspaceForm(document, vm, {
-          onNameInput: name => { vm.name = name; const railSlot = one<HTMLElement>("[data-home-rail-slot]"); if (railSlot) setRailDraftName(railSlot, name);
+          onNameInput: name => { vm.name = name;
             const preview = panel.querySelector<HTMLElement>(".hm-new-workspace__preview-title"); if (preview) preview.textContent = newWorkspacePreviewTitle(name);
             const button = panel.querySelector<HTMLButtonElement>("[data-create-button]"); if (button) button.disabled = !newWorkspaceCanCreate(name, vm.purpose); },
           onPurposeSelect: purpose => { vm.purpose = purpose; mount(); panel.querySelector<HTMLInputElement>(`[data-create-purpose][value="${purpose}"]`)?.focus({ preventScroll: true }); },
@@ -2711,7 +2737,11 @@ import "../../styles/kylon-command-palette.css";
         .select(BROWSER_SIGNAL_COLUMNS)
         .eq("workspace_id", workspaceId)
         .or(`until.is.null,until.gt.${cutoff}`);
-      if (channelId !== null) query = query.eq("channel_id", channelId);
+      /* #general is the UNFILED messages: `channel_id IS NULL` on the query, so later pages,
+         refreshes and the live tick all narrow the same way (never a filter over the page). */
+      const narrowing = channelSignalFilter(channelId);
+      if (narrowing.kind === "unfiled") query = query.is("channel_id", null);
+      else if (narrowing.kind === "channel") query = query.eq("channel_id", narrowing.channelId);
       if (cursor) {
         query = query.or(
           `created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`,
@@ -4463,6 +4493,7 @@ import "../../styles/kylon-command-palette.css";
         const at = Date.now();
         applySampleRoster(workspace.id);
         channels = sampleChannelsFor(workspace.id, at);
+        channelsLoaded = true;
         /* A REOPEN RE-READS WHAT THE WORKSPACE HOLDS; a switch builds it. The sample has no
            server, so the rows this session posted stand in for what a refetch returns: a
            refresh that rebuilt from the fixture would model a server that forgot the message
@@ -4876,19 +4907,23 @@ import "../../styles/kylon-command-palette.css";
         }));
       }
       const pickerRoot = one<HTMLElement>("[data-workspace-picker-root]");
-      const pickerKey = JSON.stringify([workspaces.map(({ id, name, archived }) => [id, name, archived]), activeWorkspaceId]);
+      const pickerKey = JSON.stringify([workspaces.map(({ id, name, archived }) => [id, name, archived]), activeWorkspaceId, sampleMode]);
       if (pickerRoot && pickerRoot.dataset.pickerKey !== pickerKey) {
         const previous = pickerRoot.querySelector<HTMLDetailsElement>("[data-workspace-picker]");
         const focused = pickerRoot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
         const choice = focused instanceof HTMLButtonElement ? focused.value : null;
         const wasOpen = previous?.open ?? false;
         pickerRoot.dataset.pickerKey = pickerKey;
+        /* A workspace opens on #general; New workspace is the picker's last entry (it left the rail). */
         const picker = buildWorkspacePicker(document, workspaces, activeWorkspaceId, workspaceId => {
           layout.closeNavigation();
           const trigger = pickerRoot.querySelector<HTMLElement>("summary");
           if (trigger?.getClientRects().length && !trigger.closest("[hidden], [inert]")) trigger.focus({ preventScroll: true });
-          void navigateHome({ view: "chat", workspaceId }, "push");
-        }) as HTMLDetailsElement;
+          void navigateHome({ view: "chat", workspaceId, channelId: GENERAL_CHANNEL_ID }, "push");
+        }, sampleMode ? undefined : { href: routeHref({ view: "new" }), open: () => {
+          layout.closeNavigation(false);
+          navigateHomeHref(routeHref({ view: "new" }));
+        } }) as HTMLDetailsElement;
         picker.open = wasOpen;
         pickerRoot.replaceChildren(picker);
         if (focused) {
@@ -4904,13 +4939,15 @@ import "../../styles/kylon-command-palette.css";
       const orgWorkspaces=organizationWorkspaces(workspaces,selectedOrgId);
       const orgWorkspaceIds=new Set(orgWorkspaces.map(workspace=>workspace.id));
       const railPeople = homeRailPeople(catchUpData.filter(entry=>orgWorkspaceIds.has(entry.workspace.id)), homeRoute.view === "catchup" ? null : currentHomePeople());
+      /* The Channels section belongs to the selected workspace; guarded for fixtures that render
+         the rail without channel state. */
+      const channelSection = typeof railChannelSection === "function" ? railChannelSection() : undefined;
       const vm = { ...mapHomeRail(orgWorkspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts),
         ...(typeof activeDm !== "undefined" && activeDm ? { currentDmId: activeDm.id } : {}),
-        ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}) };
-      /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
-         follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
-      const draftName = homeRoute.view === "new" ? one<HTMLInputElement>("[data-panel=create] #dashboard-workspace-name")?.value ?? null : null;
-      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft") + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}`;
+        ...(typeof activeWorkspaceLeadAgent === "function" && activeWorkspaceLeadAgent() ? { leadAgentId: activeWorkspaceLeadAgent()!.principalId } : {}),
+        ...(channelSection ? { channels: channelSection } : {}) };
+      const archivedOpen = typeof railArchivedOpen === "boolean" && railArchivedOpen;
+      const key = homeStructureKey(vm) + `|dm:${vm.currentDmId ?? ""}|lead:${vm.leadAgentId ?? ""}|more:${railExpanded}|archived:${archivedOpen}`;
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
@@ -4962,14 +4999,25 @@ import "../../styles/kylon-command-palette.css";
           null, copyName,
         ], name);
       };
+      const channelCallbacks = channelSection ? {
+        selectChannel: (id: string) => {
+          layout.closeNavigation(false);
+          selectChannel(id);
+          focusConversationHeading();
+        },
+        channelMenu: openChannelRowMenu,
+        newChannel: (button: HTMLElement) => openChannelDialog("create", null, button),
+        retryChannels: () => { void refreshChannels(activeWorkspaceId, requestVersion).catch(() => {}); },
+        toggleChannels: (expanded: boolean) => { railExpanded = expanded; writeRailExpanded(activeWorkspaceId, expanded); },
+        toggleArchived: (open: boolean) => { railArchivedOpen = open; },
+      } : {};
       layout.refreshTodoContext(() => replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: openRailPerson,
         openAgent: openRailAgent,
         contextMenu: railContextMenu,
-        toggleWorkspaces: expanded => { railExpanded = expanded; },
-      }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
-        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]));
+        ...channelCallbacks,
+      }, { channelsExpanded: railExpanded, archivedOpen })]));
       homeRailKey = key;
     };
     const answerOffer = (card: OfferCardVM, answer: OfferAnswer, controls: { buttons: HTMLButtonElement[]; status: HTMLElement }): void => {
@@ -5054,8 +5102,10 @@ import "../../styles/kylon-command-palette.css";
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
-        menu: { settings: true, adminAccess: true } };
-      const composerName = `Message #${workspace.name}`;
+        menu: { settings: true, adminAccess: true },
+        /* Chat's heading is the channel being read; the workspace stays in the picker. */
+        channelTitle: (typeof activeDm !== "undefined" && activeDm) || !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
+      const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
       const composerLabel = one<HTMLElement>("[data-composer-label]");
       if (composerLabel) composerLabel.textContent = composerName;
       one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
@@ -6524,15 +6574,29 @@ import "../../styles/kylon-command-palette.css";
       const list = one<HTMLOListElement>("[data-feed-list]");
       if (list) {
         list.replaceChildren();
+        /* The unresolved id stays in the address (syncChannelUrl) and is resolved again on every
+           channel read, so Retry and a later list both reach it. Nothing posts or shows from
+           another channel meanwhile: the composer is hidden while this state holds. */
         const row = document.createElement("li");
-        row.className = "dashboard__filter-empty";
-        row.textContent = unknownChannelText(channelListFailed);
+        row.className = "dashboard__filter-empty dashboard__channel-unavailable";
+        row.dataset.channelUnavailable = "";
+        const title = document.createElement("strong");
+        title.textContent = CHANNEL_UNAVAILABLE_TITLE;
         const open = document.createElement("button");
         open.type = "button";
-        open.className = "dashboard__text-button";
-        open.textContent = `Open ${channelLabel(ALL_SIGNALS_SLUG)}`;
-        open.addEventListener("click", () => selectChannel(null));
-        row.append(" ", open);
+        open.className = "dashboard__button dashboard__button--secondary";
+        open.dataset.channelGoGeneral = "";
+        open.textContent = GO_TO_GENERAL_LABEL;
+        open.addEventListener("click", () => selectChannel(GENERAL_CHANNEL_ID));
+        row.append(title, open);
+        if (channelListFailed) {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "dashboard__button dashboard__button--secondary";
+          retry.textContent = "Retry";
+          retry.addEventListener("click", () => { void refreshChannels(activeWorkspaceId, requestVersion).catch(() => {}); });
+          row.append(retry);
+        }
         list.append(row);
       }
       showChannelView("feed");
@@ -6628,11 +6692,10 @@ import "../../styles/kylon-command-palette.css";
             : "No messages yet.";
         }
         if (emptyDetail) {
-          /* A channel is empty on the day it is made and can never be filled from the
-             past: a signal row is immutable, so nothing written before the channel
-             existed moves into it. Say that here, where the reader meets it. */
-          emptyDetail.textContent = channel !== null
-            ? CHANNEL_EMPTY_TEXT
+          /* An empty channel (#general included) is its header, this line and a usable composer:
+             no introductory paragraph. All messages keeps its first-run sentence. */
+          emptyDetail.textContent = activeChannelId !== null
+            ? ""
             : "When a person or an agent posts a note, a question or what they are working on, it shows up here. Agents in chat apps post when you chat with them.";
         }
         previousSignalIds.clear();
@@ -7300,6 +7363,10 @@ import "../../styles/kylon-command-palette.css";
         /* Brain topics decide which names in a body are controls. This offers a re-read on
            every healthy tick; refreshBrainTopics keeps it to one request per 30 seconds. */
         void refreshBrainTopics(false);
+        /* New messages elsewhere reach the rail's unread dots; at most one read per 15 seconds.
+           Channels another member creates, renames or archives arrive within a minute. */
+        void refreshChannelUnread(workspaceId, false);
+        if (Date.now() - channelListReadAt > 60_000) void refreshChannels(workspaceId, version, true).catch(() => {});
       } catch {
         // A live refresh never replaces a readable channel with an error. The
         // next tick retries, and the explicit refresh control remains available.
@@ -7524,6 +7591,8 @@ import "../../styles/kylon-command-palette.css";
          slugs are out of the DOM as well as out of memory. */
       channels = [];
       channelListFailed = false;
+      channelsLoaded = false;
+      channelUnreadRows = null;
       activeChannelId = null;
       unknownChannelId = null;
       postedSinceReset.clear();
@@ -8270,6 +8339,11 @@ import "../../styles/kylon-command-palette.css";
          switch: not the list, not the narrowing, not a reply in progress. */
       channels = [];
       channelListFailed = false;
+      channelsLoaded = false;
+      channelUnreadRows = null;
+      channelUnreadGeneration += 1;
+      railArchivedOpen = false;
+      railExpanded = readRailExpanded(selected.id);
       activeChannelId = null;
       unknownChannelId = null;
       /* Nothing this browser posted in the workspace being left may stand in for a page of
@@ -8357,7 +8431,10 @@ import "../../styles/kylon-command-palette.css";
         if (channelGeneration === channelReadGeneration) {
           channels = nextChannels.value;
           channelListFailed = nextChannels.failed;
+          channelsLoaded = true;
+          channelListReadAt = Date.now();
         }
+        void refreshChannelUnread(selected.id, true);
         /* The URL is read ONCE per workspace open, after the channels are known: a ?c= that
            names no channel here must show an honest empty state, and the only way to tell
            that from a channel that is merely empty is to have the list. Then it is WRITTEN,
@@ -9305,9 +9382,54 @@ import "../../styles/kylon-command-palette.css";
     const activeChannel = (): WorkspaceChannel | null =>
       channelById(channels, activeChannelId);
 
-    /** The name in the head, the phone's chip, and the composer, from one place. */
+    /** The name in the head, the header's title and the composer, from one place. */
     const activeChannelName = (): string =>
-      channelLabel(activeChannel()?.slug ?? ALL_SIGNALS_SLUG);
+      unknownChannelId !== null ? CHANNEL_UNAVAILABLE_TITLE : channelViewLabel(activeChannelId, channels) ?? CHANNEL_UNAVAILABLE_TITLE;
+
+    /** The channel being read is archived: it stays readable and takes no new messages. */
+    const activeChannelArchived = (): boolean => activeChannel()?.archivedAt != null;
+
+    /** The viewer's own workspace role, for showing the actions the server would accept. */
+    const viewerWorkspaceRole = (): "owner" | "admin" | "member" | null =>
+      members.find((member) => member.userId === session?.user.id)?.role ?? null;
+
+    /** May the viewer rename or archive this channel (creator, owner or admin). The server decides. */
+    const viewerMayManageChannel = (channel: WorkspaceChannel): boolean =>
+      !sampleMode && mayManageChannel(channel, { userId: session?.user.id ?? null, role: viewerWorkspaceRole() });
+
+    /* EXPANSION IS KEPT PER VIEWER AND WORKSPACE, so "Show 12 more" survives a reload. Storage can
+       be unavailable (private windows); then it simply starts compact. */
+    const railExpandedKey = (workspaceId: string): string =>
+      `commonswarm:channel-rail-expanded:${session?.user.id ?? "sample"}:${workspaceId}`;
+    const readRailExpanded = (workspaceId: string): boolean => {
+      try { return window.localStorage.getItem(railExpandedKey(workspaceId)) === "1"; } catch { return false; }
+    };
+    const writeRailExpanded = (workspaceId: string, expanded: boolean): void => {
+      try {
+        if (expanded) window.localStorage.setItem(railExpandedKey(workspaceId), "1");
+        else window.localStorage.removeItem(railExpandedKey(workspaceId));
+      } catch { /* storage unavailable: the rail stays as the reader left it this session */ }
+    };
+
+    /** The Channels section of the rail for the workspace being read, or undefined where none is. */
+    const railChannelSection = (): RailChannelsVM | undefined => {
+      if (!activeWorkspaceId || homeRoute.view === "catchup" || homeRoute.view === "new") return undefined;
+      const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
+      const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null &&
+        !(typeof activeDm !== "undefined" && activeDm);
+      const row = (channel: WorkspaceChannel) => ({ id: channel.channelId, slug: channel.slug, href: href(channel.channelId),
+        current: reading && activeChannelId === channel.channelId,
+        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
+      return {
+        state: !channelsLoaded ? "loading" : channelListFailed ? "failed" : "ready",
+        general: { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
+          current: reading && activeChannelId === GENERAL_CHANNEL_ID,
+          unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false },
+        channels: liveChannels(channels).map(row),
+        archived: archivedChannels(channels).map(row),
+        mayCreate: !sampleMode,
+      };
+    };
 
     /**
      * Which place the rail marks as current. An unresolved `?c=` marks NOTHING: the reader is
@@ -9319,7 +9441,7 @@ import "../../styles/kylon-command-palette.css";
     const syncChannelCurrent = (): void => {
       for (const button of all<HTMLButtonElement>("[data-channel-place]")) {
         const place = button.dataset.channelPlace ?? "";
-        const id = place === "" ? null : place;
+        const id = place === "" ? null : place; // "" is All messages; "general" and ids name themselves
         if (
           activeWorkspaceView === "signals" && id === activeChannelId &&
           unknownChannelId === null
@@ -9453,6 +9575,15 @@ import "../../styles/kylon-command-palette.css";
         return;
       }
       const leadName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
+      /* #general names itself; All messages keeps the plain box. Guarded so the fixture that runs this
+         function without the channel state still reads the All-messages branch. */
+      const generalPlace = channel === null && typeof activeChannelId === "string" && activeChannelId === GENERAL_CHANNEL_ID
+        ? channelLabel(GENERAL_CHANNEL_SLUG) : null;
+      if (generalPlace !== null) {
+        input.placeholder = leadName ? `Message ${generalPlace} — ${leadName} leads` : `Message ${generalPlace}`;
+        input.setAttribute("aria-label", `Message in ${generalPlace}`);
+        return;
+      }
       if (channel === null) {
         input.placeholder = leadName ? `Message… (${leadName} leads)` : "Message…";
         input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
@@ -9529,44 +9660,54 @@ import "../../styles/kylon-command-palette.css";
       const name = one<HTMLElement>("[data-channel-name]");
       const description = one<HTMLElement>("[data-channel-description]");
       const channel = activeChannel();
-      if (unknownChannelId !== null) {
-        if (name) name.textContent = "Channel not found";
-        if (description) description.textContent = unknownChannelHeadText(channelListFailed);
-      } else if (channel === null) {
-        if (name) name.textContent = channelLabel(ALL_SIGNALS_SLUG);
-        if (description) {
-          description.textContent = "Messages from everyone in this workspace, people and agents.";
-        }
-      } else {
-        if (name) name.textContent = channelLabel(channel.slug);
-        if (description) {
-          description.textContent = channel.archivedAt !== null
-            ? CHANNEL_ARCHIVED_TEXT
-            : channel.purpose ?? CHANNEL_REACH_TEXT;
-        }
+      if (name) name.textContent = activeChannelName();
+      if (description) {
+        description.textContent = unknownChannelId !== null ? ""
+          : channel !== null && channel.archivedAt !== null ? CHANNEL_ARCHIVED_STATE
+          : channel?.purpose ?? "";
       }
+      renderChannelBlocked();
       syncChannelCurrent();
       syncComposerPlacement();
       syncFeedChrome();
     };
 
+    /**
+     * An archived channel keeps its conversation on screen and takes no new messages, so the
+     * composer gives way to that state and a way back to #general. An unresolved link shows the
+     * same way out, in the feed (renderUnknownChannel).
+     */
+    const renderChannelBlocked = (): void => {
+      const block = one<HTMLElement>("[data-channel-archived]");
+      if (!block) return;
+      const feedShown = app.dataset.channelView === "feed" || app.dataset.channelView === "feed-empty";
+      const archived = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        unknownChannelId === null && activeChannelArchived();
+      block.hidden = !archived;
+      const composer = one<HTMLFormElement>("[data-composer]");
+      if (composer && archived) {
+        composer.hidden = true;
+        closeMentionPicker();
+      }
+    };
+
     const renderChannelRail = (): void => {
+      renderHomeRail();
       const slot = one<HTMLElement>("[data-home-channel-menu]");
       if (!slot) return;
-      slot.replaceChildren(buildChannelMenu(document, { sample: sampleMode,
-        label: unknownChannelId !== null ? "Channel not found" : channelLabel(activeChannel()?.slug ?? ALL_SIGNALS_SLUG) }));
+      slot.replaceChildren(buildChannelMenu(document, { sample: sampleMode, label: activeChannelName() }));
       one<HTMLButtonElement>("[data-channel-place='']")?.addEventListener("click", () => selectChannel(null));
-      one<HTMLButtonElement>("[data-channel-new]")?.addEventListener("click", () => openChannelDialog());
+      one<HTMLButtonElement>("[data-channel-new]")?.addEventListener("click", () => openChannelDialog("create"));
       const list = one<HTMLElement>("[data-channel-list]");
       if (!list) return;
-      for (const channel of liveChannels(channels)) {
+      const places = [{ id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG }, ...liveChannels(channels).map((channel) => ({ id: channel.channelId, slug: channel.slug }))];
+      for (const place of places) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "hm-channel-menu__item";
-        button.dataset.channelPlace = channel.channelId;
-        button.textContent = channel.slug;
-        if (channel.purpose !== null) button.title = channel.purpose;
-        button.addEventListener("click", () => selectChannel(channel.channelId));
+        button.dataset.channelPlace = place.id;
+        button.textContent = channelLabel(place.slug);
+        button.addEventListener("click", () => selectChannel(place.id));
         list.append(button);
       }
       syncChannelCurrent();
@@ -9610,16 +9751,25 @@ import "../../styles/kylon-command-palette.css";
         unknownChannelId = null;
         return;
       }
-      const found = channelById(channels, requested);
-      activeChannelId = found === null ? null : found.channelId;
-      unknownChannelId = found === null ? requested : null;
+      ({ activeChannelId, unknownChannelId } = resolveChannelParam(requested, channels));
+      /* A link into an archived channel opens it, with its row revealed under Archived channels. */
+      if (activeChannelArchived()) railArchivedOpen = true;
     };
 
     const selectChannel = (channelId: string | null): void => {
       const next = channelId === null
         ? null
+        : channelId === GENERAL_CHANNEL_ID
+        ? GENERAL_CHANNEL_ID
         : channelById(channels, channelId)?.channelId ?? null;
       if (channelId !== null && next === null) return;
+      /* A channel row leaves a Direct Message: the feed and the composer go back to the channel. */
+      const leavingDm = !!activeDm;
+      if (leavingDm) {
+        activeDm = null;
+        syncComposerAddress([]);
+        closeEntityPanel(false);
+      }
       const changed = next !== activeChannelId || unknownChannelId !== null;
       /* `changed` is also true when only the unresolved state clears. The RETIREMENT below
          needs the narrower question — did the address actually move — because clicking the
@@ -9654,11 +9804,10 @@ import "../../styles/kylon-command-palette.css";
          existed. The dishonesty a client-side filter usually carries is absent here: the
          sample IS the whole set, so "the messages in this channel" is exactly true of it. */
       if (sampleMode) {
-        signals = sampleSignals.filter(
-          (signal) => activeChannelId === null || signal.channelId === activeChannelId,
-        );
+        signals = sampleSignals.filter((signal) => signalInChannelView(signal.channelId, activeChannelId));
         syncChannelUrl();
         renderChannelRail();
+        renderHomeShell();
         closeChannelDialog();
         renderChannelHead();
         renderFeed();
@@ -9680,92 +9829,152 @@ import "../../styles/kylon-command-palette.css";
       }
       syncChannelUrl();
       renderChannelRail();
+      renderHomeShell();
       closeChannelDialog();
       /* returnToChannel, reached through here, is what loads the new page: it sees an
          empty signal list and fetches one under the channel now in state. */
       activateWorkspaceView("signals");
     };
 
+    /* ── The channel dialog: New channel, Rename channel, Archive #slug? ───────────── */
+    let channelDialogMode: "create" | "rename" | "archive" = "create";
+    /** The channel a rename or archive acts on: the row whose ⋯ opened it, not the one being read. */
+    let managedChannelId: string | null = null;
+    /** Where a cancelled dialog hands focus back, and whether it came from the phone drawer. */
+    let channelDialogReturn: { selector: string | null; element: HTMLElement | null; drawer: boolean } | null = null;
+    let channelDialogSucceeded = false;
+
     const setChannelDialogError = (message: string): void => {
-      const target = one<HTMLElement>("[data-channel-dialog-error]");
-      if (!target) return;
-      target.textContent = message;
-      target.hidden = message === "";
+      for (const target of all<HTMLElement>("[data-channel-dialog-error]")) {
+        target.textContent = message;
+        target.hidden = message === "";
+      }
     };
 
-    const setChannelDialogStatus = (message: string): void => {
-      const target = one<HTMLElement>("[data-channel-dialog-status]");
-      if (target) target.textContent = message;
+    /** The visible heading of the conversation: where a channel move lands focus. */
+    const focusConversationHeading = (): void => {
+      window.requestAnimationFrame(() => {
+        all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1")
+          .find((heading) => heading.getClientRects().length > 0 && !heading.closest("[hidden], [inert]"))
+          ?.focus({ preventScroll: true });
+      });
     };
 
     const renderChannelDialog = (): void => {
-      const reach = one<HTMLElement>("[data-channel-reach]");
-      if (reach) reach.textContent = CHANNEL_REACH_TEXT;
-      for (const hint of all<HTMLElement>("[data-channel-name-hint], [data-channel-rename-hint]")) {
-        hint.textContent = channelNameHint();
+      const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
+      if (!dialog) return;
+      const mode = channelDialogMode;
+      const channel = channelById(channels, managedChannelId);
+      dialog.dataset.channelMode = mode;
+      const title = one<HTMLElement>("[data-channel-dialog-title]");
+      if (title) {
+        title.textContent = mode === "create" ? NEW_CHANNEL_LABEL
+          : mode === "rename" ? RENAME_CHANNEL_LABEL : archiveChannelTitle(channel?.slug ?? "");
       }
-      const purposeHint = one<HTMLElement>("[data-channel-purpose-hint]");
-      if (purposeHint) purposeHint.textContent = channelPurposeHint();
-      const archiveHint = one<HTMLElement>("[data-channel-archive-hint]");
-      if (archiveHint) {
-        archiveHint.textContent =
-          "Archiving hides a channel from this list and refuses new messages. Nothing is deleted, and its messages still read.";
-      }
+      const create = one<HTMLFormElement>("[data-channel-create-form]");
+      const rename = one<HTMLFormElement>("[data-channel-rename-form]");
+      const archive = one<HTMLFormElement>("[data-channel-archive-form]");
+      if (create) create.hidden = mode !== "create";
+      if (rename) rename.hidden = mode !== "rename";
+      if (archive) archive.hidden = mode !== "archive";
+      /* The bounds are the validator's own constants; the validator still has the last word. */
       for (const input of all<HTMLInputElement>("[data-channel-new-slug], [data-channel-rename-slug]")) {
         input.maxLength = channelSlugInputMax();
       }
       const purposeInput = one<HTMLInputElement>("[data-channel-new-purpose]");
       if (purposeInput) purposeInput.maxLength = channelPurposeInputMax();
-      const list = one<HTMLElement>("[data-channel-dialog-list]");
-      if (list) {
-        list.replaceChildren();
-        const places: { id: string | null; slug: string }[] = [
-          { id: null, slug: ALL_SIGNALS_SLUG },
-          ...liveChannels(channels).map((channel) => ({
-            id: channel.channelId as string | null,
-            slug: channel.slug,
-          })),
-        ];
-        for (const place of places) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "dashboard__sidebar-place";
-          button.dataset.channelPlace = place.id ?? "";
-          button.textContent = channelLabel(place.slug);
-          if (place.id === activeChannelId && unknownChannelId === null) {
-            button.setAttribute("aria-current", "page");
-          }
-          button.addEventListener("click", () => selectChannel(place.id));
-          list.append(button);
-        }
+      const renameInput = one<HTMLInputElement>("[data-channel-rename-slug]");
+      if (renameInput && mode === "rename") renameInput.value = channel?.slug ?? "";
+      const consequence = one<HTMLElement>("[data-channel-archive-consequence]");
+      if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
+      const archiveSubmit = one<HTMLButtonElement>("[data-channel-archive-submit]");
+      if (archiveSubmit) archiveSubmit.textContent = ARCHIVE_CHANNEL_LABEL;
+      for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit]")) {
+        submit.disabled = false;
+        submit.removeAttribute("aria-busy");
       }
-      const manage = one<HTMLFormElement>("[data-channel-manage-form]");
-      const channel = activeChannel();
-      const manageable = channel !== null && channel.archivedAt === null && !sampleMode;
-      if (manage) manage.hidden = !manageable;
-      if (manageable) {
-        const title = one<HTMLElement>("[data-channel-manage-title]");
-        if (title) title.textContent = `Manage ${channelLabel(channel!.slug)}`;
-        const rename = one<HTMLInputElement>("[data-channel-rename-slug]");
-        if (rename) rename.value = channel!.slug;
-      }
-      const create = one<HTMLFormElement>("[data-channel-create-form]");
-      if (create) create.hidden = sampleMode;
     };
 
-    const openChannelDialog = (): void => {
+    /**
+     * Open the dialog. A phone drawer closes first, so the drawer and the dialog never trap focus
+     * at the same time; a cancel reopens it and puts focus back on the control that opened it.
+     */
+    const openChannelDialog = (
+      mode: "create" | "rename" | "archive",
+      channelId: string | null = null,
+      opener: HTMLElement | null = null,
+    ): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
-      if (!dialog || dialog.open) return;
+      if (!dialog || dialog.open || sampleMode || !session) return;
+      const channel = mode === "create" ? null : channelById(channels, channelId);
+      if (mode !== "create" && (channel === null || !viewerMayManageChannel(channel))) return;
+      channelDialogMode = mode;
+      managedChannelId = channel?.channelId ?? null;
+      channelDialogSucceeded = false;
+      const drawer = layout.navigationOpen();
+      channelDialogReturn = {
+        selector: opener?.dataset.railChannelMenu !== undefined
+          ? `[data-rail-channel-menu="${CSS.escape(opener.dataset.railChannelMenu)}"]`
+          : opener?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]" : null,
+        element: opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null),
+        drawer,
+      };
+      if (drawer) layout.closeNavigation(false);
       setChannelDialogError("");
-      setChannelDialogStatus("");
       renderChannelDialog();
       dialog.showModal();
-      one<HTMLButtonElement>("[data-channel-switch]")?.setAttribute("aria-expanded", "true");
+      const first = mode === "create" ? one<HTMLInputElement>("[data-channel-new-slug]")
+        : mode === "rename" ? one<HTMLInputElement>("[data-channel-rename-slug]")
+        : one<HTMLButtonElement>("[data-channel-archive-submit]");
+      first?.focus({ preventScroll: true });
+      if (first instanceof HTMLInputElement && mode === "rename") first.select();
     };
 
     const closeChannelDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (dialog?.open) dialog.close();
+    };
+
+    /** Runs on every close: Escape, Cancel, the backdrop, or a result. */
+    const channelDialogClosed = (): void => {
+      const back = channelDialogReturn;
+      channelDialogReturn = null;
+      managedChannelId = null;
+      if (channelDialogSucceeded || back === null) return;
+      if (back.drawer) layout.openNavigation();
+      const target = (back.selector ? one<HTMLElement>(back.selector) : null) ?? back.element;
+      if (target?.isConnected && target.getClientRects().length && !target.closest("[hidden], [inert]")) {
+        target.focus({ preventScroll: true });
+      }
+    };
+
+    /** The ⋯ beside a channel row: the actions the viewer may take, and nothing else. */
+    const openChannelRowMenu = (channelId: string, event: MouseEvent, button: HTMLElement): void => {
+      const channel = channelById(channels, channelId);
+      if (!channel || !viewerMayManageChannel(channel)) return;
+      openContextMenu(event, button, [
+        { label: RENAME_CHANNEL_LABEL, run: () => openChannelDialog("rename", channelId, button) },
+        { label: ARCHIVE_CHANNEL_LABEL, run: () => openChannelDialog("archive", channelId, button), danger: true },
+      ], `${channelLabel(channel.slug)} options`);
+    };
+
+    /**
+     * The viewer's unread state per channel (C1b), re-read at workspace open, after a seen receipt
+     * lands, after a channel change, and at most every 15 seconds on the live tick. A failed read
+     * is unknown for every row: no dot, and nothing claims "read".
+     */
+    let channelUnreadReadAt = 0;
+    const refreshChannelUnread = async (workspaceId: string, force: boolean): Promise<void> => {
+      if (sampleMode || !session || !workspaceId) return;
+      const now = Date.now();
+      if (!force && now - channelUnreadReadAt < 15_000) return;
+      channelUnreadReadAt = now;
+      const generation = ++channelUnreadGeneration;
+      let rows: ChannelUnread[] | null;
+      try { rows = await channelUnread(workspaceId); } catch { rows = null; }
+      if (generation !== channelUnreadGeneration || workspaceId !== activeWorkspaceId) return;
+      channelUnreadRows = rows;
+      renderHomeRail();
     };
 
     /**
@@ -9774,7 +9983,9 @@ import "../../styles/kylon-command-palette.css";
      * can have created a channel since this list was read, so the list is re-read rather
      * than patched.
      */
-    const refreshChannels = async (workspaceId: string, version: number): Promise<void> => {
+    let channelListReadAt = 0;
+    const refreshChannels = async (workspaceId: string, version: number, background = false): Promise<void> => {
+      channelListReadAt = Date.now();
       const generation = ++channelReadGeneration;
       const current = (): boolean =>
         generation === channelReadGeneration && version === requestVersion &&
@@ -9783,16 +9994,14 @@ import "../../styles/kylon-command-palette.css";
       try {
         next = await workspaceChannels(workspaceId);
       } catch (error) {
-        /* The flag has to follow the LATEST read, in both directions. It was set once at
-           workspace open and never again, so a first read that failed kept saying so after a
-           later one succeeded, and a later one that failed left the copy claiming the id is
-           simply not here. Found by a review arm. */
-        if (current()) {
+        /* The flag follows the LATEST read, in both directions. The rail keeps this
+           workspace's last good list beside "Couldn't load channels" and Retry. A background
+           re-read that fails changes nothing: the next one tries again. */
+        if (current() && !background) {
           channelListFailed = true;
+          channelsLoaded = true;
+          renderChannelRail();
           renderChannelHead();
-          /* The feed carries the other half of that sentence. Rendering only the head left
-             the head saying the list did not load while the feed still said the id is simply
-             not here. Found by a review arm. */
           if (unknownChannelId !== null) renderFeed();
         }
         throw error;
@@ -9800,28 +10009,22 @@ import "../../styles/kylon-command-palette.css";
       if (!current()) return;
       channels = next;
       channelListFailed = false;
-      /* A `?c=` that could not be resolved earlier gets one more chance against this list.
-         The workspace open resolves the URL against the list it read, and that read can be
-         dropped in favour of a newer one that has not landed yet, leaving a real id resolved
-         against an empty list. It can also simply be a channel someone else created after
-         this reader's list was read. Found by a review arm.
-         It goes through selectChannel, not through applyChannelFromUrl: the head, the rail,
-         the URL and the FEED have to move together. Resolving the id in place left the reader
-         inside the channel with "Channel not found" still on the screen. */
+      channelsLoaded = true;
+      /* A `?c=` that could not be resolved earlier gets one more chance against this list:
+         the read it was resolved against can have been dropped for a newer one, or the
+         channel can be newer than this reader's list. Through selectChannel, so the head,
+         the rail, the URL and the FEED move together. */
       if (unknownChannelId !== null && channelById(channels, unknownChannelId) !== null) {
         selectChannel(unknownChannelId);
         return;
       }
-      /* A channel that was archived while it was open stops being the active one: the rail
-         no longer lists it and posting to it is refused. Its messages stay readable in
-         all-signals, which is where the reader is sent. */
-      if (activeChannelId !== null && activeChannel()?.archivedAt !== null) {
-        selectChannel(null);
-        return;
-      }
+      /* A channel archived while it is open STAYS open: its messages still read, the composer
+         gives way to the Archived state, and its row is revealed under Archived channels. */
+      if (activeChannelArchived()) railArchivedOpen = true;
       renderChannelRail();
       renderChannelHead();
-      renderChannelDialog();
+      renderHomeShell();
+      void refreshChannelUnread(workspaceId, true);
     };
 
     const closeConnect = (): void => {
@@ -10228,6 +10431,7 @@ import "../../styles/kylon-command-palette.css";
       delete app.dataset.adminWorkspace;
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null, sample: true } }));
       channels = sampleChannelsFor(activeWorkspaceId, now);
+      channelsLoaded = true;
       signals = sampleSignalsFor(activeWorkspaceId, now);
       sampleSignals = [...signals];
       const notice = one<HTMLElement>("[data-sample-notice]");
@@ -10886,8 +11090,11 @@ import "../../styles/kylon-command-palette.css";
           if (homeRoute.view !== "chat" && activeWorkspaceId) {
             await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
           }
-          if (action.slug === ALL_SIGNALS_SLUG) {
+          /* The palette names All messages "__all__"; it never matched ALL_SIGNALS_SLUG. */
+          if (action.slug === "__all__" || action.slug === ALL_SIGNALS_SLUG) {
             selectChannel(null);
+          } else if (action.slug === GENERAL_CHANNEL_SLUG) {
+            selectChannel(GENERAL_CHANNEL_ID);
           } else {
             const match = channels.find((channel) => channel.slug === action.slug);
             if (match) selectChannel(match.channelId);
@@ -10924,7 +11131,7 @@ import "../../styles/kylon-command-palette.css";
         return;
       }
       if (action.type === "new-channel") {
-        openChannelDialog();
+        openChannelDialog("create");
         return;
       }
       if (action.type === "cycle-theme") {
@@ -11313,8 +11520,7 @@ import "../../styles/kylon-command-palette.css";
            destination: posting would file the message in the unfiltered feed under a name
            the reader was told does not exist. */
         setComposerStatus(
-          "This link does not name a channel in this workspace, so there is nowhere to post. " +
-            `Open ${channelLabel(ALL_SIGNALS_SLUG)} first.`,
+          `${CHANNEL_UNAVAILABLE_TITLE}. ${GO_TO_GENERAL_LABEL} to post.`,
           "error",
         );
         return;
@@ -12017,19 +12223,35 @@ import "../../styles/kylon-command-palette.css";
      * browser checks first is the one thing it can know without asking: the same
      * channelSlugProblem the edge runs, imported from the edge's own module.
      */
-    let channelArchiveArmed = "";
-
+    /** Kept for its callers (selectChannel, workspace switch, sign-out): a channel move ends any open channel command. */
     const disarmChannelArchive = (): void => {
-      channelArchiveArmed = "";
-      const button = one<HTMLButtonElement>("[data-channel-archive]");
-      if (button) button.textContent = "Archive";
+      closeChannelDialog();
+    };
+
+    /** A pending command keeps its row and selection; only its own submit waits for the result. */
+    const holdChannelSubmit = (button: HTMLButtonElement | null, pending: boolean): void => {
+      if (!button) return;
+      button.disabled = pending;
+      if (pending) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+    };
+
+    /* A result lands in the conversation: focus goes to the heading, or back to the row on a
+       desktop rename, where the reader was. */
+    const finishChannelCommand = (focusRow: string | null): void => {
+      const back = channelDialogReturn;
+      channelDialogSucceeded = true;
+      closeChannelDialog();
+      const row = focusRow && !back?.drawer ? one<HTMLElement>(focusRow) : null;
+      if (row?.getClientRects().length) row.focus({ preventScroll: true });
+      else focusConversationHeading();
     };
 
     const submitChannelCreate = async (): Promise<void> => {
       const input = one<HTMLInputElement>("[data-channel-new-slug]");
       const purposeInput = one<HTMLInputElement>("[data-channel-new-purpose]");
       const submit = one<HTMLButtonElement>("[data-channel-create-submit]");
-      if (!input || !session || sampleMode || activeWorkspaceId === "") return;
+      if (!input || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
       const slug = channelSubmitSlug(input.value);
       const problem = channelSubmitProblem(slug);
       setChannelDialogError("");
@@ -12041,31 +12263,40 @@ import "../../styles/kylon-command-palette.css";
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
       const purpose = purposeInput === null ? null : purposeInput.value.trim() || null;
-      if (submit) submit.disabled = true;
-      setChannelDialogStatus(`Creating ${channelLabel(slug)}…`);
+      holdChannelSubmit(submit, true);
+      let created: WorkspaceChannel;
       try {
-        const created = await createChannel(session, uuid(), workspaceId, slug, purpose);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        input.value = "";
-        if (purposeInput) purposeInput.value = "";
-        setChannelDialogStatus(`${channelLabel(created.slug)} is ready.`);
-        await refreshChannels(workspaceId, version);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        selectChannel(created.channelId);
+        created = await createChannel(session, uuid(), workspaceId, slug, purpose);
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        setChannelDialogStatus("");
+        holdChannelSubmit(submit, false);
         setChannelDialogError(readableError(error));
-      } finally {
-        if (submit) submit.disabled = false;
+        return;
       }
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      holdChannelSubmit(submit, false);
+      input.value = "";
+      if (purposeInput) purposeInput.value = "";
+      /* The channel exists whatever the list read does next, so a failed or superseded re-read
+         still lands in it. */
+      await refreshChannels(workspaceId, version).catch(() => {});
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      if (channelById(channels, created.channelId) === null) channels = [...channels, created];
+      finishChannelCommand(null);
+      if (homeRoute.view !== "chat") {
+        await navigateHome({ view: "chat", workspaceId, channelId: created.channelId }, "push");
+        focusConversationHeading();
+        return;
+      }
+      selectChannel(created.channelId);
+      focusConversationHeading();
     };
 
     const submitChannelRename = async (): Promise<void> => {
-      const channel = activeChannel();
+      const channel = channelById(channels, managedChannelId);
       const input = one<HTMLInputElement>("[data-channel-rename-slug]");
       const submit = one<HTMLButtonElement>("[data-channel-rename-submit]");
-      if (!input || !channel || !session || sampleMode || activeWorkspaceId === "") return;
+      if (!input || !channel || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
       const slug = channelSubmitSlug(input.value);
       const problem = channelSubmitProblem(slug);
       setChannelDialogError("");
@@ -12076,111 +12307,72 @@ import "../../styles/kylon-command-palette.css";
       }
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
-      if (submit) submit.disabled = true;
-      setChannelDialogStatus(`Renaming ${channelLabel(channel.slug)}…`);
+      holdChannelSubmit(submit, true);
       try {
-        const renamed = await renameChannel(
-          session,
-          uuid(),
-          workspaceId,
-          channel.channelId,
-          slug,
-        );
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        /* The id does not change, so every link into this channel still resolves. That is
-           why the URL carries the id and not the name. */
-        setChannelDialogStatus(`This channel is now ${channelLabel(renamed.slug)}.`);
-        await refreshChannels(workspaceId, version);
+        await renameChannel(session, uuid(), workspaceId, channel.channelId, slug);
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        setChannelDialogStatus("");
+        /* The server's sentence (403 channel_forbidden included), and the name as typed. */
+        holdChannelSubmit(submit, false);
         setChannelDialogError(readableError(error));
-      } finally {
-        if (submit) submit.disabled = false;
+        return;
       }
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      holdChannelSubmit(submit, false);
+      /* The id does not change, so the link, the selection and the conversation all hold. */
+      await refreshChannels(workspaceId, version).catch(() => {});
+      finishChannelCommand(`[data-rail-channel-menu="${CSS.escape(channel.channelId)}"]`);
     };
 
     const submitChannelArchive = async (): Promise<void> => {
-      const channel = activeChannel();
-      const button = one<HTMLButtonElement>("[data-channel-archive]");
-      if (!channel || !session || sampleMode || activeWorkspaceId === "") return;
+      const channel = channelById(channels, managedChannelId);
+      const submit = one<HTMLButtonElement>("[data-channel-archive-submit]");
+      if (!channel || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
       setChannelDialogError("");
-      /* Two presses, because there is no command that un-archives. The second press is the
-         one that acts, and the button says what it is about to do to whom. */
-      if (channelArchiveArmed !== channel.channelId) {
-        channelArchiveArmed = channel.channelId;
-        if (button) {
-          button.textContent =
-            `Archive ${channelLabel(channel.slug)} for everyone. Press again to confirm.`;
-        }
-        return;
-      }
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
-      if (button) button.disabled = true;
-      setChannelDialogStatus(`Archiving ${channelLabel(channel.slug)}…`);
+      holdChannelSubmit(submit, true);
       try {
         await archiveChannel(session, uuid(), workspaceId, channel.channelId);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        setChannelDialogStatus(
-          `${channelLabel(channel.slug)} is archived. Its messages still read in ${
-            channelLabel(ALL_SIGNALS_SLUG)
-          }.`,
-        );
-        disarmChannelArchive();
-        await refreshChannels(workspaceId, version);
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        setChannelDialogStatus("");
+        holdChannelSubmit(submit, false);
         setChannelDialogError(readableError(error));
-      } finally {
-        if (button) button.disabled = false;
+        return;
       }
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      holdChannelSubmit(submit, false);
+      /* The row leaves the active list only now, after the server took it. */
+      if (activeChannelId === channel.channelId) railArchivedOpen = true;
+      await refreshChannels(workspaceId, version).catch(() => {});
+      finishChannelCommand(`[data-rail-channel="${CSS.escape(channel.channelId)}"]`);
     };
 
-    for (const button of all<HTMLButtonElement>("[data-channel-place]")) {
-      button.addEventListener("click", () => selectChannel(null));
-    }
-    one<HTMLButtonElement>("[data-channel-new]")?.addEventListener("click", () => {
-      openChannelDialog();
-      window.requestAnimationFrame(() => {
-        one<HTMLInputElement>("[data-channel-new-slug]")?.focus({ preventScroll: true });
-      });
-    });
-    one<HTMLButtonElement>("[data-channel-switch]")?.addEventListener(
-      "click",
-      openChannelDialog,
-    );
-    one<HTMLButtonElement>("[data-channel-dialog-close]")?.addEventListener(
-      "click",
-      closeChannelDialog,
-    );
     {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       dialog?.addEventListener("click", (event) => {
         if (event.target === dialog) dialog.close();
       });
-      dialog?.addEventListener("close", () => {
-        disarmChannelArchive();
-        one<HTMLButtonElement>("[data-channel-switch]")
-          ?.setAttribute("aria-expanded", "false");
-      });
+      dialog?.addEventListener("close", channelDialogClosed);
+    }
+    for (const cancel of all<HTMLButtonElement>("[data-channel-dialog-cancel]")) {
+      cancel.addEventListener("click", closeChannelDialog);
     }
     one<HTMLFormElement>("[data-channel-create-form]")?.addEventListener("submit", (event) => {
       event.preventDefault();
       void submitChannelCreate();
     });
-    one<HTMLFormElement>("[data-channel-manage-form]")?.addEventListener("submit", (event) => {
+    one<HTMLFormElement>("[data-channel-rename-form]")?.addEventListener("submit", (event) => {
       event.preventDefault();
       void submitChannelRename();
     });
-    one<HTMLButtonElement>("[data-channel-archive]")?.addEventListener("click", () => {
+    one<HTMLFormElement>("[data-channel-archive-form]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
       void submitChannelArchive();
     });
-    one<HTMLInputElement>("[data-channel-rename-slug]")?.addEventListener(
-      "input",
-      disarmChannelArchive,
-    );
+    for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
+      button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
+    }
     one<HTMLButtonElement>("[data-dm-close]")?.addEventListener("click", () => closeDirectMessage());
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
@@ -14495,52 +14687,39 @@ import "../../styles/kylon-command-palette.css";
     background: rgb(0 0 0 / 45%);
   }
 
-  .dashboard__channel-dialog-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-3);
-  }
-
-  .dashboard__channel-dialog-head h2 {
+  .dashboard__channel-dialog h2 {
     margin: 0;
     font-size: var(--t-md);
-  }
-
-  .dashboard__channel-dialog-reach,
-  .dashboard__channel-hint {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__channel-dialog-status {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__channel-dialog-status:empty {
-    display: none;
-  }
-
-  .dashboard__channel-dialog-list {
-    display: grid;
-    gap: var(--s-1);
-    margin-block: var(--s-4);
   }
 
   .dashboard__channel-form {
     display: grid;
     gap: var(--s-2);
-    margin-block-start: var(--s-5);
-    padding-block-start: var(--s-4);
-    border-block-start: 1px solid var(--border);
+    margin-block-start: var(--s-4);
   }
 
-  .dashboard__channel-form h3 {
-    margin: 0;
-    font-size: var(--t-sm);
+  /* An archived channel in place of the composer, and an unresolved link in place of the feed. */
+  .dashboard__channel-archived,
+  .dashboard__channel-unavailable {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-2) var(--s-3);
+  }
+
+  .dashboard__channel-archived {
+    padding: var(--s-3) var(--s-4) calc(var(--s-3) + env(safe-area-inset-bottom));
+    border-block-start: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .dashboard__channel-archived[hidden] {
+    display: none;
+  }
+
+  .dashboard__channel-archived .dashboard__button,
+  .dashboard__channel-unavailable .dashboard__button {
+    min-block-size: 2.75rem;
   }
 
   .dashboard__channel-form label {
@@ -14561,6 +14740,7 @@ import "../../styles/kylon-command-palette.css";
   .dashboard__channel-form-actions {
     display: flex;
     flex-wrap: wrap;
+    justify-content: flex-end;
     gap: var(--s-3);
   }
 

@@ -96,7 +96,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__rail-content { display: flex; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-rail { overflow: visible; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: none; }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__people, .hm-rail__workspace-list) { overflow: visible; max-block-size: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__people { overflow: visible; max-block-size: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-phone-bar { display: none; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell [data-home-phone-nav] { display: none; }
@@ -151,7 +151,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail {
   gap: 16px; font-size: 15px; background: var(--cs-rail-bg);
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: none; gap: 8px; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace-list { gap: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel-list { gap: 0; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__section-head { min-block-size: 36px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__heading {
   padding: 0 10px; color: var(--cs-secondary); font-size: 15px; font-weight: 600;
@@ -164,7 +164,14 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__link, .hm
   min-block-size: 30px; padding-inline: 10px; border-radius: 5px; gap: 8px; font-size: 15px;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__name { font-size: 15px; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace[data-rail-attention] { color: var(--cs-ink); font-weight: 700; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel[data-unread] { color: var(--cs-ink); font-weight: 700; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel-item:has(> [aria-current="page"]) > .hm-rail__channel-actions { color: var(--cs-rail-on-accent); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel-actions { border-radius: 5px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel-item:has(> .hm-rail__channel-actions) > .hm-rail__channel { padding-inline-end: 44px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel-skeleton { border-radius: 5px; }
+/* Channel controls keep 44px targets at every width: rows, ⋯, +, Show more/fewer, the archive disclosure, Retry. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__channel, .hm-rail__channels .hm-rail__more) { min-block-size: 44px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channels .hm-rail__new { inline-size: 44px; min-block-size: 44px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-current="page"] {
   background: var(--cs-rail-accent); color: var(--cs-rail-on-accent); font-weight: 600;
 }
@@ -210,7 +217,6 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-todo-composition], [data-wiki-composition]) .hm-rail__people-list {
     max-block-size: none;
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__workspace-list { max-block-size: 240px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]:not([data-todo-composition], [data-wiki-composition]) .hm-rail__catch-up {
     display: flex; align-items: center; gap: 8px; font-weight: 500;
   }
@@ -437,3 +443,27 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker :i
 }
 /* The borrowed picker is shown by the navigation shell, not the legacy create rail. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame__rail > [data-workspace-picker-root] { display: none; }
+
+/* Channels C1. The picker's last entry is New workspace (it left the rail). */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new {
+  display: flex; align-items: center; min-inline-size: 44px; min-block-size: 44px; padding: 8px 10px; margin-block-start: 2px;
+  border-block-start: 1px solid var(--cs-line); border-radius: 5px; color: var(--cs-ink); text-decoration: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new:hover { background: var(--cs-selected); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__new:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+/* Phone drawer: picker, then Catch up → Channels → Direct messages → the workspace's resource links, then
+   the account. #general replaces the generic Chat link and the rail's Catch up replaces the product one. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__catch-up { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products {
+    order: 2; border-block-end: 0; padding-block-end: 0; border-block-start: 1px solid var(--cs-line); padding-block-start: 0.625rem;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products [data-kylon-id="catchup"] { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-products:not(:has(.cs-org-product:not([data-kylon-id="catchup"]))) { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll:has(.hm-rail__channels) .cs-org-phone-products [data-kylon-id="chat"] { display: none; }
+}
+/* Menus opened from a touch layout keep 44px items and fit the visual viewport; long menus scroll. */
+@media (width <= 64rem), (pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { max-block-size: calc(100dvh - 16px); overflow-y: auto; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item { min-block-size: 44px; }
+}

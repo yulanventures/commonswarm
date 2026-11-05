@@ -164,6 +164,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       let restoredComposerKey, focusedComposerWorkspaceId, pendingWorkspaceId, pendingWorkspaceCreate;
       let agents, members, pendingInvites, accessStatuses, pendingAgents, pendingAgentsLoadFailed, renderedPendingAccessKey;
       let people, signals, sampleSignals, channels, channelListFailed, activeChannelId, unknownChannelId, composerIntent;
+      let channelsLoaded, channelUnreadRows;
       let deliveryReceiptRefreshOwner, files, fileLoadError, signalCursor, signalHasMore, signalCutoff, channelLoadError;
       let livePromptPrincipalId, freshInviteLink, freshInviteId, freshInviteWorkspaceId, inviteIntent, activeCreate;
       let rosterFilter, signalFilter, previousSignalIds, feedWasEmpty, liveFeedInFlight, liveFeedQueued;

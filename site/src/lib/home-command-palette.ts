@@ -70,7 +70,7 @@ export interface AgentRoutinesSummary {
 
 const CATEGORY_TITLES: Record<CommandPaletteCategory, string> = {
   teammate: "Teammates",
-  channel: "Group chats",
+  channel: "Channels",
   lead: "Workspace lead",
   action: "Workspace & tools",
 };
@@ -126,14 +126,22 @@ export function buildCommandPaletteItems(
     action: { type: "channel", slug: "__all__" },
   });
 
+  /* #general is the unfiled messages; All messages above is every message. */
+  items.push({
+    id: "channel:general",
+    category: "channel",
+    label: "#general",
+    keywords: ["general", "#general", "channel"],
+    action: { type: "channel", slug: "general" },
+  });
+
   for (const channel of input.channels) {
     if (channel.archivedAt) continue;
     items.push({
       id: `channel:${channel.slug}`,
       category: "channel",
       label: `#${channel.slug}`,
-      subtitle: channel.purpose?.trim() || "Group chat",
-      badge: "GROUP",
+      ...(channel.purpose?.trim() ? { subtitle: channel.purpose.trim() } : {}),
       keywords: [channel.slug, `#${channel.slug}`, "channel", "group", channel.purpose ?? ""],
       action: { type: "channel", slug: channel.slug },
     });
@@ -233,9 +241,8 @@ export function buildCommandPaletteItems(
     {
       id: "action:new-channel",
       category: "action",
-      label: "New group chat",
-      subtitle: "Create a channel in this workspace",
-      keywords: ["new", "create", "channel", "group chat"],
+      label: "New channel",
+      keywords: ["new", "create", "channel", "new channel", "group chat", "new group chat"],
       action: { type: "new-channel" },
     },
     {
