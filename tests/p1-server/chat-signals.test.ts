@@ -1949,3 +1949,37 @@ test("only the creator or a workspace owner or admin renames or archives a chann
   const memberMade = await send(f.otherJwt, { kind: "channel_create", slug: `${slug}-m` });
   assert.equal(memberMade.status, 200, JSON.stringify(memberMade.body));
 });
+
+/* -------------------------------------------------------------------------
+ * Channels C3: channel_messages through the read function, as an agent.
+ * Only whole-workspace messages; general alone is unfiled; refusals are exact.
+ * ------------------------------------------------------------------------- */
+
+test("an agent reads a channel's whole-workspace messages, never addressed ones", async () => {
+  const slug = `c3-${randomBytes(4).toString("hex")}`;
+  const created = await send(f.ownerJwt, { kind: "channel_create", slug });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const open = await send(f.ownerJwt, installedPost({ channel: slug, body: `C3 open ${randomUUID()}` }));
+  assert.equal(open.status, 200, JSON.stringify(open.body));
+  const openId = String(signalOf(open.body).id);
+  const addressed = await send(f.ownerJwt, installedPost({ channel: slug, body: `C3 addressed ${randomUUID()}`,
+    to: [{ kind: "user", id: f.otherId }] }));
+  assert.equal(addressed.status, 200, JSON.stringify(addressed.body));
+  const addressedId = String(signalOf(addressed.body).id);
+
+  const read = (extra: Record<string, unknown>) => readResource(f.agentToken, { resource: "channel_messages", workspace_id: f.workspace, ...extra });
+  const page = await read({ channel: slug });
+  assert.equal(page.status, 200, JSON.stringify(page.body));
+  const ids = (page.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id);
+  assert.ok(ids.includes(openId), "the whole-workspace message is listed");
+  assert.equal(ids.includes(addressedId), false, "the addressed message never is");
+  const general = await read({ channel: "general" });
+  assert.equal(general.status, 200, JSON.stringify(general.body));
+  assert.equal((general.body.messages as Array<Record<string, unknown>>).some((m) => m.signal_id === openId), false,
+    "general is unfiled messages only");
+
+  assert.equal((await read({ channel: `missing-${randomBytes(3).toString("hex")}` })).status, 404);
+  assert.equal((await read({ channel: "all-signals" })).status, 400, "a reserved non-channel name is refused");
+  assert.equal((await read({ channel: slug, after_id: randomUUID() })).status, 400, "an unknown cursor is refused");
+  assert.equal((await read({ channel: slug, extra: true })).status, 400);
+});
