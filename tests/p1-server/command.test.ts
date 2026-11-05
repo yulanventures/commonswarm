@@ -12,7 +12,9 @@ import postgres from "postgres";
 import { DELIVERY_CAPABILITIES } from "../../supabase/functions/command/durable-delivery.js";
 import {
   awaitFunctionRunning,
+  observeFunctionCli,
   postThroughColdStart,
+  type FunctionCliObserver,
 } from "../support/edge-readiness.js";
 import {
   AGENT_TOKEN_DEFAULT_TTL_MS,
@@ -118,6 +120,7 @@ let superuserSql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionClosed: Promise<boolean> | undefined;
+let functionCliState: FunctionCliObserver | undefined;
 let functionLogs = "";
 let envDir: string | undefined;
 
@@ -228,6 +231,7 @@ async function waitForFunction(): Promise<void> {
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
       diagnostics: () => `${fn} function logs:\n${functionLogs.slice(-4000)}`,
+      cliState: functionCliState,
     });
   }
 }
@@ -263,6 +267,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  functionCliState = observeFunctionCli(functionProcess);
   // Subscribe at spawn so an exit before teardown still has an observed close.
   functionClosed = new Promise<boolean>((resolve) => {
     functionProcess.once("close", () => resolve(true));

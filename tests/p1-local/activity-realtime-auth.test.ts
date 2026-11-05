@@ -20,7 +20,7 @@ import {
 } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { activityTopic } from "../../supabase/functions/activity/core.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -67,6 +67,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -79,6 +80,7 @@ before(async () => {
     sleep: (milliseconds) => delay(milliseconds),
     now: Date.now,
     diagnostics: () => `activity function logs:\n${functionLogs.slice(-4_000)}`,
+    cliState,
   });
 });
 

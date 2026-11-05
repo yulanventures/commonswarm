@@ -14,7 +14,7 @@ import { after, before, describe, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "../../supabase/functions/h0/core.js";
 import {
   H0_ACK_BATCH_MISMATCH,
@@ -331,6 +331,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -351,6 +352,7 @@ before(async () => {
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
       diagnostics: () => `${edge} function logs:\n${functionLogs.slice(-4000)}`,
+      cliState,
     });
   }
   const user = await createUser();

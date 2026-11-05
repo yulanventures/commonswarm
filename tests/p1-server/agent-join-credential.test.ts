@@ -16,7 +16,7 @@ import {
   AGENT_TOKEN_DEFAULT_TTL_MS,
   H0_SEAT_TOKEN_TTL_MS,
 } from "../../src/protocol/index.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { REGISTRATION_SEAT_REVOKED } from "../../supabase/functions/command/registration-conflicts.js";
 
 interface LocalEnvironment {
@@ -179,6 +179,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -199,6 +200,7 @@ before(async () => {
       sleep: (ms) => delay(ms),
       now: () => Date.now(),
       diagnostics: () => `${edge} function logs:\n${functionLogs.slice(-4000)}`,
+      cliState,
     });
   }
   f = await createFixture();

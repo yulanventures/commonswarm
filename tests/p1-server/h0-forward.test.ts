@@ -10,7 +10,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { REGISTRATION_TOKEN_ALREADY_USED } from "../../supabase/functions/command/registration-conflicts.js";
 
 interface Local { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string }
@@ -112,6 +112,7 @@ before(async () => {
   processHandle = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile], {
     cwd: process.cwd(), env: { ...process.env, SWARM_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"],
   });
+  const cliState = observeFunctionCli(processHandle);
   let ready = "";
   processHandle.stdout?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
   processHandle.stderr?.on("data", (chunk: Buffer) => { ready = (ready + chunk.toString()).slice(-4_000); });
@@ -125,6 +126,7 @@ before(async () => {
     url: `${local.API_URL}/functions/v1/command`, fetcher: fetch,
     timeoutMs: 30_000, sleep: (ms) => delay(ms), now: () => Date.now(),
     diagnostics: () => "command readiness failed",
+    cliState,
   });
   let documentReady = false;
   const documentDeadline = Date.now() + 30_000;

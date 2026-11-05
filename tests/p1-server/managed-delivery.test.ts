@@ -20,7 +20,7 @@ import {
   AGENT_SESSION_KEY_HEADER,
   DELIVERY_NOT_SURFACED_CODE,
 } from "../../src/cloud/session-wire.js";
-import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { WAKE_STALE_MS } from "../../src/cloud/idle-poll.js";
 import { emptyApplicationSchema, localClusterAdminUrl } from "../support/admin-schema-db.js";
 
@@ -311,6 +311,7 @@ before(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const cliState = observeFunctionCli(functionProcess);
   const capture = (chunk: Buffer) => {
     functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
   };
@@ -334,6 +335,7 @@ before(async () => {
     sleep: (ms) => delay(ms),
     now: () => Date.now(),
     diagnostics: () => `command function logs:\n${functionLogs.slice(-4000)}`,
+    cliState,
   });
 
   const owner = await createUser("managed-delivery-owner");
