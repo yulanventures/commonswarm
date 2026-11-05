@@ -1906,3 +1906,46 @@ test("reraise_ask is refused in an archived channel, like any new message there"
     WHERE workspace_id = ${f.workspace}::uuid AND signal_id = ${askId}::uuid`;
   assert.equal(ledger?.n, 0, "and the cap isn't charged");
 });
+
+/* -------------------------------------------------------------------------
+ * Channels C2 (owner decision, 2026-11-04): "general" is reserved for unfiled
+ * messages; rename and archive belong to the channel's creator and workspace
+ * owners and admins. Creation stays open to members and seated agents.
+ * ------------------------------------------------------------------------- */
+
+test("general is a reserved channel name", async () => {
+  const refused = await send(f.ownerJwt, { kind: "channel_create", slug: "general" });
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  const [row] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.channels
+    WHERE workspace_id = ${f.workspace}::uuid AND lower(slug) = 'general'`;
+  assert.equal(row?.n, 0);
+});
+
+test("only the creator or a workspace owner or admin renames or archives a channel", async () => {
+  const slug = `c2-${randomBytes(4).toString("hex")}`;
+  const created = await send(f.agentToken, { kind: "channel_create", slug });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channelId = String((created.body.channel as Record<string, unknown>).channel_id);
+
+  // A plain member, and another agent of the same owner, are neither the creator nor an admin.
+  for (const bearer of [f.otherJwt, f.agentTokenTwo]) {
+    const rename = await send(bearer, { kind: "channel_rename", channel_id: channelId, slug: `${slug}-x` });
+    assert.equal(rename.status, 403, JSON.stringify(rename.body));
+    assert.equal(rename.body.error, "channel_forbidden");
+    const archive = await send(bearer, { kind: "channel_archive", channel_id: channelId });
+    assert.equal(archive.status, 403, JSON.stringify(archive.body));
+  }
+  const [unchanged] = await sql<{ slug: string; archived_at: Date | null }[]>`
+    SELECT slug, archived_at FROM swarm.channels WHERE channel_id = ${channelId}::uuid`;
+  assert.deepEqual([unchanged?.slug, unchanged?.archived_at], [slug, null], "refusals change nothing");
+
+  // The workspace owner may rename it; the creating agent may archive it.
+  const renamed = await send(f.ownerJwt, { kind: "channel_rename", channel_id: channelId, slug: `${slug}-y` });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+  const archived = await send(f.agentToken, { kind: "channel_archive", channel_id: channelId });
+  assert.equal(archived.status, 200, JSON.stringify(archived.body));
+
+  // A member still creates channels.
+  const memberMade = await send(f.otherJwt, { kind: "channel_create", slug: `${slug}-m` });
+  assert.equal(memberMade.status, 200, JSON.stringify(memberMade.body));
+});

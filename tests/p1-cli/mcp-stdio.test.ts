@@ -1068,7 +1068,7 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
       [{ body: "hello", request_id: "valid004", to: "x".repeat(81) }, "to"],
     ] as const) await assert.rejects(f.client.callTool({ name: "note", arguments: args }), (error: any) => error.code === -32602 && error.message.includes(bad));
     const channelRule = note.inputSchema.properties!.channel as { pattern: string; maxLength: number; not: { enum: string[] } };
-    assert.deepEqual(channelRule.not.enum, ["all-signals"]);
+    assert.deepEqual(channelRule.not.enum, ["all-signals", "general"]);
     assert.match("all-signals", new RegExp(channelRule.pattern));
     for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates ", "all-signals"]) {
       await assert.rejects(f.client.callTool({ name: "note", arguments: { body: "hello", request_id: "valid005", channel } }),
