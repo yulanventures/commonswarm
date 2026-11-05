@@ -95,6 +95,13 @@ export const CORE_TOOL_TABLE = [
     inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), attachments, request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
   },
   {
+    name: "reraise", effect: "write", title: "Re-raise an open ask",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "Re-raise an open ask this seat sent: one reminder to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id.",
+    annotations: { title: "Re-raise an open ask", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, signal_id: uuid, request_id: requestId }, ["seat", "signal_id", "request_id"]),
+  },
+  {
     name: "working_on", effect: "write", title: "Share current work",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Share current work. Retry with the same request_id.",
@@ -266,6 +273,7 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   ask: { allowed: ["seat", "recipients", "body", "attachments", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
   note: { allowed: ["seat", "recipients", "body", "attachments", "request_id"], required: ["seat", "body", "request_id"] },
   reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
+  reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
   working_on: { allowed: ["seat", "body", "request_id"], required: ["seat", "body", "request_id"] },
   members: { allowed: ["seat"], required: ["seat"] },
   roster: { allowed: ["seat"], required: ["seat"] },
@@ -347,6 +355,11 @@ export function validateHostedToolArguments(
   }
   if (name === "whoami" || name === "members" || name === "roster") return args;
   if (name === "seat_release") {
+    if (!validRequestId(args.request_id)) invalid("request_id");
+    return args;
+  }
+  if (name === "reraise") {
+    if (!validUuid(args.signal_id)) invalid("signal_id");
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
   }

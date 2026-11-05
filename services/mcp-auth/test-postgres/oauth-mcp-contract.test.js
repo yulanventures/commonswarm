@@ -586,8 +586,8 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         assert.equal(response.status, 200);
         const listed = await response.json();
         // Must match supabase/functions/mcp/tools.ts; hosted-tool-pins.test.ts guards this plain-JS list.
-        const expectedTools = ['ask', 'check', 'claim_seat', 'file_get', 'file_ls', 'file_put', 'members', 'note', 'reply', 'roster', 'seat_list', 'seat_release', 'whoami', 'working_on'];
-        assert.equal(listed.result.tools.length, 14);
+        const expectedTools = ['ask', 'check', 'claim_seat', 'file_get', 'file_ls', 'file_put', 'members', 'note', 'reply', 'reraise', 'roster', 'seat_list', 'seat_release', 'whoami', 'working_on'];
+        assert.equal(listed.result.tools.length, 15);
         assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,
           'with the to-do/list switch OFF, hosted discovery exposes only the thirteen core tools');
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));

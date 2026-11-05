@@ -50,6 +50,12 @@ const MESSAGES = {
   signal_attachment_version_unavailable: "An attached version does not exist in this workspace. Use the version_n from file_put or file_ls.",
   hosted_seat_unavailable: "That seat is unavailable to this connection. Call seat_list to see the seats this connection still holds.",
   signal_attachment_not_live: "An attached version is not committed and live. Use the version_n from file_put or file_ls.",
+  not_found: "No ask sent by this seat has that signal_id. Use the signal_id returned when the ask was sent.",
+  ask_expired: "That ask has expired, so it can't be re-raised. Send a new ask if it still matters.",
+  ask_answered: "That ask already has an answer, so there's nothing to re-raise.",
+  reraise_too_soon: "This ask was re-raised in the last 24 hours. Try again after that.",
+  reraise_unsupported: "Only an ask sent to someone can be re-raised; this one went to the whole workspace.",
+  channel_archived: "That channel is archived, so it takes no new messages.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;

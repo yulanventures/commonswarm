@@ -4219,6 +4219,34 @@ test('B closed snapshots survive committed M00002 NULL only, without another All
   }
 });
 
+test("hosted reraise sends only reraise_ask, and only for an ask its own seat sent", { timeout: 180_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const seat = claimSeat(fixture, fixture.grantA, `reraise-${randomUUID()}`);
+  const handle = String(seat.body.handle);
+  const call = (tool: string, command: Record<string, unknown>) => runHostedHarness<HarnessResult>({ operation: "seat-command",
+    seat: { grantId: fixture.grantA, handle, workspaceId: fixture.workspaceA, tool }, command });
+  const asked = call("ask", { kind: "post_signal", signal_kind: "ask", body: `R1b hosted ask ${randomUUID()}`,
+    to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null, to: [{ kind: "user", id: fixture.owner }] });
+  assert.equal(asked.status, 200, JSON.stringify(asked.body));
+  const askId = String((asked.body.signal as Record<string, unknown>).id);
+
+  // The capability binds the tool to one command shape, both ways.
+  assert.equal(call("note", { kind: "reraise_ask", signal_id: askId }).status, 403, "note cannot send reraise_ask");
+  assert.equal(call("reraise", { kind: "post_signal", signal_kind: "note", body: "x", to_user_id: null,
+    to_agent_principal_id: null, in_reply_to: null, about: null }).status, 403, "reraise cannot send a post");
+  assert.equal(call("reraise", { kind: "reraise_ask", signal_id: askId, to: [] }).status, 403, "no extra fields");
+
+  const raised = call("reraise", { kind: "reraise_ask", signal_id: askId });
+  assert.equal(raised.status, 200, JSON.stringify(raised.body));
+  const note = raised.body.signal as Record<string, unknown>;
+  assert.equal(note.kind, "note");
+  assert.equal(note.in_reply_to, askId);
+  assert.equal((raised.body.reraise as Record<string, unknown>).count, 1);
+  const again = call("reraise", { kind: "reraise_ask", signal_id: askId });
+  assert.equal(again.status, 429, JSON.stringify(again.body));
+  assert.equal(again.body.error, "reraise_too_soon");
+});
+
 test("seat_release ends only that seat: the sibling seat works, the agent stays, and a reconnect brings nothing back", { timeout: 180_000 }, async () => {
   const fixture = await seedHostedFixture();
   const first = claimSeat(fixture, fixture.grantA, `release-${randomUUID()}`);
