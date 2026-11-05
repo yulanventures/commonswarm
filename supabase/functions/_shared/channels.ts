@@ -119,9 +119,10 @@ const CHAT_UUID_RE =
 /**
  * Names a channel may not take. `all-signals` is the unfiltered view, not a
  * row, so a channel by that name would shadow the one place unfiled signals
- * are readable.
+ * are readable. `general` is the name the app and hosted tools give unfiled
+ * messages (channel_id NULL); a real channel by that name would shadow it.
  */
-export const RESERVED_CHANNEL_SLUGS: readonly string[] = ["all-signals"];
+export const RESERVED_CHANNEL_SLUGS: readonly string[] = ["all-signals", "general"];
 
 /**
  * "<field> must be a UUID.", from one place. Three validators answer a

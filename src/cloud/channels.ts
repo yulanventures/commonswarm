@@ -68,9 +68,10 @@ export const CHANNEL_SLUG_RE = new RegExp(
 /**
  * Names a channel may not take. `all-signals` is the unfiltered view, not a
  * row, so a channel by that name would shadow the one place unfiled signals
- * are readable.
+ * are readable. `general` is the name the app and hosted tools give unfiled
+ * messages (channel_id NULL); a real channel by that name would shadow it.
  */
-export const RESERVED_CHANNEL_SLUGS: readonly string[] = ["all-signals"];
+export const RESERVED_CHANNEL_SLUGS: readonly string[] = ["all-signals", "general"];
 
 export const CHANNEL_SLUG_RULE_TEXT = `A channel name uses ${
   classList([...CHANNEL_SLUG_CLASSES.edge, ...CHANNEL_SLUG_CLASSES.inner])

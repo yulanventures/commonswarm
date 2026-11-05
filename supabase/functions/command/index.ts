@@ -9383,6 +9383,28 @@ async function applyChannelCommand(
     };
   }
 
+  /* Rename and archive: the channel's creator, or a workspace owner or admin (owner decision,
+   * 2026-11-04). Creation stays open to members and seated agents. */
+  const row = current[0];
+  const isCreator = row.created_by_kind === auth.credentialKind &&
+    row.created_by_principal === canonicalPrincipal(auth.actor);
+  const [membership] = !isCreator && auth.credentialKind === "user" && auth.actor.user !== null
+    ? await tx<{ role: string }[]>`
+      SELECT role FROM swarm.memberships
+      WHERE workspace_id = ${route.workspaceId}::uuid AND user_id = ${auth.actor.user}::uuid
+        AND revoked_at IS NULL
+    `
+    : [];
+  if (!isCreator && membership?.role !== "owner" && membership?.role !== "admin") {
+    return {
+      ok: false,
+      status: 403,
+      error: "channel_forbidden",
+      message: "Only the channel's creator or a workspace owner or admin can rename or archive it.",
+      reason: "channel_not_creator_or_admin",
+    };
+  }
+
   if (command.kind === "channel_archive") {
     /* Archiving twice is an accepted no-op: the caller's intent already holds,
      * and the append-only habit of this codebase is not to invent a conflict
