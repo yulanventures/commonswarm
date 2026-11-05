@@ -5,7 +5,8 @@
  * layer shrinks or drops it to fit whatever room remains.
  */
 export const CHANNEL_READ_MARGIN_BYTES = 1024;
-const ID_ALLOWANCE = "x".repeat(200);
+// The worst-case request id the protocol accepts: 256 control characters, each escaped as \u00XX.
+const ID_ALLOWANCE = "\u0001".repeat(256);
 
 export interface ChannelPageShape {
   context: unknown;

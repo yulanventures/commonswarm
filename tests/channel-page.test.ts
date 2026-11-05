@@ -23,3 +23,10 @@ test("a page that fits is unchanged, including the server's next cursor", () => 
   const small = { ...page([message("1", "hello"), message("2", "world")]), next: { after_id: "2" } };
   assert.deepEqual(fitChannelPage(small, 64 * 1024), small);
 });
+
+test("the id allowance covers the worst-case protocol id", () => {
+  const empty = channelPageWireBytes(page([]));
+  const withLongestId = new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id: "\u0001".repeat(256),
+    result: { content: [{ type: "text", text: JSON.stringify(page([])) }] } })).byteLength;
+  assert.ok(empty >= withLongestId);
+});
