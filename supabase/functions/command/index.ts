@@ -10726,6 +10726,9 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
       exactKeys(command, ["kind", "grant_id", "seat_id"]);
   }
   if (command?.kind === "release_hosted_mcp_seat") return false;
+  // Roster R1b: the hosted reraise tool sends exactly one reraise_ask, and no other tool can.
+  if (tool === "reraise") return command?.kind === "reraise_ask" && exactKeys(command, ["kind", "signal_id"]);
+  if (command?.kind === "reraise_ask") return false;
   if (command?.kind === FILE_DOWNLOAD_URL_KIND || command?.kind === FILE_VERSION_CREATE_KIND ||
       command?.kind === FILE_VERSION_COMMIT_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;

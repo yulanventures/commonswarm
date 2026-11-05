@@ -425,6 +425,17 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       { tool: "check", scope: "new messages addressed to this seat" },
       signals.length >= HOSTED_CHECK_BATCH_LIMIT) };
   }
+  if (call.name === "reraise") {
+    const result = await handleHostedCommand({
+      command_id: args.request_id,
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: { kind: "reraise_ask", signal_id: String(args.signal_id).toLowerCase() },
+    }, capability);
+    const reraise = result.body.reraise as { count?: unknown; next_allowed_at?: unknown } | undefined;
+    return { ...commandOutput(result), reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null };
+  }
   return commandOutput(await handleHostedCommand(
     hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
     capability,

@@ -5,7 +5,7 @@ import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat", "seat_list"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check", "file_get", "file_put", "seat_release", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "reraise", "working_on", "check", "file_get", "file_put", "seat_release", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
 export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", "roster", "file_ls", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
@@ -90,7 +90,7 @@ function seatTool(value: string): value is HostedSeatTool {
 function sqlSeatTool(tool: string, use: "command" | "read"): string {
   if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool)) return use === "command" ? "note" : "members";
   if (tool === "file_ls" || tool === "roster") return "members";
-  if (tool === "file_get" || tool === "file_put" || tool === "seat_release") return "note";
+  if (tool === "file_get" || tool === "file_put" || tool === "seat_release" || tool === "reraise") return "note";
   return tool;
 }
 
