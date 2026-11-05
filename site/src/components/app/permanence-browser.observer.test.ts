@@ -123,6 +123,11 @@ function installConnectionFixture() {
         // Read-only activity/queue requests have no write effects in this UI fixture.
       }
       // Roster R1b: Catch up reads each workspace's decision queue for its asks.
+      // Channels C1b: the rail reads each workspace's channel unread; unknown is a valid answer.
+      if (url.pathname === "/rest/v1/rpc/channel_unread") {
+        return Response.json({ workspace_id: (body as { p_workspace_id?: string } | null)?.p_workspace_id ?? workspace,
+          generated_at: new Date().toISOString(), channels: [{ channel_id: null, slug: "general", unread: null }] });
+      }
       if (url.pathname === "/rest/v1/rpc/decision_queue") {
         return Response.json({ workspace_id: (body as { p_workspace_id?: string } | null)?.p_workspace_id ?? workspace, generated_at: new Date().toISOString(), total: 0, truncated: false, asks: [] });
       }
@@ -408,8 +413,9 @@ async function observeConnectionApp() {
         assert(!one("[data-home-route-pane] [data-connection-end-date]"), "reset retained owner's editor");
       } else {
       if (f.hosted) one("[data-connected-apps-close]").click();
-      const next = Array.from(document.querySelectorAll<HTMLAnchorElement>("a")).find(a => new URL(a.href).searchParams.get("w") === f.otherWorkspace);
-      assert(next, "normal workspace link missing"); next!.click();
+      // Channels C1: the rail no longer lists workspaces; the workspace picker switches them.
+      const next = document.querySelector<HTMLButtonElement>(`[data-workspace-picker] button[value="${f.otherWorkspace}"]`);
+      assert(next, "normal workspace switch missing"); next!.click();
       await wait(() => one("live-dashboard").dataset.adminWorkspace === f.otherWorkspace, "workspace change");
       stale.dispatchEvent(new Event("submit", { cancelable: true }));
       if (f.hosted) {
