@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after, before } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import {
   claudeUserPromptHookSnippet,
@@ -43,6 +43,19 @@ import {
   writeSessionContext,
 } from "../../src/cloud/session-context.js";
 import { NO_LISTENER_STATUS_SENTENCE } from "../../src/listener/main-routing.js";
+
+// In-process checks open the successor-credential lock in the default state directory; keep it off the real home.
+const previousAgentStateDir = process.env.SWARM_AGENT_STATE_DIR;
+let agentStateRoot: string;
+before(async () => {
+  agentStateRoot = await mkdtemp(join(tmpdir(), "cswarm-hook-agent-state-"));
+  process.env.SWARM_AGENT_STATE_DIR = join(agentStateRoot, "agent-credentials");
+});
+after(async () => {
+  if (previousAgentStateDir === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+  else process.env.SWARM_AGENT_STATE_DIR = previousAgentStateDir;
+  await rm(agentStateRoot, { recursive: true, force: true });
+});
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cliPath = join(repoRoot, "src", "cli.ts");
