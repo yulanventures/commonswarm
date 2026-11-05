@@ -370,4 +370,67 @@ test("channel_messages: whole-workspace messages in that channel only, never add
   assert.equal(await channelPage(ws, owner, outsider, "design"), null);
   await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${reader}::uuid`;
   assert.equal(await channelPage(ws, owner, reader, "design"), null);
+
+ * Channels C1b: swarm_read.channel_unread, the person's own per-channel unread
+ * from the seen receipts the app writes. Read the way the web app reads it.
+ * ------------------------------------------------------------------------- */
+
+type Unread = { channels: Array<{ channel_id: string | null; slug: string; unread: boolean | null }> } | null;
+
+async function unread(ws: string, viewer: string, extraClaims: Record<string, unknown> = {}, role = "authenticated"): Promise<Unread> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${role}`);
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: viewer, role: "authenticated", ...extraClaims })}, true)`;
+    const [row] = await tx<{ unread: Unread }[]>`SELECT swarm_read.channel_unread(${ws}::uuid) AS unread`;
+    return row!.unread;
+  });
+}
+
+async function post(ws: string, from: { kind: "user" | "agent"; id: string }, channelId: string | null, ago = "1 minute"): Promise<string> {
+  const id = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
+    VALUES (${id}::uuid, ${ws}::uuid, ${from.id}::uuid, ${from.kind}, 'note', 'channel message',
+      statement_timestamp() + interval '1 day', statement_timestamp() - ${ago}::interval, ${channelId})`;
+  return id;
+}
+
+async function seen(ws: string, viewer: string, signalId: string): Promise<void> {
+  await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id) VALUES (${ws}::uuid, ${signalId}::uuid, ${viewer}::uuid)`;
+}
+
+test("channel_unread: unknown without receipts, unread until seen, unread again for a newer message", async () => {
+  const owner = await person("Owner");
+  const ws = await workspace(owner, "Unread test");
+  const writer = { kind: "agent" as const, id: await agent(ws, owner, "Writer") };
+  const [design] = await sql<{ channel_id: string }[]>`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
+    VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'design', ${owner}::uuid, 'user', statement_timestamp()) RETURNING channel_id`;
+  const channelId = design!.channel_id;
+  const state = async () => Object.fromEntries((await unread(ws, owner))!.channels.map((c) => [c.slug, c.unread]));
+
+  const first = await post(ws, writer, null, "10 minutes");
+  assert.deepEqual(await state(), { general: null, design: null }, "no receipts yet: unknown, never read");
+
+  await seen(ws, owner, first);
+  assert.deepEqual(await state(), { general: false, design: false });
+
+  const inDesign = await post(ws, writer, channelId, "5 minutes");
+  await post(ws, { kind: "user", id: owner }, null, "4 minutes");
+  assert.deepEqual(await state(), { general: false, design: true }, "the person's own post never counts");
+
+  await seen(ws, owner, inDesign);
+  assert.deepEqual(await state(), { general: false, design: false });
+  await post(ws, writer, channelId, "1 minute");
+  assert.deepEqual(await state(), { general: false, design: true }, "a newer message is unread again");
+});
+
+test("channel_unread is the person's own: never for an agent's claims, a non-member or the read roles", async () => {
+  const owner = await person("Owner");
+  const outsider = await person("Outsider");
+  const ws = await workspace(owner, "Unread gate");
+  const own = await agent(ws, owner, "Own");
+  assert.equal(await unread(ws, owner, { agent_principal_id: own }), null);
+  assert.equal(await unread(ws, outsider), null);
+  for (const role of ["swarm_read", "swarm_command"]) {
+    await assert.rejects(() => unread(ws, owner, {}, role), /permission denied/);
+  }
 });
