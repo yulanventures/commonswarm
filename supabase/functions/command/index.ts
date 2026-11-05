@@ -10514,6 +10514,19 @@ async function reraiseAsk(
     return decided({ status: 409, body: { error: "ask_answered",
       message: "That ask already has an answer, so there's nothing to re-raise." } });
   }
+  if (ask.channel_id !== null) {
+    // Same rule as a new post or a thread reply: an archived channel takes no new messages.
+    // A threaded ask carries its root's channel, so this covers threads too.
+    const [channel] = await tx<{ archived_at: Date | null }[]>`
+      SELECT archived_at FROM swarm.channels
+      WHERE workspace_id = ${route.workspaceId}::uuid AND channel_id = ${ask.channel_id}::uuid
+    `;
+    if (channel === undefined || channel.archived_at !== null) {
+      await audit("domain", "channel_archived");
+      return decided({ status: 409, body: { error: "channel_archived",
+        message: "That ask is in an archived channel, so it can't be re-raised. Its history still reads." } });
+    }
+  }
   if (ask.too_soon) {
     const next = ask.next_allowed_at!.toISOString();
     await audit("domain", "reraise_too_soon");
