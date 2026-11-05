@@ -185,7 +185,6 @@ with patch.object(os,'fstat',side_effect=lambda fd:metadata(fd,1000)):
 const localHarness = String.raw`
 import contextlib,datetime,hashlib,importlib.util,io,json,os,pathlib,stat,sys,socket,subprocess
 from unittest.mock import patch
-from types import SimpleNamespace
 sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
 import common as c
 import status as s
@@ -204,8 +203,11 @@ def real_rm(p):
  assert p.parent.resolve().is_relative_to(root)
  os.rmdir(p) if p.is_dir() and not p.is_symlink() else os.unlink(p)
 def owned(meta,path=''):
- fields={key:getattr(meta,key) for key in dir(meta) if key.startswith('st_')}
- return SimpleNamespace(**dict(fields,st_mode=meta.st_mode & ~0o022 if str(path) in temp_paths else meta.st_mode,st_uid=0,st_gid=0))
+ # A real stat_result keeps tuple slicing and equality on every Python; 3.14's pathlib calls os.lstat.
+ mode=meta.st_mode & ~0o022 if str(path) in temp_paths else meta.st_mode
+ visible=('st_mode','st_ino','st_dev','st_nlink','st_uid','st_gid','st_size')
+ hidden={key:getattr(meta,key) for key in dir(meta) if key.startswith('st_') and key not in visible}
+ return os.stat_result((mode,meta.st_ino,meta.st_dev,meta.st_nlink,0,0,meta.st_size,*meta[7:10]),hidden)
 stack.enter_context(patch.object(os,'geteuid',return_value=0))
 stack.enter_context(patch.object(socket,'gethostname',return_value=c.HOST))
 stack.enter_context(patch.object(c,'digest',side_effect=lambda raw:c.MACHINE_SHA256 if raw==machine.read_bytes() else real_digest(raw)))
