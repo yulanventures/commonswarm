@@ -107,6 +107,7 @@ import {
   channelSlugProblem,
   findChannelBySlug,
   listChannelsAsAgent,
+  readChannelMessagesAsAgent,
   listChannelsAsHuman,
   normalizeChannelSlug,
   renderChannelList,
@@ -9570,6 +9571,35 @@ async function runChannelLs(args: Arguments): Promise<void> {
   process.stdout.write(renderChannelList(rows, { includeArchived }));
 }
 
+export const RUN_CHANNEL_READ_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "after", "limit"] as const;
+
+/** Channels C3: a channel's whole-workspace messages, oldest first; `general` is the unfiled messages. */
+async function runChannelRead(args: Arguments): Promise<void> {
+  const channel = args.positionals[2];
+  if (channel === undefined) throw new UsageError("cswarm channel read needs a channel name, or general");
+  const context = await fileContext(args, RUN_CHANNEL_READ_1_ACCEPTED_FLAGS, 3);
+  if (context.selected.kind !== "agent") {
+    throw new Error("channel read uses an agent credential; people read channels in the web app");
+  }
+  const slug = normalizeChannelSlug(channel);
+  if (slug !== "general" && channelSlugProblem(slug) !== null) throw new UsageError(channelSlugProblem(slug)!);
+  const after = args.optional("after");
+  if (after !== undefined && !UUID_RE.test(after)) throw new UsageError("--after takes next.after_id from the previous page");
+  const limitText = args.optional("limit");
+  const limit = limitText === undefined ? undefined : Number(limitText);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) throw new UsageError("--limit takes 1 to 50");
+  const page = await readChannelMessagesAsAgent(context.cloud, context.selected.bearer, context.selected.selectedWorkspace,
+    { channel: slug, ...(after === undefined ? {} : { after_id: after.toLowerCase() }), ...(limit === undefined ? {} : { limit }) },
+    context.selected.fetcher);
+  if (args.has("json")) { printJson({ ...page }); return; }
+  process.stdout.write(`#${sanitizeDisplayLabel(page.channel, "general")}${page.archived ? " (archived)" : ""}\n`);
+  for (const message of page.messages) {
+    const sender = sanitizeDisplayLabel(message.from.name ?? "", message.from.kind === "agent" ? "Unnamed agent" : "Unnamed member");
+    process.stdout.write(`${message.created_at} ${sender}: ${sanitizeForTerminal(message.body)}\n`);
+  }
+  if (page.next !== null) process.stdout.write(`More: cswarm channel read ${page.channel} --after ${page.next.after_id}\n`);
+}
+
 export const RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
 
 async function runChannelRename(args: Arguments): Promise<void> {
@@ -10472,7 +10502,8 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: [`cswarm feedback "<text>" --kind ${FEEDBACK_KINDS.join("|")} [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`] }),
   channel: group({
     create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
-    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
+    read: commandEntry({ tool: "channel_read", mcp: true, handler: traced("runChannel", runChannelRead), description: "Read a channel's whole-workspace messages.", mutates: false, flags: [...agentFlags, "after", "limit"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel read <channel|general> [--after <message-id>] [--limit <1-50>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    ls: commandEntry({ tool: "channel_ls", mcp: true, handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
@@ -10592,6 +10623,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   feedback: FEEDBACK_ACCEPTED_FLAGS,
   "channel.create": RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
   "channel.ls": RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
+  "channel.read": RUN_CHANNEL_READ_1_ACCEPTED_FLAGS,
   "channel.rename": RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
   "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
   "file.put": FILE_PUT_ACCEPTED_FLAGS,

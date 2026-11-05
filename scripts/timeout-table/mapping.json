@@ -426,6 +426,24 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/channels.ts:289",
+          "detail": "readChannelMessagesAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "channel-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm channel read POSTs resource channel_messages to the read edge and changes no workspace state.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
+          }
+        },
+        "src/cloud/channels.ts:timeoutMs#3": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
             "/rest/v1/channels"
           ],
           "citation": "src/cloud/channels.ts:343",
@@ -2189,6 +2207,24 @@
           }
         },
         "src/cloud/channels.ts:timeoutMs#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/channels.ts:289",
+          "detail": "readChannelMessagesAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "channel-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm channel read POSTs resource channel_messages to the read edge and changes no workspace state.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
+          }
+        },
+        "src/cloud/channels.ts:timeoutMs#3": {
           "class": "network-api",
           "scope": "per-request",
           "endpoints": [

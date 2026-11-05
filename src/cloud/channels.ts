@@ -260,6 +260,74 @@ export async function listChannelsAsAgent(
   }
 }
 
+/** Channels C3: one channel's whole-workspace messages ("general" = unfiled), oldest first. */
+export interface ChannelMessage {
+  signal_id: string;
+  from: { kind: string; id: string; name: string | null };
+  kind: string;
+  body: string;
+  created_at: string;
+  until: string;
+  thread_root_id: string | null;
+  attachments: Array<{ file_id: string; version_n: number }>;
+}
+
+export interface ChannelMessagePage {
+  workspace_id: string;
+  channel: string;
+  archived: boolean;
+  messages: ChannelMessage[];
+  next: { after_id: string } | null;
+}
+
+export async function readChannelMessagesAsAgent(
+  target: CloudTarget,
+  credential: string,
+  workspaceId: string,
+  request: { channel: string; after_id?: string; limit?: number },
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<ChannelMessagePage> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await fetcher(readEndpoint(target), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential}`,
+          apikey: target.anonKey,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          resource: "channel_messages", workspace_id: workspaceId, channel: request.channel,
+          ...(request.after_id === undefined ? {} : { after_id: request.after_id }),
+          ...(request.limit === undefined ? {} : { limit: request.limit }),
+        }),
+        signal: controller.signal,
+      });
+    } catch {
+      throw new ChannelListError(0, "The channel read did not complete. Nothing changed. Run the same command again.", true);
+    }
+    let body: Record<string, unknown> | null = null;
+    try { body = await response.json() as Record<string, unknown>; } catch { body = null; }
+    if (response.status === 404) {
+      throw new ChannelListError(404, "There is no channel with that name in this workspace. Run cswarm channel ls to see them.");
+    }
+    if (!response.ok) {
+      const message = typeof body?.message === "string" ? body.message : `The channel read was refused (HTTP ${response.status}).`;
+      throw new ChannelListError(response.status, message);
+    }
+    if (!body || !Array.isArray(body.messages)) {
+      throw new ChannelListError(response.status, "The channel read came back in a shape this version does not understand.");
+    }
+    return body as unknown as ChannelMessagePage;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function channelSelectorProblem(selector: string): string | null {
   const problem = channelNameProblem(selector);
   if (problem === "ok") return null;

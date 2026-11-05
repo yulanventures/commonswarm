@@ -11,6 +11,7 @@ import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from ".
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
 import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
+import { listChannelsAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { signalDuration } from "../cloud/signal-duration.js";
 import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
@@ -169,6 +170,21 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           break;
         }
         case "members": output = tool.mapResult(await directory(), profile.workspace_id); break;
+        case "channel_ls": {
+          const auth = await authenticated();
+          output = tool.mapResult(await listChannelsAsAgent(profileTarget(profile), auth.token, profile.workspace_id, auth.fetcher));
+          break;
+        }
+        case "channel_read": {
+          const auth = await authenticated();
+          const raw = args as Record<string, unknown>;
+          output = tool.mapResult(await readChannelMessagesAsAgent(profileTarget(profile), auth.token, profile.workspace_id, {
+            channel: String(raw.channel).toLowerCase(),
+            ...(typeof raw.after_id === "string" ? { after_id: raw.after_id.toLowerCase() } : {}),
+            ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
+          }, auth.fetcher));
+          break;
+        }
         case "roster": {
           const auth = await authenticated();
           await directory(auth);
