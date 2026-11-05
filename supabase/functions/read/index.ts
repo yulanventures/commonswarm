@@ -172,6 +172,63 @@ interface ChannelReadRequest {
   resource: "channels";
   workspace_id: string;
 }
+/** Channels C3: one channel's whole-workspace messages ("general" = unfiled), paged oldest first. */
+interface ChannelMessagesReadRequest {
+  resource: "channel_messages";
+  workspace_id: string;
+  channel: string;
+  after_created_at: string | null;
+  after_id: string | null;
+  limit: number;
+}
+
+const CHANNEL_MESSAGES_KEYS = ["resource", "workspace_id", "channel", "after_created_at", "after_id", "limit"];
+
+function parseChannelMessages(body: Record<string, unknown>): ChannelMessagesReadRequest | null {
+  if (body.resource !== "channel_messages" || Object.keys(body).some(key => !CHANNEL_MESSAGES_KEYS.includes(key)) ||
+      typeof body.workspace_id !== "string" || !UUID_RE.test(body.workspace_id) || typeof body.channel !== "string") return null;
+  const channel = normalizeChannelSlug(body.channel);
+  if (channel !== "general" && channelSlugProblem(channel) !== null) return null;
+  const after = body.after_created_at ?? null, afterId = body.after_id ?? null;
+  if ((after === null) !== (afterId === null)) return null;
+  if (after !== null && (typeof after !== "string" || !Number.isFinite(Date.parse(after)))) return null;
+  if (afterId !== null && (typeof afterId !== "string" || !UUID_RE.test(afterId))) return null;
+  const limit = body.limit ?? 50;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 50) return null;
+  return { resource: "channel_messages", workspace_id: body.workspace_id.toLowerCase(), channel,
+    after_created_at: after as string | null, after_id: afterId === null ? null : (afterId as string).toLowerCase(), limit };
+}
+
+/** The definer returns only messages every member can already read; see 20261105000002. */
+async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessagesReadRequest): Promise<{ status: number; body: Record<string, unknown> }> {
+  const [row] = await tx<{ page: Record<string, unknown> | null }[]>`
+    SELECT swarm_read.channel_messages(${workspaceId}::uuid, ${input.channel},
+      ${input.after_created_at}::timestamptz, ${input.after_id}::uuid, ${input.limit}) AS page
+  `;
+  const page = row?.page;
+  if (!page) throw new Error("channel messages unavailable for an authorized caller");
+  if (page.error === "channel_not_found") {
+    return { status: 404, body: { error: "channel_not_found", message: "There is no channel with that name in this workspace." } };
+  }
+  return { status: 200, body: boundChannelPage(page) };
+}
+
+/** Rows are capped at 50 in SQL; bytes are capped here, keeping whole messages and a cursor to the rest. */
+const CHANNEL_PAGE_MAX_BYTES = 64 * 1024;
+function boundChannelPage(page: Record<string, unknown>): Record<string, unknown> {
+  const messages = Array.isArray(page.messages) ? page.messages as Array<Record<string, unknown>> : [];
+  const encoder = new TextEncoder();
+  let bytes = 0, kept = 0;
+  for (const message of messages) {
+    const size = encoder.encode(JSON.stringify(message)).length;
+    if (kept > 0 && bytes + size > CHANNEL_PAGE_MAX_BYTES) break;
+    bytes += size; kept += 1;
+  }
+  if (kept === messages.length) return page;
+  const last = messages[kept - 1]!;
+  return { ...page, messages: messages.slice(0, kept),
+    next: { after_created_at: last.created_at, after_id: last.signal_id } };
+}
 interface WakeLeaseReadRequest {
   resource: "agent_wake_lease";
   workspace_id: string;
@@ -254,7 +311,7 @@ function parseBody(
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} |
-  {resource:"roster";workspace_id:string} | null {
+  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -276,6 +333,7 @@ function parseBody(
       workspace_id: body.workspace_id.toLowerCase(),
     };
   }
+  if (body.resource === "channel_messages") return parseChannelMessages(body);
   if (
     body.resource === "channels" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -669,6 +727,9 @@ async function handle(
       if (body.resource === "channels") {
         return json(200, { channels: [] });
       }
+      if (body.resource === "channel_messages") {
+        return json(200, { workspace_id: body.workspace_id, channel: body.channel, archived: false, messages: [], next: null });
+      }
       if (body.resource === "agent_wake_lease") return json(200, { lease: null });
       return json(200, {
         signals: [],
@@ -926,6 +987,10 @@ async function handle(
     if (body.resource === "roster") {
       return json(200, await workspaceRoster(tx, agent.principal_workspace_id));
     }
+    if (body.resource === "channel_messages") {
+      const page = await channelMessages(tx, agent.principal_workspace_id, body);
+      return json(page.status, page.body);
+    }
     if (body.resource === "files") {
       // File artifacts list (FILE-ARTIFACTS.md §7): the membership-gated view
       // carries one row per file with its current LIVE version's facts. sha256
@@ -1124,6 +1189,8 @@ export type HostedReadInput =
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
   | { resource: "roster"; workspace_id: string }
+  | { resource: "channels"; workspace_id: string }
+  | ChannelMessagesReadRequest
   | {
       resource: "files";
       workspace_id: string;
@@ -1203,6 +1270,8 @@ export async function handleHostedRead(
   if ((input.resource === "whoami" && tool !== "whoami") ||
       (input.resource === "members" && tool !== "members") ||
       (input.resource === "roster" && tool !== "roster") ||
+      (input.resource === "channels" && tool !== "channel_ls") ||
+      (input.resource === "channel_messages" && tool !== "channel_read") ||
       (input.resource === "files" && tool !== "file_ls") ||
       (input.resource === "signals" && tool !== "check")) {
     return { status: 403, body: { error: "forbidden" } };
@@ -1261,6 +1330,18 @@ export async function handleHostedRead(
     }
     if (input.resource === "roster") {
       return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
+    }
+    if (input.resource === "channels") {
+      const channels = await tx<Record<string, unknown>[]>`
+        SELECT slug, purpose, archived_at FROM swarm.channels
+        WHERE workspace_id = ${seat.workspace_id}::uuid AND archived_at IS NULL
+        ORDER BY lower(slug) LIMIT 200
+      `;
+      return { status: 200, body: { channels: [{ slug: "general", purpose: null, archived_at: null }, ...channels], context } };
+    }
+    if (input.resource === "channel_messages") {
+      const page = await channelMessages(tx, seat.workspace_id, input);
+      return { status: page.status, body: page.status === 200 ? { ...page.body, context } : page.body };
     }
     if (input.resource === "files") {
       return await hostedFileList(tx, seat, input, context);

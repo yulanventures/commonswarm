@@ -284,3 +284,83 @@ test("decision_queue: the person's own open asks, oldest first; never for an age
     await assert.rejects(() => queue(ws, owner, {}, role), /permission denied/);
   }
 });
+
+/* -------------------------------------------------------------------------
+ * Channels C3: swarm_read.channel_messages returns only messages every member
+ * can already read: whole-workspace, unexpired, filed in that channel, and for
+ * a thread reply a root that is whole-workspace too. Called the way the read
+ * function calls it (swarm_read, the owner's claims plus the agent).
+ * ------------------------------------------------------------------------- */
+
+type ChannelPage = { channel: string; archived: boolean; next: { after_created_at: string; after_id: string } | null;
+  messages: Array<{ signal_id: string; body: string; thread_root_id: string | null }>; error?: string } | null;
+
+async function channelPage(ws: string, owner: string, agentId: string, channel: string,
+  after: { after_created_at: string; after_id: string } | null = null, limit = 50): Promise<ChannelPage> {
+  return await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated", agent_principal_id: agentId })}, true)`;
+    const [row] = await tx<{ page: ChannelPage }[]>`SELECT swarm_read.channel_messages(${ws}::uuid, ${channel},
+      ${after?.after_created_at ?? null}::timestamptz, ${after?.after_id ?? null}::uuid, ${limit}) AS page`;
+    return row!.page;
+  });
+}
+
+async function filed(ws: string, from: string, body: string, opts: { channel?: string | null; thread?: string; toUser?: string; recipients?: string[]; ago?: string } = {}): Promise<string> {
+  const id = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until, created_at, channel_id, thread_root_id)
+      VALUES (${id}::uuid, ${ws}::uuid, ${from}::uuid, 'agent', ${opts.toUser ?? opts.recipients?.[0] ?? null}, 'note', ${body},
+        statement_timestamp() + interval '1 day', statement_timestamp() - ${opts.ago ?? "1 minute"}::interval,
+        ${opts.channel ?? null}, ${opts.thread ?? null})`;
+    for (const [position, user] of (opts.recipients ?? []).entries()) {
+      await tx`INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+        VALUES (${id}::uuid, ${ws}::uuid, ${user}::uuid, ${position})`;
+    }
+  });
+  return id;
+}
+
+test("channel_messages: whole-workspace messages in that channel only, never addressed ones or their threads", async () => {
+  const owner = await person("Owner");
+  const helper = await person("Helper");
+  const ws = await workspace(owner, "Channel read test");
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${ws}::uuid, ${helper}::uuid, 'member')`;
+  const reader = await agent(ws, owner, "Reader");
+  const writer = await agent(ws, helper, "Writer");
+  const [design] = await sql<{ channel_id: string }[]>`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
+    VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'design', ${owner}::uuid, 'user', statement_timestamp()) RETURNING channel_id`;
+  const channelId = design!.channel_id;
+
+  const open = await filed(ws, writer, "OPEN-IN-DESIGN", { channel: channelId, ago: "3 minutes" });
+  const threadOk = await filed(ws, writer, "THREAD-OK", { channel: channelId, thread: open, ago: "2 minutes" });
+  await filed(ws, writer, "DIRECT-TO-HELPER", { channel: channelId, toUser: helper });
+  await filed(ws, writer, "TO-RECIPIENTS", { channel: channelId, recipients: [helper] });
+  const privateRoot = await filed(ws, writer, "PRIVATE-ROOT", { channel: channelId, toUser: owner });
+  await filed(ws, writer, "REPLY-UNDER-PRIVATE-ROOT", { channel: channelId, thread: privateRoot });
+  const unfiled = await filed(ws, writer, "UNFILED", {});
+
+  const page = await channelPage(ws, owner, reader, "design");
+  assert.deepEqual(page?.messages.map((m) => m.signal_id), [open, threadOk]);
+  assert.equal(JSON.stringify(page).includes("PRIVATE"), false);
+  assert.equal(JSON.stringify(page).includes("DIRECT"), false);
+  assert.equal(JSON.stringify(page).includes("RECIPIENTS"), false);
+  assert.deepEqual((await channelPage(ws, owner, reader, "general"))?.messages.map((m) => m.signal_id), [unfiled],
+    "general alone is the unfiled channel");
+  assert.equal((await channelPage(ws, owner, reader, "missing"))?.error, "channel_not_found");
+
+  // Paging: one row at a time, oldest first, with a cursor.
+  const first = await channelPage(ws, owner, reader, "design", null, 1);
+  assert.deepEqual(first?.messages.map((m) => m.signal_id), [open]);
+  assert.ok(first?.next);
+  const second = await channelPage(ws, owner, reader, "design", first!.next, 1);
+  assert.deepEqual(second?.messages.map((m) => m.signal_id), [threadOk]);
+  assert.equal(second?.next, null);
+
+  // An agent of another workspace, or a removed one, reads nothing.
+  const elsewhere = await workspace(owner, "Other workspace");
+  const outsider = await agent(elsewhere, owner, "Outsider");
+  assert.equal(await channelPage(ws, owner, outsider, "design"), null);
+  await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${reader}::uuid`;
+  assert.equal(await channelPage(ws, owner, reader, "design"), null);
+});

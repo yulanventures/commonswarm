@@ -4,6 +4,7 @@
 import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { SIGNAL_UNSAFE_GLOBAL_RE } from "../_shared/signal-text.ts";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannelSlug } from "../_shared/channels.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { contentTypeForName } from "../../../src/protocol/file-types.ts";
 
@@ -35,6 +36,8 @@ const uuid = text(36, 36, UUID_PATTERN);
 const claimWorkspace = { ...uuid, not: { enum: ["00000000-0000-0000-0000-000000000000", "00000000-0000-4000-8000-000000000000"] } };
 const handle = text(27, 69, HANDLE_PATTERN);
 const requestId = text(8, 72, REQUEST_ID_PATTERN);
+// A channel by name; "general" is the unfiled main channel.
+const channel = text(1, CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE.source);
 const recipient = objectSchema({ kind: { type: "string", enum: ["user", "agent"] }, id: uuid }, ["kind", "id"]);
 const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 };
 const integer = (minimum: number, maximum: number): JsonSchema => ({ type: "integer", minimum, maximum });
@@ -78,14 +81,14 @@ export const CORE_TOOL_TABLE = [
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Ask one or more workspace participants, optionally attaching files from file_put or file_ls. Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, request_id: requestId }, ["seat", "recipients", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, request_id: requestId }, ["seat", "recipients", "body", "request_id"]),
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Share a note, optionally with recipients and attached files from file_put or file_ls. Retry with the same request_id.",
     annotations: { title: "Share a workspace note", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, request_id: requestId }, ["seat", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "reply", effect: "write", title: "Reply to a signal",
@@ -106,7 +109,7 @@ export const CORE_TOOL_TABLE = [
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Share current work. Retry with the same request_id.",
     annotations: { title: "Share current work", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, body: text(1, 8000), channel, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "members", effect: "read", title: "List workspace participants",
@@ -121,6 +124,20 @@ export const CORE_TOOL_TABLE = [
     description: "Every agent in the selected seat's workspace: owner, derived status (active, idle, inactive, not_picking_up, off), last activity, current work, and how many asks to people it has open and since when. Ask contents are never included.",
     annotations: { title: "Read the agent roster", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
+  },
+  {
+    name: "channel_ls", effect: "read", title: "List channels",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "The live channels in the selected seat's workspace, general (unfiled messages) first.",
+    annotations: { title: "List channels", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle }, ["seat"]),
+  },
+  {
+    name: "channel_read", effect: "read", title: "Read a channel",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "Messages posted to the whole workspace in one channel (general for unfiled), oldest first, 50 at a time. Pass next's after_created_at and after_id to continue. Addressed messages aren't included; use check for those.",
+    annotations: { title: "Read a channel", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, channel, after_created_at: text(20, 40), after_id: uuid, limit: { type: "integer" as const, minimum: 1, maximum: 50 } }, ["seat", "channel"]),
   },
   {
     name: "file_ls", effect: "read", title: "List workspace files",
@@ -270,13 +287,15 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   claim_seat: { allowed: ["workspace_id", "agent_id", "name", "request_id"], required: ["request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
-  ask: { allowed: ["seat", "recipients", "body", "attachments", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
-  note: { allowed: ["seat", "recipients", "body", "attachments", "request_id"], required: ["seat", "body", "request_id"] },
+  ask: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
+  note: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
-  working_on: { allowed: ["seat", "body", "request_id"], required: ["seat", "body", "request_id"] },
+  working_on: { allowed: ["seat", "body", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   members: { allowed: ["seat"], required: ["seat"] },
   roster: { allowed: ["seat"], required: ["seat"] },
+  channel_ls: { allowed: ["seat"], required: ["seat"] },
+  channel_read: { allowed: ["seat", "channel", "after_created_at", "after_id", "limit"], required: ["seat", "channel"] },
   file_ls: { allowed: ["seat", "signal_id", "offset", "limit"], required: ["seat"] },
   file_get: { allowed: ["seat", "file_id", "version_n", "offset"], required: ["seat", "file_id"] },
   file_put: { allowed: ["seat", "name", "content", "content_base64", "request_id"], required: ["seat", "name", "request_id"] },
@@ -305,6 +324,9 @@ const EXPECTED: Record<string, string> = {
   body: "provide 1 to 8000 characters with non-whitespace text; only tab, newline and carriage return are allowed control characters",
   recipients: "provide 1 to 20 objects with only kind (user or agent) and id (UUID); use members to find recipients",
   signal_id: "provide the signal UUID from check that you want to reply to",
+  channel: "provide a channel name from channel_ls, or general for the main channel",
+  after_created_at: "pass next.after_created_at from the previous channel_read page, together with after_id",
+  after_id: "pass next.after_id from the previous channel_read page, together with after_created_at",
   file_id: "provide the file UUID from check attachments or file_ls",
   version_n: "provide the positive version number from check attachments or file_ls, or omit it for the current version",
   offset: "provide a whole number from 0, or the next_offset returned by the previous page",
@@ -353,7 +375,16 @@ export function validateHostedToolArguments(
     if (args.ack !== undefined && !validUuid(args.ack)) invalid("ack");
     return args;
   }
-  if (name === "whoami" || name === "members" || name === "roster") return args;
+  if (name === "whoami" || name === "members" || name === "roster" || name === "channel_ls") return args;
+  if (name === "channel_read") {
+    if (!validChannel(args.channel)) invalid("channel");
+    const hasAfter = args.after_created_at !== undefined, hasId = args.after_id !== undefined;
+    if (hasAfter !== hasId) invalid(hasAfter ? "after_id" : "after_created_at");
+    if (hasAfter && (typeof args.after_created_at !== "string" || !Number.isFinite(Date.parse(args.after_created_at)))) invalid("after_created_at");
+    if (hasId && !validUuid(args.after_id)) invalid("after_id");
+    if (args.limit !== undefined && !wholeNumber(args.limit, 1, 50)) invalid("limit");
+    return args;
+  }
   if (name === "seat_release") {
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
@@ -395,5 +426,12 @@ export function validateHostedToolArguments(
       (name === "note" && args.recipients !== undefined && !validRecipients(args.recipients))) invalid("recipients");
   if (name === "reply" && !validUuid(args.signal_id)) invalid("signal_id");
   if (args.attachments !== undefined && !validAttachments(args.attachments)) invalid("attachments");
+  if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
   return args;
+}
+
+function validChannel(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const slug = normalizeChannelSlug(value);
+  return slug === "general" || channelSlugProblem(slug) === null;
 }
