@@ -32,6 +32,7 @@ import {
 import { executeFilePut } from "./file-put.ts";
 import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
+import { fitChannelPage } from "./channel-page.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
   createMcpProtocolHandler,
@@ -346,12 +347,13 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       after_id: typeof args.after_id === "string" ? args.after_id.toLowerCase() : null,
       limit: typeof args.limit === "number" ? args.limit : 50,
     }, capability));
-    const messages = Array.isArray(output.messages) ? output.messages : [];
-    return { context: output.context, workspace_id: output.workspace_id, channel: output.channel,
-      archived: output.archived, messages, next: output.next ?? null,
-      provenance: messageReadProvenance(messages.map((m) => ({ ...(m as Record<string, unknown>),
-        id: (m as Record<string, unknown>).signal_id })),
-        { tool: "channel_read", scope: "messages posted to the whole workspace in one channel" }, output.next != null) };
+    const page = fitChannelPage({ context: output.context, workspace_id: output.workspace_id, channel: output.channel,
+      archived: output.archived, messages: Array.isArray(output.messages) ? output.messages as Array<Record<string, unknown>> : [],
+      next: output.next ?? null }, limits.maxResponseBytes);
+    const { messages, next } = page;
+    return { ...page,
+      provenance: messageReadProvenance(messages.map((m) => ({ ...m, id: m.signal_id })),
+        { tool: "channel_read", scope: "messages posted to the whole workspace in one channel" }, next !== null) };
   }
   if (call.name === "file_ls") {
     const output = readOutput(await handleHostedRead({

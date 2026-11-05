@@ -1332,8 +1332,9 @@ export async function handleHostedRead(
       return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
     }
     if (input.resource === "channels") {
+      // The read role's view, gated by the seat owner's membership; no new grant.
       const channels = await tx<Record<string, unknown>[]>`
-        SELECT slug, purpose, archived_at FROM swarm.channels
+        SELECT slug, purpose, archived_at FROM swarm_read.channels
         WHERE workspace_id = ${seat.workspace_id}::uuid AND archived_at IS NULL
         ORDER BY lower(slug) LIMIT 200
       `;

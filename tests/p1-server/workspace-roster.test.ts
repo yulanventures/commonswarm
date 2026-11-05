@@ -357,6 +357,13 @@ test("channel_messages: whole-workspace messages in that channel only, never add
   assert.deepEqual(second?.messages.map((m) => m.signal_id), [threadOk]);
   assert.equal(second?.next, null);
 
+  // The cursor must be a message this read returns: a private id, another channel's message and an
+  // unknown id all get the same refusal, with no ordering metadata.
+  for (const cursor of [privateRoot, unfiled, randomUUID()]) {
+    const refused = await channelPage(ws, owner, reader, "design", { after_id: cursor });
+    assert.deepEqual(refused, { error: "cursor_not_found" });
+  }
+
   // An agent of another workspace, or a removed one, reads nothing.
   const elsewhere = await workspace(owner, "Other workspace");
   const outsider = await agent(elsewhere, owner, "Outsider");
