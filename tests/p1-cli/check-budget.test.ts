@@ -40,12 +40,17 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cliPath = join(repoRoot, "src", "cli.ts");
 const tsxImport = import.meta.resolve("tsx");
 let root: string;
+// In-process checks open the successor-credential lock in the default state directory; keep it off the real home.
+const previousAgentStateDir = process.env.SWARM_AGENT_STATE_DIR;
 
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "cswarm-check-budget-test-"));
+  process.env.SWARM_AGENT_STATE_DIR = join(root, "agent-credentials");
 });
 
 after(async () => {
+  if (previousAgentStateDir === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+  else process.env.SWARM_AGENT_STATE_DIR = previousAgentStateDir;
   await rm(root, { recursive: true, force: true });
 });
 
