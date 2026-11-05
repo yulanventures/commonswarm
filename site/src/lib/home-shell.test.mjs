@@ -155,3 +155,24 @@ test("workspace picker retains sibling workspaces, excludes archived entries and
   picker.listeners.keydown({ key: "Escape", preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
   assert.equal(picker.open, false); assert.equal(trigger.focused, true); assert.ok(prevented && stopped);
 });
+
+test("the workspace picker ends with New workspace, which opens the existing flow", () => {
+  const element = tag => ({ tag, children: [], attrs: {}, listeners: {}, dataset: {}, open: false, href: "",
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    focus() { this.focused = true; },
+  });
+  const opened = [];
+  const picker = buildWorkspacePicker({ createElement: element }, [{ id: "one", name: "First", archived: false }], "one", () => {},
+    { href: "/app?v=new", open: () => opened.push("new") });
+  const [, list] = picker.children;
+  const create = list.children.at(-1);
+  assert.equal(create.tag, "a");
+  assert.equal(create.textContent, "New workspace");
+  assert.equal(create.href, "/app?v=new");
+  picker.open = true;
+  let prevented = false;
+  create.listeners.click({ button: 0, preventDefault() { prevented = true; } });
+  assert.deepEqual(opened, ["new"]); assert.equal(prevented, true); assert.equal(picker.open, false);
+});

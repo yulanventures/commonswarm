@@ -3,12 +3,12 @@
 // no presence dot on people; a person row opens People & agents, an agent row opens the Agent view.
 import { agentOrb, personAvatar, statusLine } from "./home-primitives";
 import type { AgentVM, CapsuleVM, Id, PersonVM, RailVM } from "./home-types";
+import { ARCHIVED_CHANNELS_LABEL, CHANNELS_LOAD_FAILED, CHANNELS_TITLE, NEW_CHANNEL_LABEL, channelLabel, channelRowName, railSlice } from "./channels";
 
-export const RAIL_WORKSPACE_CAP = 6;
 export const RAIL_OWNERSHIP_NOTE = "Every agent belongs to a person, who connects it.";
 export const RAIL_CATCH_UP_PEOPLE_TITLE = "You and your agents";
-/** Grokbot-style sections: workspaces are the group chats; people and agents are 1:1 Direct messages. */
-export const RAIL_GROUP_CHATS_TITLE = "Group chats";
+/** The selected workspace's channels, then people and agents as 1:1 Direct messages. Workspaces are switched in the
+ *  picker above the rail, never here. */
 export const RAIL_DIRECT_MESSAGES_TITLE = "Direct messages";
 
 type RailWorkspace = RailVM["workspaces"][number];
@@ -21,8 +21,18 @@ export interface RailCallbacks {
   openPerson: (personId: Id) => void;
   /** Opens the Agent view for this agent. */
   openAgent: (agentId: Id) => void;
-  /** Lets the page keep the "Show N more" state across rebuilds. */
-  toggleWorkspaces?: (expanded: boolean) => void;
+  /** Lets the page keep the channels' "Show N more" state across rebuilds. */
+  toggleChannels?: (expanded: boolean) => void;
+  /** Lets the page keep the Archived channels disclosure open across rebuilds. */
+  toggleArchived?: (open: boolean) => void;
+  /** A plain click on a channel row. Without it the row navigates natively. */
+  selectChannel?: (channelId: string, event: MouseEvent) => void;
+  /** The row's ⋯ button. The page decides the actions (rename, archive). */
+  channelMenu?: (channelId: string, event: MouseEvent, button: HTMLElement) => void;
+  /** The Channels heading's +. */
+  newChannel?: (button: HTMLElement) => void;
+  /** "Retry" after the channel list failed to load. */
+  retryChannels?: () => void;
   /** Right-click (or Shift+F10 / the Menu key) on a Direct messages row. The page decides the actions. */
   contextMenu?: (target: { kind: "person" | "agent"; id: Id }, event: MouseEvent, row: HTMLElement) => void;
 }
@@ -34,62 +44,39 @@ export type HomeRailVM = RailVM & {
   currentDmId?: Id;
   /** The workspace Lead agent: tagged "Lead" in Direct messages. */
   leadAgentId?: Id;
+  /** The selected workspace's channels. Absent where no workspace is selected (Catch up). */
+  channels?: RailChannelsVM;
 };
+
+/** One channel row. `id` is the view id: GENERAL_CHANNEL_ID for #general, otherwise the channel's id. */
+export interface RailChannelRowVM {
+  id: string;
+  slug: string;
+  href: string;
+  current: boolean;
+  /** As the per-channel read reported it. null is unknown: no dot and no claim of "read". */
+  unread: boolean | null;
+  /** Rename and archive are offered (the creator, or a workspace owner or admin). */
+  manageable: boolean;
+}
+
+export interface RailChannelsVM {
+  /** loading: the list for this workspace has not been read yet. failed: the latest read failed. */
+  state: "loading" | "ready" | "failed";
+  general: RailChannelRowVM;
+  /** Live named channels, in rail order. */
+  channels: RailChannelRowVM[];
+  /** Archived channels, in rail order. */
+  archived: RailChannelRowVM[];
+  mayCreate: boolean;
+}
 
 /** Local to this lane; home-types.ts has no rail options. */
 export interface RailOptions {
-  newWorkspaceHref?: string;
   /** Where the brand row links. Default: the site home. */
   brandHref?: string;
-  workspacesExpanded?: boolean;
-  /** While "New workspace" is open: the name typed so far. The rail shows it as a draft row (display only). */
-  draftWorkspace?: { name: string };
-}
-
-/** The draft row's words: the typed name, or the door's own label while the field is empty. */
-export const RAIL_DRAFT_PLACEHOLDER = "New workspace";
-export function railDraftName(name: string): { text: string; empty: boolean } {
-  const trimmed = name.trim();
-  return trimmed ? { text: trimmed, empty: false } : { text: RAIL_DRAFT_PLACEHOLDER, empty: true };
-}
-
-/** Repaints the draft row's name in place (one keystroke must not rebuild the rail). */
-export function setRailDraftName(root: ParentNode, name: string): void {
-  const label = root.querySelector<HTMLElement>("[data-rail-draft-name]");
-  if (!label) return;
-  const value = railDraftName(name);
-  label.textContent = value.text;
-  label.title = value.text;
-  label.toggleAttribute("data-empty", value.empty);
-}
-
-/** The workspace being started (New-Space.dc.html): the current row, drawn with a dashed lime edge and a "new" marker.
- *  It is not a link: the workspace does not exist until the form creates it, and the row leaves with the form. */
-function draftRow(doc: Document, name: string): HTMLLIElement {
-  const item = node(doc, "li", "hm-rail__workspace-item");
-  const row = node(doc, "div", "hm-rail__draft");
-  row.dataset.railDraft = "";
-  const label = node(doc, "span", "hm-rail__name");
-  label.dataset.railDraftName = "";
-  const marker = node(doc, "span", "hm-rail__draft-marker", "new");
-  marker.setAttribute("aria-hidden", "true");
-  row.append(icon(doc, "workspace"), label, marker, node(doc, "span", "hm-rail__sr", ", not created yet"));
-  item.append(row);
-  setRailDraftName(item, name);
-  return item;
-}
-
-/**
- * At most six workspaces show; the rest wait behind "Show N more". The current workspace is never
- * hidden: if it sits past the cap it takes the sixth place (in its own position), so the first five
- * show with it and the count is everything else.
- */
-export function railWorkspaceRows(workspaces: readonly RailWorkspace[], expanded: boolean) {
-  const currentIndex = workspaces.findIndex((workspace) => workspace.current);
-  const leading = currentIndex >= RAIL_WORKSPACE_CAP ? RAIL_WORKSPACE_CAP - 1 : RAIL_WORKSPACE_CAP;
-  const rows = workspaces.map((workspace, index) => ({ workspace, overflow: index >= leading && index !== currentIndex }));
-  const overflowCount = rows.filter((row) => row.overflow).length;
-  return { rows: rows.map((row) => ({ ...row, hidden: row.overflow && !expanded })), overflowCount };
+  channelsExpanded?: boolean;
+  archivedOpen?: boolean;
 }
 
 /** Duplicate names carry enough of the UUID to distinguish every matching membership. */
@@ -174,7 +161,7 @@ function link(doc: Document, href: string, className: string, callbacks: RailCal
 }
 
 /** A decorative 18px line icon. Its shape is a CSS mask in rail.css and its colour is currentColor. */
-function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement {
+function icon(doc: Document, name: "inbox" | "workspace" | "plus" | "archive"): HTMLElement {
   const mark = node(doc, "span", "hm-rail__icon");
   mark.dataset.icon = name;
   mark.setAttribute("aria-hidden", "true");
@@ -256,7 +243,146 @@ function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: Ra
   return item;
 }
 
-/** The left rail: brand row, Catch up, Workspaces with its create action, then People & agents. The ownership line is
+/** #general, then live channels; the compact list holds six rows (railSlice in channels.ts). */
+export function railChannelRows(channels: RailChannelsVM, expanded: boolean) {
+  return railSlice(channels.channels, channels.channels.findIndex((row) => row.current), expanded);
+}
+
+function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, callbacks: RailCallbacks): HTMLAnchorElement {
+  const link = node(doc, "a", "hm-rail__link hm-rail__channel");
+  link.href = row.href;
+  link.dataset.railChannel = row.id;
+  if (row.current) link.setAttribute("aria-current", "page");
+  const unread = archived ? null : row.unread;
+  if (unread === true) link.dataset.unread = "";
+  link.setAttribute("aria-label", channelRowName(row.slug, unread));
+  link.title = channelLabel(row.slug);
+  const name = node(doc, "span", "hm-rail__name", row.slug);
+  link.append(icon(doc, archived ? "archive" : "workspace"), name);
+  if (unread === true) { const dot = node(doc, "span", "hm-rail__unread"); dot.setAttribute("aria-hidden", "true"); link.append(dot); }
+  link.addEventListener("click", (event) => {
+    if (!callbacks.selectChannel || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    callbacks.selectChannel(row.id, event);
+  });
+  return link;
+}
+
+/** One row: the link, and beside it (never inside it) the ⋯ button where an action exists. */
+function channelItem(doc: Document, row: RailChannelRowVM, archived: boolean, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+  const item = node(doc, "li", "hm-rail__channel-item");
+  item.append(channelLink(doc, row, archived, callbacks));
+  if (!archived && !sample && row.manageable && callbacks.channelMenu) {
+    const actions = node(doc, "button", "hm-rail__channel-actions");
+    actions.type = "button";
+    actions.dataset.railChannelMenu = row.id;
+    actions.setAttribute("aria-haspopup", "menu");
+    actions.setAttribute("aria-label", `${channelLabel(row.slug)} options`);
+    actions.title = `${channelLabel(row.slug)} options`;
+    const glyph = node(doc, "span", "", "⋯");
+    glyph.setAttribute("aria-hidden", "true");
+    actions.append(glyph);
+    actions.addEventListener("click", (event) => callbacks.channelMenu?.(row.id, event, actions));
+    item.append(actions);
+  }
+  return item;
+}
+
+function channelsSection(doc: Document, vm: RailChannelsVM, sample: boolean, callbacks: RailCallbacks, options: RailOptions): HTMLElement {
+  const section = node(doc, "section", "hm-rail__channels");
+  section.dataset.homeChannels = vm.state;
+  section.setAttribute("aria-labelledby", "hm-rail-channels-title");
+  const head = node(doc, "div", "hm-rail__section-head");
+  const title = node(doc, "h2", "hm-rail__heading", CHANNELS_TITLE);
+  title.id = "hm-rail-channels-title";
+  head.append(title);
+  if (!sample && vm.mayCreate && callbacks.newChannel) {
+    const create = node(doc, "button", "hm-rail__new");
+    create.type = "button";
+    create.dataset.homeNewChannel = "";
+    create.setAttribute("aria-label", NEW_CHANNEL_LABEL);
+    create.title = NEW_CHANNEL_LABEL;
+    create.append(icon(doc, "plus"));
+    create.addEventListener("click", () => callbacks.newChannel?.(create));
+    head.append(create);
+  }
+  const list = node(doc, "ul", "hm-rail__channel-list");
+  list.id = "hm-rail-channel-list";
+  list.dataset.homeChannelList = "";
+  list.append(channelItem(doc, vm.general, false, sample, callbacks));
+  section.append(head, list);
+  if (vm.state === "loading") {
+    list.setAttribute("aria-busy", "true");
+    for (let index = 0; index < 3; index += 1) {
+      const skeleton = node(doc, "li", "hm-rail__channel-skeleton");
+      skeleton.setAttribute("aria-hidden", "true");
+      list.append(skeleton);
+    }
+    return section;
+  }
+  let expanded = options.channelsExpanded === true;
+  const { rows, hiddenCount } = railChannelRows(vm, expanded);
+  for (const { row, overflow, hidden } of rows) {
+    const item = channelItem(doc, row, false, sample, callbacks);
+    if (overflow) item.dataset.railOverflow = "";
+    item.hidden = hidden;
+    list.append(item);
+  }
+  const moreLabel = railMoreLabel(hiddenCount, expanded);
+  if (moreLabel) {
+    const more = node(doc, "button", "hm-rail__more", moreLabel);
+    more.type = "button";
+    more.dataset.homeChannelsMore = "";
+    more.setAttribute("aria-expanded", String(expanded));
+    more.setAttribute("aria-controls", list.id);
+    more.addEventListener("click", () => {
+      expanded = !expanded;
+      for (const item of list.querySelectorAll<HTMLLIElement>("[data-rail-overflow]")) item.hidden = !expanded;
+      more.textContent = railMoreLabel(hiddenCount, expanded);
+      more.setAttribute("aria-expanded", String(expanded));
+      callbacks.toggleChannels?.(expanded);
+    });
+    section.append(more);
+  }
+  if (vm.state === "failed") {
+    const failed = node(doc, "div", "hm-rail__channels-failed");
+    failed.setAttribute("role", "status");
+    failed.append(node(doc, "span", "", CHANNELS_LOAD_FAILED));
+    if (callbacks.retryChannels) {
+      const retry = node(doc, "button", "hm-rail__more hm-rail__retry", "Retry");
+      retry.type = "button";
+      retry.dataset.homeChannelsRetry = "";
+      retry.addEventListener("click", () => callbacks.retryChannels?.());
+      failed.append(retry);
+    }
+    section.append(failed);
+  }
+  if (vm.archived.length) {
+    let open = options.archivedOpen === true || vm.archived.some((row) => row.current);
+    const toggle = node(doc, "button", "hm-rail__more hm-rail__archived-toggle");
+    toggle.type = "button";
+    toggle.dataset.homeArchivedToggle = "";
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-controls", "hm-rail-archived-list");
+    const chevron = node(doc, "span", "hm-rail__disclosure", "▸");
+    chevron.setAttribute("aria-hidden", "true");
+    toggle.append(chevron, node(doc, "span", "hm-rail__name", ARCHIVED_CHANNELS_LABEL));
+    const archived = node(doc, "ul", "hm-rail__channel-list hm-rail__archived-list");
+    archived.id = "hm-rail-archived-list";
+    archived.hidden = !open;
+    for (const row of vm.archived) archived.append(channelItem(doc, row, true, sample, callbacks));
+    toggle.addEventListener("click", () => {
+      open = !open;
+      archived.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+      callbacks.toggleArchived?.(open);
+    });
+    section.append(toggle, archived);
+  }
+  return section;
+}
+
+/** The left rail: brand row, Catch up, the selected workspace's Channels, then Direct messages. The ownership line is
  *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
 export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
   const { currentAgentId, currentDmId, leadAgentId } = vm;
@@ -276,60 +402,7 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
   catchUp.append(icon(doc, "inbox"), node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
   nav.append(catchUp);
 
-  const workspaces = node(doc, "section", "hm-rail__workspaces");
-  workspaces.setAttribute("aria-labelledby", "hm-rail-workspaces-title");
-  const workspacesTitle = node(doc, "h2", "hm-rail__heading", RAIL_GROUP_CHATS_TITLE);
-  workspacesTitle.id = "hm-rail-workspaces-title";
-  const workspacesHead = node(doc, "div", "hm-rail__section-head");
-  workspacesHead.append(workspacesTitle);
-  if (!vm.sample) {
-    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__new", callbacks);
-    create.dataset.homeNewWorkspace = "";
-    create.setAttribute("aria-label", "New workspace");
-    create.title = "New workspace";
-    create.append(icon(doc, "plus"));
-    workspacesHead.append(create);
-  }
-  const list = node(doc, "ul", "hm-rail__workspace-list");
-  list.id = "hm-rail-workspace-list";
-  list.dataset.homeWorkspaceList = "";
-  let expanded = options.workspacesExpanded === true;
-  const { rows, overflowCount } = railWorkspaceRows(vm.workspaces, expanded);
-  for (const { workspace, overflow, hidden } of rows) {
-    const item = node(doc, "li", "hm-rail__workspace-item");
-    if (overflow) item.dataset.railOverflow = "";
-    item.hidden = hidden;
-    const row = link(doc, workspace.href, "hm-rail__link hm-rail__workspace", callbacks);
-    row.dataset.railWorkspace = workspace.id;
-    if (workspace.current) row.setAttribute("aria-current", "page");
-    if (needsYouBadge(workspace.needsYou)) row.dataset.railAttention = "";
-    const name = node(doc, "span", "hm-rail__name", workspace.name);
-    name.title = workspace.name;
-    row.append(icon(doc, "workspace"), name);
-    const shortId = railWorkspaceIdentifier(workspace, vm.workspaces);
-    if (shortId) { const identifier = node(doc, "span", "hm-rail__identifier", shortId); identifier.title = workspace.id; row.append(identifier); }
-    row.append(...badge(doc, workspace.needsYou));
-    item.append(row);
-    list.append(item);
-  }
-  if (options.draftWorkspace) list.append(draftRow(doc, options.draftWorkspace.name));
-  workspaces.append(workspacesHead, list);
-  const moreLabel = railMoreLabel(overflowCount, expanded);
-  if (moreLabel) {
-    const more = node(doc, "button", "hm-rail__more", moreLabel);
-    more.type = "button";
-    more.setAttribute("aria-expanded", String(expanded));
-    more.setAttribute("aria-controls", list.id);
-    more.addEventListener("click", () => {
-      expanded = !expanded;
-      for (const item of list.querySelectorAll<HTMLLIElement>("[data-rail-overflow]")) item.hidden = !expanded;
-      more.textContent = railMoreLabel(overflowCount, expanded);
-      more.setAttribute("aria-expanded", String(expanded));
-      callbacks.toggleWorkspaces?.(expanded);
-    });
-    workspaces.append(more);
-  }
-  nav.append(workspaces);
+  if (vm.channels) nav.append(channelsSection(doc, vm.channels, vm.sample, callbacks, options));
   root.append(nav);
 
   if (vm.people) {

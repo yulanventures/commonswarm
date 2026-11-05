@@ -137,7 +137,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     const channels = { general: randomUUID(), group: randomUUID(), long: randomUUID() };
     try {
       await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind) VALUES
-        (${channels.general}::uuid, ${workspace}::uuid, 'general', 'Everything for the household', ${owner.id}::uuid, 'user'),
+        (${channels.general}::uuid, ${workspace}::uuid, 'household', 'Everything for the household', ${owner.id}::uuid, 'user'),
         (${channels.group}::uuid, ${workspace}::uuid, 'design-studio', 'Studio work', ${owner.id}::uuid, 'user'),
         (${channels.long}::uuid, ${workspace}::uuid, 'household-logistics-long-channel', NULL, ${owner.id}::uuid, 'user')`;
       ids["channel.general"] = channels.general;

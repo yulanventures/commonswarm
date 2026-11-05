@@ -50,8 +50,9 @@
   max-block-size: 60%;
 }
 
-.hm-rail__workspaces { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
-.hm-rail__workspace-list { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; overflow-y: auto; }
+/* Channels share the rail's one scroll region: no list here scrolls on its own. */
+.hm-rail__channels { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
+.hm-rail__channel-list { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
 
 .hm-rail__heading,
 .hm-rail__other-head {
@@ -100,9 +101,8 @@
 .hm-rail__link:hover,
 .hm-rail button:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
 
-/* Catch up, the viewer and any workspace waiting on you read strong, as in the design. */
+/* Catch up and the viewer read strong, as in the design. */
 .hm-rail__catch-up,
-.hm-rail__workspace[data-rail-attention],
 .hm-rail__group[data-rail-viewer] > .hm-rail__person { color: var(--home-rail-strong); font-weight: 700; }
 
 .hm-rail__link[aria-current="page"],
@@ -133,6 +133,9 @@
 .hm-rail__icon[data-icon="workspace"] {
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='m6 2-2 12M12 2l-2 12M2.5 6h11M1.5 10h11'/%3E%3C/svg%3E");
 }
+.hm-rail__icon[data-icon="archive"] {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='3' width='12' height='3' rx='0.8'/%3E%3Cpath d='M3 6v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6M6.5 9h3'/%3E%3C/svg%3E");
+}
 .hm-rail__icon[data-icon="plus"] {
   inline-size: 14px;
   block-size: 14px;
@@ -140,6 +143,58 @@
 }
 
 .hm-rail__more { color: var(--home-rail-muted); font-size: var(--t-sm); }
+
+/* A channel row: the link fills the row; its ⋯ is a sibling laid over the row's end, so the selected
+   surface keeps one width whether or not the row has actions. */
+.hm-rail__channel-item { position: relative; display: flex; min-inline-size: 0; }
+.hm-rail__channel-item > .hm-rail__channel { flex: 1 1 auto; }
+.hm-rail__channel-item:has(> .hm-rail__channel-actions) > .hm-rail__channel { padding-inline-end: 44px; }
+.hm-rail__channel[data-unread] { font-weight: 700; }
+.hm-rail__channel[data-unread]:not([aria-current="page"]) { color: var(--home-rail-strong); }
+.hm-rail__unread { flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: currentColor; }
+.hm-rail__channel-actions {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+.hm-rail__channel-item:has(> [aria-current="page"]) > .hm-rail__channel-actions { color: var(--home-rail-current-ink); }
+/* Shown on hover and focus where there is a hover; always on touch layouts. The space is reserved either way. */
+@media (hover: hover) and (pointer: fine) {
+  .hm-rail__channel-actions { opacity: 0; }
+  .hm-rail__channel-item:is(:hover, :focus-within) > .hm-rail__channel-actions,
+  .hm-rail__channel-actions[data-context-open] { opacity: 1; }
+}
+.hm-rail__channel-skeleton {
+  block-size: 44px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, var(--home-rail-raised) 0 70%, transparent 70%);
+  opacity: 0.6;
+}
+.hm-rail__channels-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding-inline-start: 12px;
+  color: var(--home-rail-muted);
+  font-size: var(--t-sm);
+}
+.hm-rail__channels-failed .hm-rail__retry { inline-size: auto; color: var(--home-rail-strong); }
+.hm-rail__disclosure { flex: none; inline-size: 18px; text-align: center; }
+.hm-rail__archived-toggle[aria-expanded="true"] .hm-rail__disclosure { transform: rotate(90deg); }
 
 .hm-rail__name {
   flex: 1 1 auto;
@@ -291,7 +346,9 @@
   padding: 0;
   border: 0;
   border-radius: 6px;
+  background: transparent;
   color: var(--home-rail-text);
+  font: inherit;
   text-decoration: none;
 }
 .hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }

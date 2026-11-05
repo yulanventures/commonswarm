@@ -86,7 +86,9 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
     key.stopPropagation();
   });
   menu.addEventListener("contextmenu", inner => inner.preventDefault());
-  (anchor.closest("live-dashboard") ?? doc.body).append(menu);
+  /* Inside an open modal (the phone navigation drawer) the menu must live in that dialog: everything
+     outside a modal dialog is inert. */
+  (anchor.closest<HTMLElement>("dialog[open]") ?? anchor.closest("live-dashboard") ?? doc.body).append(menu);
   closeOpen = close;
   anchor.dataset.contextOpen = "";
   const view = doc.defaultView;

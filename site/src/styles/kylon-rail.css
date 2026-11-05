@@ -1,4 +1,4 @@
-/* Grokbot-style rail: Group chats, then Direct messages with a status dot and the workspace Lead tag. */
+/* Rail: Channels, then Direct messages with a status dot and the workspace Lead tag. */
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb { position: relative; }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb::after {
   content: ""; position: absolute; inset-block-end: -1px; inset-inline-end: -1px;

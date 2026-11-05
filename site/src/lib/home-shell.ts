@@ -22,6 +22,8 @@ export interface WorkspaceShellVM {
   pane: WorkspacePane;
   /** The current route owns its main heading; workspace identity is context. */
   contextTitle?: boolean;
+  /** Chat's heading: the channel being read ("#general", "#slug", "All messages"). Workspace identity stays in the picker. */
+  channelTitle?: string;
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
   /** False while the to-dos read is absent: every To-dos entry hides. Nothing is faked. */
   todosAvailable: boolean;
@@ -130,12 +132,13 @@ export function buildOrganizationMenu(doc: Document, items: readonly Organizatio
   return group;
 }
 
-/** A workspace picker lists every readable workspace, including siblings in one organization. */
+/** A workspace picker lists every readable workspace, including siblings in one organization, then New workspace. */
 export function buildWorkspacePicker(
   doc: Document,
   workspaces: readonly { id: string; name: string; archived: boolean }[],
   workspaceId: string,
   select: (workspaceId: string) => void,
+  newWorkspace?: { href: string; open: (event: MouseEvent) => void },
 ): HTMLElement {
   const picker = node(doc, "details", "cs-workspace-picker");
   picker.dataset.workspacePicker = "";
@@ -154,6 +157,16 @@ export function buildWorkspacePicker(
     if (workspace.id === workspaceId) item.setAttribute("aria-current", "page");
     item.addEventListener("click", () => { picker.open = false; select(item.value); });
     list.append(item);
+  }
+  if (newWorkspace) {
+    const create = node(doc, "a", "cs-workspace-picker__new", "New workspace");
+    create.href = newWorkspace.href;
+    create.dataset.homeNewWorkspace = "";
+    create.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); picker.open = false; newWorkspace.open(event);
+    });
+    list.append(create);
   }
   picker.append(trigger, list);
   picker.addEventListener("keydown", event => {
@@ -472,7 +485,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   header.dataset.homeWorkspaceHeader = vm.workspaceId;
   const copy = node(doc, "div", "hm-ws-header__copy");
   const channel = vm.pane === "chat" && !vm.contextTitle;
-  copy.append(title(doc, channel ? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true));
+  copy.append(title(doc, channel ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true));
   const actions = node(doc, "div", "hm-ws-header__actions");
   const doors = shellDoors(vm);
   if (doors.people) {
@@ -568,7 +581,7 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   }
   people.append(memberStack(doc, vm));
   people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
-  bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
+  bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
   if (doors.menu) {
     const menu = buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true });
     if (vm.pane === "chat" && !vm.contextTitle) menu.prepend(people, detailsButton(doc));

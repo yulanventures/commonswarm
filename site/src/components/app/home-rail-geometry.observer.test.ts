@@ -18,7 +18,7 @@ type Geometry = {
   smallTargets: string[]; hostileElements: number; hostileText: boolean;
   rail: null | {
     railHeight: number; listClient: number; listScroll: number; listOverflowY: string; listInsideRail: boolean; noteInsideRail: boolean;
-    workspacesVisible: boolean; visibleWorkspaces: number; currentWorkspace: string | null; moreLabel: string | null;
+    channelsVisible: boolean; visibleChannels: number; currentChannel: string | null; moreLabel: string | null;
     firstGroupIsViewer: boolean; participantHook: boolean; presenceDots: number; groupAgentCounts: number[]; otherAgents: number;
   };
   menu: null | { openFocus: string | null; expanded: string | null; escapeClosed: boolean; focusBack: boolean; smallItems: string[]; itemsShown: number };
@@ -60,10 +60,14 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
           const many = (owner, count, prefix) => Array.from({ length: count }, (_, index) => agent(prefix + index, 'Agent ' + prefix + String(index).padStart(2, '0') + (index === 0 ? ' ' + hostile : ''), owner));
           const groups = [{ person: priya, agents: many(priya, 15, 'p') }, { person: nikki, agents: many(nikki, 15, 'n') }, { person: tom, agents: many(tom, 15, 't') }];
           const other = many(null, 5, 'o');
-          const workspaces = Array.from({ length: 9 }, (_, index) => ({ id: 'w' + index, name: index === 1 ? 'Home ' + hostile : 'Workspace with a long name number ' + index, href: '?w=w' + index, current: index === 1, needsYou: index === 3 ? 2 : null }));
-          const vm = { sample: false, catchUp: { href: '?v=catchup', current: false, needsYou: 1 }, workspaces, people: { title: 'People & agents', groups, other } };
+          const workspaces = [{ id: 'w1', name: 'Home ' + hostile, href: '?w=w1', current: true, needsYou: null }];
+          const channelRow = (id, slug, current) => ({ id, slug, href: '?w=w1&c=' + id, current, unread: id === 'c3' ? true : id === 'c4' ? false : null, manageable: id !== 'general' });
+          const named = Array.from({ length: 9 }, (_, index) => channelRow('c' + index, index === 1 ? 'design-' + hostile : 'a-very-long-channel-name-number-' + index, index === 1));
+          const channels = { state: 'ready', general: channelRow('general', 'general', false), channels: named, archived: [channelRow('old', 'archived-channel', false)], mayCreate: true };
+          const vm = { sample: false, catchUp: { href: '?v=catchup', current: false, needsYou: 1 }, workspaces, people: { title: 'People & agents', groups, other }, channels };
           const noop = () => {};
-          const rail = HomeShell.buildHomeRail(document, vm, { openPerson: noop, openAgent: noop });
+          const channelCallbacks = { selectChannel: noop, channelMenu: noop, newChannel: noop };
+          const rail = HomeShell.buildHomeRail(document, vm, { openPerson: noop, openAgent: noop, ...channelCallbacks });
           document.getElementById('rail').append(rail);
           const hrefs = { chat: '?w=w1', todos: '?w=w1&v=todos', lists: '?w=w1&v=lists', files: '?w=w1&v=files', wiki: '?w=w1&v=wiki', workspaces: '?v=catchup' };
           const longName = 'Home ' + hostile + ' ' + 'and a very long workspace name that keeps going '.repeat(4);
@@ -86,13 +90,13 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
           const inside = (element) => { const box = element.getBoundingClientRect(); return box.height > 0 && box.top >= railBox.top - 0.5 && box.bottom <= railBox.bottom + 0.5; };
           if (shown(rail)) {
             const list = rail.querySelector('[data-sidebar-participant-list]');
-            const visibleRows = [...rail.querySelectorAll('[data-rail-workspace]')].filter(shown);
+            const visibleRows = [...rail.querySelectorAll('[data-rail-channel]')].filter(shown);
             metrics.rail = {
               railHeight: railBox.height, listClient: list.clientHeight, listScroll: list.scrollHeight, listOverflowY: getComputedStyle(list).overflowY,
               listInsideRail: inside(list), noteInsideRail: inside(rail.querySelector('.hm-rail__note')),
-              workspacesVisible: visibleRows.every(inside) && inside(rail.querySelector('[data-home-catch-up]')) && inside(rail.querySelector('[data-home-new-workspace]')),
-              visibleWorkspaces: visibleRows.length,
-              currentWorkspace: rail.querySelector('[data-rail-workspace][aria-current="page"]')?.dataset.railWorkspace ?? null,
+              channelsVisible: visibleRows.every(inside) && inside(rail.querySelector('[data-home-catch-up]')) && inside(rail.querySelector('[data-home-new-channel]')),
+              visibleChannels: visibleRows.length,
+              currentChannel: rail.querySelector('[data-rail-channel][aria-current="page"]')?.dataset.railChannel ?? null,
               moreLabel: rail.querySelector('.hm-rail__more')?.textContent ?? null,
               firstGroupIsViewer: list.firstElementChild?.hasAttribute('data-rail-viewer') ?? false,
               participantHook: !!list, presenceDots: rail.querySelectorAll('.dashboard__presence-dot, [data-presence]').length,
@@ -124,9 +128,9 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
             return { selector, shown: shown(heading), clipped: text.bottom > box.bottom + 0.5 || text.right > box.right + 0.5 || getComputedStyle(heading).overflow === 'hidden', lines };
           });
 
-          const late = HomeShell.buildHomeRail(document, { ...vm, workspaces: workspaces.map((ws, index) => ({ ...ws, current: index === 7 })) }, { openPerson: noop, openAgent: noop });
-          metrics.latePast = { visible: [...late.querySelectorAll('li:not([hidden]) > [data-rail-workspace]')].map((row) => row.dataset.railWorkspace),
-            more: late.querySelector('.hm-rail__more')?.textContent ?? null };
+          const late = HomeShell.buildHomeRail(document, { ...vm, channels: { ...channels, channels: named.map((row, index) => ({ ...row, current: index === 7 })) } }, { openPerson: noop, openAgent: noop, ...channelCallbacks });
+          metrics.latePast = { visible: [...late.querySelectorAll('[data-home-channel-list] > li:not([hidden]) > [data-rail-channel]')].map((row) => row.dataset.railChannel),
+            more: late.querySelector('[data-home-channels-more]')?.textContent ?? null };
 
           const sampleShell = { ...shell, sample: true };
           const sampleBox = document.createElement('div');
@@ -134,7 +138,7 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
           const sampleRail = HomeShell.buildHomeRail(document, { ...vm, sample: true }, { openPerson: noop, openAgent: noop });
           metrics.sample = {
             shellDoors: [...sampleBox.querySelectorAll('button, [data-roster-open], [role="menu"]')].map((element) => element.className || element.tagName),
-            railDoors: [...sampleRail.querySelectorAll('[data-rail-person] , [data-rail-agent], [data-home-new-workspace]')].filter((element) => element.matches('a, button')).map((element) => element.className),
+            railDoors: [...sampleRail.querySelectorAll('[data-rail-person] , [data-rail-agent], [data-home-new-channel], [data-rail-channel-menu]')].filter((element) => element.matches('a, button')).map((element) => element.className),
             menuButtons: sampleBox.querySelectorAll('.hm-menu__trigger').length,
           };
 
@@ -156,6 +160,10 @@ test("the home rail and shell keep a bounded people list, 44 px targets and no o
 
       assert.equal(geometry.hostileElements, 0, `${width}px: names render as text`);
       assert.equal(geometry.hostileText, true);
+      // #general first, five named rows, and a selected channel past them keeps the fifth slot in order.
+      assert.deepEqual(geometry.latePast.visible, ["general", "c0", "c1", "c2", "c3", "c7"]);
+      assert.equal(geometry.latePast.more, "Show 4 more");
+      assert.deepEqual(geometry.sample.railDoors, [], "a sample rail offers no channel create or manage controls");
 
       const shownTitles = geometry.titles.filter((title) => title.shown);
 
