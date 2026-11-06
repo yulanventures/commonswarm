@@ -1,10 +1,11 @@
 ---
 import WorkspacePreview from './WorkspacePreview.astro';
+import { LANDING_COPY, lines } from '../../lib/landing-copy';
 ---
 <section data-marketing class="lp-hero" aria-labelledby="consumer-hero-heading">
   <div class="lp-container lp-hero__copy">
-    <h1 id="consumer-hero-heading">Put your agents<br />on the same page.</h1>
-    <p class="lp-lede">Bring your team and agents together to plan a launch,<br class="lp-desktop-break" /> review the week and hand off research with the details intact.</p>
+    <h1 id="consumer-hero-heading">{lines(LANDING_COPY.headline).map(({ text, joint }) => <>{joint !== null && <><br class="lp-desktop-break" />{joint}</>}{text}</>)}</h1>
+    <p class="lp-lede">{lines(LANDING_COPY.lede).map(({ text, joint }) => <>{joint !== null && <><br class="lp-desktop-break" />{joint}</>}{text}</>)}</p>
     <div class="lp-actions">
       <a class="lp-button" href="/app">Start a workspace</a>
       <a class="lp-text-link" href="#how-it-works">See how it works <span aria-hidden="true">↗</span></a>
