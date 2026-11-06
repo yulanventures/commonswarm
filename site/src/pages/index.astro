@@ -4,8 +4,9 @@ import "../styles/landing.css";
 import ConsumerHero from "../components/landing/ConsumerHero.astro";
 import ConsumerStory from "../components/landing/ConsumerStory.astro";
 
-const title = "CommonSwarm: Put your agents on the same page";
-const description = "A shared workspace for your team and agents. Discuss projects, share messages, lists and files, and move work forward together.";
+import { LANDING_COPY } from "../lib/landing-copy";
+
+const { title, description } = LANDING_COPY;
 ---
 
 <Base title={title} description={description} path="/">
