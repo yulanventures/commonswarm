@@ -47,7 +47,7 @@
 .lp-hero { padding: 72px 0 0; }
 .lp-hero__copy { text-align: center; }
 .lp-hero h1 { font-size: clamp(52px, 6.5vw, 90px); line-height: .99; font-weight: 650; letter-spacing: -.045em; text-wrap: balance; }
-.lp-lede { margin: 26px auto 0 !important; font-size: 19px; line-height: 1.6; color: var(--lp-muted); max-width: 650px; }
+.lp-lede { margin: 26px auto 0 !important; font-size: 19px; line-height: 1.6; color: var(--lp-muted); max-width: 650px; text-wrap: balance; }
 .lp-actions { display: flex; align-items: center; justify-content: center; gap: 28px; margin-top: 27px; }
 .lp-button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; padding: 13px 23px; border: 1px solid #2c2c42; border-radius: 7px; background: #ffd84d; color: #2c2c42 !important; font-weight: 650; font-size: 16px; text-decoration: none; transition: transform .18s; }
 .lp-button:hover { background: #f3c72f; border-color: #2c2c42; transform: translateY(-2px); }
