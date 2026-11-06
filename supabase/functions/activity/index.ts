@@ -15,6 +15,7 @@ import {
   ACTIVITY_REQUEST_MAX_BYTES,
   activityTopic,
   parseActivityRequest,
+  parseActivityStatusRequest,
 } from "./core.ts";
 
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -96,7 +97,13 @@ async function handle(request: Request): Promise<Response> {
   if (token === null || !AGENT_TOKEN_RE.test(token)) {
     return json(401, { error: "unauthenticated" });
   }
-  const frame = parseActivityRequest(await boundedJson(request));
+  const body = await boundedJson(request);
+  // A status frame is its own closed shape; it never falls back to the activity frame parser.
+  const isStatus = !!body && typeof body === "object" && !Array.isArray(body) &&
+    (body as Record<string, unknown>).kind !== undefined;
+  const status = isStatus ? parseActivityStatusRequest(body) : null;
+  const activity = isStatus ? null : parseActivityRequest(body);
+  const frame = status ?? activity;
   if (frame === null) return json(400, { error: "invalid_request" });
   const tokenHash = await sha256(token);
 
@@ -157,18 +164,57 @@ async function handle(request: Request): Promise<Response> {
       return json(sessionResult.status, { error: sessionResult.error });
     }
 
-    const payload = {
+    if (status !== null && status.state === "working") {
+      // Working names one message, and only a live delivery addressed to this agent qualifies.
+      const addressed = await tx`
+        SELECT 1
+        FROM swarm.signal_deliveries AS d
+        JOIN swarm.signals AS s
+          ON s.id = d.signal_id AND s.workspace_id = d.workspace_id
+        WHERE d.workspace_id = ${agent.principal_workspace_id}::uuid
+          AND d.signal_id = ${status.signalId}::uuid
+          AND d.recipient_agent_principal_id = ${agent.principal_id}::uuid
+          AND s.until > statement_timestamp()
+      `;
+      if (addressed.length === 0) return json(403, { error: "forbidden" });
+    }
+    if (status !== null) {
+      // Server time sets the two-minute expiry. Stream and sequence order the frames, so a late
+      // frame cannot revive or clear newer work. Idle clears the snapshot and keeps the order.
+      await tx`
+        UPDATE swarm.agent_presence
+        SET working_signal_id = ${status.signalId}::uuid,
+            working_label = ${status.label},
+            working_until = CASE WHEN ${status.state} = 'working'
+              THEN statement_timestamp() + interval '2 minutes' ELSE NULL END,
+            working_stream_id = ${status.streamId}::uuid,
+            working_sequence = ${status.sequence}
+        WHERE workspace_id = ${agent.principal_workspace_id}::uuid
+          AND principal_id = ${agent.principal_id}::uuid
+          AND (working_stream_id IS DISTINCT FROM ${status.streamId}::uuid
+            OR working_sequence < ${status.sequence})
+      `;
+    }
+    // The workspace topic admits every live member: a status event says only that this agent's
+    // status changed. The message id and label stay behind message_status.
+    const payload = status !== null ? {
+      version: 1,
+      kind: "status",
+      workspaceId: agent.principal_workspace_id,
+      principalId: agent.principal_id,
+      emittedAt: new Date().toISOString(),
+    } : {
       version: 1,
       workspaceId: agent.principal_workspace_id,
       principalId: agent.principal_id,
-      streamId: frame.streamId,
-      sequence: frame.sequence,
-      phase: frame.phase,
-      signalId: frame.signalId,
-      toolTitle: frame.toolTitle === null
+      streamId: activity!.streamId,
+      sequence: activity!.sequence,
+      phase: activity!.phase,
+      signalId: activity!.signalId,
+      toolTitle: activity!.toolTitle === null
         ? null
-        : redactCredentialText(frame.toolTitle).slice(0, 160) || "Tool",
-      elapsedMs: frame.elapsedMs,
+        : redactCredentialText(activity!.toolTitle).slice(0, 160) || "Tool",
+      elapsedMs: activity!.elapsedMs,
       emittedAt: new Date().toISOString(),
     };
     // The built-in realtime.send function is not executable by swarm_command.
