@@ -3828,6 +3828,20 @@
             "reason": "A status update is visible to the message's sender and there is no cleanup request.",
             "proxy": "The activity function has no read-only operation."
           }
+        },
+        "src/listener/message-status.ts:timeoutMs": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/listener/message-status.ts:213",
+          "detail": "Wait for the per-agent message-status state lock (inside MESSAGE_STATUS_BUDGET_MS).",
+          "operation": {
+            "name": "message-status-state-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local lock wait; the network update is reported under MESSAGE_STATUS_BUDGET_MS."
+          }
         }
       }
     }

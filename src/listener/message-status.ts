@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { CloudTarget } from "../cloud/config.js";
-import { readSecureJsonFileIfPresent, writeSecureJsonFile } from "../cloud/storage.js";
+import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "../cloud/storage.js";
 
 export const MESSAGE_STATUS_LABELS = [
   "thinking",
@@ -188,24 +188,31 @@ export async function applyMessageStatusEvent(options: {
   });
   const work = (async (): Promise<"sent" | "skipped" | "failed"> => {
     const now = options.now ?? Date.now;
-    const state = await readMessageStatusState(options.directory);
     const { event } = options;
-    let next: MessageStatusState;
-    let frame: MessageStatusFrame;
-    if (event.kind === "working") {
-      next = { ...state, sequence: state.sequence + 1, signal_id: event.signalId, last_sent_at: now() };
-      frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "working", signalId: event.signalId, label: "thinking" };
-    } else if (event.kind === "tool") {
-      if (state.signal_id === null || now() - state.last_sent_at < MESSAGE_STATUS_THROTTLE_MS) return "skipped";
-      next = { ...state, sequence: state.sequence + 1, last_sent_at: now() };
-      frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "working", signalId: state.signal_id, label: event.label };
-    } else {
-      if (state.signal_id === null) return "skipped";
-      next = { ...state, sequence: state.sequence + 1, signal_id: null, last_sent_at: now() };
-      frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "idle", signalId: null, label: null };
-    }
-    // The sequence advances before the send, so a retried or concurrent update never reuses one.
-    await writeMessageStatusState(options.directory, next);
+    // Hook processes run in the background and can overlap: the state read, the next sequence and
+    // the write happen under one short lock, so two updates never share a sequence.
+    const planned = await withFileLock(options.directory, "message-status", async () => {
+      const state = await readMessageStatusState(options.directory);
+      let next: MessageStatusState;
+      let frame: MessageStatusFrame;
+      if (event.kind === "working") {
+        next = { ...state, sequence: state.sequence + 1, signal_id: event.signalId, last_sent_at: now() };
+        frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "working", signalId: event.signalId, label: "thinking" };
+      } else if (event.kind === "tool") {
+        if (state.signal_id === null || now() - state.last_sent_at < MESSAGE_STATUS_THROTTLE_MS) return null;
+        next = { ...state, sequence: state.sequence + 1, last_sent_at: now() };
+        frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "working", signalId: state.signal_id, label: event.label };
+      } else {
+        if (state.signal_id === null) return null;
+        next = { ...state, sequence: state.sequence + 1, signal_id: null, last_sent_at: now() };
+        frame = { workspaceId: options.workspaceId, streamId: state.stream_id, sequence: next.sequence, state: "idle", signalId: null, label: null };
+      }
+      // The sequence advances before the send, so a retried or concurrent update never reuses one.
+      await writeMessageStatusState(options.directory, next);
+      return frame;
+    }, { timeoutMs: 250, signal: controller.signal });
+    if (planned === null) return "skipped";
+    const frame = planned;
     if (controller.signal.aborted) return "failed";
     return await publishMessageStatus({
       target: options.target,

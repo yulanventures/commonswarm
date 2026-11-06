@@ -75,7 +75,7 @@ class FailingTransport implements AgentActivityTransport {
   }
 }
 
-test("listener frames stay below two per second and redact laced agent tokens", async () => {
+test("listener frames stay below two per second and never carry the tool title", async () => {
   assert.equal(
     ACTIVITY_FRAME_INTERVAL_MS,
     750,
@@ -144,7 +144,8 @@ test("listener frames stay below two per second and redact laced agent tokens", 
   }
   const redacted = transport.sent[1]!.frame;
   assert.equal(redacted.phase, "tool-running");
-  assert.equal(redacted.toolTitle, "Open [redacted-credential] records");
+  assert.equal(redacted.toolTitle, "Tool", "the ACP title never leaves the listener; a fixed placeholder does");
+  assert.doesNotMatch(JSON.stringify(transport.sent), /swm_|records/);
   assert.doesNotMatch(JSON.stringify(transport.sent), /swm_.*agt_/);
   assert.deepEqual(Object.keys(redacted).sort(), [
     "elapsedMs",

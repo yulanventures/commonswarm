@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SignalRecord } from "../cloud/command-client.js";
 import type { CloudTarget } from "../cloud/config.js";
-import { sanitizeText } from "../host/sanitize.js";
 import type { HostSessionEvents, SanitizedSessionUpdate } from "../host/types.js";
 import type { ListenerRuntimeEvent, ListenerRuntimeModel } from "./runtime.js";
 import {
@@ -265,13 +264,10 @@ export class ListenerActivityController {
       this.setPhase(this.runningTools.size > 0 ? "tool-running" : "prompting");
       return;
     }
-    const sanitizedTitle = update.title === undefined
-      ? this.runningTools.get(id)
-      : sanitizeText(update.title).slice(0, ACTIVITY_TOOL_TITLE_MAX);
-    const title = sanitizedTitle && sanitizedTitle.length > 0
-      ? sanitizedTitle
-      : "Tool";
-    this.runningTools.set(id, title);
+    // The tool title never leaves this process: the activity topic reaches every member, and
+    // pattern redaction cannot remove arbitrary paths or secrets. The request carries a fixed
+    // placeholder; the edge broadcasts no title at all.
+    this.runningTools.set(id, "Tool");
     // The label comes from the tool kind only; the title never reaches a status frame.
     if (update.toolKind !== undefined || !this.toolLabels.has(id)) {
       this.toolLabels.set(id, acpToolKindLabel(update.toolKind));
