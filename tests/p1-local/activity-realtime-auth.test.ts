@@ -349,7 +349,8 @@ test("a status frame is bound to an addressed message, expires by server time an
   const payload = { ...frames[0]!.payload };
   assert.notEqual(payload.id, message);
   delete payload.id;
-  assert.deepEqual(Object.keys(payload).sort(), ["emittedAt", "kind", "principalId", "version", "workspaceId"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["emittedAt", "kind", "principalId", "state", "version", "workspaceId"]);
+  assert.equal(payload.state, "working");
   assert.doesNotMatch(JSON.stringify(frames[0]), new RegExp(`${message}|editing`), "no message id or label on the workspace topic");
 
   const stale = await post({ sequence: 1, state: "working", signal_id: message, label: "reading" });

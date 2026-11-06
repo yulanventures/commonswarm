@@ -201,13 +201,14 @@ async function handle(request: Request): Promise<Response> {
         WHERE w.stream_id IS DISTINCT FROM EXCLUDED.stream_id OR w.sequence < EXCLUDED.sequence
       `;
     }
-    // The workspace topic admits every live member: a status event says only that this agent's
-    // status changed. The message id and label stay behind message_status.
+    // The workspace topic admits every live member: a status event says only that this agent is
+    // working or idle. The message id and label stay behind message_status.
     const payload = status !== null ? {
       version: 1,
       kind: "status",
       workspaceId: agent.principal_workspace_id,
       principalId: agent.principal_id,
+      state: status.state,
       emittedAt: new Date().toISOString(),
     } : {
       version: 1,
