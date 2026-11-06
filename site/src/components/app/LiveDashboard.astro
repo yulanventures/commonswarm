@@ -3036,16 +3036,9 @@ import "../../styles/kylon-command-palette.css";
       }
 
       const details = document.createElement("dl");
+      /* Coarse only: the activity topic reaches every member, so it carries no message or tool
+         detail. Message status in the thread shows what the agent is doing for that sender. */
       appendEntityField(details, "Phase", view.phaseLabel ?? "Idle");
-      /* Whole, not abbreviated. This one had no disclosure and no title behind it, so the
-       * shortened form was the only copy the reader could see. The id field below keeps its
-       * summary because the full value sits inside the disclosure. */
-      appendEntityField(details, "Signal", view.signalLabel ?? "None");
-      appendEntityField(
-        details,
-        "Now",
-        view.toolTitle ?? (view.phaseLabel === "Idle" ? "Waiting for work" : "Between tools"),
-      );
       appendEntityField(details, "Elapsed", view.elapsedLabel ?? "0s");
       details.lastElementChild?.setAttribute("data-agent-activity-elapsed", "");
       live.append(details);

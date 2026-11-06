@@ -109,14 +109,7 @@ export function parseAgentActivityFrame(
   ) {
     return null;
   }
-  if (
-    (record.phase === "idle" &&
-      (record.signalId !== null || record.toolTitle !== null || record.elapsedMs !== 0)) ||
-    (record.phase !== "idle" && record.signalId === null) ||
-    (record.phase === "tool-running") !== (record.toolTitle !== null)
-  ) {
-    return null;
-  }
+  if (record.phase === "idle" && record.elapsedMs !== 0) return null;
   return {
     version: 1,
     workspaceId: record.workspaceId.toLowerCase(),
@@ -124,8 +117,10 @@ export function parseAgentActivityFrame(
     streamId: record.streamId.toLowerCase(),
     sequence: record.sequence as number,
     phase: record.phase as AgentActivityFrame["phase"],
-    signalId: record.signalId === null ? null : record.signalId.toLowerCase(),
-    toolTitle: record.toolTitle as string | null,
+    /* The workspace topic reaches every member, so a message id or tool title is never kept
+       from it, even if an older edge still sends one. Message details come from message_status. */
+    signalId: null,
+    toolTitle: null,
     elapsedMs: record.elapsedMs as number,
     emittedAt: record.emittedAt,
   };
