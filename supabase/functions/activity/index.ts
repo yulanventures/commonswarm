@@ -182,17 +182,23 @@ async function handle(request: Request): Promise<Response> {
       // Server time sets the two-minute expiry. Stream and sequence order the frames, so a late
       // frame cannot revive or clear newer work. Idle clears the snapshot and keeps the order.
       await tx`
-        UPDATE swarm.agent_presence
-        SET working_signal_id = ${status.signalId}::uuid,
-            working_label = ${status.label},
-            working_until = CASE WHEN ${status.state} = 'working'
-              THEN statement_timestamp() + interval '2 minutes' ELSE NULL END,
-            working_stream_id = ${status.streamId}::uuid,
-            working_sequence = ${status.sequence}
-        WHERE workspace_id = ${agent.principal_workspace_id}::uuid
-          AND principal_id = ${agent.principal_id}::uuid
-          AND (working_stream_id IS DISTINCT FROM ${status.streamId}::uuid
-            OR working_sequence < ${status.sequence})
+        INSERT INTO swarm.agent_message_working AS w
+          (workspace_id, principal_id, signal_id, label, working_until, stream_id, sequence)
+        VALUES (
+          ${agent.principal_workspace_id}::uuid, ${agent.principal_id}::uuid,
+          ${status.signalId}::uuid, ${status.label},
+          CASE WHEN ${status.state} = 'working'
+            THEN statement_timestamp() + interval '2 minutes' ELSE NULL END,
+          ${status.streamId}::uuid, ${status.sequence}
+        )
+        ON CONFLICT (workspace_id, principal_id) DO UPDATE SET
+          signal_id = EXCLUDED.signal_id,
+          label = EXCLUDED.label,
+          working_until = EXCLUDED.working_until,
+          stream_id = EXCLUDED.stream_id,
+          sequence = EXCLUDED.sequence,
+          updated_at = statement_timestamp()
+        WHERE w.stream_id IS DISTINCT FROM EXCLUDED.stream_id OR w.sequence < EXCLUDED.sequence
       `;
     }
     // The workspace topic admits every live member: a status event says only that this agent's

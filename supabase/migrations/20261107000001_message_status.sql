@@ -1,32 +1,36 @@
 -- Message status for agents, slice 1: Delivered, Seen, Working (with a coarse label) and Replied
 -- for messages a person sent to a specific agent.
 --
--- Working is a short-lived snapshot on the agent's presence row, written only by the activity
--- edge from a status frame. The edge binds the frame to a delivery addressed to the calling agent,
--- sets working_until from server time (two minutes) and orders frames by stream and sequence.
--- swarm_read.agent_presence lists its columns explicitly and is not changed, so the message id and
--- label never reach a workspace-wide read. They are returned only by message_status below, to a
--- person who can already read that message.
+-- Working is a short-lived per-agent snapshot in swarm.agent_message_working, written only by the
+-- activity edge from a status frame. The edge binds the frame to a delivery addressed to the
+-- calling agent, sets working_until from server time (two minutes) and orders frames by stream and
+-- sequence. No workspace-wide read exposes the table, so the message id and label are returned
+-- only by message_status below, to a person who can already read that message.
 
-ALTER TABLE swarm.agent_presence
-  ADD COLUMN working_signal_id uuid,
-  ADD COLUMN working_label text,
-  ADD COLUMN working_until timestamptz,
-  ADD COLUMN working_stream_id uuid,
-  ADD COLUMN working_sequence bigint,
-  ADD CONSTRAINT agent_presence_working_label_valid CHECK (
-    working_label IS NULL OR working_label IN (
-      'thinking', 'reading', 'editing', 'searching', 'running_command', 'searching_web', 'using_tool'
-    )
-  ),
-  ADD CONSTRAINT agent_presence_working_complete CHECK (
-    num_nonnulls(working_signal_id, working_label, working_until) IN (0, 3)
-  ),
-  ADD CONSTRAINT agent_presence_working_order_complete CHECK (
-    num_nonnulls(working_stream_id, working_sequence) IN (0, 2)
-    AND (working_sequence IS NULL OR working_sequence >= 1)
-    AND (working_signal_id IS NULL OR working_stream_id IS NOT NULL)
-  );
+CREATE TABLE swarm.agent_message_working (
+  workspace_id uuid NOT NULL,
+  principal_id uuid NOT NULL,
+  signal_id uuid,
+  label text,
+  working_until timestamptz,
+  stream_id uuid NOT NULL,
+  sequence bigint NOT NULL CHECK (sequence >= 1),
+  updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (workspace_id, principal_id),
+  FOREIGN KEY (principal_id, workspace_id)
+    REFERENCES swarm.agent_principals (principal_id, workspace_id),
+  CHECK (label IS NULL OR label IN (
+    'thinking', 'reading', 'editing', 'searching', 'running_command', 'searching_web', 'using_tool'
+  )),
+  CHECK (num_nonnulls(signal_id, label, working_until) IN (0, 3))
+);
+ALTER TABLE swarm.agent_message_working OWNER TO swarm_admin;
+ALTER TABLE swarm.agent_message_working ENABLE ROW LEVEL SECURITY;
+CREATE POLICY agent_message_working_command_all ON swarm.agent_message_working
+  AS PERMISSIVE FOR ALL TO swarm_command
+  USING (true) WITH CHECK (true);
+REVOKE ALL ON swarm.agent_message_working FROM PUBLIC, anon, authenticated, swarm_read;
+GRANT SELECT, INSERT, UPDATE ON swarm.agent_message_working TO swarm_command;
 
 -- Per message and addressed agent, for up to 50 messages the signed-in person can read:
 --   delivered - the agent's client received it (leased, routed to a session, or acknowledged);
@@ -58,19 +62,19 @@ BEGIN
    SELECT coalesce(jsonb_agg(jsonb_build_object(
      'signal_id', s.id,
      'agent_principal_id', d.recipient_agent_principal_id,
-     'delivered', d.delivered_at IS NOT NULL OR d.ack_outcome IN ('queued', 'observed', 'replied'),
-     'seen', d.ack_outcome IN ('observed', 'replied'),
-     'replied', d.ack_outcome = 'replied' OR EXISTS (
+     'delivered', d.delivered_at IS NOT NULL OR coalesce(d.ack_outcome IN ('queued', 'observed', 'replied'), false),
+     'seen', coalesce(d.ack_outcome IN ('observed', 'replied'), false),
+     'replied', coalesce(d.ack_outcome = 'replied', false) OR EXISTS (
        SELECT 1 FROM swarm_read.signals r
        WHERE r.workspace_id = p_workspace_id AND r.in_reply_to = s.id
          AND r.from_kind = 'agent' AND r."from" = d.recipient_agent_principal_id),
      'working', (
-       SELECT jsonb_build_object('label', p.working_label, 'until', p.working_until)
-       FROM swarm.agent_presence p
-       WHERE p.workspace_id = p_workspace_id
-         AND p.principal_id = d.recipient_agent_principal_id
-         AND p.working_signal_id = s.id
-         AND p.working_until > read_at))
+       SELECT jsonb_build_object('label', w.label, 'until', w.working_until)
+       FROM swarm.agent_message_working w
+       WHERE w.workspace_id = p_workspace_id
+         AND w.principal_id = d.recipient_agent_principal_id
+         AND w.signal_id = s.id
+         AND w.working_until > read_at))
     ORDER BY s.id, d.recipient_agent_principal_id), '[]'::jsonb)
    FROM swarm_read.signals s
    JOIN swarm.signal_deliveries d

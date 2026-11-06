@@ -302,8 +302,6 @@ test("a status frame is bound to an addressed message, expires by server time an
   });
   assert.equal(joined.status, "SUBSCRIBED");
   const agent = await newAgent(owner.userId, owner.workspaceId);
-  await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at)
-    VALUES (${owner.workspaceId}::uuid, ${agent.principalId}::uuid, statement_timestamp())`;
   await sql`INSERT INTO swarm.streams (stream_id, workspace_id, kind)
     VALUES (${randomUUID()}::uuid, ${owner.workspaceId}::uuid, 'workspace')`;
   const message = randomUUID();
@@ -323,9 +321,10 @@ test("a status frame is bound to an addressed message, expires by server time an
   });
   const snapshot = async () => (await sql<{
     working_signal_id: string | null; working_label: string | null; seconds_left: number | null;
-  }[]>`SELECT working_signal_id, working_label,
+  }[]>`SELECT signal_id AS working_signal_id, label AS working_label,
       extract(epoch FROM working_until - statement_timestamp())::float8 AS seconds_left
-    FROM swarm.agent_presence WHERE principal_id = ${agent.principalId}::uuid`)[0]!;
+    FROM swarm.agent_message_working WHERE principal_id = ${agent.principalId}::uuid`)[0]
+    ?? { working_signal_id: null, working_label: null, seconds_left: null };
 
   for (const signal of [notAddressed, randomUUID()]) {
     const refused = await post({ sequence: 1, state: "working", signal_id: signal, label: "editing" });

@@ -52,8 +52,6 @@ async function agent(ws: string, owner: string, name: string): Promise<string> {
   const id = randomUUID();
   await sql`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
     VALUES (${id}::uuid, ${ws}::uuid, ${owner}::uuid, ${name}, 'local', false)`;
-  await sql`INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at)
-    VALUES (${ws}::uuid, ${id}::uuid, statement_timestamp())`;
   return id;
 }
 
@@ -77,11 +75,11 @@ async function ack(signal: string, to: string, outcome: "observed" | null): Prom
 }
 
 async function working(ws: string, principal: string, signal: string | null, label: string | null, until = "2 minutes"): Promise<void> {
-  await sql`UPDATE swarm.agent_presence SET
-      working_signal_id = ${signal}, working_label = ${label},
-      working_until = ${signal === null ? null : sql`statement_timestamp() + ${until}::interval`},
-      working_stream_id = ${randomUUID()}::uuid, working_sequence = 1
-    WHERE workspace_id = ${ws}::uuid AND principal_id = ${principal}::uuid`;
+  await sql`INSERT INTO swarm.agent_message_working (workspace_id, principal_id, signal_id, label, working_until, stream_id, sequence)
+    VALUES (${ws}::uuid, ${principal}::uuid, ${signal}, ${label},
+      ${signal === null ? null : sql`statement_timestamp() + ${until}::interval`}, ${randomUUID()}::uuid, 1)
+    ON CONFLICT (workspace_id, principal_id) DO UPDATE SET signal_id = EXCLUDED.signal_id, label = EXCLUDED.label,
+      working_until = EXCLUDED.working_until, stream_id = EXCLUDED.stream_id, sequence = EXCLUDED.sequence`;
 }
 
 async function status(ws: string, viewer: string, ids: string[], extraClaims: Record<string, unknown> = {}, role = "authenticated"): Promise<Result> {
@@ -169,7 +167,13 @@ test("message_status is the sender's own: other members, outsiders, agents and r
   assert.equal(await status(ws, owner, tooMany), null, "the batch is bounded");
 });
 
-test("the presence view does not expose the Working message or label", async () => {
+test("the Working snapshot has no direct read: only message_status returns it", async () => {
+  for (const role of ["authenticated", "anon", "swarm_read"]) {
+    await assert.rejects(() => sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL ROLE ${role}`);
+      await tx`SELECT * FROM swarm.agent_message_working LIMIT 1`;
+    }), /permission denied/, role);
+  }
   const [view] = await sql<{ definition: string }[]>`SELECT pg_get_viewdef('swarm_read.agent_presence'::regclass, true) AS definition`;
-  assert.doesNotMatch(view!.definition, /working_/);
+  assert.doesNotMatch(view!.definition, /agent_message_working/);
 });
