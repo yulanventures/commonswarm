@@ -289,7 +289,7 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
     db_artifact = workdir / 'database'
     db_artifact.mkdir(mode=0o700)
     if local_artifact is None:
-        run_cmd(['rclone', 'copy', destination + '/database', str(db_artifact), '--immutable'])
+        result.update(json.loads(run_cmd(['python3', '/usr/local/sbin/yulan-pg-offsite-age.py', 'restore-source', destination + '/database', str(db_artifact)]).stdout))
         rows, counts = validate_artifact(db_artifact, marker_data)
     else:
         rows, counts = validate_artifact(local_artifact)
@@ -326,7 +326,7 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
 
     service_file = workdir / 'service'
     service_file.write_text(''.join(f'[{service}]\nhost=cold-db\nport=5432\ndbname={database}\nuser=supabase_admin\nsslmode=disable\n'
-                                   for service, database in (('target', 'postgres'), ('source', 'schema_source'))))
+                                   for service, database in (('target', 'postgres'), ('source', 'schema_source'), ('maintenance', 'template1'))))
     service_file.chmod(0o600)
 
     pass_file = workdir / 'pass'
@@ -344,7 +344,11 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
         if 'commonswarm_cutover_write_freeze' not in line and 'commonswarm_cutover_write_guard' not in line))
     result['schema_checksums'] = {'algorithm': 'sha256-schema-ddl-v3'}
     artifact_tool('psql', '--dbname=service=target', '-X', '-v', 'ON_ERROR_STOP=1', '--file=/artifacts/roles.sql')
-    artifact_tool('createdb', '--maintenance-db=service=target', '--template=postgres', 'schema_source')
+    artifact_tool('psql', '--dbname=service=maintenance', '-X', '-v', 'ON_ERROR_STOP=1',
+                  '--command=ALTER DATABASE postgres ALLOW_CONNECTIONS false;',
+                  "--command=SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres' AND pid <> pg_backend_pid();",
+                  '--command=CREATE DATABASE schema_source TEMPLATE postgres;',
+                  '--command=ALTER DATABASE postgres ALLOW_CONNECTIONS true;')
     artifact_tool('pg_restore', '--dbname=service=source', '--schema-only', '--clean', '--if-exists',
                   '--exit-on-error',
                   '--use-list=/artifacts/schema-list', '/artifacts/database.dump')
