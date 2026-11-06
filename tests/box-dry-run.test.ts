@@ -9952,7 +9952,8 @@ test("controls: all Python calls share the exact prelude wrapper and preserve ar
     const invalid = spawnSync("/bin/bash", ["-c", 'source "$1"; python3 --unsupported-fixture-flag', "python-refusal-control", PRELUDE],
       { env, encoding: "utf8" });
     assert.notEqual(invalid.status, 0);
-    assert.match(invalid.stderr, /unknown option/);
+    // Python 3.14 capitalizes the refusal ("Unknown option"); older releases do not.
+    assert.match(invalid.stderr, /unknown option/i);
   } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-"); }
 });
 
