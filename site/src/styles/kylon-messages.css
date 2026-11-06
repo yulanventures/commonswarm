@@ -198,3 +198,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
 
 /* Operational tints, failed/expired delivery colors and arrival state are
  * deliberately inherited. They distinguish facts, not decoration. */
+
+/* Message status under the person's latest message to an agent: one quiet line. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-status {
+  margin: 2px 0 0;
+  color: var(--k-shell-secondary);
+  font-family: var(--k-shell-font);
+  font-size: 12px;
+  line-height: 1.5;
+}

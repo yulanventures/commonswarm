@@ -61,3 +61,9 @@ test("sequence ordering rejects replay but permits a listener restart at the sam
     true,
   );
 });
+
+test("a frame delivered by Realtime with its own broadcast id still parses; other extra keys do not", () => {
+  assert.ok(parseAgentActivityFrame({ ...frame, id: "realtime-broadcast-id" }, WORKSPACE_ID));
+  assert.equal(parseAgentActivityFrame({ ...frame, id: 7 }, WORKSPACE_ID), null);
+  assert.equal(parseAgentActivityFrame({ ...frame, kind: "status" }, WORKSPACE_ID), null);
+});

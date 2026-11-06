@@ -75,7 +75,9 @@ export function parseAgentActivityFrame(
 ): AgentActivityFrame | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => !FRAME_KEYS.has(key))) return null;
+  // Realtime adds its own broadcast `id` to a payload sent through realtime.send; it carries no
+  // agent data. Every other key stays closed.
+  if (Object.keys(record).some((key) => !FRAME_KEYS.has(key) && !(key === "id" && typeof record.id === "string"))) return null;
   if (
     record.version !== 1 ||
     typeof record.workspaceId !== "string" ||
