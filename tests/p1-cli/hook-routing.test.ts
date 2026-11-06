@@ -1896,6 +1896,71 @@ test("hook default falls back to cwd outside git", async () => {
   }
 });
 
+test("hook install --message-status adds background PreToolUse and Stop hooks; reinstall without it or uninstall removes them", async () => {
+  const project = await mkdtemp(join(tmpdir(), "cswarm-hook-status-"));
+  const home = await mkdtemp(join(tmpdir(), "cswarm-hook-status-home-"));
+  try {
+    const settingsPath = join(project, ".claude", "settings.local.json");
+    const env = { HOME: home, CLAUDE_CONFIG_DIR: "" };
+    const foreign = { type: "command", command: "echo keep-me" };
+    await mkdir(join(project, ".claude"), { recursive: true });
+    await writeFile(settingsPath, JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [foreign] }], Stop: [{ hooks: [foreign] }] },
+    }));
+    const status = `cswarm hook status --principal-id ${PRINCIPAL_ID}`;
+
+    const on = runCli(["hook", "install", "claude", "--principal-id", PRINCIPAL_ID, "--message-status", "--write"], { cwd: project, env });
+    assert.equal(on.status, 0, on.stderr);
+    assert.match(on.stdout, /Message status is on/);
+    const enabled = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.deepEqual(enabled.hooks.UserPromptSubmit, [{ hooks: [{ type: "command", command: `cswarm hook check --principal-id ${PRINCIPAL_ID} --message-status` }] }]);
+    for (const event of ["PreToolUse", "Stop"]) {
+      assert.deepEqual(enabled.hooks[event].at(-1), { hooks: [{ type: "command", command: status, async: true }] }, event);
+      assert.ok(JSON.stringify(enabled.hooks[event]).includes("keep-me"), `${event} keeps other hooks`);
+    }
+    const printed = runCli(["hook", "install", "claude", "--principal-id", PRINCIPAL_ID, "--message-status"], { cwd: project, env });
+    assert.deepEqual(JSON.parse(printed.stdout), claudeUserPromptHookSnippet(PRINCIPAL_ID, true));
+
+    const again = runCli(["hook", "install", "claude", "--principal-id", PRINCIPAL_ID, "--message-status", "--write"], { cwd: project, env });
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), enabled, "installing twice is idempotent");
+
+    const off = runCli(["hook", "install", "claude", "--principal-id", PRINCIPAL_ID, "--write"], { cwd: project, env });
+    assert.equal(off.status, 0, off.stderr);
+    const disabled = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.deepEqual(disabled.hooks.UserPromptSubmit, [{ hooks: [{ type: "command", command: `cswarm hook check --principal-id ${PRINCIPAL_ID}` }] }]);
+    assert.deepEqual(disabled.hooks.PreToolUse, [{ matcher: "Bash", hooks: [foreign] }]);
+    assert.deepEqual(disabled.hooks.Stop, [{ hooks: [foreign] }]);
+
+    runCli(["hook", "install", "claude", "--principal-id", PRINCIPAL_ID, "--message-status", "--write"], { cwd: project, env });
+    const removed = runCli(["hook", "uninstall", "claude", "--write"], { cwd: project, env });
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [foreign] }], Stop: [{ hooks: [foreign] }] },
+    });
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("hook status prints nothing, exits 0 and returns quickly with no listener state", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cswarm-hook-status-run-"));
+  try {
+    const started = Date.now();
+    const result = runCli(["hook", "status", "--principal-id", PRINCIPAL_ID], {
+      env: { HOME: home, XDG_STATE_HOME: "" },
+      input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s", tool_name: "Bash", tool_input: { command: "cat ~/.ssh/id_rsa" } }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+    assert.ok(Date.now() - started < 10_000);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("hook install --repo keeps the ignored repository settings path", async () => {
   const project = await mkdtemp(join(tmpdir(), "cswarm-hook-install-repo-"));
   const xdg = await mkdtemp(join(tmpdir(), "cswarm-hook-install-repo-state-"));

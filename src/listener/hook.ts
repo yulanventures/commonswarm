@@ -42,6 +42,13 @@ import {
 import { defaultListenerStateDirectory } from "./file-store.js";
 import { FileBrainDigestStore } from "./brain-digest.js";
 import {
+  MESSAGE_STATUS_BUDGET_MS,
+  applyMessageStatusEvent,
+  claudeToolLabel,
+  setMessageStatusOptIn,
+  type MessageStatusEvent,
+} from "./message-status.js";
+import {
   FilePendingMainQueue,
   type PendingMainEntry,
 } from "./main-routing.js";
@@ -137,6 +144,11 @@ export interface HookCheckOptions {
    * fails closed to manual and marks nothing observed.
    */
   hostSessionId?: string;
+  /**
+   * Opt-in message status (`hook install claude --message-status`): after surfacing a queued message,
+   * mark the agent Working on it. Runs beside the observation writes, inside its own budget.
+   */
+  messageStatus?: boolean;
 }
 
 function exactKeys(row: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -1094,6 +1106,19 @@ export async function checkListenerHooks(
       }
     }
 
+    // Working names the first surfaced queued delivery: a message addressed to this agent.
+    const workingOn = options.messageStatus
+      ? commits.flatMap((commit) => {
+        const surfaced = new Set(commit.signalIds);
+        const queued = [...commit.observationPendingSignalIds, ...commit.plainPendingSignalIds]
+          .find((signalId) => surfaced.has(signalId));
+        return queued === undefined ? [] : [{ context: commit.check.context, signalId: queued }];
+      })[0]
+      : undefined;
+    const statusUpdate = workingOn === undefined
+      ? Promise.resolve()
+      : messageStatusUpdate(workingOn.context, { kind: "working", signalId: workingOn.signalId }, options);
+
     for (const commit of commits) {
       await commit.store.commit({
         signalIds: commit.signalIds,
@@ -1130,9 +1155,113 @@ export async function checkListenerHooks(
         }
       }
     }
+    await statusUpdate;
     return surfaced;
   } catch {
     return "";
+  }
+}
+
+/**
+ * One message-status update for a hook context, bounded by MESSAGE_STATUS_BUDGET_MS in total
+ * (session-context reads included). A managed principal sends its session proof; a refused gate
+ * sends nothing. Never throws.
+ */
+async function messageStatusUpdate(
+  context: ListenerHookContext,
+  event: MessageStatusEvent,
+  options: { fetcher?: typeof fetch; hostSessionId?: string; now?: () => number },
+): Promise<void> {
+  const stored = context.credential;
+  if (stored === null) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const startedAt = (options.now ?? Date.now)();
+  const budget = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, MESSAGE_STATUS_BUDGET_MS);
+  });
+  const work = (async () => {
+    const gate = await managedHookGate(stored, options.hostSessionId);
+    if (gate.mode === "refuse") return;
+    const base = options.fetcher ?? fetch;
+    const fetcher = gate.mode === "managed" ? bindSessionProof(base, gate.proof) as typeof fetch : base;
+    const remaining = MESSAGE_STATUS_BUDGET_MS - ((options.now ?? Date.now)() - startedAt);
+    if (remaining <= 0) return;
+    await applyMessageStatusEvent({
+      directory: context.instanceDirectory,
+      target: cloudTarget(stored.targetUrl, stored.anonKey),
+      credential: stored.credential,
+      workspaceId: stored.workspaceId,
+      event,
+      fetcher,
+      budgetMs: remaining,
+      ...(options.now ? { now: options.now } : {}),
+    });
+  })().catch(() => undefined);
+  try {
+    await Promise.race([work, budget]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Claude Code's hook input, reduced to the fields status may use. tool_input is never read. */
+export interface MessageStatusHookInput {
+  hookEventName: string | null;
+  toolName: string | null;
+  hostSessionId: string | null;
+}
+
+export function messageStatusHookInput(value: unknown): MessageStatusHookInput {
+  const row = value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const text = (field: unknown) =>
+    typeof field === "string" && field.length > 0 && field.length <= 200 ? field : null;
+  return {
+    hookEventName: text(row.hook_event_name),
+    toolName: text(row.tool_name),
+    hostSessionId: text(row.session_id),
+  };
+}
+
+/**
+ * `cswarm hook status`: the PreToolUse and Stop hooks installed by `hook install claude --message-status`.
+ * PreToolUse updates the Working label (throttled) while the agent handles a message; Stop goes
+ * idle. Prints nothing and resolves within MESSAGE_STATUS_BUDGET_MS whatever happens.
+ */
+export async function runListenerHookStatus(
+  input: MessageStatusHookInput,
+  options: Pick<HookCheckOptions, "stateDirectory" | "principalIds" | "fetcher" | "isListenerLive" | "now"> = {},
+): Promise<void> {
+  const event: MessageStatusEvent | null = input.hookEventName === "PreToolUse"
+    ? { kind: "tool", label: claudeToolLabel(input.toolName) }
+    : input.hookEventName === "Stop"
+    ? { kind: "stop" }
+    : null;
+  if (event === null) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, MESSAGE_STATUS_BUDGET_MS);
+  });
+  const work = (async () => {
+    const stateDirectory = options.stateDirectory ?? defaultListenerStateDirectory();
+    if (!isAbsolute(stateDirectory)) return;
+    const discovery = await discoverContexts(
+      stateDirectory,
+      options.principalIds,
+      options.isListenerLive ?? listenerIsLive,
+    );
+    if (discovery.requiresPrincipalScope || discovery.contexts.length !== 1) return;
+    await messageStatusUpdate(discovery.contexts[0]!, event, {
+      ...(options.fetcher ? { fetcher: options.fetcher } : {}),
+      ...(input.hostSessionId === null ? {} : { hostSessionId: input.hostSessionId }),
+      ...(options.now ? { now: options.now } : {}),
+    });
+  })().catch(() => undefined);
+  try {
+    await Promise.race([work, budget]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -1158,4 +1287,22 @@ export async function runListenerHookCheck(options: HookCheckOptions = {}): Prom
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * Turn the listener's headless message status on or off for one agent (or, with null, every
+ * agent on this host), by its opt-in marker in each matching instance directory. Returns how many
+ * listener directories were updated; zero means no listener state exists yet.
+ */
+export async function setListenerMessageStatusOptIn(
+  principalId: string | null,
+  enabled: boolean,
+  stateDirectory = defaultListenerStateDirectory(),
+): Promise<number> {
+  if (!isAbsolute(stateDirectory)) return 0;
+  const directories = (await discoverStoredStatusContexts(stateDirectory))
+    .filter((context) => principalId === null || context.status.principalId === principalId)
+    .map((context) => context.instanceDirectory);
+  for (const directory of directories) await setMessageStatusOptIn(directory, enabled);
+  return directories.length;
 }

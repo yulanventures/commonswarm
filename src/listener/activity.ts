@@ -4,6 +4,12 @@ import type { CloudTarget } from "../cloud/config.js";
 import { sanitizeText } from "../host/sanitize.js";
 import type { HostSessionEvents, SanitizedSessionUpdate } from "../host/types.js";
 import type { ListenerRuntimeEvent, ListenerRuntimeModel } from "./runtime.js";
+import {
+  MESSAGE_STATUS_THROTTLE_MS,
+  acpToolKindLabel,
+  type MessageStatusFrame,
+  type MessageStatusLabel,
+} from "./message-status.js";
 import type {
   ListenerPromptMode,
   ListenerPromptResult,
@@ -150,7 +156,16 @@ interface ListenerActivityControllerOptions {
   streamId?: string;
   clock?: ActivityClock;
   onPublishFailure?: (code: ActivityPublishErrorCode) => void;
+  /** Opt-in message status: Working with a coarse label from the ACP tool kind, then idle. */
+  messageStatus?: {
+    enabled: () => Promise<boolean>;
+    publish: (frame: MessageStatusFrame) => Promise<boolean>;
+  };
 }
+
+/** A Working snapshot expires after two minutes on the server; renew well before that. */
+export const MESSAGE_STATUS_RENEW_MS = 60_000;
+const MESSAGE_STATUS_OPT_IN_CHECK_MS = 30_000;
 
 /**
  * Coalesce the structured live-steering view chosen in SWARM-CLOUD §2.13.
@@ -176,6 +191,13 @@ export class ListenerActivityController {
   private lastSentAt = Number.NEGATIVE_INFINITY;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly toolLabels = new Map<string, MessageStatusLabel>();
+  private statusSequence = 0;
+  private statusKey: string | null = null;
+  private statusSentAt = Number.NEGATIVE_INFINITY;
+  private statusSending = false;
+  private statusOptIn: { value: boolean; at: number } | null = null;
+  private statusTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: ListenerActivityControllerOptions) {
     this.clock = options.clock ?? SYSTEM_CLOCK;
@@ -208,6 +230,7 @@ export class ListenerActivityController {
         this.setPhase("prompting");
         const result = await model.prompt(signal, mode, prompt, attempt);
         this.runningTools.clear();
+    this.toolLabels.clear();
         this.latestToolId = null;
         this.setPhase("replying");
         return result;
@@ -221,8 +244,10 @@ export class ListenerActivityController {
     this.closed = true;
     if (this.timer !== null) this.clock.clearTimer(this.timer);
     if (this.heartbeatTimer !== null) this.clock.clearTimer(this.heartbeatTimer);
+    if (this.statusTimer !== null) this.clock.clearTimer(this.statusTimer);
     this.timer = null;
     this.heartbeatTimer = null;
+    this.statusTimer = null;
   }
 
   private onSessionUpdate(update: SanitizedSessionUpdate): void {
@@ -233,6 +258,7 @@ export class ListenerActivityController {
     const status = update.status?.toLowerCase();
     if (status && TERMINAL_TOOL_STATUSES.has(status)) {
       this.runningTools.delete(id);
+      this.toolLabels.delete(id);
       if (this.latestToolId === id) {
         this.latestToolId = [...this.runningTools.keys()].at(-1) ?? null;
       }
@@ -246,6 +272,10 @@ export class ListenerActivityController {
       ? sanitizedTitle
       : "Tool";
     this.runningTools.set(id, title);
+    // The label comes from the tool kind only; the title never reaches a status frame.
+    if (update.toolKind !== undefined || !this.toolLabels.has(id)) {
+      this.toolLabels.set(id, acpToolKindLabel(update.toolKind));
+    }
     this.latestToolId = id;
     this.setPhase("tool-running");
   }
@@ -255,6 +285,7 @@ export class ListenerActivityController {
     this.signalId = signalId;
     this.signalStartedAt = this.clock.now();
     this.runningTools.clear();
+    this.toolLabels.clear();
     this.latestToolId = null;
     this.setPhase("claimed");
   }
@@ -263,6 +294,7 @@ export class ListenerActivityController {
     this.signalId = null;
     this.signalStartedAt = null;
     this.runningTools.clear();
+    this.toolLabels.clear();
     this.latestToolId = null;
     this.setPhase("idle");
   }
@@ -333,6 +365,60 @@ export class ListenerActivityController {
       this.sending = false;
       if (this.dirty) this.schedule();
       else this.armHeartbeat();
+    }
+    void this.flushStatus();
+  }
+
+  /**
+   * Opt-in message status, driven by the same coalesced flushes and heartbeat. Working names the
+   * current message with a label from the running tool's kind (thinking when none); a label
+   * change waits for the throttle, the same status renews every minute, and idle follows only a
+   * Working this stream sent. Failures are ignored: status is a hint, never delivery state.
+   */
+  private async flushStatus(): Promise<void> {
+    const status = this.options.messageStatus;
+    if (status === undefined || this.statusSending || this.closed) return;
+    const now = this.clock.now();
+    const working = this.signalId !== null && this.phase !== "idle";
+    const label: MessageStatusLabel | null = !working
+      ? null
+      : this.latestToolId === null
+      ? "thinking"
+      : this.toolLabels.get(this.latestToolId) ?? "using_tool";
+    const key = working ? `working:${this.signalId}:${label}` : "idle";
+    if (!working && (this.statusKey === null || this.statusKey === "idle")) return;
+    if (key === this.statusKey && now - this.statusSentAt < MESSAGE_STATUS_RENEW_MS) return;
+    if (
+      working && this.statusKey !== null && this.statusKey.startsWith(`working:${this.signalId}:`) &&
+      key !== this.statusKey && now - this.statusSentAt < MESSAGE_STATUS_THROTTLE_MS
+    ) {
+      // Send the newer label when the throttle ends, not at the next heartbeat.
+      if (this.statusTimer === null) {
+        this.statusTimer = this.clock.setTimer(() => {
+          this.statusTimer = null;
+          void this.flushStatus();
+        }, this.statusSentAt + MESSAGE_STATUS_THROTTLE_MS - now);
+      }
+      return;
+    }
+    this.statusSending = true;
+    try {
+      if (this.statusOptIn === null || now - this.statusOptIn.at >= MESSAGE_STATUS_OPT_IN_CHECK_MS) {
+        this.statusOptIn = { value: await status.enabled().catch(() => false), at: now };
+      }
+      if (!this.statusOptIn.value) return;
+      this.statusKey = key;
+      this.statusSentAt = now;
+      await status.publish({
+        workspaceId: this.options.workspaceId,
+        streamId: this.streamId,
+        sequence: ++this.statusSequence,
+        state: working ? "working" : "idle",
+        signalId: working ? this.signalId : null,
+        label,
+      }).catch(() => false);
+    } finally {
+      this.statusSending = false;
     }
   }
 }

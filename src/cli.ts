@@ -385,6 +385,7 @@ import {
   listenerRestartCommand,
   readListenerCredentialState,
   runListenerHookCheck, HOOK_CHECK_TIMEOUT_MS, hookProcessDeadlineDelayMs,
+  runListenerHookStatus, messageStatusHookInput, setListenerMessageStatusOptIn,
   renderListenerAttendanceCanary,
   renderAttendedAttendanceCanary,
   runAttendedAttendanceCanary,
@@ -431,6 +432,7 @@ import {
   type ListenerAttendanceSurface,
 } from "./listener/index.js";
 import { ListenerHttpClient } from "./listener/http-client.js";
+import { MESSAGE_STATUS_BUDGET_MS, messageStatusOptedIn, publishMessageStatus, setMessageStatusOptIn, withinMessageStatusBudget } from "./listener/message-status.js";
 import {
   inspectResume,
   renderResume,
@@ -667,6 +669,7 @@ export const KNOWN_FLAGS = new Set([
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
+  "message-status",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -700,6 +703,7 @@ export const BOOLEAN_FLAGS = new Set([
   "user",
   "write",
   "allow-duplicate-name",
+  "message-status",
 ]);
 
 const UUID_RE =
@@ -7467,6 +7471,16 @@ async function runConfiguredListener(options: {
             code,
             ts: new Date().toISOString(),
           }),
+          messageStatus: {
+            enabled: () => messageStatusOptedIn(paths.instanceDirectory),
+            publish: (frame) => withinMessageStatusBudget(async (signal) => publishMessageStatus({
+              target: options.cloud,
+              credential: await credentialSession.bearer(),
+              frame,
+              fetcher: boundFetch,
+              signal,
+            })),
+          },
         });
         const instrumentedModel = activity.instrumentModel(
           await newModel(onCanaryAttempt, activity.events),
@@ -8371,14 +8385,23 @@ async function runSession(args: Arguments): Promise<void> {
 
 const CLAUDE_HOOK_COMMAND = "cswarm hook check";
 
-function scopedClaudeHookCommand(principalId: string): string {
-  return `${CLAUDE_HOOK_COMMAND} --principal-id ${listenerUuid(principalId, "principal-id")}`;
+function scopedClaudeHookCommand(principalId: string, status = false): string {
+  return `${CLAUDE_HOOK_COMMAND} --principal-id ${listenerUuid(principalId, "principal-id")}${status ? " --message-status" : ""}`;
 }
+
+/** The PreToolUse and Stop hook that `hook install claude --message-status` adds. */
+function scopedClaudeStatusHookCommand(principalId: string): string {
+  return `cswarm hook status --principal-id ${listenerUuid(principalId, "principal-id")}`;
+}
+
+/** Claude events that may hold a CommonSwarm hook: the message check, and the status hooks. */
+const CLAUDE_HOOK_EVENTS = ["UserPromptSubmit", "PreToolUse", "Stop"] as const;
 
 function isCommonSwarmClaudeHook(value: unknown): boolean {
   return typeof value === "string" && (
     value === CLAUDE_HOOK_COMMAND ||
-    /^cswarm hook check --principal-id [0-9a-f-]{36}$/.test(value)
+    /^cswarm hook check --principal-id [0-9a-f-]{36}( --message-status)?$/.test(value) ||
+    /^cswarm hook status --principal-id [0-9a-f-]{36}$/.test(value)
   );
 }
 
@@ -8400,14 +8423,14 @@ function settingsHaveScopedClaudeHook(
   }
   const promptHooks = (settings.hooks as Record<string, unknown>).UserPromptSubmit;
   if (!Array.isArray(promptHooks)) return false;
-  const expected = scopedClaudeHookCommand(principalId);
+  const expected = [scopedClaudeHookCommand(principalId), scopedClaudeHookCommand(principalId, true)];
   return promptHooks.some((group) => {
     if (!group || typeof group !== "object" || Array.isArray(group)) return false;
     const hooks = (group as Record<string, unknown>).hooks;
     return Array.isArray(hooks) && hooks.some((hook) =>
       hook !== null && typeof hook === "object" && !Array.isArray(hook) &&
       (hook as Record<string, unknown>).type === "command" &&
-      (hook as Record<string, unknown>).command === expected
+      expected.includes((hook as Record<string, unknown>).command as string)
     );
   });
 }
@@ -8510,8 +8533,13 @@ export async function collectListenerAttendanceEvidence(options: {
   };
 }
 
-/** Exact project-settings fragment printed by `cswarm hook install claude`. */
-export function claudeUserPromptHookSnippet(principalId: string): Record<string, unknown> {
+/** Exact project-settings fragment printed by `cswarm hook install claude`. With status, the
+ *  message check also marks Working, and PreToolUse and Stop run the status hook in the
+ *  background (async), so they never delay a tool call or the end of a turn. */
+export function claudeUserPromptHookSnippet(principalId: string, status = false): Record<string, unknown> {
+  const statusGroup = () => ({
+    hooks: [{ type: "command", command: scopedClaudeStatusHookCommand(principalId), async: true }],
+  });
   return {
     hooks: {
       UserPromptSubmit: [
@@ -8519,11 +8547,12 @@ export function claudeUserPromptHookSnippet(principalId: string): Record<string,
           hooks: [
             {
               type: "command",
-              command: scopedClaudeHookCommand(principalId),
+              command: scopedClaudeHookCommand(principalId, status),
             },
           ],
         },
       ],
+      ...(status ? { PreToolUse: [statusGroup()], Stop: [statusGroup()] } : {}),
     },
   };
 }
@@ -8629,53 +8658,52 @@ function readClaudeSettings(path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function isCommonSwarmHookEntry(hook: unknown): boolean {
+  return !!hook && typeof hook === "object" && !Array.isArray(hook) &&
+    (hook as Record<string, unknown>).type === "command" &&
+    isCommonSwarmClaudeHook((hook as Record<string, unknown>).command);
+}
+
+/** One event's groups with every CommonSwarm hook removed; other hooks keep their place. The
+ *  first removed entry is reported so the message check can be replaced where it was. */
+function withoutCommonSwarmHooks(groups: unknown[]): { groups: unknown[]; firstAt: number | null } {
+  const kept: unknown[] = [];
+  let firstAt: number | null = null;
+  for (const group of groups) {
+    if (!group || typeof group !== "object" || Array.isArray(group) ||
+        !Array.isArray((group as Record<string, unknown>).hooks)) {
+      kept.push(group);
+      continue;
+    }
+    const row = group as Record<string, unknown>;
+    const hooks = (row.hooks as unknown[]).filter((hook) => !isCommonSwarmHookEntry(hook));
+    if (hooks.length !== (row.hooks as unknown[]).length && firstAt === null) firstAt = kept.length;
+    if (hooks.length > 0) kept.push({ ...row, hooks });
+  }
+  return { groups: kept, firstAt };
+}
+
 function installClaudeHook(
   settings: Record<string, unknown>,
   principalId: string,
+  status = false,
 ): Record<string, unknown> {
   const hooks = settings.hooks && typeof settings.hooks === "object" &&
       !Array.isArray(settings.hooks)
     ? { ...(settings.hooks as Record<string, unknown>) }
     : {};
-  const current = Array.isArray(hooks.UserPromptSubmit)
-    ? [...hooks.UserPromptSubmit]
-    : [];
-  const command = scopedClaudeHookCommand(principalId);
-  let installed = false;
-  const groups: unknown[] = [];
-  for (const group of current) {
-    if (!group || typeof group !== "object" || Array.isArray(group)) {
-      groups.push(group);
-      continue;
+  const snippet = claudeUserPromptHookSnippet(principalId, status).hooks as Record<string, unknown[]>;
+  for (const event of CLAUDE_HOOK_EVENTS) {
+    const current = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
+    const { groups, firstAt } = withoutCommonSwarmHooks(current);
+    const ours = snippet[event];
+    if (ours !== undefined) {
+      // The message check returns to the position the previous one held.
+      groups.splice(event === "UserPromptSubmit" && firstAt !== null ? firstAt : groups.length, 0, ours[0]);
     }
-    const row = { ...(group as Record<string, unknown>) };
-    if (!Array.isArray(row.hooks)) {
-      groups.push(group);
-      continue;
-    }
-    const commands: unknown[] = [];
-    for (const hook of row.hooks) {
-      if (
-        hook && typeof hook === "object" && !Array.isArray(hook) &&
-        (hook as Record<string, unknown>).type === "command" &&
-        isCommonSwarmClaudeHook((hook as Record<string, unknown>).command)
-      ) {
-        if (!installed) {
-          commands.push({ ...(hook as Record<string, unknown>), command });
-          installed = true;
-        }
-        continue;
-      }
-      commands.push(hook);
-    }
-    if (commands.length > 0) groups.push({ ...row, hooks: commands });
+    if (groups.length > 0) hooks[event] = groups;
+    else delete hooks[event];
   }
-  if (!installed) {
-    const snippetHooks = (claudeUserPromptHookSnippet(principalId).hooks as Record<string, unknown>)
-      .UserPromptSubmit as unknown[];
-    groups.push(snippetHooks[0]);
-  }
-  hooks.UserPromptSubmit = groups;
   return { ...settings, hooks };
 }
 
@@ -8684,27 +8712,15 @@ function uninstallClaudeHook(settings: Record<string, unknown>): Record<string, 
     return settings;
   }
   const hooks = { ...(settings.hooks as Record<string, unknown>) };
-  if (!Array.isArray(hooks.UserPromptSubmit)) return settings;
-  const groups: unknown[] = [];
-  for (const group of hooks.UserPromptSubmit) {
-    if (!group || typeof group !== "object" || Array.isArray(group)) {
-      groups.push(group);
-      continue;
-    }
-    const row = { ...(group as Record<string, unknown>) };
-    if (!Array.isArray(row.hooks)) {
-      groups.push(group);
-      continue;
-    }
-    row.hooks = row.hooks.filter((hook) => !(
-      hook && typeof hook === "object" && !Array.isArray(hook) &&
-      (hook as Record<string, unknown>).type === "command" &&
-      isCommonSwarmClaudeHook((hook as Record<string, unknown>).command)
-    ));
-    if ((row.hooks as unknown[]).length > 0) groups.push(row);
+  let changed = false;
+  for (const event of CLAUDE_HOOK_EVENTS) {
+    if (!Array.isArray(hooks[event])) continue;
+    const { groups } = withoutCommonSwarmHooks(hooks[event] as unknown[]);
+    changed = true;
+    if (groups.length > 0) hooks[event] = groups;
+    else delete hooks[event];
   }
-  if (groups.length > 0) hooks.UserPromptSubmit = groups;
-  else delete hooks.UserPromptSubmit;
+  if (!changed) return settings;
   if (Object.keys(hooks).length === 0) {
     const result = { ...settings };
     delete result.hooks;
@@ -8739,6 +8755,14 @@ async function hookInstallPrincipalId(args: Arguments): Promise<string> {
  * JSON, or a missing field all read as "not proven": null, never a guess.
  */
 async function hookHostSessionIdFromStdin(): Promise<string | null> {
+  const value = await hookInputFromStdin();
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = (value as Record<string, unknown>).session_id;
+  return typeof id === "string" && id.length > 0 && id.length <= 200 ? id : null;
+}
+
+/** The host's hook input JSON (bounded, 250 ms), or null. Callers pick the fields they may use. */
+async function hookInputFromStdin(): Promise<unknown> {
   if (process.stdin.isTTY) return null;
   const raw = await new Promise<string>((resolve) => {
     let text = "";
@@ -8762,17 +8786,15 @@ async function hookHostSessionIdFromStdin(): Promise<string | null> {
     });
   });
   try {
-    const value = JSON.parse(raw) as unknown;
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-    const id = (value as Record<string, unknown>).session_id;
-    return typeof id === "string" && id.length > 0 && id.length <= 200 ? id : null;
+    return JSON.parse(raw) as unknown;
   } catch {
     return null;
   }
 }
 
-export const RUN_HOOK_1_ACCEPTED_FLAGS = ["cooldown", "principal-id"] as const;
-export const HOOK_INSTALL_ACCEPTED_FLAGS = ["write", "user", "repo", "principal-id"] as const;
+export const RUN_HOOK_1_ACCEPTED_FLAGS = ["cooldown", "principal-id", "message-status"] as const;
+export const HOOK_STATUS_ACCEPTED_FLAGS = ["principal-id"] as const;
+export const HOOK_INSTALL_ACCEPTED_FLAGS = ["write", "user", "repo", "principal-id", "message-status"] as const;
 export const HOOK_UNINSTALL_ACCEPTED_FLAGS = ["write", "user", "repo"] as const;
 
 async function runHook(args: Arguments): Promise<void> {
@@ -8805,6 +8827,7 @@ async function runHook(args: Arguments): Promise<void> {
         ...(cooldownSeconds === undefined ? {} : { cooldownSeconds }),
         ...(principalIds.length === 0 ? {} : { principalIds }),
         ...(hostSessionId === null ? {} : { hostSessionId }),
+        ...(args.has("message-status") ? { messageStatus: true } : {}),
         fetcher: httpClient.fetch,
         write: async (output) => {
           await new Promise<void>((resolve, reject) => {
@@ -8820,8 +8843,30 @@ async function runHook(args: Arguments): Promise<void> {
     }
     return;
   }
+  if (command === "status") {
+    // PreToolUse and Stop, run in the background by Claude Code. Prints nothing, exits 0, and
+    // never outlives the status budget plus the stdin read.
+    args.assertShape(HOOK_STATUS_ACCEPTED_FLAGS, 2);
+    const rawPrincipalIds = args.all("principal-id");
+    if (rawPrincipalIds.length !== 1 || !UUID_RE.test(rawPrincipalIds[0]!)) return;
+    const hardExit = setTimeout(() => {
+      process.exit(0);
+    }, MESSAGE_STATUS_BUDGET_MS + 500);
+    hardExit.unref();
+    const input = messageStatusHookInput(await hookInputFromStdin());
+    const httpClient = new ListenerHttpClient();
+    try {
+      await runListenerHookStatus(input, {
+        principalIds: [rawPrincipalIds[0]!.toLowerCase()],
+        fetcher: httpClient.fetch,
+      });
+    } finally {
+      httpClient.close();
+    }
+    return;
+  }
   if (command !== "install" && command !== "uninstall") {
-    throw new UsageError("hook requires check, install, or uninstall");
+    throw new UsageError("hook requires check, status, install, or uninstall");
   }
   args.assertShape(command === "install" ? HOOK_INSTALL_ACCEPTED_FLAGS : HOOK_UNINSTALL_ACCEPTED_FLAGS, 3);
   if (args.positionals[2] !== "claude") {
@@ -8840,7 +8885,8 @@ async function runHook(args: Arguments): Promise<void> {
     throw new Error("hook --user requires --write");
   }
   const principalId = command === "install" ? await hookInstallPrincipalId(args) : null;
-  const snippet = principalId === null ? null : claudeUserPromptHookSnippet(principalId);
+  const status = command === "install" && args.has("message-status");
+  const snippet = principalId === null ? null : claudeUserPromptHookSnippet(principalId, status);
   if (command === "install" && !args.has("write")) {
     process.stdout.write(`${JSON.stringify(snippet, null, 2)}\n`);
     return;
@@ -8849,7 +8895,7 @@ async function runHook(args: Arguments): Promise<void> {
   const path = target.path;
   const settings = readClaudeSettings(path);
   const updated = command === "install"
-    ? installClaudeHook(settings, principalId!)
+    ? installClaudeHook(settings, principalId!, status)
     : uninstallClaudeHook(settings);
   if (target.scope === "user") {
     process.stdout.write(`${claudeUserScopeWarning(path)}\n`);
@@ -8862,9 +8908,14 @@ async function runHook(args: Arguments): Promise<void> {
   const scopeMessage = target.scope === "local"
     ? ` This scope applies only to Claude Code sessions started in ${target.projectRoot}.`
     : "";
+  // The listener's headless path follows the same opt-in.
+  await setListenerMessageStatusOptIn(command === "install" ? principalId : null, status).catch(() => 0);
+  const statusMessage = status
+    ? ` Message status is on: PreToolUse and Stop run ${scopedClaudeStatusHookCommand(principalId!)} in the background. Install again without --message-status to turn it off.`
+    : "";
   process.stdout.write(
     command === "install"
-      ? `Installed the Claude Code UserPromptSubmit hook in ${path}. It runs: ${scopedClaudeHookCommand(principalId!)}.${scopeMessage}\n`
+      ? `Installed the Claude Code UserPromptSubmit hook in ${path}. It runs: ${scopedClaudeHookCommand(principalId!, status)}.${statusMessage}${scopeMessage}\n`
       : `Removed the CommonSwarm UserPromptSubmit hook from ${path}. Other settings were kept.${scopeMessage}\n`,
   );
 }
@@ -10436,11 +10487,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
 
   "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
   hook: group({
-    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>]"], errorMode: "hook-check" }),
-    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install claude [--principal-id <uuid>] [--write] [--user | --repo]"] }),
+    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id", "message-status"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>] [--message-status]"], errorMode: "hook-check" }),
+    status: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message-status hook.", mutates: true, flags: ["principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook status --principal-id <uuid>"], errorMode: "hook-check" }),
+    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id", "message-status"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install claude [--principal-id <uuid>] [--message-status] [--write] [--user | --repo]"] }),
     uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall claude --write [--user | --repo]"] }),
-  }, (args) => args.positionals[1], () => new UsageError("hook requires check, install, or uninstall"), {
-    refusalPolicy: { flags: ["cooldown", "principal-id", "write", "user", "repo"], ...REFUSE_PROFILE },
+  }, (args) => args.positionals[1], () => new UsageError("hook requires check, status, install, or uninstall"), {
+    refusalPolicy: { flags: ["cooldown", "principal-id", "write", "user", "repo", "message-status"], ...REFUSE_PROFILE },
     refusalTrace: "runHook",
   }),
   listen: group({
@@ -10596,6 +10648,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "receive.serve": RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
   "__listen-supervisor": RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
+  "hook.status": HOOK_STATUS_ACCEPTED_FLAGS,
   "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
   "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
   get "listen.start"() { return LISTEN_START_ACCEPTED_FLAGS.filter(flag => !(LISTEN_START_REFUSED_FLAGS as readonly string[]).includes(flag)); },
