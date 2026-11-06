@@ -241,7 +241,7 @@ test("another workspace member cannot join or receive the private activity chann
     sequence: 1,
     phase: "tool-running",
     signal_id: randomUUID(),
-    tool_title: `Read swm_\u200bagt_${"z".repeat(43)} record`,
+    tool_title: `Inspect /private/finance.txt credential=CANARY_PRIVATE swm_\u200bagt_${"z".repeat(43)}`,
     elapsed_ms: 12,
   };
   const published = await fetch(`${local.API_URL}/functions/v1/activity`, {
@@ -269,12 +269,12 @@ test("another workspace member cannot join or receive the private activity chann
     agent.principalId,
     "the edge must derive the publishing principal from the agent token",
   );
-  assert.equal(
-    (ownerFrames[1] as { payload?: { toolTitle?: unknown } } | undefined)
-      ?.payload?.toolTitle,
-    "Read [redacted-credential] record",
-    "the edge must redact a direct caller even if the listener sanitizer is bypassed",
-  );
+  const legacy = (ownerFrames[1] as { payload?: Record<string, unknown> } | undefined)?.payload ?? {};
+  assert.equal(legacy.toolTitle, null, "no tool title reaches the workspace topic");
+  assert.equal(legacy.signalId, null, "no message id reaches the workspace topic");
+  assert.equal(legacy.phase, "tool-running", "the coarse phase remains");
+  assert.doesNotMatch(JSON.stringify(ownerFrames[1]), new RegExp(`finance|CANARY_PRIVATE|swm_|${requestBody.signal_id}`),
+    "whatever an old or direct client sends, the broadcast carries no private detail");
 
   const crossWorkspace = await fetch(`${local.API_URL}/functions/v1/activity`, {
     method: "POST",
@@ -356,6 +356,11 @@ test("a status frame is bound to an addressed message, expires by server time an
   const stale = await post({ sequence: 1, state: "working", signal_id: message, label: "reading" });
   assert.equal(stale.status, 202);
   assert.equal((await snapshot()).working_label, "editing", "an older frame cannot replace newer work");
+  const otherStream = await post({ stream_id: randomUUID(), sequence: 9, state: "idle", signal_id: null, label: null });
+  assert.equal(otherStream.status, 202);
+  assert.equal((await snapshot()).working_label, "editing", "another stream cannot take over live work");
+  await delay(300);
+  assert.equal(frames.length, 1, "a frame that changed nothing announces nothing");
 
   const idle = await post({ sequence: 3, state: "idle", signal_id: null, label: null });
   assert.equal(idle.status, 202);
@@ -363,6 +368,9 @@ test("a status frame is bound to an addressed message, expires by server time an
   const revived = await post({ sequence: 2, state: "working", signal_id: message, label: "editing" });
   assert.equal(revived.status, 202);
   assert.equal((await snapshot()).working_signal_id, null, "an older frame cannot revive cleared work");
+  const handover = await post({ stream_id: randomUUID(), sequence: 1, state: "working", signal_id: message, label: "reading" });
+  assert.equal(handover.status, 202);
+  assert.equal((await snapshot()).working_label, "reading", "a new stream takes over once the old one is idle");
 
   await owner.client.removeChannel(joined.channel);
 });

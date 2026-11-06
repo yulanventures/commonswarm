@@ -1,7 +1,6 @@
 import postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
-import { redactCredentialText } from "../../../src/host/credential-redaction.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -181,7 +180,7 @@ async function handle(request: Request): Promise<Response> {
     if (status !== null) {
       // Server time sets the two-minute expiry. Stream and sequence order the frames, so a late
       // frame cannot revive or clear newer work. Idle clears the snapshot and keeps the order.
-      await tx`
+      const applied = await tx`
         INSERT INTO swarm.agent_message_working AS w
           (workspace_id, principal_id, signal_id, label, working_until, stream_id, sequence)
         VALUES (
@@ -198,8 +197,15 @@ async function handle(request: Request): Promise<Response> {
           stream_id = EXCLUDED.stream_id,
           sequence = EXCLUDED.sequence,
           updated_at = statement_timestamp()
-        WHERE w.stream_id IS DISTINCT FROM EXCLUDED.stream_id OR w.sequence < EXCLUDED.sequence
+        WHERE (w.stream_id = EXCLUDED.stream_id AND w.sequence < EXCLUDED.sequence)
+          -- Stream handover: a different stream takes over only once the current snapshot is idle
+          -- or expired, so a delayed frame from an older stream cannot replace live work.
+          OR (w.stream_id <> EXCLUDED.stream_id
+            AND (w.signal_id IS NULL OR w.working_until <= statement_timestamp()))
+        RETURNING 1
       `;
+      // A stale frame changes nothing, so it announces nothing.
+      if (applied.length === 0) return json(202, { status: "accepted" });
     }
     // The workspace topic admits every live member: a status event says only that this agent is
     // working or idle. The message id and label stay behind message_status.
@@ -211,16 +217,16 @@ async function handle(request: Request): Promise<Response> {
       state: status.state,
       emittedAt: new Date().toISOString(),
     } : {
+      // Every live member receives this topic. A listener frame keeps only its coarse phase:
+      // the message id and the tool title are never broadcast, whatever the client sends.
       version: 1,
       workspaceId: agent.principal_workspace_id,
       principalId: agent.principal_id,
       streamId: activity!.streamId,
       sequence: activity!.sequence,
       phase: activity!.phase,
-      signalId: activity!.signalId,
-      toolTitle: activity!.toolTitle === null
-        ? null
-        : redactCredentialText(activity!.toolTitle).slice(0, 160) || "Tool",
+      signalId: null,
+      toolTitle: null,
       elapsedMs: activity!.elapsedMs,
       emittedAt: new Date().toISOString(),
     };
