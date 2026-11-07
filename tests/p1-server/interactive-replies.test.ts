@@ -358,11 +358,19 @@ test("a typed reply first means a later click is too late; an expired ask replay
   assert.equal(late.status, 409);
   assert.equal(late.body.error, "ask_answered", "the canonical answered rule counts a typed reply");
 
-  const expiring = await askOwner();
-  const expiringId = (expiring.body.signal as { id: string }).id;
+  // Signals are append-only, so this ask is written with a short life rather than expired later.
+  const expiringId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+      VALUES (${expiringId}::uuid, ${f.workspaceA}::uuid, ${f.principal}::uuid, 'agent', ${f.ownerId}::uuid,
+        'ask', 'Quick: ship?', statement_timestamp() + interval '4 seconds')`;
+    await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
+      VALUES (${expiringId}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
+  });
   const original = randomUUID();
-  assert.equal((await answer(f.ownerJwt, expiringId, "ship", original)).status, 200);
-  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second' WHERE id = ${expiringId}::uuid`;
+  const first = await answer(f.ownerJwt, expiringId, "ship", original);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  await delay(4_500);
   for (const commandId of [original, randomUUID()]) {
     const retry = await answer(f.ownerJwt, expiringId, "ship", commandId);
     assert.equal(retry.status, 409, "nothing replays once the ask has expired");
