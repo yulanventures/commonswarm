@@ -351,7 +351,7 @@ test("a typed reply first means a later click is too late; an expired ask replay
   const typedId = (typed.body.signal as { id: string }).id;
   const words = await postCommand(f.ownerJwt, f.workspaceA, {
     kind: "post_signal", signal_kind: "note", body: "Let's wait.", to_user_id: null,
-    to_agent_principal_id: f.principal, in_reply_to: typedId, about: null,
+    to_agent_principal_id: null, in_reply_to: typedId, about: null,
   });
   assert.equal(words.status, 200, JSON.stringify(words.body));
   const late = await answer(f.ownerJwt, typedId, "ship");
