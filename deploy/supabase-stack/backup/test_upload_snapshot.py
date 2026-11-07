@@ -74,9 +74,13 @@ class UploadFailures(unittest.TestCase):
                 elif args[1] == 'check' and args[2].startswith('csfiles:'):
                     self.assertIn('--download', args)
                     code = 1 if failure == 'corrupt-object' else 0
-                elif args[1] == 'check' and args[2] == str(artifact):
-                    self.assertIn('--download', args)
+                elif args[:3] == ['python3', '/usr/local/sbin/yulan-pg-offsite-age.py', 'publish']:
+                    self.assertEqual(args[3], str(artifact))
+                    self.assertTrue(args[4].endswith('/database'))
+                    self.assertEqual(args[5], str(artifact / 'database-files.txt'))
                     code = 1 if failure == 'partial-database' else 0
+                    output = json.dumps({'offsite_encrypted': True, 'encrypted_files': 3,
+                                         'ciphertext_download_verified': True, 'age_manifest_sha256': 'a' * 64})
                 elif args[1] == 'cat':
                     output = '{}' if failure == 'wrong-marker' else (artifact / 'COMPLETE.json').read_text()
                 return subprocess.CompletedProcess(args, code, stdout=output, stderr='')
@@ -93,6 +97,8 @@ class UploadFailures(unittest.TestCase):
                     self.assertEqual(result['objects'], 2)
                     self.assertTrue(result['database_bytes_verified'])
                     self.assertTrue(result['object_bytes_verified'])
+                    self.assertTrue(result['offsite_encrypted'])
+                    self.assertTrue(result['ciphertext_download_verified'])
             marker_writes = [args for args in calls if len(args) > 1 and args[1] == 'copyto']
             self.assertEqual(len(marker_writes), 1 if failure in (None, 'wrong-marker', 'positive-ops-count') else 0)
             if failure in ('no-ops-schema', 'no-ops-count', 'zero-ops-count'):

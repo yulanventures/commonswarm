@@ -107,7 +107,9 @@ class DrillTests(unittest.TestCase):
             if args[2]==drill.BACKUP_ROOT:output=self.name+'/\n'
             else:output='COMPLETE.json\n'
         elif args[:2]==['rclone','cat']:output=json.dumps(self.marker)
-        elif args[:2]==['rclone','copy']:shutil.copytree(self.source,args[3],dirs_exist_ok=True)
+        elif args[:3]==['python3','/usr/local/sbin/yulan-pg-offsite-age.py','restore-source']:
+            shutil.copytree(self.source,args[4],dirs_exist_ok=True)
+            output=json.dumps({'restore_source':'local-copy','offsite_ciphertext_integrity_verified':True,'offsite_decryption_verified':False})
         elif args[:3]==['docker','network','create']:
             self.label=args[args.index('--label')+1]
             if '--internal' in args:self.network=args[-1]
@@ -346,7 +348,16 @@ class DrillTests(unittest.TestCase):
         self.assertNotIn('scope', self.status())
         for boundary in (drill.generate_temp_credentials, drill.fetch_offsite_bytes, drill.fetch_api_bytes):
             boundary.assert_called_once()
-        self.assertTrue(any(a[:2] == ['rclone', 'copy'] for a in self.calls))
+        self.assertTrue(any(a[:3] == ['python3', '/usr/local/sbin/yulan-pg-offsite-age.py', 'restore-source'] for a in self.calls))
+        self.assertFalse(any(a[:2] == ['rclone', 'copy'] for a in self.calls))
+        self.assertTrue(any(
+            '--dbname=service=maintenance' in a
+            and '--command=ALTER DATABASE postgres ALLOW_CONNECTIONS false;' in a
+            and '--command=CREATE DATABASE schema_source TEMPLATE postgres;' in a
+            and '--command=ALTER DATABASE postgres ALLOW_CONNECTIONS true;' in a
+            for a in self.calls
+        ))
+        self.assertFalse(any('createdb' in a for a in self.calls))
         self.assertFalse(any(self.resources.values()))
         scripts=[a[-1] for a in self.calls if a[-1].startswith('/work/migrate/')]
         self.assertEqual(scripts, ['/work/migrate/'+s for s in ['restore-target.sh','prepare-target.sh','restore-cron-jobs.sh','verify-counts.sh']])
@@ -354,6 +365,7 @@ class DrillTests(unittest.TestCase):
         self.assertFalse(list((self.root/'work').rglob('pass')))
         status = self.status()
         self.assertEqual(status['status'], 'PASS')
+        self.assertTrue(status['offsite_ciphertext_integrity_verified'])
         self.assertEqual(status['restore_container_id'], 'c' * 64)
         self.assertEqual(status['database'], 'postgres')
         restored = datetime.datetime.fromisoformat(status['restored_at'])

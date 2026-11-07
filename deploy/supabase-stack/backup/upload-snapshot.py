@@ -157,13 +157,12 @@ def upload(artifact, retention_file):
         (artifact / 'SHA256SUMS').write_text(sums)
         db_list = artifact / 'database-files.txt'
         db_list.write_text('\n'.join(files + ['SHA256SUMS']) + '\n')
-        call(['rclone', 'copy', str(artifact), destination + '/database', '--files-from-raw', str(db_list), '--immutable'])
-        call(['rclone', 'check', str(artifact), destination + '/database', '--files-from-raw', str(db_list), '--download', '--one-way'])
+        offsite = json.loads(call(['python3', '/usr/local/sbin/yulan-pg-offsite-age.py', 'publish', str(artifact), destination + '/database', str(db_list)], True))
         after = selected_host_snapshot(call(['rclone', 'lsf', ROOT, '--dirs-only', '--max-depth', '1'], True).splitlines())
         if after < before:
             raise RuntimeError('host snapshot selection moved backwards')
         result = dict(binding, host_snapshot_after=after, verified_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      database_bytes_verified=True, object_bytes_verified=True)
+                      database_bytes_verified=True, object_bytes_verified=True, **offsite)
         marker = artifact / 'COMPLETE.json'
         marker.write_text(json.dumps(result, indent=2))
         call(['rclone', 'copyto', str(marker), destination + '/COMPLETE.json', '--immutable'])
