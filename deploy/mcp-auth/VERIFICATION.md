@@ -56,7 +56,7 @@ path. The public CA may be mode `0644`; it must be a root-owned regular file,
 not a symlink, and must not be writable by group or other users. Secret
 contents are represented inside the container only by `*_FILE` paths. The
 ES256 signing key originates on the box, with its source of truth in the
-1Password vault **Yulan Ventures Infra**. The `kid` overlap contract retains
+1Password vault `c73s3oi567rtz44ikt2nslzszi` (Agents (Full Access), formerly Yulan Ventures Infra), by item ID. The `kid` overlap contract retains
 both required public keys through cache propagation, token lifetime, and clock
 skew.
 
