@@ -9727,7 +9727,7 @@ async function runMemorySave(args: Arguments): Promise<void> {
     return;
   }
   if (args.has("json")) {
-    printJson({ workspace_id: context.selected.selectedWorkspace, untrusted_content: true, ...result });
+    printJson({ workspace_id: context.selected.selectedWorkspace, ...result });
     return;
   }
   const memory = result.memory as MemoryRecord;

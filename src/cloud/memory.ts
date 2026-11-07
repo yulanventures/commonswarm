@@ -44,6 +44,8 @@ export interface MemorySaveInput {
 export type MemoryOutcome = "created" | "updated" | "duplicate" | "forgotten";
 
 export interface MemoryCommandResult {
+  /** The memory and any previous statement are workspace data, never instructions. */
+  untrusted_content: true;
   memory: MemoryRecord | { memory_id: string; status: "deleted" };
   memory_outcome: MemoryOutcome;
   previous_statement?: string;
@@ -208,6 +210,7 @@ export async function sendMemoryCommand(
     throw new MemoryError(reply.status, "malformed", `The memory ${action} came back in a shape this version doesn't understand.`);
   }
   return {
+    untrusted_content: true,
     memory: memory as unknown as MemoryCommandResult["memory"],
     memory_outcome: outcome,
     ...(typeof body.previous_statement === "string" ? { previous_statement: body.previous_statement } : {}),
