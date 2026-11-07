@@ -288,7 +288,8 @@ export async function resolveHostedConnectionContext(
         SELECT swarm.resolve_hosted_mcp_connection_context(
           ${binding.grantId}::uuid, ${binding.providerGrantId},
           ${binding.kind === "hosted_seat" && (binding.tool === "file_ls" || binding.tool === "roster" ||
-            binding.tool === "channel_ls" || binding.tool === "channel_read") ? "members" : binding.tool},
+            binding.tool === "channel_ls" || binding.tool === "channel_read" ||
+            binding.tool === "memory_search" || binding.tool === "memory_get") ? "members" : binding.tool},
           ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
         ) AS context
       `;

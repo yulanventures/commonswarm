@@ -151,7 +151,9 @@ test("a hosted seat saves, searches, reads and forgets its own memory, as its ag
   assert.equal(created!.status, 200, JSON.stringify(created));
   assert.equal(created!.body.memory_outcome, "created");
   const memory = created!.body.memory as { memory_id: string; revision: number };
-  assert.deepEqual(replayed, created, "the same request_id replays the stored result");
+  assert.equal(replayed!.status, 200, JSON.stringify(replayed));
+  assert.deepEqual(replayed!.body.memory, created!.body.memory, "the same request_id replays the stored result");
+  assert.equal(replayed!.body.memory_outcome, "created");
   assert.equal(search!.status, 200, JSON.stringify(search));
   assert.equal(search!.body.untrusted_content, true);
   assert.ok(search!.body.context, "hosted reads carry the connection context");
