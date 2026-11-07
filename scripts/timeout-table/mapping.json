@@ -3188,26 +3188,6 @@
             "reason": "Size bound, not a wait."
           }
         },
-        "src/listener/hook.ts:setTimeout": {
-          "class": "network-api",
-          "scope": "whole-operation",
-          "endpoints": [
-            "/functions/v1/read",
-            "/functions/v1/command"
-          ],
-          "citation": "src/listener/hook.ts:1179",
-          "detail": "Hook check wait timer using HOOK_CHECK_TIMEOUT_MS.",
-          "operation": {
-            "name": "hook-check-timer",
-            "class": "not-run",
-            "writes": [
-              "private-copy check.json cursor/cache only"
-            ],
-            "removes": [],
-            "reason": "Use of HOOK_CHECK_TIMEOUT_MS.",
-            "proxy_operation": "check"
-          }
-        },
         "src/listener/hook.ts:timeoutMs": {
           "class": "local",
           "scope": "whole-operation",
@@ -3699,6 +3679,168 @@
             "writes": [],
             "removes": [],
             "reason": "The app's authenticated browser Wiki reader is not a CLI operation."
+          }
+        },
+        "src/listener/hook.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/hook.ts:1175-1210",
+          "detail": "Message-status budget for one hook update (MESSAGE_STATUS_BUDGET_MS), session gate included.",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/hook.ts:setTimeout#2": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/hook.ts:1240-1265",
+          "detail": "Message-status budget for cswarm hook status (PreToolUse and Stop), listener discovery included.",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/hook.ts:setTimeout#3": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read",
+            "/functions/v1/command"
+          ],
+          "citation": "src/listener/hook.ts:1279",
+          "detail": "Hook check wait timer using HOOK_CHECK_TIMEOUT_MS.",
+          "operation": {
+            "name": "hook-check-timer",
+            "class": "not-run",
+            "writes": [
+              "private-copy check.json cursor/cache only"
+            ],
+            "removes": [],
+            "reason": "Use of HOOK_CHECK_TIMEOUT_MS.",
+            "proxy_operation": "check"
+          }
+        },
+        "src/cli.ts:setTimeout#4": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:8852",
+          "detail": "Hard process ceiling for cswarm hook status (budget plus stdin read).",
+          "operation": {
+            "name": "hook-status-hard-exit",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local process ceiling; the network update is reported under MESSAGE_STATUS_BUDGET_MS."
+          }
+        },
+        "src/listener/message-status.ts:MESSAGE_STATUS_BUDGET_MS": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/message-status.ts:28",
+          "detail": "Total time for one message-status update, credential and state file included.",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/message-status.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/message-status.ts:114",
+          "detail": "Default request timeout for one status frame POST.",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/message-status.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/message-status.ts:184",
+          "detail": "Budget timer in applyMessageStatusEvent.",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/message-status.ts:budgetMs": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/activity"
+          ],
+          "citation": "src/listener/message-status.ts:254",
+          "detail": "Budget for withinMessageStatusBudget (the listener's status publish).",
+          "operation": {
+            "name": "message-status-update",
+            "class": "not-run",
+            "writes": [
+              "private-copy message-status.json; ephemeral status snapshot (two-minute server expiry)"
+            ],
+            "removes": [],
+            "reason": "A status update is visible to the message's sender and there is no cleanup request.",
+            "proxy": "The activity function has no read-only operation."
+          }
+        },
+        "src/listener/message-status.ts:timeoutMs": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/listener/message-status.ts:213",
+          "detail": "Wait for the per-agent message-status state lock (inside MESSAGE_STATUS_BUDGET_MS).",
+          "operation": {
+            "name": "message-status-state-lock",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local lock wait; the network update is reported under MESSAGE_STATUS_BUDGET_MS."
           }
         }
       }

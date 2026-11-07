@@ -61,6 +61,7 @@ tests/host-acp-claude.test.ts
 tests/host-acp-codex.test.ts
 tests/host-stderr-tail.test.ts
 tests/listener-activity.test.ts
+tests/listener-message-status.test.ts
 tests/listener-engine.test.ts
 tests/listener-effect-store.test.ts
 tests/listener-grok-model.test.ts
