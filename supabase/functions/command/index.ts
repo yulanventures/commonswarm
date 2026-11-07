@@ -13230,10 +13230,14 @@ async function handleTransaction(
         ) ||
         !Array.isArray(auth.agent.scopes) ||
         !auth.agent.scopes.every((scope) => typeof scope === "string") ||
-        /* A re-raise posts one note, so it needs the post_signal scope, which every
+        /* A re-raise posts one note, and a memory save or forget writes shared workspace
+         * content like a post, so both need the post_signal scope, which every
          * signal-capable token already carries. */
         !auth.agent.scopes.includes(
-          validation.command.kind === "reraise_ask" ? "post_signal" : validation.command.kind,
+          validation.command.kind === "reraise_ask" || validation.command.kind === "memory_save" ||
+            validation.command.kind === "memory_forget"
+            ? "post_signal"
+            : validation.command.kind,
         )
       )
     ) {
