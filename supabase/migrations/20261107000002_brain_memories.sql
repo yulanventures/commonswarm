@@ -167,28 +167,28 @@ RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog AS $$
 DECLARE
- found swarm.memories%ROWTYPE;
+ mem swarm.memories%ROWTYPE;
 BEGIN
  IF swarm_read.memory_reader(p_workspace_id) IS NULL OR p_memory_id IS NULL THEN RETURN NULL; END IF;
- SELECT * INTO found FROM swarm.memories m
+ SELECT * INTO mem FROM swarm.memories m
  WHERE m.workspace_id = p_workspace_id AND m.memory_id = p_memory_id;
  IF NOT FOUND THEN RETURN NULL; END IF;
  RETURN jsonb_build_object('workspace_id', p_workspace_id, 'untrusted_content', true,
   'memory', jsonb_build_object(
-    'memory_id', found.memory_id, 'subject', found.subject_key, 'kind', found.kind,
-    'statement', found.statement, 'evidence', found.evidence, 'status', found.status,
-    'revision', found.revision,
-    'author', jsonb_build_object('kind', found.author_kind, 'id', found.author_id),
-    'sponsor_user_id', found.sponsor_user_id,
-    'last_editor', jsonb_build_object('kind', found.last_editor_kind, 'id', found.last_editor_id),
-    'created_at', found.created_at, 'updated_at', found.updated_at, 'review_at', found.review_at),
+    'memory_id', mem.memory_id, 'subject', mem.subject_key, 'kind', mem.kind,
+    'statement', mem.statement, 'evidence', mem.evidence, 'status', mem.status,
+    'revision', mem.revision,
+    'author', jsonb_build_object('kind', mem.author_kind, 'id', mem.author_id),
+    'sponsor_user_id', mem.sponsor_user_id,
+    'last_editor', jsonb_build_object('kind', mem.last_editor_kind, 'id', mem.last_editor_id),
+    'created_at', mem.created_at, 'updated_at', mem.updated_at, 'review_at', mem.review_at),
   'versions', (
    SELECT coalesce(jsonb_agg(jsonb_build_object(
      'revision', v.revision, 'action', v.action, 'kind', v.kind, 'statement', v.statement,
      'evidence', v.evidence, 'editor', jsonb_build_object('kind', v.editor_kind, 'id', v.editor_id),
      'created_at', v.created_at) ORDER BY v.revision DESC), '[]'::jsonb)
    FROM (SELECT * FROM swarm.memory_versions v
-     WHERE v.memory_id = found.memory_id AND v.workspace_id = p_workspace_id
+     WHERE v.memory_id = mem.memory_id AND v.workspace_id = p_workspace_id
      ORDER BY v.revision DESC LIMIT 50) v));
 END;
 $$;
