@@ -297,7 +297,7 @@ test("live Catch up keeps a successful overview when the ask queue fails, withou
     new DOMException("Deadline", "TimeoutError"), new TypeError("Failed to fetch")];
   for (const outcome of outcomes) {
     const paints = []; const reads = [];
-    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+    const context = { catchUpGeneration: 0, catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
@@ -359,19 +359,22 @@ test("Catch up's Retry on unavailable asks reloads Catch up; other actions follo
   };
   visit(file); assert.ok(render);
   const script = ts.transpile(`const ${render.getText(file)}; renderHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
-  let callbacks; const reloads = []; const navigations = [];
+  let callbacks; const reloads = []; const navigations = []; const choices = [];
   const detail = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [], "unavailable");
   const context = { homeRoute: { view: "catchup" }, one: () => ({ childElementCount: 0 }), members: [], session: null,
     catchUpData: [{ workspace: workspaces[0], state: "ready", detail }], homeViewerId: () => "zoe", greetingName: () => "Zoe",
     sampleMode: false, catchUpExpanded: false, SAMPLE_ROSTERS: {}, Date: { now: () => now }, mapCatchUp,
     homeStructureKey: () => "key", homeCatchUpKey: "", refreshHomeCatchUpTimes: () => {}, renderHomeRail: () => {},
-    document: {}, replaceHomeRegion: () => {}, ASKS_UNAVAILABLE_ACTION,
+    document: {}, replaceHomeRegion: () => {}, ASKS_UNAVAILABLE_ACTION, NEEDS_YOU_CHOICE_ACTION: "choice:",
+    catchUpChoicePending: new Set(), catchUpChoiceErrors: new Map(), sendCatchUpChoice: (item, optionId) => choices.push([item.id, optionId]),
     buildCatchUp: (_doc, _vm, given) => { callbacks = given; return { querySelector: () => null }; },
     loadHomeCatchUp: async () => { reloads.push(true); }, navigateHomeHref: href => navigations.push(href) };
   runInNewContext(script, context);
   const retry = detail.needsYou[0];
   callbacks.onNeedsYouAction(retry.primary.action, retry);
   assert.deepEqual([reloads.length, navigations], [1, []]);
+  callbacks.onNeedsYouAction("choice:ship", { id: "ask", primary: { label: "Reply", href: "/app?w=W&m=ask" } });
+  assert.deepEqual([choices, navigations], [[["ask", "ship"]], []], "a choice sends the answer and doesn't navigate");
   callbacks.onNeedsYouAction("open", { primary: { label: "Reply", href: "/app?w=W&m=ask" } });
   assert.deepEqual([reloads.length, navigations], [1, ["/app?w=W&m=ask"]]);
 });
@@ -560,7 +563,7 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
   ], needs_you: { asks: overviewRow.needs_you.asks, waiting: [], assigned: [assigned] } };
   const load = async (queueOutcome, todoFailure) => {
     const paints = []; const todoReads = [];
-    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+    const context = { catchUpGeneration: 0, catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
@@ -783,7 +786,7 @@ test("the live loader keeps the queue's list and does not treat a short feed as 
   const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
   const load = async (overview, pageFor, decisionQueue = async () => noAsks) => {
     const paints = []; const pages = [];
-    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+    const context = { catchUpGeneration: 0, catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,

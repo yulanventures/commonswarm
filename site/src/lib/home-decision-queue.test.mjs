@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHomeServer, parseDecisionQueue, HomeToolsUnavailable } from "./home/client.ts";
 import { ASKS_UNAVAILABLE_ACTION, catchUpDetailFromOverview, homeNeedsYouCount, mapCatchUp } from "./home-map.ts";
-import { needsYouCard } from "./home-primitives.ts";
+import { needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "./home-primitives.ts";
 import { catchUpSubline } from "./home-catchup.ts";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -111,9 +111,10 @@ test("the live Catch up loader takes asks from the queue; when the queue can't b
   const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
   const overviewAsk = { signal_id: "new", from: { kind: "user", id: "amy" }, created_at: "2026-11-04T11:30:00Z", until: "2026-11-05T12:00:00Z" };
   const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [{ ...row, needs_you: { ...row.needs_you, asks: [overviewAsk] } }] };
-  const load = async decisionQueue => {
-    const paints = []; const reads = [];
-    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+  const load = async (decisionQueue, choiceRows = []) => {
+    const paints = []; const reads = []; const choiceReads = [];
+    const context = { catchUpGeneration: 0, catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50,
+      askChoices: async (workspaceId, ids) => { choiceReads.push([workspaceId, ids]); return choiceRows; }, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: [{ id: "W", name: "Home" }],
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
       initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
@@ -123,12 +124,18 @@ test("the live Catch up loader takes asks from the queue; when the queue can't b
       feed: async () => [],
       renderHomeCatchUp: () => paints.push(mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false)) };
     await runInNewContext(script, context);
-    return { vm: paints.at(-1), reads, count: context.homeOverviewCounts.get("W") };
+    return { vm: paints.at(-1), reads, choiceReads, count: context.homeOverviewCounts.get("W") };
   };
   const queued = await load(async () => queue([ask("old", "2026-11-01T09:00:00Z"), ask("new", "2026-11-04T11:30:00Z")]));
   assert.deepEqual(queued.reads, ["queue:W"]);
   assert.deepEqual(queued.vm.needsYou.map(item => item.id), ["old", "new"]);
   assert.equal(queued.count, 2);
+  assert.deepEqual(queued.choiceReads, [["W", ["old", "new"]]], "the queued asks' stored choices are read once");
+  assert.equal(queued.vm.needsYou.some(item => item.choices), false, "no stored choices, no buttons");
+  const chosen = await load(async () => queue([ask("old", "2026-11-01T09:00:00Z")]),
+    [{ signalId: "old", options: [{ id: "ship", label: "Ship it" }, { id: "wait", label: "Wait" }], answer: null }]);
+  assert.deepEqual(chosen.vm.needsYou[0].choices, { options: [{ id: "ship", label: "Ship it" }, { id: "wait", label: "Wait" }] });
+  assert.equal(chosen.count, 1, "choices don't change the count");
   for (const missing of [async () => { throw new HomeToolsUnavailable(); }, async () => null]) {
     const failed = await load(missing);
     assert.deepEqual(failed.reads, ["queue:W"], "no fallback read of the overview's asks");
@@ -156,4 +163,27 @@ test("the Retry card isn't counted as a thing that needs you, and unread asks ne
   assert.equal(catchUpSubline(unread), "Checked 1 of 1 workspace.");
   const read = mapCatchUp(entry(catchUpDetailFromOverview(row, "zoe", now, false, [], queue([ask("x", "2026-11-04T11:00:00Z")]))), "zoe", "Zoe", now, false);
   assert.equal(catchUpSubline(read), "1 thing needs you across 1 workspace.");
+});
+
+test("Waiting on you shows an ask's stored choices as text-only buttons that send the option id", () => {
+  const label = "<img src=x onerror=alert(1)> ship";
+  const options = [{ id: "ship", label }, { id: "wait", label: "Wait" }];
+  const choices = new Map([["x", { signalId: "x", options, answer: null }], ["done", { signalId: "done", options, answer: { optionId: "ship", byViewer: true } }]]);
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], queue([ask("x", "2026-11-04T11:00:00Z"), ask("done", "2026-11-04T11:00:00Z"), ask("plain", "2026-11-04T11:00:00Z")]), choices);
+  assert.deepEqual(detail.needsYou.map(item => Boolean(item.choices)), [true, false, false], "only an unanswered ask with stored choices gets buttons");
+  const doc = fakeDocument(); const clicks = []; const actions = [];
+  const base = doc.createElement;
+  doc.createElement = tag => { const el = base(tag); el.addEventListener = (type, fn) => { if (type === "click") clicks.push({ el, fn }); }; return el; };
+  const card = needsYouCard(doc, detail.needsYou[0], action => actions.push(action));
+  const find = (node, cls) => node.className === cls ? node : node.children?.map(child => typeof child === "object" ? find(child, cls) : null).find(Boolean);
+  const group = find(card, "hm-needs-choices");
+  assert.equal(group.attrs.role, "group");
+  assert.deepEqual(group.children.map(button => [button.tag, button.textContent, button.dataset.choice]), [["button", label, "ship"], ["button", "Wait", "wait"]]);
+  for (const { el, fn } of clicks) if (el.dataset.choice) fn();
+  assert.deepEqual(actions, [`${NEEDS_YOU_CHOICE_ACTION}ship`, `${NEEDS_YOU_CHOICE_ACTION}wait`]);
+  assert.ok(find(card, "hm-actions"), "Reply stays");
+  const pending = needsYouCard(fakeDocument(), { ...detail.needsYou[0], choices: { ...detail.needsYou[0].choices, pending: true, error: "That ask was already answered." } }, () => {});
+  assert.ok(find(pending, "hm-needs-choices").children.every(button => button.disabled === true));
+  assert.equal(find(pending, "hm-needs-choice-error").textContent, "That ask was already answered.");
+  assert.equal(find(needsYouCard(fakeDocument(), { ...detail.needsYou[0], sample: true }, () => {}), "hm-needs-choices"), undefined, "samples get no buttons");
 });

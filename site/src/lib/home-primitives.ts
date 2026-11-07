@@ -140,6 +140,8 @@ export function objectCard(doc: Document, o: ObjectCardVM): HTMLElement {
   return root;
 }
 /** Needs you, with links or callback actions. */
+/** A needs-you action naming one of an ask's choices: the prefix, then the option id. */
+export const NEEDS_YOU_CHOICE_ACTION = "choice:";
 export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: string, n: NeedsYouVM) => void): HTMLElement {
   const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id;
   const heading = node(doc, "h3", "hm-needs-title", n.what); heading.id = `hm-needs-${encodeURIComponent(n.id)}`;
@@ -149,6 +151,17 @@ export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: st
     glyph.append(decorative(objectIcon(doc, n.kind === "ask" ? "ask" : "todo"))); root.append(glyph);
   } else root.append("label" in n.from ? agentOrb(doc, n.from, { size: 36, badge: true }) : personAvatar(doc, n.from, 36));
   const copy = node(doc, "div", "hm-needs-copy"); copy.append(node(doc, "p", "hm-eyebrow", ["Needs you", n.workspace.name, n.when].filter(Boolean).join(" · ")), heading);
+  // An ask's choices: one button per stored option, labels as text only. The server checks the answer.
+  if (n.choices && !isSample(n)) {
+    const group = node(doc, "div", "hm-needs-choices"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Choices");
+    for (const option of n.choices.options) {
+      const control = button(doc, option.label, () => onAction(`${NEEDS_YOU_CHOICE_ACTION}${option.id}`, n));
+      control.dataset.primary = "false"; control.dataset.choice = option.id;
+      control.disabled = !!n.choices.pending; group.append(control);
+    }
+    copy.append(group);
+    if (n.choices.error) { const error = node(doc, "p", "hm-needs-choice-error", n.choices.error); error.setAttribute("role", "alert"); copy.append(error); }
+  }
   const actions = node(doc, "div", "hm-actions");
   if (!isSample(n)) for (const [index, action] of [n.primary, n.secondary].entries()) {
     if (!action) continue;

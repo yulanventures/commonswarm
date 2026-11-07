@@ -1180,7 +1180,7 @@ import "../../styles/kylon-command-palette.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
-  import type { TodoVM, AgentVM } from "../../lib/home-types";
+  import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
   import { listsAndDocsFact } from "../../lib/home-agent-copy";
@@ -1192,7 +1192,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
-  import { statusLine, needsYouCard } from "../../lib/home-primitives";
+  import { statusLine, needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -1354,7 +1354,7 @@ import "../../styles/kylon-command-palette.css";
     type AgentStatusEvent,
     type MessageStatus,
   } from "../../lib/message-status";
-  import { choiceAnswerText, type AskChoiceState } from "../../lib/choices";
+  import { choiceAnswerText, ASK_CHOICES_BATCH, type AskChoiceState } from "../../lib/choices";
   import {
     agentActivityFrameIsNewer,
     agentActivityPanelView,
@@ -5199,6 +5199,12 @@ import "../../styles/kylon-command-palette.css";
       const viewerName = members.find(member => member.userId === homeViewerId())?.name ||
         catchUpData.flatMap(entry => entry.detail?.people.groups ?? []).find(group => group.person.id === homeViewerId())?.person.name;
       const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
+      for (const item of vm.needsYou) {
+        if (!item.choices) continue;
+        if (catchUpChoicePending.has(item.id)) item.choices.pending = true;
+        const error = catchUpChoiceErrors.get(item.id);
+        if (error) item.choices.error = error;
+      }
       const key = homeStructureKey(vm);
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
@@ -5206,6 +5212,7 @@ import "../../styles/kylon-command-palette.css";
       const view = buildCatchUp(document, vm, {
         onNeedsYouAction: (action, item) => {
           if (action === ASKS_UNAVAILABLE_ACTION) { void loadHomeCatchUp(); return; }
+          if (action.startsWith(NEEDS_YOU_CHOICE_ACTION)) { void sendCatchUpChoice(item, action.slice(NEEDS_YOU_CHOICE_ACTION.length)); return; }
           if (item.primary.href) navigateHomeHref(item.primary.href);
         },
         onShowMoreNeedsYou: () => { catchUpExpanded = true; renderHomeCatchUp(); },
@@ -5219,8 +5226,32 @@ import "../../styles/kylon-command-palette.css";
       homeCatchUpKey = key;
       renderHomeRail();
     };
+    /* Waiting on you: a click on an ask's choice sends answer_choice. On success the catch-up reloads and the
+       answered ask leaves the queue; a refusal shows the server's message on the card. */
+    const catchUpChoicePending = new Set<string>();
+    const catchUpChoiceErrors = new Map<string, string>();
+    const sendCatchUpChoice = async (item: NeedsYouVM, optionId: string): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || catchUpChoicePending.has(item.id)) return;
+      const generation = catchUpGeneration;
+      catchUpChoicePending.add(item.id);
+      catchUpChoiceErrors.delete(item.id);
+      renderHomeCatchUp();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, optionId);
+      } catch {
+        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+      }
+      catchUpChoicePending.delete(item.id);
+      if (generation !== catchUpGeneration) return;
+      if (result.ok) { void loadHomeCatchUp(); return; }
+      catchUpChoiceErrors.set(item.id, result.message);
+      renderHomeCatchUp();
+    };
     const loadHomeCatchUp = async (): Promise<void> => {
       const generation = ++catchUpGeneration;
+      catchUpChoiceErrors.clear();
       const viewer = homeViewerId();
       const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
       catchUpExpanded = false;
@@ -5251,7 +5282,11 @@ import "../../styles/kylon-command-palette.css";
           // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
-          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable"), signals: latest };
+          // Stored choices on the queued asks; with interactive replies off there are none, and a failed read shows plain asks.
+          const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+          const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
+          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
+            new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
