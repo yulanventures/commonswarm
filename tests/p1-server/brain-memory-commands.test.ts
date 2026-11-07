@@ -380,3 +380,36 @@ test("a person can save; a non-member cannot; bad input and the daily cap are re
   assert.equal(limited.status, 429);
   assert.equal(limited.body.error, "memory_rate_limited");
 });
+
+test("a forget hides the memory from detail reads and from every replay, including another agent's edit receipt", async () => {
+  const subject = `forget replay ${randomUUID().slice(0, 8)}`;
+  const saveId = randomUUID();
+  const saved = await save(f.agentToken, subject, "Secret plan A.", {}, saveId);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const memoryId = (saved.body.memory as { memory_id: string }).memory_id;
+  const other = await secondAgent();
+  const editId = randomUUID();
+  const edited = await save(other.token, subject, "Secret plan B.", { expected_revision: 1 }, editId);
+  assert.equal(edited.body.memory_outcome, "updated");
+  const forgotten = await postCommand(f.agentToken, f.workspaceA, { kind: "memory_forget", memory_id: memoryId });
+  assert.equal(forgotten.status, 200, JSON.stringify(forgotten.body));
+  const versionCount = (await versions(memoryId)).length;
+
+  for (const [bearer, statement, id] of [
+    [other.token, "Secret plan B.", editId], [f.agentToken, "Secret plan A.", saveId],
+  ] as const) {
+    const replay = await save(bearer, subject, statement, statement === "Secret plan B." ? { expected_revision: 1 } : {}, id);
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.deepEqual(replay.body.memory, { memory_id: memoryId, status: "deleted" }, "a replay carries the id only");
+    assert.equal(Object.hasOwn(replay.body, "previous_statement"), false);
+    assert.doesNotMatch(JSON.stringify(replay.body), /Secret plan/);
+  }
+  assert.equal((await versions(memoryId)).length, versionCount, "a replay adds no version");
+
+  const detail = await sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: f.ownerId, role: "authenticated" })}, true)`;
+    return (await tx<{ r: unknown }[]>`SELECT swarm_read.memory_get(${f.workspaceA}::uuid, ${memoryId}::uuid) AS r`)[0]!.r;
+  });
+  assert.equal(detail, null, "a forgotten memory has no detail read");
+});

@@ -160,8 +160,8 @@ REVOKE ALL ON FUNCTION swarm_read.memory_search(uuid, text, integer)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.memory_search(uuid, text, integer) TO swarm_read, authenticated;
 
--- One memory in the workspace (active, or deleted by an agent's forget and not yet purged), with
--- up to its 50 newest versions. Unknown, purged and other-workspace ids all return NULL.
+-- One active memory in the workspace, with up to its 50 newest versions. Forgotten, purged,
+-- unknown and other-workspace ids all return NULL: a forget hides the content from every read.
 CREATE FUNCTION swarm_read.memory_get(p_workspace_id uuid, p_memory_id uuid)
 RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -171,7 +171,7 @@ DECLARE
 BEGIN
  IF swarm_read.memory_reader(p_workspace_id) IS NULL OR p_memory_id IS NULL THEN RETURN NULL; END IF;
  SELECT * INTO mem FROM swarm.memories m
- WHERE m.workspace_id = p_workspace_id AND m.memory_id = p_memory_id;
+ WHERE m.workspace_id = p_workspace_id AND m.memory_id = p_memory_id AND m.status = 'active';
  IF NOT FOUND THEN RETURN NULL; END IF;
  RETURN jsonb_build_object('workspace_id', p_workspace_id, 'untrusted_content', true,
   'memory', jsonb_build_object(

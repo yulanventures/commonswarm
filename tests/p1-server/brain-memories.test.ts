@@ -112,6 +112,11 @@ test("reads refuse outsiders, other workspaces, unbound or revoked agents, and m
   const get = (workspaceId: string, claims: Record<string, unknown>) => asCaller("authenticated", claims, async (tx) =>
     (await tx<{ r: unknown }[]>`SELECT swarm_read.memory_get(${workspaceId}::uuid, ${id}::uuid) AS r`)[0]!.r);
   assert.ok(await get(ws, { sub: owner }));
+  await sql`UPDATE swarm.memories SET status = 'deleted', deleted_at = statement_timestamp(), revision = revision + 1
+    WHERE memory_id = ${id}::uuid`;
+  assert.equal(await get(ws, { sub: owner }), null, "a forgotten memory has no detail read");
+  await sql`UPDATE swarm.memories SET status = 'active', deleted_at = NULL, revision = revision + 1
+    WHERE memory_id = ${id}::uuid`;
   assert.equal(await get(other, { sub: owner }), null, "an id from another workspace returns nothing");
   assert.equal(await get(ws, { sub: outsider }), null);
 

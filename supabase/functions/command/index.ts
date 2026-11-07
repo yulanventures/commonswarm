@@ -339,6 +339,11 @@ interface MemoryForgetCommand {
   kind: "memory_forget";
   memory_id: string;
 }
+/** A replayed result for a memory that's since been forgotten or purged: an id and nothing else. */
+interface MemoryGone {
+  memory_id: string;
+  status: "deleted";
+}
 interface MemoryRecord {
   memory_id: string;
   subject: string;
@@ -659,7 +664,7 @@ interface StoredResponse {
   signal?: SignalRecord;
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
-  memory?: MemoryRecord;
+  memory?: MemoryRecord | MemoryGone;
   memory_outcome?: "created" | "updated" | "duplicate" | "forgotten";
   previous_statement?: string;
   grant_id?: string;
@@ -3185,7 +3190,7 @@ function storedResponse(value: unknown): StoredResponse {
       : { reraise: response.reraise as unknown as ReraiseRecord }),
     ...(record(response.memory) === null
       ? {}
-      : { memory: response.memory as unknown as MemoryRecord }),
+      : { memory: response.memory as unknown as MemoryRecord | MemoryGone }),
     ...(response.memory_outcome === "created" || response.memory_outcome === "updated" ||
         response.memory_outcome === "duplicate" || response.memory_outcome === "forgotten"
       ? { memory_outcome: response.memory_outcome }
@@ -10774,6 +10779,30 @@ function memoryEvidenceUrl(value: unknown): boolean {
   }
 }
 
+/**
+ * Every replay of a memory result is checked against the current row in this workspace: an
+ * active memory replays as it is now; a forgotten or purged one replays as its id only, with no
+ * statement, subject or evidence. previous_statement is never replayed.
+ */
+async function memoryReplay(tx: Sql, workspaceId: string, response: StoredResponse): Promise<StoredResponse> {
+  const { previous_statement: _previous, memory, ...rest } = response;
+  if (memory === undefined) return rest;
+  const [row] = await tx<{
+    memory_id: string; subject_key: string; kind: MemoryKind; statement: string; evidence: string[];
+    revision: number; status: "active" | "deleted";
+  }[]>`
+    SELECT memory_id, subject_key, kind, statement, evidence, revision, status FROM swarm.memories
+    WHERE workspace_id = ${workspaceId}::uuid AND memory_id = ${memory.memory_id}::uuid
+  `;
+  if (row === undefined || row.status !== "active") {
+    return { ...rest, memory: { memory_id: memory.memory_id, status: "deleted" } };
+  }
+  return { ...rest, memory: {
+    memory_id: row.memory_id, subject: row.subject_key, kind: row.kind, statement: row.statement,
+    evidence: row.evidence, revision: row.revision, status: row.status,
+  } };
+}
+
 const MEMORY_ACTIVE_CAP = 500;
 const MEMORY_HISTORY_CAP = 5000;
 const MEMORY_AGENT_DAILY_SAVES = 50;
@@ -10844,7 +10873,7 @@ async function memoryCommand(
       prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
     await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
     return decided(matches
-      ? replayResult(storedResponse(prior.response), kind)
+      ? replayResult(await memoryReplay(tx, route.workspaceId, storedResponse(prior.response)), kind)
       : { status: 409, body: { error: "command_id_conflict" } });
   }
 
@@ -10880,6 +10909,11 @@ async function memoryCommand(
     `;
     response = { ok: true, event_ids: [], memory: recordOf(row), memory_outcome: "forgotten" };
   } else {
+    /* Workspace quota decisions are serialized after the subject lock (always this order), so
+     * saves on different subjects can't both pass a count at the cap. Forget never checks the
+     * history cap: each active memory can be forgotten once, so its rows are bounded by the
+     * active cap, and forgetting is never blocked by a full history. */
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`memory-quota:${route.workspaceId}`}, 0))`;
     if (editorKind === "agent") {
       const [recent] = await tx<{ n: number }[]>`
         SELECT count(*)::int AS n FROM swarm.memory_versions
@@ -13357,6 +13391,16 @@ async function handleTransaction(
      */
     let renewalRecovery = false;
 
+    /* Brain M1: the memory flag is checked before any replay, so a stored memory result is never
+     * served while the feature is off. */
+    if ((kind === "memory_save" || kind === "memory_forget") && !brainMemoryEnabled) {
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "domain", reason: "memory_unavailable", detail: ignoredIdentity, hash,
+      });
+      return { status: 404, body: { error: "memory_unavailable", message: "Workspace memory isn't turned on here." } };
+    }
+
     await beforeStep(7);
     const existingRows = await tx<
       {
@@ -13465,6 +13509,8 @@ async function handleTransaction(
         return matches
           ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
             ? await currentLocalPolicyResponse(tx,storedResponse(existing.response),localState.localPlan)
+            : kind === "memory_save" || kind === "memory_forget"
+            ? await memoryReplay(tx, route.workspaceId, storedResponse(existing.response))
             : storedResponse(existing.response), kind))
           : { status: 409, body: { error: "command_id_conflict" } };
       }
