@@ -280,7 +280,9 @@ const answer = (bearer: string, signalId: string, optionId: string, commandId?: 
   postCommand(bearer, f.workspaceA, { kind: "answer_choice", signal_id: signalId, option_id: optionId }, commandId);
 
 async function actions(signalId: string): Promise<Array<{ state: string; error_code: string | null; option_id: string }>> {
-  return await sql`SELECT state, error_code, option_id FROM swarm.ui_actions WHERE signal_id = ${signalId}::uuid ORDER BY created_at`;
+  const rows = await sql<Array<{ state: string; error_code: string | null; option_id: string }>>`
+    SELECT state, error_code, option_id FROM swarm.ui_actions WHERE signal_id = ${signalId}::uuid ORDER BY created_at`;
+  return rows.map((row) => ({ ...row }));
 }
 
 test("an agent's choice ask stores its options once; the addressed person's click is an ordinary reply", async () => {
