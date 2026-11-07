@@ -294,6 +294,9 @@ const COMMAND_ENV = [
   "SWARM_COMMAND_ALLOWED_ORIGINS",
   "SWARM_CAPABILITY_URLS",
   "SWARM_SELF_SERVE",
+  // Feature switches; exact "1" turns each on. Off when unset.
+  "SWARM_BRAIN_MEMORY",
+  "SWARM_INTERACTIVE_REPLIES",
   "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
   "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
 ] as const;
@@ -324,6 +327,9 @@ export const MCP_ENV_NAMES = [
   "SWARM_MCP_CLOCK_SKEW_SECONDS",
   MCP_PUBLIC_ENABLED_ENV,
   MCP_TODOS_LISTS_ENABLED_ENV,
+  // The command and read code that hosted seats run checks these memory switches.
+  "SWARM_BRAIN_MEMORY",
+  "SWARM_BRAIN_MEMORY_HOSTED",
   // Shared only by main and mcp: it authenticates mcp to main's internal PDF text path.
   "SWARM_FILE_TEXT_TOKEN",
 ] as const;
@@ -337,6 +343,7 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SUPABASE_SERVICE_ROLE_KEY",
     "SWARM_ENV",
     "SWARM_COMMAND_ALLOWED_ORIGINS",
+    "SWARM_BRAIN_MEMORY",
   ],
   capability: [
     ...DATABASE_ENV,
