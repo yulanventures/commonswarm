@@ -323,6 +323,24 @@ interface ReraiseAskCommand {
   signal_id: string;
 }
 
+/** Interactive replies G1: an ask to one person with fixed choices, and a person's click. */
+interface ChoiceOption {
+  id: string;
+  label: string;
+}
+interface AskChoiceCommand {
+  kind: "ask_choice";
+  body: string;
+  to_user_id: string;
+  about: string | null;
+  options: ChoiceOption[];
+}
+interface AnswerChoiceCommand {
+  kind: "answer_choice";
+  signal_id: string;
+  option_id: string;
+}
+
 /** Channel authority. Self-contained like post_signal: emits no protocol event. */
 type ChannelCommand =
   | { kind: "channel_create"; slug: string; purpose: string | null }
@@ -386,6 +404,8 @@ type ValidatedCommand =
   | RegisterAgentSeatCommand
   | SignalCommand
   | ReraiseAskCommand
+  | AskChoiceCommand
+  | AnswerChoiceCommand
   | ChannelCommand
   | SignalsSeenCommand
   | DeliveryCommand
@@ -631,6 +651,8 @@ interface StoredResponse {
   signal?: SignalRecord;
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
+  choice_options?: ChoiceOption[];
+  choice_answer?: { signal_id: string; option_id: string; reply_signal_id: string };
   grant_id?: string;
   seat_id?: string;
   handle?: string;
@@ -843,6 +865,8 @@ const CAPABILITY_LIVE_LIMIT = 200;
  * Absent or any value other than "1", a stranger gets the same 403 as before.
  */
 const selfServeEnabled = Deno.env.get("SWARM_SELF_SERVE") === "1";
+/** Interactive replies: choice asks and answers are refused unless this is on (off by default). */
+const interactiveRepliesEnabled = Deno.env.get("SWARM_INTERACTIVE_REPLIES") === "1";
 
 /**
  * §9 P5 caps free-tier workspaces per *verified* identity so one attacker
@@ -1101,6 +1125,8 @@ const COMMAND_KINDS = [
   "submit_feedback",
   "post_signal",
   "reraise_ask",
+  "ask_choice",
+  "answer_choice",
   ...CHANNEL_COMMAND_KINDS,
   SIGNALS_SEEN_KIND,
   CLAIM_AGENT_INBOX_KIND,
@@ -2065,6 +2091,48 @@ function validateCommand(
       ok: true,
       command: { kind: "reraise_ask", signal_id: (cmd.signal_id as string).toLowerCase() },
     };
+  }
+
+  if (cmd.kind === "ask_choice") {
+    const keys = ["kind", "body", "to_user_id", "about", "options"];
+    if (Object.keys(cmd).some((key) => !keys.includes(key))) {
+      return { ok: false, status: 400, reason: commandFieldsMessage("ask_choice", keys.slice(1)) };
+    }
+    const body = typeof cmd.body === "string" ? sanitizeSignalText(cmd.body).trim() : "";
+    const about = typeof cmd.about === "string" ? sanitizeSignalText(cmd.about) || null : null;
+    const options = Array.isArray(cmd.options) ? cmd.options : null;
+    const parsed: ChoiceOption[] = [];
+    for (const option of options ?? []) {
+      const row = record(option);
+      const label = typeof row?.label === "string" ? sanitizeSignalText(row.label).replace(/\s+/g, " ").trim() : "";
+      if (!row || !exactKeys(row, ["id", "label"]) || typeof row.id !== "string" ||
+          !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(row.id) || label.length < 1 || label.length > 80) {
+        parsed.length = 0;
+        break;
+      }
+      parsed.push({ id: row.id, label });
+    }
+    if (body.length < 1 || body.length > SIGNAL_BODY_MAX) {
+      return { ok: false, status: 400, reason: `body must be 1 to ${SIGNAL_BODY_MAX} characters` };
+    }
+    if (typeof cmd.to_user_id !== "string" || !UUID_RE.test(cmd.to_user_id)) {
+      return { ok: false, status: 400, reason: "to_user_id must be the UUID of the person who chooses" };
+    }
+    if (options === null || parsed.length < 2 || parsed.length > 6 || parsed.length !== options.length ||
+        new Set(parsed.map((option) => option.id)).size !== parsed.length) {
+      return { ok: false, status: 400,
+        reason: "options must be 2 to 6 entries {id, label}: unique ids (a-z, 0-9, _ or -, up to 32) and plain-text labels up to 80 characters" };
+    }
+    return { ok: true, command: { kind: "ask_choice", body, to_user_id: cmd.to_user_id.toLowerCase(), about, options: parsed } };
+  }
+
+  if (cmd.kind === "answer_choice") {
+    if (!exactKeys(cmd, ["kind", "signal_id", "option_id"]) || typeof cmd.signal_id !== "string" ||
+        !UUID_RE.test(cmd.signal_id) || typeof cmd.option_id !== "string" ||
+        !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(cmd.option_id)) {
+      return { ok: false, status: 400, reason: "answer_choice takes signal_id (a choice ask) and option_id" };
+    }
+    return { ok: true, command: { kind: "answer_choice", signal_id: cmd.signal_id.toLowerCase(), option_id: cmd.option_id } };
   }
 
   if (cmd.kind === "post_signal") {
@@ -3105,6 +3173,12 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.reraise) === null
       ? {}
       : { reraise: response.reraise as unknown as ReraiseRecord }),
+    ...(Array.isArray(response.choice_options)
+      ? { choice_options: response.choice_options as unknown as ChoiceOption[] }
+      : {}),
+    ...(record(response.choice_answer) === null
+      ? {}
+      : { choice_answer: response.choice_answer as unknown as StoredResponse["choice_answer"] }),
     ...(typeof response.file_id === "string" ? { file_id: response.file_id } : {}),
     ...(typeof response.version_id === "string" ? { version_id: response.version_id } : {}),
     ...(typeof response.version_n === "number" ? { version_n: response.version_n } : {}),
@@ -10675,6 +10749,228 @@ async function reraiseAsk(
   };
 }
 
+const ASK_CHOICE_ATTEMPTS_PER_PERSON = 5;
+
+type ChoiceCtx = {
+  commandId: string;
+  hash: string;
+  kind: string;
+  minClientVersion: string;
+  ignoredIdentity: string | null;
+  decided: (result: HttpResult) => HttpResult;
+};
+
+async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx: ChoiceCtx,
+  audit: (outcome: string, reason: string | null) => Promise<unknown>): Promise<HttpResult | null> {
+  const [prior] = await tx<{ request_hash: string; workspace_id: string; stream_id: string; response: unknown }[]>`
+    SELECT request_hash, workspace_id, stream_id, response FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind} AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${ctx.commandId}
+    LIMIT 1
+  `;
+  if (prior === undefined) return null;
+  const matches = prior.request_hash === ctx.hash &&
+    prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
+  await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
+  return ctx.decided(matches
+    ? replayResult(storedResponse(prior.response), ctx.kind)
+    : { status: 409, body: { error: "command_id_conflict" } });
+}
+
+async function choiceLedgerSettle(tx: Sql, route: Route, auth: AuthContext, ctx: ChoiceCtx,
+  response: StoredResponse): Promise<void> {
+  const inserted = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id, workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.ledgerCredentialKind}, ${auth.ledgerPrincipalId}, ${ctx.commandId},
+      ${route.workspaceId}::uuid, ${route.streamId}::uuid, ${ctx.hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (inserted.length === 0) {
+    throw new LedgerRace(auth, ctx.commandId, ctx.kind, route.workspaceId, route.streamId, ctx.hash);
+  }
+}
+
+/**
+ * Interactive replies G1: an ask to one person with fixed choices, behind
+ * SWARM_INTERACTIVE_REPLIES. The ask goes through the normal target, rate and post path; the
+ * choices are stored once beside it and never change. Hosted seats wait for G3's tool binding.
+ */
+async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskChoiceCommand,
+  ctx: ChoiceCtx): Promise<HttpResult> {
+  const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
+    insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
+      outcome, reason, detail, hash: ctx.hash });
+  if (!interactiveRepliesEnabled) {
+    await audit("domain", "interactive_replies_unavailable");
+    return { status: 404, body: { error: "interactive_replies_unavailable",
+      message: "Choice asks aren't turned on here." } };
+  }
+  if (auth.ledgerCredentialKind === "hosted_seat") {
+    await audit("authz", "ask_choice_hosted_unsupported");
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ask_choice:${auth.ledgerPrincipalId}:${ctx.commandId}`}, 0))`;
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  if (replay !== null) return replay;
+  const ask: SignalCommand = {
+    kind: "post_signal", signal_kind: "ask", body: command.body, to_user_id: command.to_user_id,
+    to_agent_principal_id: null, in_reply_to: null, about: command.about,
+  };
+  const target = await resolveSignalWriteTarget(tx, route, auth, ask);
+  if (target === null) {
+    await audit("authz", "ask_choice_target_refused");
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, ask, target);
+  if (rateLimit !== null) {
+    const detail = `${rateLimit.bucket} limit ${rateLimit.description}; resets at ${rateLimit.resetsAt}`;
+    await audit("rate_limit", "rate_limited", detail);
+    return ctx.decided({ status: 429, body: { error: "rate_limited", message: `Signal refused: ${detail}.`,
+      limit: rateLimit.limit, resets_at: rateLimit.resetsAt } });
+  }
+  const posted = await postSignal(tx, route, auth, ask, target, [], {
+    channelId: null, threadRootId: null, broadcastToChannel: false,
+    untilMs: SIGNAL_DEFAULT_UNTIL_MS.ask, untilCeiling: null, untilExplicit: false,
+  }, null);
+  if (posted.status !== "inserted") throw new Error("choice ask returned an unexpected outcome");
+  await tx`
+    INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
+    VALUES (${posted.signal.id}::uuid, ${route.workspaceId}::uuid, ${tx.json(command.options as unknown as postgres.JSONValue)}::jsonb)
+  `;
+  const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal, choice_options: command.options };
+  await choiceLedgerSettle(tx, route, auth, ctx, response);
+  await audit("accepted", null);
+  await chargeSpend(tx, "signal_post");
+  return { status: 200, body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion } };
+}
+
+/**
+ * Interactive replies G1: a person answers a choice ask by clicking. The click is only that
+ * person's ordinary reply: the reply goes through the normal target, rate and post path with the
+ * chosen option's stored label as its text. A person's session only, never an agent or hosted
+ * credential. Answers to one ask are serialized; the first completed answer wins and later ones
+ * are refused and recorded as failed; a retry by the person who answered returns their answer.
+ * Every attempt is recorded in swarm.ui_actions (pending, approved, completed, failed) and
+ * attempts are capped per person and ask.
+ */
+async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: AnswerChoiceCommand,
+  ctx: ChoiceCtx): Promise<HttpResult> {
+  const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
+    insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
+      outcome, reason, detail, hash: ctx.hash });
+  if (!interactiveRepliesEnabled) {
+    await audit("domain", "interactive_replies_unavailable");
+    return { status: 404, body: { error: "interactive_replies_unavailable",
+      message: "Choice answers aren't turned on here." } };
+  }
+  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+    await audit("authz", "answer_choice_person_only");
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const viewer = auth.actor.user;
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${command.signal_id}`}, 0))`;
+  // The current ask and person come first: nothing replays for an ask this person can't answer now.
+  const [ask] = await tx<{
+    id: string; from_kind: string; from_principal: string; to_user_id: string | null;
+    to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
+    until: Date; live: boolean; answered: boolean; options: Array<{ id: string; label: string }>;
+  }[]>`
+    SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
+      s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
+      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options
+    FROM swarm.ask_choices c
+    JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
+    WHERE c.workspace_id = ${route.workspaceId}::uuid AND c.signal_id = ${command.signal_id}::uuid
+      AND s.kind = 'ask'
+  `;
+  // Unknown, another workspace's, not a choice ask, or not addressed to this person: one answer.
+  if (ask === undefined || ask.to_user_id !== viewer ||
+      (ask.from_kind === "user" && ask.from_principal === viewer)) {
+    await audit("authz", "answer_choice_not_addressed");
+    return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
+  }
+  if (!ask.live) {
+    await audit("domain", "ask_expired");
+    return ctx.decided({ status: 409, body: { error: "ask_expired", message: "This ask has expired." } });
+  }
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  if (replay !== null) return replay;
+  const [mine] = await tx<{ option_id: string; reply_signal_id: string }[]>`
+    SELECT option_id, reply_signal_id FROM swarm.ui_actions
+    WHERE signal_id = ${ask.id}::uuid AND actor_user_id = ${viewer}::uuid AND state = 'completed'
+  `;
+  if (mine !== undefined) {
+    if (mine.option_id !== command.option_id) {
+      await audit("domain", "choice_conflict");
+      return ctx.decided({ status: 409, body: { error: "choice_conflict",
+        message: "You already chose a different option for this ask." } });
+    }
+    // The same person retrying the same choice (a lost response or a second click): their answer.
+    await audit("replayed", "answer_choice_already_answered_by_you");
+    return ctx.decided({ status: 200, body: { status: "accepted", ok: true, event_ids: [],
+      choice_answer: { signal_id: ask.id, option_id: mine.option_id, reply_signal_id: mine.reply_signal_id },
+      events: [], min_client_version: ctx.minClientVersion } });
+  }
+  const [attempts] = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM swarm.ui_actions
+    WHERE signal_id = ${ask.id}::uuid AND actor_user_id = ${viewer}::uuid
+  `;
+  if (attempts!.n >= ASK_CHOICE_ATTEMPTS_PER_PERSON) {
+    await audit("rate_limit", "answer_choice_attempts");
+    return ctx.decided({ status: 429, body: { error: "answer_attempts_exhausted",
+      message: "Too many attempts on this ask. Reply in words instead." } });
+  }
+  const actionId = crypto.randomUUID();
+  await tx`
+    INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, state)
+    VALUES (${actionId}::uuid, ${route.workspaceId}::uuid, ${ask.id}::uuid, ${viewer}::uuid, ${command.option_id}, 'pending')
+  `;
+  const fail = async (status: number, error: string, message: string): Promise<HttpResult> => {
+    await tx`UPDATE swarm.ui_actions SET state = 'failed', error_code = ${error} WHERE action_id = ${actionId}::uuid`;
+    await audit("domain", error);
+    return ctx.decided({ status, body: { error, message } });
+  };
+  // The canonical answered rule (a typed reply counts) or an earlier completed choice: too late.
+  const [won] = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM swarm.ui_actions WHERE signal_id = ${ask.id}::uuid AND state = 'completed'
+  `;
+  if (ask.answered || won!.n > 0) return await fail(409, "ask_answered", "This ask already has an answer.");
+  const option = ask.options.find((candidate) => candidate.id === command.option_id);
+  if (option === undefined) return await fail(400, "unknown_option", "That isn't one of this ask's choices.");
+  await tx`UPDATE swarm.ui_actions SET state = 'approved' WHERE action_id = ${actionId}::uuid`;
+  const reply: SignalCommand = {
+    kind: "post_signal", signal_kind: "note", body: `Chose: ${option.label}`,
+    to_user_id: ask.from_kind === "user" ? ask.from_principal : null,
+    to_agent_principal_id: ask.from_kind === "agent" ? ask.from_principal : null,
+    in_reply_to: ask.id, about: null,
+  };
+  const target = await resolveSignalWriteTarget(tx, route, auth, reply);
+  if (target === null) return await fail(403, "reply_refused", "You can't reply to this ask.");
+  const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, reply, target);
+  if (rateLimit !== null) return await fail(429, "rate_limited", "Too many messages just now. Try again shortly.");
+  const posted = await postSignal(tx, route, auth, reply, target, [], {
+    channelId: ask.channel_id, threadRootId: ask.thread_root_id, broadcastToChannel: false,
+    untilMs: SIGNAL_DEFAULT_UNTIL_MS.note, untilCeiling: null, untilExplicit: false,
+  }, null);
+  if (posted.status !== "inserted") return await fail(409, "reply_refused", "The reply couldn't be posted.");
+  await tx`
+    UPDATE swarm.ui_actions SET state = 'completed', reply_signal_id = ${posted.signal.id}::uuid,
+      completed_at = statement_timestamp()
+    WHERE action_id = ${actionId}::uuid
+  `;
+  const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal,
+    choice_answer: { signal_id: ask.id, option_id: option.id, reply_signal_id: posted.signal.id } };
+  await choiceLedgerSettle(tx, route, auth, ctx, response);
+  await audit("accepted", null);
+  await chargeSpend(tx, "signal_post");
+  return { status: 200, body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion } };
+}
+
 /**
  * The recipient set a reader sees, derived the way swarm_read.signals derives
  * it: the rows the caller named when there are any, and otherwise the row's own
@@ -12909,8 +13205,12 @@ async function handleTransaction(
         !auth.agent.scopes.every((scope) => typeof scope === "string") ||
         /* A re-raise posts one note, so it needs the post_signal scope, which every
          * signal-capable token already carries. */
+        /* A choice ask posts one ask, so it needs post_signal like any ask. answer_choice is a
+         * person's command and never reaches an agent credential path with a scope. */
         !auth.agent.scopes.includes(
-          validation.command.kind === "reraise_ask" ? "post_signal" : validation.command.kind,
+          validation.command.kind === "reraise_ask" || validation.command.kind === "ask_choice"
+            ? "post_signal"
+            : validation.command.kind,
         )
       )
     ) {
@@ -13030,6 +13330,18 @@ async function handleTransaction(
      */
     let renewalRecovery = false;
 
+    /* Interactive replies: with the flag off nothing replays; with it on, choice commands replay
+     * only inside their own handlers, after the current ask and person checks. */
+    const choiceKind = kind === "ask_choice" || kind === "answer_choice";
+    if (choiceKind && !interactiveRepliesEnabled) {
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "domain", reason: "interactive_replies_unavailable", detail: ignoredIdentity, hash,
+      });
+      return { status: 404, body: { error: "interactive_replies_unavailable",
+        message: "Choice asks aren't turned on here." } };
+    }
+
     await beforeStep(7);
     const existingRows = await tx<
       {
@@ -13046,7 +13358,7 @@ async function handleTransaction(
         AND command_id = ${commandId}
       LIMIT 1
     `;
-    const existing = existingRows[0];
+    const existing = choiceKind ? undefined : existingRows[0];
     if (existing) {
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
@@ -13346,7 +13658,30 @@ async function handleTransaction(
       }, hostedSeatCapability);
     }
 
+    if (command.kind === "ask_choice") {
+      return await askChoice(tx, route, auth, command, {
+        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+      });
+    }
+
+    if (command.kind === "answer_choice") {
+      return await answerChoice(tx, route, auth, command, {
+        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+      });
+    }
+
     if (command.kind === "post_signal") {
+      /* A reply to a choice ask takes the same per-ask lock answer_choice holds, so a typed reply
+       * and a click can't both count as the first answer. Other posts are untouched. */
+      if (typeof command.in_reply_to === "string") {
+        const [choiceAsk] = await tx<{ signal_id: string }[]>`
+          SELECT signal_id FROM swarm.ask_choices
+          WHERE workspace_id = ${route.workspaceId}::uuid AND signal_id = ${command.in_reply_to}::uuid
+        `;
+        if (choiceAsk !== undefined) {
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${choiceAsk.signal_id}`}, 0))`;
+        }
+      }
       const namedTarget = await resolveSignalWriteTarget(
         tx,
         route,
