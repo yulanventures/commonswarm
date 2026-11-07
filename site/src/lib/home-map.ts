@@ -12,6 +12,7 @@ import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } fro
 import { railAgentOwnerPhrase, type HomeRailVM } from "./home-rail";
 import { askExcerpt } from "./home-stream";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
+import type { AskChoiceState } from "./choices";
 import type { AgentWorkStatus, DecisionAsk, DecisionQueue, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
 
@@ -265,7 +266,7 @@ function pushNeed(needsYou: NeedsYouVM[], item: NeedsYouVM, replaceAssignment = 
   else if (replaceAssignment && needsYou[index].kind === "todo") needsYou[index] = item;
 }
 /** Waiting on you: a decision-queue ask with its body, how long it has waited, and a compact re-raise count. */
-function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: NeedsYouVM["workspace"], now: number): NeedsYouVM {
+function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: NeedsYouVM["workspace"], now: number, choice?: AskChoiceState): NeedsYouVM {
   const author = ask.from.kind === "agent" ? homeAgent(people, ask.from.id) : homePerson(people, ask.from.id);
   const from = author ?? (ask.from.name ? { ...unnamedMember(), name: ask.from.name, firstName: ask.from.name } : unnamedMember());
   const name = "label" in from ? from.label : from.name;
@@ -273,7 +274,8 @@ function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: N
   const excerpt = askExcerpt(ask.body);
   return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
     what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
-    primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) } };
+    primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) },
+    ...(choice && choice.answer === null ? { choices: { options: choice.options.map(option => ({ id: option.id, label: option.label })) } } : {}) };
 }
 /** The queue couldn't be read: say so, with Retry. Never an empty or resolved list, and never the overview's asks. */
 export const ASKS_UNAVAILABLE_ACTION = "retry-asks";
@@ -293,7 +295,8 @@ function countedNeedIds(row: WorkspaceCatchUp, queue: CatchUpAsks): Set<string> 
 /** Asks come only from the decision queue (all of them, oldest first). The overview's own ask list is never shown: its
  * answer rule lets an asker's own follow-up close an ask. Until the queue arrives the asks are unmeasured; if it can't
  * be read they show as unavailable with Retry. */
-export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = [], queue: CatchUpAsks = "loading"): CatchUpDetail {
+export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = [], queue: CatchUpAsks = "loading",
+  choices: ReadonlyMap<string, AskChoiceState> = new Map()): CatchUpDetail {
   const roster: HomePeopleInput = { workspaceId: row.workspace_id, viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
     agents: row.people.flatMap(person => person.agents.map(agent => ({ principalId: agent.principal_id, name: agent.name,
@@ -304,7 +307,7 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
   if (queue === "unavailable") pushNeed(needsYou, asksUnavailableCard(workspace));
-  else if (queue !== "loading") for (const ask of queue.asks) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now));
+  else if (queue !== "loading") for (const ask of queue.asks) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now, choices.get(ask.signal_id)));
   for (const todo of row.needs_you.assigned) pushNeed(needsYou, assignedNeedsYouCard(todo, workspace));
   for (const todo of row.needs_you.waiting) {
     const card = waitingNeedsYouCard(todo, historicalPeople, workspace);

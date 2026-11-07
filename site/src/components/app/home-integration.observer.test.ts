@@ -42,6 +42,9 @@ const MESSAGE_STATUS_STUBS = {
   refreshMessageStatus: async () => undefined,
   appendMessageStatus: () => undefined,
   resetMessageStatus: () => undefined,
+  refreshChoices: async () => undefined,
+  appendChoices: () => undefined,
+  resetChoices: () => undefined,
 };
 
 async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {

@@ -1180,7 +1180,7 @@ import "../../styles/kylon-command-palette.css";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
-  import type { TodoVM, AgentVM } from "../../lib/home-types";
+  import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
   import { listsAndDocsFact } from "../../lib/home-agent-copy";
@@ -1192,7 +1192,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
-  import { statusLine, needsYouCard } from "../../lib/home-primitives";
+  import { statusLine, needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -1307,6 +1307,8 @@ import "../../styles/kylon-command-palette.css";
     workspaceChannels,
     channelUnread,
     messageStatus,
+    askChoices,
+    answerChoice,
     type ChannelUnread,
     createChannel,
     renameChannel,
@@ -1352,6 +1354,7 @@ import "../../styles/kylon-command-palette.css";
     type AgentStatusEvent,
     type MessageStatus,
   } from "../../lib/message-status";
+  import { choiceAnswerText, ASK_CHOICES_BATCH, type AskChoiceState } from "../../lib/choices";
   import {
     agentActivityFrameIsNewer,
     agentActivityPanelView,
@@ -1958,6 +1961,34 @@ import "../../styles/kylon-command-palette.css";
     let messageStatusGeneration = 0;
     let messageStatusExpiryTimer: number | undefined;
     const agentStatusEvents = new Map<string, AgentStatusEvent>();
+    /* Interactive replies: the stored choices on asks addressed to the signed-in person. Choices are
+       created only while the server's flag is on; ones created earlier stay readable after it is
+       turned off, while every choice command is refused. */
+    let choiceRows = new Map<string, AskChoiceState>();
+    let choiceCheckedAt = 0;
+    let choiceGeneration = 0;
+    const choiceErrors = new Map<string, string>();
+    /* A click's ticket: the account, workspace, request and reset epoch it was made in. Its
+       completion changes nothing unless the ticket is still the ask's own and all four still hold;
+       a stale ticket is never pending, so it can't hold a button disabled either. */
+    type ChoiceTicket = { viewer: string; workspaceId: string; version: number; epoch: number };
+    let choiceTickets = new Map<string, ChoiceTicket>();
+    let choiceEpoch = 0;
+    const choiceTicketLive = (ticket: ChoiceTicket): boolean =>
+      ticket.viewer === (session?.user.id ?? "") && ticket.workspaceId === activeWorkspaceId &&
+      ticket.version === requestVersion && ticket.epoch === choiceEpoch;
+    const choiceIsPending = (signalId: string): boolean => {
+      const ticket = choiceTickets.get(signalId);
+      return ticket !== undefined && choiceTicketLive(ticket);
+    };
+    const resetChoices = (): void => {
+      choiceRows = new Map();
+      choiceCheckedAt = 0;
+      choiceGeneration += 1;
+      choiceEpoch += 1;
+      choiceTickets = new Map();
+      choiceErrors.clear();
+    };
     const resetMessageStatus = (): void => {
       messageStatusRows = new Map();
       messageStatusCheckedAt = 0;
@@ -5182,6 +5213,12 @@ import "../../styles/kylon-command-palette.css";
       const viewerName = members.find(member => member.userId === homeViewerId())?.name ||
         catchUpData.flatMap(entry => entry.detail?.people.groups ?? []).find(group => group.person.id === homeViewerId())?.person.name;
       const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
+      for (const item of vm.needsYou) {
+        if (!item.choices) continue;
+        if (catchUpChoiceIsPending(item.id)) item.choices.pending = true;
+        const error = catchUpChoiceErrors.get(item.id);
+        if (error) item.choices.error = error;
+      }
       const key = homeStructureKey(vm);
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
@@ -5189,6 +5226,7 @@ import "../../styles/kylon-command-palette.css";
       const view = buildCatchUp(document, vm, {
         onNeedsYouAction: (action, item) => {
           if (action === ASKS_UNAVAILABLE_ACTION) { void loadHomeCatchUp(); return; }
+          if (action.startsWith(NEEDS_YOU_CHOICE_ACTION)) { void sendCatchUpChoice(item, action.slice(NEEDS_YOU_CHOICE_ACTION.length)); return; }
           if (item.primary.href) navigateHomeHref(item.primary.href);
         },
         onShowMoreNeedsYou: () => { catchUpExpanded = true; renderHomeCatchUp(); },
@@ -5202,8 +5240,42 @@ import "../../styles/kylon-command-palette.css";
       homeCatchUpKey = key;
       renderHomeRail();
     };
+    /* Waiting on you: a click on an ask's choice sends answer_choice. On success the catch-up reloads and the
+       answered ask leaves the queue; a refusal shows the server's message on the card. */
+    /* Each click holds a ticket for the account and Catch up load it was made in; any reload or account
+       change makes it stale. A stale completion changes nothing, and a stale ticket is never pending. */
+    type CatchUpChoiceTicket = { viewer: string; generation: number };
+    const catchUpChoiceTickets = new Map<string, CatchUpChoiceTicket>();
+    const catchUpChoiceErrors = new Map<string, string>();
+    const catchUpChoiceTicketLive = (ticket: CatchUpChoiceTicket): boolean =>
+      ticket.viewer === homeViewerId() && ticket.generation === catchUpGeneration && homeRoute.view === "catchup";
+    const catchUpChoiceIsPending = (id: string): boolean => {
+      const ticket = catchUpChoiceTickets.get(id);
+      return ticket !== undefined && catchUpChoiceTicketLive(ticket);
+    };
+    const sendCatchUpChoice = async (item: NeedsYouVM, optionId: string): Promise<void> => {
+      const activeSession = session;
+      if (!activeSession || sampleMode || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const ticket: CatchUpChoiceTicket = { viewer: activeSession.user.id, generation: catchUpGeneration };
+      catchUpChoiceTickets.set(item.id, ticket);
+      catchUpChoiceErrors.delete(item.id);
+      renderHomeCatchUp();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, optionId);
+      } catch {
+        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+      }
+      if (catchUpChoiceTickets.get(item.id) !== ticket || !catchUpChoiceTicketLive(ticket)) return;
+      catchUpChoiceTickets.delete(item.id);
+      if (result.ok) { void loadHomeCatchUp(); return; }
+      catchUpChoiceErrors.set(item.id, result.message);
+      renderHomeCatchUp();
+    };
     const loadHomeCatchUp = async (): Promise<void> => {
       const generation = ++catchUpGeneration;
+      catchUpChoiceTickets.clear();
+      catchUpChoiceErrors.clear();
       const viewer = homeViewerId();
       const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
       catchUpExpanded = false;
@@ -5234,7 +5306,11 @@ import "../../styles/kylon-command-palette.css";
           // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
-          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable"), signals: latest };
+          // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
+          const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+          const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
+          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
+            new Map((choices ?? []).map(choice => [choice.signalId, choice]))), signals: latest };
         }
         const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
@@ -6311,6 +6387,97 @@ import "../../styles/kylon-command-palette.css";
 
     /* Repaint when the soonest Working expires, so a crashed agent stops looking busy even if no
        idle event arrives. */
+    /* Choice buttons under an ask addressed to the signed-in person: text only, at least 44px.
+       A click sends answer_choice; the server checks everything and records an ordinary reply. */
+    const appendChoices = (body: HTMLElement, signal: Signal): void => {
+      const state = choiceRows.get(signal.id);
+      if (!state) return;
+      const answered = choiceAnswerText(state);
+      if (answered !== null) {
+        const line = document.createElement("p");
+        line.className = "dashboard__choice-answer";
+        line.textContent = answered;
+        body.append(line);
+        return;
+      }
+      const group = document.createElement("div");
+      group.className = "dashboard__choices";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", "Choices");
+      for (const option of state.options) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "dashboard__choice";
+        button.textContent = option.label;
+        button.disabled = choiceIsPending(signal.id);
+        button.addEventListener("click", () => void sendChoice(signal.id, option.id));
+        group.append(button);
+      }
+      body.append(group);
+      const error = choiceErrors.get(signal.id);
+      if (error) {
+        const note = document.createElement("p");
+        note.className = "dashboard__choice-error";
+        note.setAttribute("role", "alert");
+        note.textContent = error;
+        body.append(note);
+      }
+    };
+
+    const sendChoice = async (signalId: string, optionId: string): Promise<void> => {
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      if (!activeSession || !workspaceId || choiceIsPending(signalId)) return;
+      const ticket: ChoiceTicket = { viewer: activeSession.user.id, workspaceId, version: requestVersion, epoch: choiceEpoch };
+      choiceTickets.set(signalId, ticket);
+      choiceErrors.delete(signalId);
+      renderFeed();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, optionId);
+      } catch {
+        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+      }
+      // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
+      if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
+      choiceTickets.delete(signalId);
+      const state = choiceRows.get(signalId);
+      if (result.ok && state) {
+        choiceRows.set(signalId, { ...state, answer: { optionId: result.optionId, byViewer: true } });
+      } else if (!result.ok) {
+        choiceErrors.set(signalId, result.message);
+      }
+      renderFeed();
+      void refreshChoices(workspaceId, ticket.version, true);
+    };
+
+    const refreshChoices = async (workspaceId: string, version: number, force = false): Promise<void> => {
+      const viewerId = session?.user.id ?? "";
+      if (sampleMode || !viewerId) return;
+      const now = Date.now();
+      if (!force && now - choiceCheckedAt < 20_000) return;
+      const ids = signals
+        .filter((signal) => signal.kind === "ask" && signal.to === viewerId && signal.threadRootId === null)
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+        .slice(0, 50)
+        .map((signal) => signal.id);
+      if (ids.length === 0) return;
+      choiceCheckedAt = now;
+      const generation = ++choiceGeneration;
+      let rows: AskChoiceState[] | null;
+      try {
+        rows = await askChoices(workspaceId, ids);
+      } catch {
+        rows = null;
+      }
+      if (generation !== choiceGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      if (rows === null) return;
+      const next = new Map(rows.map((row) => [row.signalId, row]));
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...choiceRows]);
+      choiceRows = next;
+      if (changed && !addAgentViewOpen()) renderFeed();
+    };
+
     const scheduleMessageStatusExpiry = (): void => {
       window.clearTimeout(messageStatusExpiryTimer);
       messageStatusExpiryTimer = undefined;
@@ -7107,6 +7274,7 @@ import "../../styles/kylon-command-palette.css";
         }
         appendDeliveryReceipt(body, signal);
         appendMessageStatus(body, signal);
+        appendChoices(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
            `threadRootBlock` is every rule `resolveThreadRoot` applies, in its order: directed
            or expiring inside the server's one-second margin (both 404), then an archived
@@ -7424,6 +7592,7 @@ import "../../styles/kylon-command-palette.css";
       renderFeed();
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
+      void refreshChoices(workspaceId, version);
     };
 
     const refreshLatestSignals = async (): Promise<void> => {
@@ -7477,6 +7646,7 @@ import "../../styles/kylon-command-palette.css";
         }
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
            offers a catch-up, and the shared gate keeps the requests bounded. */
         void refreshPendingAccess(workspaceId, version);
@@ -7724,6 +7894,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
+      resetChoices();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -8454,6 +8625,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
+      resetChoices();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -9949,6 +10121,7 @@ import "../../styles/kylon-command-palette.css";
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
+        resetChoices();
       }
       syncChannelUrl();
       renderChannelRail();
@@ -12057,6 +12230,7 @@ import "../../styles/kylon-command-palette.css";
         renderFeed("latest");
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
       } catch (caught) {
         /* THE SEND'S OWN TEARDOWN COMES FIRST, before any question about the screen. This
            block used to open with `if (version !== requestVersion || workspaceId !==

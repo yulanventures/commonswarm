@@ -40,6 +40,7 @@ import {
   type ComposerRecipient,
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
+import { ASK_CHOICES_BATCH, parseAskChoices, type AskChoiceState } from "./choices.js";
 import {
   MESSAGE_STATUS_BATCH,
   parseAgentStatusEvent,
@@ -3558,6 +3559,47 @@ export async function messageStatus(workspaceId: string, signalIds: readonly str
     }).abortSignal(signal));
   if (result.error) return null;
   return parseMessageStatus(result.data);
+}
+
+/** Interactive replies: the stored choices (and any answer) for up to 50 asks the signed-in person can read.
+ * `null` when the read is unavailable or malformed; asks without choices simply aren't in the result. */
+export async function askChoices(workspaceId: string, signalIds: readonly string[]): Promise<AskChoiceState[] | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  if (signalIds.length === 0) return [];
+  const result = await readWithDeadline("Ask choices", signal =>
+    api.schema("swarm_read").rpc("ask_choices", {
+      p_workspace_id: workspaceId,
+      p_signal_ids: signalIds.slice(0, ASK_CHOICES_BATCH),
+    }).abortSignal(signal));
+  if (result.error) return null;
+  return parseAskChoices(result.data);
+}
+
+export type AnswerChoiceResult = { ok: true; optionId: string } | { ok: false; message: string };
+
+/** A person's click on one of an ask's choices: the server checks everything and records an ordinary reply. */
+export async function answerChoice(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  signalId: string,
+  optionId: string,
+): Promise<AnswerChoiceResult> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "answer_choice", signal_id: signalId, option_id: optionId },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") {
+    const answer = (body as { choice_answer?: { option_id?: unknown } }).choice_answer;
+    return { ok: true, optionId: typeof answer?.option_id === "string" ? answer.option_id : optionId };
+  }
+  const message = typeof (body as { message?: unknown }).message === "string"
+    ? (body as { message: string }).message
+    : "That choice couldn't be sent. Reply in words instead.";
+  return { ok: false, message };
 }
 
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */
