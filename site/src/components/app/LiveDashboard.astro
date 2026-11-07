@@ -1961,18 +1961,32 @@ import "../../styles/kylon-command-palette.css";
     let messageStatusGeneration = 0;
     let messageStatusExpiryTimer: number | undefined;
     const agentStatusEvents = new Map<string, AgentStatusEvent>();
-    /* Interactive replies: the stored choices on asks addressed to the signed-in person. Rows exist
-       only when the server's flag is on, so with it off nothing renders. */
+    /* Interactive replies: the stored choices on asks addressed to the signed-in person. Choices are
+       created only while the server's flag is on; ones created earlier stay readable after it is
+       turned off, while every choice command is refused. */
     let choiceRows = new Map<string, AskChoiceState>();
     let choiceCheckedAt = 0;
     let choiceGeneration = 0;
-    const choicePending = new Set<string>();
     const choiceErrors = new Map<string, string>();
+    /* A click's ticket: the account, workspace, request and reset epoch it was made in. Its
+       completion changes nothing unless the ticket is still the ask's own and all four still hold;
+       a stale ticket is never pending, so it can't hold a button disabled either. */
+    type ChoiceTicket = { viewer: string; workspaceId: string; version: number; epoch: number };
+    let choiceTickets = new Map<string, ChoiceTicket>();
+    let choiceEpoch = 0;
+    const choiceTicketLive = (ticket: ChoiceTicket): boolean =>
+      ticket.viewer === (session?.user.id ?? "") && ticket.workspaceId === activeWorkspaceId &&
+      ticket.version === requestVersion && ticket.epoch === choiceEpoch;
+    const choiceIsPending = (signalId: string): boolean => {
+      const ticket = choiceTickets.get(signalId);
+      return ticket !== undefined && choiceTicketLive(ticket);
+    };
     const resetChoices = (): void => {
       choiceRows = new Map();
       choiceCheckedAt = 0;
       choiceGeneration += 1;
-      choicePending.clear();
+      choiceEpoch += 1;
+      choiceTickets = new Map();
       choiceErrors.clear();
     };
     const resetMessageStatus = (): void => {
@@ -5201,7 +5215,7 @@ import "../../styles/kylon-command-palette.css";
       const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
       for (const item of vm.needsYou) {
         if (!item.choices) continue;
-        if (catchUpChoicePending.has(item.id)) item.choices.pending = true;
+        if (catchUpChoiceIsPending(item.id)) item.choices.pending = true;
         const error = catchUpChoiceErrors.get(item.id);
         if (error) item.choices.error = error;
       }
@@ -5228,13 +5242,22 @@ import "../../styles/kylon-command-palette.css";
     };
     /* Waiting on you: a click on an ask's choice sends answer_choice. On success the catch-up reloads and the
        answered ask leaves the queue; a refusal shows the server's message on the card. */
-    const catchUpChoicePending = new Set<string>();
+    /* Each click holds a ticket for the account and Catch up load it was made in; any reload or account
+       change makes it stale. A stale completion changes nothing, and a stale ticket is never pending. */
+    type CatchUpChoiceTicket = { viewer: string; generation: number };
+    const catchUpChoiceTickets = new Map<string, CatchUpChoiceTicket>();
     const catchUpChoiceErrors = new Map<string, string>();
+    const catchUpChoiceTicketLive = (ticket: CatchUpChoiceTicket): boolean =>
+      ticket.viewer === homeViewerId() && ticket.generation === catchUpGeneration && homeRoute.view === "catchup";
+    const catchUpChoiceIsPending = (id: string): boolean => {
+      const ticket = catchUpChoiceTickets.get(id);
+      return ticket !== undefined && catchUpChoiceTicketLive(ticket);
+    };
     const sendCatchUpChoice = async (item: NeedsYouVM, optionId: string): Promise<void> => {
       const activeSession = session;
-      if (!activeSession || sampleMode || catchUpChoicePending.has(item.id)) return;
-      const generation = catchUpGeneration;
-      catchUpChoicePending.add(item.id);
+      if (!activeSession || sampleMode || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
+      const ticket: CatchUpChoiceTicket = { viewer: activeSession.user.id, generation: catchUpGeneration };
+      catchUpChoiceTickets.set(item.id, ticket);
       catchUpChoiceErrors.delete(item.id);
       renderHomeCatchUp();
       let result: Awaited<ReturnType<typeof answerChoice>>;
@@ -5243,14 +5266,15 @@ import "../../styles/kylon-command-palette.css";
       } catch {
         result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
       }
-      catchUpChoicePending.delete(item.id);
-      if (generation !== catchUpGeneration) return;
+      if (catchUpChoiceTickets.get(item.id) !== ticket || !catchUpChoiceTicketLive(ticket)) return;
+      catchUpChoiceTickets.delete(item.id);
       if (result.ok) { void loadHomeCatchUp(); return; }
       catchUpChoiceErrors.set(item.id, result.message);
       renderHomeCatchUp();
     };
     const loadHomeCatchUp = async (): Promise<void> => {
       const generation = ++catchUpGeneration;
+      catchUpChoiceTickets.clear();
       catchUpChoiceErrors.clear();
       const viewer = homeViewerId();
       const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
@@ -5282,7 +5306,7 @@ import "../../styles/kylon-command-palette.css";
           // asks show as unavailable with Retry; the overview's own ask list is never shown. Assigned cards name nobody, so this does not read each to-do.
           const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
-          // Stored choices on the queued asks; with interactive replies off there are none, and a failed read shows plain asks.
+          // Stored choices on the queued asks (created only while interactive replies are on); a failed read shows plain asks.
           const askIds = (queue?.asks ?? []).slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
           const choices = askIds.length ? await askChoices(workspace.id, askIds).catch(() => null) : null;
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, [], queue ?? "unavailable",
@@ -6385,7 +6409,7 @@ import "../../styles/kylon-command-palette.css";
         button.type = "button";
         button.className = "dashboard__choice";
         button.textContent = option.label;
-        button.disabled = choicePending.has(signal.id);
+        button.disabled = choiceIsPending(signal.id);
         button.addEventListener("click", () => void sendChoice(signal.id, option.id));
         group.append(button);
       }
@@ -6403,8 +6427,9 @@ import "../../styles/kylon-command-palette.css";
     const sendChoice = async (signalId: string, optionId: string): Promise<void> => {
       const activeSession = session;
       const workspaceId = activeWorkspaceId;
-      if (!activeSession || !workspaceId || choicePending.has(signalId)) return;
-      choicePending.add(signalId);
+      if (!activeSession || !workspaceId || choiceIsPending(signalId)) return;
+      const ticket: ChoiceTicket = { viewer: activeSession.user.id, workspaceId, version: requestVersion, epoch: choiceEpoch };
+      choiceTickets.set(signalId, ticket);
       choiceErrors.delete(signalId);
       renderFeed();
       let result: Awaited<ReturnType<typeof answerChoice>>;
@@ -6413,8 +6438,9 @@ import "../../styles/kylon-command-palette.css";
       } catch {
         result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
       }
-      choicePending.delete(signalId);
-      if (workspaceId !== activeWorkspaceId) return;
+      // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
+      if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
+      choiceTickets.delete(signalId);
       const state = choiceRows.get(signalId);
       if (result.ok && state) {
         choiceRows.set(signalId, { ...state, answer: { optionId: result.optionId, byViewer: true } });
@@ -6422,7 +6448,7 @@ import "../../styles/kylon-command-palette.css";
         choiceErrors.set(signalId, result.message);
       }
       renderFeed();
-      void refreshChoices(workspaceId, requestVersion, true);
+      void refreshChoices(workspaceId, ticket.version, true);
     };
 
     const refreshChoices = async (workspaceId: string, version: number, force = false): Promise<void> => {

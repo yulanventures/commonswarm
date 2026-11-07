@@ -113,7 +113,7 @@ test("the live Catch up loader takes asks from the queue; when the queue can't b
   const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [{ ...row, needs_you: { ...row.needs_you, asks: [overviewAsk] } }] };
   const load = async (decisionQueue, choiceRows = []) => {
     const paints = []; const reads = []; const choiceReads = [];
-    const context = { catchUpGeneration: 0, catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50,
+    const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50,
       askChoices: async (workspaceId, ids) => { choiceReads.push([workspaceId, ids]); return choiceRows; }, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: [{ id: "W", name: "Home" }],
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
