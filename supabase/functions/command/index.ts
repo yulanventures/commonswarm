@@ -10874,15 +10874,15 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   }
   const viewer = auth.actor.user;
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${command.signal_id}`}, 0))`;
-  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
-  if (replay !== null) return replay;
+  // The current ask and person come first: nothing replays for an ask this person can't answer now.
   const [ask] = await tx<{
     id: string; from_kind: string; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
-    until: Date; live: boolean; options: Array<{ id: string; label: string }>;
+    until: Date; live: boolean; answered: boolean; options: Array<{ id: string; label: string }>;
   }[]>`
     SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
-      s.thread_root_id, s.until, s.until > statement_timestamp() AS live, c.options
+      s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
+      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options
     FROM swarm.ask_choices c
     JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
     WHERE c.workspace_id = ${route.workspaceId}::uuid AND c.signal_id = ${command.signal_id}::uuid
@@ -10894,12 +10894,23 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     await audit("authz", "answer_choice_not_addressed");
     return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
   }
+  if (!ask.live) {
+    await audit("domain", "ask_expired");
+    return ctx.decided({ status: 409, body: { error: "ask_expired", message: "This ask has expired." } });
+  }
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  if (replay !== null) return replay;
   const [mine] = await tx<{ option_id: string; reply_signal_id: string }[]>`
     SELECT option_id, reply_signal_id FROM swarm.ui_actions
     WHERE signal_id = ${ask.id}::uuid AND actor_user_id = ${viewer}::uuid AND state = 'completed'
   `;
   if (mine !== undefined) {
-    // The same person retrying (a new click or a lost response): their answer, unchanged.
+    if (mine.option_id !== command.option_id) {
+      await audit("domain", "choice_conflict");
+      return ctx.decided({ status: 409, body: { error: "choice_conflict",
+        message: "You already chose a different option for this ask." } });
+    }
+    // The same person retrying the same choice (a lost response or a second click): their answer.
     await audit("replayed", "answer_choice_already_answered_by_you");
     return ctx.decided({ status: 200, body: { status: "accepted", ok: true, event_ids: [],
       choice_answer: { signal_id: ask.id, option_id: mine.option_id, reply_signal_id: mine.reply_signal_id },
@@ -10924,11 +10935,11 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     await audit("domain", error);
     return ctx.decided({ status, body: { error, message } });
   };
+  // The canonical answered rule (a typed reply counts) or an earlier completed choice: too late.
   const [won] = await tx<{ n: number }[]>`
     SELECT count(*)::int AS n FROM swarm.ui_actions WHERE signal_id = ${ask.id}::uuid AND state = 'completed'
   `;
-  if (won!.n > 0) return await fail(409, "ask_answered", "This ask already has an answer.");
-  if (!ask.live) return await fail(409, "ask_expired", "This ask has expired.");
+  if (ask.answered || won!.n > 0) return await fail(409, "ask_answered", "This ask already has an answer.");
   const option = ask.options.find((candidate) => candidate.id === command.option_id);
   if (option === undefined) return await fail(400, "unknown_option", "That isn't one of this ask's choices.");
   await tx`UPDATE swarm.ui_actions SET state = 'approved' WHERE action_id = ${actionId}::uuid`;
@@ -13319,6 +13330,18 @@ async function handleTransaction(
      */
     let renewalRecovery = false;
 
+    /* Interactive replies: with the flag off nothing replays; with it on, choice commands replay
+     * only inside their own handlers, after the current ask and person checks. */
+    const choiceKind = kind === "ask_choice" || kind === "answer_choice";
+    if (choiceKind && !interactiveRepliesEnabled) {
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "domain", reason: "interactive_replies_unavailable", detail: ignoredIdentity, hash,
+      });
+      return { status: 404, body: { error: "interactive_replies_unavailable",
+        message: "Choice asks aren't turned on here." } };
+    }
+
     await beforeStep(7);
     const existingRows = await tx<
       {
@@ -13335,7 +13358,7 @@ async function handleTransaction(
         AND command_id = ${commandId}
       LIMIT 1
     `;
-    const existing = existingRows[0];
+    const existing = choiceKind ? undefined : existingRows[0];
     if (existing) {
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
@@ -13648,6 +13671,17 @@ async function handleTransaction(
     }
 
     if (command.kind === "post_signal") {
+      /* A reply to a choice ask takes the same per-ask lock answer_choice holds, so a typed reply
+       * and a click can't both count as the first answer. Other posts are untouched. */
+      if (typeof command.in_reply_to === "string") {
+        const [choiceAsk] = await tx<{ signal_id: string }[]>`
+          SELECT signal_id FROM swarm.ask_choices
+          WHERE workspace_id = ${route.workspaceId}::uuid AND signal_id = ${command.in_reply_to}::uuid
+        `;
+        if (choiceAsk !== undefined) {
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${choiceAsk.signal_id}`}, 0))`;
+        }
+      }
       const namedTarget = await resolveSignalWriteTarget(
         tx,
         route,

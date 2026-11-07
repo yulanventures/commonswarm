@@ -311,8 +311,11 @@ test("an agent's choice ask stores its options once; the addressed person's clic
   assert.equal(reply.in_reply_to, askId);
   assert.deepEqual((await actions(askId)).map((a) => [a.state, a.error_code]), [["failed", "unknown_option"], ["completed", null]]);
 
-  const again = await answer(f.ownerJwt, askId, "wait");
-  assert.equal(again.status, 200, "the same person's retry returns their first answer");
+  const changed = await answer(f.ownerJwt, askId, "wait");
+  assert.equal(changed.status, 409, "a different option after answering conflicts");
+  assert.equal(changed.body.error, "choice_conflict");
+  const again = await answer(f.ownerJwt, askId, "ship");
+  assert.equal(again.status, 200, "the same person's retry of the same choice returns their answer");
   assert.equal((again.body.choice_answer as { option_id: string }).option_id, "ship");
   const [replies] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.signals WHERE in_reply_to = ${askId}::uuid`;
   assert.equal(replies!.n, 1, "one reply, whatever the retries");
@@ -340,5 +343,29 @@ test("only the addressed person may answer; attempts are capped; bad asks are re
     [{ id: "a", label: "x", url: "https://example.test" }, OPTIONS[1]],
   ]) {
     assert.equal((await askOwner(options)).status, 400, JSON.stringify(options).slice(0, 80));
+  }
+});
+
+test("a typed reply first means a later click is too late; an expired ask replays nothing", async () => {
+  const typed = await askOwner();
+  const typedId = (typed.body.signal as { id: string }).id;
+  const words = await postCommand(f.ownerJwt, f.workspaceA, {
+    kind: "post_signal", signal_kind: "note", body: "Let's wait.", to_user_id: null,
+    to_agent_principal_id: f.principal, in_reply_to: typedId, about: null,
+  });
+  assert.equal(words.status, 200, JSON.stringify(words.body));
+  const late = await answer(f.ownerJwt, typedId, "ship");
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, "ask_answered", "the canonical answered rule counts a typed reply");
+
+  const expiring = await askOwner();
+  const expiringId = (expiring.body.signal as { id: string }).id;
+  const original = randomUUID();
+  assert.equal((await answer(f.ownerJwt, expiringId, "ship", original)).status, 200);
+  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second' WHERE id = ${expiringId}::uuid`;
+  for (const commandId of [original, randomUUID()]) {
+    const retry = await answer(f.ownerJwt, expiringId, "ship", commandId);
+    assert.equal(retry.status, 409, "nothing replays once the ask has expired");
+    assert.equal(retry.body.error, "ask_expired");
   }
 });
