@@ -12,6 +12,10 @@ import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
 import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
 import { listChannelsAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
+import {
+  getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
+  type MemoryKind, type MemorySaveInput,
+} from "../cloud/memory.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { signalDuration } from "../cloud/signal-duration.js";
 import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
@@ -183,6 +187,53 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             ...(typeof raw.after_id === "string" ? { after_id: raw.after_id.toLowerCase() } : {}),
             ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
           }, auth.fetcher));
+          break;
+        }
+        case "memory_save":
+        case "memory_search":
+        case "memory_get":
+        case "memory_forget": {
+          const raw = selected.arguments as Record<string, unknown>;
+          let input: MemorySaveInput | undefined;
+          if (tool.name === "memory_save") {
+            const subject = memorySubject(String(raw.subject));
+            if ("problem" in subject) throw new McpError(ErrorCode.InvalidParams, subject.problem);
+            input = {
+              kind: raw.kind as MemoryKind, subject: subject.subject, statement: String(raw.statement).normalize("NFC").trim(),
+              evidence: Array.isArray(raw.evidence) ? raw.evidence as string[] : [],
+              ...(typeof raw.expected_revision === "number" ? { expected_revision: raw.expected_revision } : {}),
+            };
+            const problem = memorySaveProblem(input);
+            if (problem !== null) throw new McpError(ErrorCode.InvalidParams, problem);
+          }
+          const auth = await authenticated();
+          const target = profileTarget(profile);
+          try {
+            output = tool.mapResult(
+              tool.name === "memory_save"
+                ? await sendMemoryCommand(target, auth.token, profile.workspace_id, { kind: "memory_save", input: input! }, auth.fetcher)
+                : tool.name === "memory_forget"
+                  ? await sendMemoryCommand(target, auth.token, profile.workspace_id,
+                    { kind: "memory_forget", memory_id: String(raw.memory_id) }, auth.fetcher)
+                  : tool.name === "memory_get"
+                    ? await getMemoryAsAgent(target, auth.token, profile.workspace_id, String(raw.memory_id), auth.fetcher)
+                    : await searchMemoriesAsAgent(target, auth.token, profile.workspace_id, {
+                      ...(typeof raw.query === "string" ? { query: raw.query } : {}),
+                      ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
+                    }, auth.fetcher));
+          } catch (error) {
+            if (!(error instanceof MemoryError)) throw error;
+            // A save that hit an existing subject returns that memory, so the agent can decide without a search.
+            const refusal = {
+              error: error.code, message: error.message,
+              ...(error.noResponse ? { outcome: "unknown", next_step: "Call the same tool again." } : {}),
+              ...(error.memory === undefined ? {} : {
+                untrusted_content: true, memory: error.memory,
+                next_step: `To replace it, call memory_save again with expected_revision ${error.memory.revision}.`,
+              }),
+            };
+            return { isError: true, content: [{ type: "text", text: JSON.stringify(capMcpResult(refusal)) }] };
+          }
           break;
         }
         case "roster": {
