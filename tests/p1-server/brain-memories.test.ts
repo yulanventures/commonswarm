@@ -65,7 +65,7 @@ async function asCaller<T>(role: string, claims: Record<string, unknown>, query:
     await tx.unsafe(`SET LOCAL ROLE ${role}`);
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ role: "authenticated", ...claims })}, true)`;
     return await query(tx);
-  });
+  }) as T;
 }
 
 const search = (ws: string, claims: Record<string, unknown>, q: string | null = null, role = "authenticated") =>
