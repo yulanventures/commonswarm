@@ -9,7 +9,7 @@ import {
   type AgentActivityFrameRequest,
   type AgentActivityTransport,
 } from "../src/listener/activity.js";
-import { parseActivityRequest } from "../supabase/functions/activity/core.js";
+import { ACTIVITY_STATUS_LABELS, parseActivityRequest, parseActivityStatusRequest } from "../supabase/functions/activity/core.js";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SIGNAL_ID = "22222222-2222-4222-8222-222222222222";
@@ -301,4 +301,38 @@ test("activity parser rejects fields that could carry terminal or message data",
   for (const forbidden of ["message_body", "stderr_tail", "terminal_bytes", "raw_input"]) {
     assert.equal(parseActivityRequest({ ...valid, [forbidden]: "private" }), null);
   }
+});
+
+test("a status frame names one message and a closed label, and carries no title, body or time", () => {
+  const working = {
+    version: 1,
+    kind: "status",
+    workspace_id: WORKSPACE_ID,
+    stream_id: STREAM_ID,
+    sequence: 2,
+    state: "working",
+    signal_id: SIGNAL_ID,
+    label: "editing",
+  };
+  const idle = { ...working, state: "idle", signal_id: null, label: null };
+  assert.ok(parseActivityStatusRequest(working), "working is the positive control");
+  assert.ok(parseActivityStatusRequest(idle), "idle is the positive control");
+  for (const label of ACTIVITY_STATUS_LABELS) assert.ok(parseActivityStatusRequest({ ...working, label }));
+
+  for (const label of ["Edit", "Bash", "running a command", "cat ~/.ssh/id_rsa", "https://example.test", "", null]) {
+    assert.equal(parseActivityStatusRequest({ ...working, label }), null, `label ${String(label)}`);
+  }
+  for (const extra of ["tool_title", "tool_name", "tool_input", "until", "expires_at", "message_body", "phase", "elapsed_ms"]) {
+    assert.equal(parseActivityStatusRequest({ ...working, [extra]: null }), null, `key ${extra}`);
+    assert.equal(parseActivityStatusRequest({ ...idle, [extra]: null }), null, `idle key ${extra}`);
+  }
+  assert.equal(parseActivityStatusRequest({ ...idle, label: "thinking" }), null, "idle carries no label");
+  assert.equal(parseActivityStatusRequest({ ...idle, signal_id: SIGNAL_ID }), null, "idle names no message");
+  assert.equal(parseActivityStatusRequest({ ...working, signal_id: null }), null, "working names a message");
+  assert.equal(parseActivityStatusRequest({ ...working, state: "replied" }), null);
+  assert.equal(parseActivityStatusRequest({ ...working, sequence: 0 }), null);
+
+  // The two shapes never cross: an activity frame is not a status frame, and the reverse.
+  assert.equal(parseActivityRequest(working), null);
+  assert.equal(parseActivityStatusRequest({ ...working, kind: undefined }), null);
 });

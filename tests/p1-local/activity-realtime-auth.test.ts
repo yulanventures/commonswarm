@@ -241,7 +241,7 @@ test("another workspace member cannot join or receive the private activity chann
     sequence: 1,
     phase: "tool-running",
     signal_id: randomUUID(),
-    tool_title: `Read swm_\u200bagt_${"z".repeat(43)} record`,
+    tool_title: `Inspect /private/finance.txt credential=CANARY_PRIVATE swm_\u200bagt_${"z".repeat(43)}`,
     elapsed_ms: 12,
   };
   const published = await fetch(`${local.API_URL}/functions/v1/activity`, {
@@ -269,12 +269,12 @@ test("another workspace member cannot join or receive the private activity chann
     agent.principalId,
     "the edge must derive the publishing principal from the agent token",
   );
-  assert.equal(
-    (ownerFrames[1] as { payload?: { toolTitle?: unknown } } | undefined)
-      ?.payload?.toolTitle,
-    "Read [redacted-credential] record",
-    "the edge must redact a direct caller even if the listener sanitizer is bypassed",
-  );
+  const legacy = (ownerFrames[1] as { payload?: Record<string, unknown> } | undefined)?.payload ?? {};
+  assert.equal(legacy.toolTitle, null, "no tool title reaches the workspace topic");
+  assert.equal(legacy.signalId, null, "no message id reaches the workspace topic");
+  assert.equal(legacy.phase, "tool-running", "the coarse phase remains");
+  assert.doesNotMatch(JSON.stringify(ownerFrames[1]), new RegExp(`finance|CANARY_PRIVATE|swm_|${requestBody.signal_id}`),
+    "whatever an old or direct client sends, the broadcast carries no private detail");
 
   const crossWorkspace = await fetch(`${local.API_URL}/functions/v1/activity`, {
     method: "POST",
@@ -291,4 +291,86 @@ test("another workspace member cannot join or receive the private activity chann
 
   await owner.client.removeChannel(allowed.channel);
   await outsider.client.removeChannel(refused.channel);
+});
+
+test("a status frame is bound to an addressed message, expires by server time and broadcasts no id or label", async () => {
+  const owner = await newMember("status");
+  const topic = activityTopic(owner.workspaceId);
+  const frames: Array<{ payload?: Record<string, unknown> }> = [];
+  const joined = await subscribe(owner.client, topic, (frame) => {
+    frames.push(frame as { payload?: Record<string, unknown> });
+  });
+  assert.equal(joined.status, "SUBSCRIBED");
+  const agent = await newAgent(owner.userId, owner.workspaceId);
+  await sql`INSERT INTO swarm.streams (stream_id, workspace_id, kind)
+    VALUES (${randomUUID()}::uuid, ${owner.workspaceId}::uuid, 'workspace')`;
+  const message = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until)
+    VALUES (${message}::uuid, ${owner.workspaceId}::uuid, ${owner.userId}::uuid, 'user', ${agent.principalId}::uuid,
+      'ask', 'private question', statement_timestamp() + interval '1 day')`;
+  const notAddressed = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until)
+    VALUES (${notAddressed}::uuid, ${owner.workspaceId}::uuid, ${owner.userId}::uuid, 'user',
+      'note', 'for everyone', statement_timestamp() + interval '1 day')`;
+
+  const stream = randomUUID();
+  const post = (body: Record<string, unknown>) => fetch(`${local.API_URL}/functions/v1/activity`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${agent.token}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ version: 1, kind: "status", workspace_id: owner.workspaceId, stream_id: stream, ...body }),
+  });
+  const snapshot = async () => (await sql<{
+    working_signal_id: string | null; working_label: string | null; seconds_left: number | null;
+  }[]>`SELECT signal_id AS working_signal_id, label AS working_label,
+      extract(epoch FROM working_until - statement_timestamp())::float8 AS seconds_left
+    FROM swarm.agent_message_working WHERE principal_id = ${agent.principalId}::uuid`)[0]
+    ?? { working_signal_id: null, working_label: null, seconds_left: null };
+
+  for (const signal of [notAddressed, randomUUID()]) {
+    const refused = await post({ sequence: 1, state: "working", signal_id: signal, label: "editing" });
+    assert.equal(refused.status, 403, "Working names only a message addressed to this agent");
+  }
+  for (const bad of [{ label: "Bash" }, { tool_title: "cat secrets" }, { until: "2099-01-01T00:00:00Z" }]) {
+    const rejected = await post({ sequence: 1, state: "working", signal_id: message, label: "editing", ...bad });
+    assert.equal(rejected.status, 400);
+  }
+  assert.equal((await snapshot()).working_signal_id, null);
+
+  const accepted = await post({ sequence: 2, state: "working", signal_id: message, label: "editing" });
+  assert.equal(accepted.status, 202, `${await accepted.text()}\n${functionLogs.slice(-4_000)}`);
+  const busy = await snapshot();
+  assert.equal(busy.working_signal_id, message);
+  assert.equal(busy.working_label, "editing");
+  assert.ok(busy.seconds_left! > 100 && busy.seconds_left! <= 120, `expiry from server time: ${busy.seconds_left}`);
+
+  for (let attempt = 0; attempt < 40 && frames.length === 0; attempt += 1) await delay(50);
+  assert.equal(frames.length, 1, "the member receives one status event");
+  // Realtime adds its own broadcast id; every other key is the edge's generic status event.
+  const payload = { ...frames[0]!.payload };
+  assert.notEqual(payload.id, message);
+  delete payload.id;
+  assert.deepEqual(Object.keys(payload).sort(), ["emittedAt", "kind", "principalId", "state", "version", "workspaceId"]);
+  assert.equal(payload.state, "working");
+  assert.doesNotMatch(JSON.stringify(frames[0]), new RegExp(`${message}|editing`), "no message id or label on the workspace topic");
+
+  const stale = await post({ sequence: 1, state: "working", signal_id: message, label: "reading" });
+  assert.equal(stale.status, 202);
+  assert.equal((await snapshot()).working_label, "editing", "an older frame cannot replace newer work");
+  const otherStream = await post({ stream_id: randomUUID(), sequence: 9, state: "idle", signal_id: null, label: null });
+  assert.equal(otherStream.status, 202);
+  assert.equal((await snapshot()).working_label, "editing", "another stream cannot take over live work");
+  await delay(300);
+  assert.equal(frames.length, 1, "a frame that changed nothing announces nothing");
+
+  const idle = await post({ sequence: 3, state: "idle", signal_id: null, label: null });
+  assert.equal(idle.status, 202);
+  assert.deepEqual(await snapshot(), { working_signal_id: null, working_label: null, seconds_left: null });
+  const revived = await post({ sequence: 2, state: "working", signal_id: message, label: "editing" });
+  assert.equal(revived.status, 202);
+  assert.equal((await snapshot()).working_signal_id, null, "an older frame cannot revive cleared work");
+  const handover = await post({ stream_id: randomUUID(), sequence: 1, state: "working", signal_id: message, label: "reading" });
+  assert.equal(handover.status, 202);
+  assert.equal((await snapshot()).working_label, "reading", "a new stream takes over once the old one is idle");
+
+  await owner.client.removeChannel(joined.channel);
 });
