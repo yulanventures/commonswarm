@@ -41,6 +41,13 @@ import {
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
 import {
+  MESSAGE_STATUS_BATCH,
+  parseAgentStatusEvent,
+  parseMessageStatus,
+  type AgentStatusEvent,
+  type MessageStatus,
+} from "./message-status.js";
+import {
   agentActivityTopic,
   parseAgentActivityFrame,
   type AgentActivityConnectionState,
@@ -512,6 +519,7 @@ export async function subscribeAgentActivity(
   workspaceId: string,
   onFrame: (frame: AgentActivityFrame) => void,
   onState: (state: AgentActivityConnectionState) => void,
+  onStatus?: (event: AgentStatusEvent) => void,
 ): Promise<AgentActivitySubscription> {
   const c = client();
   if (!c) throw new NoDeployment();
@@ -526,6 +534,12 @@ export async function subscribeAgentActivity(
     },
   });
   channel.on("broadcast", { event: "activity" }, (message) => {
+    // A message-status event is its own closed shape; it never reaches the frame parser.
+    const status = parseAgentStatusEvent(message.payload, workspaceId);
+    if (status !== null) {
+      onStatus?.(status);
+      return;
+    }
     const frame = parseAgentActivityFrame(message.payload, workspaceId);
     if (frame !== null) onFrame(frame);
   });
@@ -3529,6 +3543,21 @@ export async function channelUnread(workspaceId: string): Promise<ChannelUnread[
     api.schema("swarm_read").rpc("channel_unread", { p_workspace_id: workspaceId }).abortSignal(signal));
   if (result.error) return null;
   return parseChannelUnread(result.data);
+}
+
+/** Message status for the signed-in person's own messages to agents (at most 50 ids). `null` when
+ * the read is unavailable or malformed: the line then shows nothing rather than a guess. */
+export async function messageStatus(workspaceId: string, signalIds: readonly string[]): Promise<MessageStatus[] | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  if (signalIds.length === 0) return [];
+  const result = await readWithDeadline("Message status", signal =>
+    api.schema("swarm_read").rpc("message_status", {
+      p_workspace_id: workspaceId,
+      p_signal_ids: signalIds.slice(0, MESSAGE_STATUS_BATCH),
+    }).abortSignal(signal));
+  if (result.error) return null;
+  return parseMessageStatus(result.data);
 }
 
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */

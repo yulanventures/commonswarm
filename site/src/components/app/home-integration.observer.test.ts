@@ -36,6 +36,14 @@ import type { HomeOverview } from '../../lib/home/contract';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
+/* Message status has its own tests (src/lib/message-status.test.mjs); lifted feed functions only
+   need its three entry points to exist. */
+const MESSAGE_STATUS_STUBS = {
+  refreshMessageStatus: async () => undefined,
+  appendMessageStatus: () => undefined,
+  resetMessageStatus: () => undefined,
+};
+
 async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {
   const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
@@ -76,7 +84,7 @@ test('standalone details hide the account door and restore the same DOM to works
   const nodes = new Map<string, unknown>([['.hm-frame', frame], ['[data-user-menu-root]', account],
     ['.hm-frame__main', main], ['.hm-frame__rail', rail]]);
   // Exercise the legacy/parked frame; the mounted adapter owns its account placement.
-  const context = createContext({ layout: { mounted: false }, one: (selector: string) => nodes.get(selector) });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  layout: { mounted: false }, one: (selector: string) => nodes.get(selector) });
   runInContext("let homeRoute={view:'todo'}; const app={dataset:{state:'channel',channelView:'feed'}};", context);
   runInContext(await dashboardFunctions(['syncStandalonePage']), context);
   const sync = (statement = '') => runInContext(`${statement}; syncStandalonePage();`, context);
@@ -138,7 +146,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
     const microtasks: (() => void)[] = [];
     let finishBoot!: () => void, boots = 0;
     const pendingBoot = new Promise<void>(resolve => { finishBoot = resolve; });
-    const context = createContext({
+    const context = createContext({ ...MESSAGE_STATUS_STUBS, 
       layout: { mounted: false, refreshTodoContext: (replace: () => void) => replace() },
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector.split(',').some(part => part.trim() === '[data-home-route-pane]') ? [pane] : [],
@@ -236,7 +244,7 @@ async function routedPaneFixture(initialView: 'todo' | 'todos' = 'todo') {
   const nodes = new Map<string, PaneNode>([['.hm-frame', frame], ['.hm-frame__main', main], ['.hm-frame__rail', rail],
     ['[data-home-route-pane]', slot], ['.dashboard__channel', channel], ['[data-user-menu-root]', account]]);
   const navigations: string[] = [], history: string[] = [];
-  const context = createContext({ document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, routeHref, resolveHomeRoute, homeViewTitle, todoView, todosPane, personNames, URL,
     listsChrome: createListsChrome(channel as unknown as HTMLElement),
     layout: { mounted: false }, navigateHomeHref: (href: string) => navigations.push(href),
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback), location: { origin: 'https://example.test' },
@@ -306,7 +314,7 @@ test('applyHomePane keeps standalone to-do states readable, with a back link, in
 });
 
 async function readFixture(server: unknown, postCommand?: (...args: unknown[]) => Promise<unknown>) {
-  const context = createContext({ server, postCommand, createLatestRead, HomeToolsUnavailable, HomeCommandRefused });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  server, postCommand, createLatestRead, HomeToolsUnavailable, HomeCommandRefused });
   runInContext(`
     let activeWorkspaceId = 'W', homeWorkspaceGeneration = 1, homeWorkspaceRead = 0;
     let homeTodosState = 'pending', homeTodoRows = [], homeTodoRead = null, homeQueue = null, homeQueueRead = 'pending', homeObjects = {state:'pending'}, homeTodoReceipt = '';
@@ -396,7 +404,7 @@ test('routed To-dos keeps an honest message, workspace back link and heading foc
   assert.deepEqual(f.history, ['/app?w=W&v=todos', '/app?w=W&v=todos'], 'pop re-entry does not create history');
 });
 async function routedTodoFixture() {
-  const context = createContext({});
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, });
   runInContext(`
     const buttons = [], slot = {hidden:true, append(node) {buttons.push(node);}};
     const activeWorkspaceId='W', workspaces=[{id:'W',name:'Home'}], homeRoute={view:'todo'}, sampleMode=false;
@@ -436,7 +444,7 @@ test('workspace and channel composers keep their own addresses when a thread clo
   const attributes = new Map<string, string>();
   const input = { placeholder: '', setAttribute(name: string, value: string) { attributes.set(name, value); } };
   const label = { textContent: 'Message Home' };
-  const context = createContext({ input, label });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  input, label });
   runInContext(`
     const one=selector=>selector==='[data-composer-input]' ? input : selector==='[data-composer-label]' ? label : null;
     const all=()=>[];
@@ -518,7 +526,7 @@ test('a signal page settling after a same-workspace view change retains data wit
     const composer = new ViewNode('form'), list = new ViewNode('ol'), emptyTitle = new ViewNode('h2');
     const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
     let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
-    const context = createContext({ routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,  routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
       // This signal fixture omits channel chrome; still execute its real projection dependency.
       listsChrome: createListsChrome(new ViewNode('div') as unknown as HTMLElement),
       signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
@@ -624,7 +632,7 @@ test('Lists retains Refresh across Files and Wiki, then restores channel nodes a
       ['[data-channel-name]', name], ['[data-channel-description]', description], ['[data-refresh]', refresh],
       ['[data-update-count]', count], ['#dashboard-lists-title', title], ['#dashboard-files-title', fileTitle], ['#dashboard-wiki-title', wikiTitle]] as const) nodes.set(selector, node);
     const inventory = root.descendants();
-    const context = createContext({ document, homeViewTitle, listsChrome: createListsChrome(root as unknown as HTMLElement),
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, homeViewTitle, listsChrome: createListsChrome(root as unknown as HTMLElement),
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? sections : selector.includes('[data-channel-view=objects] h1')
         ? [title] : selector.includes('[data-channel-view=files] h1') ? [fileTitle]
@@ -762,7 +770,7 @@ test('People Allow lands from settled access, continues after consent, and retir
       ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm],
       ['[data-household-agent-list]', list], ['[data-household-agent-empty]', empty],
       ['[data-household-purpose]:checked', purpose], ['[data-household-role]:checked', role]]);
-    const context = createContext({ document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
       peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage,
@@ -896,7 +904,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
   const loadedRows: RowNode[] = [];
   const input = { placeholder: '', setAttribute() {}, focus() {} };
   const target = { textContent: '' };
-  const context = createContext({ document, HTMLElement: RowNode, input, target, loadedRows, mapHomePeople, homeParty,
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, HTMLElement: RowNode, input, target, loadedRows, mapHomePeople, homeParty,
     buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
     threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
@@ -969,7 +977,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   const frames: (() => void)[] = [];
   const question = 'Which option should we take? '.repeat(24) + '[Read the options](https://example.test/options) Budget';
   let withoutTitle = false;
-  const context = createContext({ document, HTMLElement: RowNode, buildAuthorLine,
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, HTMLElement: RowNode, buildAuthorLine,
     buildStreamExtras: (...args: Parameters<typeof buildStreamExtras>) => { const result = buildStreamExtras(...args); if (withoutTitle) (result as unknown as RowNode)?.querySelector('.hm-needs-title')?.remove(); return result; }, deriveStreamExtras, question, homeAskAnswered,
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body;
@@ -1012,7 +1020,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   }
 });
 test('an unknown write outcome is shown plainly; a late result never writes to the next workspace', async () => {
-  const context = createContext({ HomeCommandRefused, HomeToolsUnavailable, CommandOutcomeUnknown, crypto: { randomUUID: () => 'request-1' } });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  HomeCommandRefused, HomeToolsUnavailable, CommandOutcomeUnknown, crypto: { randomUUID: () => 'request-1' } });
   runInContext(`
     let activeWorkspaceId='W', homeWorkspaceGeneration=1, homeNavigation=1, homeTodoSave='idle', homeTodoReceipt='', homeTodoNotice=null, homeTodoRead=null, homeDetailKey='';
     let homeTodosState='ready', homeTodoRows=[], homeQueue=null, homeQueueRead='ready'; const homeRoute={view:'todos'};
@@ -1048,7 +1056,7 @@ test('the role client posts the change_role envelope, and each reducer refusal i
   const code = ts.transpileModule(fn.getText(ast).replace(/^export /, ''), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
   const commands: unknown[][] = [];
   let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { status: 'rejected', ok: false, reason: codes[0] } };
-  const context = createContext({ WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
   runInContext(code, context);
   const envelope = { kind: 'change_role', user_id: 'nikki', role: 'admin' };
   for (const reason of codes) {
@@ -1100,7 +1108,7 @@ test('each navigation focuses the visible H1 for that view', async () => {
   const phoneTitle = heading('phone workspace');
   const selectedTitle = heading('selected profile');
   headings.set('.cs-org-phone-title h1', phoneTitle);
-  const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
     document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
     all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
   runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
@@ -1138,7 +1146,7 @@ test('each navigation focuses the visible H1 for that view', async () => {
 test('the Add agent poll passes the measured joined time and ignores another owner', async () => {
   const joined: unknown[] = [], intervals: number[] = [];
   let tick: ()=>void = ()=>{};
-  const context = createContext({document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
     one:()=>({showJoined:(value:unknown)=>joined.push(JSON.parse(JSON.stringify(value)))}), renderRoster:()=>{},
     roster:async()=>[{principalId:'foreign',name:'Muse',ownerUserId:'nikki',joinedAt:'2026-10-05T11:31:00Z'},
       {principalId:'own',name:'Claude',ownerUserId:'tom',joinedAt:'2026-10-05T11:32:00Z'}] });
@@ -1160,7 +1168,7 @@ test('an accepted role save stays successful when the roster refresh fails', asy
   };
   visit(ast); assert.ok(changeRole);
   const code = ts.transpileModule(`const changeRole = ${changeRole.getText(ast)};`, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
-  const context = createContext({ changeWorkspaceRole: async () => {}, memberRoster: async () => { throw new Error('read failed'); } });
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  changeWorkspaceRole: async () => {}, memberRoster: async () => { throw new Error('read failed'); } });
   runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,members=[{userId:'nikki',role:'member'}]; const peopleDialogState={rolePending:new Map()}, uuid=()=> 'R', one=()=>null; let paints=0; const renderRoster=()=>{paints++;};",context);
   runInContext(code,context);
   await runInContext("changeRole({kind:'change-role',userId:'nikki',role:'admin'})",context);
@@ -1191,7 +1199,7 @@ test('People arrival prefers an eligible requested detail and otherwise the elig
     closest(selector: string) { return selector.split(',').some(part => part.trim() === `[${this.blocked}]`) ? { reason: this.blocked } : null; },
     focus() { focused.push(name); } });
   const page = heading('page'), detail = heading('detail');
-  const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
     one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
       : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
     all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
@@ -1236,7 +1244,7 @@ test('past agents owned by the viewer remain answerers beyond the 200-name histo
   const query = {schema:()=>query,from:()=>query,select:()=>query,order:()=>query,
     eq:(...args:unknown[])=>{filters.push(args);return query;},not:(...args:unknown[])=>{filters.push(args);return query;},
     range:async(start:number,end:number)=>{ranges.push([start,end]);return {data:Array.from({length:start===200?1:100},(_,i)=>({principal_id:`old-${start+i}`}))};}};
-  const context = createContext({client:()=>query,sampleMode:false});
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, client:()=>query,sampleMode:false});
   runInContext(await dashboardFunctions(['readRemovedAgentOwners']),context);
   const result = await runInContext("readRemovedAgentOwners('W','tom')",context) as Map<string,string>;
   assert.equal(result.size,201); assert.equal(result.get('old-200'),'tom');
@@ -1253,7 +1261,7 @@ test('past agents owned by the viewer remain answerers beyond the 200-name histo
 test('Add agent receives the viewer first name and Home and Done leave that screen', async () => {
   const seen: Array<{ workspaceName?: string; accountEmail?: string; viewerFirstName?: string }> = [];
   const backs: boolean[] = [];
-  const context = createContext({
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, 
     personFirstName,
     parentRoute,
     seen,
@@ -1336,7 +1344,7 @@ test('accepted agent removals leave every current surface immediately and after 
     let tick!: () => void, finishRoster!: (rows: unknown) => void, finishOverview!: (overview: HomeOverview) => void;
     let finishReload!: () => void;
     const commands: string[] = [];
-    const context = createContext({ ...agentStatusFunctions, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, connectionPolicyState, classifyAgentPresence, agentPresenceLine, wakePathMark,
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,  ...agentStatusFunctions, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, connectionPolicyState, classifyAgentPresence, agentPresenceLine, wakePathMark,
       identityDisplayLabel, isTaggable, removedAgentLabel, peopleDialogCanAct, mapHomePeople, homeRailPeople, mapHomeRail,
       initialCatchUpData, overviewCatchUpData, homeNeedsYouCount, homeStructureKey, buildHomeRail, buildOrganizationMenu, organizationMenuItems, organizationWorkspaces, routeHref, assignOptions, tagOptions,
       one: (selector: string) => selector === '[data-home-rail-slot]' ? slot : null,
@@ -1446,7 +1454,7 @@ test('account directory loads current owned agents, reports errors for retry, an
       ['[data-account-agents-retry]', retry], ['[data-account-agents-dialog]', dialog]]);
     let finish!: (agents: unknown[]) => void, fail!: (error: Error) => void;
     const pending = new Promise<unknown[]>((resolve, reject) => { finish = resolve; fail = reject; });
-    const context = createContext({ one: (selector: string) => nodes.get(selector),
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,  one: (selector: string) => nodes.get(selector),
       document: { createElement: (tag: string) => new RowNode(tag) }, buildAccountAgents,
       myAccountAgents: () => pending, readableError: (error: Error) => error.message });
     runInContext("let accountAgentsGeneration=0, session={user:{id:'owner'}}, sampleMode=false;", context);
@@ -1475,7 +1483,7 @@ test('account directory loads current owned agents, reports errors for retry, an
 
 test('phone account menu exposes Your agents for a signed-in person and dispatches its existing account door', async () => {
   let opened = 0;
-  const context = createContext({ one: (selector: string) => selector === '[data-account-agents-open]'
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,  one: (selector: string) => selector === '[data-account-agents-open]'
     ? { click() { opened++; } } : null, organizationMenuItems });
   runInContext("let sampleMode=false, session={user:{id:'owner'}}, workspaces=[], activeWorkspaceId='', selectedOrgId=null;", context);
   runInContext(await dashboardFunctions(['accountMenuState', 'accountMenuAction']), context);
@@ -1499,7 +1507,7 @@ test('workspace lead helpers resolve live local lead agents, gate owner/admin up
 
   const calls: Array<{ workspaceId: string; principalId: string | null }> = [];
   const paints: string[] = [];
-  const context = createContext({
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, 
     uuid: () => 'cmd-lead-1',
     setWorkspaceLead: async (_s: unknown, _c: string, workspaceId: string, principalId: string | null) => {
       calls.push({ workspaceId, principalId });

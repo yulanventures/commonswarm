@@ -1306,6 +1306,7 @@ import "../../styles/kylon-command-palette.css";
     workspaceFiles,
     workspaceChannels,
     channelUnread,
+    messageStatus,
     type ChannelUnread,
     createChannel,
     renameChannel,
@@ -1343,6 +1344,14 @@ import "../../styles/kylon-command-palette.css";
     type CloseableWorkspace,
   } from "../../lib/workspace-close-state";
   import { agentEntityView, truncateEntityId } from "../../lib/entity-panel";
+  import {
+    latestMessagesToAgents,
+    messageStatusText,
+    MESSAGE_STATUS_REFRESH_MS,
+    MESSAGE_STATUS_WORKING_MS,
+    type AgentStatusEvent,
+    type MessageStatus,
+  } from "../../lib/message-status";
   import {
     agentActivityFrameIsNewer,
     agentActivityPanelView,
@@ -1941,6 +1950,22 @@ import "../../styles/kylon-command-palette.css";
     const attachmentPreviewUrls = new ChatImagePreviewCache();
     const deliveryReceiptCache = new Map<string, BrowserDeliveryReceiptCacheEntry>();
     let deliveryReceiptRefreshOwner = "";
+    /* Message status: only the signed-in person's latest message to each agent, from
+       message_status. Agent status events (working or idle, no message or label) trigger a
+       re-read and the agent panel's bare "Working". */
+    let messageStatusRows = new Map<string, MessageStatus>();
+    let messageStatusCheckedAt = 0;
+    let messageStatusGeneration = 0;
+    let messageStatusExpiryTimer: number | undefined;
+    const agentStatusEvents = new Map<string, AgentStatusEvent>();
+    const resetMessageStatus = (): void => {
+      messageStatusRows = new Map();
+      messageStatusCheckedAt = 0;
+      messageStatusGeneration += 1;
+      agentStatusEvents.clear();
+      window.clearTimeout(messageStatusExpiryTimer);
+      messageStatusExpiryTimer = undefined;
+    };
     let humanSeenObserver: IntersectionObserver | null = null;
 
     const humanSeenReporter = new HumanSeenReporter({
@@ -2863,6 +2888,23 @@ import "../../styles/kylon-command-palette.css";
             refreshEntityActivitySection();
           }
         },
+        (event) => {
+          if (
+            generation !== agentActivityGeneration ||
+            version !== requestVersion ||
+            workspaceId !== activeWorkspaceId
+          ) return;
+          const previous = agentStatusEvents.get(event.principalId);
+          if (previous && previous.emittedAt > event.emittedAt) return;
+          agentStatusEvents.set(event.principalId, event);
+          if (selectedEntity?.kind === "agent" && selectedEntity.id === event.principalId) {
+            refreshEntityActivitySection();
+          }
+          const viewerId = session?.user.id ?? "";
+          if (latestMessagesToAgents(signals, viewerId).some((signal) => signal.toAgent === event.principalId)) {
+            void refreshMessageStatus(workspaceId, version, true);
+          }
+        },
       ).then((subscription) => {
         if (
           generation !== agentActivityGeneration ||
@@ -2980,24 +3022,23 @@ import "../../styles/kylon-command-palette.css";
       live.append(header);
 
       if (view.emptyMessage !== null) {
+        /* An agent that reports message status but no listener frames: a bare "Working" while
+           its last status event is recent. The message and label stay in the thread. */
+        const statusEvent = agentStatusEvents.get(principalId);
+        const statusWorking = statusEvent?.state === "working" &&
+          Date.now() - statusEvent.emittedAt < MESSAGE_STATUS_WORKING_MS;
         const empty = document.createElement("p");
         empty.className = "dashboard__entity-live-empty";
-        empty.textContent = view.emptyMessage;
+        if (statusWorking) empty.dataset.agentStatus = "working";
+        empty.textContent = statusWorking ? "Working" : view.emptyMessage;
         live.append(empty);
         return live;
       }
 
       const details = document.createElement("dl");
+      /* Coarse only: the activity topic reaches every member, so it carries no message or tool
+         detail. Message status in the thread shows what the agent is doing for that sender. */
       appendEntityField(details, "Phase", view.phaseLabel ?? "Idle");
-      /* Whole, not abbreviated. This one had no disclosure and no title behind it, so the
-       * shortened form was the only copy the reader could see. The id field below keeps its
-       * summary because the full value sits inside the disclosure. */
-      appendEntityField(details, "Signal", view.signalLabel ?? "None");
-      appendEntityField(
-        details,
-        "Now",
-        view.toolTitle ?? (view.phaseLabel === "Idle" ? "Waiting for work" : "Between tools"),
-      );
       appendEntityField(details, "Elapsed", view.elapsedLabel ?? "0s");
       details.lastElementChild?.setAttribute("data-agent-activity-elapsed", "");
       live.append(details);
@@ -6249,10 +6290,86 @@ import "../../styles/kylon-command-palette.css";
       if (directTarget) directTarget.textContent = String(directCount);
     };
 
+    /* One quiet line under the person's latest message to an agent: Delivered, Seen,
+       Working with a coarse label, or Replied. Nothing before the agent's client has it. */
+    const appendMessageStatus = (body: HTMLElement, signal: Signal): void => {
+      const status = messageStatusRows.get(signal.id);
+      if (!status) return;
+      const now = Date.now();
+      const text = messageStatusText(status, now);
+      if (text === null) return;
+      const line = document.createElement("p");
+      line.className = "dashboard__message-status";
+      line.dataset.messageStatus = status.replied
+        ? "replied"
+        : status.working !== null && status.working.until > now
+        ? "working"
+        : status.seen ? "seen" : "delivered";
+      line.textContent = text;
+      body.append(line);
+    };
+
+    /* Repaint when the soonest Working expires, so a crashed agent stops looking busy even if no
+       idle event arrives. */
+    const scheduleMessageStatusExpiry = (): void => {
+      window.clearTimeout(messageStatusExpiryTimer);
+      messageStatusExpiryTimer = undefined;
+      const now = Date.now();
+      const soonest = Math.min(...[...messageStatusRows.values()]
+        .map((row) => row.working?.until ?? Number.POSITIVE_INFINITY)
+        .filter((until) => until > now));
+      if (!Number.isFinite(soonest)) return;
+      messageStatusExpiryTimer = window.setTimeout(() => {
+        messageStatusExpiryTimer = undefined;
+        if (!addAgentViewOpen()) renderFeed();
+        scheduleMessageStatusExpiry();
+      }, soonest - now + 50);
+    };
+
+    const refreshMessageStatus = async (
+      workspaceId: string,
+      version: number,
+      force = false,
+    ): Promise<void> => {
+      const viewerId = session?.user.id ?? "";
+      if (sampleMode || !viewerId) return;
+      const now = Date.now();
+      if (!force && now - messageStatusCheckedAt < MESSAGE_STATUS_REFRESH_MS) return;
+      const ids = latestMessagesToAgents(signals, viewerId).map((signal) => signal.id);
+      if (ids.length === 0) {
+        if (messageStatusRows.size > 0) {
+          messageStatusRows = new Map();
+          if (!addAgentViewOpen()) renderFeed();
+        }
+        return;
+      }
+      messageStatusCheckedAt = now;
+      const generation = ++messageStatusGeneration;
+      let rows: MessageStatus[] | null;
+      try {
+        rows = await messageStatus(workspaceId, ids);
+      } catch {
+        rows = null;
+      }
+      if (
+        generation !== messageStatusGeneration ||
+        version !== requestVersion ||
+        workspaceId !== activeWorkspaceId
+      ) return;
+      /* Unavailable keeps the last known line rather than inventing one. */
+      if (rows === null) return;
+      const next = new Map(rows.map((row) => [row.signalId, row]));
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...messageStatusRows]);
+      messageStatusRows = next;
+      scheduleMessageStatusExpiry();
+      if (changed && !addAgentViewOpen()) renderFeed();
+    };
+
     const appendDeliveryReceipt = (
       body: HTMLElement,
       signal: Signal,
     ): void => {
+
       const cached = deliveryReceiptCache.get(signal.id);
       const recipient: ComposerAudience = signal.toAgent !== null
         ? { kind: "agent", id: signal.toAgent }
@@ -6989,6 +7106,7 @@ import "../../styles/kylon-command-palette.css";
           body.append(about);
         }
         appendDeliveryReceipt(body, signal);
+        appendMessageStatus(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
            `threadRootBlock` is every rule `resolveThreadRoot` applies, in its order: directed
            or expiring inside the server's one-second margin (both 404), then an archived
@@ -7305,6 +7423,7 @@ import "../../styles/kylon-command-palette.css";
       signalHasMore = page.hasMore;
       renderFeed();
       void refreshDeliveryReceipts(workspaceId, version);
+      void refreshMessageStatus(workspaceId, version);
     };
 
     const refreshLatestSignals = async (): Promise<void> => {
@@ -7357,6 +7476,7 @@ import "../../styles/kylon-command-palette.css";
           renderFeed("latest");
         }
         void refreshDeliveryReceipts(workspaceId, version);
+        void refreshMessageStatus(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
            offers a catch-up, and the shared gate keeps the requests bounded. */
         void refreshPendingAccess(workspaceId, version);
@@ -7603,6 +7723,7 @@ import "../../styles/kylon-command-palette.css";
       renderChannelHead();
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
+      resetMessageStatus();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -8332,6 +8453,7 @@ import "../../styles/kylon-command-palette.css";
       signals = [];
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
+      resetMessageStatus();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -9826,6 +9948,7 @@ import "../../styles/kylon-command-palette.css";
         feedWasEmpty = false;
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
+        resetMessageStatus();
       }
       syncChannelUrl();
       renderChannelRail();
@@ -11933,6 +12056,7 @@ import "../../styles/kylon-command-palette.css";
         }
         renderFeed("latest");
         void refreshDeliveryReceipts(workspaceId, version);
+        void refreshMessageStatus(workspaceId, version);
       } catch (caught) {
         /* THE SEND'S OWN TEARDOWN COMES FIRST, before any question about the screen. This
            block used to open with `if (version !== requestVersion || workspaceId !==
