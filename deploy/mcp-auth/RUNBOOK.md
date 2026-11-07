@@ -29,7 +29,10 @@ unimported until its edge function ships.
 ## Key and secret-file contract
 
 The ES256 signing key is generated on the box. Its source of truth is a
-protected item in the 1Password vault **Yulan Ventures Infra**.
+protected item in the 1Password vault **Agents (Full Access)**, ID
+`c73s3oi567rtz44ikt2nslzszi` (named Yulan Ventures Infra until 2026-11-07). The
+item is `CommonSwarm OAuth signing keys 145150`; that title repeats, so address it by
+item ID, confirmed in the workspace secrets inventory, never by title.
 
 Runtime files live under `/etc/commonswarm-oauth/`, owned by
 `root:<service gid>`, mode `0640`, and mounted read-only:
@@ -132,7 +135,7 @@ receives the mounted CA, explicit `servername=db.commonswarm.internal`, and
 `SUPABASE_ANON_KEY` come from the existing service env file. Signing/cookie
 keys and the OAuth artifact database credential are unchanged. No new
 1Password item name is defined here; HezLead supplies existing item references
-in vault **Yulan Ventures Infra** if recovery is needed.
+in vault `c73s3oi567rtz44ikt2nslzszi`, by item ID, if recovery is needed.
 
 The HM37 procedure takes full `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE`
 from HezLead's latest measured ON or OFF report. Preflight/open compare them

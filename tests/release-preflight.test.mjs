@@ -66,7 +66,7 @@ function fixture(file, atHead = false) {
     else if (fmt === 'schema-set') value = '20261002000001,20260916000001';
     else if (fmt === 'utc-window') value = new Date(Date.now() + 1200000).toISOString().slice(0, 19) + 'Z';
     else if (fmt.startsWith('literal:')) value = fmt.slice(8);
-    else if (fmt === 'op-reference') value = 'op://Yulan Ventures Infra/Test/document';
+    else if (fmt === 'op-reference') value = 'op://c73s3oi567rtz44ikt2nslzszi/abcdefghijklmnopqrstuvwxyz/document';
     else {
       value = join(root, key);
       if (fmt === 'empty-dir') mkdirSync(value, { mode: rule.mode ?? 0o700 });
@@ -123,6 +123,13 @@ for (const file of plans) {
         if (f.c.inputs[key].format === 'uuid') invalid.push('', '00000000-0000-0000-0000-000000000000',
           'ABCDEFAB-CDEF-4ABC-8ABC-ABCDEFABCDEF', '11111111-1111-9111-8111-111111111111',
           '11111111-1111-4111-7111-111111111111');
+        // The vault and item go by ID: the old vault name, another vault, a title or a short id are refused.
+        if (f.c.inputs[key].format === 'op-reference') invalid.push(
+          'op://Yulan Ventures Infra/CommonSwarm Site/document',
+          'op://aaaaaaaaaaaaaaaaaaaaaaaaaa/abcdefghijklmnopqrstuvwxyz/document',
+          'op://c73s3oi567rtz44ikt2nslzszi/CommonSwarm Site/document',
+          'op://c73s3oi567rtz44ikt2nslzszi/ABCDEFGHIJKLMNOPQRSTUVWXYZ/document',
+          'op://c73s3oi567rtz44ikt2nslzszi/abcdefghijklmnopqrstuvwxyz');
         for (const value of invalid) {
           const result = f.check({ ...f.inputs, [key]: value });
           assert.notEqual(result.status, 0, `${key} ${value}`);
