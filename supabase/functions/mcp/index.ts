@@ -33,6 +33,7 @@ import { executeFilePut } from "./file-put.ts";
 import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { fitChannelPage } from "./channel-page.ts";
+import { fitMemoryRows, memorySaveCommand, memoryWriteOutput } from "./memory-tools.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
   createMcpProtocolHandler,
@@ -216,7 +217,7 @@ async function seatCapability(
   // file_get resolves its version through the command path (live-state checks under
   // the hosted locks), so only file_ls joins the read-role tools.
   const use = tool === "whoami" || tool === "members" || tool === "roster" || tool === "file_ls" ||
-    tool === "channel_ls" || tool === "channel_read" ||
+    tool === "channel_ls" || tool === "channel_read" || tool === "memory_search" || tool === "memory_get" ||
     content?.effect === "read" ? "read" : "command";
   return await authDb.begin("isolation level read committed", async (tx) => {
     await setRole(tx, use === "read" ? "swarm_read" : "swarm_command");
@@ -354,6 +355,35 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     return { ...page,
       provenance: messageReadProvenance(messages.map((m) => ({ ...m, id: m.signal_id })),
         { tool: "channel_read", scope: "messages posted to the whole workspace in one channel" }, next !== null) };
+  }
+  if (call.name === "memory_search") {
+    const output = readOutput(await handleHostedRead({
+      resource: "memory_search", workspace_id: binding.workspaceId,
+      query: typeof args.query === "string" && args.query.trim() !== "" ? args.query.trim() : null,
+      limit: typeof args.limit === "number" ? args.limit : 20,
+    }, capability));
+    return fitMemoryRows({ context: output.context, workspace_id: output.workspace_id, untrusted_content: true,
+      memories: Array.isArray(output.memories) ? output.memories : [] },
+      "memories", "More memories matched than fit. Narrow with query.", limits.maxResponseBytes);
+  }
+  if (call.name === "memory_get") {
+    const output = readOutput(await handleHostedRead({
+      resource: "memory_get", workspace_id: binding.workspaceId, memory_id: String(args.memory_id).toLowerCase(),
+    }, capability));
+    return fitMemoryRows({ context: output.context, workspace_id: output.workspace_id, untrusted_content: true,
+      memory: output.memory, versions: Array.isArray(output.versions) ? output.versions : [] },
+      "versions", "Older versions are left out.", limits.maxResponseBytes);
+  }
+  if (call.name === "memory_save" || call.name === "memory_forget") {
+    return memoryWriteOutput(await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command: call.name === "memory_save"
+        ? memorySaveCommand(args)
+        : { kind: "memory_forget", memory_id: String(args.memory_id).toLowerCase() },
+    }, capability));
   }
   if (call.name === "file_ls") {
     const output = readOutput(await handleHostedRead({

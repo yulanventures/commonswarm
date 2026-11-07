@@ -903,6 +903,8 @@ const CAPABILITY_LIVE_LIMIT = 200;
 const selfServeEnabled = Deno.env.get("SWARM_SELF_SERVE") === "1";
 /** Brain M1: memory commands are refused unless this is on (off by default). */
 const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
+/** Brain M3b: hosted MCP seats get memory only with their own flag, on top of SWARM_BRAIN_MEMORY. */
+const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN_MEMORY_HOSTED") === "1";
 /** Interactive replies: choice asks and answers are refused unless this is on (off by default). */
 const interactiveRepliesEnabled = Deno.env.get("SWARM_INTERACTIVE_REPLIES") === "1";
 
@@ -10885,7 +10887,8 @@ const MEMORY_AGENT_DAILY_SAVES = 50;
  * Brain M1: memory_save and memory_forget, both behind SWARM_BRAIN_MEMORY.
  *
  * Admission is the command's normal path (membership, agent binding, family, tombstone and
- * session fences ran before dispatch); hosted seats are refused until M3 binds memory tools.
+ * session fences ran before dispatch); hosted seats need SWARM_BRAIN_MEMORY_HOSTED as well, and their capability binds the exact
+ * memory tool (hostedToolAllowsCommand).
  * The author, sponsor and workspace come from the credential. Saves on one subject are
  * serialized by a per-subject lock, and an existing memory changes only with the caller's
  * expected_revision, so a parallel save never overwrites an edit it has not seen. A save that
@@ -10917,9 +10920,9 @@ async function memoryCommand(
     await audit("domain", "memory_unavailable");
     return { status: 404, body: { error: "memory_unavailable", message: "Workspace memory isn't turned on here." } };
   }
-  if (auth.ledgerCredentialKind === "hosted_seat") {
-    await audit("authz", "memory_hosted_unsupported");
-    return { status: 403, body: { error: "forbidden" } };
+  if (auth.ledgerCredentialKind === "hosted_seat" && !brainMemoryHostedEnabled) {
+    await audit("domain", "memory_unavailable");
+    return { status: 404, body: { error: "memory_unavailable", message: "Workspace memory isn't turned on here." } };
   }
   const editorKind: "user" | "agent" = auth.credentialKind === "user" ? "user" : "agent";
   const editorId = canonicalPrincipal(auth.actor);
@@ -11396,6 +11399,13 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
       (command?.kind === FILE_VERSION_COMMIT_KIND &&
         exactKeys(command, ["kind", "file_id", "version_id", "sha256"]));
   }
+  // Brain M3b: each memory tool sends exactly its own command, and no other tool can.
+  if (tool === "memory_save") {
+    return command?.kind === "memory_save" && Object.keys(command).every(key =>
+      ["kind", "memory_kind", "subject", "statement", "evidence", "expected_revision"].includes(key));
+  }
+  if (tool === "memory_forget") return command?.kind === "memory_forget" && exactKeys(command, ["kind", "memory_id"]);
+  if (command?.kind === "memory_save" || command?.kind === "memory_forget") return false;
   if (tool === "seat_release") {
     return command?.kind === "release_hosted_mcp_seat" &&
       exactKeys(command, ["kind", "grant_id", "seat_id"]);
@@ -13691,7 +13701,8 @@ async function handleTransaction(
 
     /* Brain M1: the memory flag is checked before any replay, so a stored memory result is never
      * served while the feature is off. */
-    if ((kind === "memory_save" || kind === "memory_forget") && !brainMemoryEnabled) {
+    if ((kind === "memory_save" || kind === "memory_forget") &&
+        (!brainMemoryEnabled || (auth.ledgerCredentialKind === "hosted_seat" && !brainMemoryHostedEnabled))) {
       await insertAudit(tx, {
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "domain", reason: "memory_unavailable", detail: ignoredIdentity, hash,
