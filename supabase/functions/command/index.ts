@@ -323,6 +323,32 @@ interface ReraiseAskCommand {
   signal_id: string;
 }
 
+/** Brain M1: workspace memory. The author, sponsor and workspace come from the credential;
+ * nothing in the command names them. */
+const MEMORY_KINDS = ["decision", "convention", "ownership", "fact"] as const;
+type MemoryKind = typeof MEMORY_KINDS[number];
+interface MemorySaveCommand {
+  kind: "memory_save";
+  memory_kind: MemoryKind;
+  subject: string;
+  statement: string;
+  evidence: string[];
+  expected_revision: number | null;
+}
+interface MemoryForgetCommand {
+  kind: "memory_forget";
+  memory_id: string;
+}
+interface MemoryRecord {
+  memory_id: string;
+  subject: string;
+  kind: MemoryKind;
+  statement: string;
+  evidence: string[];
+  revision: number;
+  status: "active" | "deleted";
+}
+
 /** Channel authority. Self-contained like post_signal: emits no protocol event. */
 type ChannelCommand =
   | { kind: "channel_create"; slug: string; purpose: string | null }
@@ -386,6 +412,8 @@ type ValidatedCommand =
   | RegisterAgentSeatCommand
   | SignalCommand
   | ReraiseAskCommand
+  | MemorySaveCommand
+  | MemoryForgetCommand
   | ChannelCommand
   | SignalsSeenCommand
   | DeliveryCommand
@@ -631,6 +659,9 @@ interface StoredResponse {
   signal?: SignalRecord;
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
+  memory?: MemoryRecord;
+  memory_outcome?: "created" | "updated" | "duplicate" | "forgotten";
+  previous_statement?: string;
   grant_id?: string;
   seat_id?: string;
   handle?: string;
@@ -843,6 +874,8 @@ const CAPABILITY_LIVE_LIMIT = 200;
  * Absent or any value other than "1", a stranger gets the same 403 as before.
  */
 const selfServeEnabled = Deno.env.get("SWARM_SELF_SERVE") === "1";
+/** Brain M1: memory commands are refused unless this is on (off by default). */
+const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
 
 /**
  * §9 P5 caps free-tier workspaces per *verified* identity so one attacker
@@ -1101,6 +1134,8 @@ const COMMAND_KINDS = [
   "submit_feedback",
   "post_signal",
   "reraise_ask",
+  "memory_save",
+  "memory_forget",
   ...CHANNEL_COMMAND_KINDS,
   SIGNALS_SEEN_KIND,
   CLAIM_AGENT_INBOX_KIND,
@@ -2065,6 +2100,49 @@ function validateCommand(
       ok: true,
       command: { kind: "reraise_ask", signal_id: (cmd.signal_id as string).toLowerCase() },
     };
+  }
+
+  if (cmd.kind === "memory_save") {
+    const keys = ["kind", "memory_kind", "subject", "statement", "evidence", "expected_revision"];
+    if (Object.keys(cmd).some((key) => !keys.includes(key))) {
+      return { ok: false, status: 400, reason: commandFieldsMessage("memory_save", keys.slice(1)) };
+    }
+    const subject = typeof cmd.subject === "string"
+      ? cmd.subject.normalize("NFC").trim().toLowerCase().replace(/\s+/g, " ")
+      : "";
+    const statement = typeof cmd.statement === "string" ? cmd.statement.normalize("NFC").trim() : "";
+    const evidence = cmd.evidence === undefined ? [] : cmd.evidence;
+    const expected = cmd.expected_revision === undefined ? null : cmd.expected_revision;
+    if (!MEMORY_KINDS.includes(cmd.memory_kind as MemoryKind)) {
+      return { ok: false, status: 400, reason: `memory_kind must be ${MEMORY_KINDS.join(", ")}` };
+    }
+    if (!/^[a-z0-9][a-z0-9 ._/-]{0,119}$/.test(subject)) {
+      return { ok: false, status: 400,
+        reason: "subject must be 1 to 120 characters: letters, digits, spaces, dot, underscore, slash or hyphen" };
+    }
+    if (statement.length < 1 || statement.length > 1000) {
+      return { ok: false, status: 400, reason: "statement must be 1 to 1000 characters" };
+    }
+    if (!Array.isArray(evidence) || evidence.length > 5 || !evidence.every(memoryEvidenceUrl)) {
+      return { ok: false, status: 400, reason: "evidence must be up to five https URLs, each up to 500 characters" };
+    }
+    if (expected !== null && (!Number.isSafeInteger(expected) || (expected as number) < 1)) {
+      return { ok: false, status: 400, reason: "expected_revision must be a positive integer" };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "memory_save", memory_kind: cmd.memory_kind as MemoryKind, subject, statement,
+        evidence: evidence as string[], expected_revision: expected as number | null,
+      },
+    };
+  }
+
+  if (cmd.kind === "memory_forget") {
+    if (!exactKeys(cmd, ["kind", "memory_id"]) || typeof cmd.memory_id !== "string" || !UUID_RE.test(cmd.memory_id)) {
+      return { ok: false, status: 400, reason: "memory_forget takes memory_id, the UUID of a memory you saved" };
+    }
+    return { ok: true, command: { kind: "memory_forget", memory_id: cmd.memory_id.toLowerCase() } };
   }
 
   if (cmd.kind === "post_signal") {
@@ -3105,6 +3183,16 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.reraise) === null
       ? {}
       : { reraise: response.reraise as unknown as ReraiseRecord }),
+    ...(record(response.memory) === null
+      ? {}
+      : { memory: response.memory as unknown as MemoryRecord }),
+    ...(response.memory_outcome === "created" || response.memory_outcome === "updated" ||
+        response.memory_outcome === "duplicate" || response.memory_outcome === "forgotten"
+      ? { memory_outcome: response.memory_outcome }
+      : {}),
+    ...(typeof response.previous_statement === "string"
+      ? { previous_statement: response.previous_statement }
+      : {}),
     ...(typeof response.file_id === "string" ? { file_id: response.file_id } : {}),
     ...(typeof response.version_id === "string" ? { version_id: response.version_id } : {}),
     ...(typeof response.version_n === "number" ? { version_n: response.version_n } : {}),
@@ -10675,6 +10763,241 @@ async function reraiseAsk(
   };
 }
 
+/** Memory evidence: a plain https URL without credentials, up to 500 characters. Stored as data. */
+function memoryEvidenceUrl(value: unknown): boolean {
+  if (typeof value !== "string" || value.length < 1 || value.length > 500) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === "" && url.href === value;
+  } catch {
+    return false;
+  }
+}
+
+const MEMORY_ACTIVE_CAP = 500;
+const MEMORY_HISTORY_CAP = 5000;
+const MEMORY_AGENT_DAILY_SAVES = 50;
+
+/**
+ * Brain M1: memory_save and memory_forget, both behind SWARM_BRAIN_MEMORY.
+ *
+ * Admission is the command's normal path (membership, agent binding, family, tombstone and
+ * session fences ran before dispatch); hosted seats are refused until M3 binds memory tools.
+ * The author, sponsor and workspace come from the credential. Saves on one subject are
+ * serialized by a per-subject lock, and an existing memory changes only with the caller's
+ * expected_revision, so a parallel save never overwrites an edit it has not seen. A save that
+ * matches the active memory exactly is a duplicate: no version, no new authorship. Every change
+ * adds a version. Forget is the original author's only, whoever edited since. An exact retry of
+ * a settled command id replays its stored result; a changed retry conflicts.
+ */
+async function memoryCommand(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: MemorySaveCommand | MemoryForgetCommand,
+  ctx: {
+    commandId: string;
+    hash: string;
+    kind: string;
+    minClientVersion: string;
+    ignoredIdentity: string | null;
+    decided: (result: HttpResult) => HttpResult;
+  },
+): Promise<HttpResult> {
+  const { commandId, hash, kind, decided } = ctx;
+  const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
+    insertAudit(tx, {
+      auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+      outcome, reason, detail, hash,
+    });
+  if (!brainMemoryEnabled) {
+    await audit("domain", "memory_unavailable");
+    return { status: 404, body: { error: "memory_unavailable", message: "Workspace memory isn't turned on here." } };
+  }
+  if (auth.ledgerCredentialKind === "hosted_seat") {
+    await audit("authz", "memory_hosted_unsupported");
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const editorKind: "user" | "agent" = auth.credentialKind === "user" ? "user" : "agent";
+  const editorId = canonicalPrincipal(auth.actor);
+  const sponsor = auth.actor.user;
+  if (sponsor === null) {
+    await audit("authz", "memory_no_sponsor");
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const lockKey = command.kind === "memory_save"
+    ? `memory:${route.workspaceId}:${command.subject}`
+    : `memory-id:${route.workspaceId}:${command.memory_id}`;
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+  const [prior] = await tx<{
+    request_hash: string; workspace_id: string; stream_id: string; response: unknown;
+  }[]>`
+    SELECT request_hash, workspace_id, stream_id, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind}
+      AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  if (prior !== undefined) {
+    const matches = prior.request_hash === hash &&
+      prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
+    await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
+    return decided(matches
+      ? replayResult(storedResponse(prior.response), kind)
+      : { status: 409, body: { error: "command_id_conflict" } });
+  }
+
+  type Row = {
+    memory_id: string; subject_key: string; kind: MemoryKind; statement: string; evidence: string[];
+    revision: number; status: "active" | "deleted"; author_kind: string; author_id: string;
+  };
+  const recordOf = (row: Row): MemoryRecord => ({
+    memory_id: row.memory_id, subject: row.subject_key, kind: row.kind, statement: row.statement,
+    evidence: row.evidence, revision: row.revision, status: row.status,
+  });
+  let response: StoredResponse;
+
+  if (command.kind === "memory_forget") {
+    const [row] = await tx<Row[]>`
+      UPDATE swarm.memories SET status = 'deleted', deleted_at = statement_timestamp(),
+        revision = revision + 1, last_editor_kind = ${editorKind}, last_editor_id = ${editorId}::uuid,
+        updated_at = statement_timestamp()
+      WHERE workspace_id = ${route.workspaceId}::uuid AND memory_id = ${command.memory_id}::uuid
+        AND status = 'active' AND author_kind = ${editorKind} AND author_id = ${editorId}::uuid
+      RETURNING memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
+    `;
+    if (row === undefined) {
+      // Missing, deleted, another workspace's, or saved by someone else: one answer.
+      await audit("authz", "memory_forget_not_own");
+      return { status: 404, body: { error: "not_found", message: "No active memory you saved has that id." } };
+    }
+    await tx`
+      INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, evidence,
+        editor_kind, editor_id, sponsor_user_id)
+      VALUES (${row.memory_id}::uuid, ${route.workspaceId}::uuid, ${row.revision}, 'forget', ${row.kind},
+        ${row.statement}, ${tx.json(row.evidence)}::jsonb, ${editorKind}, ${editorId}::uuid, ${sponsor}::uuid)
+    `;
+    response = { ok: true, event_ids: [], memory: recordOf(row), memory_outcome: "forgotten" };
+  } else {
+    if (editorKind === "agent") {
+      const [recent] = await tx<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM swarm.memory_versions
+        WHERE workspace_id = ${route.workspaceId}::uuid AND editor_kind = 'agent'
+          AND editor_id = ${editorId}::uuid AND action IN ('save', 'edit')
+          AND created_at > statement_timestamp() - interval '24 hours'
+      `;
+      if (recent!.n >= MEMORY_AGENT_DAILY_SAVES) {
+        await audit("rate_limit", "memory_rate_limited");
+        return decided({ status: 429, body: { error: "memory_rate_limited",
+          message: `An agent can save ${MEMORY_AGENT_DAILY_SAVES} memories a day in a workspace. Try again later.` } });
+      }
+    }
+    const [history] = await tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM swarm.memory_versions WHERE workspace_id = ${route.workspaceId}::uuid
+    `;
+    if (history!.n >= MEMORY_HISTORY_CAP) {
+      await audit("domain", "memory_history_full");
+      return decided({ status: 409, body: { error: "memory_history_full",
+        message: "This workspace's memory history is full. A person can delete old memories to make room." } });
+    }
+    const [current] = await tx<Row[]>`
+      SELECT memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
+      FROM swarm.memories
+      WHERE workspace_id = ${route.workspaceId}::uuid AND subject_key = ${command.subject} AND status = 'active'
+    `;
+    if (current === undefined) {
+      if (command.expected_revision !== null) {
+        await audit("domain", "memory_revision_conflict");
+        return decided({ status: 409, body: { error: "memory_revision_conflict",
+          message: "There's no active memory with that subject to update. Save it without expected_revision." } });
+      }
+      const [active] = await tx<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM swarm.memories
+        WHERE workspace_id = ${route.workspaceId}::uuid AND status = 'active'
+      `;
+      if (active!.n >= MEMORY_ACTIVE_CAP) {
+        await audit("domain", "memory_limit");
+        return decided({ status: 409, body: { error: "memory_limit",
+          message: `A workspace can hold ${MEMORY_ACTIVE_CAP} memories. A person can delete some to make room.` } });
+      }
+      const [created] = await tx<Row[]>`
+        INSERT INTO swarm.memories (memory_id, workspace_id, subject_key, kind, statement, evidence, revision,
+          author_kind, author_id, sponsor_user_id, last_editor_kind, last_editor_id, review_at)
+        VALUES (gen_random_uuid(), ${route.workspaceId}::uuid, ${command.subject}, ${command.memory_kind},
+          ${command.statement}, ${tx.json(command.evidence)}::jsonb, 1, ${editorKind}, ${editorId}::uuid,
+          ${sponsor}::uuid, ${editorKind}, ${editorId}::uuid, statement_timestamp() + interval '90 days')
+        RETURNING memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
+      `;
+      await tx`
+        INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, evidence,
+          editor_kind, editor_id, sponsor_user_id)
+        VALUES (${created!.memory_id}::uuid, ${route.workspaceId}::uuid, 1, 'save', ${command.memory_kind},
+          ${command.statement}, ${tx.json(command.evidence)}::jsonb, ${editorKind}, ${editorId}::uuid, ${sponsor}::uuid)
+      `;
+      response = { ok: true, event_ids: [], memory: recordOf(created!), memory_outcome: "created" };
+    } else if (
+      current.kind === command.memory_kind && current.statement === command.statement &&
+      JSON.stringify(current.evidence) === JSON.stringify(command.evidence)
+    ) {
+      response = { ok: true, event_ids: [], memory: recordOf(current), memory_outcome: "duplicate" };
+    } else if (command.expected_revision !== current.revision) {
+      // The caller hasn't seen the current revision: show it, change nothing.
+      const error = command.expected_revision === null ? "memory_exists" : "memory_revision_conflict";
+      await audit("domain", error);
+      return decided({ status: 409, body: { error,
+        message: "A memory with that subject already exists. Read it, then save again with expected_revision to update it.",
+        memory: recordOf(current) } });
+    } else {
+      const [updated] = await tx<Row[]>`
+        UPDATE swarm.memories SET kind = ${command.memory_kind}, statement = ${command.statement},
+          evidence = ${tx.json(command.evidence)}::jsonb, revision = revision + 1,
+          last_editor_kind = ${editorKind}, last_editor_id = ${editorId}::uuid,
+          updated_at = statement_timestamp(), review_at = statement_timestamp() + interval '90 days'
+        WHERE memory_id = ${current.memory_id}::uuid AND revision = ${current.revision}
+        RETURNING memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
+      `;
+      if (updated === undefined) throw new Error("memory revision moved under its subject lock");
+      await tx`
+        INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, evidence,
+          editor_kind, editor_id, sponsor_user_id)
+        VALUES (${updated.memory_id}::uuid, ${route.workspaceId}::uuid, ${updated.revision}, 'edit',
+          ${command.memory_kind}, ${command.statement}, ${tx.json(command.evidence)}::jsonb,
+          ${editorKind}, ${editorId}::uuid, ${sponsor}::uuid)
+      `;
+      response = {
+        ok: true, event_ids: [], memory: recordOf(updated), memory_outcome: "updated",
+        previous_statement: current.statement,
+      };
+    }
+  }
+
+  const inserted = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.ledgerCredentialKind},
+      ${auth.ledgerPrincipalId},
+      ${commandId},
+      ${route.workspaceId}::uuid,
+      ${route.streamId}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (inserted.length === 0) {
+    throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+  }
+  await audit("accepted", null);
+  return {
+    status: 200,
+    body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion },
+  };
+}
+
 /**
  * The recipient set a reader sees, derived the way swarm_read.signals derives
  * it: the rows the caller named when there are any, and otherwise the row's own
@@ -13344,6 +13667,12 @@ async function handleTransaction(
       return await reraiseAsk(tx, route, auth, command, {
         commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
       }, hostedSeatCapability);
+    }
+
+    if (command.kind === "memory_save" || command.kind === "memory_forget") {
+      return await memoryCommand(tx, route, auth, command, {
+        commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
+      });
     }
 
     if (command.kind === "post_signal") {
