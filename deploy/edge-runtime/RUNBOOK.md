@@ -38,13 +38,14 @@ The API cutover is done. `api.commonswarm.com` is Caddy on `yulan-vps-1`. The st
 
 ## 2. Put secrets on the box
 
-Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
+Use the 1Password vault **Agents (Full Access)**, ID `c73s3oi567rtz44ikt2nslzszi`
+(named Yulan Ventures Infra until 2026-11-07). Its titles repeat, so address each item
+by its item ID, confirmed in the workspace secrets inventory, never by title:
 
-- `CommonSwarm — edge-runtime production env`
-- `CommonSwarm — Cloudflare Origin CA certificate`
-- `CommonSwarm — Cloudflare Origin CA key`
+- `CommonSwarm self-hosted Supabase env` (the production env file);
+- `Cloudflare origin cert commonswarm.com` (Origin CA certificate and key).
 
-- [ ] **NOT RUN** — confirm the item names and their revision dates in 1Password.
+- [ ] **NOT RUN** — confirm the item IDs and their revision dates in 1Password.
   Do not print, export to shell history, or paste values into a command line.
 - [ ] **NOT RUN** — write the environment item to `/home/commonswarm/.env` by a
   protected editor or approved 1Password file workflow. It must contain only the
