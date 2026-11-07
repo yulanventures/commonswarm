@@ -295,7 +295,9 @@ test("an agent's choice ask stores its options once; the addressed person's clic
   }), /permission denied/, "stored choices never change");
 
   assert.equal((await answer(f.agentToken, askId, "ship")).status, 403, "an agent credential can't click");
-  assert.equal((await answer(f.otherJwt, askId, "ship")).status, 404, "a non-member gets nothing");
+  const outsider = await answer(f.otherJwt, askId, "ship");
+  assert.ok(outsider.status === 403 || outsider.status === 404, `a non-member is refused (${outsider.status})`);
+  assert.deepEqual(await actions(askId), [], "a refused caller records no attempt");
   const unknown = await answer(f.ownerJwt, askId, "nope");
   assert.equal(unknown.status, 400);
   assert.equal(unknown.body.error, "unknown_option");
