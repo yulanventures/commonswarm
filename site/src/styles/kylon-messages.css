@@ -207,3 +207,32 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* Choice buttons on an agent's ask: plain text, at least 44px square, wrapping on narrow screens. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choice {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--k-shell-border, currentColor);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choice:disabled {
+  opacity: .6;
+  cursor: progress;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(.dashboard__choice-answer, .dashboard__choice-error) {
+  margin: 6px 0 0;
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}

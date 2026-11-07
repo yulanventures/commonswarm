@@ -1307,6 +1307,8 @@ import "../../styles/kylon-command-palette.css";
     workspaceChannels,
     channelUnread,
     messageStatus,
+    askChoices,
+    answerChoice,
     type ChannelUnread,
     createChannel,
     renameChannel,
@@ -1352,6 +1354,7 @@ import "../../styles/kylon-command-palette.css";
     type AgentStatusEvent,
     type MessageStatus,
   } from "../../lib/message-status";
+  import { choiceAnswerText, type AskChoiceState } from "../../lib/choices";
   import {
     agentActivityFrameIsNewer,
     agentActivityPanelView,
@@ -1958,6 +1961,20 @@ import "../../styles/kylon-command-palette.css";
     let messageStatusGeneration = 0;
     let messageStatusExpiryTimer: number | undefined;
     const agentStatusEvents = new Map<string, AgentStatusEvent>();
+    /* Interactive replies: the stored choices on asks addressed to the signed-in person. Rows exist
+       only when the server's flag is on, so with it off nothing renders. */
+    let choiceRows = new Map<string, AskChoiceState>();
+    let choiceCheckedAt = 0;
+    let choiceGeneration = 0;
+    const choicePending = new Set<string>();
+    const choiceErrors = new Map<string, string>();
+    const resetChoices = (): void => {
+      choiceRows = new Map();
+      choiceCheckedAt = 0;
+      choiceGeneration += 1;
+      choicePending.clear();
+      choiceErrors.clear();
+    };
     const resetMessageStatus = (): void => {
       messageStatusRows = new Map();
       messageStatusCheckedAt = 0;
@@ -6311,6 +6328,95 @@ import "../../styles/kylon-command-palette.css";
 
     /* Repaint when the soonest Working expires, so a crashed agent stops looking busy even if no
        idle event arrives. */
+    /* Choice buttons under an ask addressed to the signed-in person: text only, at least 44px.
+       A click sends answer_choice; the server checks everything and records an ordinary reply. */
+    const appendChoices = (body: HTMLElement, signal: Signal): void => {
+      const state = choiceRows.get(signal.id);
+      if (!state) return;
+      const answered = choiceAnswerText(state);
+      if (answered !== null) {
+        const line = document.createElement("p");
+        line.className = "dashboard__choice-answer";
+        line.textContent = answered;
+        body.append(line);
+        return;
+      }
+      const group = document.createElement("div");
+      group.className = "dashboard__choices";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", "Choices");
+      for (const option of state.options) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "dashboard__choice";
+        button.textContent = option.label;
+        button.disabled = choicePending.has(signal.id);
+        button.addEventListener("click", () => void sendChoice(signal.id, option.id));
+        group.append(button);
+      }
+      body.append(group);
+      const error = choiceErrors.get(signal.id);
+      if (error) {
+        const note = document.createElement("p");
+        note.className = "dashboard__choice-error";
+        note.setAttribute("role", "alert");
+        note.textContent = error;
+        body.append(note);
+      }
+    };
+
+    const sendChoice = async (signalId: string, optionId: string): Promise<void> => {
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      if (!activeSession || !workspaceId || choicePending.has(signalId)) return;
+      choicePending.add(signalId);
+      choiceErrors.delete(signalId);
+      renderFeed();
+      let result: Awaited<ReturnType<typeof answerChoice>>;
+      try {
+        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, optionId);
+      } catch {
+        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+      }
+      choicePending.delete(signalId);
+      if (workspaceId !== activeWorkspaceId) return;
+      const state = choiceRows.get(signalId);
+      if (result.ok && state) {
+        choiceRows.set(signalId, { ...state, answer: { optionId: result.optionId, byViewer: true } });
+      } else if (!result.ok) {
+        choiceErrors.set(signalId, result.message);
+      }
+      renderFeed();
+      void refreshChoices(workspaceId, requestVersion, true);
+    };
+
+    const refreshChoices = async (workspaceId: string, version: number, force = false): Promise<void> => {
+      const viewerId = session?.user.id ?? "";
+      if (sampleMode || !viewerId) return;
+      const now = Date.now();
+      if (!force && now - choiceCheckedAt < 20_000) return;
+      const ids = signals
+        .filter((signal) => signal.kind === "ask" && signal.to === viewerId && signal.threadRootId === null)
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+        .slice(0, 50)
+        .map((signal) => signal.id);
+      if (ids.length === 0) return;
+      choiceCheckedAt = now;
+      const generation = ++choiceGeneration;
+      let rows: AskChoiceState[] | null;
+      try {
+        rows = await askChoices(workspaceId, ids);
+      } catch {
+        rows = null;
+      }
+      if (generation !== choiceGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      if (rows === null) return;
+      const next = new Map(rows.map((row) => [row.signalId, row]));
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...choiceRows]);
+      choiceRows = next;
+      if (changed && !addAgentViewOpen()) renderFeed();
+    };
+
     const scheduleMessageStatusExpiry = (): void => {
       window.clearTimeout(messageStatusExpiryTimer);
       messageStatusExpiryTimer = undefined;
@@ -7107,6 +7213,7 @@ import "../../styles/kylon-command-palette.css";
         }
         appendDeliveryReceipt(body, signal);
         appendMessageStatus(body, signal);
+        appendChoices(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
            `threadRootBlock` is every rule `resolveThreadRoot` applies, in its order: directed
            or expiring inside the server's one-second margin (both 404), then an archived
@@ -7424,6 +7531,7 @@ import "../../styles/kylon-command-palette.css";
       renderFeed();
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
+      void refreshChoices(workspaceId, version);
     };
 
     const refreshLatestSignals = async (): Promise<void> => {
@@ -7477,6 +7585,7 @@ import "../../styles/kylon-command-palette.css";
         }
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
            offers a catch-up, and the shared gate keeps the requests bounded. */
         void refreshPendingAccess(workspaceId, version);
@@ -7724,6 +7833,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
+      resetChoices();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -8454,6 +8564,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
+      resetChoices();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -9949,6 +10060,7 @@ import "../../styles/kylon-command-palette.css";
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
+        resetChoices();
       }
       syncChannelUrl();
       renderChannelRail();
@@ -12057,6 +12169,7 @@ import "../../styles/kylon-command-palette.css";
         renderFeed("latest");
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
+        void refreshChoices(workspaceId, version);
       } catch (caught) {
         /* THE SEND'S OWN TEARDOWN COMES FIRST, before any question about the screen. This
            block used to open with `if (version !== requestVersion || workspaceId !==
