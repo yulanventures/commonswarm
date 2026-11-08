@@ -219,6 +219,22 @@ test('store rechecks access, commits multiple events once, persists notice recei
         await tx`UPDATE swarm.hosted_mcp_grants SET state='active',activated_at=clock_timestamp() WHERE grant_id=${g.grant}::uuid`;
         await check('live', 'read_write');
       });
+      await t.test('messages waiting counts only messages that have not expired, like the roster and home', async () => {
+        const waiting = async () => {
+          await tx`SET LOCAL ROLE swarm_command`;
+          const queue = await adapter.read(tx, g.workspace, g.human, { kind: 'todo_queue', principal_id: g.principal }) as {
+            status: { facts: { messages_waiting_since: string | null } } };
+          await tx`RESET ROLE`; return queue.status.facts.messages_waiting_since;
+        };
+        assert.notEqual(await waiting(), null, 'the unacked start notice is waiting');
+        // Expire every message to this agent. Signals are append-only, so the trigger is set aside inside
+        // this rolled-back transaction only.
+        await tx`ALTER TABLE swarm.signals DISABLE TRIGGER USER`;
+        await tx`UPDATE swarm.signals s SET until = clock_timestamp() - interval '1 second', created_at = least(created_at, clock_timestamp() - interval '2 seconds')
+          FROM swarm.signal_deliveries d WHERE d.workspace_id = s.workspace_id AND d.signal_id = s.id AND d.recipient_agent_principal_id = ${g.principal}::uuid`;
+        await tx`ALTER TABLE swarm.signals ENABLE TRIGGER USER`;
+        assert.equal(await waiting(), null, 'an expired message is no longer waiting');
+      });
       await t.test('rate-limited notice commits the to-do and is never retried', async () => {
         let calls = 0;
         const limited = store(async (_tx, _workspace, _identity, intent) => { calls++; return { to: intent.to, status: 'not_sent', reason: 'signal_rate_limited' }; });
