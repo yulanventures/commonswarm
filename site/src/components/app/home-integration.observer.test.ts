@@ -1035,9 +1035,16 @@ test('an unknown write outcome is shown plainly; a late result never writes to t
   await runInContext("homeWrite(async () => { throw new CommandOutcomeUnknown('Transport prose'); })", context);
   assert.equal(runInContext('homeTodoSave', context), 'unknown');
   assert.equal(runInContext('homeTodoReceipt', context), 'The result is unknown. Reload to check.');
+  // A refusal is not a connection problem: it shows only the refusal, never "Check your connection".
   await runInContext("homeWrite(async () => ({status:'refused',reason:'owner_only'}))", context);
-  assert.equal(runInContext('homeTodoSave', context), 'failed');
+  assert.equal(runInContext('homeTodoSave', context), 'refused');
   assert.equal(runInContext('homeTodoReceipt', context), 'Only its owner can change its line.');
+  await runInContext("homeWrite(async () => { throw new HomeCommandRefused('owner_only'); })", context);
+  assert.equal(runInContext('homeTodoSave', context), 'refused');
+  assert.equal(runInContext('homeTodoReceipt', context), 'Only its owner can change its line.');
+  await runInContext("homeWrite(async () => { throw new Error('socket closed'); })", context);
+  assert.equal(runInContext('homeTodoSave', context), 'failed', 'a failed request still says to check the connection');
+  assert.equal(runInContext('homeTodoReceipt', context), 'Not saved. Check your connection and try again.');
   const pending = runInContext("homeWrite(() => new Promise(resolve => { globalThis.finishWrite=resolve; }))", context);
   runInContext("activeWorkspaceId='X'; ++homeWorkspaceGeneration; homeTodoReceipt='New workspace'; homeTodoSave='idle'; finishWrite({status:'committed',value:{},notices:[]});", context);
   await pending;

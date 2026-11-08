@@ -23,7 +23,7 @@ export interface TodoViewVM {
   people: PickerPeople; facts?: AssignFacts;
   /** Other open to-dos in this workspace, for "Waiting on: another to-do". */
   openTodos: { id: Id; title: string }[];
-  save: "idle" | "saving" | "failed" | "unknown";
+  save: "idle" | "saving" | "failed" | "refused" | "unknown";
 }
 export type TodoGateInput = { kind: "todo"; todoId: Id } | { kind: "time"; date: string; time: string } | { kind: "note"; note: string };
 /** Dates and times are the native inputs' local values ("2026-10-09", "21:00"); integration converts. */

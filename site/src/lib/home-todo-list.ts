@@ -11,7 +11,7 @@ export interface TodoListRow { todo: TodoVM; href: string }
 /** Local to lane T. `rows: null` is the loading state. `mayAdd` comes from the server. `names` is
  * home-pickers `personNames` for this workspace, so shared first names stay apart. */
 export interface TodoListVM { filter: TodoFilter; rows: TodoListRow[] | null; now: number; timeZone?: string; sample: boolean; mayAdd: boolean;
-  save?: "idle" | "saving" | "failed" | "unknown"; names?: ReadonlyMap<Id, string> }
+  save?: "idle" | "saving" | "failed" | "refused" | "unknown"; names?: ReadonlyMap<Id, string> }
 export interface TodoListCallbacks { filter: (filter: TodoFilter) => void; complete: (todo: TodoVM, done: boolean) => void; add: (title: string) => void }
 
 export const TODOS_LOADING = "Checking to-dos…";

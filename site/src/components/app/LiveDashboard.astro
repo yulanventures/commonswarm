@@ -1597,7 +1597,8 @@ import "../../styles/kylon-command-palette.css";
     let homeTodoRows: TodoSummary[] = [];
     let homeTodoRead: { todo: Todo; comments: Comment[] } | null = null;
     let homeTodoFilter: TodoFilter = "open";
-    let homeTodoSave: "idle" | "saving" | "failed" | "unknown" = "idle";
+    // refused: the server said no, and the receipt says why; failed: the request itself failed.
+    let homeTodoSave: "idle" | "saving" | "failed" | "refused" | "unknown" = "idle";
     let homeTodoReceipt = "";
     let homeTodoNotice: TodoNotice | null = null;
     let homeQueue: AgentQueue | null = null;
@@ -2474,7 +2475,9 @@ import "../../styles/kylon-command-palette.css";
       }
       const message = one<HTMLElement>("[data-workspace-error]");
       if (message) {
-        message.textContent = `${readableError(error)} Nothing was created or changed.`;
+        // An unknown outcome can't promise that nothing changed.
+        const unknown = error instanceof CommandOutcomeUnknown || error instanceof WorkspaceOutcomeUnknown;
+        message.textContent = unknown ? readableError(error) : `${readableError(error)} Nothing was created or changed.`;
       }
       showPanel("workspace-error");
     };
@@ -4695,7 +4698,7 @@ import "../../styles/kylon-command-palette.css";
         const result = await run(server, crypto.randomUUID());
         if (!live()) return;
         homeTodoSave = "idle";
-        if (result.status === "refused") { homeTodoSave = "failed"; homeTodoReceipt = homeRefusalCopy(result.reason); }
+        if (result.status === "refused") { homeTodoSave = "refused"; homeTodoReceipt = homeRefusalCopy(result.reason); }
         else if (result.status === "conflict") homeTodoReceipt = "Someone changed this to-do. Reload to check before trying again.";
         else {
           homeTodoReceipt = "Saved.";
@@ -4720,7 +4723,7 @@ import "../../styles/kylon-command-palette.css";
           if (workspace) workspace.todosAvailable = false;
           renderHomeShell(); if (homeRoute.view === "chat") renderFeed();
         }
-        homeTodoSave = error instanceof CommandOutcomeUnknown ? "unknown" : "failed";
+        homeTodoSave = error instanceof CommandOutcomeUnknown ? "unknown" : error instanceof HomeCommandRefused ? "refused" : "failed";
         homeTodoReceipt = error instanceof CommandOutcomeUnknown ? TODO_RESULT_UNKNOWN : error instanceof HomeCommandRefused ? homeRefusalCopy(error.reason) : TODO_SAVE_FAILED;
       }
       if (live()) { renderHomeObjectPane(); renderHomeSide(); }

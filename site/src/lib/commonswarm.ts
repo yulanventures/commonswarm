@@ -1101,6 +1101,13 @@ export async function postCommand(
   } catch (error) {
     if (error instanceof SessionExpired || error instanceof AuthRecoveryRequired) throw error;
     if (unknownOutcome) throw new CommandOutcomeUnknown(unknownOutcome);
+    // Only create_workspace may say a workspace might have been created. Every other command gets
+    // copy about the change it was making, so a lost rename or invite isn't reported as a creation.
+    if (command.kind !== "create_workspace") {
+      throw new CommandOutcomeUnknown(deadline.controller.signal.aborted
+        ? "CommonSwarm stopped waiting after 30 seconds, so it can't tell whether that change was saved. Reload to see the current state before trying again."
+        : "CommonSwarm lost contact before it could read the result, so it can't tell whether that change was saved. Reload to see the current state before trying again.");
+    }
     if (deadline.controller.signal.aborted) {
       throw new WorkspaceOutcomeUnknown(
         "CommonSwarm stopped waiting after 30 seconds, so it cannot tell whether the " +
