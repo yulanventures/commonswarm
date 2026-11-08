@@ -24,7 +24,8 @@ def deletion_controls(repo, temp_root='/private/tmp'):
     pathlib.Path(temp_root).resolve(strict=True)
     environment = dict(os.environ)
     environment.pop('NODE_TEST_CONTEXT', None)  # Run the owner, not a nested-runner no-op.
-    result = subprocess.run(['node', '--import', 'tsx', '--test',
+    # Pin TAP: newer Node prints the spec reporter even without a TTY, which has no '# pass N' line.
+    result = subprocess.run(['node', '--import', 'tsx', '--test', '--test-reporter=tap',
                              'tests/p1-cli/site-artifact.test.ts'],
                             cwd=pathlib.Path(repo).resolve(strict=True),
                             capture_output=True, text=True, env=environment)
