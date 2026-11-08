@@ -113,14 +113,30 @@ export async function sendConnectWithPending(
       // evaluated afresh without risking a second destructive intent.
       throw error;
     }
-    if (!(error instanceof CommandTransportError)) {
+    // A 5xx is ambiguous for these too: the gateway can answer after the command committed.
+    // Clearing the id would make the retry a second invite, join credential or workspace
+    // rather than a replay. Same rule as sendCapabilityWithPending and sendSignalWithPending.
+    const ambiguous = error instanceof CommandTransportError ||
+      (error instanceof CommandHttpError && error.status >= 500);
+    if (!ambiguous) {
       await clearPendingCommand(session.store, session.userId, pending.intent);
       throw error;
     }
+    if (error instanceof CommandHttpError) throw pendingHttpError(error, "command");
     throw new CommandTransportError(
       `${error.message}; retry the same command to resolve its pending outcome`,
     );
   }
+}
+
+/** The same HTTP failure with the retry hint, keeping its status, server code and response. */
+function pendingHttpError(error: CommandHttpError, what: "command" | "signal"): CommandHttpError {
+  return new CommandHttpError(
+    error.status,
+    `${error.message}; retry the same ${what} to resolve its pending outcome`,
+    error.code,
+    error.response,
+  );
 }
 
 /**
@@ -174,12 +190,7 @@ export async function sendCapabilityWithPending(
       await clearPendingCommand(session.store, session.userId, pending.intent);
       throw error;
     }
-    if (error instanceof CommandHttpError) {
-      throw new CommandHttpError(
-        error.status,
-        `${error.message}; retry the same command to resolve its pending outcome`,
-      );
-    }
+    if (error instanceof CommandHttpError) throw pendingHttpError(error, "command");
     throw new CommandTransportError(
       `${error.message}; retry the same command to resolve its pending outcome`,
     );
@@ -285,12 +296,7 @@ export async function sendSignalWithPending(
       await clearPendingSignal(session.store, pending.intent);
       throw error;
     }
-    if (error instanceof CommandHttpError) {
-      throw new CommandHttpError(
-        error.status,
-        `${error.message}; retry the same signal to resolve its pending outcome`,
-      );
-    }
+    if (error instanceof CommandHttpError) throw pendingHttpError(error, "signal");
     throw new CommandTransportError(
       `${error.message}; retry the same signal to resolve its pending outcome`,
     );
