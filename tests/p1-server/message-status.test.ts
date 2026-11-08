@@ -122,6 +122,21 @@ test("message_status moves from sent to delivered, seen, working and replied", a
   assert.equal((await one(ws, owner, id))?.replied, true, "a reply from the agent counts as replied");
 });
 
+test("an agent working in a workspace other than its home one shows Working there too", async () => {
+  const owner = await person("Owner");
+  const home = await workspace(owner);
+  const other = await workspace(owner);
+  const helper = await agent(home, owner, "Helper");
+  await sql`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${helper}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  for (const ws of [home, other]) {
+    const id = await dm(ws, owner, helper);
+    await ack(id, helper, "observed");
+    await working(ws, helper, id, "editing");
+    assert.equal((await one(ws, owner, id))?.working?.label, "editing", ws === home ? "home workspace" : "second workspace");
+  }
+});
+
 test("message_status shows Working only for that message and only before it expires", async () => {
   const owner = await person("Owner");
   const ws = await workspace(owner);
