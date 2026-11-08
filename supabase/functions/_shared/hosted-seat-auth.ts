@@ -5,8 +5,8 @@ import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat", "seat_list"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "reraise", "working_on", "check", "file_get", "file_put", "seat_release", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
-export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", "roster", "channel_ls", "channel_read", "file_ls", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "reraise", "working_on", "check", "file_get", "file_put", "seat_release", "memory_save", "memory_forget", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
+export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", "roster", "channel_ls", "channel_read", "file_ls", "memory_search", "memory_get", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
 export type HostedSeatCommandTool = typeof HOSTED_SEAT_COMMAND_TOOLS[number];
@@ -89,8 +89,10 @@ function seatTool(value: string): value is HostedSeatTool {
  */
 function sqlSeatTool(tool: string, use: "command" | "read"): string {
   if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool)) return use === "command" ? "note" : "members";
-  if (tool === "file_ls" || tool === "roster" || tool === "channel_ls" || tool === "channel_read") return "members";
-  if (tool === "file_get" || tool === "file_put" || tool === "seat_release" || tool === "reraise") return "note";
+  if (tool === "file_ls" || tool === "roster" || tool === "channel_ls" || tool === "channel_read" ||
+    tool === "memory_search" || tool === "memory_get") return "members";
+  if (tool === "file_get" || tool === "file_put" || tool === "seat_release" || tool === "reraise" ||
+    tool === "memory_save" || tool === "memory_forget") return "note";
   return tool;
 }
 
@@ -286,7 +288,8 @@ export async function resolveHostedConnectionContext(
         SELECT swarm.resolve_hosted_mcp_connection_context(
           ${binding.grantId}::uuid, ${binding.providerGrantId},
           ${binding.kind === "hosted_seat" && (binding.tool === "file_ls" || binding.tool === "roster" ||
-            binding.tool === "channel_ls" || binding.tool === "channel_read") ? "members" : binding.tool},
+            binding.tool === "channel_ls" || binding.tool === "channel_read" ||
+            binding.tool === "memory_search" || binding.tool === "memory_get") ? "members" : binding.tool},
           ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
         ) AS context
       `;

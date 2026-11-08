@@ -217,9 +217,11 @@ async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessa
  * Brain M3: an agent's reads of workspace memory, behind SWARM_BRAIN_MEMORY like the memory
  * commands. The definers (20261107000002) admit the caller again from the installed claims and
  * return only active memories in this workspace. Memory text and evidence links are untrusted
- * data. Hosted seats have no path here: HostedReadInput doesn't carry these resources.
+ * data. Hosted seats (M3b) also need SWARM_BRAIN_MEMORY_HOSTED, and each capability reads only
+ * its own resource: memory_search or memory_get.
  */
 const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
+const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN_MEMORY_HOSTED") === "1";
 const MEMORY_QUERY_MAX = 200;
 interface MemorySearchReadRequest {
   resource: "memory_search";
@@ -1271,6 +1273,8 @@ export type HostedReadInput =
   | { resource: "roster"; workspace_id: string }
   | { resource: "channels"; workspace_id: string }
   | ChannelMessagesReadRequest
+  | MemorySearchReadRequest
+  | MemoryGetReadRequest
   | {
       resource: "files";
       workspace_id: string;
@@ -1313,6 +1317,7 @@ export interface ReadResult {
 
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
+  if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
   if (input.resource === "files") {
     const offset = input.offset ?? 0;
     const limit = input.limit ?? HOSTED_FILE_PAGE_LIMIT;
@@ -1352,9 +1357,14 @@ export async function handleHostedRead(
       (input.resource === "roster" && tool !== "roster") ||
       (input.resource === "channels" && tool !== "channel_ls") ||
       (input.resource === "channel_messages" && tool !== "channel_read") ||
+      (input.resource === "memory_search" && tool !== "memory_search") ||
+      (input.resource === "memory_get" && tool !== "memory_get") ||
       (input.resource === "files" && tool !== "file_ls") ||
       (input.resource === "signals" && tool !== "check")) {
     return { status: 403, body: { error: "forbidden" } };
+  }
+  if (isMemoryRead(input) && !brainMemoryHostedEnabled) {
+    return { status: 404, body: { error: "memory_unavailable", message: "Workspace memory isn't turned on here." } };
   }
   return await withReadTransaction(async (tx) => {
     await setReadTransaction(tx);
@@ -1423,6 +1433,11 @@ export async function handleHostedRead(
     if (input.resource === "channel_messages") {
       const page = await channelMessages(tx, seat.workspace_id, input);
       return { status: page.status, body: page.status === 200 ? { ...page.body, context } : page.body };
+    }
+    if (isMemoryRead(input)) {
+      // The canonical form the agent route reads (trimmed query, lowercase id); validated above.
+      const result = await memoryRead(tx, seat.workspace_id, parseMemoryRead({ ...input })!);
+      return { status: result.status, body: result.status === 200 ? { ...result.body, context } : result.body };
     }
     if (input.resource === "files") {
       return await hostedFileList(tx, seat, input, context);
