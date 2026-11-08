@@ -438,6 +438,12 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
         if (Object.values(state.todos).filter(isOpen).length >= TODO_OPEN_LIMIT) return refuse('todo_limit_reached');
         if (todo.assignee && queueFull(todo, todo.assignee)) return refuse('queue_full');
       }
+      // A finished to-do can't take a pending request: accepting it would be refused. Answer it as
+      // replaced, as starting the to-do does, so no one is left holding a request they can't act on.
+      if ((next === 'done' || next === 'dropped') && todo.offer) {
+        emit('TodoOfferAnswered', { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: 'replaced' });
+        todo = own(draft.todos, todo.todo_id)!;
+      }
     }
     const rank = !isOpen(todo) && next === 'open' && todo.assignee?.kind === 'agent'
       ? Math.max(0, ...queue(draft, todo.assignee.id).map(t => t.queue_rank!)) + 1 : todo.queue_rank;
