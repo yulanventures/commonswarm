@@ -5698,10 +5698,11 @@ async function createSelfServeWorkspace(
     };
   }
 
-  await tx`
+  const inserted = await tx<{ workspace_id: string }[]>`
     INSERT INTO swarm.workspaces (workspace_id, name, created_by, org_id)
     VALUES (${workspaceId}::uuid, ${name}, ${auth.actor.user}::uuid, ${orgId}::uuid)
     ON CONFLICT (workspace_id) DO NOTHING
+    RETURNING workspace_id
   `;
   // A client-proposed id that is already taken must not silently hand the
   // caller someone else's tenant — the same guard seedDogfood applies.
@@ -5715,6 +5716,24 @@ async function createSelfServeWorkspace(
   }
   if (orgId !== null && owned[0]?.org_id !== orgId) {
     return { status: 409, body: { error: "workspace_org_conflict" } };
+  }
+  // A re-sent create for a workspace that already exists is a retry, and only a retry: it
+  // answers as before for a creator who is still a live owner of a live workspace, and never
+  // restores a membership that was removed or demoted after creation, or reopens an archived one.
+  if (inserted.length === 0) {
+    const [current] = await tx<{ live_owner: boolean; archived: boolean }[]>`
+      SELECT
+        EXISTS (
+          SELECT 1 FROM swarm.memberships
+          WHERE workspace_id = ${workspaceId}::uuid AND user_id = ${auth.actor.user}::uuid
+            AND role = 'owner' AND revoked_at IS NULL
+        ) AS live_owner,
+        archived_at IS NOT NULL AS archived
+      FROM swarm.workspaces
+      WHERE workspace_id = ${workspaceId}::uuid
+    `;
+    if (!current?.live_owner) return await forbid("workspace_rerun_not_live_owner");
+    if (current.archived) return await forbid("workspace_rerun_archived");
   }
   await tx`
     INSERT INTO swarm.memberships (workspace_id, user_id, role, revoked_at)
