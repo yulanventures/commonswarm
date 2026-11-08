@@ -903,6 +903,12 @@ test("re-raise refusals name the ask's state and what can still be done", () => 
   }
 });
 
+test("an ask with choices while choice asks are off says so and how to send it instead", () => {
+  const mapped = mapMcpError(new CommandHttpError(404, "Choice asks aren't turned on here.", "interactive_replies_unavailable"));
+  assert.deepEqual(mapped, { code: "interactive_replies_unavailable", message: "Choice asks aren't turned on here, so nothing was sent.",
+    next_step: "send it as a plain ask, without choices", status: 404 });
+});
+
 test("MCP malformed accepted response is unknown after the signal was created", { timeout: 15_000 }, async () => {
   const f = await fixture();
   try {
