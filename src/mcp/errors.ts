@@ -10,7 +10,7 @@ import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
 import { FilePutPreflightError, RequestIdConflict } from "../cloud/exact-file-put.js";
 import { isAskChainRefusalCode, printableAskRefusalMessage } from "../cloud/ask-chain-constants.js";
 
-type Action = "retry the same call" | "retry this call with the same request_id" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "use a new request_id for new content" | "read the topic again and use a NEW request_id for new content" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
+type Action = "retry the same call" | "retry this call with the same request_id" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "use a new request_id for new content" | "read the topic again and use a NEW request_id for new content" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id" | "send a new ask if it still matters" | "call check to read the replies" | "wait until 24 hours after the last re-raise, then use a new request_id";
 type Sentence = { message: string; next_step: Action };
 const RETRY: Action = "retry the same call";
 const FIX: Action = "fix the named argument";
@@ -22,6 +22,7 @@ const CHECK_ARGUMENTS: Action = "check the arguments; if the problem stays, ask 
 const RESTART_SESSION: Action = "restart this MCP server with the current host session";
 const WAIT_AND_RETRY: Action = "wait, then retry the same call with the same request_id";
 const FILE_RETRY: Action = "retry this call with the same request_id";
+const NEW_ASK: Action = "send a new ask if it still matters";
 const entry = (message: string, next_step: Action): Sentence => ({ message, next_step });
 
 /** The only model-visible error prose. No producer message is copied here. */
@@ -92,6 +93,12 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   renewal_forbidden: entry("The service refused this agent's credential renewal.", PERSON),
   channel_not_found: entry("The channel argument names no channel in this workspace.", FIX),
   channel_archived: entry("The channel argument names an archived channel.", FIX),
+  // reraise refusals: each names the ask's state and what can still be done.
+  ask_expired: entry("That ask has expired, so it can't be re-raised.", NEW_ASK),
+  ask_answered: entry("That ask already has an answer, so there's nothing to re-raise.", "call check to read the replies"),
+  reraise_too_soon: entry("This ask was re-raised in the last 24 hours.", "wait until 24 hours after the last re-raise, then use a new request_id"),
+  reraise_unsupported: entry("Only an ask sent to someone can be re-raised; this one went to the whole workspace.", NEW_ASK),
+  outcome_still_unknown: entry("CommonSwarm still can't confirm whether this request was applied, after a retry with the same request_id.", STOP),
   invalid_request: entry("The service did not accept the named arguments.", FIX),
   payload_too_large: entry("The body or about argument is too large.", FIX),
   rate_limited: entry("The service rate limit was reached.", WAIT_AND_RETRY),
@@ -148,11 +155,17 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   mcp_call_failed: entry("The tool could not complete this call.", RETRY),
 };
 
+/** A send whose outcome was already unknown once came back unknown again for the same request id. */
+export class OutcomeStillUnknown extends Error {
+  constructor() { super("outcome still unknown"); this.name = "OutcomeStillUnknown"; }
+}
+
 export function mapMcpError(error: unknown): { code: string; message: string; next_step: string; status?: number } {
   const readHttp = followHttpDetails(error);
   const readCode = followErrorEnvelope(error).error;
   const readFailure = classifySignalReadFailure(error);
-  const code = error instanceof AgentSetupError ? error.code
+  const code = error instanceof OutcomeStillUnknown ? "outcome_still_unknown"
+    : error instanceof AgentSetupError ? error.code
     : error instanceof AgentCredentialInputError ? error.code
     : error instanceof CommandHttpError ? error.code ?? `http_${error.status}`
     : error instanceof FileCommandRefused ? error.code

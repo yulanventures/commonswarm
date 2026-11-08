@@ -871,6 +871,38 @@ test("MCP typed producer classes have owned sentences and truthful status", { ti
   assert.equal(mapMcpError(new RenewalRefused(200, "malformed_successor", "bad")).next_step, "retry the same call");
 });
 
+test("a second unknown outcome for the same request id stops instead of asking for another retry", { timeout: 45_000 }, async () => {
+  const f = await fixture();
+  try {
+    const args = { body: "keeps failing", request_id: "stuck0001" };
+    f.loseNextAnswer();
+    assert.deepEqual((await f.call("note", args)).value, { outcome: "unknown", retry_with_same_request_id: true }, "first: retry");
+    f.loseNextAnswer();
+    const second = await f.call("note", args);
+    assert.equal(second.result.isError, true, "second: an error, not another retry");
+    assert.equal(second.value.code, "outcome_still_unknown");
+    assert.equal(second.value.next_step, "stop and keep the same request id");
+    assert.equal(second.value.message, MCP_ERROR_SENTENCES.outcome_still_unknown!.message);
+    assert.equal(f.created(), 1, "the write committed once");
+    // When the service answers again, the same id resolves to the committed signal.
+    assert.equal((await f.call("note", args)).value.signal_id, ID);
+    assert.equal(f.created(), 1);
+    // One unknown followed by an answer starts over: a later unknown is a first unknown again.
+    f.loseNextAnswer();
+    assert.deepEqual((await f.call("note", { body: "later", request_id: "stuck0002" })).value, { outcome: "unknown", retry_with_same_request_id: true });
+  } finally { await f.close(); }
+});
+
+test("re-raise refusals name the ask's state and what can still be done", () => {
+  for (const [code, next] of [["ask_expired", "send a new ask if it still matters"], ["ask_answered", "call check to read the replies"],
+    ["reraise_too_soon", "wait until 24 hours after the last re-raise, then use a new request_id"], ["reraise_unsupported", "send a new ask if it still matters"]] as const) {
+    const mapped = mapMcpError(new CommandHttpError(409, "refused", code));
+    assert.equal(mapped.code, code);
+    assert.equal(mapped.next_step, next, code);
+    assert.doesNotMatch(mapped.message, /The service returned/, `${code} has its own sentence`);
+  }
+});
+
 test("MCP malformed accepted response is unknown after the signal was created", { timeout: 15_000 }, async () => {
   const f = await fixture();
   try {
