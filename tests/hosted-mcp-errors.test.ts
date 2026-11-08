@@ -59,7 +59,8 @@ test("hosted input errors name the field and expected form without echoing suppl
 });
 
 const accessMessage = "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.";
-const genericMessage = "Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com";
+const genericMessage = "Something failed on our side; retry the same call; if it repeats, contact support@commonswarm.com";
+const genericWriteMessage = "Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com";
 
 test("hosted command and read failures return exact stable codes and safe recovery messages", async (t) => {
   const logging = t.mock.method(console, "error", () => undefined);
@@ -80,8 +81,9 @@ test("hosted command and read failures return exact stable codes and safe recove
     ["command_id_conflict", "This request_id was already used for different arguments. Retry the original request unchanged, or use a new request_id for a different request."],
     ["invalid_request", "The request arguments were rejected. Check the tool's input schema and correct the arguments before retrying."],
     ["payload_too_large", "The request is too large. Shorten body to at most 8000 characters and retry with a new request_id."],
-    ["upgrade_required", "This hosted connection needs a service update. Contact support@commonswarm.com, then retry with the same request_id."],
-    ["rate_limited", "Too many requests. Retry at 2026-10-03T12:01:00.000Z; reuse the same request_id."],
+    // whoami is a read tool: it takes no request_id, so its retry copy never mentions one.
+    ["upgrade_required", "This hosted connection needs a service update. Contact support@commonswarm.com, then retry."],
+    ["rate_limited", "Too many requests. Retry at 2026-10-03T12:01:00.000Z."],
   ];
   for (const [code, message] of rows) {
     const serve = handler(async () => commandOutput({ status: 403, body: {
@@ -183,4 +185,31 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   assert.equal(executed, 0);
   assert.equal((await serve(request("whoami", { seat }))).status, 200);
   assert.equal(executed, 1);
+});
+
+test("every refusal a hosted tool can get names the state and a next step that fits the tool", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  const call = async (tool: string, args: Record<string, unknown>, failure: () => unknown) => {
+    const serve = handler(async () => failure());
+    return JSON.parse((await (await serve(request(tool, args))).json()).result.content[0].text);
+  };
+  const rows: Array<[string, Record<string, unknown>, string, string]> = [
+    // tool, arguments, backend code, expected copy
+    ["note", { ...base, channel: "ops" }, "channel_not_found", "There's no channel with that name in this workspace. Call channel_ls to see its channels."],
+    ["channel_read", { seat, channel: "ops" }, "channel_not_found", "There's no channel with that name in this workspace. Call channel_ls to see its channels."],
+    ["note", { ...base, channel: "ops" }, "channel_archived", "That channel is archived, so it takes no new messages. Call channel_ls to pick a live channel, or leave channel out to post to #general."],
+    ["reraise", { seat, signal_id: uuid, request_id: base.request_id }, "ask_answered", "That ask already has an answer, so there's nothing to re-raise. Call check to read replies to it."],
+    ["note", base, "temporarily_unavailable", "CommonSwarm is briefly busy. Retry in a few seconds with the same request_id."],
+    ["members", { seat }, "temporarily_unavailable", "CommonSwarm is briefly busy. Retry the same call in a few seconds."],
+    ["note", base, "rate_limited", "Too many requests. Retry after the current rate-limit window resets; reuse the same request_id."],
+    ["members", { seat }, "rate_limited", "Too many requests. Retry after the current rate-limit window resets."],
+    ["note", base, "upgrade_required", "This hosted connection needs a service update. Contact support@commonswarm.com, then retry with the same request_id."],
+    ["note", base, "hosted_private_code", genericWriteMessage],
+    ["members", { seat }, "hosted_private_code", genericMessage],
+  ];
+  for (const [tool, args, code, message] of rows) {
+    const output = tool === "members" || tool === "channel_read" ? readOutput : commandOutput;
+    const body = await call(tool, args, () => output({ status: code === "temporarily_unavailable" ? 503 : 404, body: { error: code, message: "backend prose" } }));
+    assert.deepEqual(body, { error: code === "hosted_private_code" ? "tool_failed" : code, message }, `${tool} ${code}`);
+  }
 });
