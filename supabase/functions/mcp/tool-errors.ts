@@ -1,9 +1,12 @@
 import type { CommandResult } from "../command/contract.d.ts";
-import type { HostedToolName } from "./tools.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
+import { HOSTED_TOOL_TABLE, type HostedToolName } from "./tools.ts";
 
 const ACCESS_MESSAGE = "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.";
 const SEAT_MESSAGE = "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.";
 export const TOOL_FAILURE_MESSAGE = "Something failed on our side; retry with the same request_id; if it repeats, contact support@commonswarm.com";
+/** Read tools take no request_id, so their copy says to repeat the call instead. */
+export const READ_TOOL_FAILURE_MESSAGE = "Something failed on our side; retry the same call; if it repeats, contact support@commonswarm.com";
 
 // Only codes returned by the hosted claim/check/read/post_signal/file paths belong here.
 // Never forward backend prose, arbitrary codes, or exception messages to a client.
@@ -26,6 +29,7 @@ const MESSAGES = {
   payload_too_large: "The request is too large. Shorten body to at most 8000 characters and retry with a new request_id.",
   upgrade_required: "This hosted connection needs a service update. Contact support@commonswarm.com, then retry with the same request_id.",
   rate_limited: "Too many requests. Retry after the current rate-limit window resets; reuse the same request_id.",
+  temporarily_unavailable: "CommonSwarm is briefly busy. Retry in a few seconds with the same request_id.",
   file_not_found: "No readable version of that file exists in this seat's workspace. Use file_ls or the attachments from check to get a current file_id and version_n.",
   file_tombstoned: "That file was removed from the workspace. Ask a workspace member to restore it if you still need it.",
   household_managed_file: "That file belongs to a shared list or doc and cannot be read with file_get.",
@@ -50,12 +54,13 @@ const MESSAGES = {
   signal_attachment_version_unavailable: "An attached version does not exist in this workspace. Use the version_n from file_put or file_ls.",
   hosted_seat_unavailable: "That seat is unavailable to this connection. Call seat_list to see the seats this connection still holds.",
   signal_attachment_not_live: "An attached version is not committed and live. Use the version_n from file_put or file_ls.",
+  channel_not_found: "There's no channel with that name in this workspace. Call channel_ls to see its channels.",
   not_found: "No ask sent by this seat has that signal_id. Use the signal_id returned when the ask was sent.",
   ask_expired: "That ask has expired, so it can't be re-raised. Send a new ask if it still matters.",
-  ask_answered: "That ask already has an answer, so there's nothing to re-raise.",
+  ask_answered: "That ask already has an answer, so there's nothing to re-raise. Call check to read replies to it.",
   reraise_too_soon: "This ask was re-raised in the last 24 hours. Try again after that.",
   reraise_unsupported: "Only an ask sent to someone can be re-raised; this one went to the whole workspace.",
-  channel_archived: "That channel is archived, so it takes no new messages.",
+  channel_archived: "That channel is archived, so it takes no new messages. Call channel_ls to pick a live channel, or leave channel out to post to #general.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;
@@ -80,20 +85,35 @@ export class HostedToolFailure extends Error {
   }
 }
 
+/** Whether the tool's input carries a request_id, so "retry with the same request_id" applies. */
+function takesRequestId(tool: HostedToolName): boolean {
+  const row = HOSTED_TOOL_TABLE.find((entry) => entry.name === tool);
+  const properties = (row?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  return properties !== undefined && Object.hasOwn(properties, "request_id");
+}
+
+/** Copy that tells a read-tool caller how to retry, without a request_id it doesn't have. */
+const READ_TOOL_MESSAGES: Partial<Record<ToolErrorCode, string>> = {
+  rate_limited: "Too many requests. Retry after the current rate-limit window resets.",
+  temporarily_unavailable: "CommonSwarm is briefly busy. Retry the same call in a few seconds.",
+  upgrade_required: "This hosted connection needs a service update. Contact support@commonswarm.com, then retry.",
+};
+
 export function hostedToolError(error: unknown, tool: HostedToolName): { error: string; message: string } {
+  const write = takesRequestId(tool);
   if (!(error instanceof HostedToolFailure) || error.code === "tool_failed") {
-    return { error: "tool_failed", message: TOOL_FAILURE_MESSAGE };
+    return { error: "tool_failed", message: write ? TOOL_FAILURE_MESSAGE : READ_TOOL_FAILURE_MESSAGE };
   }
   const code = error.code;
   const message = code === "rate_limited" && error.retryAt !== null
-    ? `Too many requests. Retry at ${error.retryAt}; reuse the same request_id.`
+    ? `Too many requests. Retry at ${error.retryAt}${write ? "; reuse the same request_id" : ""}.`
     : code === "forbidden" && tool === "reply"
     // The command intentionally combines missing/expired/unaddressed signals
     // and authorization denials. Do not turn this into an existence oracle.
     ? "The signal is unavailable for this seat, or reply access is missing. Check signal_id in check output and reply from the addressed seat; ask a workspace admin if access is missing."
     : code === "forbidden" && (tool === "ask" || tool === "note")
     ? "Workspace access or recipient access is missing. Ask a workspace admin to restore access, reconnect, and use members to select current recipients."
-    : MESSAGES[code];
+    : (!write && READ_TOOL_MESSAGES[code]) || MESSAGES[code];
   return { error: code, message };
 }
 
