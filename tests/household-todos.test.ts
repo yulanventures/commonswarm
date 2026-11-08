@@ -335,6 +335,29 @@ test('accepting an agent now offer puts it first and sends one start ask to that
   assert.equal(reduceTodoEvents(s, accepted.events).todos[second]!.queue_rank, 2);
 });
 
+test('finishing a to-do answers its pending request as replaced, so no one holds a request they cannot act on', () => {
+  const s0 = state(todo());
+  const s = reduceTodoEvents(s0, run(s0, { kind: 'todo_assign', todo_id: first, base_version: 1, to: { kind: 'user', id: bob } }).events);
+  assert.ok(s.todos[first]!.offer, 'a pending request to bob');
+  const answer: TodoCommand = { kind: 'household_todo_answer', todo_id: first, offer_id: uid(300000), answer: 'accept' };
+  const version = s.todos[first]!.version;
+  for (const finish of ['done', 'dropped'] as const) {
+    const d = run(s, { kind: 'todo_set_state', todo_id: first, base_version: version, state: finish });
+    assert.deepEqual(d.events.map(event => event.type), ['TodoOfferAnswered', 'TodoStateChanged'], finish);
+    assert.equal((d.events[0]!.payload as { answer: string }).answer, 'replaced');
+    assert.equal(value(d).offer, null, finish);
+    assert.equal(value(d).state, finish);
+    const after = reduceTodoEvents(s, d.events);
+    assert.equal(after.todos[first]!.offer, null, `${finish}: the projection drops the request`);
+    refused(run(after, answer, bob), 'offer_not_pending');
+    // Reopening leaves it without a request; a new one can be sent.
+    const reopened = run(after, { kind: 'todo_set_state', todo_id: first, base_version: after.todos[first]!.version, state: 'open' });
+    assert.equal(value(reopened).offer, null);
+  }
+  // A to-do without a request finishes with one event, as before.
+  assert.deepEqual(run(s0, { kind: 'todo_set_state', todo_id: first, base_version: 1, state: 'done' }).events.map(event => event.type), ['TodoStateChanged']);
+});
+
 test('state transition matrix allows only explicit lifecycle changes', () => {
   const allowed: Record<string, string[]> = { open: ['doing', 'done', 'dropped'], doing: ['open', 'done', 'dropped'], done: ['open'], dropped: ['open'] };
   for (const from of ['open', 'doing', 'done', 'dropped'] as const) {

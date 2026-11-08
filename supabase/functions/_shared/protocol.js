@@ -5459,6 +5459,10 @@ function decideTodo(state, command, ctx) {
         if (Object.values(state.todos).filter(isOpen).length >= TODO_OPEN_LIMIT) return refuse2("todo_limit_reached");
         if (todo.assignee && queueFull(todo, todo.assignee)) return refuse2("queue_full");
       }
+      if ((next === "done" || next === "dropped") && todo.offer) {
+        emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: todo.offer.offer_id, answer: "replaced" });
+        todo = own2(draft.todos, todo.todo_id);
+      }
     }
     const rank = !isOpen(todo) && next === "open" && todo.assignee?.kind === "agent" ? Math.max(0, ...queue(draft, todo.assignee.id).map((t) => t.queue_rank)) + 1 : todo.queue_rank;
     emit("TodoStateChanged", { todo: {

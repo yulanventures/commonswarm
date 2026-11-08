@@ -5,6 +5,8 @@ export function householdRefusalNextStep(reason: string): string | undefined {
   const place = 'CommonSwarm: People & agents → this agent → Lists & docs → Allow…';
   if (reason === 'content_consent_required' || reason === 'connection_access_refused') return `Ask this agent's owner to allow it in ${place}`;
   if (reason === 'workspace_access_refused') return `If this agent has not been allowed yet, ask its owner to allow it in ${place}`;
+  if (reason === 'invalid_transition') return 'Read the to-do with todo_read for its current state. Open moves to doing, done or dropped; doing to open, done or dropped; done or dropped only back to open. A finished to-do takes no requests.';
+  if (reason === 'gate_invalid') return 'Read the to-do with todo_read. If it waits on a hold, another to-do or a time, it can start once that clears; if you were setting a gate, correct it.';
   return undefined;
 }
 
