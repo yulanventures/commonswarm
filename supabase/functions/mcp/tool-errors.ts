@@ -56,6 +56,10 @@ const MESSAGES = {
   reraise_too_soon: "This ask was re-raised in the last 24 hours. Try again after that.",
   reraise_unsupported: "Only an ask sent to someone can be re-raised; this one went to the whole workspace.",
   channel_archived: "That channel is archived, so it takes no new messages.",
+  memory_unavailable: "Workspace memory isn't turned on here.",
+  memory_rate_limited: "This agent has saved 50 memories in this workspace in the last day. Try again later.",
+  memory_history_full: "This workspace's memory history is full. A person can delete old memories to make room.",
+  memory_limit: "This workspace holds 500 memories, the most it can. A person can delete some to make room.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;
@@ -91,6 +95,10 @@ export function hostedToolError(error: unknown, tool: HostedToolName): { error: 
     // The command intentionally combines missing/expired/unaddressed signals
     // and authorization denials. Do not turn this into an existence oracle.
     ? "The signal is unavailable for this seat, or reply access is missing. Check signal_id in check output and reply from the addressed seat; ask a workspace admin if access is missing."
+    : code === "not_found" && tool === "memory_get"
+    ? "No active memory in this workspace has that memory_id. Use one from memory_search."
+    : code === "not_found" && tool === "memory_forget"
+    ? "No active memory this seat's agent saved has that memory_id. People can delete other memories in the web app."
     : code === "forbidden" && (tool === "ask" || tool === "note")
     ? "Workspace access or recipient access is missing. Ask a workspace admin to restore access, reconnect, and use members to select current recipients."
     : MESSAGES[code];
