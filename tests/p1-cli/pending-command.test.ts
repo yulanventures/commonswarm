@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import {
+  CommandHttpError,
   CommandTransportError,
   ThinCommandClient,
 } from "../../src/cloud/command-client.js";
@@ -84,6 +85,43 @@ test("pending command ids survive only transport ambiguity", async () => {
   await sendConnectWithPending(client, session, workspaceId, command);
   assert.notEqual(requests[1]?.command_id, requests[2]?.command_id);
   assert.deepEqual(store.profile.pendingCommands, {});
+});
+
+test("a 5xx keeps the pending id so the retry is a replay, not a second invite or credential", async () => {
+  const target = cloudTarget("http://127.0.0.1:54321", "anon-key");
+  const rows: Array<[status: number, keeps: boolean]> = [
+    [500, true], [502, true], [503, true], [504, true], [400, false], [403, false], [409, false],
+  ];
+  for (const [status, keeps] of rows) {
+    const userId = randomUUID();
+    const workspaceId = randomUUID();
+    const store = new MemoryStore(userId, workspaceId);
+    const ids: unknown[] = [];
+    let call = 0;
+    const client = new ThinCommandClient(target, (async (_url: URL | RequestInfo, init?: RequestInit) => {
+      ids.push((JSON.parse(String(init?.body)) as Record<string, unknown>).command_id);
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: "temporarily_unavailable" }), {
+          status, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ status: "accepted", ok: true, event_ids: [], invitation_id: randomUUID() }), {
+        status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch);
+    const session = { accessToken: "human-jwt", userId, store };
+    const command = { kind: "invite_member", email: "friend@example.test" } as const;
+
+    const failure = await sendConnectWithPending(client, session, workspaceId, command).then(() => null, (error: unknown) => error);
+    assert.ok(failure instanceof CommandHttpError, `${status}: ${String(failure)}`);
+    assert.equal(failure.status, status);
+    if (status !== 403) assert.equal(failure.code, "temporarily_unavailable", `${status}: the server's code survives`);
+    assert.equal(Object.keys(store.profile.pendingCommands).length, keeps ? 1 : 0, `${status}: pending id kept?`);
+    if (keeps) assert.match(failure.message, /retry the same command/);
+
+    await sendConnectWithPending(client, session, workspaceId, command);
+    assert.equal(ids[0] === ids[1], keeps, `${status}: the retry ${keeps ? "replays" : "is a new command"}`);
+    assert.deepEqual(store.profile.pendingCommands, {}, `${status}: cleared after success`);
+  }
 });
 
 test("parsed HTTP failures clear pending ids", async () => {
