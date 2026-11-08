@@ -366,9 +366,21 @@ export interface ReraiseAskCommand {
   signal_id: string;
 }
 
+/** Interactive replies: an ask to one person with fixed choices (server flag SWARM_INTERACTIVE_REPLIES). */
+export interface AskChoiceCommand {
+  kind: "ask_choice";
+  body: string;
+  to_user_id: string;
+  about: string | null;
+  options: import("./choices.js").ChoiceOption[];
+}
+
+/** Every command sendSignal sends. */
+export type SignalWriteCommand = PostSignalCommand | ReraiseAskCommand | AskChoiceCommand;
+
 export interface PostSignalRequest {
   workspaceId: string;
-  command: PostSignalCommand | ReraiseAskCommand;
+  command: SignalWriteCommand;
   credential: string;
   commandId?: string;
   /**
@@ -1249,8 +1261,11 @@ export class ThinCommandClient {
 
   async sendSignal(request: PostSignalRequest): Promise<PostSignalResult> {
     const commandId = request.commandId ?? newCommandId();
-    const command: PostSignalCommand | ReraiseAskCommand = request.command.kind === "reraise_ask"
+    const command: SignalWriteCommand = request.command.kind === "reraise_ask"
       ? { kind: "reraise_ask", signal_id: request.command.signal_id }
+      : request.command.kind === "ask_choice"
+      ? { kind: "ask_choice", body: request.command.body, to_user_id: request.command.to_user_id,
+        about: request.command.about, options: request.command.options.map(({ id, label }) => ({ id, label })) }
       : {
       kind: "post_signal",
       signal_kind: request.command.signal_kind,

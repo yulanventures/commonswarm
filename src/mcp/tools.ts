@@ -4,6 +4,7 @@ import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/ve
 import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
+import { CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN } from "../cloud/choices.js";
 import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
@@ -38,7 +39,7 @@ const schema = (properties: Record<string, object>, required: string[] = []) => 
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. To let a person answer with a click, give choices (2 to 6 labels) and to (that member); the reply reads \"Chose: <label>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX } }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
@@ -69,6 +70,11 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
     }>)[key];
     if (!rule) throw new Error(`Unknown argument: ${JSON.stringify(key.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
     const item = args[key];
+    if (key === "choices") {
+      if (!Array.isArray(item) || item.length < CHOICE_MIN || item.length > CHOICE_MAX ||
+          item.some(label => typeof label !== "string" || !label.trim() || label.length > CHOICE_LABEL_MAX)) throw new Error("Invalid argument: choices.");
+      continue;
+    }
     if (key === "if_version") {
       if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) throw new Error("Invalid argument: if_version.");
       continue;
