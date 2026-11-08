@@ -346,7 +346,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       (SELECT max(occurred_at) FROM swarm.household_todo_events WHERE workspace_id=${workspaceId}::uuid AND event->>'actor_agent_principal'=${principalId}),
       (SELECT to_timestamp(max((revision->>'occurred_at_server')::double precision)/1000) FROM swarm.household_object_streams s CROSS JOIN LATERAL jsonb_each(s.projection->'objects') o CROSS JOIN LATERAL jsonb_array_elements(o.value->'history') revision WHERE s.workspace_id=${workspaceId}::uuid AND revision->'author'->>'principal_id'=${principalId})
       ) AS last_activity_at,
-      (SELECT min(enqueued_at) FROM swarm.signal_deliveries WHERE workspace_id=${workspaceId}::uuid AND recipient_agent_principal_id=${principalId}::uuid AND acked_at IS NULL) AS messages_waiting_since`;
+      (SELECT min(d.enqueued_at) FROM swarm.signal_deliveries d JOIN swarm.signals s ON s.workspace_id=d.workspace_id AND s.id=d.signal_id WHERE d.workspace_id=${workspaceId}::uuid AND d.recipient_agent_principal_id=${principalId}::uuid AND d.acked_at IS NULL AND s.until>${new Date(now)}) AS messages_waiting_since`;
     const [claim] = await tx`SELECT id,created_at,until FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_principal=${principalId}::uuid AND from_kind='agent' AND kind='working-on' AND until>${new Date(now)} ORDER BY created_at DESC,id LIMIT 1`;
     const doing = Object.values(current.todos).filter(t => t.state === 'doing' && t.assignee?.kind === 'agent' && t.assignee.id === principalId).sort((a,b) => a.state_at.localeCompare(b.state_at))[0];
     const live = agent.revoked_at === null && agent.member_live && (agent.transport === 'hosted_mcp' ? agent.hosted_live : agent.token_live || agent.renewal_live);
