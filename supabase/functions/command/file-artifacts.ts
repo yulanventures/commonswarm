@@ -833,7 +833,7 @@ export async function fileVersionCommit(
   }
   // Create refuses a tombstoned name; commit must too, or a pending upload started before the file
   // was removed would land a new live version in it. A replay of an earlier commit still answers above.
-  if (fileLock[0]?.tombstoned_at !== null) {
+  if ((fileLock[0]?.tombstoned_at ?? null) !== null) {
     return refuse(
       409,
       "file_tombstoned",
