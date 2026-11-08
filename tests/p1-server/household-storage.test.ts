@@ -155,7 +155,7 @@ test('file reservations recheck base at commit, verify actual stored digest, and
   const conflict = await write(workspace, { kind: 'commit_household_upload', reservation_id: reservations[1]!, operation: 'update' }, null);
   assert.equal(conflict.outcome.status, 'conflict');
   const [projection] = await sql`SELECT projection FROM swarm.household_object_streams WHERE workspace_id=${workspace}::uuid`;
-  assert.deepEqual(objects.householdObjectUsage(projection!.projection as HouseholdObjectState), { object_count: 1, storage_bytes: 12 });
+  assert.deepEqual(objects.householdObjectUsage(projection!.projection as HouseholdObjectState, Date.now()), { object_count: 1, storage_bytes: 12 });
   // Corrupt a pending object's bytes with privileged local Storage API only.
   // Same size, different digest: size-only commit would incorrectly pass.
   const corruptObject = randomUUID(), corruptReservation = randomUUID();
@@ -242,6 +242,41 @@ test('durable shared write ceilings refuse new revisions while exact retry and r
   assert.equal((await write(workspace,{kind:'release_household_upload',reservation_id:reservation,operation:'create'},null)).outcome.status,'released');
   // Restore the synthetic identity's shared counter for subsequent cases.
   await sql`UPDATE swarm.rate_buckets SET count=0 WHERE bucket_key=${`file:create:user:${owner}`} AND window_start=date_trunc('hour',statement_timestamp())`;
+});
+
+test('an expired reservation releases its rows, name and slot on the next write; its owner still gets upload_expired', async () => {
+  const abandon = async (workspace: string, object: string) => {
+    const reservation = randomUUID();
+    const pending = await write(workspace, { kind: 'reserve_household_upload', object_id: object, reservation_id: reservation, expires_at: Date.now() + 1000,
+      change: { kind: 'create', title: 'Abandoned', content: proposal('base').content } }, proposal('base'));
+    assert.equal(pending.outcome.status, 'pending');
+    return reservation;
+  };
+  const rows = async (workspace: string, reservation: string) => {
+    const [row] = await sql`SELECT a.state, v.state AS version, (SELECT count(*)::int FROM swarm.file_purge_queue q WHERE q.storage_path=a.storage_path) AS queued
+      FROM swarm.household_object_artifacts a JOIN swarm.file_versions v USING(version_id,file_id,workspace_id)
+      WHERE a.workspace_id=${workspace}::uuid AND a.reservation_id=${reservation}`;
+    return [row!.state, row!.version, row!.queued];
+  };
+  const workspace = await fixture(), object = randomUUID();
+  const reservation = await abandon(workspace, object);
+  assert.deepEqual((await write(workspace, newDoc(object), proposal('base'), randomUUID(), human(other))).outcome,
+    { status: 'refused', reason: 'object_already_exists' }, 'a live reservation holds its name');
+  assert.deepEqual(await rows(workspace, reservation), ['reserved', 'pending', 0]);
+
+  // A full workspace: 499 other names plus the abandoned create.
+  const full = await fixture();
+  await sql`INSERT INTO swarm.files(file_id,workspace_id,name,created_by_kind,created_by)
+    SELECT gen_random_uuid(),${full}::uuid,'held-'||n||'.txt','user',${owner}::uuid FROM generate_series(1,499) AS n`;
+  await abandon(full, randomUUID());
+  assert.deepEqual((await write(full, newDoc(randomUUID()), proposal('base'))).outcome, { status: 'refused', reason: 'object_quota_reached' });
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  committed(await write(workspace, newDoc(object), proposal('base'), randomUUID(), human(other)));
+  assert.deepEqual(await rows(workspace, reservation), ['released', 'purged', 1], 'the next write settles the expired reservation');
+  assert.deepEqual((await write(workspace, { kind: 'commit_household_upload', reservation_id: reservation, operation: 'create' }, null)).outcome,
+    { status: 'refused', reason: 'upload_expired' }, "the owner's late commit");
+  committed(await write(full, newDoc(randomUUID()), proposal('base')));
 });
 
 test('rolling history keeps retired bytes readable and protected from the legacy purge job', async () => {
