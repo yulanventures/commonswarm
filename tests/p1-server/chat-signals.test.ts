@@ -1950,6 +1950,49 @@ test("only the creator or a workspace owner or admin renames or archives a chann
   assert.equal(memberMade.status, 200, JSON.stringify(memberMade.body));
 });
 
+test("channel names: concurrent creates and renames get one winner and channel_exists, never a server error", async () => {
+  const outcome = (response: { status: number; body: Record<string, unknown> }) =>
+    response.status === 200 ? "ok" : `${response.status} ${String(response.body.error)}`;
+  const slug = `race-${randomBytes(4).toString("hex")}`;
+  const creates = await Promise.all(Array.from({ length: 6 }, () => send(f.ownerJwt, { kind: "channel_create", slug })));
+  assert.deepEqual(creates.map(outcome).sort(), ["409 channel_exists", "409 channel_exists", "409 channel_exists",
+    "409 channel_exists", "409 channel_exists", "ok"], JSON.stringify(creates.map((r) => r.body)));
+
+  const ids: string[] = [];
+  for (const n of [1, 2, 3, 4]) {
+    const made = await send(f.ownerJwt, { kind: "channel_create", slug: `${slug}-${n}` });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    ids.push(String((made.body.channel as Record<string, unknown>).channel_id));
+  }
+  const target = `${slug}-renamed`;
+  const renames = await Promise.all(ids.map((channel_id) => send(f.ownerJwt, { kind: "channel_rename", channel_id, slug: target })));
+  assert.deepEqual(renames.map(outcome).sort(), ["409 channel_exists", "409 channel_exists", "409 channel_exists", "ok"],
+    JSON.stringify(renames.map((r) => r.body)));
+  const [named] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.channels
+    WHERE workspace_id = ${f.workspace}::uuid AND lower(slug) = ${target}`;
+  assert.equal(named?.n, 1);
+});
+
+test("channel names: an archived name says how to free it, and renaming the archived channel frees it", async () => {
+  const slug = `arch-${randomBytes(4).toString("hex")}`;
+  const made = await send(f.ownerJwt, { kind: "channel_create", slug });
+  const channelId = String((made.body.channel as Record<string, unknown>).channel_id);
+  const live = await send(f.ownerJwt, { kind: "channel_create", slug });
+  assert.equal(live.status, 409);
+  assert.equal(live.body.message, `This workspace already has a channel named ${slug}. Post to it instead.`);
+
+  assert.equal((await send(f.ownerJwt, { kind: "channel_archive", channel_id: channelId })).status, 200);
+  const archived = await send(f.ownerJwt, { kind: "channel_create", slug });
+  assert.equal(archived.status, 409);
+  assert.equal(archived.body.error, "channel_exists");
+  assert.equal(archived.body.message, `An archived channel is named ${slug}. Pick another name, or have its creator or a workspace owner or admin rename the archived channel to free this one.`);
+
+  const freed = await send(f.ownerJwt, { kind: "channel_rename", channel_id: channelId, slug: `${slug}-old` });
+  assert.equal(freed.status, 200, JSON.stringify(freed.body));
+  const again = await send(f.ownerJwt, { kind: "channel_create", slug });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+});
+
 /* -------------------------------------------------------------------------
  * Channels C3: channel_messages through the read function, as an agent.
  * Only whole-workspace messages; general alone is unfiled; refusals are exact.
