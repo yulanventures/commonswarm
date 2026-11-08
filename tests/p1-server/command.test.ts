@@ -3325,6 +3325,64 @@ test("self-serve creates an owned workspace with a workspace stream", async () =
   });
 });
 
+test("re-sending create_workspace is only a retry: it never restores a removed or demoted creator", async () => {
+  await scenario(async (f) => {
+    type Membership = { role: string; revoked: boolean };
+    const membership = async (workspaceId: string, userId: string): Promise<Membership | undefined> =>
+      (await sql<Membership[]>`SELECT role, revoked_at IS NOT NULL AS revoked FROM swarm.memberships
+        WHERE workspace_id = ${workspaceId}::uuid AND user_id = ${userId}::uuid`)[0];
+    const cases: { name: string; change: (workspaceId: string, userId: string) => Promise<unknown>;
+      status: number; reason: string | null; after: Membership }[] = [
+      { name: "live owner retries", change: async () => undefined, status: 200, reason: null,
+        after: { role: "owner", revoked: false } },
+      { name: "creator removed", status: 403, reason: "workspace_rerun_not_live_owner", after: { role: "owner", revoked: true },
+        change: (w, u) => sql`UPDATE swarm.memberships SET revoked_at = now() WHERE workspace_id = ${w}::uuid AND user_id = ${u}::uuid` },
+      { name: "creator demoted to admin", status: 403, reason: "workspace_rerun_not_live_owner", after: { role: "admin", revoked: false },
+        change: (w, u) => sql`UPDATE swarm.memberships SET role = 'admin' WHERE workspace_id = ${w}::uuid AND user_id = ${u}::uuid` },
+      { name: "creator demoted to member", status: 403, reason: "workspace_rerun_not_live_owner", after: { role: "member", revoked: false },
+        change: (w, u) => sql`UPDATE swarm.memberships SET role = 'member' WHERE workspace_id = ${w}::uuid AND user_id = ${u}::uuid` },
+      { name: "workspace archived", status: 403, reason: "workspace_rerun_archived", after: { role: "owner", revoked: false },
+        change: (w) => sql`UPDATE swarm.workspaces SET archived_at = now() WHERE workspace_id = ${w}::uuid` },
+    ];
+    for (const row of cases) {
+      const user = await createUser(`rerun-${row.name.replaceAll(" ", "-")}`);
+      registerHuman(f, user);
+      const workspaceId = randomUUID();
+      const created = await createWorkspace(user.jwt, workspaceId, "first");
+      assert.equal(created.status, 200, row.name);
+      await row.change(workspaceId, user.id);
+
+      const again = await createWorkspace(user.jwt, workspaceId, "again");
+      assert.equal(again.status, row.status, `${row.name}: ${again.text}`);
+      if (row.status === 200) {
+        assert.equal(again.body.workspace_id, workspaceId, row.name);
+        assert.equal(again.body.stream_id, created.body.stream_id, row.name);
+      } else {
+        assert.deepEqual(again.body, { error: "forbidden" }, row.name);
+      }
+      assert.deepEqual(await membership(workspaceId, user.id), row.after, row.name);
+      const [audit] = await sql<{ outcome: string; reason: string | null }[]>`
+        SELECT outcome, reason FROM swarm.audit_log
+        WHERE actor_user = ${user.id}::uuid AND command_kind = 'create_workspace'
+        ORDER BY audit_id DESC LIMIT 1`;
+      assert.deepEqual(audit, { outcome: row.status === 200 ? "accepted" : "authz", reason: row.reason }, row.name);
+      const [name] = await sql<{ name: string }[]>`SELECT name FROM swarm.workspaces WHERE workspace_id = ${workspaceId}::uuid`;
+      assert.equal(name?.name, "first", `${row.name}: a re-send never renames`);
+    }
+
+    // Someone else's id stays refused, as before.
+    const other = await createUser("rerun-other");
+    registerHuman(f, other);
+    const owner = await createUser("rerun-owner");
+    registerHuman(f, owner);
+    const taken = randomUUID();
+    assert.equal((await createWorkspace(owner.jwt, taken, "mine")).status, 200);
+    const stolen = await createWorkspace(other.jwt, taken, "theirs");
+    assert.equal(stolen.status, 403);
+    assert.equal(await membership(taken, other.id), undefined);
+  });
+});
+
 test("create-in-org admits live non-guests without promoting workspace owners",async()=>{
   const f=await fixture();
   const createdId=randomUUID();

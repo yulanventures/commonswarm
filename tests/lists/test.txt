@@ -25,6 +25,7 @@ tests/hm5-router-box.test.ts
 tests/bounded-json.test.ts
 tests/channel-page.test.ts
 tests/brain-memory-client.test.ts
+tests/hosted-memory-tools.test.ts
 tests/protocol-hosted-authority.test.ts
 tests/protocol-hosted-check.test.ts
 tests/release-proof-format.test.ts
