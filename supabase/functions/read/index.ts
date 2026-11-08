@@ -213,6 +213,72 @@ async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessa
   return { status: 200, body: boundChannelPage(page) };
 }
 
+/**
+ * Brain M3: an agent's reads of workspace memory, behind SWARM_BRAIN_MEMORY like the memory
+ * commands. The definers (20261107000002) admit the caller again from the installed claims and
+ * return only active memories in this workspace. Memory text and evidence links are untrusted
+ * data. Hosted seats have no path here: HostedReadInput doesn't carry these resources.
+ */
+const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
+const MEMORY_QUERY_MAX = 200;
+interface MemorySearchReadRequest {
+  resource: "memory_search";
+  workspace_id: string;
+  query: string | null;
+  limit: number;
+}
+interface MemoryGetReadRequest {
+  resource: "memory_get";
+  workspace_id: string;
+  memory_id: string;
+}
+type MemoryReadRequest = MemorySearchReadRequest | MemoryGetReadRequest;
+
+function isMemoryRead(body: { resource: string }): body is MemoryReadRequest {
+  return body.resource === "memory_search" || body.resource === "memory_get";
+}
+
+function parseMemoryRead(body: Record<string, unknown>): MemoryReadRequest | null {
+  if (typeof body.workspace_id !== "string" || !UUID_RE.test(body.workspace_id)) return null;
+  const workspaceId = body.workspace_id.toLowerCase();
+  if (body.resource === "memory_get") {
+    if (!exactKeys(body, ["resource", "workspace_id", "memory_id"]) ||
+        typeof body.memory_id !== "string" || !UUID_RE.test(body.memory_id)) return null;
+    return { resource: "memory_get", workspace_id: workspaceId, memory_id: body.memory_id.toLowerCase() };
+  }
+  if (Object.keys(body).some((key) => !["resource", "workspace_id", "query", "limit"].includes(key))) return null;
+  const raw = body.query ?? null;
+  if (raw !== null && typeof raw !== "string") return null;
+  const query = raw === null ? "" : raw.trim();
+  if (query.length > MEMORY_QUERY_MAX) return null;
+  const limit = body.limit ?? 20;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 50) return null;
+  return { resource: "memory_search", workspace_id: workspaceId, query: query === "" ? null : query, limit };
+}
+
+async function memoryRead(
+  tx: Sql,
+  workspaceId: string,
+  input: MemoryReadRequest,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (input.resource === "memory_get") {
+    const [row] = await tx<{ result: Record<string, unknown> | null }[]>`
+      SELECT swarm_read.memory_get(${workspaceId}::uuid, ${input.memory_id}::uuid) AS result
+    `;
+    // Unknown, forgotten, purged and other-workspace ids all read the same.
+    if (!row?.result) {
+      return { status: 404, body: { error: "not_found", message: "No active memory in this workspace has that id." } };
+    }
+    return { status: 200, body: row.result };
+  }
+  const [row] = await tx<{ result: Record<string, unknown> | null }[]>`
+    SELECT swarm_read.memory_search(${workspaceId}::uuid, ${input.query}, ${input.limit}) AS result
+  `;
+  // The definer admits again from the claims; an agent it doesn't admit here gets nothing.
+  if (!row?.result) return { status: 403, body: { error: "forbidden" } };
+  return { status: 200, body: row.result };
+}
+
 /** Rows are capped at 50 in SQL; bytes are capped here, keeping whole messages and a cursor to the rest. */
 const CHANNEL_PAGE_MAX_BYTES = 64 * 1024;
 function boundChannelPage(page: Record<string, unknown>): Record<string, unknown> {
@@ -311,7 +377,7 @@ function parseBody(
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} |
-  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | null {
+  {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
@@ -334,6 +400,7 @@ function parseBody(
     };
   }
   if (body.resource === "channel_messages") return parseChannelMessages(body);
+  if (body.resource === "memory_search" || body.resource === "memory_get") return parseMemoryRead(body);
   if (
     body.resource === "channels" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -700,8 +767,17 @@ async function handle(
     if (transport !== "local") {
       return json(403, { error: "transport_unavailable" });
     }
+    if (isMemoryRead(body) && !brainMemoryEnabled) {
+      return json(404, { error: "memory_unavailable", message: "Workspace memory isn't turned on here." });
+    }
 
     if (body.workspace_id !== agent.principal_workspace_id) {
+      if (body.resource === "memory_search") {
+        return json(200, { workspace_id: body.workspace_id, untrusted_content: true, memories: [] });
+      }
+      if (body.resource === "memory_get") {
+        return json(404, { error: "not_found", message: "No active memory in this workspace has that id." });
+      }
       if (body.resource === "members") {
         return json(200, { members: [], agents: [] });
       }
@@ -989,6 +1065,10 @@ async function handle(
     }
     if (body.resource === "channel_messages") {
       const page = await channelMessages(tx, agent.principal_workspace_id, body);
+      return json(page.status, page.body);
+    }
+    if (isMemoryRead(body)) {
+      const page = await memoryRead(tx, agent.principal_workspace_id, body);
       return json(page.status, page.body);
     }
     if (body.resource === "files") {

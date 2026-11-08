@@ -1983,3 +1983,18 @@ test("an agent reads a channel's whole-workspace messages, never addressed ones"
   assert.equal((await read({ channel: slug, after_id: randomUUID() })).status, 400, "an unknown cursor is refused");
   assert.equal((await read({ channel: slug, extra: true })).status, 400);
 });
+
+test("Brain M3: with workspace memory off, an admitted agent's memory reads are refused", async () => {
+  for (const body of [
+    { resource: "memory_search", workspace_id: f.workspace },
+    { resource: "memory_get", workspace_id: f.workspace, memory_id: randomUUID() },
+  ]) {
+    const response = await fetch(`${local.API_URL}/functions/v1/read`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${f.agentToken}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 404, body.resource);
+    assert.equal(((await response.json()) as { error?: string }).error, "memory_unavailable");
+  }
+});

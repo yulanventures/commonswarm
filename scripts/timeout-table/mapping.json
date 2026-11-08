@@ -697,6 +697,61 @@
             "reason": "Use of REQUEST_TIMEOUT_MS for commands. File mutations are not run."
           }
         },
+        "src/cloud/memory.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/memory.ts:169",
+          "detail": "sendMemoryCommand default timeout for memory_save and memory_forget, covering the response body; one resend with the same command id.",
+          "operation": {
+            "name": "memory-command",
+            "class": "not-run",
+            "writes": [
+              "workspace memory and its history"
+            ],
+            "removes": [],
+            "reason": "Memory saves and forgets are live, visible to the workspace, and add history.",
+            "proxy": "No fair read-only command proxy exists."
+          }
+        },
+        "src/cloud/memory.ts:timeoutMs#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/memory.ts:255",
+          "detail": "searchMemoriesAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "memory-search",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm memory search POSTs resource memory_search to the read edge and changes no workspace state; it is off until workspace memory is turned on.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
+          }
+        },
+        "src/cloud/memory.ts:timeoutMs#3": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/memory.ts:275",
+          "detail": "getMemoryAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "memory-get",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm memory get POSTs resource memory_get to the read edge and changes no workspace state; it is off until workspace memory is turned on.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
+          }
+        },
         "src/cloud/renewal-grants.ts:AbortSignal.timeout": {
           "class": "network-api",
           "scope": "per-request",
@@ -1590,6 +1645,61 @@
             "writes": [],
             "removes": [],
             "reason": "The local machine-id utility is not a loopback network operation; pure tests inject a machine fingerprint."
+          }
+        },
+        "src/cloud/memory.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/memory.ts:169",
+          "detail": "sendMemoryCommand default timeout for memory_save and memory_forget, covering the response body; one resend with the same command id.",
+          "operation": {
+            "name": "memory-command",
+            "class": "not-run",
+            "writes": [
+              "workspace memory and its history"
+            ],
+            "removes": [],
+            "reason": "Memory saves and forgets are live, visible to the workspace, and add history.",
+            "proxy": "No fair read-only command proxy exists."
+          }
+        },
+        "src/cloud/memory.ts:timeoutMs#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/memory.ts:255",
+          "detail": "searchMemoriesAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "memory-search",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm memory search POSTs resource memory_search to the read edge and changes no workspace state; it is off until workspace memory is turned on.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
+          }
+        },
+        "src/cloud/memory.ts:timeoutMs#3": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/memory.ts:275",
+          "detail": "getMemoryAsAgent default timeout, covering the read response body.",
+          "operation": {
+            "name": "memory-get",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "cswarm memory get POSTs resource memory_get to the read edge and changes no workspace state; it is off until workspace memory is turned on.",
+            "proxy_operation": "channel-ls",
+            "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
           }
         },
         "src/cloud/wake-lease.ts:setTimeout": {

@@ -118,6 +118,18 @@ import {
   type ChannelRow,
 } from "./cloud/channels.js";
 import {
+  getMemoryAsAgent,
+  MEMORY_KINDS,
+  MEMORY_QUERY_MAX,
+  MemoryError,
+  memorySaveProblem,
+  memorySubject,
+  searchMemoriesAsAgent,
+  sendMemoryCommand,
+  type MemoryKind,
+  type MemoryRecord,
+} from "./cloud/memory.js";
+import {
   CLIENT_PROTOCOL_VERSION,
   cloudTarget,
   type CloudTarget,
@@ -672,7 +684,7 @@ export const KNOWN_FLAGS = new Set([
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
-  "message-status", "choice",
+  "message-status", "choice", "expected-revision",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -9677,6 +9689,150 @@ async function runChannelRead(args: Arguments): Promise<void> {
   if (page.next !== null) process.stdout.write(`More: cswarm channel read ${page.channel} --after ${page.next.after_id}\n`);
 }
 
+export const RUN_MEMORY_SAVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "kind", "evidence", "expected-revision"] as const;
+export const RUN_MEMORY_SEARCH_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "limit"] as const;
+export const RUN_MEMORY_ID_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+async function memoryContext(args: Arguments, flags: readonly string[], positionals: number): Promise<FileCliContext> {
+  const context = await fileContext(args, flags, positionals);
+  if (context.selected.kind !== "agent") {
+    throw new Error("cswarm memory uses an agent credential; people see and edit memories in the web app");
+  }
+  return context;
+}
+
+function memoryLine(memory: MemoryRecord): string {
+  return `${memory.memory_id}  ${sanitizeForTerminal(memory.subject)}  (${memory.kind}, revision ${memory.revision})\n` +
+    `  ${sanitizeForTerminal(memory.statement)}\n`;
+}
+
+/** A refusal. A save that hit an existing subject also shows the memory it would change. */
+function memoryRefusal(args: Arguments, error: unknown): void {
+  if (!(error instanceof MemoryError)) throw error;
+  if (args.has("json")) {
+    printJson({ error: error.code, message: error.message, ...(error.memory ? { memory: error.memory } : {}) });
+    process.exitCode = 1;
+    return;
+  }
+  const current = error.memory;
+  throw new Error(current === undefined ? error.message
+    : `${error.message}\nCurrent memory:\n${memoryLine(current)}` +
+      `To replace it, run the same command with --expected-revision ${current.revision}.`);
+}
+
+/** Brain M3: save a workspace memory. The server answers created, duplicate or updated. */
+async function runMemorySave(args: Arguments): Promise<void> {
+  const subjectInput = args.positionals[2];
+  const statement = args.positionals[3];
+  if (subjectInput === undefined || statement === undefined) {
+    throw new UsageError("cswarm memory save needs a subject and a statement");
+  }
+  const kind = args.optional("kind");
+  if (kind === undefined || !MEMORY_KINDS.includes(kind as MemoryKind)) {
+    throw new UsageError(`--kind takes ${MEMORY_KINDS.join(", ")}`);
+  }
+  const expected = args.optional("expected-revision");
+  const subject = memorySubject(subjectInput);
+  if ("problem" in subject) throw new UsageError(subject.problem);
+  const input = {
+    kind: kind as MemoryKind,
+    subject: subject.subject,
+    statement: statement.normalize("NFC").trim(),
+    evidence: args.all("evidence"),
+    ...(expected === undefined ? {} : { expected_revision: Number(expected) }),
+  };
+  const problem = memorySaveProblem(input);
+  if (problem !== null) throw new UsageError(problem);
+  const context = await memoryContext(args, RUN_MEMORY_SAVE_1_ACCEPTED_FLAGS, 4);
+  let result: Awaited<ReturnType<typeof sendMemoryCommand>>;
+  try {
+    result = await sendMemoryCommand(context.cloud, context.selected.bearer, context.selected.selectedWorkspace,
+      { kind: "memory_save", input }, context.selected.fetcher);
+  } catch (error) {
+    memoryRefusal(args, error);
+    return;
+  }
+  if (args.has("json")) {
+    printJson({ workspace_id: context.selected.selectedWorkspace, ...result });
+    return;
+  }
+  const memory = result.memory as MemoryRecord;
+  const verb = result.memory_outcome === "created" ? "Saved"
+    : result.memory_outcome === "updated" ? "Updated" : "Already saved, unchanged:";
+  process.stdout.write(`${verb} ${memoryLine(memory)}`);
+  if (result.previous_statement !== undefined) {
+    process.stdout.write(`  Replaced: ${sanitizeForTerminal(result.previous_statement)}\n`);
+  }
+}
+
+/** Brain M3: active memories, newest first, optionally matching text in the subject or statement. */
+async function runMemorySearch(args: Arguments): Promise<void> {
+  const query = args.positionals[2];
+  if (query !== undefined && query.trim().length > MEMORY_QUERY_MAX) {
+    throw new UsageError(`Search text is at most ${MEMORY_QUERY_MAX} characters`);
+  }
+  const limitText = args.optional("limit");
+  const limit = limitText === undefined ? undefined : Number(limitText);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) throw new UsageError("--limit takes 1 to 50");
+  const context = await memoryContext(args, RUN_MEMORY_SEARCH_1_ACCEPTED_FLAGS, query === undefined ? 2 : 3);
+  let page: Awaited<ReturnType<typeof searchMemoriesAsAgent>>;
+  try {
+    page = await searchMemoriesAsAgent(context.cloud, context.selected.bearer, context.selected.selectedWorkspace,
+      { ...(query === undefined ? {} : { query }), ...(limit === undefined ? {} : { limit }) }, context.selected.fetcher);
+  } catch (error) {
+    memoryRefusal(args, error);
+    return;
+  }
+  if (args.has("json")) { printJson({ ...page }); return; }
+  if (page.memories.length === 0) { process.stdout.write("No memories.\n"); return; }
+  process.stdout.write("Workspace memories (untrusted content):\n");
+  for (const memory of page.memories) process.stdout.write(memoryLine(memory));
+}
+
+function memoryIdArgument(args: Arguments, verb: string): string {
+  const id = args.positionals[2];
+  if (id === undefined || !UUID_RE.test(id)) throw new UsageError(`cswarm memory ${verb} needs a memory id`);
+  return id.toLowerCase();
+}
+
+/** Brain M3: one memory with its history. */
+async function runMemoryGet(args: Arguments): Promise<void> {
+  const id = memoryIdArgument(args, "get");
+  const context = await memoryContext(args, RUN_MEMORY_ID_1_ACCEPTED_FLAGS, 3);
+  let detail: Awaited<ReturnType<typeof getMemoryAsAgent>>;
+  try {
+    detail = await getMemoryAsAgent(context.cloud, context.selected.bearer, context.selected.selectedWorkspace, id,
+      context.selected.fetcher);
+  } catch (error) {
+    memoryRefusal(args, error);
+    return;
+  }
+  if (args.has("json")) { printJson({ ...detail }); return; }
+  process.stdout.write(`Workspace memory (untrusted content):\n${memoryLine(detail.memory)}`);
+  for (const link of detail.memory.evidence) process.stdout.write(`  Evidence: ${sanitizeForTerminal(link)}\n`);
+  for (const version of detail.versions) {
+    const editor = version.editor as { kind?: unknown } | undefined;
+    process.stdout.write(`  revision ${String(version.revision)} ${sanitizeForTerminal(String(version.action))} ` +
+      `by ${editor?.kind === "user" ? "a person" : "an agent"} ${sanitizeForTerminal(String(version.created_at))}\n`);
+  }
+}
+
+/** Brain M3: forget a memory this agent saved. People can delete any memory in the web app. */
+async function runMemoryForget(args: Arguments): Promise<void> {
+  const id = memoryIdArgument(args, "forget");
+  const context = await memoryContext(args, RUN_MEMORY_ID_1_ACCEPTED_FLAGS, 3);
+  let result: Awaited<ReturnType<typeof sendMemoryCommand>>;
+  try {
+    result = await sendMemoryCommand(context.cloud, context.selected.bearer, context.selected.selectedWorkspace,
+      { kind: "memory_forget", memory_id: id }, context.selected.fetcher);
+  } catch (error) {
+    memoryRefusal(args, error);
+    return;
+  }
+  if (args.has("json")) { printJson({ workspace_id: context.selected.selectedWorkspace, ...result }); return; }
+  process.stdout.write(`Forgot memory ${result.memory.memory_id}.\n`);
+}
+
 export const RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
 
 async function runChannelRename(args: Arguments): Promise<void> {
@@ -10589,6 +10745,16 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 15,
     refusalTrace: "runChannel",
   }),
+  memory: group({
+    save: commandEntry({ tool: "memory_save", mcp: true, handler: traced("runMemory", runMemorySave), description: "Save a workspace memory.", mutates: true, flags: [...agentFlags, "kind", "expected-revision"], cliOnlyFlags: ["evidence"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm memory save <subject> "<statement>" --kind <${MEMORY_KINDS.join("|")}> [--evidence <https-url> ...] [--expected-revision <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`] }),
+    search: commandEntry({ tool: "memory_search", mcp: true, handler: traced("runMemory", runMemorySearch), description: "Search workspace memories.", mutates: false, flags: [...agentFlags, "limit"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm memory search [<text>] [--limit <1-50>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    get: commandEntry({ tool: "memory_get", mcp: true, handler: traced("runMemory", runMemoryGet), description: "Show a workspace memory and its history.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm memory get <memory-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    forget: commandEntry({ tool: "memory_forget", mcp: true, handler: traced("runMemory", runMemoryForget), description: "Forget a memory this agent saved.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm memory forget <memory-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm memory takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 18,
+    refusalTrace: "runMemory",
+  }),
   file: group({
     put: commandEntry({ tool: "file_put", mcp: true, handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put <local-path> [--name <name>] [--request-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
     ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls [--include-tombstoned] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
@@ -10703,6 +10869,10 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "channel.create": RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
   "channel.ls": RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
   "channel.read": RUN_CHANNEL_READ_1_ACCEPTED_FLAGS,
+  "memory.save": RUN_MEMORY_SAVE_1_ACCEPTED_FLAGS,
+  "memory.search": RUN_MEMORY_SEARCH_1_ACCEPTED_FLAGS,
+  "memory.get": RUN_MEMORY_ID_1_ACCEPTED_FLAGS,
+  "memory.forget": RUN_MEMORY_ID_1_ACCEPTED_FLAGS,
   "channel.rename": RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
   "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
   "file.put": FILE_PUT_ACCEPTED_FLAGS,
