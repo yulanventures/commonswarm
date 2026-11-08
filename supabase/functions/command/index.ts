@@ -9494,6 +9494,12 @@ async function applyChannelCommand(
   auth: AuthContext,
   command: ChannelCommand,
 ): Promise<ChannelOutcome> {
+  // Create and rename check a name, then write it. Two at once in one workspace would both pass
+  // the check and the second write would hit the unique index as a server error, so they take
+  // this workspace's channel-name lock first. Archive changes no name and doesn't need it.
+  if (command.kind === "channel_create" || command.kind === "channel_rename") {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-names:${route.workspaceId}`}, 0))`;
+  }
   if (command.kind === "channel_create") {
     const existing = await tx<ChannelRow[]>`
       SELECT channel_id, workspace_id, slug, purpose,
@@ -9508,8 +9514,11 @@ async function applyChannelCommand(
         ok: false,
         status: 409,
         error: "channel_exists",
-        message:
-          `This workspace already has a channel named ${command.slug}. Post to it instead.`,
+        // An archived channel keeps its name, and archived channels take no messages, so
+        // "post to it" would be a dead end. Renaming the archived channel frees the name.
+        message: existing[0].archived_at === null
+          ? `This workspace already has a channel named ${command.slug}. Post to it instead.`
+          : `An archived channel is named ${command.slug}. Pick another name, or have its creator or a workspace owner or admin rename the archived channel to free this one.`,
         reason: "channel_slug_taken",
       };
     }
