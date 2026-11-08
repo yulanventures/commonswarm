@@ -122,19 +122,24 @@ test("message_status moves from sent to delivered, seen, working and replied", a
   assert.equal((await one(ws, owner, id))?.replied, true, "a reply from the agent counts as replied");
 });
 
-test("an agent working in a workspace other than its home one shows Working there too", async () => {
+test("an agent's Working snapshot can be recorded in a workspace other than its home one", async () => {
   const owner = await person("Owner");
   const home = await workspace(owner);
   const other = await workspace(owner);
   const helper = await agent(home, owner, "Helper");
   await sql`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
     VALUES (${helper}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  // The activity edge writes an idle snapshot (no message) for any status frame; outside the home
+  // workspace that insert failed the foreign key and the frame became a server error.
   for (const ws of [home, other]) {
-    const id = await dm(ws, owner, helper);
-    await ack(id, helper, "observed");
-    await working(ws, helper, id, "editing");
-    assert.equal((await one(ws, owner, id))?.working?.label, "editing", ws === home ? "home workspace" : "second workspace");
+    await working(ws, helper, null, null);
+    const [row] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.agent_message_working
+      WHERE workspace_id = ${ws}::uuid AND principal_id = ${helper}::uuid`;
+    assert.equal(row?.n, 1, ws === home ? "home workspace" : "second workspace");
   }
+  // A workspace the agent was never added to still refuses.
+  const stranger = await workspace(owner);
+  await assert.rejects(working(stranger, helper, null, null), /agent_message_working_principal_id_workspace_id_fkey/);
 });
 
 test("message_status shows Working only for that message and only before it expires", async () => {
