@@ -413,3 +413,64 @@ test("a forget hides the memory from detail reads and from every replay, includi
   });
   assert.equal(detail, null, "a forgotten memory has no detail read");
 });
+
+test("Brain M3: an agent reads memory through the read edge; people, bad input and other workspaces get nothing", async () => {
+  const tag = randomUUID().slice(0, 8);
+  const subject = `read edge ${tag}`;
+  const saved = await save(f.agentToken, subject, `Deploys need a backup first ${tag}.`, { evidence: ["https://example.com/runbook"] });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const memoryId = (saved.body.memory as { memory_id: string }).memory_id;
+
+  const search = await postRead(f.agentToken, { resource: "memory_search", workspace_id: f.workspaceA, query: `BACKUP FIRST ${tag}` });
+  assert.equal(search.status, 200, JSON.stringify(search.body) + functionLogs.slice(-2000));
+  assert.equal(search.body.untrusted_content, true);
+  const rows = search.body.memories as Array<Record<string, unknown>>;
+  assert.deepEqual(rows.map((row) => row.memory_id), [memoryId]);
+  assert.deepEqual(rows[0]!.author, { kind: "agent", id: f.principal });
+  assert.deepEqual(rows[0]!.evidence, ["https://example.com/runbook"]);
+
+  const listed = await postRead(f.agentToken, { resource: "memory_search", workspace_id: f.workspaceA, limit: 1 });
+  assert.equal(listed.status, 200);
+  assert.equal((listed.body.memories as unknown[]).length, 1);
+
+  const detail = await postRead(f.agentToken, { resource: "memory_get", workspace_id: f.workspaceA, memory_id: memoryId.toUpperCase() });
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  assert.equal(detail.body.untrusted_content, true);
+  assert.equal((detail.body.memory as { subject: string }).subject, subject);
+  assert.deepEqual((detail.body.versions as Array<{ action: string }>).map((row) => row.action), ["save"]);
+
+  const unknown = await postRead(f.agentToken, { resource: "memory_get", workspace_id: f.workspaceA, memory_id: randomUUID() });
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error, "not_found");
+
+  for (const body of [
+    { resource: "memory_search", workspace_id: f.workspaceA, query: "x".repeat(201) },
+    { resource: "memory_search", workspace_id: f.workspaceA, limit: 51 },
+    { resource: "memory_search", workspace_id: f.workspaceA, query: 7 },
+    { resource: "memory_search", workspace_id: f.workspaceA, include_deleted: true },
+    { resource: "memory_get", workspace_id: f.workspaceA },
+    { resource: "memory_get", workspace_id: f.workspaceA, memory_id: "not-a-uuid" },
+  ]) {
+    const refused = await postRead(f.agentToken, body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+  }
+
+  // Another workspace: no rows and no detail, whatever the agent asks for.
+  const elsewhere = await postRead(f.agentToken, { resource: "memory_search", workspace_id: f.workspaceB });
+  assert.ok(elsewhere.status !== 200 || (elsewhere.body.memories as unknown[]).length === 0, JSON.stringify(elsewhere.body));
+  const elsewhereGet = await postRead(f.agentToken, { resource: "memory_get", workspace_id: f.workspaceB, memory_id: memoryId });
+  assert.notEqual(elsewhereGet.status, 200);
+  assert.doesNotMatch(JSON.stringify(elsewhereGet.body), /backup/);
+
+  // People read memory in the app, not through this edge.
+  const person = await postRead(f.ownerJwt, { resource: "memory_search", workspace_id: f.workspaceA });
+  assert.equal(person.status, 401);
+
+  // A forgotten memory leaves every agent read at once.
+  const forgotten = await postCommand(f.agentToken, f.workspaceA, { kind: "memory_forget", memory_id: memoryId });
+  assert.equal(forgotten.status, 200, JSON.stringify(forgotten.body));
+  const after = await postRead(f.agentToken, { resource: "memory_search", workspace_id: f.workspaceA, query: tag });
+  assert.deepEqual(after.body.memories, []);
+  const gone = await postRead(f.agentToken, { resource: "memory_get", workspace_id: f.workspaceA, memory_id: memoryId });
+  assert.equal(gone.status, 404);
+});
