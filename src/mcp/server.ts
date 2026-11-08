@@ -19,7 +19,7 @@ import {
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { signalDuration } from "../cloud/signal-duration.js";
 import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
-import { mapMcpError } from "./errors.js";
+import { mapMcpError, OutcomeStillUnknown } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
 import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
 import { FILE_MAX_VERSION_BYTES, FileCommandRefused, FileTransportError } from "../cloud/files.js";
@@ -81,6 +81,16 @@ export async function sendWithDeferredCommit<T extends object>(
 export async function serveMcp(options: McpServerOptions): Promise<void> {
   const profilePath = privatePath(options.profilePath);
   const profile = await readAgentProfile(profilePath, options.hostSessionId);
+  /* Sends whose outcome came back unknown once. A retry with the same request_id is the right first
+   * move; a second unknown for the same id (a server that keeps failing) stops with an error instead
+   * of asking the agent to retry forever. Any answer clears the id. Bounded, oldest first. */
+  const unknownOnce = new Set<string>();
+  const unknownOutcome = (key: string): Record<string, unknown> => {
+    if (unknownOnce.has(key)) { unknownOnce.delete(key); throw new OutcomeStillUnknown(); }
+    unknownOnce.add(key);
+    if (unknownOnce.size > 256) unknownOnce.delete(unknownOnce.values().next().value!);
+    return { outcome: "unknown", retry_with_same_request_id: true };
+  };
   const contexts = await listSessionContexts(profile.workspace_id, profile.principal_id);
   if (!options.hostSessionId && contexts.some(context => context.released_at === null && sessionProofOf(context) !== null)) {
     throw new AgentSetupError("host_session_required", "This managed agent needs --host-session-id from its current host session.");
@@ -299,9 +309,13 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             output = tool.mapResult(await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
               command: { kind: "reraise_ask", signal_id: args.signal_id!.toLowerCase() },
               commandId: args.request_id!, signal: extra.signal }));
+            unknownOnce.delete(`reraise:${args.request_id}`);
           } catch (error) {
-            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) throw error;
-            output = { outcome: "unknown", retry_with_same_request_id: true };
+            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {
+              unknownOnce.delete(`reraise:${args.request_id}`);
+              throw error;
+            }
+            output = unknownOutcome(`reraise:${args.request_id}`);
           }
           break;
         }
@@ -335,9 +349,13 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
               commandId: args.request_id!, signal: extra.signal });
             output = { ...tool.mapResult(sent), ...(parentContextSentence === undefined ? {} : { parent_context: parentContextSentence }) };
+            unknownOnce.delete(`${tool.name}:${args.request_id}`);
           } catch (error) {
-            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) throw error;
-            output = { outcome: "unknown", retry_with_same_request_id: true };
+            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {
+              unknownOnce.delete(`${tool.name}:${args.request_id}`);
+              throw error;
+            }
+            output = unknownOutcome(`${tool.name}:${args.request_id}`);
             break;
           }
         }
