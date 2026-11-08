@@ -807,8 +807,8 @@ export async function fileVersionCommit(
   // Concurrent commits of two DIFFERENT pending versions lock different
   // version rows and would each pass the live-version count (review P1), so
   // commit serializes per FILE first — the same lock create takes.
-  const fileLock = await tx<{ file_id: string; household_managed: boolean }[]>`
-    SELECT file_id, household_managed FROM swarm.files
+  const fileLock = await tx<{ file_id: string; household_managed: boolean; tombstoned_at: Date | null }[]>`
+    SELECT file_id, household_managed, tombstoned_at FROM swarm.files
     WHERE file_id = ${cmd.file_id}::uuid
       AND workspace_id = ${workspaceId}::uuid
     FOR UPDATE
@@ -830,6 +830,16 @@ export async function fileVersionCommit(
   }
   if (storedCommitEarly !== null) {
     return { ok: "replay", stored: storedCommitEarly.stored };
+  }
+  // Create refuses a tombstoned name; commit must too, or a pending upload started before the file
+  // was removed would land a new live version in it. A replay of an earlier commit still answers above.
+  if (fileLock[0]?.tombstoned_at !== null) {
+    return refuse(
+      409,
+      "file_tombstoned",
+      "this file was removed while the upload was pending; restore it, then upload again",
+      "commit into tombstone",
+    );
   }
   // ★R1 compound key; ★R2 one-time, creator-only. The row is locked so the
   // measured-size UPDATE below cannot race a second commit of the same version.

@@ -442,6 +442,41 @@ test("F1 happy path: create -> PUT -> commit -> download -> list -> tombstone ->
   assert.ok(Number(audits[0]?.n) >= 1, "accepted create is audited with the agent actor");
 });
 
+test("F1b a pending upload cannot commit into a file removed meanwhile; restoring lets it commit", async () => {
+  const fileId = randomUUID();
+  const upload = async (versionId: string) => {
+    const create = await postCommand(f.agentToken, { kind: "file_version_create", file_id: fileId, version_id: versionId,
+      name: "removed-meanwhile.md", declared_size_bytes: PLAN_BYTES.length, content_type: "text/markdown" }, f.workspaceA);
+    assert.equal(create.status, 200, JSON.stringify(create.body));
+    const put = await fetch(`${local.API_URL}${create.body.upload_path as string}`, { method: "PUT",
+      headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
+    assert.ok(put.ok, `upload PUT failed: ${put.status}`);
+  };
+  const commit = (versionId: string, commandId?: string) => postCommand(f.agentToken, { kind: "file_version_commit",
+    file_id: fileId, version_id: versionId, sha256: sha256hex(PLAN_BYTES) }, f.workspaceA, commandId);
+  const live = async () => Number((await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM swarm.file_versions
+    WHERE file_id = ${fileId}::uuid AND state = 'live'`)[0]?.n);
+
+  const v1 = randomUUID(), v2 = randomUUID();
+  await upload(v1);
+  const first = await commit(v1);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  await upload(v2); // pending, bytes uploaded
+  assert.equal((await postCommand(f.agentToken, { kind: "file_tombstone", file_id: fileId }, f.workspaceA)).status, 200);
+
+  const refused = await commit(v2);
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "file_tombstoned");
+  assert.equal(await live(), 1, "no new live version lands in a removed file");
+  const replay = await commit(v1, first.commandId);
+  assert.equal(replay.status, 200, "an earlier commit still replays its stored answer");
+
+  assert.equal((await postCommand(f.agentToken, { kind: "file_restore", file_id: fileId }, f.workspaceA)).status, 200);
+  const after = await commit(v2);
+  assert.equal(after.status, 200, JSON.stringify(after.body));
+  assert.equal(after.body.reference, `file:${fileId}@v2`);
+});
+
 test("F9 .html is accepted (Fastio feedback); a genuinely-unsafe extension is still refused", async () => {
   // A web/marketing team's deliverables are HTML. Downloads are served
   // Content-Disposition: attachment, so .html is no worse than the .svg already allowed.
