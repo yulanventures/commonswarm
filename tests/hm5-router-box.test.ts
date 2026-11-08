@@ -119,7 +119,8 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
   const database = ["SWARM_DATABASE_URL", "SUPABASE_DB_URL", "SWARM_DATABASE_TLS_CA_B64"];
   const hooks = ["SWARM_CMD_TEST_SLEEP_AFTER_STEP", "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP"];
   const command = [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
-    "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_CAPABILITY_URLS", "SWARM_SELF_SERVE", ...hooks];
+    "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_CAPABILITY_URLS", "SWARM_SELF_SERVE",
+    "SWARM_BRAIN_MEMORY", "SWARM_INTERACTIVE_REPLIES", ...hooks];
   const expected = [
     "SWARM_DATABASE_URL",
     "SUPABASE_DB_URL",
@@ -140,12 +141,14 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
     "SWARM_MCP_CLOCK_SKEW_SECONDS",
     "SWARM_MCP_PUBLIC_ENABLED",
     "SWARM_MCP_TODOS_LISTS_ENABLED",
+    "SWARM_BRAIN_MEMORY",
+    "SWARM_BRAIN_MEMORY_HOSTED",
     "SWARM_FILE_TEXT_TOKEN",
   ];
   const allowlists = {
     command, admin: command,
     read: [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
-      "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS"],
+      "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_BRAIN_MEMORY"],
     h0: command.filter(name => name !== "SUPABASE_SERVICE_ROLE_KEY"),
     activity: database,
     capability: [...database, "SWARM_ENV", "SWARM_CAPABILITY_URLS", "SWARM_CAPABILITY_ALLOWED_ORIGINS"],
