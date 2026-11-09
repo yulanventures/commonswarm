@@ -50,7 +50,7 @@ async function insert(row: Row, as: "owner" | "swarm_command" = "owner"): Promis
         registry_version, scope_names, workspace_ids, manifest, manifest_digest, expires_at)
       VALUES (${grantId}::uuid, ${owner}::uuid, ${row.principal_id}::uuid, ${row.level}, ${row.organization_id}::uuid,
         ${row.registry_version}, ${row.scope_names}::text[],
-        ${row.workspace_ids}::uuid[], ${tx.json(manifest)}::jsonb, ${row.digest ?? "a".repeat(64)},
+        ${row.workspace_ids}::uuid[], ${tx.json(manifest as postgres.JSONValue)}::jsonb, ${row.digest ?? "a".repeat(64)},
         ${row.expires === null ? null : sql.unsafe(row.expires)})`;
   });
   return grantId;
