@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { projectHomeLayout } from "./kylon-shell/projection.ts";
 import { RESIZER_SPECS, clampResizerWidth } from "./kylon-shell/resizers.ts";
@@ -60,4 +61,25 @@ test("all five vertical pane dividers have bounded specs and clamp widths cleanl
     assert.equal(clampResizerWidth(spec.maxPx + 50, spec.minPx, spec.maxPx), spec.maxPx);
     assert.equal(clampResizerWidth(spec.defaultPx + 0.4, spec.minPx, spec.maxPx), spec.defaultPx);
   }
+});
+
+test("Slack-like sidebar density, flat DM list, compact header tabs, and bordered composer box keep 44px touch targets", async () => {
+  const railCss = await readFile(new URL("../styles/kylon-rail.css", import.meta.url), "utf8");
+  const integrationCss = await readFile(new URL("../styles/kylon-layout/integration.css", import.meta.url), "utf8");
+  const composerCss = await readFile(new URL("../styles/kylon-composer.css", import.meta.url), "utf8");
+  const carbonCss = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
+
+  // Step 6: Presence dot only visually (keep "Idle"/"Working" status and "you" SR-accessible so state isn't color-only), flat DM list, bold unread, 30px desktop rows.
+  assert.match(railCss, /\.cs-org-shell\s+\.hm-rail\s+:is\(\.hm-rail__status,\s*\.hm-rail__you\)\s*\{[\s\S]*?clip-path:\s*inset\(50%\);/u);
+  assert.doesNotMatch(railCss, /:is\(\.hm-rail__status[^)]*\)\s*\{\s*display:\s*none;/u);
+  assert.match(railCss, /\.cs-org-shell\s+\.hm-rail\s+\.hm-rail__agent\s*\{\s*margin-block:\s*0;\s*padding-inline:\s*10px;/u);
+  assert.match(railCss, /@media\s*\(width\s*>\s*64rem\)[\s\S]*?min-block-size:\s*30px;\s*block-size:\s*30px;/u);
+  assert.match(integrationCss, /\.cs-org-shell\s+\.hm-rail__agent\s*\{\s*margin-block:\s*0;\s*padding-inline:\s*10px;\s*\}/u);
+
+  // Step 7: Compact header line, underline tabs on --carbon-line, and bordered 10px composer with compact To: footer.
+  assert.match(integrationCss, /\.hm-ws-header__copy\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;\s*align-items:\s*center;/u);
+  assert.match(integrationCss, /border-block-end:\s*1px\s+solid\s+var\(--carbon-line,\s*var\(--cs-line\)\);/u);
+  assert.match(carbonCss, /\.dashboard__composer-input\s*\{\s*min-block-size:\s*48px;\s*padding:\s*4px;\s*border-radius:\s*10px;\s*\}/u);
+  assert.match(carbonCss, /box-shadow:\s*inset\s+0\s+0\s+0\s+1px\s+var\(--carbon-line\);/u);
+  assert.match(composerCss, /\.dashboard__composer-to-note\s*\{[\s\S]*?clip-path:\s*inset\(50%\);/u);
 });
