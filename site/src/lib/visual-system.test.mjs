@@ -215,6 +215,8 @@ test("Slack-like message header line and 36px rounded-square avatars keep restin
   assert.match(channel, /\.dashboard__message:not\(:hover,\s*:focus-within\)\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-meta\s*\{[\s\S]*?opacity:\s*0;\s*pointer-events:\s*none;/u);
   assert.doesNotMatch(channel, /\.dashboard__message-meta\s*\{[^}]*visibility:\s*hidden;/u);
   assert.doesNotMatch(channel, /\.dashboard__message-tools[^{]*\{[^}]*visibility:\s*hidden;/u);
+  assert.match(channel, /\.dashboard__message-operator[\s\S]*?display:\s*none;/u);
+  assert.match(channel, /@media\s*\(hover:\s*none\)\s*\{\s*live-dashboard\.dashboard\[data-kylon-shell\]\s+\.hm-frame\s+\.dashboard__message\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-tools/u);
   assert.match(dashboard, /row\.tabIndex = -1;/u);
   assert.match(dashboard, /hour:\s*"numeric",\s*minute:\s*"2-digit"/u);
 });
