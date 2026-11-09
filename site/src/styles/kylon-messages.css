@@ -64,7 +64,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-aut
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta strong {
   color: var(--k-shell-ink);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(
@@ -74,6 +74,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(
   color: var(--k-shell-secondary);
   font-size: 12px;
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Metadata keeps the renderer/Home visibility contract. Agent identity,
@@ -85,12 +86,20 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta {
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-mentions {
-  --lh-base: 1.55;
+  --lh-base: 1.6;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 400;
   line-height: var(--lh-base);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown {
+  max-inline-size: 70ch;
+}
+/* Keep headings, lists and code on their existing rhythm; consecutive prose
+ * paragraphs need only half a line to read as one message. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown > p + p {
+  margin-block-start: .5em;
 }
 /* This line-height property is also used by the existing collapsed-height
  * calculation. Markdown block spacing, code/table overflow and links stay. */

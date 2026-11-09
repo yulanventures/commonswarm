@@ -119,11 +119,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send-i
 /* Desktop keeps its existing Send word; phone keeps its existing arrow.
  * Active, disabled, posting/spinner and action colors stay app-owned. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to {
+  color: var(--k-shell-secondary);
   font-size: 12px;
+  font-weight: 400;
   line-height: 1.5;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-label {
-  font-weight: 500;
+  font-weight: 400;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-chip {
   border-radius: 6px;

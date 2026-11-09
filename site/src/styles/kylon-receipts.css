@@ -39,6 +39,19 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* Settled delivery is supporting information. Keep pending, failed, expired
+ * and mixed receipts on their existing semantic colors and visible path. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt[data-receipt-quiet] {
+  color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt[data-receipt-quiet] > summary {
+  color: inherit;
+  background: transparent;
+  border-color: transparent;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > span:not(.dashboard__message-receipt-glyph) {
   min-inline-size: 0;
 }
