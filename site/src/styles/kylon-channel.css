@@ -65,6 +65,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:ho
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
   opacity: 0; pointer-events: none;
 }
+/* The ownership label is normally screen-reader-only. Its profile button is
+ * tabbable, so reveal the label while that control has keyboard focus. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-operator:focus-within {
+  position: static;
+  inline-size: auto;
+  block-size: auto;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+}
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
@@ -123,8 +133,11 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { inset-inline-end: 8px; }
 }
 @media (hover: none) {
+  /* Touch tools stay in flow on focus: moving them under the finger can
+   * turn a tap on message text into a receipt activation. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
+    position: static; inset: auto; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; padding: 0; border: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
     opacity: 1; pointer-events: auto;
@@ -170,5 +183,6 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-lead-pill, .dashboard__dm-bar
 }
 
 @media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta .dashboard__message-entity { min-inline-size: 44px; min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-ws-header__people, .hm-details-close, .dashboard__dm-bar-close, .hm-lead-pill) { min-inline-size: 44px; min-block-size: 44px; }
 }
