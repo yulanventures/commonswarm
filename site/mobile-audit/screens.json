@@ -134,5 +134,24 @@
     "requiresSeed": [
       "message.richtext.code"
     ]
+  },
+  {
+    "id": "app.chat.day-divider",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": ".dashboard__feed > .hm-day",
+        "scroll": ".dashboard__feed > .hm-day"
+      }
+    ],
+    "ready": ".dashboard__feed > .hm-day .hm-day__label",
+    "states": [
+      "dense",
+      "day-divider"
+    ],
+    "requiresSeed": [
+      "seed_channels"
+    ]
   }
 ]
