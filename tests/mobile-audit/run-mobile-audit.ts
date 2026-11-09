@@ -306,6 +306,21 @@ async function main(): Promise<void> {
               if (step.press) await page.keyboard.press(step.press);
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
               if (step.wait) await page.waitForTimeout(step.wait);
+              const focus = await page.evaluate((signalId: string) => {
+                const active = document.activeElement as HTMLElement | null;
+                const row = document.querySelector(`[data-signal-id="${signalId}"]`);
+                const describe = (el: Element | null) => el ? `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}.${typeof el.className === "string" ? el.className.split(/\s+/).join(".") : ""}` : null;
+                const box = (el: Element) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; };
+                const ancestors = [];
+                for (let n = active; n && n !== document.body; n = n.parentElement) {
+                  const css = getComputedStyle(n);
+                  ancestors.push({ element: describe(n), box: box(n), opacity: css.opacity, visibility: css.visibility, overflow: css.overflow, clip: css.clipPath });
+                }
+                return { active: describe(active), tabIndex: active?.tabIndex, text: active?.textContent?.slice(0, 100), row: active?.closest("[data-signal-id]")?.getAttribute("data-signal-id"), withinExpected: !!row?.contains(active), documentFocused: document.hasFocus(), ancestors,
+                  candidates: [...(row?.querySelectorAll("button,a[href],summary,[tabindex]") ?? [])].map(el => ({ element: describe(el), tabIndex: (el as HTMLElement).tabIndex, box: box(el), text: el.textContent?.slice(0, 70), visibility: getComputedStyle(el).visibility, opacity: getComputedStyle(el).opacity })) };
+              }, seed.ids["message.richtext.code"]!);
+              entry.focusTrace ??= [];
+              (entry.focusTrace as unknown[]).push({ step, focus });
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
             if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });

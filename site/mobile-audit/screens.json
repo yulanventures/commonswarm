@@ -9,7 +9,7 @@
         "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       }
     ],
-    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus-within:not(:has(.dashboard__message-receipt[open]))",
     "states": [
       "dense",
       "touch-focus"
@@ -34,7 +34,7 @@
         "press": "Tab"
       }
     ],
-    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-body > :is(.dashboard__message-meta, .dashboard__message-tools):focus-within",
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:not(:has(.dashboard__message-receipt[open])) .dashboard__message-body > :is(.dashboard__message-meta, .dashboard__message-tools):focus-within",
     "states": [
       "dense",
       "keyboard-focus"
