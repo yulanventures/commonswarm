@@ -89,6 +89,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
   gap: 2px 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author {
+  flex-basis: 100%;
   align-items: baseline;
   gap: 2px 8px;
   font-size: 13px;
