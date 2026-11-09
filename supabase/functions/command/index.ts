@@ -11265,7 +11265,7 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   }
   const viewer = auth.actor.user;
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${command.signal_id}`}, 0))`;
-  // The current ask and person come first: nothing replays for an ask this person can't answer now.
+  // The ask and person come first: nothing replays for an ask that isn't this person's to answer.
   const [ask] = await tx<{
     id: string; from_kind: string; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
@@ -11285,10 +11285,7 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     await audit("authz", "answer_choice_not_addressed");
     return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
   }
-  if (!ask.live) {
-    await audit("domain", "ask_expired");
-    return ctx.decided({ status: 409, body: { error: "ask_expired", message: "This ask has expired." } });
-  }
+  // A settled answer outlives the ask: a retry after expiry gets this person's answer, not ask_expired.
   const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
   if (replay !== null) return replay;
   const [mine] = await tx<{ option_id: string; reply_signal_id: string }[]>`
@@ -11306,6 +11303,10 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     return ctx.decided({ status: 200, body: { status: "accepted", ok: true, event_ids: [],
       choice_answer: { signal_id: ask.id, option_id: mine.option_id, reply_signal_id: mine.reply_signal_id },
       events: [], min_client_version: ctx.minClientVersion } });
+  }
+  if (!ask.live) {
+    await audit("domain", "ask_expired");
+    return ctx.decided({ status: 409, body: { error: "ask_expired", message: "This ask has expired." } });
   }
   const [attempts] = await tx<{ n: number }[]>`
     SELECT count(*)::int AS n FROM swarm.ui_actions
@@ -11341,7 +11342,11 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     in_reply_to: ask.id, about: null,
   };
   const target = await resolveSignalWriteTarget(tx, route, auth, reply);
-  if (target === null) return await fail(403, "reply_refused", "You can't reply to this ask.");
+  // The ask is live and addressed to this person, so only the asker can be missing: a person who
+  // left, or an agent that was removed or whose owner left.
+  if (target === null) {
+    return await fail(403, "reply_refused", "Whoever asked is no longer in this workspace, so your answer wasn't sent.");
+  }
   const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, reply, target);
   if (rateLimit !== null) return await fail(429, "rate_limited", "Too many messages just now. Try again shortly.");
   const posted = await postSignal(tx, route, auth, reply, target, [], {
