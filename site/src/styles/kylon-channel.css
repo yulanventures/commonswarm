@@ -59,9 +59,11 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff
   padding: 0; border-radius: 0; background: transparent; color: var(--k-shell-secondary); font-size: 12px; font-weight: 400; line-height: 1.5;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff-word { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta,
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped]:not(:focus-within) > .dashboard__message-body > .dashboard__message-meta {
-  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: 0; border: 0; overflow: hidden; clip-path: inset(50%); visibility: hidden; pointer-events: none;
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
+  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: 0; border: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
+  opacity: 0; pointer-events: none;
 }
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
@@ -84,7 +86,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0; visibility: hidden; pointer-events: none;
+  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0; opacity: 0; pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
+  opacity: 0; pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
@@ -119,7 +124,10 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
 }
 @media (hover: none) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none; visibility: visible; pointer-events: auto;
+    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
+    opacity: 1; pointer-events: auto;
   }
 }
 

@@ -208,10 +208,13 @@ test("Slack-like message header line and 36px rounded-square avatars keep restin
   assert.equal(continuesStreamGroup(second, first), true);
   assert.equal(continuesStreamGroup(later, first), false);
 
-  // Avatars are 36px rounded squares (8px radius) without overlaid owner badges; resting meta is hidden.
+  // Avatars are 36px rounded squares (8px radius) without overlaid owner badges; resting meta/tools use opacity+pointer-events (not visibility:hidden) so Tab reaches them and tapping the focusable row reveals meta.
   assert.match(channel, /\.dashboard__message\s*>\s*\.dashboard__message-avatar\.hm-person-avatar[\s\S]*?inline-size:\s*36px;\s*block-size:\s*36px;\s*border-radius:\s*8px;\s*align-self:\s*start;/u);
   assert.match(channel, /\.dashboard__message-avatar\s+\.hm-owner-badge,\s*live-dashboard\.dashboard\[data-kylon-shell\]\s+\.hm-frame\s+\.dashboard__message\s+\.hm-author__you\s*\{\s*display:\s*none;\s*\}/u);
   assert.match(channel, /\.hm-author__agent\s*\{[\s\S]*?border-radius:\s*4px;[\s\S]*?text-transform:\s*uppercase;/u);
-  assert.match(channel, /\.dashboard__message:not\(:hover,\s*:focus-within\)\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-meta[\s\S]*?visibility:\s*hidden;/u);
+  assert.match(channel, /\.dashboard__message:not\(:hover,\s*:focus-within\)\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-meta\s*\{[\s\S]*?opacity:\s*0;\s*pointer-events:\s*none;/u);
+  assert.doesNotMatch(channel, /\.dashboard__message-meta\s*\{[^}]*visibility:\s*hidden;/u);
+  assert.doesNotMatch(channel, /\.dashboard__message-tools[^{]*\{[^}]*visibility:\s*hidden;/u);
+  assert.match(dashboard, /row\.tabIndex = -1;/u);
   assert.match(dashboard, /hour:\s*"numeric",\s*minute:\s*"2-digit"/u);
 });
