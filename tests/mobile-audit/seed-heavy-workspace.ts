@@ -228,7 +228,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel
         ) VALUES (
           ${id}::uuid, ${workspace}::uuid, ${agents[0]}::uuid, 'agent', 'note', ${update.body},
-          statement_timestamp() + interval '25 days', statement_timestamp() - ((20 - index * 10) * interval '1 second'),
+          statement_timestamp() + interval '25 days', statement_timestamp() - (${20 - index * 10} * interval '1 second'),
           ${channels.general}::uuid, false
         )`;
         ids[update.key] = id;
