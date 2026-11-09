@@ -219,6 +219,19 @@ async function main(): Promise<void> {
     const seed = await seedHeavyWorkspace(env);
     seedNotes = seed.notes;
     writeFileSync(join(OUT, "seed.json"), JSON.stringify({ ids: seed.ids, notes: seed.notes, steps: seed.steps }, null, 2));
+    console.log(JSON.stringify({ phase: "seeded", steps: seed.steps.length, notes: seed.notes.length }));
+
+    const runPool = async <T, R>(items: readonly T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
+      const results = new Array<R>(items.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (next < items.length) {
+          const index = next++;
+          results[index] = await worker(items[index]!);
+        }
+      }));
+      return results;
+    };
 
     // Installed only in the CI job (npm install --no-save), so it stays out of the lockfile and typecheck.
     const playwrightModule = "playwright";
@@ -239,34 +252,55 @@ async function main(): Promise<void> {
       await signInContext.close();
 
       for (const theme of THEMES) for (const viewport of VIEWPORTS) {
+        const size = `${viewport.width}x${viewport.height}`;
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
-        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+        // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
+        // skills, definitions) settle before setup steps interact with the DOM.
+        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
         // The app is dark-first: with no stored preference it opens dark whatever the OS says
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
         for (const c of [context, signedIn]) {
-          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); } catch {}` });
+          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        for (const screen of screens()) {
-          const size = `${viewport.width}x${viewport.height}`;
+        const batch = await runPool(screens(), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
-          if (screen.status === "pending") { report.push({ ...entry, error: "pending", reason: screen.reason ?? null }); continue; }
+          if (screen.status === "pending") return { ...entry, error: "pending", reason: screen.reason ?? null };
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
-          if (unmet.length) { report.push({ ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` }); continue; }
+          if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
             await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
-            await page.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
-            await page.waitForTimeout(800);
+            await page.waitForFunction(() => {
+              const app = document.querySelector("live-dashboard");
+              if (!app) return true;
+              if (app.getAttribute("data-state") === "loading") return false;
+              const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
+              if (channelVisible && app.getAttribute("data-channel-view") === "feed-pending") return false;
+              const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
+              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 150;
+            }, undefined, { timeout: 30_000 });
+            await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
             for (const step of screen.setup ?? []) {
               if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
-              if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 20_000 });
+              if (step.click) {
+                const target = fill(step.click, seed.ids);
+                if (target === '[data-brain-topic="overview"]' && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
+                  try { await page.click(target, { timeout: 5_000 }); }
+                  catch {
+                    entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
+                    await page.locator(target).first().click({ force: true, timeout: 5_000 });
+                  }
+                } else {
+                  await page.click(target, { timeout: 8_000 });
+                }
+              }
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
@@ -280,10 +314,13 @@ async function main(): Promise<void> {
             entry.screenshot = shot;
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
+            console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
-          report.push(entry);
-        }
+          return entry;
+        });
+        report.push(...batch);
+        console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
         await context.close(); await signedIn.close();
       }
     } finally { await browser.close(); }
@@ -294,6 +331,7 @@ async function main(): Promise<void> {
       withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
       withOverlaps: report.filter(r => ((r.overlaps as unknown[] | undefined)?.length ?? 0) > 0).length,
       withCollapsedText: report.filter(r => ((r.collapsed as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withBypassedInteractions: report.filter(r => ((r.bypassedInteractions as unknown[] | undefined)?.length ?? 0) > 0).length,
       themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
