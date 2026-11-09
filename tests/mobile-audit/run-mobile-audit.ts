@@ -259,7 +259,7 @@ async function main(): Promise<void> {
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
-        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); window.addEventListener('storage', (e) => { if (e.key && e.key.includes('auth-token')) e.stopImmediatePropagation(); }, true); if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
+        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); window.addEventListener('storage', (e) => { if (e.key && e.key.includes('auth-token')) e.stopImmediatePropagation(); }, true); if (typeof globalThis.BroadcastChannel === 'function') { const OrigBC = globalThis.BroadcastChannel; globalThis.BroadcastChannel = class extends OrigBC { addEventListener(type, listener, opts) { if (type === 'message') return; return super.addEventListener(type, listener, opts); } set onmessage(_fn) {} }; } if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
         // The app is dark-first: with no stored preference it opens dark whatever the OS says
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
@@ -309,24 +309,41 @@ async function main(): Promise<void> {
                   }
                 };
                 if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
-                  && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-kylon-nav-drawer[open]"))) {
+                  && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
                   await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+                  await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
                 }
                 if (target === '[data-brain-topic="overview"]') {
                   await clickBrainTopic();
-                  await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-markdown]:not([hidden]), [data-brain-retry]:not([hidden]))", { state: "visible", timeout: 15_000 }).catch(() => {});
-                  if (!(await page.evaluate(() => Boolean(document.querySelector("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])"))))) {
-                    if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden])")))) {
+                  for (let attempt = 0; attempt < 3; attempt++) {
+                    await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-body-mode]:not([hidden]), [data-brain-retry]:not([hidden]):not([disabled]))", { state: "visible", timeout: 15_000 }).catch(() => {});
+                    const loaded = await page.evaluate(() => {
+                      const md = document.querySelector<HTMLElement>("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])");
+                      return Boolean(md && md.childElementCount > 0 && document.querySelector("[data-brain-body-mode]:not([hidden])"));
+                    });
+                    if (loaded) break;
+                    if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden]):not([disabled])")))) {
                       await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
                     } else {
                       await clickBrainTopic().catch(() => {});
                     }
-                    await page.waitForSelector("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])", { state: "visible", timeout: 15_000 }).catch(() => {});
+                  }
+                } else if (target.startsWith("[data-rail-channel-menu=")) {
+                  for (let attempt = 0; attempt < 3; attempt++) {
+                    if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
+                      await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+                      await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
+                    }
+                    await page.locator(target).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+                    await page.waitForTimeout(150);
+                    await page.click(target, { timeout: 8_000 });
+                    const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    if (menuVisible) break;
                   }
                 } else {
                   await page.click(target, { timeout: 8_000 });
                   if (target === 'button[aria-label="Open navigation"]') {
-                    const drawerOpen = await page.waitForSelector("dialog.cs-kylon-nav-drawer[open]", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    const drawerOpen = await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
                     if (!drawerOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
                   } else if (target.endsWith(".hm-menu__trigger")) {
                     const menuOpen = await page.waitForSelector(":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
@@ -334,14 +351,6 @@ async function main(): Promise<void> {
                   } else if (target === "[data-user-menu-trigger]") {
                     const userMenuOpen = await page.waitForSelector("[data-user-menu]:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
                     if (!userMenuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
-                  } else if (target.startsWith("[data-rail-channel-menu=")) {
-                    const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                    if (!menuVisible) {
-                      if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-kylon-nav-drawer[open]"))) {
-                        await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
-                      }
-                      await page.click(target, { timeout: 5_000 });
-                    }
                   } else if (target.startsWith('[data-def-action="select"]')) {
                     const selected = await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 10_000 }).then(() => true, () => false);
                     if (!selected) {
