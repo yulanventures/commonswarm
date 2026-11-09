@@ -138,7 +138,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
    * turn a tap on message text into a receipt activation. */
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-    position: static; inset: auto; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; padding: 0; border: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
+    position: static; inset: auto; display: grid; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; padding: 0; border: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
     opacity: 1; pointer-events: auto;
