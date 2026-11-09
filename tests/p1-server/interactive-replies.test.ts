@@ -346,7 +346,7 @@ test("only the addressed person may answer; attempts are capped; bad asks are re
   }
 });
 
-test("a typed reply first means a later click is too late; an expired ask replays nothing", async () => {
+test("a typed reply first means a later click is too late; after expiry an answer replays and an unanswered ask is closed", async () => {
   const typed = await askOwner();
   const typedId = (typed.body.signal as { id: string }).id;
   const words = await postCommand(f.ownerJwt, f.workspaceA, {
@@ -358,22 +358,61 @@ test("a typed reply first means a later click is too late; an expired ask replay
   assert.equal(late.status, 409);
   assert.equal(late.body.error, "ask_answered", "the canonical answered rule counts a typed reply");
 
-  // Signals are append-only, so this ask is written with a short life rather than expired later.
-  const expiringId = randomUUID();
-  await sql.begin(async (tx) => {
-    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
-      VALUES (${expiringId}::uuid, ${f.workspaceA}::uuid, ${f.principal}::uuid, 'agent', ${f.ownerId}::uuid,
-        'ask', 'Quick: ship?', statement_timestamp() + interval '4 seconds')`;
-    await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
-      VALUES (${expiringId}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
-  });
+  // Signals are append-only, so these asks are written with a short life rather than expired later.
+  const expiringAsk = async () => {
+    const id = randomUUID();
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+        VALUES (${id}::uuid, ${f.workspaceA}::uuid, ${f.principal}::uuid, 'agent', ${f.ownerId}::uuid,
+          'ask', 'Quick: ship?', statement_timestamp() + interval '4 seconds')`;
+      await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
+        VALUES (${id}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
+    });
+    return id;
+  };
+  const answeredId = await expiringAsk();
+  const unansweredId = await expiringAsk();
   const original = randomUUID();
-  const first = await answer(f.ownerJwt, expiringId, "ship", original);
+  const first = await answer(f.ownerJwt, answeredId, "ship", original);
   assert.equal(first.status, 200, JSON.stringify(first.body));
+  const replyId = (first.body.choice_answer as { reply_signal_id: string }).reply_signal_id;
   await delay(4_500);
-  for (const commandId of [original, randomUUID()]) {
-    const retry = await answer(f.ownerJwt, expiringId, "ship", commandId);
-    assert.equal(retry.status, 409, "nothing replays once the ask has expired");
-    assert.equal(retry.body.error, "ask_expired");
+  for (const { name, askId, option, commandId, status, error } of [
+    { name: "the same command id", askId: answeredId, option: "ship", commandId: original, status: 200, error: null },
+    { name: "a new click on the same choice", askId: answeredId, option: "ship", commandId: randomUUID(), status: 200, error: null },
+    { name: "a different choice", askId: answeredId, option: "wait", commandId: randomUUID(), status: 409, error: "choice_conflict" },
+    { name: "an ask nobody answered", askId: unansweredId, option: "ship", commandId: randomUUID(), status: 409, error: "ask_expired" },
+  ]) {
+    const retry = await answer(f.ownerJwt, askId, option, commandId);
+    assert.equal(retry.status, status, `${name}: ${JSON.stringify(retry.body)}`);
+    if (error === null) {
+      assert.deepEqual(retry.body.choice_answer, { signal_id: answeredId, option_id: "ship", reply_signal_id: replyId }, name);
+    } else {
+      assert.equal(retry.body.error, error, name);
+    }
+  }
+  const [replies] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.signals WHERE in_reply_to = ${answeredId}::uuid`;
+  assert.equal(replies!.n, 1, "a replay posts nothing");
+  assert.deepEqual(await actions(unansweredId), [], "a closed ask records no attempt");
+});
+
+test("a click whose asker is gone says so: reply_refused names why", async () => {
+  for (const { name, fromKind } of [
+    { name: "an agent no longer in the workspace", fromKind: "agent" },
+    { name: "a person no longer in the workspace", fromKind: "user" },
+  ]) {
+    const askId = randomUUID();
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+        VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${randomUUID()}::uuid, ${fromKind}, ${f.ownerId}::uuid,
+          'ask', 'Still shipping?', statement_timestamp() + interval '1 hour')`;
+      await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
+        VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
+    });
+    const refused = await answer(f.ownerJwt, askId, "ship");
+    assert.equal(refused.status, 403, `${name}: ${JSON.stringify(refused.body)}`);
+    assert.deepEqual(refused.body, { error: "reply_refused",
+      message: "Whoever asked is no longer in this workspace, so your answer wasn't sent." }, name);
+    assert.deepEqual((await actions(askId)).map((a) => [a.state, a.error_code]), [["failed", "reply_refused"]], name);
   }
 });
