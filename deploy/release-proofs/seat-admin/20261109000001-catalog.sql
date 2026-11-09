@@ -18,5 +18,7 @@ SELECT to_regclass('swarm.seat_admin_grants') IS NOT NULL
  AND has_function_privilege('swarm_command','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
  AND NOT has_function_privilege('authenticated','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
  AND NOT has_function_privilege('anon','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
+ AND NOT has_function_privilege('anon','swarm.seat_admin_text_set(text[])','EXECUTE')
+ AND has_function_privilege('swarm_command','swarm.seat_admin_uuid_set(uuid[])','EXECUTE')
  AS catalog_ok
 \gset

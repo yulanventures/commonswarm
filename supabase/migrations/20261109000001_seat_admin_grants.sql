@@ -105,6 +105,9 @@ CREATE TRIGGER seat_admin_grants_forward_only BEFORE UPDATE OR DELETE ON swarm.s
 
 ALTER FUNCTION swarm.seat_admin_text_set(text[]) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.seat_admin_uuid_set(uuid[]) OWNER TO swarm_admin;
+-- The CHECK helpers run as whoever writes a grant row: only the command role (and the owner).
+REVOKE ALL ON FUNCTION swarm.seat_admin_text_set(text[]), swarm.seat_admin_uuid_set(uuid[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION swarm.seat_admin_text_set(text[]), swarm.seat_admin_uuid_set(uuid[]) TO swarm_command;
 ALTER FUNCTION swarm.seat_admin_grants_forward_only() OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.seat_admin_grants_forward_only() FROM PUBLIC;
 ALTER TABLE swarm.seat_admin_grants OWNER TO swarm_admin;
