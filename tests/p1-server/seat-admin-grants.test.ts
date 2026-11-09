@@ -184,3 +184,16 @@ test("only the command role writes, only the end columns; people read only their
     await tx`SELECT swarm_read.my_seat_admin_grants()`;
   }), /permission denied/, "anon can't call the read");
 });
+
+test("the command role learns only whether a person is a live owner of a live organization", async () => {
+  const ask = (role: string, org: string, user: string) => sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${role}`);
+    return (await tx<{ r: unknown }[]>`SELECT swarm.seat_admin_org_owner(${org}::uuid, ${user}::uuid) AS r`)[0]!.r;
+  });
+  assert.deepEqual(await ask("swarm_command", workspaceA, owner), { archived: false, owner: true }, "the founder owns the organization");
+  assert.deepEqual(await ask("swarm_command", workspaceA, other), { archived: false, owner: false });
+  assert.equal(await ask("swarm_command", randomUUID(), owner), null, "an unknown organization");
+  for (const role of ["authenticated", "anon", "swarm_read"]) {
+    await assert.rejects(() => ask(role, workspaceA, owner), /permission denied/, role);
+  }
+});
