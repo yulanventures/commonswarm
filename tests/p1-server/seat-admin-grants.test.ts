@@ -1,7 +1,7 @@
 /**
  * Seat admin, PR 1: the swarm.seat_admin_grants schema on its own (no edge yet). A grant pins its
- * confirmed manifest, binds one agent principal, only moves active -> one terminal state, and only
- * the command role writes it. People read their own grants through one definer function.
+ * confirmed manifest, binds one agent principal at one level (scoped, workspace role or organization
+ * role), only moves active -> one terminal state, and only the command role writes it. People read their own grants through one definer function.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -29,23 +29,27 @@ async function agent(name: string): Promise<string> {
   return principal;
 }
 
-type Row = { principal_id: string; scope_names: string[]; workspace_ids: string[]; expires: string | null;
-  registry_version: number; manifest_patch?: Record<string, unknown>; digest?: string };
+type Row = { principal_id: string; level: string; organization_id: string | null; scope_names: string[];
+  workspace_ids: string[]; expires: string | null; registry_version: number; manifest_patch?: Record<string, unknown>;
+  manifest_drop?: string; digest?: string };
 
 function grantRow(principal: string, patch: Partial<Row> = {}): Row {
-  return { principal_id: principal, scope_names: ["admin:read", "invites:create"], workspace_ids: [workspaceA].sort(),
-    expires: null, registry_version: 3, ...patch };
+  return { principal_id: principal, level: "scoped", organization_id: null, scope_names: ["admin:read", "invites:create"],
+    workspace_ids: [workspaceA], expires: null, registry_version: 3, ...patch };
 }
 
 async function insert(row: Row, as: "owner" | "swarm_command" = "owner"): Promise<string> {
   const grantId = randomUUID();
-  const manifest = { registry_version: row.registry_version, scope_names: row.scope_names, workspace_ids: row.workspace_ids,
+  const manifest: Record<string, unknown> = { registry_version: row.registry_version, level: row.level,
+    scope_names: row.scope_names, workspace_ids: row.workspace_ids, organization_id: row.organization_id,
     principal_id: row.principal_id, expires: row.expires, ...row.manifest_patch };
+  if (row.manifest_drop) delete manifest[row.manifest_drop];
   await sql.begin(async (tx) => {
     if (as === "swarm_command") await tx.unsafe("SET LOCAL ROLE swarm_command");
-    await tx`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, registry_version, scope_names,
-        workspace_ids, manifest, manifest_digest, expires_at)
-      VALUES (${grantId}::uuid, ${owner}::uuid, ${row.principal_id}::uuid, ${row.registry_version}, ${row.scope_names}::text[],
+    await tx`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, level, organization_id,
+        registry_version, scope_names, workspace_ids, manifest, manifest_digest, expires_at)
+      VALUES (${grantId}::uuid, ${owner}::uuid, ${row.principal_id}::uuid, ${row.level}, ${row.organization_id}::uuid,
+        ${row.registry_version}, ${row.scope_names}::text[],
         ${row.workspace_ids}::uuid[], ${tx.json(manifest)}::jsonb, ${row.digest ?? "a".repeat(64)},
         ${row.expires === null ? null : sql.unsafe(row.expires)})`;
   });
@@ -93,6 +97,19 @@ test("the schema admits only a pinned, bounded manifest", async () => {
     ["manifest names another agent", { manifest_patch: { principal_id: randomUUID() } }, false],
     ["manifest workspaces differ", { manifest_patch: { workspace_ids: two } }, false],
     ["bad digest", { digest: "not-a-digest" }, false],
+    ["a manifest missing its scopes", { manifest_drop: "scope_names" }, false],
+    ["a manifest missing its level", { manifest_drop: "level" }, false],
+    ["a manifest missing its organization", { manifest_drop: "organization_id" }, false],
+    ["workspace admin in one workspace", { level: "workspace", scope_names: ["role:workspace_admin"] }, true],
+    ["workspace admin in two workspaces", { level: "workspace", scope_names: ["role:workspace_admin"], workspace_ids: two }, false],
+    ["workspace admin with extra scopes", { level: "workspace", scope_names: ["admin:read", "role:workspace_admin"] }, false],
+    ["workspace admin naming an organization", { level: "workspace", scope_names: ["role:workspace_admin"], organization_id: workspaceA }, false],
+    ["organization admin", { level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspaceA }, true],
+    ["organization admin without an organization", { level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [] }, false],
+    ["organization admin also naming workspaces", { level: "organization", scope_names: ["role:organization_admin"], organization_id: workspaceA }, false],
+    ["a role bundle on a scoped grant", { scope_names: ["admin:read", "role:workspace_admin"] }, false],
+    ["the organization bundle at workspace level", { level: "workspace", scope_names: ["role:organization_admin"] }, false],
+    ["an unknown level", { level: "account", scope_names: ["role:workspace_admin"] }, false],
   ];
   for (const [name, patch, ok] of cases) {
     const principal = await agent(`schema-${randomUUID().slice(0, 8)}`);
@@ -105,7 +122,14 @@ test("the schema admits only a pinned, bounded manifest", async () => {
 test("one active grant per agent; a grant only ends, once, and never reactivates", async () => {
   const principal = await agent("forward-only");
   const first = await insert(grantRow(principal));
-  await assert.rejects(() => insert(grantRow(principal)), /seat_admin_grants_one_active/, "a second active grant");
+  await assert.rejects(() => insert(grantRow(principal)), /seat_admin_grants_one_active/, "a second active scoped grant");
+  const wsAdmin = { level: "workspace", scope_names: ["role:workspace_admin"] };
+  await insert(grantRow(principal, wsAdmin)); // a workspace role beside the scoped grant
+  await insert(grantRow(principal, { ...wsAdmin, workspace_ids: [workspaceB] })); // and in another workspace
+  await assert.rejects(() => insert(grantRow(principal, wsAdmin)), /seat_admin_grants_one_active_workspace/, "twice in one workspace");
+  const orgAdmin = { level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspaceA };
+  await insert(grantRow(principal, orgAdmin));
+  await assert.rejects(() => insert(grantRow(principal, orgAdmin)), /seat_admin_grants_one_active_organization/, "twice in one organization");
   const refused: Array<[string, () => Promise<unknown>]> = [
     ["change scopes", () => sql`UPDATE swarm.seat_admin_grants SET scope_names = ARRAY['admin:read'] WHERE grant_id = ${first}::uuid`],
     ["extend the end", () => sql`UPDATE swarm.seat_admin_grants SET expires_at = statement_timestamp() + interval '1 day' WHERE grant_id = ${first}::uuid`],
