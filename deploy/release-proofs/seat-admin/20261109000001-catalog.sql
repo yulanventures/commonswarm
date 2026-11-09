@@ -15,5 +15,8 @@ SELECT to_regclass('swarm.seat_admin_grants') IS NOT NULL
  AND has_function_privilege('authenticated','swarm_read.my_seat_admin_grants()','EXECUTE')
  AND NOT has_function_privilege('anon','swarm_read.my_seat_admin_grants()','EXECUTE')
  AND (SELECT prosecdef FROM pg_proc WHERE oid='swarm_read.my_seat_admin_grants()'::regprocedure)
+ AND has_function_privilege('swarm_command','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
+ AND NOT has_function_privilege('authenticated','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
+ AND NOT has_function_privilege('anon','swarm.seat_admin_org_owner(uuid,uuid)','EXECUTE')
  AS catalog_ok
 \gset

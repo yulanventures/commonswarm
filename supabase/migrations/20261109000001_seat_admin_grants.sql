@@ -142,3 +142,24 @@ $$;
 ALTER FUNCTION swarm_read.my_seat_admin_grants() OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.my_seat_admin_grants() FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.my_seat_admin_grants() TO authenticated;
+
+-- The command role has no access to organizations or org_memberships. For an organization-level
+-- grant it needs exactly one fact under lock: is this organization live, and is this person a live
+-- owner of it. Nothing else about the organization is returned.
+CREATE FUNCTION swarm.seat_admin_org_owner(p_org uuid, p_user uuid)
+RETURNS jsonb
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+ archived boolean;
+BEGIN
+ SELECT o.archived_at IS NOT NULL INTO archived FROM swarm.organizations o WHERE o.id = p_org FOR SHARE;
+ IF NOT FOUND THEN RETURN NULL; END IF;
+ PERFORM 1 FROM swarm.org_memberships m WHERE m.org_id = p_org AND m.principal_kind = 'user'
+   AND m.principal_id = p_user AND m.role = 'owner' AND m.revoked_at IS NULL FOR SHARE;
+ RETURN jsonb_build_object('archived', archived, 'owner', FOUND);
+END;
+$$;
+ALTER FUNCTION swarm.seat_admin_org_owner(uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.seat_admin_org_owner(uuid, uuid) FROM PUBLIC, anon, authenticated, swarm_read;
+GRANT EXECUTE ON FUNCTION swarm.seat_admin_org_owner(uuid, uuid) TO swarm_command;

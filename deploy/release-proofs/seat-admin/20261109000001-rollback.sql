@@ -6,6 +6,7 @@ DO $guard$ BEGIN
    RAISE EXCEPTION 'seat admin grants exist; rollback refused' USING ERRCODE='55000'; END IF;
 END $guard$;
 DROP FUNCTION swarm_read.my_seat_admin_grants();
+DROP FUNCTION swarm.seat_admin_org_owner(uuid, uuid);
 DROP TABLE swarm.seat_admin_grants;
 DROP FUNCTION swarm.seat_admin_grants_forward_only();
 DROP FUNCTION swarm.seat_admin_text_set(text[]);
