@@ -27,7 +27,9 @@ CREATE TABLE swarm.seat_admin_grants (
   owner_user_id uuid NOT NULL REFERENCES swarm.users (user_id),
   principal_id uuid NOT NULL REFERENCES swarm.agent_principals (principal_id),
   level text NOT NULL CHECK (level IN ('scoped', 'workspace', 'organization')),
-  organization_id uuid REFERENCES swarm.organizations (id),
+  -- No foreign key: the organization tables predate this one and their rollbacks must still drop
+  -- them. The grant command confirms the organization is live and owned through seat_admin_org_owner.
+  organization_id uuid,
   -- Registry v3: v2's available routine commands plus workspaces:rename. Seat grants start at v3.
   registry_version integer NOT NULL CHECK (registry_version = 3),
   scope_names text[] NOT NULL CHECK (cardinality(scope_names) BETWEEN 1 AND 8 AND swarm.seat_admin_text_set(scope_names)),
@@ -65,7 +67,8 @@ CREATE TABLE swarm.seat_admin_grants (
     ELSE false
   END),
   CHECK (expires_at IS NULL OR (expires_at > created_at AND expires_at <= created_at + interval '90 days')),
-  CHECK ((state = 'active') = (ended_at IS NULL AND end_reason IS NULL)),
+  CHECK ((state = 'active' AND ended_at IS NULL AND end_reason IS NULL)
+    OR (state <> 'active' AND ended_at IS NOT NULL AND end_reason IS NOT NULL)),
   CHECK (state <> 'expired' OR end_reason = 'expired'),
   CHECK (state <> 'downgraded' OR end_reason IN ('owner_downgrade', 'replaced')),
   CHECK (ended_at IS NULL OR ended_at >= created_at)
