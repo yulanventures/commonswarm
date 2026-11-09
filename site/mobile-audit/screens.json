@@ -1,157 +1,46 @@
 [
   {
-    "id": "app.chat.general",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [],
-    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ]
-  },
-  {
-    "id": "app.chat.group",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.group}",
-    "setup": [],
-    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ]
-  },
-  {
-    "id": "app.chat.dm",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [
-      {
-        "press": "ControlOrMeta+k"
-      },
-      {
-        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
-      },
-      {
-        "type": "[data-command-palette-input]",
-        "text": "Atlas"
-      },
-      {
-        "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
-      },
-      {
-        "waitFor": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]"
-      },
-      {
-        "click": "[data-entity-panel-close]"
-      }
-    ],
-    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]) [data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "create_agent_principal Atlas Research & Long-Running Investigations Agent",
-      "seed_dm"
-    ]
-  },
-  {
-    "id": "app.thread",
-    "kind": "view",
-    "path": "/app?w={workspace}&m={message.thread}",
-    "setup": [
-      {
-        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
-      },
-      {
-        "scroll": "li[data-thread-root=\"{message.thread}\"]"
-      }
-    ],
-    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "seed_thread"
-    ]
-  },
-  {
-    "id": "app.composer",
+    "id": "app.chat.tap-message",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
     "setup": [
       {
-        "waitFor": "[data-composer]:not([hidden]) [data-composer-input]"
-      },
-      {
-        "type": "[data-composer-input]",
-        "text": "Checking the boiler quote before Friday."
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       }
     ],
-    "ready": "[data-composer]:not([hidden]) [data-composer-send]:not([disabled])",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "seed_channels"
-    ]
-  },
-  {
-    "id": "app.chat.richtext.list",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [
-      {
-        "waitFor": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"]",
-        "scroll": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"]"
-      }
-    ],
-    "ready": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"] .dashboard__message-markdown ul",
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
     "states": [
       "dense",
-      "richtext"
-    ],
-    "requiresSeed": [
-      "message.richtext.list"
-    ]
-  },
-  {
-    "id": "app.chat.richtext.code",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [
-      {
-        "waitFor": ".dashboard__message[data-signal-id=\"{message.richtext.code}\"]",
-        "scroll": ".dashboard__message[data-signal-id=\"{message.richtext.code}\"]"
-      }
-    ],
-    "ready": ".dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
-    "states": [
-      "dense",
-      "richtext"
+      "tap-focus"
     ],
     "requiresSeed": [
       "message.richtext.code"
     ]
   },
   {
-    "id": "app.chat.day-divider",
+    "id": "app.chat.keyboard-secondary",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
     "setup": [
       {
-        "waitFor": ".dashboard__feed > .hm-day",
-        "scroll": ".dashboard__feed > .hm-day"
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "press": "Tab"
+      },
+      {
+        "press": "Tab"
       }
     ],
-    "ready": ".dashboard__feed > .hm-day .hm-day__label",
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-body > :is(.dashboard__message-meta, .dashboard__message-tools):focus-within",
     "states": [
       "dense",
-      "day-divider"
+      "keyboard-focus"
     ],
     "requiresSeed": [
-      "seed_channels"
+      "message.richtext.code"
     ]
   }
 ]
