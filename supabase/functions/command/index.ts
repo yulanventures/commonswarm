@@ -9,6 +9,7 @@ import {
   adminTransaction, adminDigest, recordAdminFailure,
   type AdminAuthentication, type AdminInput,
 } from "./admin-delegation.ts";
+import { seatAdminTransaction, type SeatAdminHuman } from "./seat-admin.ts";
 import {
   REGISTRATION_SEAT_REVOKED,
   REGISTRATION_TOKEN_ALREADY_USED,
@@ -181,6 +182,7 @@ import {
   PRINCIPAL_NAME_TAKEN,
   publicHostedCommandForbidden, legacyHouseholdAcceptRefusal, legacyRemovalRejoinRefusal,
   reduceHostedAuthority,
+  SEAT_ADMIN_COMMAND_KINDS,
 } from "../_shared/protocol.js";
 import {
   revalidateHouseholdSeat,
@@ -907,6 +909,8 @@ const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
 const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN_MEMORY_HOSTED") === "1";
 /** Interactive replies: choice asks and answers are refused unless this is on (off by default). */
 const interactiveRepliesEnabled = Deno.env.get("SWARM_INTERACTIVE_REPLIES") === "1";
+/** Seat admin: owners give their own agents admin powers on the seat they hold. Off when unset. */
+const seatAdminEnabled = Deno.env.get("SWARM_SEAT_ADMIN") === "1";
 
 /**
  * §9 P5 caps free-tier workspaces per *verified* identity so one attacker
@@ -15929,6 +15933,17 @@ let verifiedHuman: VerifiedHuman | null = null;
   if (record(body.stream)?.kind === "account") {
     if (verifiedHuman === null || adminSessionBinding === null) return json(403, { error: "credential_kind_forbidden" });
     const identity = verifiedHuman;
+    if ((SEAT_ADMIN_COMMAND_KINDS as readonly string[]).includes(String(record(body.command)?.kind))) {
+      if (!seatAdminEnabled) {
+        return json(404, { error: "seat_admin_unavailable", message: "Agent admin access isn't turned on here." });
+      }
+      const result = await runSeatAdminCommand(body, {
+        user_id: identity.userId, session_binding: adminSessionBinding,
+        interactive_at_seconds: identity.interactiveAuthAtSeconds,
+        csrf_verified: allowedCommandOrigins.has(request.headers.get("origin") ?? ""),
+      }, identity);
+      return json(result.status, result.body);
+    }
     const result = await runAdminAccountCommand(body, { kind: "human", identity: {
       user_id: identity.userId, session_binding: adminSessionBinding,
       interactive_at_seconds: identity.interactiveAuthAtSeconds,
@@ -16033,6 +16048,19 @@ export async function handleRequest(request: Request): Promise<Response> {
     allowedCommandOrigins,
     commandEnvironment,
   );
+}
+
+async function runSeatAdminCommand(input: RequestBody, human: SeatAdminHuman, verified: VerifiedHuman): Promise<HttpResult> {
+  try {
+    return await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
+      await setTransaction(tx);
+      await authenticateHuman(tx, verified);
+      return await seatAdminTransaction(tx, input, human);
+    }));
+  } catch (error) {
+    console.error("seat_admin_command_failed", safeAdminError(error));
+    return { status: 500, body: { error: "seat_admin_command_failed" } };
+  }
 }
 
 async function runAdminAccountCommand(
