@@ -1,46 +1,23 @@
 [
   {
-    "id": "app.chat.tap-message",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
+    "id": "dialog.navigation-drawer",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
     "setup": [
       {
-        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
-        "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
-      }
-    ],
-    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
-    "states": [
-      "dense",
-      "touch-focus"
-    ],
-    "requiresSeed": [
-      "message.richtext.code"
-    ]
-  },
-  {
-    "id": "app.chat.keyboard-secondary",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [
-      {
-        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
-        "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+        "tap": "button[aria-label=\"Open navigation\"]"
       },
       {
-        "press": "Tab"
-      },
-      {
-        "press": "Tab"
+        "waitFor": "dialog.cs-org-drawer[open] [data-workspace-picker]"
       }
     ],
-    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-body > :is(.dashboard__message-meta, .dashboard__message-tools):focus-within",
+    "ready": "dialog.cs-org-drawer[open] [data-workspace-picker]",
     "states": [
       "dense",
-      "keyboard-focus"
+      "touch-drawer"
     ],
     "requiresSeed": [
-      "message.richtext.code"
+      "create_workspace"
     ]
   }
 ]

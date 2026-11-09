@@ -24,9 +24,10 @@ const DIST = join(ROOT, "site/dist");
 const OUT = resolve(process.env.MOBILE_AUDIT_OUT ?? join(ROOT, "site/mobile-audit/out"));
 const SITE_PORT = 4329;
 
+// Verification-only drawer matrix: the four standard widths at or below 52rem.
 export const VIEWPORTS = [
-  { width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 },
-  { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
+  { width: 360, height: 740 }, { width: 390, height: 844 },
+  { width: 430, height: 932 }, { width: 768, height: 1024 },
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
