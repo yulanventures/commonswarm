@@ -24,12 +24,22 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day {
   color: var(--k-shell-secondary);
   font-family: var(--k-shell-font);
   font-size: 12px;
-  font-weight: 400;
+  font-weight: 600;
   line-height: 1.5;
+  gap: 0;
+  margin-block: 12px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day__label {
+  max-inline-size: 100%;
+  padding: 4px 12px;
+  border: 1px solid var(--carbon-line);
+  border-radius: 999px;
+  background: var(--k-shell-surface);
+  text-align: center;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day::before,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day::after {
-  background: var(--k-shell-line);
+  background: var(--carbon-line);
 }
 
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
@@ -44,6 +54,29 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
   padding: 8px 24px;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
+}
+/* Feed scope wins the later channel turn-spacing rules. Replies and activity
+ * keep their own layout; the renderer still decides which rows are grouped. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
+  padding-block: 6px 4px;
+  margin-block-start: 4px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message[data-stream-grouped] {
+  padding-block: 1px 3px;
+  margin-block-start: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:first-child,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .hm-day + .dashboard__message {
+  margin-block-start: 0;
+}
+/* Addressing is available in the message tools. Keep the explicit selected
+ * thread root highlight, but remove resting address bands and animation tints. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message--direct-to-viewer:not([data-thread-reply-root]) {
+  --message-row-background: transparent;
+  background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:is(:hover, :focus-within) {
+  background: var(--k-shell-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar {
   inline-size: 32px;
@@ -86,7 +119,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta {
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-mentions {
-  --lh-base: 1.6;
+  --lh-base: 1.5;
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
   font-size: 15px;
@@ -96,13 +129,24 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown {
   max-inline-size: 70ch;
 }
-/* Keep headings, lists and code on their existing rhythm; consecutive prose
- * paragraphs need only half a line to read as one message. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown > p + p {
-  margin-block-start: .5em;
+/* Compact rich text only inside conversation messages, not the Brain reader.
+ * Preserve semantic lists, task markers and the existing wrapped-code behavior. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown :where(h2, h3, h4, h5, p, ul, ol, blockquote, pre, table, hr) + :where(h2, h3, h4, h5, p, ul, ol, blockquote, pre, table, hr) {
+  margin-block-start: 4px;
 }
-/* This line-height property is also used by the existing collapsed-height
- * calculation. Markdown block spacing, code/table overflow and links stay. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown :where(p, ul, ol, blockquote, pre, table, hr) + :where(h2, h3, h4, h5) {
+  margin-block-start: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown :where(ul, ol) {
+  padding-inline-start: 20px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown ul {
+  list-style-type: disc;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown li + li {
+  margin-block-start: 2px;
+}
+/* This line-height also feeds the existing message-collapse calculation. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown a {
   color: var(--k-shell-focus);
 }
@@ -111,7 +155,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 ) {
   color: var(--k-shell-ink);
   background: var(--k-shell-subtle);
-  border-color: var(--k-shell-line);
+  border: 1px solid var(--carbon-line);
+  font-family: var(--font-mono);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown pre {
+  padding: 8px 12px;
+  border-radius: 6px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown blockquote {
   color: var(--k-shell-secondary);
@@ -205,8 +254,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(
   background: var(--k-shell-hover);
 }
 
-/* Operational tints, failed/expired delivery colors and arrival state are
- * deliberately inherited. They distinguish facts, not decoration. */
+/* Failed/expired delivery colors remain on their semantic receipt path. */
 
 /* Message status under the person's latest message to an agent: one quiet line. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-status {
