@@ -291,8 +291,15 @@ async function main(): Promise<void> {
               if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 20_000 });
               if (step.click) {
                 const target = fill(step.click, seed.ids);
-                try { await page.click(target, { timeout: 5_000 }); }
-                catch { await page.locator(target).first().click({ force: true, timeout: 5_000 }); }
+                if (target === '[data-brain-topic="overview"]' && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
+                  try { await page.click(target, { timeout: 5_000 }); }
+                  catch {
+                    entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
+                    await page.locator(target).first().click({ force: true, timeout: 5_000 });
+                  }
+                } else {
+                  await page.click(target, { timeout: 8_000 });
+                }
               }
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
@@ -324,6 +331,7 @@ async function main(): Promise<void> {
       withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
       withOverlaps: report.filter(r => ((r.overlaps as unknown[] | undefined)?.length ?? 0) > 0).length,
       withCollapsedText: report.filter(r => ((r.collapsed as unknown[] | undefined)?.length ?? 0) > 0).length,
+      withBypassedInteractions: report.filter(r => ((r.bypassedInteractions as unknown[] | undefined)?.length ?? 0) > 0).length,
       themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
