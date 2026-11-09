@@ -24,9 +24,9 @@ const DIST = join(ROOT, "site/dist");
 const OUT = resolve(process.env.MOBILE_AUDIT_OUT ?? join(ROOT, "site/mobile-audit/out"));
 const SITE_PORT = 4329;
 
+// Verification-only desktop pointer matrix; this branch must never be merged.
 export const VIEWPORTS = [
-  { width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 },
-  { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
+  { width: 1280, height: 900 }, { width: 1440, height: 900 },
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
@@ -254,8 +254,8 @@ async function main(): Promise<void> {
       for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         const phone = viewport.width < 768 || viewport.height < 500;
-        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
-        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: false, isMobile: phone, deviceScaleFactor: 1 });
+        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: false, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.

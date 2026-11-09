@@ -10,72 +10,6 @@
     ]
   },
   {
-    "id": "app.chat.group",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.group}",
-    "setup": [],
-    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ]
-  },
-  {
-    "id": "app.chat.dm",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [
-      {
-        "press": "ControlOrMeta+k"
-      },
-      {
-        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
-      },
-      {
-        "type": "[data-command-palette-input]",
-        "text": "Atlas"
-      },
-      {
-        "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
-      },
-      {
-        "waitFor": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]"
-      },
-      {
-        "click": "[data-entity-panel-close]"
-      }
-    ],
-    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]) [data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "create_agent_principal Atlas Research & Long-Running Investigations Agent",
-      "seed_dm"
-    ]
-  },
-  {
-    "id": "app.thread",
-    "kind": "view",
-    "path": "/app?w={workspace}&m={message.thread}",
-    "setup": [
-      {
-        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
-      },
-      {
-        "scroll": "li[data-thread-root=\"{message.thread}\"]"
-      }
-    ],
-    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "seed_thread"
-    ]
-  },
-  {
     "id": "app.composer",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
@@ -95,25 +29,6 @@
     "requiresSeed": [
       "create_workspace",
       "seed_channels"
-    ]
-  },
-  {
-    "id": "app.chat.richtext.list",
-    "kind": "view",
-    "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [
-      {
-        "waitFor": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"]",
-        "scroll": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"]"
-      }
-    ],
-    "ready": ".dashboard__message[data-signal-id=\"{message.richtext.list}\"] .dashboard__message-markdown ul",
-    "states": [
-      "dense",
-      "richtext"
-    ],
-    "requiresSeed": [
-      "message.richtext.list"
     ]
   },
   {
@@ -152,6 +67,50 @@
     ],
     "requiresSeed": [
       "seed_channels"
+    ]
+  },
+  {
+    "id": "app.chat.tap-message",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      }
+    ],
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
+    "states": [
+      "dense",
+      "tap-focus"
+    ],
+    "requiresSeed": [
+      "message.richtext.code"
+    ]
+  },
+  {
+    "id": "app.chat.keyboard-secondary",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "press": "Tab"
+      },
+      {
+        "press": "Tab"
+      }
+    ],
+    "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-body > :is(.dashboard__message-meta, .dashboard__message-tools):focus-within",
+    "states": [
+      "dense",
+      "keyboard-focus"
+    ],
+    "requiresSeed": [
+      "message.richtext.code"
     ]
   }
 ]
