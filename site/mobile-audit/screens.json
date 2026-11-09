@@ -70,7 +70,7 @@
     ]
   },
   {
-    "id": "app.chat.tap-message",
+    "id": "app.chat.pointer-message",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
     "setup": [
@@ -82,7 +82,7 @@
     "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
     "states": [
       "dense",
-      "tap-focus"
+      "pointer-focus"
     ],
     "requiresSeed": [
       "message.richtext.code"
