@@ -12,15 +12,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-ws-header [data-menu-item="wiki"]
   }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__copy { flex: 1; }
-live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__title { font-size: 18px; line-height: 1.4; letter-spacing: -.3px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__title { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -.2px; }
 live-dashboard.dashboard[data-kylon-shell] .hm-ws-header__actions { gap: 8px; flex-wrap: nowrap; }
 live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-ws-header__people, .hm-details-close) {
   display: inline-flex; align-items: center; justify-content: center; min-block-size: 36px;
   padding: 4px 10px; border: 1px solid var(--k-shell-line); border-radius: 6px;
-  color: var(--k-shell-ink); background: transparent; box-shadow: none; font: 500 13px var(--k-shell-font); cursor: pointer;
+  color: var(--k-shell-secondary); background: transparent; box-shadow: none; font: 500 13px var(--k-shell-font); cursor: pointer;
 }
 live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-ws-header__people, .hm-details-close):hover { background: var(--k-shell-hover); }
-live-dashboard.dashboard[data-kylon-shell] .hm-details-toggle[aria-expanded="true"] { background: var(--k-shell-selected); }
+live-dashboard.dashboard[data-kylon-shell] .hm-details-toggle[aria-expanded="true"] { color: var(--k-shell-ink); background: var(--k-shell-selected); }
 live-dashboard.dashboard[data-kylon-shell] .hm-member-stack { display: inline-flex; align-items: center; gap: 8px; }
 live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces { display: inline-flex; align-items: center; padding-inline-start: 4px; }
 live-dashboard.dashboard[data-kylon-shell] .hm-member-stack__faces > * {
@@ -34,18 +34,25 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:hover,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:focus-within { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar { inline-size: 36px; block-size: 36px; border-radius: 7px; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 15px; font-weight: 700; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown { font-size: 15px; line-height: 1.5; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 14px; font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown { font-size: 15px; line-height: var(--lh-base); }
 live-dashboard.dashboard[data-kylon-shell] .hm-author__agent {
-  align-self: center; padding: 0 4px; border-radius: 3px; background: var(--k-shell-selected); color: var(--k-shell-secondary); font-size: 11px; line-height: 17px;
+  align-self: center; padding: 0; background: transparent; color: var(--k-shell-secondary); font-size: 12px; font-weight: 400; line-height: 18px;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] { padding-block-start: 2px; }
+/* Separate speaker turns without adding space to replies or activity rows.
+ * The renderer remains the sole owner of five-minute author grouping. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
+  padding-block: 10px 6px; margin-block-start: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:first-child,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day + .dashboard__message { margin-block-start: 0; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] { padding-block: 2px 4px; margin-block-start: 0; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] > .dashboard__message-avatar { visibility: hidden; }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author {
   position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
-  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 10px var(--k-shell-font); color: var(--k-shell-secondary); visibility: hidden;
+  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 12px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-secondary); visibility: hidden;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { visibility: visible; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools {
@@ -118,8 +125,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar-close:hover { colo
 /* Group chat header: who answers untagged messages. */
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill {
   display: inline-flex; align-items: center; min-block-size: 28px; margin-inline-start: 10px; padding: 0 12px;
-  border: 0; border-radius: 999px; font: 600 12px var(--k-shell-font); color: var(--k-shell-ink);
-  background: var(--k-shell-subtle); cursor: pointer; vertical-align: middle;
+  border: 0; border-radius: 999px; font: 500 12px var(--k-shell-font); color: var(--k-shell-secondary);
+  background: transparent; cursor: pointer; vertical-align: middle;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill:hover { background: var(--k-shell-selected); }
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill[data-lead-unset] { color: var(--k-shell-secondary); }
