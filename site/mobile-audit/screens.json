@@ -104,13 +104,13 @@
     "path": "/app?w={workspace}&v=lists",
     "setup": [
       {
-        "waitFor": ".household-definitions [data-def-list]"
+        "waitFor": ".household-definitions [data-def-list] [data-def-action=\"select\"]"
       },
       {
         "scroll": ".household-definitions [data-def-list]"
       }
     ],
-    "ready": ".household-definitions [data-def-list]",
+    "ready": ".household-definitions [data-def-list] [data-def-action=\"select\"]",
     "states": [
       "dense"
     ],
@@ -698,7 +698,7 @@
         "waitFor": ".hdr__nav .hdr__link"
       }
     ],
-    "ready": ":is(dialog#site-menu[data-menu][open] [data-menu-close], .hdr__nav .hdr__link)",
+    "ready": ":is(dialog#site-menu[data-menu][open] [data-menu-close], header.hdr:has(+ dialog#site-menu:not([open])) .hdr__nav .hdr__link)",
     "states": [
       "dense"
     ]
@@ -891,10 +891,10 @@
       },
       {
         "media": "(width > 52rem)",
-        "waitFor": ".cs-org-rail [data-workspace-picker]"
+        "waitFor": ".cs-org-context [data-workspace-picker]"
       }
     ],
-    "ready": ":is(dialog.cs-org-drawer[open], .cs-org-rail) [data-workspace-picker]",
+    "ready": ":is(dialog.cs-org-drawer[open], .cs-org-context-parking) .cs-org-context [data-workspace-picker]",
     "states": [
       "dense"
     ],
