@@ -297,6 +297,7 @@ const COMMAND_ENV = [
   // Feature switches; exact "1" turns each on. Off when unset.
   "SWARM_BRAIN_MEMORY",
   "SWARM_INTERACTIVE_REPLIES",
+  "SWARM_SEAT_ADMIN",
   "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
   "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
 ] as const;

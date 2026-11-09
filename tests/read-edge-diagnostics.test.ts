@@ -343,7 +343,8 @@ function assertTransactionOpenings(name: "read" | "command", source: string): vo
   }
   visit(file);
   assert.deepEqual(inventory.sort(), name === "read" ? ["request"]
-    : ["audit", "audit", "audit", "audit", "drain", "request", "request", "request", "request", "request", "request", "worker"],
+    // The seventh command request transaction is runSeatAdminCommand (seat admin grant and end).
+    : ["audit", "audit", "audit", "audit", "drain", "request", "request", "request", "request", "request", "request", "request", "worker"],
   `${name}: all request, failure-audit, drain and worker transactions are accounted for`);
 
   if (name === "read") {
