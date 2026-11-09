@@ -2,7 +2,8 @@
 SELECT to_regclass('swarm.seat_admin_grants') IS NOT NULL
  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='swarm.seat_admin_grants'::regclass
    AND tgname='seat_admin_grants_forward_only' AND NOT tgisinternal)
- AND EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='swarm' AND indexname='seat_admin_grants_one_active')
+ AND (SELECT count(*)=3 FROM pg_indexes WHERE schemaname='swarm' AND indexname IN
+   ('seat_admin_grants_one_active','seat_admin_grants_one_active_workspace','seat_admin_grants_one_active_organization'))
  AND (SELECT relrowsecurity FROM pg_class WHERE oid='swarm.seat_admin_grants'::regclass)
  AND has_table_privilege('swarm_command','swarm.seat_admin_grants','SELECT,INSERT')
  AND NOT has_table_privilege('swarm_command','swarm.seat_admin_grants','DELETE')
