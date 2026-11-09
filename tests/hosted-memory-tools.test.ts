@@ -98,7 +98,7 @@ test("memory refusals have their own copy, not another tool's", () => {
 test("memory refusals name only remedies that exist: the author forgets; nothing frees history", () => {
   for (const [code, tool, message] of [
     ["memory_limit", "memory_save", "This workspace holds 500 memories, the most it can. Whoever saved a memory can forget it to make room."],
-    ["memory_history_full", "memory_save", "This workspace's memory history is full, so no more memories can be saved or changed."],
+    ["memory_history_full", "memory_save", "This workspace's memory history is full, so no more memories can be saved or edited."],
     ["not_found", "memory_forget", "No active memory this seat's agent saved has that memory_id. Only whoever saved a memory can forget it."],
   ] as const) {
     assert.equal(hostedToolError(new HostedToolFailure(code), tool as never).message, message, code);

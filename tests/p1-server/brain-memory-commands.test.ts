@@ -475,7 +475,7 @@ test("cap refusals name only remedies that exist", async () => {
       },
       {
         code: "memory_history_full",
-        message: "This workspace's memory history is full, so no more memories can be saved or changed.",
+        message: "This workspace's memory history is full, so no more memories can be saved or edited.",
         fill: async () => {
           const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.memory_versions
             WHERE workspace_id = ${f.workspaceA}::uuid`;

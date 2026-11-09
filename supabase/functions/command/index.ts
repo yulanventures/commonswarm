@@ -11038,7 +11038,7 @@ async function memoryCommand(
     if (history!.n >= MEMORY_HISTORY_CAP) {
       await audit("domain", "memory_history_full");
       return decided({ status: 409, body: { error: "memory_history_full",
-        message: "This workspace's memory history is full, so no more memories can be saved or changed." } });
+        message: "This workspace's memory history is full, so no more memories can be saved or edited." } });
     }
     const [current] = await tx<Row[]>`
       SELECT memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id

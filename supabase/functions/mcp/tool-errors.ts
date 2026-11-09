@@ -63,7 +63,7 @@ const MESSAGES = {
   channel_archived: "That channel is archived, so it takes no new messages. Call channel_ls to pick a live channel, or leave channel out to post to #general.",
   memory_unavailable: "Workspace memory isn't turned on here.",
   memory_rate_limited: "This agent has saved 50 memories in this workspace in the last day. Try again later.",
-  memory_history_full: "This workspace's memory history is full, so no more memories can be saved or changed.",
+  memory_history_full: "This workspace's memory history is full, so no more memories can be saved or edited.",
   memory_limit: "This workspace holds 500 memories, the most it can. Whoever saved a memory can forget it to make room.",
 } as const;
 
