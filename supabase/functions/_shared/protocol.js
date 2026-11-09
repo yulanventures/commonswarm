@@ -3914,13 +3914,17 @@ function emptyHouseholdObjectState(workspaceId, streamId) {
     receipts: {}
   };
 }
-function householdObjectUsage(state) {
+function householdReservationLive(reservation, now) {
+  return reservation.expires_at > now;
+}
+function householdObjectUsage(state, now) {
   const names = new Set(Object.keys(state.objects));
   let bytes = 0;
   for (const object2 of Object.values(state.objects)) {
     for (const revision2 of object2.history) bytes += revision2.blob.size_bytes;
   }
   for (const reservation of Object.values(state.reservations)) {
+    if (!householdReservationLive(reservation, now)) continue;
     names.add(reservation.object_id);
     bytes += reservation.proposed.size_bytes;
   }
@@ -4018,7 +4022,7 @@ function decideHouseholdObject(command, state, ctx) {
     return { outcome, events: [structuredClone(event2)], replayed: false };
   };
   const refuse2 = (reason) => emit("HouseholdObjectCommandRefused", {}, { status: "refused", reason });
-  const usage = householdObjectUsage(state);
+  const usage = householdObjectUsage(state, ctx.now);
   if (!nonnegative(ctx.other_storage_bytes) || !nonnegative(ctx.other_object_count)) return noEvent("quota_facts_invalid");
   const bytes = usage.storage_bytes + ctx.other_storage_bytes;
   const count = usage.object_count + ctx.other_object_count;
@@ -4122,7 +4126,7 @@ function decideHouseholdObject(command, state, ctx) {
   let base = null;
   let title;
   if (change.kind === "create") {
-    if (current || Object.values(state.reservations).some((pending) => pending.object_id === objectId2)) return refuse2("object_already_exists");
+    if (current || Object.values(state.reservations).some((pending) => pending.object_id === objectId2 && householdReservationLive(pending, ctx.now))) return refuse2("object_already_exists");
     if (count >= HOUSEHOLD_OBJECT_LIMIT) return refuse2("object_quota_reached");
     if (!validContent(change.content) || !sameContent(change.content, prepared.content)) return refuse2("verified_content_mismatch");
     title = change.title;
@@ -4210,7 +4214,7 @@ function reduceHouseholdObject(state, event2) {
       const object2 = own(objects, objectId2);
       if (event2.type === "HouseholdObjectCreated") {
         if (object2 || revision2.parent !== null) fail("duplicate create or non-null parent");
-        if (Object.values(reservations).some((pending) => pending.object_id === objectId2 && pending.reservation_id !== event2.payload.reservation_id)) fail("name is reserved");
+        if (Object.values(reservations).some((pending) => pending.object_id === objectId2 && pending.reservation_id !== event2.payload.reservation_id && householdReservationLive(pending, event2.occurred_at_server))) fail("name is reserved");
       } else if (!object2 || object2.kind !== revision2.kind || !sameRevision(object2.history.at(-1).revision, revision2.parent)) fail("stale or missing parent");
       const outcome = receipt.outcome;
       if (outcome.status !== "committed" || outcome.object_id !== objectId2 || !sameRevision(outcome.revision, revision2.revision)) fail("commit receipt mismatch");
@@ -4234,7 +4238,7 @@ function reduceHouseholdObject(state, event2) {
       assertMetadata(reservation.kind, reservation.file_metadata);
       const current = own(objects, reservation.object_id)?.history.at(-1);
       if (reservation.base === null) {
-        if (current || Object.values(reservations).some((pending) => pending.object_id === reservation.object_id)) fail("duplicate name reservation");
+        if (current || Object.values(reservations).some((pending) => pending.object_id === reservation.object_id && householdReservationLive(pending, event2.occurred_at_server))) fail("duplicate name reservation");
       } else {
         assertRef(reservation.base, reservation.object_id);
         if (!current || !sameRevision(current.revision, reservation.base) || current.kind !== reservation.kind) fail("stale reservation base");
@@ -4296,7 +4300,7 @@ function reduceHouseholdObject(state, event2) {
     last_seq: event2.seq,
     receipts: { ...state.receipts, [receiptKey(receipt.principal, receipt.command_id)]: structuredClone(receipt) }
   };
-  const usage = householdObjectUsage(next);
+  const usage = householdObjectUsage(next, event2.occurred_at_server);
   if (usage.object_count > HOUSEHOLD_OBJECT_LIMIT || usage.storage_bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT) fail("quota invariant violated");
   return next;
 }
@@ -6042,6 +6046,7 @@ export {
   householdDefinitionKey,
   householdObjectUsage,
   householdQuestionUsesTerm,
+  householdReservationLive,
   householdToolInvocation,
   householdToolOperation,
   householdWriteLimitReached,

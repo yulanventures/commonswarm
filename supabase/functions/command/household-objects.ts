@@ -16,7 +16,7 @@ import type { HouseholdStorage } from './household-transfers.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 type Core = Pick<typeof import('../_shared/household-objects.d.ts'),
-  'decideHouseholdObject' | 'reduceHouseholdObjectStream' | 'readHouseholdObjects' | 'emptyHouseholdObjectState' | 'householdObjectUsage'>
+  'decideHouseholdObject' | 'reduceHouseholdObjectStream' | 'readHouseholdObjects' | 'emptyHouseholdObjectState' | 'householdReservationLive'>
   & Pick<typeof import('../_shared/household-object-policy.d.ts'),
     'householdAccessRefusal' | 'HOUSEHOLD_LIVE_REVISION_LIMIT' | 'HOUSEHOLD_VERSION_BYTE_LIMIT'
     | 'HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT' | 'HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT'>;
@@ -147,6 +147,19 @@ export function createHouseholdObjectStore(dependencies: {
     if (!preparedAccess || core.householdAccessRefusal(preparedAccess.facts, workspaceId, operation(command), preparedAccess.now)) {
       throw new transfers.HouseholdTransferError('access_refused');
     }
+    // An expired reservation no longer counts toward names or bytes. Settle its rows
+    // as an explicit release would, whatever this command's outcome; the projection
+    // keeps the entry so the owner's late commit still says upload_expired.
+    const expired = Object.values(current.reservations)
+      .filter((reservation) => !core.householdReservationLive(reservation, preparedAccess.now)).map((reservation) => reservation.reservation_id);
+    if (expired.length) {
+      const settled = await tx`UPDATE swarm.household_object_artifacts SET state='released'
+        WHERE workspace_id=${workspaceId}::uuid AND state='reserved' AND reservation_id IN ${tx(expired)} RETURNING storage_path`;
+      for (const { storage_path: path } of settled) {
+        await tx`UPDATE swarm.file_versions SET state='purged' WHERE workspace_id=${workspaceId}::uuid AND storage_path=${path} AND state='pending'`;
+        await tx`INSERT INTO swarm.file_purge_queue(storage_path) VALUES (${path}) ON CONFLICT(storage_path) DO NOTHING`;
+      }
+    }
     const contents: HouseholdVerifiedContent[] = [];
     const base = baseOf(command);
     if (base?.workspace_id === workspaceId) {
@@ -186,11 +199,10 @@ export function createHouseholdObjectStore(dependencies: {
     const [legacy] = await tx`SELECT
       (SELECT coalesce(sum(v.size_bytes),0)::text FROM swarm.file_versions v JOIN swarm.files f USING(file_id,workspace_id)
         WHERE v.workspace_id=${workspaceId}::uuid AND NOT f.household_managed AND v.state IN ('pending','live','retired')) AS bytes,
-      (SELECT count(*)::text FROM swarm.files WHERE workspace_id=${workspaceId}::uuid AND purged_at IS NULL) AS names`;
-    const usage = core.householdObjectUsage(current);
+      (SELECT count(*)::text FROM swarm.files WHERE workspace_id=${workspaceId}::uuid AND purged_at IS NULL AND NOT household_managed) AS names`;
     const ctx = { access: preparedAccess.facts, now: preparedAccess.now, command_id: requestId, request_digest: digest,
       seq: current.last_seq + 1, event_id: crypto.randomUUID(), revision_token: crypto.randomUUID().replaceAll('-', ''), draft_id: crypto.randomUUID(),
-      other_storage_bytes: Number(legacy!.bytes), other_object_count: Math.max(0, Number(legacy!.names) - usage.object_count),
+      other_storage_bytes: Number(legacy!.bytes), other_object_count: Number(legacy!.names),
       identity_write_attempts: identityAttempts, workspace_write_attempts: workspaceAttempts, contents, prepared };
     let decision = core.decideHouseholdObject(command, current, ctx);
     let staged = false;

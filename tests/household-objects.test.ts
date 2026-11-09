@@ -100,7 +100,7 @@ test('golden replay preserves immutable bytes and exact human provenance', () =>
   }] });
   assert.deepEqual(initial.objects, {});
   assert.deepEqual(golden, before);
-  assert.deepEqual(householdObjectUsage(state), { object_count: 1, storage_bytes: 87 });
+  assert.deepEqual(householdObjectUsage(state, 100), { object_count: 1, storage_bytes: 87 });
   // Mutating a caller's returned read view cannot corrupt retained history.
   const read = readHouseholdObjects({ kind: 'object_read', object_id: 'shopping' }, state, access('blair'), 100);
   assert.equal(read.status, 'ok');
@@ -154,7 +154,7 @@ test('a stale write preserves a private draft, current history and merge referen
   assert.equal(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, access('blair'), 100).status, 'ok');
   assert.deepEqual(readHouseholdObjects({ kind: 'draft_read', draft_id: 'losing-draft' }, conflicted, access('alex'), 100),
     { status: 'refused', reason: 'draft_access_refused' });
-  assert.deepEqual(householdObjectUsage(conflicted), { object_count: 1, storage_bytes: content.blob.size_bytes + 2 * prepared.blob.size_bytes });
+  assert.deepEqual(householdObjectUsage(conflicted, 100), { object_count: 1, storage_bytes: content.blob.size_bytes + 2 * prepared.blob.size_bytes });
 });
 
 test('upload reservation checks the base and commit catches a later writer', () => {
@@ -179,7 +179,7 @@ test('upload reservation checks the base and commit catches a later writer', () 
   assert.equal(next.objects.shopping!.history.length, 2);
   assert.deepEqual(next.reservations, {});
   assert.equal(Object.keys(next.drafts).length, 1);
-  assert.deepEqual(householdObjectUsage(next), { object_count: 1, storage_bytes: content.blob.size_bytes + 2 * prepared.blob.size_bytes });
+  assert.deepEqual(householdObjectUsage(next, 100), { object_count: 1, storage_bytes: content.blob.size_bytes + 2 * prepared.blob.size_bytes });
   const staleBegin = decideHouseholdObject(reserve, advanced, context(advanced, reserve, prepared,
     { access: access('blair'), contents: [content], command_id: 'new-reservation' }));
   assert.equal(staleBegin.outcome.status, 'conflict', 'reservation also refuses an old base');
@@ -342,10 +342,10 @@ test('retired revisions remain readable and count against quota after 21 commits
   const old = readHouseholdObjects({ kind: 'object_read', object_id: 'shopping', revision: ref(1) }, state, access('blair'), 100);
   assert.equal(old.status, 'ok');
   if (old.status === 'ok' && old.kind === 'object_read') assert.equal(old.revision.blob.storage_key, 'household/shopping/bytes');
-  assert.equal(householdObjectUsage(state).storage_bytes, expectedBytes);
+  assert.equal(householdObjectUsage(state, 100).storage_bytes, expectedBytes);
   const replay = reduceHouseholdObjectStream(events, emptyHouseholdObjectState('household', 'stream'));
   assert.deepEqual(replay.objects.shopping!.history.map((revision) => revision.revision.token), Array.from({ length: 21 }, (_, i) => token(i + 1)));
-  assert.equal(householdObjectUsage(replay).storage_bytes, expectedBytes);
+  assert.equal(householdObjectUsage(replay, 100).storage_bytes, expectedBytes);
 });
 
 test('proposed quota and attempt ceilings use inclusive boundaries without deleting history', () => {
@@ -426,7 +426,7 @@ test('file reservation admits create-only grants, checks verified artifacts and 
     { status: 'refused', reason: 'verified_content_required' });
 });
 
-test('expiration does not silently free reserved bytes; an explicit release does', () => {
+test('an expired reservation stops holding its name and bytes; its owner still gets upload_expired or released', () => {
   const { state, content } = createList();
   const prepared = artifact(checkedMilk, 'shopping', ref(1));
   const reserve: HouseholdObjectCommand = { kind: 'reserve_household_upload', object_id: 'shopping', reservation_id: 'upload', expires_at: 200,
@@ -434,16 +434,41 @@ test('expiration does not silently free reserved bytes; an explicit release does
   const pending = decideHouseholdObject(reserve, state, context(state, reserve, prepared, { contents: [content] }));
   const reserved = reduceHouseholdObjectStream(pending.events, state);
   const commit: HouseholdObjectCommand = { kind: 'commit_household_upload', reservation_id: 'upload', operation: 'update' };
-  assert.equal(decideHouseholdObject(commit, reserved, context(reserved, commit, prepared, { now: 199 })).outcome.status, 'committed');
-  assert.deepEqual(decideHouseholdObject(commit, reserved, context(reserved, commit, prepared, { now: 200 })).outcome,
-    { status: 'refused', reason: 'upload_expired' });
-  assert.equal(householdObjectUsage(reserved).storage_bytes, content.blob.size_bytes + prepared.blob.size_bytes);
   const release: HouseholdObjectCommand = { kind: 'release_household_upload', reservation_id: 'upload', operation: 'update' };
-  const released = decideHouseholdObject(release, reserved, context(reserved, release, null, { now: 200 }));
-  assert.deepEqual(released.outcome, { status: 'released', reservation_id: 'upload' });
-  const next = reduceHouseholdObjectStream(released.events, reserved);
-  assert.deepEqual(next.reservations, {});
-  assert.equal(householdObjectUsage(next).storage_bytes, content.blob.size_bytes);
+  for (const [now, bytes, committed] of [
+    [199, content.blob.size_bytes + prepared.blob.size_bytes, { status: 'committed', object_id: 'shopping', revision: ref(3) }],
+    [200, content.blob.size_bytes, { status: 'refused', reason: 'upload_expired' }],
+  ] as const) {
+    assert.equal(householdObjectUsage(reserved, now).storage_bytes, bytes, `bytes at ${now}`);
+    assert.deepEqual(decideHouseholdObject(commit, reserved, context(reserved, commit, prepared, { now })).outcome, committed, `commit at ${now}`);
+    const released = decideHouseholdObject(release, reserved, context(reserved, release, null, { now }));
+    assert.deepEqual(released.outcome, { status: 'released', reservation_id: 'upload' }, `release at ${now}`);
+    assert.deepEqual(reduceHouseholdObjectStream(released.events, reserved).reservations, {});
+  }
+
+  // A create reservation holds its name until it expires; then anyone may take the name.
+  const initial = emptyHouseholdObjectState('household', 'stream');
+  const file: HouseholdContent = { kind: 'file', name: 'receipt.txt', media_type: 'text/plain' };
+  const abandoned: HouseholdObjectCommand = { kind: 'reserve_household_upload', object_id: 'receipt', reservation_id: 'abandoned', expires_at: 200,
+    change: { kind: 'create', title: 'Receipt', content: file } };
+  const held = reduceHouseholdObjectStream(decideHouseholdObject(abandoned, initial,
+    context(initial, abandoned, artifact(file, 'receipt', null, 'abandoned'))).events, initial);
+  for (const [now, user, outcome] of [
+    [199, 'blair', { status: 'refused', reason: 'object_already_exists' }],
+    [200, 'blair', { status: 'pending', object_id: 'receipt', reservation_id: 'retry' }],
+    [200, 'alex', { status: 'pending', object_id: 'receipt', reservation_id: 'retry' }],
+  ] as const) {
+    const again: HouseholdObjectCommand = { ...abandoned, reservation_id: 'retry', expires_at: now + 100 };
+    const decision = decideHouseholdObject(again, held, context(held, again, artifact(file, 'receipt', null, 'retry'), { now, access: access(user) }));
+    assert.deepEqual(decision.outcome, outcome, `${user} reserves at ${now}`);
+    const next = reduceHouseholdObjectStream(decision.events, held);
+    assert.deepEqual(householdObjectUsage(next, now), { object_count: 1, storage_bytes: Buffer.byteLength(JSON.stringify(file)) },
+      `one name and one reservation's bytes at ${now}`);
+  }
+  const create: HouseholdObjectCommand = { kind: 'create_household_object', object_id: 'receipt', title: 'Receipt', content: milk };
+  const direct = decideHouseholdObject(create, held, context(held, create, artifact(milk, 'receipt'), { now: 200, access: access('blair') }));
+  assert.equal(direct.outcome.status, 'committed');
+  assert.equal(reduceHouseholdObjectStream(direct.events, held).objects.receipt!.history.length, 1, 'replay accepts the name after expiry');
 });
 
 test('file replacement checks its exact byte digest, preserves metadata and retains old versions', () => {
