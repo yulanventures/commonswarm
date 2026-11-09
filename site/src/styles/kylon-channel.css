@@ -35,6 +35,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:hover,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:focus-within { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar { inline-size: 36px; block-size: 36px; border-radius: 7px; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 14px; font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-author { text-align: start; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown { font-size: 15px; line-height: var(--lh-base); }
 live-dashboard.dashboard[data-kylon-shell] .hm-author__agent {
   align-self: center; padding: 0; background: transparent; color: var(--k-shell-secondary); font-size: 12px; font-weight: 400; line-height: 18px;
@@ -126,7 +127,7 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__dm-bar-close:hover { colo
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill {
   display: inline-flex; align-items: center; min-block-size: 28px; margin-inline-start: 10px; padding: 0 12px;
   border: 0; border-radius: 999px; font: 500 12px var(--k-shell-font); color: var(--k-shell-secondary);
-  background: transparent; cursor: pointer; vertical-align: middle;
+  background: transparent; cursor: pointer; vertical-align: middle; text-align: start;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill:hover { background: var(--k-shell-selected); }
 live-dashboard.dashboard[data-kylon-shell] .hm-lead-pill[data-lead-unset] { color: var(--k-shell-secondary); }
