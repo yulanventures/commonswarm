@@ -766,3 +766,169 @@ test("new shared workspaces open chat and the invite door once; personal and res
     assert.deepEqual(JSON.parse(JSON.stringify(f.ctx.homeRoute)),{view:"chat",workspaceId:"workspace"});assert.deepEqual(f.ctx.inviteOpens,[]);
   }
 });
+
+test("openWorkspace settles each read independently so sibling failures keep loaded files or show the file error with retry", async () => {
+  const sampleFile = {
+    fileId: "file-1",
+    name: "quote.txt",
+    currentVersion: 1,
+    sizeBytes: 110,
+    uploadedByKind: "user",
+    uploadedBy: "person",
+    committedAt: "2026-11-09T00:00:00Z",
+    tombstonedAt: null,
+  };
+  const makeCtx = (overrides: Record<string, unknown>) => {
+    const rendered: string[] = [];
+    const feedError = { textContent: "" };
+    const ctx: Record<string, any> = {
+      workspaces: [{ id: "workspace", name: "Home" }],
+      homeRoute: { view: "files", workspaceId: "workspace" },
+      activeWorkspaceId: "",
+      session: { user: { id: "person" } },
+      app: { dataset: { state: "loading" } },
+      window: { history: { replaceState: () => {} }, dispatchEvent: () => {}, requestAnimationFrame: () => {} },
+      CustomEvent: class { constructor(readonly type: string, readonly detail?: unknown) {} },
+      routeHref: () => "/app?w=workspace&v=files",
+      one: (selector: string) => selector === "[data-feed-error]" ? feedError : null,
+      closeEntityPanel: () => {},
+      resetHouseholdSurface: () => {},
+      previousSignalIds: new Set(),
+      feedWasEmpty: false,
+      pendingWorkspaceId: "",
+      resetInviteSubmitControl: () => {},
+      resetComposer: () => {},
+      resetFreshInviteResult: () => {},
+      inviteIntent: null,
+      closeRosterDialog: () => {},
+      closeWorkspaceDetailsDialog: () => {},
+      rosterRefreshAttemptedAt: 0,
+      pendingRefreshGate: { resetCooldown: () => {} },
+      unknownAgentCandidates: new Set(),
+      settledUnknownAgents: new Set(),
+      stopPendingPoll: () => {},
+      disposeCleanup: () => {},
+      resetHomeWorkspace: () => {},
+      homeWorkClaims: [],
+      homePeopleReadState: "pending",
+      syncConnectWorkspace: () => {},
+      requestVersion: 0,
+      startAgentActivity: () => {},
+      startFeedPush: () => {},
+      agents: [],
+      members: [],
+      pendingInvites: [],
+      accessStatuses: [],
+      pendingAgents: [],
+      pendingAgentsLoadFailed: false,
+      renderedPendingAccessKey: "",
+      syncPendingPoll: () => {},
+      people: new Map(),
+      signals: [],
+      deliveryReceiptCache: new Map(),
+      deliveryReceiptRefreshOwner: "",
+      resetMessageStatus: () => {},
+      resetChoices: () => {},
+      files: [],
+      fileLoadError: "",
+      signalFilter: "all",
+      channels: [],
+      channelListFailed: false,
+      channelsLoaded: false,
+      channelUnreadRows: null,
+      channelUnreadGeneration: 0,
+      railArchivedOpen: false,
+      railExpanded: false,
+      readRailExpanded: () => false,
+      activeChannelId: null,
+      unknownChannelId: null,
+      postedSinceReset: new Map(),
+      disarmChannelArchive: () => {},
+      signalCursor: null,
+      signalHasMore: false,
+      signalCutoff: "",
+      channelLoadError: "",
+      setLoading: () => {},
+      channelReadGeneration: 0,
+      removedAgentNames: async () => new Map(),
+      readRemovedAgentOwners: async () => new Map(),
+      homeWorkingOn: async () => [],
+      roster: async () => [],
+      memberRoster: async () => ({ names: new Map([["person", "Alex"]]), members: [] }),
+      pendingMemberInvites: async () => [],
+      agentAccessStatuses: async () => [],
+      loadPendingAccess: async (fn: () => Promise<unknown>) => ({ rows: await fn(), failed: false }),
+      pendingAgentAccess: async () => [],
+      workspaceFiles: async () => [sampleFile],
+      workspaceChannels: async () => [],
+      readableError: (err: unknown) => err instanceof Error ? err.message : String(err),
+      wakeRosterLastFetchedAt: 0,
+      loadHomeWorkspace: async () => {},
+      refreshChannelUnread: async () => {},
+      applyChannelFromUrl: () => {},
+      syncChannelUrl: () => {},
+      freshInviteWorkspaceId: "",
+      freshInviteId: "",
+      shouldRetireFreshInvite: () => false,
+      retireFreshInviteResult: () => {},
+      addAgentViewOpen: () => false,
+      renderChannel: () => { rendered.push("channel"); },
+      renderMembers: () => {},
+      renderPendingAccess: () => {},
+      renderFiles: () => { rendered.push(`files:${ctx.files.length}:${ctx.fileLoadError}`); },
+      renderBrain: () => { rendered.push(`brain:${ctx.files.length}:${ctx.fileLoadError}`); },
+      renderHomeRail: () => {},
+      renderHomeShell: () => {},
+      renderHomeSide: () => {},
+      loadSignals: async () => {},
+      applyHomePane: () => { rendered.push("applyHomePane"); },
+      showChannelView: (view: string) => { rendered.push(`view:${view}`); },
+      ...overrides,
+    };
+    return { ctx, rendered, feedError };
+  };
+
+  const openSource = `${section(script, "const openWorkspace =", "const openAgentChoice =")}; openWorkspace;`;
+
+  // 1. A transient invite/access status failure does not discard loaded files or fail the workspace open.
+  {
+    const { ctx, rendered } = makeCtx({
+      pendingMemberInvites: async () => { throw new Error("invites timed out"); },
+    });
+    const openWorkspace = execute(openSource, ctx);
+    await openWorkspace("workspace");
+    assert.equal(ctx.files.length, 1);
+    assert.equal(ctx.fileLoadError, "");
+    assert.equal(ctx.pendingAgentsLoadFailed, true);
+    assert.equal(ctx.channelLoadError, "");
+    assert.ok(rendered.includes("files:1:"));
+    assert.ok(rendered.includes("applyHomePane"));
+  }
+
+  // 2. A roster failure still commits the loaded files before surfacing the feed error.
+  {
+    const { ctx, rendered } = makeCtx({
+      roster: async () => { throw new Error("roster unavailable"); },
+    });
+    const openWorkspace = execute(openSource, ctx);
+    await openWorkspace("workspace");
+    assert.equal(ctx.files.length, 1);
+    assert.equal(ctx.fileLoadError, "");
+    assert.equal(ctx.channelLoadError, "roster unavailable");
+    assert.ok(rendered.includes("files:1:"));
+    assert.ok(rendered.includes("view:feed-error"));
+  }
+
+  // 3. When workspaceFiles itself fails alongside a sibling failure, fileLoadError is set for the retry UI rather than leaving an empty state.
+  {
+    const { ctx, rendered } = makeCtx({
+      roster: async () => { throw new Error("roster unavailable"); },
+      workspaceFiles: async () => { throw new Error("Could not load files."); },
+    });
+    const openWorkspace = execute(openSource, ctx);
+    await openWorkspace("workspace");
+    assert.equal(ctx.files.length, 0);
+    assert.equal(ctx.fileLoadError, "Could not load files. The signal feed is still available.");
+    assert.ok(rendered.includes("files:0:Could not load files. The signal feed is still available."));
+  }
+});
