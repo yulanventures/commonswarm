@@ -9,7 +9,7 @@
  * still produces an audit.
  */
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 
@@ -143,6 +143,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       ids["channel.general"] = channels.general;
       ids["channel.group"] = channels.group;
       ids["channel.long"] = channels.long;
+      steps.push("seed_channels");
     } catch (error) { note("channels", error); }
 
     // 240 messages over three days: workspace feed, group chats, DMs both ways and thread replies.
@@ -174,6 +175,109 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } catch (error) { if (notes.filter(n => n.startsWith("signals")).length < 3) note("signals", error); }
     }
     note("signals inserted", inserted);
+
+    // Ensure a recent #general thread and a recent DM with ids.agent sit inside the initial 25-signal page.
+    try {
+      const recentRootId = randomUUID();
+      const recentReplyId = randomUUID();
+      await sql`INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+          about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+        ) VALUES
+        (
+          ${recentRootId}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+          NULL, 'note', 'Can someone confirm the boiler service quote before Friday?',
+          statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes',
+          NULL, NULL, false
+        ),
+        (
+          ${recentReplyId}::uuid, ${workspace}::uuid, ${adminPerson.id}::uuid, 'user', NULL, NULL, ${recentRootId}::uuid,
+          NULL, 'note', 'Checked the quote in Files — $240 includes the expansion vessel check.',
+          statement_timestamp() + interval '25 days', statement_timestamp() - interval '1 minute',
+          NULL, ${recentRootId}::uuid, false
+        )`;
+      ids["message.thread"] = recentRootId;
+      steps.push("seed_thread");
+    } catch (error) { note("seed_thread", error); }
+
+    if (ids.agent) {
+      try {
+        const dmId = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${dmId}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+            NULL, 'note', 'Direct update: I compared three boiler service quotes and saved the summary in Wiki.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '30 seconds',
+            NULL, NULL, false
+          )`;
+        steps.push("seed_dm");
+      } catch (error) { note("seed_dm", error); }
+    }
+
+    // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
+    const seedFile = async (stepName: string, name: string, contentType: string, text: string, existingFileId?: string): Promise<string | null> => {
+      try {
+        const bytes = new TextEncoder().encode(text);
+        const requestedFileId = existingFileId ?? randomUUID();
+        const requestedVersionId = randomUUID();
+        const created = await command(owner.token, {
+          kind: "file_version_create",
+          file_id: requestedFileId,
+          version_id: requestedVersionId,
+          name,
+          declared_size_bytes: bytes.length,
+          content_type: contentType,
+        }, workspace);
+        if (created.status !== 200 || created.body.status !== "accepted" || typeof created.body.upload_path !== "string") {
+          note(stepName, `create HTTP ${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
+          return null;
+        }
+        const fileId = String(created.body.file_id ?? requestedFileId);
+        const versionId = String(created.body.version_id ?? requestedVersionId);
+        const put = await fetch(new URL(created.body.upload_path, `${env.apiUrl.replace(/\/+$/, "")}/`).href, {
+          method: "PUT",
+          headers: { "content-type": contentType },
+          body: bytes,
+        });
+        if (!put.ok) {
+          note(stepName, `PUT HTTP ${put.status}`);
+          return null;
+        }
+        const committed = await command(owner.token, {
+          kind: "file_version_commit",
+          file_id: fileId,
+          version_id: versionId,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        }, workspace);
+        return ok(stepName, committed) ? fileId : null;
+      } catch (error) {
+        note(stepName, error);
+        return null;
+      }
+    };
+    await seedFile(
+      "seed_file boiler-service-quote-2026-11.txt",
+      "boiler-service-quote-2026-11.txt",
+      "text/plain",
+      "Boiler service quote — $240 including filter check and expansion vessel inspection.\nValid until 2026-11-30.\n",
+    );
+    const wikiFileId = await seedFile(
+      "seed_wiki overview v1",
+      "brain--overview.md",
+      "text/markdown",
+      "# Household overview\n\nShared notes for household schedules, school pickup, and appliance maintenance.\n",
+    );
+    if (wikiFileId) {
+      await seedFile(
+        "seed_wiki overview",
+        "brain--overview.md",
+        "text/markdown",
+        "# Household overview\n\nShared notes for household schedules, school pickup, and appliance maintenance.\n\n## Weekly rhythm\n\n- Monday: groceries & meal plan\n- Wednesday: school pickup cover\n- Friday: bills & receipts review\n",
+        wikiFileId,
+      );
+    }
 
     // Lists & docs, definitions and to-dos through household_tool, as the owner.
     ok("household_permissions", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, workspace));
