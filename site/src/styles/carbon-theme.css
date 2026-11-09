@@ -11,10 +11,10 @@
   --k-shell-subtle: #f4f4f5;
   --k-shell-hover: #f4f4f5;
   --k-shell-selected: #e4e4e7;
-  --k-shell-rail-deep: #ededf0;
-  --k-shell-rail: #f4f4f5;
-  --k-shell-rail-hover: #e4e4e7;
-  --k-shell-side: #f8f8fa;
+  --k-shell-rail-deep: var(--k-shell-surface);
+  --k-shell-rail: var(--k-shell-surface);
+  --k-shell-rail-hover: var(--k-shell-hover);
+  --k-shell-side: var(--k-shell-surface);
   --k-shell-ink: #09090b;
   --k-shell-secondary: #52525b;
   --k-shell-muted: #71717a;

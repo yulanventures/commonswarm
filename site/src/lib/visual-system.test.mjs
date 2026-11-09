@@ -132,10 +132,14 @@ test("dark mode lifts surface off black, softens text contrast, and steps column
   const channel = await readFile(new URL("../styles/kylon-channel.css", import.meta.url), "utf8");
   const entityProfile = await readFile(new URL("../styles/kylon-entity-profile.css", import.meta.url), "utf8");
 
-  // Light mode tokens stay untouched.
+  // Light mode tokens and column aliases stay untouched on --k-shell-surface / --k-shell-hover.
   assert.match(carbon, /--k-shell-surface:\s*#ffffff;/u);
   assert.match(carbon, /--k-shell-subtle:\s*#f4f4f5;/u);
   assert.match(carbon, /--k-shell-selected:\s*#e4e4e7;/u);
+  assert.match(carbon, /--k-shell-rail-deep:\s*var\(--k-shell-surface\);/u);
+  assert.match(carbon, /--k-shell-rail:\s*var\(--k-shell-surface\);/u);
+  assert.match(carbon, /--k-shell-rail-hover:\s*var\(--k-shell-hover\);/u);
+  assert.match(carbon, /--k-shell-side:\s*var\(--k-shell-surface\);/u);
   assert.match(carbon, /--k-shell-ink:\s*#09090b;/u);
 
   // Dark mode uses a background lighter than #0a0a0b black, softer ink than #fafafa, and distinct column steps.
@@ -156,7 +160,7 @@ test("dark mode lifts surface off black, softens text contrast, and steps column
   assert.match(kylonTokens, /--k-shell-rail-deep:\s*var\(--k-shell-dark-rail-deep\);/u);
   assert.match(kylonTokens, /--k-shell-rail:\s*var\(--k-shell-dark-rail\);/u);
   assert.match(kylonTokens, /--k-shell-side:\s*var\(--k-shell-dark-side\);/u);
-  assert.match(integration, /--home-rail-bg:\s*var\(--k-shell-rail,\s*var\(--k-shell-subtle\)\);/u);
+  assert.match(integration, /--home-rail-bg:\s*var\(--k-shell-rail,\s*var\(--k-shell-surface\)\);/u);
   assert.match(integration, />\s*:is\(\.cs-org-rail,\s*\.cs-org-rail-account\)\s*\{\s*background:\s*var\(--k-shell-rail-deep,\s*var\(--cs-rail-bg\)\);/u);
   assert.match(channel, /\.hm-frame\s+:is\(\.hm-frame__side,\s*\.hm-frame__profile\)\s*\{\s*background:\s*var\(--k-shell-side,\s*var\(--k-shell-surface\)\);/u);
   assert.match(entityProfile, /\[data-entity-panel\]\s*\{\s*background:\s*var\(--k-shell-side,\s*var\(--k-shell-surface\)\);/u);

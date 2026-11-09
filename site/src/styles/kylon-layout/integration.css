@@ -5,7 +5,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]
   --home-font-display: var(--k-shell-font);
   --home-canvas: var(--k-shell-surface);
   --home-card: var(--k-shell-surface);
-  --home-rail-bg: var(--k-shell-rail, var(--k-shell-subtle));
+  --home-rail-bg: var(--k-shell-rail, var(--k-shell-surface));
   --home-rail-raised: var(--k-shell-rail-hover, var(--k-shell-hover));
   --home-rail-text: var(--k-shell-secondary);
   --home-rail-strong: var(--k-shell-ink);
