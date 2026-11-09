@@ -1402,6 +1402,7 @@ import "../../styles/kylon-command-palette.css";
     archivedChannels,
     channelById,
     channelLabel,
+    channelListStaleAgainstUnread,
     channelPurposeInputMax,
     channelSignalFilter,
     channelSlugInputMax,
@@ -7657,9 +7658,15 @@ import "../../styles/kylon-command-palette.css";
            every healthy tick; refreshBrainTopics keeps it to one request per 30 seconds. */
         void refreshBrainTopics(false);
         /* New messages elsewhere reach the rail's unread dots; at most one read per 15 seconds.
-           Channels another member creates, renames or archives arrive within a minute. */
+           If a fetched message is filed in an unknown channel, or channel_unread / the 15s cadence
+           spots a channel created, renamed or archived by another member, refresh the list now. */
         void refreshChannelUnread(workspaceId, false);
-        if (Date.now() - channelListReadAt > 60_000) void refreshChannels(workspaceId, version, true).catch(() => {});
+        const hasUnknownSignalChannel = page.rows.some(
+          (signal) => signal.channelId !== null && channelById(channels, signal.channelId) === null,
+        );
+        if (hasUnknownSignalChannel || Date.now() - channelListReadAt > 15_000) {
+          void refreshChannels(workspaceId, version, true).catch(() => {});
+        }
       } catch {
         // A live refresh never replaces a readable channel with an error. The
         // next tick retries, and the explicit refresh control remains available.
@@ -10274,6 +10281,9 @@ import "../../styles/kylon-command-palette.css";
       if (generation !== channelUnreadGeneration || workspaceId !== activeWorkspaceId) return;
       channelUnreadRows = rows;
       renderHomeRail();
+      if (!force && channelsLoaded && channelListStaleAgainstUnread(channels, rows)) {
+        void refreshChannels(workspaceId, requestVersion, true).catch(() => {});
+      }
     };
 
     /**

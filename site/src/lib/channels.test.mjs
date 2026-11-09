@@ -1,9 +1,11 @@
 /** Reached by `npm --prefix site test` through the src/lib/*.test.mjs glob. */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
   GENERAL_CHANNEL_ID,
   RESERVED_CHANNEL_SLUGS,
+  channelListStaleAgainstUnread,
   channelRowName,
   channelSignalFilter,
   channelUnreadFor,
@@ -144,4 +146,53 @@ test("the compact rail shows five named rows and keeps a selected overflow chann
   assert.equal(few.hiddenCount, 0);
   assert.equal(shown(few).length, 3);
   assert.equal(railChannelSlice([], null, false).hiddenCount, 0);
+});
+
+test("channelListStaleAgainstUnread detects channels created, renamed or archived by others", () => {
+  const list = [
+    channel(UUID, "design"),
+    channel("archived-id", "old", { archivedAt: "2026-11-02T00:00:00Z" }),
+  ];
+  assert.equal(channelListStaleAgainstUnread(list, null), false);
+  assert.equal(
+    channelListStaleAgainstUnread(list, [
+      { channelId: null, slug: "general" },
+      { channelId: UUID, slug: "design" },
+    ]),
+    false,
+  );
+  // Another member created a channel:
+  assert.equal(
+    channelListStaleAgainstUnread(list, [
+      { channelId: null, slug: "general" },
+      { channelId: UUID, slug: "design" },
+      { channelId: "new-id", slug: "ops" },
+    ]),
+    true,
+  );
+  // Another member renamed a channel:
+  assert.equal(
+    channelListStaleAgainstUnread(list, [
+      { channelId: null, slug: "general" },
+      { channelId: UUID, slug: "design-v2" },
+    ]),
+    true,
+  );
+  // Another member archived a channel:
+  assert.equal(
+    channelListStaleAgainstUnread(list, [{ channelId: null, slug: "general" }]),
+    true,
+  );
+});
+
+test("rail DM rows (.hm-rail__person, .hm-rail__agent) keep 44px targets alongside channel rows at every width", async () => {
+  const css = await readFile(new URL("../styles/kylon-layout/integration.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\.cs-org-shell\s+:is\(\.hm-rail__link,\s*\.hm-rail__more,\s*\.hm-rail__person,\s*\.hm-rail__agent\)\s*\{\s*min-block-size:\s*44px;/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.cs-org-shell\s+:is\([^)]*\.hm-rail__(?:person|agent)[^)]*\)\s*\{\s*min-block-size:\s*3[06]px;/,
+  );
 });

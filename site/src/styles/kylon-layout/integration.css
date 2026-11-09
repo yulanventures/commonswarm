@@ -41,7 +41,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-rail :is(a, but
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { max-block-size: 45%; gap: 12px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__heading { font-size: 12px; font-weight: 500; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__name, .hm-rail__status, .hm-rail__link) { font-size: 13px; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 36px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__person, .hm-rail__agent) { min-block-size: 44px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new { font-size: 13px; border-radius: 6px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-brand { display: grid; place-items: center; inline-size: 44px; block-size: 44px; border-radius: 8px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-phone-account {
@@ -161,7 +161,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new {
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__new .hm-rail__icon { color: inherit; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__link, .hm-rail__more, .hm-rail__person, .hm-rail__agent) {
-  min-block-size: 30px; padding-inline: 10px; border-radius: 5px; gap: 8px; font-size: 15px;
+  min-block-size: 44px; padding-inline: 10px; border-radius: 5px; gap: 8px; font-size: 15px;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__name { font-size: 15px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__channel[data-unread] { color: var(--cs-ink); font-weight: 700; }
