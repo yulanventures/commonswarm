@@ -13,8 +13,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail__lead {
   color: var(--k-shell-secondary); background: var(--k-shell-subtle);
   border: 1px solid var(--carbon-line, var(--cs-line));
 }
-/* Presence is shown as the corner dot on the avatar; drop "idle" status text and "you" suffix. */
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__status, .hm-rail__you, .hm-rail__other-head) {
+/* Presence is drawn as the corner dot on the avatar; keep status ("Idle", "Working") and "you"
+ * visually hidden in the accessibility tree so the state is never color-only. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__status, .hm-rail__you) {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: 0; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__other-head {
   display: none;
 }
 /* Flat Direct messages list: people and agents share one left edge and 20px rounded-square avatars. */

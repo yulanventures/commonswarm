@@ -69,8 +69,9 @@ test("Slack-like sidebar density, flat DM list, compact header tabs, and bordere
   const composerCss = await readFile(new URL("../styles/kylon-composer.css", import.meta.url), "utf8");
   const carbonCss = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
 
-  // Step 6: Presence dot only (drop "idle" and "you" text), flat DM list, bold unread, 30px desktop rows.
-  assert.match(railCss, /\.cs-org-shell\s+\.hm-rail\s+:is\(\.hm-rail__status,\s*\.hm-rail__you,\s*\.hm-rail__other-head\)\s*\{\s*display:\s*none;/u);
+  // Step 6: Presence dot only visually (keep "Idle"/"Working" status and "you" SR-accessible so state isn't color-only), flat DM list, bold unread, 30px desktop rows.
+  assert.match(railCss, /\.cs-org-shell\s+\.hm-rail\s+:is\(\.hm-rail__status,\s*\.hm-rail__you\)\s*\{[\s\S]*?clip-path:\s*inset\(50%\);/u);
+  assert.doesNotMatch(railCss, /:is\(\.hm-rail__status[^)]*\)\s*\{\s*display:\s*none;/u);
   assert.match(railCss, /\.cs-org-shell\s+\.hm-rail\s+\.hm-rail__agent\s*\{\s*margin-block:\s*0;\s*padding-inline:\s*10px;/u);
   assert.match(railCss, /@media\s*\(width\s*>\s*64rem\)[\s\S]*?min-block-size:\s*30px;\s*block-size:\s*30px;/u);
   assert.match(integrationCss, /\.cs-org-shell\s+\.hm-rail__agent\s*\{\s*margin-block:\s*0;\s*padding-inline:\s*10px;\s*\}/u);
