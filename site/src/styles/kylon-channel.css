@@ -33,15 +33,38 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message {
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:hover,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:focus-within { background: var(--k-shell-hover); }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar { inline-size: 36px; block-size: 36px; border-radius: 7px; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 14px; font-weight: 600; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-avatar,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-avatar.hm-person-avatar,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-avatar.hm-agent-orb {
+  inline-size: 36px; block-size: 36px; border-radius: 8px; align-self: start; margin-block-start: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply > .dashboard__message-avatar,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply > .dashboard__message-avatar.hm-person-avatar,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply > .dashboard__message-avatar.hm-agent-orb {
+  inline-size: 28px; block-size: 28px; border-radius: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar .hm-owner-badge,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__you { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name { font-size: 15px; font-weight: 700; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-author { text-align: start; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown { font-size: 15px; line-height: var(--lh-base); }
 live-dashboard.dashboard[data-kylon-shell] .hm-author__agent {
-  align-self: center; padding: 0; background: transparent; color: var(--k-shell-secondary); font-size: 12px; font-weight: 400; line-height: 18px;
+  align-self: center; padding: 1px 5px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 4px;
+  background: var(--k-shell-subtle); color: var(--k-shell-secondary); font-size: 10px; font-weight: 600; line-height: 14px; letter-spacing: 0.03em; text-transform: uppercase;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__when {
+  color: var(--k-shell-muted, var(--k-shell-secondary)); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff {
+  padding: 0; border-radius: 0; background: transparent; color: var(--k-shell-secondary); font-size: 12px; font-weight: 400; line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff-word { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped]:not(:focus-within) > .dashboard__message-body > .dashboard__message-meta {
+  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: 0; border: 0; overflow: hidden; clip-path: inset(50%); visibility: hidden; pointer-events: none;
 }
 /* Separate speaker turns without adding space to replies or activity rows.
- * The renderer remains the sole owner of five-minute author grouping. */
+ * The renderer remains the sole owner of ten-minute author grouping. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
   padding-block: 10px 6px; margin-block-start: 6px;
 }
@@ -53,15 +76,15 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-group
   position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
-  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 12px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-secondary); visibility: hidden;
+  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 11px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-muted, var(--k-shell-secondary)); visibility: hidden;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { visibility: visible; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools {
   position: absolute; inset: -12px 16px auto auto; z-index: 3; display: flex; align-items: center;
-  padding: 3px; border: 1px solid var(--k-shell-line); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
+  padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0;
+  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0; visibility: hidden; pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
@@ -96,7 +119,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
 }
 @media (hover: none) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none;
+    position: static; inline-size: auto; block-size: auto; clip-path: none; padding: 0; background: transparent; box-shadow: none; visibility: visible; pointer-events: auto;
   }
 }
 
