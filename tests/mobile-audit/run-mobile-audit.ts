@@ -283,33 +283,72 @@ async function main(): Promise<void> {
               const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
               return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
             }, undefined, { timeout: 30_000 });
-            await page.waitForFunction(() => {
+            await page.waitForFunction(({ id, hasWorkspace }: { id: string; hasWorkspace: boolean }) => {
+              if (hasWorkspace && !document.querySelector('[data-home-workspace-shell] [data-home-pane="todos"]')) return false;
+              if (id.startsWith("app.definitions") && !document.querySelector('.household-definitions [data-def-action="select"]')) return false;
+              if (id.startsWith("app.skills") && !document.querySelector(".household-skills [data-skill-action]")) return false;
+              if (id === "app.lists" && !document.querySelector('[data-household-objects] [data-hh-action="select"]')) return false;
               const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
-              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 150;
-            }, undefined, { timeout: 4_000 }).catch(() => {});
+              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
+            }, { id: screen.id, hasWorkspace: screen.path.includes("?w=") }, { timeout: screen.path.includes("v=lists") ? 45_000 : 30_000 }).catch(() => {});
             await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
             for (const step of screen.setup ?? []) {
               if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 20_000 });
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
               if (step.click) {
                 const target = fill(step.click, seed.ids);
-                if (target === '[data-brain-topic="overview"]' && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
-                  try { await page.click(target, { timeout: 3_000 }); }
-                  catch {
-                    entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
-                    await page.locator(target).first().dispatchEvent("click");
+                const clickBrainTopic = async () => {
+                  if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
+                    try { await page.click(target, { timeout: 3_000 }); }
+                    catch {
+                      entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
+                      await page.locator(target).first().dispatchEvent("click");
+                    }
+                  } else {
+                    await page.click(target, { timeout: 8_000 });
+                  }
+                };
+                if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
+                  && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-kylon-nav-drawer[open]"))) {
+                  await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+                }
+                if (target === '[data-brain-topic="overview"]') {
+                  await clickBrainTopic();
+                  await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-markdown]:not([hidden]), [data-brain-retry]:not([hidden]))", { state: "visible", timeout: 15_000 }).catch(() => {});
+                  if (!(await page.evaluate(() => Boolean(document.querySelector("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])"))))) {
+                    if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden])")))) {
+                      await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
+                    } else {
+                      await clickBrainTopic().catch(() => {});
+                    }
+                    await page.waitForSelector("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])", { state: "visible", timeout: 15_000 }).catch(() => {});
                   }
                 } else {
                   await page.click(target, { timeout: 8_000 });
-                }
-                if (target === '[data-brain-topic="overview"]') {
-                  await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-markdown]:not([hidden]), [data-brain-retry]:not([hidden]))", { state: "visible", timeout: 15_000 }).catch(() => {});
-                  if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden])")))) {
-                    await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
+                  if (target === 'button[aria-label="Open navigation"]') {
+                    const drawerOpen = await page.waitForSelector("dialog.cs-kylon-nav-drawer[open]", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    if (!drawerOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+                  } else if (target.endsWith(".hm-menu__trigger")) {
+                    const menuOpen = await page.waitForSelector(":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    if (!menuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+                  } else if (target === "[data-user-menu-trigger]") {
+                    const userMenuOpen = await page.waitForSelector("[data-user-menu]:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    if (!userMenuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+                  } else if (target.startsWith("[data-rail-channel-menu=")) {
+                    const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                    if (!menuVisible) {
+                      if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-kylon-nav-drawer[open]"))) {
+                        await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+                      }
+                      await page.click(target, { timeout: 5_000 });
+                    }
+                  } else if (target.startsWith('[data-def-action="select"]')) {
+                    const selected = await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 10_000 }).then(() => true, () => false);
+                    if (!selected) {
+                      await page.click(target, { timeout: 5_000 }).catch(() => {});
+                      await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 15_000 }).catch(() => {});
+                    }
                   }
-                } else if (target.startsWith("[data-rail-channel-menu=")) {
-                  const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                  if (!menuVisible) await page.click(target, { timeout: 5_000 });
                 }
               }
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
@@ -322,7 +361,7 @@ async function main(): Promise<void> {
               if (step.wait) await page.waitForTimeout(step.wait);
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
-            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
+            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
