@@ -75,6 +75,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   clip-path: none;
   white-space: normal;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta .dashboard__message-entity { min-inline-size: 24px; min-block-size: 24px; }
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
