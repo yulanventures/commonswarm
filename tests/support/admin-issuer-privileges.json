@@ -232,6 +232,8 @@
   ["swarm_command","FUNCTION","swarm.resume_renewal_grant(uuid,uuid,uuid)","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.rotate_wake_id(uuid)","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.seat_admin_org_owner(uuid,uuid)","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.seat_admin_text_set(text[])","EXECUTE",false],
+  ["swarm_command","FUNCTION","swarm.seat_admin_uuid_set(uuid[])","EXECUTE",false],
   ["swarm_command","FUNCTION","swarm.wake_seat_lock(uuid,uuid)","EXECUTE",false],
   ["swarm_command","SCHEMA","commonswarm_oauth","USAGE",false],
   ["swarm_command","SCHEMA","commonswarm_ops","USAGE",false],
