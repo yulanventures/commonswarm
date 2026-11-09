@@ -5,8 +5,8 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout]
   --home-font-display: var(--k-shell-font);
   --home-canvas: var(--k-shell-surface);
   --home-card: var(--k-shell-surface);
-  --home-rail-bg: var(--k-shell-surface);
-  --home-rail-raised: var(--k-shell-hover);
+  --home-rail-bg: var(--k-shell-rail, var(--k-shell-subtle));
+  --home-rail-raised: var(--k-shell-rail-hover, var(--k-shell-hover));
   --home-rail-text: var(--k-shell-secondary);
   --home-rail-strong: var(--k-shell-ink);
   --home-rail-muted: var(--k-shell-muted);
@@ -135,8 +135,11 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-needs-y
 }
 
 /* One organization rail: workspaces read like channels; existing app doors follow. */
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] :is(.cs-org-context, .cs-org-rail, .cs-org-rail-account) {
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] :is(.cs-org-context-parking, .cs-org-context, .cs-org-rail, .cs-org-rail-account) {
   background: var(--cs-rail-bg);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > :is(.cs-org-rail, .cs-org-rail-account) {
+  background: var(--k-shell-rail-deep, var(--cs-rail-bg));
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-identity-slot { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__org-mark { background: var(--cs-selected); color: var(--cs-ink); }

@@ -10,6 +10,10 @@ invite-onramp[data-kylon-onramp] {
   --k-shell-subtle: #f5f5f2;
   --k-shell-hover: #f5f5f2;
   --k-shell-selected: #eeefea;
+  --k-shell-rail-deep: #ededf0;
+  --k-shell-rail: var(--k-shell-subtle);
+  --k-shell-rail-hover: var(--k-shell-selected);
+  --k-shell-side: #f8f8fa;
   --k-shell-ink: #282720;
   --k-shell-secondary: #655e53;
   --k-shell-muted: #716b60;
@@ -37,6 +41,10 @@ invite-onramp[data-kylon-onramp] {
   --k-shell-dark-surface: #181a18;
   --k-shell-dark-subtle: #222521;
   --k-shell-dark-selected: #30352e;
+  --k-shell-dark-rail-deep: #111317;
+  --k-shell-dark-rail: #14161b;
+  --k-shell-dark-rail-hover: #1c1f26;
+  --k-shell-dark-side: #15171c;
   --k-shell-dark-ink: #eeeee7;
   --k-shell-dark-secondary: #c3bfb4;
   --k-shell-dark-muted: #b3afa4;
@@ -53,6 +61,10 @@ invite-onramp[data-kylon-onramp] {
     --k-shell-subtle: var(--k-shell-dark-subtle);
     --k-shell-hover: var(--k-shell-dark-subtle);
     --k-shell-selected: var(--k-shell-dark-selected);
+    --k-shell-rail-deep: var(--k-shell-dark-rail-deep);
+    --k-shell-rail: var(--k-shell-dark-rail);
+    --k-shell-rail-hover: var(--k-shell-dark-rail-hover);
+    --k-shell-side: var(--k-shell-dark-side);
     --k-shell-ink: var(--k-shell-dark-ink);
     --k-shell-secondary: var(--k-shell-dark-secondary);
     --k-shell-muted: var(--k-shell-dark-muted);
@@ -70,6 +82,10 @@ invite-onramp[data-kylon-onramp] {
   --k-shell-subtle: var(--k-shell-dark-subtle);
   --k-shell-hover: var(--k-shell-dark-subtle);
   --k-shell-selected: var(--k-shell-dark-selected);
+  --k-shell-rail-deep: var(--k-shell-dark-rail-deep);
+  --k-shell-rail: var(--k-shell-dark-rail);
+  --k-shell-rail-hover: var(--k-shell-dark-rail-hover);
+  --k-shell-side: var(--k-shell-dark-side);
   --k-shell-ink: var(--k-shell-dark-ink);
   --k-shell-secondary: var(--k-shell-dark-secondary);
   --k-shell-muted: var(--k-shell-dark-muted);

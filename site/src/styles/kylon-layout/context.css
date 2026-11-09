@@ -1,6 +1,6 @@
 /* Existing workspace summary, permissions and actions; quiet contextual rows. */
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame__side {
-  background: var(--k-shell-surface); border-inline-start-color: var(--k-shell-line);
+  background: var(--k-shell-side, var(--k-shell-surface)); border-inline-start-color: var(--k-shell-line);
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-side {
   gap: 20px; padding: 20px 16px; color: var(--k-shell-ink);

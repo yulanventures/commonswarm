@@ -11,6 +11,10 @@
   --k-shell-subtle: #f4f4f5;
   --k-shell-hover: #f4f4f5;
   --k-shell-selected: #e4e4e7;
+  --k-shell-rail-deep: #ededf0;
+  --k-shell-rail: #f4f4f5;
+  --k-shell-rail-hover: #e4e4e7;
+  --k-shell-side: #f8f8fa;
   --k-shell-ink: #09090b;
   --k-shell-secondary: #52525b;
   --k-shell-muted: #71717a;
@@ -23,19 +27,23 @@
   --k-shell-focus: #3b82f6;
   --k-shell-shadow: 0 12px 40px #09090b1f, 0 2px 6px #09090b0d;
 
-  /* Dark: carbon canvas, raised zinc surfaces, hairline borders. kylon-tokens.css maps these in
-     for the OS and manual dark branches. */
-  --k-shell-dark-surface: #0a0a0b;
-  --k-shell-dark-subtle: #121215;
-  --k-shell-dark-selected: #27272a;
-  --k-shell-dark-ink: #fafafa;
-  --k-shell-dark-secondary: #a1a1aa;
-  --k-shell-dark-muted: #a1a1aa;
-  --k-shell-dark-line: #27272a;
-  --k-shell-dark-control: #a1a1aa;
-  --k-shell-dark-selection-edge: #fafafa;
-  --k-shell-dark-focus: #6366f1;
-  --k-shell-dark-shadow: 0 12px 40px #00000080, 0 2px 6px #00000059;
+  /* Dark: lifted slate-carbon canvas, stepped column surfaces, softened ink contrast (WCAG AA).
+     kylon-tokens.css maps these in for the OS and manual dark branches. */
+  --k-shell-dark-rail-deep: #111317;
+  --k-shell-dark-rail: #14161b;
+  --k-shell-dark-rail-hover: #1c1f26;
+  --k-shell-dark-side: #15171c;
+  --k-shell-dark-surface: #191b20;
+  --k-shell-dark-subtle: #20232a;
+  --k-shell-dark-selected: #282c35;
+  --k-shell-dark-ink: #e4e6eb;
+  --k-shell-dark-secondary: #a0a6b2;
+  --k-shell-dark-muted: #8d94a2;
+  --k-shell-dark-line: #262a33;
+  --k-shell-dark-control: #9ba1ae;
+  --k-shell-dark-selection-edge: #e4e6eb;
+  --k-shell-dark-focus: #818cf8;
+  --k-shell-dark-shadow: 0 12px 40px #00000066, 0 2px 6px #00000040;
 
   /* Status dots and semantic fills. */
   --carbon-live: #10b981;
@@ -102,32 +110,32 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) :is(live-dashboard.dashboard[data-kylon-shell], admin-delegations[data-kylon-account],
     human-invitation-inbox[data-kylon-invite], invite-onramp[data-kylon-onramp]) {
-    --k-shell-accent: #fafafa;
-    --k-shell-accent-hover: #e4e4e7;
-    --k-shell-accent-ink: #09090b;
+    --k-shell-accent: #e4e6eb;
+    --k-shell-accent-hover: #d4d7de;
+    --k-shell-accent-ink: #111317;
     --carbon-danger: #ef4444;
     --carbon-danger-soft: #2a1215;
     --carbon-warning-ink: #fbbf24;
     --carbon-warning-soft: #1f1a0b;
     --carbon-warning-line: #3f3410;
-    --border-strong: #3f3f46;
-    --border-interactive: #3f3f46;
+    --border-strong: #383d47;
+    --border-interactive: #383d47;
     --success: #34d399;
     --info: #818cf8;
   }
 }
 :root[data-theme="dark"] :is(live-dashboard.dashboard[data-kylon-shell], admin-delegations[data-kylon-account],
   human-invitation-inbox[data-kylon-invite], invite-onramp[data-kylon-onramp]) {
-  --k-shell-accent: #fafafa;
-  --k-shell-accent-hover: #e4e4e7;
-  --k-shell-accent-ink: #09090b;
+  --k-shell-accent: #e4e6eb;
+  --k-shell-accent-hover: #d4d7de;
+  --k-shell-accent-ink: #111317;
   --carbon-danger: #ef4444;
   --carbon-danger-soft: #2a1215;
   --carbon-warning-ink: #fbbf24;
   --carbon-warning-soft: #1f1a0b;
   --carbon-warning-line: #3f3410;
-  --border-strong: #3f3f46;
-  --border-interactive: #3f3f46;
+  --border-strong: #383d47;
+  --border-interactive: #383d47;
   --success: #34d399;
   --info: #818cf8;
 }
@@ -136,6 +144,8 @@
    monochrome primary now, and danger/warning pairs follow the theme. */
 live-dashboard.dashboard[data-kylon-shell] .cs-ui {
   /* The rail accent (tab underlines, pending dots, counts, resizer) is the monochrome primary. */
+  --cs-rail-bg: var(--k-shell-rail);
+  --cs-rail-hover: var(--k-shell-rail-hover);
   --cs-rail-accent: var(--k-shell-accent);
   --cs-rail-on-accent: var(--k-shell-accent-ink);
   --cs-danger: var(--carbon-danger);
@@ -194,9 +204,9 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-cur
   --home-rail-divider: transparent;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #27272a; }
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #262a33; }
 }
-:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #27272a; }
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] { --carbon-line: #262a33; }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__sample-notice .notice { border-color: transparent; }
 
 /* Borderless icons and header controls (Tom, 2026-11-03). High-contrast mode keeps its system
@@ -297,11 +307,11 @@ live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[data-danger] {
 live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__separator { block-size: 1px; margin: 4px 6px; background: color-mix(in srgb, currentColor 10%, transparent); }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { background: var(--k-shell-hover); }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { background: #1d1d21; box-shadow: 0 18px 50px #000000b3, 0 2px 8px #00000066; }
-  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus-visible, :focus) { background: #2c2c32; }
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { background: #20232a; box-shadow: 0 18px 50px #00000099, 0 2px 8px #00000059; }
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus-visible, :focus) { background: #282c35; }
 }
-:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { background: #1d1d21; box-shadow: 0 18px 50px #000000b3, 0 2px 8px #00000066; }
-:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus-visible, :focus) { background: #2c2c32; }
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { background: #20232a; box-shadow: 0 18px 50px #00000099, 0 2px 8px #00000059; }
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus-visible, :focus) { background: #282c35; }
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] .cs-context-menu { border: 1px solid CanvasText; }
   live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item:is(:hover, :focus) { outline: 2px solid Highlight; }
