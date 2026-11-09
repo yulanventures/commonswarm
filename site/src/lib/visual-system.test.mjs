@@ -183,3 +183,35 @@ test("dark mode lifts surface off black, softens text contrast, and steps column
     assert.ok(contrast("#9ba1ae", bg) >= 3.0, `expected >= 3.0:1 control contrast on ${bg}`);
   }
 });
+
+test("Slack-like message header line and 36px rounded-square avatars keep resting headers to name, compact agent badge, and clock time", async () => {
+  const { authorLabel, continuesStreamGroup } = await import("./home-stream.ts");
+  const channel = await readFile(new URL("../styles/kylon-channel.css", import.meta.url), "utf8");
+  const dashboard = await readFile(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+
+  // Owned agents show their clean nestedLabel ("HezLead", not "Your HezLead") in the stream header.
+  const ownAgent = {
+    id: "hezlead", name: "HezLead", label: "Your HezLead", nestedLabel: "HezLead",
+    ownerId: "u1", ownerFirstName: "Owner", ownerInitial: "O", yours: true, tint: 0, hosted: false,
+    state: { kind: "idle", word: "Idle", detail: "", attention: false, fix: { action: null, allowed: false, askWho: null, sentence: "" } },
+  };
+  const peerAgent = { ...ownAgent, id: "muse", name: "Muse", label: "Nikki’s Muse", nestedLabel: "Muse", yours: false };
+  const person = { id: "u1", name: "Owner", firstName: "Owner", initials: "O", you: true, role: "owner" };
+  assert.equal(authorLabel(ownAgent), "HezLead");
+  assert.equal(authorLabel(peerAgent), "Nikki’s Muse");
+  assert.equal(authorLabel(person), "Owner");
+
+  // Consecutive same-author notes within 10 minutes group even when recipient metadata differs.
+  const first = { from: "u1", fromKind: "user", channelId: "general", threadRootId: null, kind: "note", to: null, toAgent: "hezlead", createdAt: "2026-11-09T14:00:00Z" };
+  const second = { ...first, to: "u2", toAgent: null, createdAt: "2026-11-09T14:07:00Z" };
+  const later = { ...first, createdAt: "2026-11-09T14:12:00Z" };
+  assert.equal(continuesStreamGroup(second, first), true);
+  assert.equal(continuesStreamGroup(later, first), false);
+
+  // Avatars are 36px rounded squares (8px radius) without overlaid owner badges; resting meta is hidden.
+  assert.match(channel, /\.dashboard__message\s*>\s*\.dashboard__message-avatar\.hm-person-avatar[\s\S]*?inline-size:\s*36px;\s*block-size:\s*36px;\s*border-radius:\s*8px;\s*align-self:\s*start;/u);
+  assert.match(channel, /\.dashboard__message-avatar\s+\.hm-owner-badge,\s*live-dashboard\.dashboard\[data-kylon-shell\]\s+\.hm-frame\s+\.dashboard__message\s+\.hm-author__you\s*\{\s*display:\s*none;\s*\}/u);
+  assert.match(channel, /\.hm-author__agent\s*\{[\s\S]*?border-radius:\s*4px;[\s\S]*?text-transform:\s*uppercase;/u);
+  assert.match(channel, /\.dashboard__message:not\(:hover,\s*:focus-within\)\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-meta[\s\S]*?visibility:\s*hidden;/u);
+  assert.match(dashboard, /hour:\s*"numeric",\s*minute:\s*"2-digit"/u);
+});

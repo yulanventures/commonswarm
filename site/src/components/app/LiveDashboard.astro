@@ -6372,21 +6372,22 @@ import "../../styles/kylon-command-palette.css";
 
     /* One quiet line under the person's latest message to an agent: Delivered, Seen,
        Working with a coarse label, or Replied. Nothing before the agent's client has it. */
-    const appendMessageStatus = (body: HTMLElement, signal: Signal): void => {
+    const appendMessageStatus = (body: HTMLElement, signal: Signal, meta?: HTMLElement): void => {
       const status = messageStatusRows.get(signal.id);
       if (!status) return;
       const now = Date.now();
       const text = messageStatusText(status, now);
       if (text === null) return;
-      const line = document.createElement("p");
-      line.className = "dashboard__message-status";
-      line.dataset.messageStatus = status.replied
+      const state = status.replied
         ? "replied"
         : status.working !== null && status.working.until > now
         ? "working"
         : status.seen ? "seen" : "delivered";
+      const line = document.createElement(state === "working" || !meta ? "p" : "span");
+      line.className = "dashboard__message-status";
+      line.dataset.messageStatus = state;
       line.textContent = text;
-      body.append(line);
+      (state === "working" || !meta ? body : meta).append(line);
     };
 
     /* Repaint when the soonest Working expires, so a crashed agent stops looking busy even if no
@@ -7170,9 +7171,14 @@ import "../../styles/kylon-command-palette.css";
         badge.textContent = kindLabel(signal.kind);
         const time = document.createElement("time");
         const formatted = formatTime(signal.createdAt);
+        const parsedAt = Date.parse(signal.createdAt);
+        const clockTime = Number.isFinite(parsedAt)
+          ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(parsedAt))
+          : formatted.relative;
+        const timeHover = formatted.absolute ? `${formatted.relative} · ${formatted.absolute}` : formatted.relative;
         time.dateTime = signal.createdAt;
-        time.title = formatted.absolute;
-        time.textContent = formatted.relative;
+        time.title = timeHover;
+        time.textContent = clockTime;
         /* The channel the message is IN, named on the row. all-signals shows every
            message, filed and unfiled together, so without this a reader cannot tell one
            from the other. Inside a channel every row is in that channel and the name would
@@ -7192,7 +7198,7 @@ import "../../styles/kylon-command-palette.css";
         } else {
           meta.append(author, identityBadge, addressed, operator, badge, time);
         }
-        const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
+        const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: clockTime,
           author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
@@ -7201,7 +7207,10 @@ import "../../styles/kylon-command-palette.css";
           const mark = authorLine.firstElementChild; if (mark instanceof HTMLElement) { avatar = mark; avatar.classList.add("dashboard__message-avatar"); }
           author.remove(); time.remove();
           const authorLabel = authorLine.querySelector<HTMLElement>(".hm-author__name");
-          if (authorEntity && authorLabel) authorLabel.replaceChildren(entityControl(authorName, authorEntity, "dashboard__message-entity dashboard__message-author"));
+          const headerAuthorName = homeAuthor && "nestedLabel" in homeAuthor && homeAuthor.yours && homeAuthor.nestedLabel ? homeAuthor.nestedLabel : authorName;
+          if (authorEntity && authorLabel) authorLabel.replaceChildren(entityControl(headerAuthorName, authorEntity, "dashboard__message-entity dashboard__message-author"));
+          const authorWhen = authorLine.querySelector<HTMLElement>(".hm-author__when");
+          if (authorWhen) authorWhen.title = timeHover;
           body.append(authorLine);
         }
         const extras = streamSignal ? deriveStreamExtras(streamSignal, { workspace: streamWorkspace, todos: streamTodos }) : null;
@@ -7277,7 +7286,7 @@ import "../../styles/kylon-command-palette.css";
           body.append(about);
         }
         appendDeliveryReceipt(body, signal);
-        appendMessageStatus(body, signal);
+        appendMessageStatus(body, signal, meta);
         appendChoices(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
            `threadRootBlock` is every rule `resolveThreadRoot` applies, in its order: directed
@@ -7383,7 +7392,7 @@ import "../../styles/kylon-command-palette.css";
       const byRoot = new Map(groups.map(group => [group.root.id, group]));
       let previousRoot: Signal | null = null;
       for (const entry of groupByDay(groups.map(group => group.root), now, navigator.language)) {
-        if (entry.type === "divider") { list.append(buildDayDivider(document, entry.label, entry.key)); continue; }
+        if (entry.type === "divider") { list.append(buildDayDivider(document, entry.label, entry.key)); previousRoot = null; continue; }
         const group = byRoot.get(entry.item.id)!;
         const messageRow = buildMessageRow(group.root, group.root.threadRootId !== null);
         groupStreamMessage(messageRow, group.root, previousRoot);
