@@ -71,7 +71,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .hm-day 
 }
 /* Addressing is available in the message tools. Keep the explicit selected
  * thread root highlight, but remove resting address bands and animation tints. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message--direct-to-viewer:not([data-thread-reply-root]) {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--direct-to-viewer:not([data-thread-reply-root]) {
   --message-row-background: transparent;
   background: transparent;
 }
