@@ -66,8 +66,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send {
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-frame[data-channel-details-collapsed] { grid-template-columns: minmax(0, 1fr); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame[data-channel-details-collapsed] > .hm-frame__side { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-frame__side {
-  background: var(--k-shell-surface); border-color: var(--k-shell-line); color: var(--k-shell-ink);
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.hm-frame__side, .hm-frame__profile) {
+  background: var(--k-shell-side, var(--k-shell-surface)); border-color: var(--k-shell-line); color: var(--k-shell-ink);
 }
 live-dashboard.dashboard[data-kylon-shell] :is(.cs-org-shell, .cs-details-sheet) .hm-side { padding: 0 16px 16px; gap: 0; font-family: var(--k-shell-font); color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] .hm-details-heading { display: flex; align-items: center; justify-content: space-between; min-block-size: 56px; gap: 8px; }
@@ -78,7 +78,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-card {
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-card__title { font: 600 14px var(--k-shell-font); margin: 0; }
 live-dashboard.dashboard[data-kylon-shell] .hm-side .hm-side-card__line { font-size: 13px; color: var(--k-shell-secondary); }
-live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet { padding: 0; border: 1px solid var(--k-shell-line); background: var(--k-shell-surface); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet { padding: 0; border: 1px solid var(--k-shell-line); background: var(--k-shell-side, var(--k-shell-surface)); color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet::backdrop { background: #10151080; }
 live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-close):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
 @media (width <= 52rem) {

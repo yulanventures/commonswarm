@@ -1,7 +1,7 @@
 /* Message-author profile only. The native shell owns visibility, geometry,
  * scrolling and focus restoration; the renderer owns every fact and action. */
 live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] {
-  background: var(--k-shell-surface);
+  background: var(--k-shell-side, var(--k-shell-surface));
   border-inline-start-color: var(--k-shell-line);
   color: var(--k-shell-ink);
   font: 400 14px/1.6 var(--k-shell-font);

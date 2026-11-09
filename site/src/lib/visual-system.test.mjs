@@ -124,3 +124,61 @@ test("workspace chat composer spans the column and workspace switching paints sh
   );
   assert.match(dashboard, /const claimsRead = homeWorkingOn\(selected\.id\);/u);
 });
+
+test("dark mode lifts surface off black, softens text contrast, and steps column backgrounds while keeping WCAG AA and light mode unchanged", async () => {
+  const carbon = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
+  const kylonTokens = await readFile(new URL("../styles/kylon-tokens.css", import.meta.url), "utf8");
+  const integration = await readFile(new URL("../styles/kylon-layout/integration.css", import.meta.url), "utf8");
+  const channel = await readFile(new URL("../styles/kylon-channel.css", import.meta.url), "utf8");
+  const entityProfile = await readFile(new URL("../styles/kylon-entity-profile.css", import.meta.url), "utf8");
+
+  // Light mode tokens and column aliases stay untouched on --k-shell-surface / --k-shell-hover.
+  assert.match(carbon, /--k-shell-surface:\s*#ffffff;/u);
+  assert.match(carbon, /--k-shell-subtle:\s*#f4f4f5;/u);
+  assert.match(carbon, /--k-shell-selected:\s*#e4e4e7;/u);
+  assert.match(carbon, /--k-shell-rail-deep:\s*var\(--k-shell-surface\);/u);
+  assert.match(carbon, /--k-shell-rail:\s*var\(--k-shell-surface\);/u);
+  assert.match(carbon, /--k-shell-rail-hover:\s*var\(--k-shell-hover\);/u);
+  assert.match(carbon, /--k-shell-side:\s*var\(--k-shell-surface\);/u);
+  assert.match(carbon, /--k-shell-ink:\s*#09090b;/u);
+
+  // Dark mode uses a background lighter than #0a0a0b black, softer ink than #fafafa, and distinct column steps.
+  assert.doesNotMatch(carbon, /--k-shell-dark-surface:\s*#0a0a0b;/u);
+  assert.doesNotMatch(carbon, /--k-shell-dark-ink:\s*#fafafa;/u);
+  assert.match(carbon, /--k-shell-dark-rail-deep:\s*#111317;/u);
+  assert.match(carbon, /--k-shell-dark-rail:\s*#14161b;/u);
+  assert.match(carbon, /--k-shell-dark-side:\s*#15171c;/u);
+  assert.match(carbon, /--k-shell-dark-surface:\s*#191b20;/u);
+  assert.match(carbon, /--k-shell-dark-subtle:\s*#20232a;/u);
+  assert.match(carbon, /--k-shell-dark-selected:\s*#282c35;/u);
+  assert.match(carbon, /--k-shell-dark-ink:\s*#e4e6eb;/u);
+  assert.match(carbon, /--k-shell-dark-secondary:\s*#a0a6b2;/u);
+  assert.match(carbon, /--k-shell-dark-muted:\s*#8d94a2;/u);
+  assert.match(carbon, /--k-shell-dark-control:\s*#9ba1ae;/u);
+
+  // Column tokens map in both dark branches and bridge to the four columns.
+  assert.match(kylonTokens, /--k-shell-rail-deep:\s*var\(--k-shell-dark-rail-deep\);/u);
+  assert.match(kylonTokens, /--k-shell-rail:\s*var\(--k-shell-dark-rail\);/u);
+  assert.match(kylonTokens, /--k-shell-side:\s*var\(--k-shell-dark-side\);/u);
+  assert.match(integration, /--home-rail-bg:\s*var\(--k-shell-rail,\s*var\(--k-shell-surface\)\);/u);
+  assert.match(integration, />\s*:is\(\.cs-org-rail,\s*\.cs-org-rail-account\)\s*\{\s*background:\s*var\(--k-shell-rail-deep,\s*var\(--cs-rail-bg\)\);/u);
+  assert.match(channel, /\.hm-frame\s+:is\(\.hm-frame__side,\s*\.hm-frame__profile\)\s*\{\s*background:\s*var\(--k-shell-side,\s*var\(--k-shell-surface\)\);/u);
+  assert.match(entityProfile, /\[data-entity-panel\]\s*\{\s*background:\s*var\(--k-shell-side,\s*var\(--k-shell-surface\)\);/u);
+
+  // Verify WCAG 2.1 AA contrast (>= 4.5:1 text, >= 3:1 controls) across all stepped dark surfaces.
+  const luminance = (hex) => {
+    const rgb = hex.slice(1).match(/../gu).map((x) => parseInt(x, 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  };
+  const contrast = (a, b) => {
+    const l1 = luminance(a);
+    const l2 = luminance(b);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
+  for (const bg of ["#111317", "#14161b", "#15171c", "#191b20", "#20232a", "#282c35"]) {
+    for (const fg of ["#e4e6eb", "#a0a6b2", "#8d94a2"]) {
+      assert.ok(contrast(fg, bg) >= 4.5, `expected >= 4.5:1 contrast for ${fg} on ${bg}, got ${contrast(fg, bg).toFixed(2)}`);
+    }
+    assert.ok(contrast("#9ba1ae", bg) >= 3.0, `expected >= 3.0:1 control contrast on ${bg}`);
+  }
+});
