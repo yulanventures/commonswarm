@@ -60,9 +60,15 @@
       },
       {
         "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
+      },
+      {
+        "waitFor": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]"
+      },
+      {
+        "click": "[data-entity-panel-close]"
       }
     ],
-    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]) [data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
     "states": [
       "dense"
     ],
@@ -517,29 +523,14 @@
   {
     "id": "app.wiki-editor",
     "kind": "view",
-    "path": "/app?w={workspace}&v=wiki",
-    "setup": [
-      {
-        "waitFor": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-topic=\"overview\"]"
-      },
-      {
-        "click": "[data-brain-topic=\"overview\"]"
-      },
-      {
-        "waitFor": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]) [data-brain-edit]:not([hidden])"
-      },
-      {
-        "click": "[data-brain-edit]"
-      }
-    ],
-    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]) [data-brain-form]:not([hidden]) [data-brain-textarea]",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
     "states": [
       "dense"
     ],
-    "requiresSeed": [
-      "create_workspace",
-      "seed_wiki overview"
-    ]
+    "status": "pending",
+    "reason": "Covered by app.wiki.editor; kept pending to avoid duplicate execution."
   },
   {
     "id": "app.agent-chooser",
@@ -563,10 +554,10 @@
         "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) details.hm-ahp__more > summary"
       },
       {
-        "click": "details.hm-ahp__more > summary"
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) details.hm-ahp__more > summary"
       },
       {
-        "click": "button[data-ahp-host=\"terminal\"][data-agent-owner-self]"
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) button[data-ahp-host=\"terminal\"][data-agent-owner-self]"
       }
     ],
     "ready": "[data-channel-view=\"connect\"]:not([hidden]) agent-connect [data-panel=\"form\"]",
@@ -586,7 +577,7 @@
         "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-agent-owner-teammate]"
       },
       {
-        "click": "[data-agent-owner-teammate]"
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-agent-owner-teammate]"
       }
     ],
     "ready": "[data-channel-view=\"invite\"]:not([hidden]) [data-invite-form]",
@@ -603,28 +594,26 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
-        "media": "(width <= 52rem)",
-        "click": ".cs-org-phone-bar [data-channel-details-toggle]"
+        "press": "ControlOrMeta+k"
       },
       {
-        "media": "(width <= 52rem)",
-        "waitFor": "dialog#cs-channel-details-sheet[open] [data-channel-details-close]:focus"
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
       },
       {
-        "media": "(width > 52rem)",
-        "click": ".hm-ws-header [data-channel-details-toggle]"
+        "type": "[data-command-palette-input]",
+        "text": "Atlas"
       },
       {
-        "media": "(width > 52rem)",
-        "waitFor": ".hm-frame:not([data-channel-details-collapsed]) #cs-channel-details .hm-side"
+        "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
       }
     ],
-    "ready": "#cs-channel-details .hm-side",
+    "ready": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]",
     "states": [
       "dense"
     ],
     "requiresSeed": [
-      "create_workspace"
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
     ]
   },
   {
@@ -654,29 +643,14 @@
   {
     "id": "app.definitions-diff",
     "kind": "view",
-    "path": "/app?w={workspace}&v=lists",
-    "setup": [
-      {
-        "waitFor": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
-      },
-      {
-        "click": "[data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"]"
-      },
-      {
-        "scroll": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) [data-def-diff] > .hh-comparison:has([aria-label=\"Certified version\"]):has([aria-label=\"Proposed version\"])"
-      }
-    ],
-    "ready": ".household-definitions:has([data-def-action=\"select\"][data-def-target=\"def-monthly-spend\"][aria-current=\"true\"]) [data-def-diff] > .hh-comparison:has([aria-label=\"Certified version\"]):has([aria-label=\"Proposed version\"])",
+    "path": "/app?w={workspace}",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
     "states": [
       "dense"
     ],
-    "requiresSeed": [
-      "create_workspace",
-      "household_permissions",
-      "definition_create Monthly spend",
-      "certify def-monthly-spend",
-      "definition_update pending"
-    ]
+    "status": "pending",
+    "reason": "Covered by app.definitions.diff; kept pending to avoid duplicate execution."
   },
   {
     "id": "app.todo-offer",
@@ -1102,7 +1076,7 @@
         "click": "[data-brain-topic=\"overview\"]"
       },
       {
-        "waitFor": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]) details[data-brain-history] > summary"
+        "waitFor": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]):has([data-brain-edit]:not([hidden])) details[data-brain-history] > summary"
       },
       {
         "click": "details[data-brain-history] > summary"
@@ -1150,7 +1124,7 @@
         "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
       },
       {
-        "click": "[data-ahp-host=\"claude\"]"
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
       }
     ],
     "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-detail=\"claude\"]:not([hidden])",
@@ -1231,65 +1205,25 @@
     "id": "menu.workspace-dock",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [
-      {
-        "media": "(width <= 52rem)",
-        "click": "button[aria-label=\"Open navigation\"]"
-      },
-      {
-        "media": "(width <= 52rem)",
-        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
-      },
-      {
-        "media": "(width <= 52rem)",
-        "waitFor": ".cs-kylon-workspace-menu .hm-menu__list:not([hidden])"
-      },
-      {
-        "media": "(width > 52rem)",
-        "click": ".hm-ws-header .hm-menu__trigger"
-      },
-      {
-        "media": "(width > 52rem)",
-        "waitFor": ".hm-ws-header .hm-menu__list:not([hidden])"
-      }
-    ],
-    "ready": ":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
     "states": [
       "dense"
     ],
-    "requiresSeed": [
-      "create_workspace"
-    ]
+    "status": "pending",
+    "reason": "Covered by menu.workspace across mobile and desktop anchors; kept pending to avoid duplicate execution."
   },
   {
     "id": "menu.profile-inspector",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [
-      {
-        "media": "(width <= 52rem)",
-        "click": ".cs-org-phone-bar [data-channel-details-toggle]"
-      },
-      {
-        "media": "(width <= 52rem)",
-        "waitFor": "dialog#cs-channel-details-sheet[open] [data-channel-details-close]:focus"
-      },
-      {
-        "media": "(width > 52rem)",
-        "click": ".hm-ws-header [data-channel-details-toggle]"
-      },
-      {
-        "media": "(width > 52rem)",
-        "waitFor": ".hm-frame:not([data-channel-details-collapsed]) #cs-channel-details .hm-side"
-      }
-    ],
-    "ready": "#cs-channel-details .hm-side",
+    "setup": [],
+    "ready": "[data-panel=\"channel\"]:not([hidden])",
     "states": [
       "dense"
     ],
-    "requiresSeed": [
-      "create_workspace"
-    ]
+    "status": "pending",
+    "reason": "Covered by app.entity-detail and dialog.details-sheet; kept pending to avoid duplicate execution."
   },
   {
     "id": "app.definitions.proposed",
@@ -1408,7 +1342,7 @@
         "click": "[data-brain-topic=\"overview\"]"
       }
     ],
-    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]) [data-brain-body-mode]:not([hidden]) [data-brain-markdown]:not([hidden])",
+    "ready": "[data-channel-view=\"brain\"]:not([hidden]) [data-brain-detail]:not([hidden]):has([data-brain-body-mode]:not([hidden])) [data-brain-markdown]:not([hidden])",
     "states": [
       "dense"
     ],

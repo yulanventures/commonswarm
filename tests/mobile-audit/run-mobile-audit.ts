@@ -219,6 +219,19 @@ async function main(): Promise<void> {
     const seed = await seedHeavyWorkspace(env);
     seedNotes = seed.notes;
     writeFileSync(join(OUT, "seed.json"), JSON.stringify({ ids: seed.ids, notes: seed.notes, steps: seed.steps }, null, 2));
+    console.log(JSON.stringify({ phase: "seeded", steps: seed.steps.length, notes: seed.notes.length }));
+
+    const runPool = async <T, R>(items: readonly T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
+      const results = new Array<R>(items.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (next < items.length) {
+          const index = next++;
+          results[index] = await worker(items[index]!);
+        }
+      }));
+      return results;
+    };
 
     // Installed only in the CI job (npm install --no-save), so it stays out of the lockfile and typecheck.
     const playwrightModule = "playwright";
@@ -239,6 +252,7 @@ async function main(): Promise<void> {
       await signInContext.close();
 
       for (const theme of THEMES) for (const viewport of VIEWPORTS) {
+        const size = `${viewport.width}x${viewport.height}`;
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
@@ -248,24 +262,27 @@ async function main(): Promise<void> {
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
         for (const c of [context, signedIn]) {
-          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); } catch {}` });
+          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        for (const screen of screens()) {
-          const size = `${viewport.width}x${viewport.height}`;
+        const batch = await runPool(screens(), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
-          if (screen.status === "pending") { report.push({ ...entry, error: "pending", reason: screen.reason ?? null }); continue; }
+          if (screen.status === "pending") return { ...entry, error: "pending", reason: screen.reason ?? null };
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
-          if (unmet.length) { report.push({ ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` }); continue; }
+          if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
             await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
-            await page.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
-            await page.waitForTimeout(800);
+            await page.waitForFunction(() => {
+              const app = document.querySelector("live-dashboard");
+              if (!app) return true;
+              return app.getAttribute("data-state") !== "loading" && app.getAttribute("data-channel-view") !== "feed-pending";
+            }, undefined, { timeout: 30_000 });
+            await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
             for (const step of screen.setup ?? []) {
               if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 12_000 });
               if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
@@ -273,17 +290,20 @@ async function main(): Promise<void> {
               if (step.wait) await page.waitForTimeout(step.wait);
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
-            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
+            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 12_000 });
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
+            console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
-          report.push(entry);
-        }
+          return entry;
+        });
+        report.push(...batch);
+        console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
         await context.close(); await signedIn.close();
       }
     } finally { await browser.close(); }
