@@ -13,7 +13,7 @@
 import type postgres from 'npm:postgres@3.4.9';
 import { adminDigest } from './admin-delegation.ts';
 import {
-  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, reduceAdminAuthority,
+  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, reduceAdminAuthority, seatAdminGrantPrecheck,
 } from '../_shared/protocol.js';
 import type { AdminAccountEvent, AdminAccountState } from '../_shared/admin-authority.d.ts';
 import type { EndDecision, GrantDecision, GrantSeatAdminCommand, SeatAdminCommand, SeatAdminLevel } from '../_shared/seat-admin.d.ts';
@@ -85,9 +85,13 @@ async function record(tx: Sql, owner: string, account: Awaited<ReturnType<typeof
 }
 
 async function grantFacts(tx: Sql, c: GrantSeatAdminCommand, human: SeatAdminHuman) {
+  // Only the caller's own live agent is ever locked. Anyone else's, or a retired one, stops here:
+  // no further target is read or locked.
   const [principal] = await tx<{ owner_user_id: string; revoked: boolean }[]>`
-    SELECT owner_user_id, revoked_at IS NOT NULL AS revoked FROM swarm.agent_principals
-    WHERE principal_id = ${c.principal_id}::uuid FOR UPDATE`;
+    SELECT owner_user_id, false AS revoked FROM swarm.agent_principals
+    WHERE principal_id = ${c.principal_id}::uuid AND owner_user_id = ${human.user_id}::uuid AND revoked_at IS NULL
+    FOR UPDATE`;
+  if (!principal) return { principal: null, workspaces: {}, organization: null };
   const workspaces: Record<string, { grantor_live_owner: boolean; agent_live_member: boolean; archived: boolean }> = {};
   for (const id of c.workspace_ids) { // sorted by the parser, so locks are taken in one order
     const [w] = await tx<{ archived: boolean }[]>`SELECT archived_at IS NOT NULL AS archived FROM swarm.workspaces
@@ -161,8 +165,26 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
   };
 
   if (command.kind === 'grant_seat_admin') {
+    const actor = { kind: 'human' as const, user_id: human.user_id, interactive_at_seconds: human.interactive_at_seconds,
+      csrf_verified: human.csrf_verified, session_bound: /^[0-9a-f]{64}$/u.test(human.session_binding) };
+    const target = { level: command.level, principal_id: command.principal_id, scope_names: command.scope_names,
+      workspace_ids: command.workspace_ids, organization_id: command.organization_id,
+      expires_at: command.expires_at === null ? null : new Date(command.expires_at).toISOString() };
+    const refuse = async (now: number, reason: string) => {
+      await record(tx, owner, account, human.user_id, commandId, now, { action: 'grant_seat_admin', target_kind: 'seat_admin_grant',
+        target_id: null, workspace_id: null, ...target, manifest_digest: null, request_digest: requestDigest, outcome: 'refused',
+        reason_code: reason, next_action: 'none', recovery_kind: 'human' });
+      const status = reason === 'human_confirmation_required' ? 401 : reason === 'seat_admin_exists' ? 409
+        : ['invalid_request', 'invalid_expiry', 'scope_forbidden'].includes(reason) ? 400 : 403;
+      return await finish(failure(status, reason));
+    };
+    // Who is asking, their confirmation and the request's shape are settled before any target lock.
+    const early = await clock(tx);
+    const precheck = seatAdminGrantPrecheck(command, actor, early);
+    if (precheck) return await refuse(early, precheck);
     const facts = await grantFacts(tx, command, human);
-    let existing = await activeGrant(tx, command);
+    // Grant rows are read only for the caller's own agent.
+    let existing = facts.principal ? await activeGrant(tx, command) : undefined;
     const now = await clock(tx); // after every lock wait
     if (existing && existing.expires_at !== null && existing.expires_at.getTime() <= now) {
       await tx`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = ${existing.expires_at}, end_reason = 'expired'
@@ -170,21 +192,10 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
       existing = undefined;
     }
     const decision = decideSeatAdminGrant(command, {
-      now, actor: { kind: 'human', user_id: human.user_id, interactive_at_seconds: human.interactive_at_seconds,
-        csrf_verified: human.csrf_verified, session_bound: /^[0-9a-f]{64}$/u.test(human.session_binding) },
+      now, actor,
       principal: facts.principal, workspaces: facts.workspaces, organization: facts.organization, existing_active: existing !== undefined,
     }) as GrantDecision;
-    const target = { level: command.level, principal_id: command.principal_id, scope_names: command.scope_names,
-      workspace_ids: command.workspace_ids, organization_id: command.organization_id,
-      expires_at: command.expires_at === null ? null : new Date(command.expires_at).toISOString() };
-    if (!decision.ok) {
-      await record(tx, owner, account, human.user_id, commandId, now, { action: 'grant_seat_admin', target_kind: 'seat_admin_grant',
-        target_id: null, workspace_id: null, ...target, manifest_digest: null, request_digest: requestDigest, outcome: 'refused',
-        reason_code: decision.reason, next_action: 'none', recovery_kind: 'human' });
-      const status = decision.reason === 'human_confirmation_required' ? 401 : decision.reason === 'seat_admin_exists' ? 409
-        : ['invalid_request', 'invalid_expiry', 'scope_forbidden'].includes(decision.reason) ? 400 : 403;
-      return await finish(failure(status, decision.reason));
-    }
+    if (!decision.ok) return await refuse(now, decision.reason);
     const grantId = crypto.randomUUID();
     const digest = await adminDigest(decision.manifest);
     const [row] = await tx<GrantRow[]>`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, level, organization_id,

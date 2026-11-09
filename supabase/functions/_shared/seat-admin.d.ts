@@ -114,6 +114,12 @@ export type GrantDecision = {
 export declare function seatAdminManifest(c: GrantSeatAdminCommand): SeatAdminManifest;
 export declare function seatAdminManifestJson(m: SeatAdminManifest): string;
 /**
+ * Everything decidable without the database: who is asking, their confirmation, and the request's
+ * shape. The edge runs this before it takes any lock or reads any target, and decideSeatAdminGrant
+ * runs it again with the clock read after the lock waits.
+ */
+export declare function seatAdminGrantPrecheck(c: GrantSeatAdminCommand, actor: GrantFacts['actor'], now: number): string | null;
+/**
  * Grant: a person's fresh, session-bound, CSRF-checked confirmation; the grantor owns the agent and
  * is a live owner of every covered workspace (and the organization, at that level), and the agent
  * is a live member of every listed workspace.

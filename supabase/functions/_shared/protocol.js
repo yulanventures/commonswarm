@@ -5978,8 +5978,8 @@ function parseSeatAdminCommand(input) {
   if (c.kind === "end_seat_admin") return exactKeys(c, ["kind", "grant_id"]) && isUuid(c.grant_id) ? { kind: "end_seat_admin", grant_id: c.grant_id } : null;
   if (c.kind !== "grant_seat_admin" || !exactKeys(c, ["kind", "principal_id", "level", "scope_names", "workspace_ids", "organization_id", "expires_at"])) return null;
   if (!isUuid(c.principal_id) || !SEAT_ADMIN_LEVELS.includes(c.level)) return null;
-  if (!Array.isArray(c.scope_names) || !c.scope_names.every((s) => typeof s === "string")) return null;
-  if (!Array.isArray(c.workspace_ids) || !c.workspace_ids.every(isUuid)) return null;
+  if (!Array.isArray(c.scope_names) || c.scope_names.length > 8 || !c.scope_names.every((s) => typeof s === "string" && s.length <= 64)) return null;
+  if (!Array.isArray(c.workspace_ids) || c.workspace_ids.length > SEAT_ADMIN_MAX_WORKSPACES || !c.workspace_ids.every(isUuid)) return null;
   if (!(c.organization_id === null || isUuid(c.organization_id))) return null;
   if (!(c.expires_at === null || typeof c.expires_at === "number" && Number.isSafeInteger(c.expires_at))) return null;
   const scopes2 = [...new Set(c.scope_names)].sort(), workspaces = [...new Set(c.workspace_ids)].sort();
@@ -6032,12 +6032,15 @@ function shapeProblem(c, now) {
   if (c.level === "organization" && (c.organization_id === null || c.workspace_ids.length !== 0)) return "invalid_request";
   return null;
 }
+function seatAdminGrantPrecheck(c, actor, now) {
+  if (actor.kind !== "human" || actor.user_id === null) return "credential_kind_forbidden";
+  const fresh = actor.interactive_at_seconds !== null && now / 1e3 - actor.interactive_at_seconds <= SEAT_ADMIN_FRESH_SIGN_IN_SECONDS && now / 1e3 - actor.interactive_at_seconds >= -5;
+  if (!fresh || !actor.csrf_verified || !actor.session_bound) return "human_confirmation_required";
+  return shapeProblem(c, now);
+}
 function decideSeatAdminGrant(c, f) {
-  if (f.actor.kind !== "human" || f.actor.user_id === null) return { ok: false, reason: "credential_kind_forbidden" };
-  const fresh = f.actor.interactive_at_seconds !== null && f.now / 1e3 - f.actor.interactive_at_seconds <= SEAT_ADMIN_FRESH_SIGN_IN_SECONDS && f.now / 1e3 - f.actor.interactive_at_seconds >= -5;
-  if (!fresh || !f.actor.csrf_verified || !f.actor.session_bound) return { ok: false, reason: "human_confirmation_required" };
-  const shape = shapeProblem(c, f.now);
-  if (shape) return { ok: false, reason: shape };
+  const pre = seatAdminGrantPrecheck(c, f.actor, f.now);
+  if (pre) return { ok: false, reason: pre };
   if (!f.principal || f.principal.revoked || f.principal.owner_user_id !== f.actor.user_id) return { ok: false, reason: "agent_not_yours" };
   for (const id2 of c.workspace_ids) {
     const w = f.workspaces[id2];
@@ -6273,6 +6276,7 @@ export {
   registerUpcaster,
   requestHash,
   saveWorkspaceSkill,
+  seatAdminGrantPrecheck,
   seatAdminManifest,
   seatAdminManifestJson,
   seatAdminScopedCommands,

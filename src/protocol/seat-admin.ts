@@ -116,8 +116,10 @@ export function parseSeatAdminCommand(input: unknown): SeatAdminCommand | null {
   if (c.kind === 'end_seat_admin') return exactKeys(c, ['kind', 'grant_id']) && isUuid(c.grant_id) ? { kind: 'end_seat_admin', grant_id: c.grant_id } : null;
   if (c.kind !== 'grant_seat_admin' || !exactKeys(c, ['kind', 'principal_id', 'level', 'scope_names', 'workspace_ids', 'organization_id', 'expires_at'])) return null;
   if (!isUuid(c.principal_id) || !SEAT_ADMIN_LEVELS.includes(c.level as SeatAdminLevel)) return null;
-  if (!Array.isArray(c.scope_names) || !c.scope_names.every(s => typeof s === 'string')) return null;
-  if (!Array.isArray(c.workspace_ids) || !c.workspace_ids.every(isUuid)) return null;
+  // Bounded before anything else looks at the arrays: no request reaches a lock or a query with more.
+  if (!Array.isArray(c.scope_names) || c.scope_names.length > 8
+    || !c.scope_names.every(s => typeof s === 'string' && s.length <= 64)) return null;
+  if (!Array.isArray(c.workspace_ids) || c.workspace_ids.length > SEAT_ADMIN_MAX_WORKSPACES || !c.workspace_ids.every(isUuid)) return null;
   if (!(c.organization_id === null || isUuid(c.organization_id))) return null;
   if (!(c.expires_at === null || (typeof c.expires_at === 'number' && Number.isSafeInteger(c.expires_at)))) return null;
   const scopes = [...new Set(c.scope_names as string[])].sort(), workspaces = [...new Set(c.workspace_ids as string[])].sort();
@@ -191,18 +193,27 @@ function shapeProblem(c: GrantSeatAdminCommand, now: number): string | null {
 }
 
 /**
+ * Everything decidable without the database: who is asking, their confirmation, and the request's
+ * shape. The edge runs this before it takes any lock or reads any target, and decideSeatAdminGrant
+ * runs it again with the clock read after the lock waits.
+ */
+export function seatAdminGrantPrecheck(c: GrantSeatAdminCommand, actor: GrantFacts['actor'], now: number): string | null {
+  if (actor.kind !== 'human' || actor.user_id === null) return 'credential_kind_forbidden';
+  const fresh = actor.interactive_at_seconds !== null
+    && now / 1000 - actor.interactive_at_seconds <= SEAT_ADMIN_FRESH_SIGN_IN_SECONDS
+    && now / 1000 - actor.interactive_at_seconds >= -5;
+  if (!fresh || !actor.csrf_verified || !actor.session_bound) return 'human_confirmation_required';
+  return shapeProblem(c, now);
+}
+
+/**
  * Grant: a person's fresh, session-bound, CSRF-checked confirmation; the grantor owns the agent and
  * is a live owner of every covered workspace (and the organization, at that level), and the agent
  * is a live member of every listed workspace.
  */
 export function decideSeatAdminGrant(c: GrantSeatAdminCommand, f: GrantFacts): GrantDecision {
-  if (f.actor.kind !== 'human' || f.actor.user_id === null) return { ok: false, reason: 'credential_kind_forbidden' };
-  const fresh = f.actor.interactive_at_seconds !== null
-    && f.now / 1000 - f.actor.interactive_at_seconds <= SEAT_ADMIN_FRESH_SIGN_IN_SECONDS
-    && f.now / 1000 - f.actor.interactive_at_seconds >= -5;
-  if (!fresh || !f.actor.csrf_verified || !f.actor.session_bound) return { ok: false, reason: 'human_confirmation_required' };
-  const shape = shapeProblem(c, f.now);
-  if (shape) return { ok: false, reason: shape };
+  const pre = seatAdminGrantPrecheck(c, f.actor, f.now);
+  if (pre) return { ok: false, reason: pre };
   if (!f.principal || f.principal.revoked || f.principal.owner_user_id !== f.actor.user_id) return { ok: false, reason: 'agent_not_yours' };
   for (const id of c.workspace_ids) {
     const w = f.workspaces[id];

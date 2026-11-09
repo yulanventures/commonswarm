@@ -167,3 +167,19 @@ test("grant, replay, a second grant, end by an outsider, end, end again: every s
   assert.deepEqual((await history(owner.id)).filter((h) => h.outcome === "accepted").map((h) => h.action),
     ["grant_seat_admin", "end_seat_admin", "grant_seat_admin"]);
 });
+
+test("someone else's agent is never locked: a non-owner is refused while the agent row is held elsewhere", async () => {
+  let refused: Awaited<ReturnType<typeof account>> | undefined;
+  await sql.begin(async (tx) => {
+    await tx`SELECT 1 FROM swarm.agent_principals WHERE principal_id = ${agent}::uuid FOR UPDATE`;
+    const started = Date.now();
+    refused = await account(other.jwt, grantCmd());
+    assert.ok(Date.now() - started < 10_000, "the refusal didn't wait on the held agent row");
+  });
+  assert.equal(refused!.status, 403, JSON.stringify(refused!.body));
+  assert.equal(refused!.body.error, "agent_not_yours");
+  const tooMany = await account(owner.jwt, grantCmd({ level: "scoped", scope_names: ["admin:read"],
+    workspace_ids: Array.from({ length: 11 }, () => randomUUID()).sort() }));
+  assert.equal(tooMany.status, 400, "eleven workspaces never reach a lock");
+  assert.equal(tooMany.body.error, "invalid_request");
+});

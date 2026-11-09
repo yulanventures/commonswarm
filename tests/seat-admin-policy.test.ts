@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, seatAdminManifest, seatAdminScopedCommands,
+  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, seatAdminGrantPrecheck, seatAdminManifest, seatAdminScopedCommands,
   SEAT_ADMIN_ROLE_BUNDLES, type GrantFacts, type GrantSeatAdminCommand,
 } from "../src/protocol/seat-admin.js";
 import { HUMAN_ONLY_COMMANDS } from "../src/protocol/workspace-commands.js";
@@ -41,6 +41,10 @@ test("the wire shape is closed; arrays come back sorted and unique", () => {
     ["a non-uuid agent", wire({ principal_id: "me" })],
     ["a fractional expiry", wire({ expires_at: 1.5 })],
     ["an end with extra keys", { kind: "end_seat_admin", grant_id: AGENT, reason: "x" }],
+    ["eleven workspaces", wire({ level: "scoped", scope_names: ["admin:read"],
+      workspace_ids: Array.from({ length: 11 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`) })],
+    ["nine scopes", wire({ level: "scoped", scope_names: Array.from({ length: 9 }, (_, i) => `scope:${i}`) })],
+    ["a very long scope name", wire({ level: "scoped", scope_names: ["admin:read", "x".repeat(65)] })],
   ] as const) {
     assert.equal(parseSeatAdminCommand(input), null, name);
   }
@@ -128,4 +132,20 @@ test("registry v3 bundles are HezSec's exact table and pin into the manifest", (
   assert.equal(manifest.expires_at, null, "No end date is explicit null");
   assert.equal(manifest.policy.secret_delivery, "bound_recipient_only");
   assert.equal(manifest.policy.role_ceiling, "member");
+});
+
+test("the precheck settles who, confirmation and shape with no database facts at all", () => {
+  const actor = facts().actor;
+  const cmd = (patch: Record<string, unknown> = {}) => parseSeatAdminCommand(wire(patch)) as GrantSeatAdminCommand;
+  for (const [name, command, who, reason] of [
+    ["a good request", cmd(), actor, null],
+    ["an agent", cmd(), { ...actor, kind: "agent" as const }, "credential_kind_forbidden"],
+    ["no CSRF", cmd(), { ...actor, csrf_verified: false }, "human_confirmation_required"],
+    ["a stale sign-in", cmd(), { ...actor, interactive_at_seconds: NOW / 1000 - 301 }, "human_confirmation_required"],
+    ["workspace level in two workspaces", cmd({ workspace_ids: [WS, WS2] }), actor, "invalid_request"],
+    ["a forbidden scope", cmd({ level: "scoped", scope_names: ["admin:read", "workspaces:create"] }), actor, "scope_forbidden"],
+    ["an end past 90 days", cmd({ expires_at: NOW + 91 * 86_400_000 }), actor, "invalid_expiry"],
+  ] as const) {
+    assert.equal(seatAdminGrantPrecheck(command, who, NOW), reason, name);
+  }
 });
