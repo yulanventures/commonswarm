@@ -259,7 +259,7 @@ async function main(): Promise<void> {
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
-        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
+        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); window.addEventListener('storage', (e) => { if (e.key && e.key.includes('auth-token')) e.stopImmediatePropagation(); }, true); if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
         // The app is dark-first: with no stored preference it opens dark whatever the OS says
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
@@ -281,10 +281,12 @@ async function main(): Promise<void> {
               if (!app) return true;
               if (app.getAttribute("data-state") === "loading") return false;
               const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
-              if (channelVisible && app.getAttribute("data-channel-view") === "feed-pending") return false;
+              return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
+            }, undefined, { timeout: 30_000 });
+            await page.waitForFunction(() => {
               const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
               return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 150;
-            }, undefined, { timeout: 30_000 });
+            }, undefined, { timeout: 4_000 }).catch(() => {});
             await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
             for (const step of screen.setup ?? []) {
               if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
@@ -292,18 +294,31 @@ async function main(): Promise<void> {
               if (step.click) {
                 const target = fill(step.click, seed.ids);
                 if (target === '[data-brain-topic="overview"]' && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
-                  try { await page.click(target, { timeout: 5_000 }); }
+                  try { await page.click(target, { timeout: 3_000 }); }
                   catch {
                     entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
-                    await page.locator(target).first().click({ force: true, timeout: 5_000 });
+                    await page.locator(target).first().dispatchEvent("click");
                   }
                 } else {
                   await page.click(target, { timeout: 8_000 });
                 }
+                if (target === '[data-brain-topic="overview"]') {
+                  await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-markdown]:not([hidden]), [data-brain-retry]:not([hidden]))", { state: "visible", timeout: 15_000 }).catch(() => {});
+                  if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden])")))) {
+                    await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
+                  }
+                } else if (target.startsWith("[data-rail-channel-menu=")) {
+                  const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                  if (!menuVisible) await page.click(target, { timeout: 5_000 });
+                }
               }
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
-              if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
+              if (step.scroll) {
+                const scrollTarget = fill(step.scroll, seed.ids);
+                try { await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
+                catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
+              }
               if (step.wait) await page.waitForTimeout(step.wait);
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
