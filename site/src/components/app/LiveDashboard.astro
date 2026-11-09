@@ -7037,6 +7037,7 @@ import "../../styles/kylon-command-palette.css";
         row.className = isReply
           ? "dashboard__message dashboard__message--reply"
           : "dashboard__message";
+        row.tabIndex = -1;
         row.dataset.signalId = signal.id;
         /* Working-on posts are status, not conversation: a compact activity line. */
         if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
