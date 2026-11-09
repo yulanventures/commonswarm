@@ -216,6 +216,26 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } catch (error) { note("seed_dm", error); }
     }
 
+    // Verification-only Slack-density comparison: real renderer inputs, never production data.
+    const richUpdates = [
+      { key: "message.richtext.list", body: "**Launch review**\n\nThe checkout update is ready for review.\n\n- **Web:** the cart keeps its contents.\n- **Mobile:** the payment sheet fits.\n  - Checked portrait and landscape.\n- **Support:** the FAQ is drafted.\n\nNext steps:\n\n1. Review the staging build.\n2. Confirm the launch window.\n\n- [x] Screenshots attached" },
+      { key: "message.richtext.code", body: "**Build handoff**\n\nUse `npm run check` before opening the review.\n\n```sh\nnpm ci\nnpm run check\nnpm run build\n```\n\nThe staging result is ready for the reviewer." },
+    ];
+    for (const [index, update] of richUpdates.entries()) {
+      try {
+        const id = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel
+        ) VALUES (
+          ${id}::uuid, ${workspace}::uuid, ${agents[0]}::uuid, 'agent', 'note', ${update.body},
+          statement_timestamp() + interval '25 days', statement_timestamp() - ((20 - index * 10) * interval '1 second'),
+          ${channels.general}::uuid, false
+        )`;
+        ids[update.key] = id;
+        steps.push(update.key);
+      } catch (error) { note(update.key, error); }
+    }
+
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
     const seedFile = async (stepName: string, name: string, contentType: string, text: string, existingFileId?: string): Promise<string | null> => {
       try {
