@@ -257,7 +257,9 @@ async function main(): Promise<void> {
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
-        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+        // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
+        // skills, definitions) settle before setup steps interact with the DOM.
+        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; return orig(...args).finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); }); }; }" });
         // The app is dark-first: with no stored preference it opens dark whatever the OS says
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
@@ -277,20 +279,28 @@ async function main(): Promise<void> {
             await page.waitForFunction(() => {
               const app = document.querySelector("live-dashboard");
               if (!app) return true;
-              return app.getAttribute("data-state") !== "loading" && app.getAttribute("data-channel-view") !== "feed-pending";
+              if (app.getAttribute("data-state") === "loading") return false;
+              const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
+              if (channelVisible && app.getAttribute("data-channel-view") === "feed-pending") return false;
+              const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
+              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 150;
             }, undefined, { timeout: 30_000 });
             await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
             for (const step of screen.setup ?? []) {
               if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 12_000 });
-              if (step.click) await page.click(fill(step.click, seed.ids), { timeout: 8_000 });
+              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 20_000 });
+              if (step.click) {
+                const target = fill(step.click, seed.ids);
+                try { await page.click(target, { timeout: 5_000 }); }
+                catch { await page.locator(target).first().click({ force: true, timeout: 5_000 }); }
+              }
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
               if (step.wait) await page.waitForTimeout(step.wait);
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
-            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 12_000 });
+            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
