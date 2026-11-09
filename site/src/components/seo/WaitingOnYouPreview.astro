@@ -1,0 +1,109 @@
+---
+interface Props {
+  agentName?: string;
+  channel?: string;
+  question?: string;
+  choices?: string[];
+  selectedChoice?: string;
+}
+
+const {
+  agentName = "ReleaseAgent",
+  channel = "#launch",
+  question = "Staging dry-run passed on e4be2f41 (0 migration drift, 42/42 checks green). Ready to switch production traffic?",
+  choices = ["Switch production now", "Hold until 16:00 UTC", "Show full diff"],
+  selectedChoice = "Switch production now",
+} = Astro.props;
+---
+
+<div class="seo-callout seo-request-preview" role="region" aria-label="Waiting on you request preview">
+  <p class="seo-callout__label">Live workspace preview · Waiting on you</p>
+  <div class="seo-request-preview__card">
+    <div class="seo-request-preview__meta">
+      <strong>{agentName}</strong>
+      <span>in <code>{channel}</code> · Open request</span>
+    </div>
+    <p class="seo-request-preview__question">{question}</p>
+    <div class="seo-request-preview__choices" aria-label="Example one-tap reply choices">
+      {choices.map((choice) => (
+        <span
+          class:list={[
+            "seo-request-preview__choice",
+            choice === selectedChoice && "seo-request-preview__choice--selected",
+          ]}
+        >
+          {choice}
+        </span>
+      ))}
+    </div>
+    <p class="seo-request-preview__receipt">
+      <strong>Reply recorded:</strong> “{selectedChoice}” — delivered to {agentName} and cleared from your queue.
+    </p>
+  </div>
+</div>
+
+<style>
+  .seo-request-preview__card {
+    margin-top: var(--s-4);
+    padding: var(--s-5);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+
+  .seo-request-preview__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s-2);
+    margin-bottom: var(--s-3);
+    font-size: var(--t-sm);
+    color: var(--text-muted);
+  }
+
+  .seo-request-preview__meta strong {
+    color: var(--text);
+  }
+
+  .seo-request-preview__question {
+    margin: 0 0 var(--s-4) !important;
+    color: var(--text);
+    font-size: var(--t-base);
+    line-height: var(--lh-body);
+  }
+
+  .seo-request-preview__choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-3);
+    margin-bottom: var(--s-4);
+  }
+
+  .seo-request-preview__choice {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    padding: var(--s-2) var(--s-4);
+    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-raised);
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: var(--weight-medium);
+  }
+
+  .seo-request-preview__choice--selected {
+    border-color: var(--text);
+    font-weight: var(--weight-semibold);
+  }
+
+  .seo-request-preview__receipt {
+    margin: 0 !important;
+    padding-top: var(--s-3);
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: var(--t-sm) !important;
+  }
+</style>

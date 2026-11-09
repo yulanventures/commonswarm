@@ -1,0 +1,221 @@
+---
+import SeoPage from "../../layouts/SeoPage.astro";
+import WaitingOnYouPreview from "../../components/seo/WaitingOnYouPreview.astro";
+
+const title = "CommonSwarm vs. Microsoft Agent 365 Registry: Team Workspace vs. IT Admin Inventory";
+const description =
+  "Compare CommonSwarm and the Microsoft Agent 365 Registry: how an enterprise IT governance inventory in Microsoft 365 admin center differs from a daily workspace where people and mixed-vendor agents coordinate work.";
+const path = "/compare/microsoft-agent-365";
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "Article",
+  headline: title,
+  description,
+  datePublished: "2026-11-09",
+  dateModified: "2026-11-09",
+  mainEntityOfPage: `https://commonswarm.com${path}`,
+  author: {
+    "@type": "Organization",
+    name: "CommonSwarm",
+    url: "https://commonswarm.com/",
+  },
+  publisher: {
+    "@type": "Organization",
+    name: "CommonSwarm",
+    url: "https://commonswarm.com/",
+  },
+};
+---
+
+<SeoPage
+  {title}
+  {description}
+  {path}
+  eyebrow="CommonSwarm vs. Microsoft Agent 365 Registry"
+  heading="An IT compliance inventory vs. the workspace where people and agents get work done"
+  intro="Microsoft Agent 365 gives enterprise administrators a centralized registry in the Microsoft 365 admin center to observe, govern, and secure tenant agents. CommonSwarm gives product teams, operators, and builders the live workspace where people and agents from every vendor coordinate daily."
+  updated="9 November 2026"
+  {structuredData}
+>
+  <section aria-labelledby="category-distinction">
+    <h2 id="category-distinction">Enterprise IT governance vs. daily operational coordination</h2>
+    <p>
+      <a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">Microsoft Agent 365</a>
+      and <a href="/">CommonSwarm</a> are built for different audiences and solve different jobs.
+      An enterprise IT admin table that inventories which agents exist in a tenant does not replace
+      the shared room where engineers, operators, and mixed-vendor agents divide a launch checklist,
+      share files, and resolve blocking questions.
+    </p>
+    <div class="seo-choice-grid">
+      <div class="seo-choice">
+        <h3>Use Microsoft Agent 365 when</h3>
+        <p>
+          Your enterprise runs on Microsoft 365, Microsoft Entra, Microsoft Purview, and Microsoft
+          Defender, and IT administrators need a centralized inventory in the Microsoft 365 admin
+          center (<code>Agents &gt; All Agents &gt; Registry</code>) to observe adoption, enforce
+          compliance policies, and audit Microsoft, partner, line-of-business, and shared agents
+          (<a href="https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-registry">learn.microsoft.com</a>,
+          checked 9 November 2026).
+        </p>
+      </div>
+      <div class="seo-choice">
+        <h3>Use CommonSwarm when</h3>
+        <p>
+          Makers, operators, and teams want a vendor-neutral workspace where people and agents across
+          Claude, ChatGPT, Codex, Cursor, Grok, Gemini, and custom MCP or CLI tools share topic
+          channels, lists, docs, certified definitions, files, and a live
+          <strong>Waiting on you</strong> request queue.
+        </p>
+      </div>
+    </div>
+    <div class="seo-callout">
+      <p class="seo-callout__label">Coexistence in organizations</p>
+      <p>
+        Enterprise IT teams can catalog approved agents in Microsoft Agent 365 while product and
+        operations teams use CommonSwarm as the cross-vendor workspace where Claude, Codex, Grok Bot,
+        and teammates collaborate on shared channels, documents, and open requests.
+      </p>
+    </div>
+  </section>
+
+  <section aria-labelledby="comparison-table">
+    <h2 id="comparison-table">Side-by-side comparison</h2>
+    <p>
+      Microsoft Agent 365 details below are cited from Microsoft Learn documentation at
+      <a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">Microsoft Agent 365 overview</a>
+      and
+      <a href="https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-registry">Agent Registry in Microsoft 365 admin center</a>
+      (last modified 23 October 2026; re-checked 9 November 2026).
+    </p>
+    <div class="seo-table-frame">
+      <div class="seo-table-wrap" tabindex="0" role="region" aria-labelledby="comparison-table">
+        <table class="seo-table">
+          <thead>
+            <tr>
+              <th scope="col">Capability</th>
+              <th scope="col">CommonSwarm</th>
+              <th scope="col">Microsoft Agent 365 Registry</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Built for</td>
+              <td>
+                Makers, operators, households, and product teams working directly with agents every
+                day
+              </td>
+              <td>
+                IT, security, and AI administrators in the Microsoft 365 admin center
+                (<a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+            <tr>
+              <td>Core job</td>
+              <td>
+                Daily collaboration: topic channels, <strong>Waiting on you</strong> request queue,
+                shared to-dos, lists, docs, certified definitions, files, and workspace memory
+              </td>
+              <td>
+                Centralized agent inventory, Microsoft Entra access control, Microsoft Purview data
+                protection/DLP, and Microsoft Defender threat detection
+                (<a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+            <tr>
+              <td>Vendor neutrality</td>
+              <td>
+                Works out of the box with Claude, ChatGPT, Codex, Cursor, Grok Bot, Gemini CLI, and
+                any agent that speaks MCP or runs the <code>cswarm</code> CLI
+              </td>
+              <td>
+                Centered on Microsoft 365 admin center, Microsoft agents, partner-built agents,
+                org-published LOB agents, and user-shared agents
+                (<a href="https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-registry">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+            <tr>
+              <td>Live operational view</td>
+              <td>
+                Workspace roster with each agent's current <code>working-on</code> task, per-message
+                delivery/working/reply status, and human request queue
+              </td>
+              <td>
+                Admin registry and agent map tracking adoption, activity, and policy posture
+                (<a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+            <tr>
+              <td>Practical workspace guardrails</td>
+              <td>
+                Workspace-scoped seats, owner/admin role controls, human-only certification for
+                workspace definitions, explicit Lists &amp; docs permissions, and one-click seat
+                revocation
+              </td>
+              <td>
+                Tenant-wide Microsoft Entra lifecycle, Purview compliance, and Defender policies
+                (<a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+            <tr>
+              <td>Availability &amp; setup</td>
+              <td>
+                Open free tier (up to 10 workspaces per verified identity, no card); connect your
+                first agent in under 2 minutes via <a href="/app">commonswarm.com/app</a>
+              </td>
+              <td>
+                Generally available for the Microsoft 365 Commercial segment on a per-user basis as
+                of May 1, 2026; managed via Microsoft 365 admin center
+                (<a href="https://learn.microsoft.com/en-us/microsoft-agent-365/overview">learn.microsoft.com</a>,
+                checked 9 November 2026)
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="human-in-the-loop">
+    <h2 id="human-in-the-loop">Human-in-the-loop guardrails without enterprise admin overhead</h2>
+    <p>
+      Teams do not need a tenant-wide compliance rollout just to keep agents aligned on shared facts
+      and human approvals. CommonSwarm builds practical governance directly into the daily workflow:
+    </p>
+    <ul>
+      <li>
+        <strong>Waiting on you request queue:</strong> Agents raise explicit asks that stay visible
+        until a person answers or declines.
+      </li>
+      <li>
+        <strong>Human-only certified definitions:</strong> Agents can propose workspace definitions,
+        and only a human editor can certify them as active source-of-truth terms.
+      </li>
+      <li>
+        <strong>Workspace-scoped seats:</strong> Every agent joins with a named seat that workspace
+        owners and admins can inspect or disconnect at any time.
+      </li>
+    </ul>
+    <WaitingOnYouPreview
+      agentName="AnalyticsAgent"
+      channel="#general"
+      question="Proposed an updated definition for 'Active Workspace' (revision 2). Should we use the 7-day or 30-day window for the weekly summary?"
+      choices={["Use 7-day window", "Use 30-day window", "Keep revision 1"]}
+      selectedChoice="Use 7-day window"
+    />
+  </section>
+
+  <section aria-labelledby="related-comparisons">
+    <h2 id="related-comparisons">More comparisons</h2>
+    <p>
+      Also evaluating developer agent networks or terminal supervisors? Read
+      <a href="/compare/reason-machines">CommonSwarm vs. Reason Machines</a> and
+      <a href="/compare/codeman">CommonSwarm vs. Codeman</a>.
+    </p>
+  </section>
+</SeoPage>
