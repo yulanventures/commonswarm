@@ -229,7 +229,7 @@ export const mayManageChannel = (
 };
 
 /** One row of the per-channel unread read (`channelUnread` in commonswarm.ts). */
-export interface ChannelUnreadState { channelId: string | null; unread: boolean | null }
+export interface ChannelUnreadState { channelId: string | null; slug?: string; unread: boolean | null }
 
 /**
  * Unread for one view, exactly as the read reported it. `null` is unknown: no read, a failed
@@ -243,6 +243,22 @@ export const channelUnreadFor = (
   const key = viewId === GENERAL_CHANNEL_ID ? null : viewId;
   const row = rows.find((entry) => entry.channelId === key);
   return row === undefined ? null : row.unread;
+};
+
+/**
+ * Whether `channel_unread` (which lists every live channel's id and slug on its 15-second
+ * cadence) shows a channel created, renamed or archived since `channels` was last read.
+ */
+export const channelListStaleAgainstUnread = (
+  channels: readonly Pick<WorkspaceChannel, "channelId" | "slug" | "archivedAt">[],
+  unreadRows: readonly { channelId: string | null; slug: string }[] | null,
+): boolean => {
+  if (unreadRows === null) return false;
+  const live = channels.filter((channel) => channel.archivedAt === null);
+  const reported = unreadRows.filter((row): row is { channelId: string; slug: string } => row.channelId !== null);
+  if (live.length !== reported.length) return true;
+  const byId = new Map(live.map((channel) => [channel.channelId, channel.slug]));
+  return reported.some((row) => byId.get(row.channelId) !== row.slug);
 };
 
 /** The row's accessible name: the full "#slug", plus "unread" only when the read said so. */
