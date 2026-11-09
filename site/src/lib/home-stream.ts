@@ -33,8 +33,8 @@ const ASK_EXCERPT_MAX = 160;
 
 function isAgentAuthor(author: StreamAuthor): author is AgentVM { return "state" in author; }
 
-/** The name shown beside the author's picture. Agent labels arrive already computed in AgentVM.label. */
-export function authorLabel(author: StreamAuthor): string { return isAgentAuthor(author) ? author.label : author.name; }
+/** The name shown beside the author's picture. An owned agent uses its clean nestedLabel in the stream. */
+export function authorLabel(author: StreamAuthor): string { return isAgentAuthor(author) ? (author.yours && author.nestedLabel ? author.nestedLabel : author.label) : author.name; }
 
 function dayParts(ms: number, timeZone?: string): { y: number; m: number; d: number } | null {
   if (!Number.isFinite(ms)) return null;
@@ -138,7 +138,6 @@ export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "aut
   line.append(isAgentAuthor(author) ? agentOrb(doc, author, { size, badge: true }) : personAvatar(doc, author, size));
   const name = node(doc, "span", "hm-author__name", authorLabel(author)); name.title = authorLabel(author); line.append(name);
   if (isAgentAuthor(author)) line.append(node(doc, "span", "hm-author__agent", "Agent"));
-  if (!isAgentAuthor(author) && author.you) line.append(node(doc, "span", "hm-author__you", "you"));
   const time = node(doc, "time", "hm-author__when", signal.when);
   if (Number.isFinite(Date.parse(signal.createdAt))) time.dateTime = signal.createdAt;
   line.append(time); return line;
@@ -164,10 +163,10 @@ type GroupableSignal = { from: string; fromKind: string; channelId?: string | nu
   to: string | null; toAgent: string | null; createdAt: string };
 export function continuesStreamGroup(signal: GroupableSignal, previous: GroupableSignal | null): boolean {
   if (!previous || signal.from !== previous.from || signal.fromKind !== previous.fromKind ||
-      signal.channelId !== previous.channelId || signal.threadRootId !== previous.threadRootId || signal.to !== previous.to || signal.toAgent !== previous.toAgent ||
+      signal.channelId !== previous.channelId || signal.threadRootId !== previous.threadRootId ||
       signal.kind !== previous.kind || dayKey(signal.createdAt) !== dayKey(previous.createdAt)) return false;
   const gap = Date.parse(signal.createdAt) - Date.parse(previous.createdAt);
-  return Number.isFinite(gap) && gap >= 0 && gap < 5 * 60_000;
+  return Number.isFinite(gap) && gap >= 0 && gap < 10 * 60_000;
 }
 export function groupStreamMessage(row: HTMLElement, signal: GroupableSignal, previous: GroupableSignal | null): void {
   if (!continuesStreamGroup(signal, previous)) return;
