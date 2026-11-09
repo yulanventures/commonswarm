@@ -24,11 +24,11 @@ const DIST = join(ROOT, "site/dist");
 const OUT = resolve(process.env.MOBILE_AUDIT_OUT ?? join(ROOT, "site/mobile-audit/out"));
 const SITE_PORT = 4329;
 
+// Temporary focus diagnostic: one failing touch size and one failing pointer size.
 export const VIEWPORTS = [
-  { width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 },
-  { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
+  { width: 360, height: 740 }, { width: 1440, height: 900 },
 ] as const;
-export const THEMES = ["light", "dark"] as const;
+export const THEMES = ["light"] as const;
 
 /** One setup step; fields run in this order: media, waitFor, click, tap, type (with text), press, scroll, wait.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
@@ -254,8 +254,8 @@ async function main(): Promise<void> {
       for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         const phone = viewport.width < 768 || viewport.height < 500;
-        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
-        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: phone, isMobile: phone, deviceScaleFactor: 1 });
+        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: phone, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -306,6 +306,22 @@ async function main(): Promise<void> {
               if (step.press) await page.keyboard.press(step.press);
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });
               if (step.wait) await page.waitForTimeout(step.wait);
+              const focus = await page.evaluate((signalId: string) => {
+                const active = document.activeElement as HTMLElement | null;
+                const row = document.querySelector(`[data-signal-id="${signalId}"]`);
+                const describe = (el: Element | null) => el ? `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}.${typeof el.className === "string" ? el.className.split(/\s+/).join(".") : ""}` : null;
+                const box = (el: Element) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; };
+                const ancestors = [];
+                for (let n = active; n && n !== document.body; n = n.parentElement) {
+                  const css = getComputedStyle(n);
+                  ancestors.push({ element: describe(n), box: box(n), opacity: css.opacity, visibility: css.visibility, overflow: css.overflow, clip: css.clipPath });
+                }
+                return { active: describe(active), tabIndex: active?.tabIndex, text: active?.textContent?.slice(0, 100), row: active?.closest("[data-signal-id]")?.getAttribute("data-signal-id"), withinExpected: !!row?.contains(active), documentFocused: document.hasFocus(), ancestors,
+                  candidates: [...(row?.querySelectorAll("button,a[href],summary,[tabindex]") ?? [])].map(el => ({ element: describe(el), tabIndex: (el as HTMLElement).tabIndex, box: box(el), text: el.textContent?.slice(0, 70), visibility: getComputedStyle(el).visibility, opacity: getComputedStyle(el).opacity })) };
+              }, seed.ids["message.richtext.code"]!);
+              entry.focusTrace ??= [];
+              (entry.focusTrace as unknown[]).push({ step, focus });
+
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
             if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 20_000 });

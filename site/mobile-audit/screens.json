@@ -5,8 +5,15 @@
     "path": "/app?w={workspace}&c={channel.general}",
     "setup": [
       {
-        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "media": "(width <= 64rem)",
         "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "media": "(width > 64rem)",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       }
     ],
     "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
@@ -24,8 +31,15 @@
     "path": "/app?w={workspace}&c={channel.general}",
     "setup": [
       {
-        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
+        "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "media": "(width <= 64rem)",
         "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+      },
+      {
+        "media": "(width > 64rem)",
+        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       },
       {
         "press": "Tab"
