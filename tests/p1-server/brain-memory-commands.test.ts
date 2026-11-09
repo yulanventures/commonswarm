@@ -414,6 +414,87 @@ test("a forget hides the memory from detail reads and from every replay, includi
   assert.equal(detail, null, "a forgotten memory has no detail read");
 });
 
+test("a forget that commits between an update's read and its write wins: the update gets a 409, not a 500", async () => {
+  const noActive = "There's no active memory with that subject to update. Save it without expected_revision.";
+  for (const { name, forgetInBetween, status, outcome, actions } of [
+    { name: "no forget", forgetInBetween: false, status: 200, outcome: "updated", actions: ["save", "edit"] },
+    { name: "forget in between", forgetInBetween: true, status: 409, outcome: "memory_revision_conflict", actions: ["save", "forget"] },
+  ]) {
+    const subject = `race ${randomUUID().slice(0, 8)}`;
+    const saved = await save(f.agentToken, subject, "Deploy from main.");
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const memoryId = (saved.body.memory as { memory_id: string }).memory_id;
+    const update = () => save(f.agentToken, subject, "Deploy from release.", { expected_revision: 1 });
+    let result: Awaited<ReturnType<typeof update>>;
+    if (!forgetInBetween) {
+      result = await update();
+    } else {
+      // The forget's own statements, held open until the update has read revision 1 and is waiting on the row.
+      let pending!: Promise<Awaited<ReturnType<typeof update>>>;
+      await sql.begin(async (tx) => {
+        const [{ pid }] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        await tx`UPDATE swarm.memories SET status = 'deleted', deleted_at = statement_timestamp(), revision = revision + 1,
+          updated_at = statement_timestamp() WHERE memory_id = ${memoryId}::uuid`;
+        await tx`INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, editor_kind, editor_id, sponsor_user_id)
+          VALUES (${memoryId}::uuid, ${f.workspaceA}::uuid, 2, 'forget', 'convention', 'Deploy from main.', 'agent', ${f.principal}::uuid, ${f.ownerId}::uuid)`;
+        pending = update();
+        const deadline = Date.now() + 20_000;
+        while ((await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0]!.n === 0) {
+          assert.ok(Date.now() < deadline, `the update never waited on the forget:\n${functionLogs.slice(-2000)}`);
+          await delay(50);
+        }
+      });
+      result = await pending;
+    }
+    assert.equal(result.status, status, `${name}: ${JSON.stringify(result.body)}\n${functionLogs.slice(-2000)}`);
+    if (status === 200) assert.equal(result.body.memory_outcome, outcome, name);
+    else assert.deepEqual(result.body, { error: outcome, message: noActive }, name);
+    assert.deepEqual((await versions(memoryId)).map((v) => v.action), actions, `${name}: one writer, one version`);
+  }
+});
+
+test("cap refusals name only remedies that exist", async () => {
+  const tag = randomUUID().slice(0, 8);
+  const fillers: string[] = [];
+  try {
+    for (const { code, fill, message } of [
+      {
+        code: "memory_limit",
+        message: "A workspace can hold 500 memories. Whoever saved a memory can forget it to make room.",
+        fill: async () => {
+          const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.memories
+            WHERE workspace_id = ${f.workspaceA}::uuid AND status = 'active'`;
+          const rows = await sql<{ memory_id: string }[]>`INSERT INTO swarm.memories (memory_id, workspace_id, subject_key, kind, statement,
+              revision, author_kind, author_id, sponsor_user_id, last_editor_kind, last_editor_id, review_at)
+            SELECT gen_random_uuid(), ${f.workspaceA}::uuid, ${`filler ${tag} `} || g, 'fact', 'Filler.', 1, 'user', ${f.ownerId}::uuid,
+              ${f.ownerId}::uuid, 'user', ${f.ownerId}::uuid, statement_timestamp() + interval '90 days'
+            FROM generate_series(1, ${500 - n}::int) AS g RETURNING memory_id::text`;
+          fillers.push(...rows.map((row) => row.memory_id));
+        },
+      },
+      {
+        code: "memory_history_full",
+        message: "This workspace's memory history is full, so no more memories can be saved or edited.",
+        fill: async () => {
+          const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.memory_versions
+            WHERE workspace_id = ${f.workspaceA}::uuid`;
+          await sql`INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, editor_kind, editor_id, sponsor_user_id)
+            SELECT ${fillers[0]!}::uuid, ${f.workspaceA}::uuid, g, 'edit', 'fact', 'Filler.', 'user', ${f.ownerId}::uuid, ${f.ownerId}::uuid
+            FROM generate_series(2, ${5001 - n}::int) AS g`;
+        },
+      },
+    ]) {
+      await fill();
+      const refused = await save(f.ownerJwt, `over cap ${tag} ${code.length}`, "One too many.");
+      assert.equal(refused.status, 409, `${code}: ${JSON.stringify(refused.body)}`);
+      assert.deepEqual(refused.body, { error: code, message }, code);
+    }
+  } finally {
+    if (fillers.length) await sql`DELETE FROM swarm.memories WHERE memory_id IN ${sql(fillers)}`;
+  }
+});
+
 test("Brain M3: an agent reads memory through the read edge; people, bad input and other workspaces get nothing", async () => {
   const tag = randomUUID().slice(0, 8);
   const subject = `read edge ${tag}`;

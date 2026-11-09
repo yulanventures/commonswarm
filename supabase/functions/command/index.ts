@@ -11038,19 +11038,20 @@ async function memoryCommand(
     if (history!.n >= MEMORY_HISTORY_CAP) {
       await audit("domain", "memory_history_full");
       return decided({ status: 409, body: { error: "memory_history_full",
-        message: "This workspace's memory history is full. A person can delete old memories to make room." } });
+        message: "This workspace's memory history is full, so no more memories can be saved or edited." } });
     }
     const [current] = await tx<Row[]>`
       SELECT memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
       FROM swarm.memories
       WHERE workspace_id = ${route.workspaceId}::uuid AND subject_key = ${command.subject} AND status = 'active'
     `;
+    const noActiveSubject = async () => {
+      await audit("domain", "memory_revision_conflict");
+      return decided({ status: 409, body: { error: "memory_revision_conflict",
+        message: "There's no active memory with that subject to update. Save it without expected_revision." } });
+    };
     if (current === undefined) {
-      if (command.expected_revision !== null) {
-        await audit("domain", "memory_revision_conflict");
-        return decided({ status: 409, body: { error: "memory_revision_conflict",
-          message: "There's no active memory with that subject to update. Save it without expected_revision." } });
-      }
+      if (command.expected_revision !== null) return await noActiveSubject();
       const [active] = await tx<{ n: number }[]>`
         SELECT count(*)::int AS n FROM swarm.memories
         WHERE workspace_id = ${route.workspaceId}::uuid AND status = 'active'
@@ -11058,7 +11059,7 @@ async function memoryCommand(
       if (active!.n >= MEMORY_ACTIVE_CAP) {
         await audit("domain", "memory_limit");
         return decided({ status: 409, body: { error: "memory_limit",
-          message: `A workspace can hold ${MEMORY_ACTIVE_CAP} memories. A person can delete some to make room.` } });
+          message: `A workspace can hold ${MEMORY_ACTIVE_CAP} memories. Whoever saved a memory can forget it to make room.` } });
       }
       const [created] = await tx<Row[]>`
         INSERT INTO swarm.memories (memory_id, workspace_id, subject_key, kind, statement, evidence, revision,
@@ -11096,7 +11097,9 @@ async function memoryCommand(
         WHERE memory_id = ${current.memory_id}::uuid AND revision = ${current.revision}
         RETURNING memory_id, subject_key, kind, statement, evidence, revision, status, author_kind, author_id
       `;
-      if (updated === undefined) throw new Error("memory revision moved under its subject lock");
+      // Only a forget changes a memory without its subject lock. One that committed after this
+      // save read the memory wins: answer as if the save came second.
+      if (updated === undefined) return await noActiveSubject();
       await tx`
         INSERT INTO swarm.memory_versions (memory_id, workspace_id, revision, action, kind, statement, evidence,
           editor_kind, editor_id, sponsor_user_id)

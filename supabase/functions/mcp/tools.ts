@@ -218,7 +218,7 @@ export const MEMORY_TOOL_TABLE = [
   {
     name: "memory_forget", effect: "write", title: "Forget a memory this seat saved",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Forget a memory this seat's agent saved. It stops appearing at once; people can still restore it in the web app. Retry with the same request_id.",
+    description: "Forget a memory this seat's agent saved. It stops appearing at once. Retry with the same request_id.",
     annotations: { title: "Forget a memory this seat saved", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, memory_id: uuid, request_id: requestId }, ["seat", "memory_id", "request_id"]),
   },
