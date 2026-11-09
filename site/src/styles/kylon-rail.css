@@ -1,16 +1,73 @@
-/* Rail: Channels, then Direct messages with a status dot and the workspace Lead tag. */
+/* Rail: Slack-like Channels and flat Direct messages with a corner presence dot and Lead tag. */
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb { position: relative; }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent .hm-rail__orb::after {
-  content: ""; position: absolute; inset-block-end: -1px; inset-inline-end: -1px;
+  content: ""; position: absolute; inset-block-end: -2px; inset-inline-end: -2px;
   inline-size: 8px; block-size: 8px; border-radius: 50%;
   background: var(--k-shell-muted); box-shadow: 0 0 0 2px var(--cs-rail-bg, var(--k-shell-subtle));
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent[data-agent-state="idle"] .hm-rail__orb::after { background: var(--carbon-live, #10b981); }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__agent[data-agent-state="working"] .hm-rail__orb::after { background: var(--carbon-working, #f59e0b); }
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__lead {
-  flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 16px;
-  color: var(--k-shell-accent-ink); background: var(--k-shell-accent);
+  flex: none; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 15px;
+  letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--k-shell-secondary); background: var(--k-shell-subtle);
+  border: 1px solid var(--carbon-line, var(--cs-line));
+}
+/* Presence is drawn as the corner dot on the avatar; keep status ("Idle", "Working") and "you"
+ * visually hidden in the accessibility tree so the state is never color-only. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__status, .hm-rail__you) {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: 0; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__other-head {
+  display: none;
+}
+/* Flat Direct messages list: people and agents share one left edge and 20px rounded-square avatars. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__people-list,
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__group,
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__agents {
+  display: flex; flex-direction: column; gap: 1px; margin-block: 0; padding: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__agent {
+  margin-block: 0; padding-inline: 10px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__face > .hm-person-avatar, .hm-rail__orb > .hm-agent-orb) {
+  inline-size: 20px; block-size: 20px; border-radius: 5px; font-size: 11px;
+}
+/* Small semibold section headers ("Channels", "Direct messages") and bold unread channels. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__heading {
+  padding: 0 10px; color: var(--k-shell-secondary); font-size: 13px; font-weight: 600;
+  line-height: 18px; letter-spacing: -0.01em; text-transform: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__channel, .hm-rail__person, .hm-rail__agent):not([data-unread], [aria-current="page"]) {
+  color: var(--k-shell-secondary); font-weight: 400;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel[data-unread]:not([aria-current="page"]) {
+  color: var(--k-shell-ink); font-weight: 700;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell :is(.hm-rail__agent, .hm-rail__person)[aria-current="page"] {
   background: var(--k-shell-selected); color: var(--k-shell-ink); font-weight: 600;
+}
+/* Desktop Slack-like row density (30px rows, 15px items); <= 64rem keeps 44px touch targets. */
+@media (width > 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail { gap: 12px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__nav { gap: 6px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__section-head { min-block-size: 28px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(
+    .hm-rail__link,
+    .hm-rail__channel,
+    .hm-rail__more,
+    .hm-rail__person,
+    .hm-rail__agent,
+    .hm-rail__channels .hm-rail__more
+  ) {
+    min-block-size: 30px; block-size: 30px; padding-block: 0; padding-inline: 10px;
+    border-radius: 6px; gap: 8px; font-size: 15px; line-height: 20px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail :is(.hm-rail__channel-actions, .hm-rail__channels .hm-rail__new) {
+    inline-size: 28px; min-inline-size: 28px; min-block-size: 28px; block-size: 28px; border-radius: 5px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel-item:has(> .hm-rail__channel-actions) > .hm-rail__channel {
+    padding-inline-end: 30px;
+  }
 }

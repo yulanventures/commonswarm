@@ -182,7 +182,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__link[aria-cur
   background: var(--cs-rail-on-accent); color: var(--cs-rail-accent);
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__badge { min-inline-size: 20px; block-size: 20px; padding-inline: 5px; }
-live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__agent { margin-block: 0; padding-inline-start: 30px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__agent { margin-block: 0; padding-inline: 10px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail__agent::before { inset-block: 0; border-radius: 5px; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-products { align-items: stretch; gap: 0; inline-size: 100%; }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product {
@@ -235,14 +235,27 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .cs-org-rail-products { inline-size: 100%; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-workspace { grid-column: 2; grid-row: 1 / 4; }
-  /* Slack-style horizontal section tab bar docked right under the workspace header. */
+  /* Slack-style compact header line and horizontal section underline tab bar docked right under it. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > [data-home-workspace-shell] {
     flex: none;
   }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header {
+    min-block-size: 40px; padding: 6px 20px 2px; gap: 12px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-inline-size: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__title {
+    font-size: 17px; font-weight: 700; line-height: 24px; letter-spacing: -0.02em;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill {
+    margin-inline-start: 0; min-block-size: 24px; padding: 0 8px; border-radius: 6px;
+    border: 1px solid var(--carbon-line, var(--cs-line)); background: var(--k-shell-subtle);
+  }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail {
     flex: none; display: flex; flex-direction: row; align-items: center;
-    inline-size: 100%; block-size: 36px; min-block-size: 36px; padding: 0 16px; gap: 4px;
-    border: 0; border-block-end: 1px solid var(--k-shell-line, var(--cs-line));
+    inline-size: 100%; block-size: 32px; min-block-size: 32px; padding: 0 20px; gap: 4px;
+    border: 0; border-block-end: 1px solid var(--carbon-line, var(--cs-line));
     background: var(--k-shell-surface, var(--cs-surface)); overflow-x: auto; overflow-y: hidden;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main:not(:has(> [data-home-workspace-shell] .hm-ws-header)) > .cs-org-rail {
@@ -261,7 +274,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail .cs-org-product {
     display: inline-flex; align-items: center; justify-content: center; inline-size: auto;
-    block-size: 100%; min-block-size: 32px; padding: 0 10px; gap: 6px; border-radius: 6px 6px 0 0;
+    block-size: 100%; min-block-size: 30px; padding: 0 8px; gap: 6px; border-radius: 6px 6px 0 0;
     font-size: 13px; font-weight: 500; color: var(--k-shell-secondary, var(--cs-secondary));
     background: transparent; white-space: nowrap;
   }
@@ -386,6 +399,7 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
 @media (width > 52rem) and (width <= 64rem) {
   /* 45px with its 1px bottom border, so the products inside get a full 44px (they measured 43). */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: auto; min-block-size: 45px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { min-inline-size: 44px; min-block-size: 44px; }
 }
 
 /* On short landscape screens, reserve bounded tracks for both the Wiki index and product rail. */

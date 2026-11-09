@@ -119,16 +119,51 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send-i
 /* Desktop keeps its existing Send word; phone keeps its existing arrow.
  * Active, disabled, posting/spinner and action colors stay app-owned. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: -6px;
+  padding: 4px 10px 6px;
   color: var(--k-shell-secondary);
+  background: var(--k-shell-subtle);
+  border: 1px solid var(--carbon-line, var(--k-shell-line));
+  border-radius: 0 0 10px 10px;
   font-size: 12px;
   font-weight: 400;
-  line-height: 1.5;
+  line-height: 1.4;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[hidden] {
+  display: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-label {
-  font-weight: 400;
+  font-weight: 500;
+  color: var(--k-shell-muted);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-chip {
   border-radius: 6px;
+}
+/* Keep #dashboard-composer-to-note in the DOM for aria-describedby readout while
+ * hiding the helper sentence visually inside the compact To: footer bar. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-note {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+@media (width > 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-chips {
+    padding-block: 1px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-chip :is(.dashboard__composer-chip-name, .dashboard__composer-chip-remove) {
+    min-block-size: 22px;
+    padding-block: 1px;
+    font-size: 12px;
+  }
 }
 /* Target and Cancel share a natural row. The metadata stays in that paragraph,
  * wrapping with long/unknown/closed-thread facts instead of becoming another card. */
