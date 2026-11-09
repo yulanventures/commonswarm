@@ -30,12 +30,12 @@ export const VIEWPORTS = [
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
-/** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait.
+/** One setup step; fields run in this order: media, waitFor, click, tap, type (with text), press, scroll, wait.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
+type Step = { media?: string; waitFor?: string; click?: string; tap?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[] }
@@ -301,6 +301,7 @@ async function main(): Promise<void> {
                   await page.click(target, { timeout: 8_000 });
                 }
               }
+              if (step.tap) await page.tap(fill(step.tap, seed.ids), { timeout: 8_000 });
               if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
               if (step.press) await page.keyboard.press(step.press);
               if (step.scroll) await page.locator(fill(step.scroll, seed.ids)).first().scrollIntoViewIfNeeded({ timeout: 8_000 });

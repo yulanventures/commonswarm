@@ -6,13 +6,13 @@
     "setup": [
       {
         "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
-        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+        "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       }
     ],
     "ready": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"]:focus",
     "states": [
       "dense",
-      "tap-focus"
+      "touch-focus"
     ],
     "requiresSeed": [
       "message.richtext.code"
@@ -25,7 +25,7 @@
     "setup": [
       {
         "waitFor": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre",
-        "click": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
+        "tap": ".dashboard__feed > .dashboard__message[data-signal-id=\"{message.richtext.code}\"] .dashboard__message-markdown pre"
       },
       {
         "press": "Tab"
