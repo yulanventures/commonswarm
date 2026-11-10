@@ -461,8 +461,9 @@ async function main(): Promise<void> {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
         const { context, signedIn } = await openContexts(viewport, theme, !desktop);
-        const result = await runPictureChecks(async () => {
+        const result = await runPictureChecks(async (setup) => {
           const page = await signedIn.newPage();
+          await setup(page);
           await openScreen(page, general);
           return page;
         }, async (page, label) => {

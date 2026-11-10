@@ -73,8 +73,9 @@ const PICTURE = () => {
 };
 type Picture = NonNullable<ReturnType<typeof PICTURE>>;
 
+/** `open(setup)` creates a page, runs `setup` on it (the storage routes) BEFORE any navigation, then opens the screen. */
 export async function runPictureChecks(
-  open: () => Promise<any>,
+  open: (setup: (page: any) => Promise<void>) => Promise<any>,
   shot: (page: any, label: string) => Promise<void>,
   options: { click: boolean },
 ): Promise<{ checks: PictureCheck[]; error: string | null }> {
@@ -94,10 +95,11 @@ export async function runPictureChecks(
     // 1. Held storage: the frame is laid out at its final size before any byte arrives, and loading keeps it.
     let release: () => void = () => {};
     const held = new Promise<void>(done => { release = done; });
-    const page = await open();
-    await page.route(SIGNED, async (route: any) => {
-      if (route.request().resourceType() === "image") await held;
-      await route.continue();
+    const page = await open(async (p: any) => {
+      await p.route(SIGNED, async (route: any) => {
+        if (route.request().resourceType() === "image") await held;
+        await route.continue();
+      });
     });
     const before = await until(page, p => p.signed);
     check("picture is signed and waiting", !!before?.signed && !before.loaded, before);
@@ -121,10 +123,11 @@ export async function runPictureChecks(
     await page.close();
 
     // 3. Failed storage: after one retry the frame says so and keeps its size; then the composer's staged previews.
-    const failing = await open();
-    await failing.route(SIGNED, async (route: any) => {
-      if (route.request().resourceType() === "image") await route.fulfill({ status: 404, body: "not found" });
-      else await route.continue();
+    const failing = await open(async (p: any) => {
+      await p.route(SIGNED, async (route: any) => {
+        if (route.request().resourceType() === "image") await route.fulfill({ status: 404, body: "not found" });
+        else await route.continue();
+      });
     });
     const failed = await until(failing, p => p.state === "unavailable");
     check("a picture that fails shows the unavailable state", failed?.state === "unavailable" && !failed.loaded, failed);
