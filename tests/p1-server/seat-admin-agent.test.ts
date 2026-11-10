@@ -371,8 +371,11 @@ test("rename the organization: an organization grant only, name only, attributed
   const orgGrant = await grant({ level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspace });
   const bad = await agentCommand({ kind: "rename_organization", display_name: " padded " });
   assert.equal(bad.status, 400, JSON.stringify(bad.body));
-  const renamed = await agentCommand({ kind: "rename_organization", display_name: "Renamed org" });
+  const renameId = randomUUID();
+  const renamed = await agentCommand({ kind: "rename_organization", display_name: "Renamed org" }, { commandId: renameId });
   assert.equal(renamed.status, 200, JSON.stringify(renamed.body) + functionLogs.slice(-2000));
+  const replayed = await agentCommand({ kind: "rename_organization", display_name: "Renamed org" }, { commandId: renameId });
+  assert.equal(replayed.status, 200, `a replay under the live grant: ${JSON.stringify(replayed.body)}`);
   const [org] = await sql<{ display_name: string; slug: string }[]>`SELECT display_name, slug FROM swarm.organizations WHERE id = ${workspace}::uuid`;
   assert.deepEqual([org!.display_name, org!.slug], ["Renamed org", slugBefore], "name only; the slug stays");
   const [audit] = await sql<{ actor_agent_principal: string; detail: string }[]>`SELECT actor_agent_principal, detail FROM swarm.audit_log
@@ -383,20 +386,33 @@ test("rename the organization: an organization grant only, name only, attributed
   assert.deepEqual(accepted.map((h) => [h.action, h.target_kind, h.target_id]), [["rename_organization", "organization", workspace]]);
   await endGrant(orgGrant);
   refused(await agentCommand({ kind: "rename_organization", display_name: "After end" }), "seat_admin_inactive", "after end");
+  refused(await agentCommand({ kind: "rename_organization", display_name: "Renamed org" }, { commandId: renameId }), "seat_admin_inactive",
+    "replay after end");
 });
 
 test("rename the organization as its owner; a member and an ordinary agent cannot", async () => {
-  const human = async (bearer: string, name: string) => {
+  const human = async (bearer: string, name: string, commandId: string = randomUUID()) => {
     const response = await fetch(`${local.API_URL}/functions/v1/command`, { method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", origin: ORIGIN },
-      body: JSON.stringify({ command_id: randomUUID(), client_version: "0.1.93", workspace_id: workspace, stream: { kind: "workspace" },
+      body: JSON.stringify({ command_id: commandId, client_version: "0.1.93", workspace_id: workspace, stream: { kind: "workspace" },
         command: { kind: "rename_organization", display_name: name } }) });
     return { status: response.status, body: await response.json() as Record<string, unknown> };
   };
   const byMember = await human(other.jwt, "By member");
   assert.equal(byMember.status, 403, JSON.stringify(byMember.body));
-  const byOwner = await human(owner.jwt, "By owner");
+  const ownerId = randomUUID();
+  const byOwner = await human(owner.jwt, "By owner", ownerId);
   assert.equal(byOwner.status, 200, JSON.stringify(byOwner.body) + functionLogs.slice(-2000));
+  assert.equal((await human(owner.jwt, "By owner", ownerId)).status, 200, "the owner's replay");
+  // Ownership lost: the replay re-checks it now and refuses.
+  await sql`UPDATE swarm.org_memberships SET role = 'admin' WHERE org_id = ${workspace}::uuid AND principal_kind = 'user'
+    AND principal_id = ${owner.id}::uuid`;
+  try {
+    assert.equal((await human(owner.jwt, "By owner", ownerId)).status, 403, "replay after losing ownership");
+  } finally {
+    await sql`UPDATE swarm.org_memberships SET role = 'owner' WHERE org_id = ${workspace}::uuid AND principal_kind = 'user'
+      AND principal_id = ${owner.id}::uuid`;
+  }
   const [org] = await sql<{ display_name: string }[]>`SELECT display_name FROM swarm.organizations WHERE id = ${workspace}::uuid`;
   assert.equal(org!.display_name, "By owner");
 });

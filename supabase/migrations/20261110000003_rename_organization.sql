@@ -25,3 +25,15 @@ $$;
 ALTER FUNCTION swarm.rename_organization(uuid, uuid, text) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.rename_organization(uuid, uuid, text) FROM PUBLIC, anon, authenticated, swarm_read;
 GRANT EXECUTE ON FUNCTION swarm.rename_organization(uuid, uuid, text) TO swarm_command;
+
+-- The command role has no access to organizations or org_memberships. A seat admin rename takes the addressed
+-- workspace's organization row FOR UPDATE before its grant is decided (where the coverage check would take it FOR
+-- SHARE), through this helper only. Returns the organization id, or NULL when the workspace is missing.
+CREATE FUNCTION swarm.lock_workspace_organization(p_workspace uuid)
+RETURNS uuid LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
+ SELECT o.id FROM swarm.organizations o JOIN swarm.workspaces w ON w.org_id = o.id
+ WHERE w.workspace_id = p_workspace FOR UPDATE OF o
+$$;
+ALTER FUNCTION swarm.lock_workspace_organization(uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.lock_workspace_organization(uuid) FROM PUBLIC, anon, authenticated, swarm_read;
+GRANT EXECUTE ON FUNCTION swarm.lock_workspace_organization(uuid) TO swarm_command;

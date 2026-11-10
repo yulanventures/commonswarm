@@ -6139,10 +6139,9 @@ async function renameOrganization(tx:Sql,body:RequestBody,auth:AuthContext,detai
   if(prior) {
     if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==target.stream_id) return {status:409,body:{error:'command_id_conflict'}};
     // Authority now, not at the first call: a seat admin replay was re-decided by the hook; a person must still own it.
-    const [owner]=await tx<{ok:boolean}[]>`SELECT EXISTS(SELECT 1 FROM swarm.org_memberships m JOIN swarm.organizations o ON o.id=m.org_id
-      WHERE m.org_id=${target.org_id}::uuid AND m.principal_kind='user' AND m.principal_id=${authorizer}::uuid AND m.role='owner'
-        AND m.revoked_at IS NULL AND o.archived_at IS NULL) AS ok`;
-    if(!owner?.ok) return await refuse(403,'forbidden',target.org_id,hash);
+    // The command role reads organizations only through this narrow helper.
+    const [owner]=await tx<{r:{owner:boolean;archived:boolean}|null}[]>`SELECT swarm.seat_admin_org_owner(${target.org_id}::uuid,${authorizer}::uuid) AS r`;
+    if(owner?.r?.owner!==true || owner.r.archived===true) return await refuse(403,'forbidden',target.org_id,hash);
     await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:target.stream_id,outcome:'replayed',hash,detail:auditDetail(detail)});
     return replayResult(storedResponse(prior.response),kind);
   }
@@ -13354,8 +13353,7 @@ async function handleTransaction(
       // rename_organization: the organization row FOR UPDATE now, where authorizeSeatAdminAction would take it FOR SHARE
       // (after the plan's locks), so two renames never both hold SHARE and wait to upgrade.
       if (kind === "rename_organization") {
-        await tx`SELECT o.id FROM swarm.organizations o JOIN swarm.workspaces w ON w.org_id = o.id
-          WHERE w.workspace_id = ${localWorkspace}::uuid FOR UPDATE OF o`;
+        await tx`SELECT swarm.lock_workspace_organization(${localWorkspace}::uuid)`;
       }
       const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
         kind, workspace_id: localWorkspace });
