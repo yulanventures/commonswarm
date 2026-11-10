@@ -114,11 +114,14 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a {
   position: relative;
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
   min-block-size: 44px;
-  /* Preserve the prose line box while keeping the actual link target 44px tall. */
-  margin-block: calc(.8em - 22px);
+  /* Wrapped lines reserve the full height of each link's real hit box. */
+  margin-block: 0;
   padding-inline: 2px;
   color: var(--k-shell-ink);
   text-underline-offset: 3px;

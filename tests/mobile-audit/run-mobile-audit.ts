@@ -22,7 +22,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
-import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type KeyboardSpec } from "./audit-checks.js";
+import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
 import "./witness-matrix.js";
 
@@ -71,13 +71,14 @@ const STARTER: Screen[] = [
 ];
 
 /** Overlay roots the generic rules cannot recognise, counted only while shown. */
-const DECLARED_OVERLAYS: Record<string, string[]> = {
+const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
-  // Between 52rem and 1399px the channel details panel is a side sheet over the main column.
-  "dialog.details-sheet": [".hm-frame > #cs-channel-details.hm-frame__side"],
+  // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
+  // use a native dialog, and from 1400px it is an ordinary column beside the main one.
+  "dialog.details-sheet": [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 52rem) and (width <= 1399px)" }],
 };
 /** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
 const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {

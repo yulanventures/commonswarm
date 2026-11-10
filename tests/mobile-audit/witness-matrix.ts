@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
-import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type KeyboardSpec } from "./audit-checks.js";
+import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 
 type Geometry = ReturnType<typeof GEOMETRY_WITNESS>;
 type Keyboard = Awaited<ReturnType<typeof runKeyboardWitness>>;
@@ -18,7 +18,7 @@ type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActi
   focus(selector: string): Promise<void>;
   close(): Promise<void>;
 };
-type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; declared?: string[]; keyboard?: KeyboardSpec;
+type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; declared?: DeclaredOverlay[]; keyboard?: KeyboardSpec;
   /** Runs between CHECKS and GEOMETRY_WITNESS, where the runner takes the primary screenshot. */
   between?: (page: Page) => Promise<void>;
   /** Served from a fixture origin (real navigation) instead of setContent; other paths answer with a stub page. */
@@ -160,6 +160,11 @@ const ROWS: Row[] = [
     assert.deepEqual(g.unexpectedObscured, []);
     assert.deepEqual(g.foregroundObscured, []);
   } },
+  { name: "a declared root whose media query does not match is not an overlay", html: listPage, declared: [{ selector: "#list", media: "(width > 9999px)" }],
+    check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, null, show(g.overlay));
+      assert.deepEqual(g.unexpectedObscured, [{ selector: "button#trigger", by: "div#list" }]);
+    } },
   { name: "the same list undeclared leaves the covered control unexpected", html: listPage, check: ({ geometry: g }) => {
     assert.equal(g.overlay.front, null, show(g.overlay));
     assert.deepEqual(g.unexpectedObscured, [{ selector: "button#trigger", by: "div#list" }]);

@@ -148,7 +148,9 @@ export type WitnessHelpers = {
  * `declared` names overlay roots the generic rules cannot recognise (an `aside` profile panel,
  * a picker's list); a declared root counts only while it is shown.
  */
-export const GEOMETRY_WITNESS = (declared: string[]) => {
+/** A declared overlay root: a selector, or a selector that counts only while `media` matches. */
+export type DeclaredOverlay = string | { selector: string; media: string };
+export const GEOMETRY_WITNESS = (declared: DeclaredOverlay[]) => {
   const raw = (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw;
   if (!raw) throw new Error("CHECKS must run before GEOMETRY_WITNESS");
   const { describe, visible, reaches, collect, measured: rawMeasured, small, overlapPairs, modal } = raw;
@@ -233,7 +235,10 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   // modal's backdrop takes every hit beneath it). Menus, listboxes and dialogs count when they are
   // positioned; native dialogs, popovers and declared roots count whenever they are shown.
   const popovers = (() => { try { return [...document.querySelectorAll(":popover-open")]; } catch { return []; } })();
-  const declaredEls = declared.flatMap(sel => [...document.querySelectorAll(sel)]);
+  const declaredEls = declared.flatMap(d => {
+    const { selector, media } = typeof d === "string" ? { selector: d, media: null } : d;
+    return media && !matchMedia(media).matches ? [] : [...document.querySelectorAll(selector)];
+  });
   const overlayEls = [...new Set([...document.querySelectorAll('dialog[open], [aria-modal="true"], [role="dialog"], [role="menu"], [role="listbox"]'), ...popovers, ...declaredEls])]
     .filter(el => {
       if (!visible(el)) return false;
