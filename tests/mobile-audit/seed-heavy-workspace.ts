@@ -54,6 +54,20 @@ const BODIES = [
   "Heads up: the plumber is coming between 8 and 10am tomorrow.",
 ];
 
+/**
+ * A real refresh for a witness: a short note in #general that expires after a few seconds. The app's own polling
+ * shows it and its expiry timer removes it, rebuilding the feed each time; later pages never see it.
+ */
+export async function postExpiringNote(env: SeedEnvironment, ids: Record<string, string>): Promise<void> {
+  assert.ok(loopback(env.dbUrl), "local stack only");
+  const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
+  try {
+    await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
+      VALUES (gen_random_uuid(), ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
+        statement_timestamp() + interval '4 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+  } finally { await sql.end({ timeout: 5 }); }
+}
+
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
   for (const url of [env.apiUrl, env.dbUrl]) assert.ok(loopback(url), `seed refuses non-local target ${new URL(url).hostname}`);
   const notes: string[] = [];
@@ -241,15 +255,6 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
         steps.push("seed_addressed");
       } catch (error) { note("seed_addressed", error); }
-      // Every message addressed to the viewer starts already seen. Otherwise the first capture marks it seen, and the
-      // next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
-      try {
-        await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
-          SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
-          WHERE workspace_id = ${workspace}::uuid AND to_user_id = ${owner.id}::uuid
-          ON CONFLICT DO NOTHING`;
-        steps.push("seed_viewer_seen");
-      } catch (error) { note("seed_viewer_seen", error); }
       // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
       // real feed rebuild.
       try {
@@ -267,6 +272,15 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.long"] = long;
         steps.push("seed_long_message");
       } catch (error) { note("seed_long_message", error); }
+      // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
+      // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
+      try {
+        await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+          SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
+          WHERE workspace_id = ${workspace}::uuid AND from_principal <> ${owner.id}::uuid
+          ON CONFLICT DO NOTHING`;
+        steps.push("seed_viewer_seen");
+      } catch (error) { note("seed_viewer_seen", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.

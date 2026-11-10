@@ -346,7 +346,9 @@ export type HoverRowResult = {
   early?: Compared; late?: Compared; restored?: Compared; restoredShifts?: number;
 };
 
-export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (label: string) => Promise<void>) {
+export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (label: string) => Promise<void>,
+  /** focusAcrossRebuild: makes the app refresh by itself (new data its own polling picks up). */
+  refresh?: () => Promise<void>) {
   const modes: ("hover" | "focus")[] = spec.focus ? ["hover", "focus"] : ["hover"];
   const required = spec.require ?? [];
   const coverage = required.flatMap(selector => modes.map(mode => ({ selector, mode, measured: false })));
@@ -418,10 +420,11 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     }
     const early = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "early", tolerance }) as ProbeError | ProbeCompared;
     if (mode === "focus" && spec.focusAcrossRebuild) {
-      // The marked row node leaves the document when the app rebuilds the list.
-      const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: 12_000 })
+      // New data the app's own polling picks up; the marked row node leaves the document when the app rebuilds the list.
+      if (refresh) await refresh();
+      const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: 20_000 })
         .then(() => true, () => false);
-      if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: "the feed did not rebuild the focused row within 12 s" }); return; }
+      if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: "the feed did not rebuild the focused row within 20 s" }); return; }
       await page.evaluate((_: null) => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => done())))), null);
       const same = await page.evaluate(SAME_CONTROL, { key: entry.key, target: spec.focusTarget ?? null, rows: spec.rows });
       if (!same) { Object.assign(entry, { outcome: "error", reason: "focus did not return to the same control after the rebuild" }); return; }

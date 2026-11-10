@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { postExpiringNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -418,7 +418,7 @@ async function main(): Promise<void> {
             const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
-          } : undefined));
+          } : undefined, spec.focusAcrossRebuild ? () => postExpiringNote(env, seed.ids) : undefined));
         }
         await page.mouse.move(1, 1);
         await page.evaluate(() => {
