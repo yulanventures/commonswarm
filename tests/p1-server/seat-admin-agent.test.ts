@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, test } from "node:test";
+import { after, afterEach, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
@@ -86,9 +86,14 @@ before(async () => {
     await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${owner.id}::uuid, 'SeatOwner'), (${other.id}::uuid, 'SeatOther')`;
     await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'seat-admin')`;
     await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'SeatAdmin', ${owner.id}::uuid)`;
-    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
-      VALUES (${workspace}::uuid, ${owner.id}::uuid, 'owner'), (${workspace}::uuid, ${other.id}::uuid, 'member')`;
-    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner.id}::uuid, 'owner')`;
+    // The workspace stream with its history: the reducer rebuilds the workspace from events, never from rows.
+    const streamId = randomUUID();
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${streamId}::uuid, ${workspace}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.events (workspace_id, stream_id, seq, event_id, command_id, type, schema_version, actor_user, payload)
+      VALUES (${workspace}::uuid, ${streamId}::uuid, 1, ${randomUUID()}::uuid, ${randomUUID()}, 'WorkspaceCreated', 1, ${owner.id}::uuid,
+        ${tx.json({ workspace_id: workspace, name: "SeatAdmin", created_by: owner.id, created_at: Date.now() })})`;
+    await tx`UPDATE swarm.streams SET head_seq = 1 WHERE stream_id = ${streamId}::uuid`;
     await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
       VALUES (${agent}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'seat-admin-agent')`;
     await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${agent}::uuid, ${device}::uuid)`;
@@ -99,6 +104,27 @@ before(async () => {
       VALUES (${randomUUID()}::uuid, ${agent}::uuid, ${run}::uuid, ${tx.json(["post_signal"])}::jsonb,
         ${createHash("sha256").update(agentToken).digest()}, statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)`;
   });
+  await joinWorkspace(other.id, "member");
+});
+
+/** A person joins the workspace: the membership row and its MemberJoined event, as the command path writes both. */
+async function joinWorkspace(userId: string, role: "member" | "admin") {
+  await sql.begin(async (tx) => {
+    const [stream] = await tx<{ stream_id: string; head_seq: string }[]>`SELECT stream_id, head_seq FROM swarm.streams
+      WHERE workspace_id = ${workspace}::uuid AND kind = 'workspace' FOR UPDATE`;
+    const seq = Number(stream!.head_seq) + 1;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${workspace}::uuid, ${userId}::uuid, ${role})`;
+    await tx`INSERT INTO swarm.events (workspace_id, stream_id, seq, event_id, command_id, type, schema_version, actor_user, payload)
+      VALUES (${workspace}::uuid, ${stream!.stream_id}::uuid, ${seq}, ${randomUUID()}::uuid, ${randomUUID()}, 'MemberJoined', 1, ${owner.id}::uuid,
+        ${tx.json({ user_id: userId, role, invited_by: owner.id, joined_at: Date.now() })})`;
+    await tx`UPDATE swarm.streams SET head_seq = ${seq} WHERE stream_id = ${stream!.stream_id}::uuid`;
+  });
+}
+
+// One test's failure never leaves a grant active for the next.
+afterEach(async () => {
+  await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'owner_downgrade'
+    WHERE owner_user_id = ${owner.id}::uuid AND state = 'active'`;
 });
 
 after(async () => {
