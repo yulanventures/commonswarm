@@ -12,6 +12,8 @@ import {proveHostedContentWithdrawal} from '../support/hosted-content-withdrawal
 import {offlineHostedData,offlineHostedDatabase,runOfflineHostedCommands} from '../support/hosted-agent-offline.js';
 const root='deploy/release-proofs/agents/20261028000003';
 const migration='supabase/migrations/20261028000003_hosted_agent_workspaces.sql';
+// Later migrations change objects this catalog pins: undo them first, inside the same rolled-back drill.
+const later=()=>repoSql('deploy/release-proofs/seat-admin-member-removal/20261110000002-rollback.sql');
 const catalog=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${root}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'hosted agents catalog');
 const legacy=()=>repoSql('tests/fixtures/hosted-agent-workspaces-before.sql')+repoSql('supabase/migrations/20261025000001_permanence_grandfather.sql');
 async function schemaSql(sql:string) {
@@ -26,7 +28,7 @@ async function commandDatabase() {
 }
 
 test('hosted migration backfills exact identities, preserves grandfathered consent/handles, fences removal and keeps dormant families',async()=>{
- await schemaSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+legacy()+repoSql(migration)+catalog()
+ await schemaSql(later()+catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+legacy()+repoSql(migration)+catalog()
   +repoSql('tests/fixtures/hosted-agent-workspaces.sql')+repoSql(`${root}-functional.sql`)+refuses(repoSql(`${root}-rollback.sql`),'55000'));
 });
 
@@ -35,7 +37,7 @@ test('hosted migration rollback/reapply preserves the prior authority catalog an
   const name=`20261028000003-${suffix}.sql`;
   assert.deepEqual(readFileSync(`supabase/agents-reserve/${name}`),readFileSync(`deploy/release-proofs/agents/${name}`));
  }
- await schemaSql(catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+repoSql(migration)+catalog());
+ await schemaSql(later()+catalog()+repoSql(`${root}-rollback.sql`)+catalog(true)+repoSql(migration)+catalog());
 });
 
 const A='13000000-0000-4000-8000-000000000001',B='13000000-0000-4000-8000-000000000002';

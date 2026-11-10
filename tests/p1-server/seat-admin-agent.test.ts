@@ -289,10 +289,10 @@ test("a grant that expires while the organization lookup waits refuses and chang
 test("remove a member: membership, their agents and household access end, attributed to the agent and the grantor", async () => {
   const member = await person("seat-agent-member"), adminPerson = await person("seat-agent-admin");
   const memberAgent = randomUUID();
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${member.id}::uuid, 'SeatMember'), (${adminPerson.id}::uuid, 'SeatAdminPerson')`;
+  await joinWorkspace(member.id, "member");
+  await joinWorkspace(adminPerson.id, "admin");
   await sql.begin(async (tx) => {
-    await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${member.id}::uuid, 'SeatMember'), (${adminPerson.id}::uuid, 'SeatAdminPerson')`;
-    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
-      VALUES (${workspace}::uuid, ${member.id}::uuid, 'member'), (${workspace}::uuid, ${adminPerson.id}::uuid, 'admin')`;
     await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
       VALUES (${memberAgent}::uuid, ${workspace}::uuid, ${member.id}::uuid, 'member-agent')`;
     await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)

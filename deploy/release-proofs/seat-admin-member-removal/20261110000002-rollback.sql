@@ -1,7 +1,7 @@
 -- RESERVE ONLY. Rolls back 20261110000002_seat_admin_member_removal with the edge first returned to a build that
 -- never sets cswarm.household_agent_principal or calls the four-argument removal. Keeps the tombstone column when
--- any row names an agent (with a NOTICE): attribution history is never discarded.
-BEGIN;
+-- any row names an agent (with a NOTICE): attribution history is never discarded. Runs inside the operator's
+-- transaction, which also removes the ledger row, like the other reserve rollbacks.
 CREATE OR REPLACE FUNCTION swarm.audit_household_permission() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog AS $$
 DECLARE
@@ -116,5 +116,3 @@ BEGIN
     ALTER TABLE swarm.revocation_tombstones DROP COLUMN created_by_agent_principal;
   END IF;
 END $$;
-DELETE FROM supabase_migrations.schema_migrations WHERE version = '20261110000002';
-COMMIT;

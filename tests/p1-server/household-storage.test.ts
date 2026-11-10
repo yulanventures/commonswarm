@@ -352,7 +352,9 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   // overlay first to test the original exact catalogs; this entire drill rolls back.
   // Project away the later permanent-connection overlay only inside this rolled-back historical drill.
   const agentRollback = (version: string) => readFileSync(new URL(`../../deploy/release-proofs/agents/${version}-rollback.sql`, import.meta.url), 'utf8');
-  let script = agentRollback('20261028000003') + '\n' + agentRollback('20261028000002') + '\n' + agentRollback('20261028000001') + '\nALTER TABLE swarm.household_content_connections DROP COLUMN IF EXISTS renewal_grant_id;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
+  // Later migrations first: 20261110000002 replaces audit_household_permission and the hosted removal.
+  let script = readFileSync(new URL('../../deploy/release-proofs/seat-admin-member-removal/20261110000002-rollback.sql', import.meta.url), 'utf8') + '\n'
+    + agentRollback('20261028000003') + '\n' + agentRollback('20261028000002') + '\n' + agentRollback('20261028000001') + '\nALTER TABLE swarm.household_content_connections DROP COLUMN IF EXISTS renewal_grant_id;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
     + removalProof('rollback') + removalProof('rollback-catalog') + requireProof('rollback_ok',true)
     + approvalProof('catalog') + requireProof('catalog_ok',true)
     + approvalProof('rollback') + approvalProof('rollback-catalog') + requireProof('rollback_ok',true)
