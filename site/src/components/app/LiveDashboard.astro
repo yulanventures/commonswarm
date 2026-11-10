@@ -6138,7 +6138,7 @@ import "../../styles/kylon-command-palette.css";
         if (result.kind === "success") { files = result.value; fileLoadError = ""; }
         else { files = []; fileLoadError = `${readableError(result.error)} The signal feed is still available.`; }
       },
-      render: renderFiles,
+      render: () => { renderFiles(); renderBrain(); },
       isVisible: () => activeWorkspaceView === "files" && !fileRetryButton.closest("[hidden], [inert]"),
     }) : null;
 
@@ -8701,11 +8701,18 @@ import "../../styles/kylon-command-palette.css";
         const removedAgentsRead = removedAgentNames(selected.id);
         const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
         const claimsRead = homeWorkingOn(selected.id);
-        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
-          roster(selected.id),
-          memberRoster(selected.id),
-          pendingMemberInvites(selected.id),
-          agentAccessStatuses(selected.id),
+        const [
+          [rosterSettled, memberRosterSettled, invitesSettled, accessStatusesSettled],
+          nextPending,
+          nextFiles,
+          nextChannels,
+        ] = await Promise.all([
+          Promise.allSettled([
+            roster(selected.id),
+            memberRoster(selected.id),
+            pendingMemberInvites(selected.id),
+            agentAccessStatuses(selected.id),
+          ]),
           loadPendingAccess(() => pendingAgentAccess(selected.id)),
           workspaceFiles(selected.id).then(
             (value) => ({ value, error: "" }),
@@ -8725,20 +8732,26 @@ import "../../styles/kylon-command-palette.css";
         const nextRemovedAgents = await removedAgentsRead;
         const nextRemovedOwners = await removedOwnersRead;
         if (version !== requestVersion) return;
-        agents = nextAgents;
-        wakeRosterLastFetchedAt = Date.now();
-        homePeopleReadState = "ready";
         removedAgents = nextRemovedAgents;
         removedAgentOwners = nextRemovedOwners;
-        people = nextRoster.names;
-        members = nextRoster.members;
+        if (rosterSettled.status === "fulfilled") {
+          agents = rosterSettled.value;
+          wakeRosterLastFetchedAt = Date.now();
+        }
+        if (memberRosterSettled.status === "fulfilled") {
+          people = memberRosterSettled.value.names;
+          members = memberRosterSettled.value.members;
+        }
+        const nextInvites = invitesSettled.status === "fulfilled" ? invitesSettled.value : [];
         pendingInvites = nextInvites;
-        accessStatuses = nextAccessStatuses;
+        accessStatuses = accessStatusesSettled.status === "fulfilled" ? accessStatusesSettled.value : [];
         pendingAgents = nextPending.rows;
-        pendingAgentsLoadFailed = nextPending.failed;
+        pendingAgentsLoadFailed =
+          nextPending.failed ||
+          invitesSettled.status === "rejected" ||
+          accessStatusesSettled.status === "rejected";
         files = nextFiles.value;
         fileLoadError = nextFiles.error;
-        void loadHomeWorkspace();
         /* Only if no newer channel read has landed since this one started. A create the
            reader made while the workspace was still opening is newer than this snapshot, and
            it stays. */
@@ -8757,16 +8770,35 @@ import "../../styles/kylon-command-palette.css";
         applyChannelFromUrl(selected.id);
         syncChannelUrl();
         if (
+          invitesSettled.status === "fulfilled" &&
           freshInviteWorkspaceId === selected.id &&
           shouldRetireFreshInvite(freshInviteId, nextInvites)
         ) {
           retireFreshInviteResult();
         }
+        renderFiles();
+        renderBrain();
+        const rosterError =
+          rosterSettled.status === "rejected"
+            ? rosterSettled.reason
+            : memberRosterSettled.status === "rejected"
+              ? memberRosterSettled.reason
+              : null;
+        if (rosterError !== null) {
+          homePeopleReadState = "failed";
+          void loadHomeWorkspace();
+          renderMembers();
+          renderPendingAccess();
+          renderHomeRail();
+          renderHomeShell();
+          renderHomeSide();
+          throw rosterError;
+        }
+        homePeopleReadState = "ready";
+        void loadHomeWorkspace();
         if (!addAgentViewOpen()) renderChannel(selected);
         renderMembers();
         renderPendingAccess();
-        renderFiles();
-        renderBrain();
         renderHomeRail();
         renderHomeShell();
         renderHomeSide();
@@ -10813,6 +10845,7 @@ import "../../styles/kylon-command-palette.css";
         /* ?w= names the workspace to open. It is honoured only when it is in this
            reader's own memberships, so a stale or foreign id opens the default one rather
            than an error: the address bar is a convenience, never an authorization. */
+        activeWorkspaceId = "";
         await navigateHome(resolveHomeRoute(window.location.search, workspaces), "replace");
       } catch (error) {
         if (version !== requestVersion) return;
