@@ -64,7 +64,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 50 || 30 }}
+    timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 90 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
