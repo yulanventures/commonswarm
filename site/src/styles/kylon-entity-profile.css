@@ -150,7 +150,8 @@ live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] .dashboard__entit
   font: inherit;
 }
 
-/* Inline owner traversal stays in the sentence; only discrete agent rows grow. */
+/* Above 64rem the owner link stays inline in its sentence; at 64rem and below it becomes a
+ * 44px target (the media rule at the end of this file). Agent rows are discrete targets. */
 live-dashboard.dashboard[data-kylon-shell] [data-entity-panel] :is(.dashboard__entity-link, .dashboard__entity-agent-link) {
   color: var(--k-shell-ink);
   border-radius: var(--k-shell-radius);
