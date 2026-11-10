@@ -84,15 +84,28 @@ const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" s
     <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
   </li>`).join("")}</ul>${after}`, // Row padding is a stylesheet rule, not inline, so a fixture's :hover rule can change it.
   `.msg{padding:4px 8px} .to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
-/** Ten keyed rows in a 200px scroller; `onHover` runs once, on the first pointer entry into row s5. */
-const keyedList = (onHover: string) => page(`<div id="scroller" style="height:200px;overflow:auto;width:300px">
-  <ul id="feed" style="list-style:none;margin:0;padding:0">${Array.from({ length: 10 }, (_, i) =>
-    `<li class="msg" data-signal-id="s${i}" style="height:40px;margin:0">Row ${i}</li>`).join("")}</ul></div>
-  <script>let fired = false; document.getElementById("scroller").addEventListener("mouseover", (event) => {
+/** Ten keyed rows (each with a link), in a 200px scroller or in the page itself. `onHover` runs once, on the first pointer
+ *  entry into row s5; `onFocus` once, on the first focus inside it; `onLoad` at load. `fresh()` rebuilds the list from
+ *  new markup, so rebuilt rows carry no audit marker. */
+const keyedList = (onHover: string, options: { onLoad?: string; onFocus?: string; inPage?: boolean } = {}) => {
+  const rows = Array.from({ length: 10 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="line-height:40px;margin:0">Row ${i} <a href="#s${i}">open</a></li>`).join("");
+  return page(`${options.inPage ? '<div style="height:600px"></div>' : ""}
+  <div id="scroller" style="${options.inPage ? "" : "height:200px;overflow:auto;"}width:300px">
+  <ul id="feed" style="list-style:none;margin:0;padding:0">${rows}</ul></div>${options.inPage ? '<div style="height:1200px"></div>' : ""}
+  <script>const feed = document.getElementById("feed"); const scroller = document.getElementById("scroller");
+  const fresh = () => { feed.innerHTML = ${JSON.stringify(rows)}; };
+  ${options.onLoad ?? ""}
+  let fired = false; scroller.addEventListener("mouseover", (event) => {
     const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
-    if (!row || fired) return; fired = true; const feed = document.getElementById("feed"); const scroller = document.getElementById("scroller");
+    if (!row || fired) return; fired = true;
     ${onHover}
+  });
+  let focused = false; scroller.addEventListener("focusin", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || focused) return; focused = true;
+    ${options.onFocus ?? ""}
   });</script>`);
+};
 const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
@@ -344,7 +357,7 @@ const ROWS: Row[] = [
       assert.ok((r.early?.rebuilt ?? 0) + (r.late?.rebuilt ?? 0) > 0, show(r));
   } },
   { name: "a rebuild caused by hover that makes the row taller is a shift, not a re-measure",
-    html: keyedList("feed.innerHTML = feed.innerHTML.replace('Row 5<', 'Row 5<br>a second line<');"), hover: keyedSpec, check: ({ hover: h }) => {
+    html: keyedList("feed.innerHTML = feed.innerHTML.replace('Row 5 ', 'Row 5<br>a second line ');"), hover: keyedSpec, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "shifted", show(h));
       assert.ok((h!.rows[0]!.early?.rebuilt ?? 0) + (h!.rows[0]!.late?.rebuilt ?? 0) > 0, show(h));
   } },
@@ -361,6 +374,22 @@ const ROWS: Row[] = [
       assert.equal(h?.outcome, "stable", show(h));
       const r = h!.rows[0]!;
       assert.ok([r.early, r.late].some(c => c && c.scrolled.y !== 0), show(r));
+  } },
+  { name: "a list rebuilt by a pending read before rest is measured on the live rows, and a later required row is covered",
+    html: keyedList("", { onLoad: "globalThis.__auditPendingFetches = 1; setTimeout(() => { fresh(); globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = performance.now(); }, 300);" }),
+    hover: { name: "keyed", rows: "#feed > .msg", require: ['[data-signal-id="s7"]'], max: 2 }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.deepEqual(h!.coverage, [{ selector: '[data-signal-id="s7"]', mode: "hover", measured: true }], show(h));
+  } },
+  { name: "focus lost to a rebuild during the measurement is an error, never a stable pass",
+    html: keyedList("", { onFocus: "fresh();" }), hover: { ...keyedSpec, focus: true, focusTarget: "a" }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows.find(r => r.mode === "focus")?.reason ?? "", /focus was lost/u, show(h));
+  } },
+  { name: "the page itself scrolling during hover is counted once and recorded, not a shift",
+    html: keyedList("window.scrollBy(0, -10);", { inPage: true }), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.ok([h!.rows[0]!.early, h!.rows[0]!.late].some(c => c && c.scrolled.y === -10), show(h));
   } },
   { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
     html: feed(".left .body{padding-left:12px}", false,
