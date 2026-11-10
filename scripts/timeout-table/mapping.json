@@ -3952,6 +3952,38 @@
             "removes": [],
             "reason": "Local lock wait; the network update is reported under MESSAGE_STATUS_BUDGET_MS."
           }
+        },
+        "src/mcp/file-image.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/storage/v1/..."
+          ],
+          "citation": "src/mcp/file-image.ts:39",
+          "detail": "AbortSignal.timeout using READ_TIMEOUT_MS for the local MCP picture download.",
+          "operation": {
+            "name": "mcp-file-get-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of READ_TIMEOUT_MS."
+          }
+        },
+        "src/mcp/file-image.ts:READ_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/storage/v1/..."
+          ],
+          "citation": "src/mcp/file-image.ts:33-61",
+          "detail": "Local MCP file_get picture download: one signed storage GET, read to at most the declared size (2 MiB cap).",
+          "operation": {
+            "name": "mcp-file-get",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Runs only inside the stdio MCP file_get tool for a picture; there is no CLI verb for it. The storage path is the same one cswarm file get downloads under REQUEST_TIMEOUT_MS."
+          }
         }
       }
     }
