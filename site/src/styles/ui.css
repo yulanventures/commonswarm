@@ -255,12 +255,6 @@
   background: color-mix(in oklab, var(--danger) 80%, var(--text) 20%);
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .btn--danger:hover {
-    transform: translateY(-1px);
-  }
-}
-
 .btn--danger:active {
   transform: translateY(0);
   box-shadow: var(--ring-top);

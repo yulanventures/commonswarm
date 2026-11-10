@@ -61,11 +61,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff-word,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-operator,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta:not(:has(> :not(.dashboard__message-identity-badge, .dashboard__message-operator, .dashboard__message-kind--note, .dashboard__message-kind--ask, .dashboard__message-target[data-target-kind="everyone"]))) { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
-  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: 0; border: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
-  opacity: 0; pointer-events: none;
+/* Recipient/channel metadata keeps the same header slot in every state. Tab
+   can reach its controls while opacity hides the secondary text at rest. */
+@media (hover: hover) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
+    opacity: 0; pointer-events: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
+    opacity: 0; pointer-events: none;
+  }
 }
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
@@ -77,21 +81,28 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day + .dashboard__messa
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] { padding-block: 2px 4px; margin-block-start: 0; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] > .dashboard__message-avatar { visibility: hidden; }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%);
+  position: absolute; inset: auto auto 100% 0; z-index: 4;
+  inline-size: max-content; max-inline-size: 100%; padding: 2px 8px;
+  border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px;
+  background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
+  opacity: 0; pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author:not(:focus-within) * {
+  opacity: 0; pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
-  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 11px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-muted, var(--k-shell-secondary)); visibility: hidden;
+  position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 11px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-muted, var(--k-shell-secondary)); opacity: 0;
 }
-live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { visibility: visible; }
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { opacity: 1; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools {
-  position: absolute; inset: -12px 16px auto auto; z-index: 3; display: flex; align-items: center;
+  position: absolute; inset: -12px 16px auto auto; z-index: 3;
   padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-  position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; border: 0; opacity: 0; pointer-events: none;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
-  opacity: 0; pointer-events: none;
+@media (hover: hover) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])),
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
+    opacity: 0; pointer-events: none;
+  }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
@@ -125,19 +136,14 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { inset-inline-end: 8px; }
 }
 @media (hover: none) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-body > .dashboard__message-tools,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) {
-    position: static; inline-size: auto; block-size: auto; overflow: visible; clip-path: none; padding: 0; border: 0; background: transparent; box-shadow: none; opacity: 1; pointer-events: auto;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-body > .dashboard__message-tools *,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
-    opacity: 1; pointer-events: auto;
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-body > .dashboard__message-tools {
+    position: static; padding: 0; border: 0; background: transparent; box-shadow: none;
   }
 }
 
 /* A grouped author remains reachable with a visible identity control on keyboard focus. */
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author:focus-within {
-  position: static; inline-size: auto; block-size: auto; overflow: visible; clip-path: none;
+  opacity: 1; pointer-events: auto;
 }
 
 live-dashboard.dashboard[data-kylon-shell] .hm-frame:not([data-channel-details-active]) .hm-details-heading { display: none; }

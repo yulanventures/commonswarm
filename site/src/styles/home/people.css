@@ -623,10 +623,9 @@ section.pd-page[data-people-page] .pd-status-shape {
 section.pd-page[data-people-page] .pd-status-shape[data-shape="dot"] { border: 0; background: var(--home-blue-deep); }
 section.pd-page[data-people-page] .pd-status-shape[data-shape="diamond"] { inline-size: 7px; block-size: 7px; border: 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
 
-/* Invitations: one dashed card each (4px 20px, min 76px). The heading is for screen readers and shows when focused. */
+/* Invitations: one dashed card each (4px 20px, min 76px), with a stable section heading. */
 section.pd-page[data-people-page] .pd-invited { display: flex; flex-direction: column; gap: 12px; margin: 0; }
 section.pd-page[data-people-page] .pd-invited h3 { margin: 0; color: var(--home-ink-muted); font-size: 13px; font-weight: 700; }
-section.pd-page[data-people-page] .pd-invited h3:not(:focus) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 section.pd-page[data-people-page] .pd-invite-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
 section.pd-page[data-people-page] .pd-invite {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; box-sizing: border-box; min-block-size: 76px; padding: 4px 20px;
