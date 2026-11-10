@@ -262,19 +262,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   block-size: 100%;
   object-fit: contain;
 }
-.hm-frame .hm-extras__image > img {
-  display: block;
-  inline-size: 100%;
-  block-size: auto;
-  aspect-ratio: 16 / 10;
-  object-fit: contain;
-  border-radius: 6px;
-  background: var(--k-shell-subtle);
-}
-.hm-frame .hm-extras__image :is(.hm-object-copy, .hm-extras__image-caption) {
-  min-inline-size: 0;
-  overflow-wrap: anywhere;
-}
 .hm-frame .hm-extras__image-name {
   min-inline-size: 0;
   color: var(--k-shell-ink);
@@ -287,6 +274,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   color: var(--k-shell-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+.hm-frame .hm-extras__image[data-preview-state="unavailable"] img {
+  visibility: hidden;
 }
 .hm-frame .hm-extras__image[data-preview-state="unavailable"] .hm-extras__image-frame::after {
   content: "Preview unavailable";
