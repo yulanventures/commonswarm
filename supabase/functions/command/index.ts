@@ -13316,6 +13316,22 @@ async function handleTransaction(
         const [target] = targetUser === null ? [] : await tx<{ role: string }[]>`SELECT role FROM swarm.memberships
           WHERE workspace_id = ${localWorkspace}::uuid AND user_id = ${targetUser}::uuid AND revoked_at IS NULL`;
         if (target && target.role !== "member") return seatRefuse("seat_admin_target_protected", authorized.value);
+        // Collateral: the removal also withdraws every agent this person owns from the workspace. None may be an admin
+        // agent (an active, unexpired grant anywhere), and each must be one the plan locked FOR UPDATE, the point
+        // #353's grant creation serializes on. This runs before dispatch and before any replay.
+        if (targetUser !== null) {
+          const affected = await tx<{ principal_id: string; admin: boolean }[]>`SELECT p.principal_id,
+              EXISTS(SELECT 1 FROM swarm.seat_admin_grants g WHERE g.principal_id = p.principal_id AND g.state = 'active'
+                AND (g.expires_at IS NULL OR g.expires_at > clock_timestamp())) AS admin
+            FROM swarm.agent_principals p
+            JOIN swarm.agent_workspace_memberships am ON am.principal_id = p.principal_id AND am.workspace_id = ${localWorkspace}::uuid
+              AND am.revoked_at IS NULL
+            WHERE p.owner_user_id = ${targetUser}::uuid AND p.revoked_at IS NULL ORDER BY p.principal_id`;
+          const locked = new Set(localState.localPlan.snapshot.bindings.map((b) => b.principal_id));
+          if (affected.some((a) => a.admin || !locked.has(a.principal_id))) {
+            return seatRefuse("seat_admin_target_protected", authorized.value);
+          }
+        }
       }
       seatAdminContext = authorized.value; // rename_workspace, remove_member: the workspace reducer, at an Admin's level
     }

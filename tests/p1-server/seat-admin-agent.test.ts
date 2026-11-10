@@ -300,6 +300,29 @@ test("remove a member: membership, their agents and household access end, attrib
   });
   const grantId = await grant();
   refused(await agentCommand({ kind: "remove_member", user_id: adminPerson.id }), "seat_admin_target_protected", "an admin");
+
+  // The member's own agent is an admin agent in another workspace the member owns: removing the member would remove
+  // it from this one, so the removal refuses and nothing changes.
+  const elsewhere = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${elsewhere}::uuid, 'MemberOwned', ${member.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${elsewhere}::uuid, ${member.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${elsewhere}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${memberAgent}::uuid, ${elsewhere}::uuid, ${member.id}::uuid, ${member.id}::uuid)`;
+  });
+  const memberGrant = await account(member.jwt, grantCmd({ principal_id: memberAgent, workspace_ids: [elsewhere] }));
+  assert.equal(memberGrant.status, 200, `the member's own grant: ${JSON.stringify(memberGrant.body)}`);
+  refused(await agentCommand({ kind: "remove_member", user_id: member.id }), "seat_admin_target_protected", "owns an admin agent");
+  const [still] = await sql<{ member: boolean; agent: boolean; role: boolean }[]>`SELECT
+    EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid AND revoked_at IS NULL) AS member,
+    EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships WHERE workspace_id = ${workspace}::uuid AND principal_id = ${memberAgent}::uuid
+      AND revoked_at IS NULL) AS agent,
+    EXISTS(SELECT 1 FROM swarm.household_member_content_roles WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid
+      AND revoked_at IS NULL) AS role`;
+  assert.deepEqual(still, { member: true, agent: true, role: true }, "membership, the agent and household access unchanged");
+  const ended = await account(member.jwt, { kind: "end_seat_admin", grant_id: (memberGrant.body.seat_admin_grant as { grant_id: string }).grant_id });
+  assert.equal(ended.status, 200, JSON.stringify(ended.body));
   const removed = await agentCommand({ kind: "remove_member", user_id: member.id });
   assert.equal(removed.status, 200, JSON.stringify(removed.body) + functionLogs.slice(-3000));
   const [m] = await sql<{ gone: boolean }[]>`SELECT revoked_at IS NOT NULL AS gone FROM swarm.memberships
