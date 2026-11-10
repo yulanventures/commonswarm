@@ -119,7 +119,8 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, focus: true,
       require: ['[data-signal-id="{message.addressedAgent}"]', '[data-signal-id="{message.addressedOwn}"]'] },
     // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
-    { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"]'], max: 3, focus: true },
+    { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"][data-stream-grouped]'], max: 1,
+      focus: true, focusTarget: ".hm-author .dashboard__message-author" },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
   ],
   "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
