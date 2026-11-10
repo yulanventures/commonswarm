@@ -20,6 +20,8 @@ export type HoverSpec = {
   require?: string;
   /** Also focus each row's first control (`:focus-within` and focus styles). */
   focus?: boolean;
+  /** In focus mode, the control to focus inside the row instead of its first one. */
+  focusTarget?: string;
 };
 
 export const HOVER_TOLERANCE_PX = 0.5;
@@ -152,10 +154,10 @@ const HOVER_POINT = (index: number) => {
 };
 
 /** Focus the row's first visible control without scrolling; returns what was focused. */
-const FOCUS_ROW = (index: number) => {
-  const row = document.querySelector(`[data-audit-hover-row="${index}"]`);
+const FOCUS_ROW = (arg: { index: number; target?: string }) => {
+  const row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
   if (!row) return null;
-  const focusable = [row, ...Array.from(row.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])"))]
+  const focusable = arg.target ? row.querySelector(arg.target) as HTMLElement | null ?? undefined : [row, ...Array.from(row.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])"))]
     .find(el => el.matches("a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])")
       && el.getBoundingClientRect().width > 0) as HTMLElement | undefined;
   if (!focusable) return null;
@@ -204,8 +206,9 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
           if (!entry.point) { Object.assign(entry, { outcome: "skipped", reason: "no point of the row receives the pointer" }); continue; }
           await page.mouse.move(entry.point.x, entry.point.y, { steps: 2 });
         } else {
-          entry.focused = await page.evaluate(FOCUS_ROW, row.index);
-          if (!entry.focused) { Object.assign(entry, { outcome: "skipped", reason: "no focusable control in the row" }); continue; }
+          entry.focused = await page.evaluate(FOCUS_ROW, { index: row.index, target: spec.focusTarget });
+          // A named target that cannot take focus is a failed measurement; without one, a row with no control is skipped.
+          if (!entry.focused) { Object.assign(entry, spec.focusTarget ? { outcome: "error", reason: `could not focus ${spec.focusTarget}` } : { outcome: "skipped", reason: "no focusable control in the row" }); continue; }
         }
         const early = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "early", tolerance }) as ProbeError | ProbeCompared;
         const late = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "late", tolerance }) as ProbeError | ProbeCompared;
