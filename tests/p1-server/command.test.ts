@@ -8748,7 +8748,13 @@ test("durable-delivery: relation matrix on claim matches read; cursor path still
     assert.equal(byId.get(ids[1]!)?.sender_owner_relation, "same_owner");
     assert.equal(byId.get(ids[2]!)?.sender_owner_relation, "cross_owner");
     assert.equal(byId.get(ids[3]!)?.sender_owner_relation, "cross_owner");
-    assert.equal(byId.get(orphanId)?.sender_owner_relation, "unknown", "claim_agent_inbox returns unknown for orphan/revoked author side-by-side with read");
+    // Security condition 2026-11-10: a revoked author's queued message is no longer pushed; read keeps it as history.
+    assert.equal(byId.has(orphanId), false, "claim_agent_inbox does not deliver a revoked author's queued message");
+    const [orphanDelivery] = await sql<{ ack_outcome: string | null; last_error_code: string | null }[]>`
+      SELECT ack_outcome, last_error_code FROM swarm.signal_deliveries
+      WHERE signal_id = ${orphanId}::uuid AND recipient_agent_principal_id = ${receiver.principalId}::uuid
+    `;
+    assert.deepEqual(orphanDelivery, { ack_outcome: "failed_terminal", last_error_code: "sender_not_live" });
     for (const d of byId.values()) {
       assert.equal(Object.hasOwn(d, "owner_user_id"), false);
       assert.equal(
@@ -8775,11 +8781,12 @@ test("durable-delivery: relation matrix on claim matches read; cursor path still
         d,
       ]),
     );
-    assert.equal(
-      byIdReplay.get(ids[1]!)?.sender_owner_relation,
-      "same_owner",
-      "claim idempotency replay preserves the claim-time sender_owner_relation after author revocation",
-    );
+    // A replay still hydrates the batch, but an author revoked since the claim is omitted (sender_not_live); the
+    // other deliveries keep their claim-time relation.
+    assert.equal(byIdReplay.has(ids[1]!), false, "a replay does not resume a message whose author was revoked after the claim");
+    assert.equal(byIdReplay.get(ids[0]!)?.sender_owner_relation, "same_owner");
+    assert.equal(byIdReplay.get(ids[2]!)?.sender_owner_relation, "cross_owner");
+    assert.equal(byIdReplay.get(ids[3]!)?.sender_owner_relation, "cross_owner");
 
     // Read transaction never needs swarm_command: pending count present.
     assert.equal(typeof read.body.pending_delivery_count, "number");

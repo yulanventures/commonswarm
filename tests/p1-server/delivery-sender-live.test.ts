@@ -30,7 +30,7 @@ before(() => {
 after(async () => { await sql.end(); });
 
 async function user(label: string): Promise<string> {
-  const created = await admin.auth.admin.createUser({ email: `synth-${label}-${randomUUID()}@example.test`, password: `T-${randomBytes(18).toString("base64url")}!`, email_confirm: true });
+  const created = await admin.auth.admin.createUser({ email: `synth-delivery-${randomUUID()}@example.test`, password: `T-${randomBytes(18).toString("base64url")}!`, email_confirm: true });
   assert.ifError(created.error);
   const id = created.data.user!.id;
   await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${id}::uuid, ${label})`;
