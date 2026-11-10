@@ -58,8 +58,9 @@ export type ImageRead =
 
 /**
  * Read a whole stored picture from a server-resolved, signed path, within `maxBytes`.
- * The declared size was measured at commit; a short or long read is unavailable, and
- * bytes that do not carry the declared type's signature are not returned.
+ * The declared size was measured at commit: exactly that many bytes are kept (the reader
+ * stops there, so anything a server sends past it is never consumed), a short read is
+ * unavailable, and bytes that do not carry the declared type's signature are not returned.
  */
 export async function readImage(
   baseUrl: string,

@@ -5,7 +5,7 @@
  * signature; nothing here decodes them. Every other file is metadata plus the CLI command
  * that downloads it. The signed download path never leaves this module.
  */
-import { fileDownloadUrl, getObject } from "../cloud/files.js";
+import { FileTransportError, absoluteStorageUrl, fileDownloadUrl } from "../cloud/files.js";
 import type { CloudTarget } from "../cloud/config.js";
 
 /** Matches FILE_GET_IMAGE_MAX_BYTES in supabase/functions/mcp/tools.ts. */
@@ -28,6 +28,39 @@ export function imageBytesMatch(contentType: string, bytes: Uint8Array): boolean
     case "image/webp": return at(0, ...ascii("RIFF")) && at(8, ...ascii("WEBP"));
     default: return false;
   }
+}
+
+const READ_TIMEOUT_MS = 30_000;
+
+/** Read at most `maxBytes` of a signed object, stopping the stream there; excess bytes are never consumed. */
+export async function readBounded(url: string, maxBytes: number, fetcher: typeof fetch = fetch): Promise<Uint8Array> {
+  let response: Response;
+  try {
+    response = await fetcher(url, { redirect: "error", signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
+  } catch {
+    throw new FileTransportError("the download did not complete", true);
+  }
+  if (!response.ok || !response.body) {
+    await response.body?.cancel().catch(() => {});
+    throw new FileTransportError(`the download was refused (HTTP ${response.status})`);
+  }
+  const reader = response.body.getReader();
+  const out = new Uint8Array(maxBytes);
+  let kept = 0;
+  try {
+    while (kept < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = Math.min(value.length, maxBytes - kept);
+      out.set(value.subarray(0, take), kept);
+      kept += take;
+    }
+  } catch {
+    throw new FileTransportError("the download did not complete", true);
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return out.subarray(0, kept);
 }
 
 export interface McpFileGetInput {
@@ -64,7 +97,8 @@ export async function mcpFileGet(input: McpFileGetInput): Promise<McpFileGetResu
   if (!Number.isSafeInteger(grant.size_bytes) || grant.size_bytes <= 0 || grant.size_bytes > MCP_IMAGE_MAX_BYTES) {
     return { output: { ...meta, image: null, next_step: `This picture is larger than ${MCP_IMAGE_MAX_BYTES / (1024 * 1024)} MiB. ${download}` }, image: null };
   }
-  const bytes = await getObject(input.target, grant.download_path, input.fetcher);
+  // At most the declared size (already within the cap): a short read does not match; anything past it is never read.
+  const bytes = await readBounded(absoluteStorageUrl(input.target, grant.download_path), grant.size_bytes, input.fetcher);
   if (bytes.length !== grant.size_bytes || !imageBytesMatch(grant.content_type, bytes)) {
     return { output: { ...meta, image: null, next_step: `This file's bytes do not match its declared picture type. ${download}` }, image: null };
   }

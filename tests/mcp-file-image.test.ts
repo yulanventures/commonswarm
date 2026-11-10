@@ -48,6 +48,25 @@ test("a stored PNG comes back as an image block with its details, and the signed
   assert.equal(JSON.stringify(read.output).includes("token"), false);
 });
 
+test("the local reader stops at the declared size, however much the server streams", async () => {
+  let pulled = 0;
+  const chunk = new Uint8Array(64 * 1024);
+  const endless = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(PNG); },
+    pull(controller) { pulled += chunk.length; controller.enqueue(chunk); },
+  });
+  const seen: string[] = [];
+  const fetcher = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    seen.push(url);
+    if (url.endsWith("/functions/v1/command")) return new Response(JSON.stringify(grant()), { status: 200 });
+    return new Response(endless, { status: 200 });
+  }) as typeof fetch;
+  const read = await mcpFileGet({ target, workspaceId: "w", credential: "agent-token", fetcher, fileId, versionN: 2 });
+  assert.deepEqual(read.image, { data: Buffer.from(PNG).toString("base64"), mimeType: "image/png" });
+  assert.ok(pulled <= 2 * chunk.length, `consumed ${pulled} bytes past the declared size`);
+});
+
 test("other types, oversize pictures and bytes that are not the declared picture return details and the CLI step only", async () => {
   const cases: Array<[Record<string, unknown>, Uint8Array, RegExp, number]> = [
     [{ name: "notes.txt", content_type: "text/plain", size_bytes: 5 }, encoder.encode("hello"), /returns pictures/u, 1],
