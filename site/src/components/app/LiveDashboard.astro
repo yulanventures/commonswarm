@@ -1226,6 +1226,7 @@ import "../../styles/kylon-command-palette.css";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
+    canPreviewChatAttachment,
     canPreviewChatImage,
     ChatImagePreviewCache,
     chatImagePreviewFailure,
@@ -4037,7 +4038,7 @@ import "../../styles/kylon-command-palette.css";
         const prepared = prepareBrowserAttachments(files, stagedAttachments.length);
         stagedAttachments.push(...prepared.map((intent) => ({
           intent,
-          previewUrl: intent.contentType.startsWith("image/")
+          previewUrl: canPreviewChatImage(intent.contentType)
             ? URL.createObjectURL(intent.file)
             : null,
         })));
@@ -6744,6 +6745,65 @@ import "../../styles/kylon-command-palette.css";
       );
     };
 
+    /** Sign and load one attachment picture once its holder nears the feed's view, with one retry. The signed link only
+     *  ever becomes the image's src: no fetch, blob or CORS (chat-image-preview.test.mjs). `holder` carries the state. */
+    const loadAttachmentPreview = (
+      image: HTMLImageElement,
+      holder: HTMLElement,
+      attachment: { file_id: string; version_n: number; name: string },
+    ): void => {
+      let failures = 0;
+      let signing = false;
+      const unavailable = (): void => {
+        image.alt = `${attachment.name} preview unavailable`;
+        holder.dataset.previewState = "unavailable";
+      };
+      const load = async (): Promise<void> => {
+        if (signing) return;
+        signing = true;
+        const signedAt = Date.now();
+        try {
+          const signed = await freshAttachmentDownload(
+            attachment.file_id,
+            attachment.version_n,
+          );
+          if (!image.isConnected) return;
+          attachmentPreviewUrls.remember(
+            attachment.file_id, attachment.version_n, signed, signedAt,
+          );
+          image.src = signed.url;
+        } catch {
+          if (image.isConnected) unavailable();
+        } finally {
+          signing = false;
+        }
+      };
+      const cachedUrl = attachmentPreviewUrls.get(
+        attachment.file_id, attachment.version_n, Date.now(),
+      );
+      if (cachedUrl) {
+        image.src = cachedUrl;
+      } else if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver((entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          observer.disconnect();
+          void load();
+        }, { root: feedScroller(), rootMargin: "120px" });
+        observer.observe(holder);
+      } else {
+        void load();
+      }
+      image.addEventListener("load", () => {
+        image.alt = attachment.name;
+        delete holder.dataset.previewState;
+      });
+      image.addEventListener("error", () => {
+        attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
+        if (chatImagePreviewFailure(failures++) === "retry") void load();
+        else unavailable();
+      });
+    };
+
     const renderMessageAttachments = (body: HTMLElement, signal: Signal): void => {
       const attachments = signal.attachments ?? [];
       if (attachments.length === 0) return;
@@ -6752,7 +6812,7 @@ import "../../styles/kylon-command-palette.css";
       list.dataset.messageAttachments = String(attachments.length);
       for (const attachment of attachments) {
         const card = document.createElement("article");
-        const inlineImage = canPreviewChatImage(attachment.content_type);
+        const inlineImage = canPreviewChatAttachment(attachment.content_type, attachment.size_bytes);
         card.className = `dashboard__attachment-card${
           inlineImage ? " dashboard__attachment-card--image" : ""
         }`;
@@ -6762,56 +6822,7 @@ import "../../styles/kylon-command-palette.css";
           image.alt = attachment.name;
           image.loading = "lazy";
           image.referrerPolicy = "no-referrer";
-          let failures = 0;
-          let signing = false;
-          const unavailable = (): void => {
-            image.alt = `${attachment.name} preview unavailable`;
-            card.dataset.previewState = "unavailable";
-          };
-          const load = async (): Promise<void> => {
-            if (signing) return;
-            signing = true;
-            const signedAt = Date.now();
-            try {
-              const signed = await freshAttachmentDownload(
-                attachment.file_id,
-                attachment.version_n,
-              );
-              if (!image.isConnected) return;
-              attachmentPreviewUrls.remember(
-                attachment.file_id, attachment.version_n, signed, signedAt,
-              );
-              image.src = signed.url;
-            } catch {
-              if (image.isConnected) unavailable();
-            } finally {
-              signing = false;
-            }
-          };
-          const cachedUrl = attachmentPreviewUrls.get(
-            attachment.file_id, attachment.version_n, Date.now(),
-          );
-          if (cachedUrl) {
-            image.src = cachedUrl;
-          } else if ("IntersectionObserver" in window) {
-            const observer = new IntersectionObserver((entries) => {
-              if (!entries.some((entry) => entry.isIntersecting)) return;
-              observer.disconnect();
-              void load();
-            }, { root: feedScroller(), rootMargin: "120px" });
-            observer.observe(card);
-          } else {
-            void load();
-          }
-          image.addEventListener("load", () => {
-            image.alt = attachment.name;
-            delete card.dataset.previewState;
-          });
-          image.addEventListener("error", () => {
-            attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
-            if (chatImagePreviewFailure(failures++) === "retry") void load();
-            else unavailable();
-          });
+          loadAttachmentPreview(image, card, attachment);
           card.append(image);
         }
         const details = document.createElement("div");
@@ -7267,10 +7278,21 @@ import "../../styles/kylon-command-palette.css";
           });
           if (decoration) {
             if (sampleMode) for (const control of decoration.querySelectorAll("button")) control.remove();
-            for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>("[data-stream-files] a")).entries()) {
-              const attachment = signal.attachments?.[index]; if (!attachment) continue;
-              link.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
-                void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(url => window.location.assign(url), error => setComposerStatus(readableError(error), "error")); });
+            // Pictures and file cards split the attachments the same way deriveStreamExtras does, in order.
+            type SignalAttachment = NonNullable<Signal["attachments"]>[number];
+            const pictured = (file: SignalAttachment) => canPreviewChatAttachment(file.content_type, file.size_bytes);
+            const openAttachment = (attachment: SignalAttachment) => (event: Event) => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
+              void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error")); };
+            const pictures = (signal.attachments ?? []).filter(pictured);
+            for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>(".hm-extras__image")).entries()) {
+              const attachment = pictures[index]; const image = link.querySelector<HTMLImageElement>("img"); if (!attachment || !image) continue;
+              link.addEventListener("click", openAttachment(attachment));
+              if (!sampleMode) loadAttachmentPreview(image, link, attachment);
+            }
+            const files = (signal.attachments ?? []).filter(file => !pictured(file));
+            for (const [index, link] of Array.from(decoration.querySelector(".hm-extras__files")?.querySelectorAll<HTMLAnchorElement>("a") ?? []).entries()) {
+              const attachment = files[index]; if (!attachment) continue;
+              link.addEventListener("click", openAttachment(attachment));
             }
             if (extras?.ask) {
               const title = decoration.querySelector<HTMLElement>(".hm-needs-title");

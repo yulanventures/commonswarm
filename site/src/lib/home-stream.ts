@@ -1,9 +1,10 @@
 // Home UI: stream decorations (UI-SPEC 3.3, lane W). Small builders plus the pure helpers behind them:
 // day dividers, the author line, an open ask in place, file cards and to-do cards. Builders are pure DOM and
 // put user text in through textContent only. Nothing here claims who can see a message.
+import { canPreviewChatAttachment } from "./chat-image-preview";
 import { formatFileSize } from "./file-list";
 import type { AgentVM, NeedsYouVM, ObjectCardVM, PersonVM } from "./home-types";
-import { agentOrb, needsYouCard, objectCard, personAvatar } from "./home-primitives";
+import { agentOrb, needsYouCard, objectCard, personAvatar, safeHomeHref } from "./home-primitives";
 
 export type StreamAuthor = PersonVM | AgentVM;
 
@@ -25,7 +26,8 @@ export interface StreamSignalVM {
 export interface StreamTodoRefVM { id: string; title: string; href: string; meta: string; who: StreamAuthor | null; done: boolean }
 
 export interface StreamContext { workspace: { id: string; name: string; href: string }; todos: ReadonlyMap<string, StreamTodoRefVM> }
-export interface StreamExtrasVM { ask: NeedsYouVM | null; attachments: ObjectCardVM[]; todo: ObjectCardVM | null }
+/** `images` are attachments shown as pictures (PNG, JPEG, GIF, WebP within the attachment cap); every other file is a card. */
+export interface StreamExtrasVM { ask: NeedsYouVM | null; images: StreamAttachmentVM[]; attachments: ObjectCardVM[]; todo: ObjectCardVM | null }
 
 export type StreamRow<T> = { type: "divider"; key: string; label: string } | { type: "item"; item: T };
 
@@ -112,7 +114,9 @@ export function streamAskCard(signal: StreamSignalVM, workspace: StreamContext["
  */
 export function deriveStreamExtras(signal: StreamSignalVM, context: StreamContext): StreamExtrasVM {
   const todo = streamTodoCard(signal.about, context.todos);
-  return { ask: streamAskCard(signal, context.workspace), attachments: signal.attachments.map((file) => streamFileCard(file)),
+  const image = (file: StreamAttachmentVM) => canPreviewChatAttachment(file.contentType, file.sizeBytes);
+  return { ask: streamAskCard(signal, context.workspace), images: signal.attachments.filter(image),
+    attachments: signal.attachments.filter((file) => !image(file)).map((file) => streamFileCard(file)),
     todo: todo && { ...todo, who: null } };
 }
 
@@ -145,10 +149,24 @@ export function buildAuthorLine(doc: Document, signal: Pick<StreamSignalVM, "aut
 
 /** The cards that sit under a message's text, or null when it gets none. */
 export function buildStreamExtras(doc: Document, extras: StreamExtrasVM, onAction: (action: string, ask: NeedsYouVM) => void): HTMLElement | null {
-  if (!extras.ask && extras.attachments.length === 0 && !extras.todo) return null;
+  if (!extras.ask && extras.images.length === 0 && extras.attachments.length === 0 && !extras.todo) return null;
   const box = node(doc, "div", "hm-extras"); box.dataset.streamExtras = "";
   if (extras.ask) { const slot = node(doc, "div", "hm-extras__ask"); slot.dataset.streamAsk = extras.ask.id; slot.append(needsYouCard(doc, extras.ask, onAction)); box.append(slot); }
   if (extras.todo) { const slot = node(doc, "div", "hm-extras__object"); slot.dataset.streamTodo = extras.todo.id; slot.append(objectCard(doc, extras.todo)); box.append(slot); }
+  if (extras.images.length) {
+    // The caller signs and loads each picture. The frame keeps a fixed size (styles), so loading or failing never moves the row.
+    const list = node(doc, "div", "hm-extras__images"); list.dataset.streamImages = String(extras.images.length);
+    for (const file of extras.images) {
+      const link = node(doc, "a", "hm-extras__image"); const href = safeHomeHref(file.href); if (href) link.href = href; link.title = file.name;
+      link.dataset.streamImage = file.fileId; link.dataset.streamImageVersion = String(file.versionN);
+      const frame = node(doc, "span", "hm-extras__image-frame");
+      const image = node(doc, "img"); image.alt = file.name; image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer";
+      frame.append(image);
+      link.append(frame, node(doc, "strong", "hm-extras__image-name", file.name), node(doc, "span", "hm-extras__image-meta", formatFileSize(file.sizeBytes)));
+      list.append(link);
+    }
+    box.append(list);
+  }
   if (extras.attachments.length) {
     const list = node(doc, "div", "hm-extras__files"); list.dataset.streamFiles = String(extras.attachments.length);
     for (const file of extras.attachments) { const slot = node(doc, "div", "hm-extras__object"); slot.append(objectCard(doc, file)); list.append(slot); }
