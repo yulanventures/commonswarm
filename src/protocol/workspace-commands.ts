@@ -422,8 +422,10 @@ export type WorkspaceDecision = WorkspaceDecisionAccepted | WorkspaceDecisionRej
 /** Workspace-reducer commands a seat admin agent executes in 2b (see SEAT_ADMIN_EXECUTED_KINDS). */
 export const SEAT_ADMIN_REDUCER_KINDS = new Set<string>(['rename_workspace', 'remove_member']);
 
-export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead'>([
+export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead' | 'rename_organization'>([
   'add_agent_to_workspace',
+  // An organization owner, or a seat admin agent under an organization grant (its own handler, not the reducer).
+  'rename_organization',
   'set_workspace_lead',
   'remove_agent_from_workspace',
   'move_workspace_to_org',

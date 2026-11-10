@@ -168,6 +168,7 @@ const refused = (r: { status: number; body: Record<string, unknown> }, error: st
 test("no grant: every one of the six refuses as inactive; other human-only commands stay forbidden", async () => {
   refused(await agentCommand({ kind: "rename_workspace", name: "Nope" }), "seat_admin_inactive", "rename without a grant");
   refused(await agentCommand({ kind: "set_workspace_lead", principal_id: sibling }), "seat_admin_inactive", "lead without a grant");
+  refused(await agentCommand({ kind: "rename_organization", display_name: "Nope" }), "seat_admin_inactive", "organization rename without a grant");
   const archive = await agentCommand({ kind: "archive_workspace" });
   assert.equal(archive.status, 403);
   assert.equal(archive.body.error, "forbidden", "a human-only command outside the six is refused exactly as before");
@@ -360,4 +361,42 @@ test("the database floor: a delegated removal without a live grant is refused", 
       set_config('cswarm.household_agent_principal', ${sibling}, true)`;
     await tx`UPDATE swarm.household_member_content_roles SET revoked_at = now() WHERE workspace_id = ${workspace}::uuid AND revoked_at IS NULL`;
   }), /household delegated actor refused/);
+});
+
+test("rename the organization: an organization grant only, name only, attributed to the agent and the grantor", async () => {
+  const [{ slug: slugBefore }] = await sql<{ slug: string }[]>`SELECT slug FROM swarm.organizations WHERE id = ${workspace}::uuid`;
+  const wsGrant = await grant();
+  refused(await agentCommand({ kind: "rename_organization", display_name: "Nope" }), "seat_admin_scope_missing", "a workspace grant");
+  await endGrant(wsGrant);
+  const orgGrant = await grant({ level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspace });
+  const bad = await agentCommand({ kind: "rename_organization", display_name: " padded " });
+  assert.equal(bad.status, 400, JSON.stringify(bad.body));
+  const renamed = await agentCommand({ kind: "rename_organization", display_name: "Renamed org" });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.body) + functionLogs.slice(-2000));
+  const [org] = await sql<{ display_name: string; slug: string }[]>`SELECT display_name, slug FROM swarm.organizations WHERE id = ${workspace}::uuid`;
+  assert.deepEqual([org!.display_name, org!.slug], ["Renamed org", slugBefore], "name only; the slug stays");
+  const [audit] = await sql<{ actor_agent_principal: string; detail: string }[]>`SELECT actor_agent_principal, detail FROM swarm.audit_log
+    WHERE command_kind = 'rename_organization' AND outcome = 'accepted' ORDER BY audit_id DESC LIMIT 1`;
+  assert.equal(audit!.actor_agent_principal, agent);
+  assert.match(audit!.detail, new RegExp(`seat_admin grant=${orgGrant} level=organization authorizing_user=${owner.id}`));
+  const accepted = (await agentHistory()).filter((h) => h.seat_admin_grant_id === orgGrant && h.outcome === "accepted");
+  assert.deepEqual(accepted.map((h) => [h.action, h.target_kind, h.target_id]), [["rename_organization", "organization", workspace]]);
+  await endGrant(orgGrant);
+  refused(await agentCommand({ kind: "rename_organization", display_name: "After end" }), "seat_admin_inactive", "after end");
+});
+
+test("rename the organization as its owner; a member and an ordinary agent cannot", async () => {
+  const human = async (bearer: string, name: string) => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, { method: "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", origin: ORIGIN },
+      body: JSON.stringify({ command_id: randomUUID(), client_version: "0.1.93", workspace_id: workspace, stream: { kind: "workspace" },
+        command: { kind: "rename_organization", display_name: name } }) });
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  const byMember = await human(other.jwt, "By member");
+  assert.equal(byMember.status, 403, JSON.stringify(byMember.body));
+  const byOwner = await human(owner.jwt, "By owner");
+  assert.equal(byOwner.status, 200, JSON.stringify(byOwner.body) + functionLogs.slice(-2000));
+  const [org] = await sql<{ display_name: string }[]>`SELECT display_name FROM swarm.organizations WHERE id = ${workspace}::uuid`;
+  assert.equal(org!.display_name, "By owner");
 });

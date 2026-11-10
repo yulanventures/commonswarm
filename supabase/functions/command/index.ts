@@ -159,7 +159,7 @@ import {
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
   HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS, WORKSPACE_NAME_MAX,
-  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminPrincipalTargetRefusal,
+  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminPrincipalTargetRefusal, validWorkspaceName,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -6096,6 +6096,65 @@ async function moveWorkspaceToOrg(
     detail: JSON.stringify(moved.receipt),
   });
   return { status: 200, body: { status: "accepted", ...response } };
+}
+
+/**
+ * Organization display-name rename (seat admin 2d), addressed through a workspace of that organization. Name only,
+ * through swarm.rename_organization. The authorizing person is the signed-in organization owner, or, for a seat admin
+ * agent, the grantor of the organization grant authorizeSeatAdminAction selected after the locks (the organization
+ * row is already locked FOR UPDATE then). The agent stays the audit actor; the grantor's history records the grant.
+ */
+async function renameOrganization(tx:Sql,body:RequestBody,auth:AuthContext,detail:string|null,seatAdmin:SeatAdminAuthorized|null):Promise<HttpResult> {
+  const kind='rename_organization', command=record(body.command), commandId=String(body.command_id);
+  const workspace=typeof body.workspace_id==='string' && UUID_RE.test(body.workspace_id) ? body.workspace_id.toLowerCase() : null;
+  const agent=seatAdmin ? auth.actor.agent_principal : null;
+  const authorizer=seatAdmin ? seatAdmin.grantor_user_id : auth.credentialKind==='user' ? auth.actor.user : null;
+  const auditDetail=(extra:string|null)=>seatAdmin ? seatAdminAuditDetail(seatAdmin,extra) : extra;
+  const history=(outcome:'accepted'|'refused',reason:string|null,org:string|null,digest:string)=>(outer:Sql)=>recordSeatAdminAction(outer,{
+    authorized:seatAdmin!,agent_principal_id:agent!,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace!,
+    target_kind:'organization',target_id:org,outcome,reason_code:reason,request_digest:digest});
+  const refuse=async(status:number,error:string,org:string|null,digest:string|null):Promise<HttpResult>=>{
+    const audit:Audit={auth,commandKind:kind,workspaceId:workspace??undefined,outcome:status===400?'validation':'authz',reason:error,detail:auditDetail(detail)};
+    // An agent's refusal commits only after the business savepoint rolls back, with the grantor's history.
+    if(agent) throw new LocalAuditedRefused({status,body:{error}},audit,digest&&workspace?history('refused',error,org,digest):null);
+    await insertAudit(tx,audit);
+    return {status,body:{error}};
+  };
+  if(!authorizer || (auth.credentialKind!=='user' && !seatAdmin)) return await refuse(403,'forbidden',null,null);
+  if(!command || !exactKeys(command,['kind','display_name']) || !validWorkspaceName(command.display_name) || !workspace
+    || body.stream!==undefined && (record(body.stream)?.kind!=='workspace' || !exactKeys(record(body.stream)!,['kind']))
+    || typeof body.client_version!=='string') return await refuse(400,'invalid_request',null,null);
+  const [config]=await tx<{value:unknown}[]>`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const comparison=typeof config?.value==='string' ? compareSemver(body.client_version,config.value) : null;
+  if(comparison===null) return await refuse(400,'invalid_request',null,null);
+  if(comparison<0) return {status:426,body:{error:'upgrade_required',min_client_version:config?.value}};
+  const [target]=await tx<{org_id:string;stream_id:string}[]>`SELECT w.org_id,s.stream_id FROM swarm.workspaces w
+    JOIN swarm.streams s ON s.workspace_id=w.workspace_id AND s.kind='workspace'
+    WHERE w.workspace_id=${workspace}::uuid AND w.archived_at IS NULL LIMIT 1`;
+  if(!target) return await refuse(403,'forbidden',null,null);
+  const hash=agent ? requestHash(auth.actor,command as never) : await hostedRequestHash('user',authorizer,body);
+  const principalKind=auth.credentialKind, principalKey=canonicalPrincipal(auth.actor);
+  const [prior]=await tx<{request_hash:string;workspace_id:string;stream_id:string;response:unknown}[]>`SELECT request_hash,workspace_id,stream_id,response
+    FROM swarm.idempotency_keys WHERE principal_kind=${principalKind} AND principal_id=${principalKey} AND command_id=${commandId}`;
+  if(prior) {
+    if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==target.stream_id) return {status:409,body:{error:'command_id_conflict'}};
+    // Authority now, not at the first call: a seat admin replay was re-decided by the hook; a person must still own it.
+    const [owner]=await tx<{ok:boolean}[]>`SELECT EXISTS(SELECT 1 FROM swarm.org_memberships m JOIN swarm.organizations o ON o.id=m.org_id
+      WHERE m.org_id=${target.org_id}::uuid AND m.principal_kind='user' AND m.principal_id=${authorizer}::uuid AND m.role='owner'
+        AND m.revoked_at IS NULL AND o.archived_at IS NULL) AS ok`;
+    if(!owner?.ok) return await refuse(403,'forbidden',target.org_id,hash);
+    await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:target.stream_id,outcome:'replayed',hash,detail:auditDetail(detail)});
+    return replayResult(storedResponse(prior.response),kind);
+  }
+  const [renamed]=await tx<{receipt:Record<string,unknown>|null}[]>`SELECT swarm.rename_organization(${target.org_id}::uuid,${authorizer}::uuid,${command.display_name as string}) AS receipt`;
+  if(!renamed?.receipt) return await refuse(403,'forbidden',target.org_id,hash);
+  const response={ok:true,event_ids:[],...renamed.receipt};
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES(${principalKind},${principalKey},${commandId},${workspace}::uuid,${target.stream_id}::uuid,${hash},${tx.json(response as postgres.JSONValue)})`;
+  await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:target.stream_id,outcome:'accepted',hash,
+    detail:auditDetail(JSON.stringify(renamed.receipt))});
+  if(seatAdmin) await history('accepted',null,target.org_id,hash)(tx);
+  return {status:200,body:{status:'accepted',...response}};
 }
 
 interface SignalRateLimit {
@@ -13292,6 +13351,12 @@ async function handleTransaction(
       if (auth.credentialKind !== "agent" || !agent || !actingPrincipal || !localWorkspace || !localState.localPlan) {
         return { status: 403, body: { error: "forbidden" } };
       }
+      // rename_organization: the organization row FOR UPDATE now, where authorizeSeatAdminAction would take it FOR SHARE
+      // (after the plan's locks), so two renames never both hold SHARE and wait to upgrade.
+      if (kind === "rename_organization") {
+        await tx`SELECT o.id FROM swarm.organizations o JOIN swarm.workspaces w ON w.org_id = o.id
+          WHERE w.workspace_id = ${localWorkspace}::uuid FOR UPDATE OF o`;
+      }
       const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
         kind, workspace_id: localWorkspace });
       const seatRefuse = (reason: string, value: SeatAdminAuthorized | null): never => {
@@ -13310,6 +13375,7 @@ async function handleTransaction(
       if (kind === "set_workspace_lead" || kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace") {
         return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
       }
+      if (kind === "rename_organization") return await renameOrganization(tx, body, auth, ignoredIdentity, authorized.value);
       if (kind === "remove_member") {
         // Members only, read under the plan's membership lock: never an owner (the grantor included) or an admin.
         const targetUser = typeof rawLocal?.user_id === "string" && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id : null;
@@ -13344,6 +13410,7 @@ async function handleTransaction(
       if ((principal?.transport === "hosted_mcp" && (principal.workspace_id === body.workspace_id || principal.member)) || (principal?.transport === "local" && principal.workspace_id !== body.workspace_id && principal.member)) return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
     }
 
+    if (kind === "rename_organization") return await renameOrganization(tx, body, auth, ignoredIdentity, null);
     // The move handler locks both organizations and checks live workspace ownership.
     if (kind === "move_workspace_to_org") {
       return await moveWorkspaceToOrg(tx, body, auth, ignoredIdentity);

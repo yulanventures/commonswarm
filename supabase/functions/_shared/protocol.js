@@ -409,6 +409,8 @@ var RENEWAL_IDLE_PAUSE_DAYS = 14;
 var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace", "remove_member"]);
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
+  // An organization owner, or a seat admin agent under an organization grant (its own handler, not the reducer).
+  "rename_organization",
   "set_workspace_lead",
   "remove_agent_from_workspace",
   "move_workspace_to_org",
@@ -6069,14 +6071,16 @@ var SEAT_ADMIN_AGENT_KINDS = Object.freeze([
   "add_agent_to_workspace",
   "remove_agent_from_workspace",
   "remove_member",
-  "change_role"
+  "change_role",
+  "rename_organization"
 ]);
 var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "rename_workspace",
   "set_workspace_lead",
   "add_agent_to_workspace",
   "remove_agent_from_workspace",
-  "remove_member"
+  "remove_member",
+  "rename_organization"
 ]);
 var LEVEL_ORDER = { workspace: 0, organization: 1, scoped: 2 };
 function selectCoveringGrant(grants, f) {
