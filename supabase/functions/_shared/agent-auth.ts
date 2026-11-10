@@ -782,6 +782,12 @@ export async function planLocalOperation(tx: Sql, options: {
         const parent={...r,token_id:null,predecessor_token_id:null,lineage_id:null};
         return [JSON.stringify(parent),parent] as const;
       })).values()];
+      // Seat admin (2b-2): an agent removing a person presents its own credential, which the person's parent-only
+      // plan does not contain. Add exactly that one binding back so it is locked and fenced like any agent caller.
+      if (options.seatAdmin && 'user' in options.revocation && exact?.token_id && workspace) {
+        const own = await discoverLocalTargets(tx, workspace, { principals: [], tokens: [exact.token_id] });
+        bindings=[...new Map([...bindings,...own].map(r=>[JSON.stringify(r),r] as const)).values()];
+      }
     }
     if (options.hash && (!exact || !bindings.some(r=>r.token_id===exact.token_id))) throw new LocalAuthDiscoveryChanged();
     // All existing account grants are written by delegated projection persistence.
