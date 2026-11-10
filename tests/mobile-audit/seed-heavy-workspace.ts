@@ -241,6 +241,22 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
         steps.push("seed_addressed");
       } catch (error) { note("seed_addressed", error); }
+      // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
+      // real feed rebuild.
+      try {
+        const long = randomUUID();
+        const body = Array.from({ length: 14 }, (_, i) => `Step ${i + 1}: check the boiler pressure gauge, note the reading, and compare it with the service sheet.`).join("\n\n");
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${long}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', NULL, NULL, NULL,
+            NULL, 'note', ${body}, statement_timestamp() + interval '25 days', statement_timestamp() - interval '40 seconds',
+            ${channels.general}::uuid, NULL, false
+          )`;
+        ids["message.long"] = long;
+        steps.push("seed_long_message");
+      } catch (error) { note("seed_long_message", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.

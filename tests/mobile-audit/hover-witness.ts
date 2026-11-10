@@ -23,6 +23,9 @@ export type HoverSpec = {
   focus?: boolean;
   /** In focus mode, the control to focus inside the row instead of its first one. */
   focusTarget?: string;
+  /** In focus mode, wait for the app to rebuild the focused row (a real poll), then require the same control in the
+   *  new row to hold focus. No rebuild within the wait is an error, so the case is never passed vacuously. */
+  focusAcrossRebuild?: boolean;
 };
 
 export const HOVER_TOLERANCE_PX = 0.5;
@@ -31,6 +34,7 @@ export type HoverPage = {
   evaluate: <R, A>(fn: (arg: A) => R | Promise<R>, arg: A) => Promise<R>;
   mouse: { move: (x: number, y: number, options?: { steps?: number }) => Promise<void> };
   locator: (selector: string) => { first(): { scrollIntoViewIfNeeded(options?: { timeout?: number }): Promise<void> } };
+  waitForFunction: <A>(fn: (arg: A) => boolean, arg: A, options?: { timeout?: number }) => Promise<unknown>;
 };
 
 /** Mark the rows to measure; return what each one is, so coverage of the owner's cases is visible. */
@@ -307,6 +311,12 @@ const NEUTRAL_POINT = (rows: string) => {
 };
 /** How many rows of the list the browser currently reports as hovered. */
 const HOVERED_ROWS = (rows: string) => Array.from(document.querySelectorAll(rows)).filter(row => row.matches(":hover")).length;
+/** After a rebuild: focus is on the target control inside the live row with this key. */
+const SAME_CONTROL = (arg: { key: string | null; target: string | null; rows: string }) => {
+  const active = document.activeElement;
+  const row = active?.closest(arg.rows);
+  return !!active && !!row && row.getAttribute("data-signal-id") === arg.key && (arg.target === null || active.matches(arg.target));
+};
 const BLUR = (_: null) => { (document.activeElement as HTMLElement | null)?.blur?.(); };
 const HOVER_CAPABLE = (_: null) => matchMedia("(hover: hover)").matches;
 
@@ -392,6 +402,15 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
       if (!entry.focused) { Object.assign(entry, spec.focusTarget ? { outcome: "error", reason: `could not focus ${spec.focusTarget}` } : { outcome: "skipped", reason: "no focusable control in the row" }); return; }
     }
     const early = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "early", tolerance }) as ProbeError | ProbeCompared;
+    if (mode === "focus" && spec.focusAcrossRebuild) {
+      // The marked row node leaves the document when the app rebuilds the list.
+      const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: 12_000 })
+        .then(() => true, () => false);
+      if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: "the feed did not rebuild the focused row within 12 s" }); return; }
+      await page.evaluate((_: null) => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => done())))), null);
+      const same = await page.evaluate(SAME_CONTROL, { key: entry.key, target: spec.focusTarget ?? null, rows: spec.rows });
+      if (!same) { Object.assign(entry, { outcome: "error", reason: "focus did not return to the same control after the rebuild" }); return; }
+    }
     const late = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "late", tolerance }) as ProbeError | ProbeCompared;
     if (failed(early) || failed(late)) { Object.assign(entry, { outcome: "error", reason: failed(early) ? early.error : (late as ProbeError).error }); return; }
     Object.assign(entry, { early, late });

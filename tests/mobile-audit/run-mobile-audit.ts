@@ -133,6 +133,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
     { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"][data-stream-grouped]'], max: 1,
       focus: true, focusTarget: ".hm-author .dashboard__message-author" },
+    // A focused Show more survives a real feed rebuild: the control is created a frame after its row.
+    { name: "show-more", rows: FEED_ROWS, prefer: '[data-signal-id="{message.long}"]', require: ['[data-signal-id="{message.long}"]'], max: 1,
+      focus: true, focusTarget: ".dashboard__message-toggle", focusAcrossRebuild: true },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
   ],
   "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
@@ -403,14 +406,16 @@ async function main(): Promise<void> {
       };
 
       /** Hover witnesses for one capture; the first addressed row is photographed at rest and on hover. */
-      const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[]) => {
+      // The frozen diagnostic control writes its own images; the normal names never change.
+      const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[], variant = "") => {
         const results: HoverResult[] = [];
         // Keep the app's own focus for the keyboard witnesses that start from it afterwards.
         await page.evaluate(() => document.activeElement?.setAttribute("data-audit-hover-restore", ""));
         for (const spec of specs) {
-          const filled = { ...spec, ...(spec.require ? { require: spec.require.map(selector => fill(selector, seed.ids)) } : {}) };
+          const filled = { ...spec, ...(spec.require ? { require: spec.require.map(selector => fill(selector, seed.ids)) } : {}),
+            ...(spec.prefer ? { prefer: fill(spec.prefer, seed.ids) } : {}) };
           results.push(await runHoverWitness(page, filled, spec.prefer ? async (label: string) => {
-            const shot = `shots/${id}--${state}--${size}--${theme}--${label}.png`;
+            const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
           } : undefined));
@@ -439,14 +444,14 @@ async function main(): Promise<void> {
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
             Object.assign(entry, await page.evaluate(CHECKS));
-            const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
+            const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
             // Witnesses: read-only geometry first, then native-key keyboard witnesses, which change state.
             try { entry.witness = await page.evaluate(GEOMETRY_WITNESS, DECLARED_OVERLAYS[screen.id] ?? []); }
             catch (error) { entry.witness = { error: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) }; }
             const hoverSpecs = HOVER_WITNESSES[screen.id] ?? [];
-            if (hoverSpecs.length) entry.hover = await runHovers(page, screen.id, state, size, theme, hoverSpecs);
+            if (hoverSpecs.length) entry.hover = await runHovers(page, screen.id, state, size, theme, hoverSpecs, freeze ? "--frozen" : "");
             const keyboardSpecs = KEYBOARD_WITNESSES[screen.id] ?? [];
             if (keyboardSpecs.length) {
               // Pointer to a corner first, so :hover cannot stand in for focus.
@@ -463,7 +468,7 @@ async function main(): Promise<void> {
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
-            try { const shot = `shots/${screen.id}--${state}--${size}--${theme}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
+            try { const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
           return entry;
         });
@@ -484,7 +489,7 @@ async function main(): Promise<void> {
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
-            entry.hover = await runHovers(page, screen.id, state, size, theme, HOVER_WITNESSES[screen.id]!);
+            entry.hover = await runHovers(page, screen.id, state, size, theme, HOVER_WITNESSES[screen.id]!, freeze ? "--frozen" : "");
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "hover-capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
