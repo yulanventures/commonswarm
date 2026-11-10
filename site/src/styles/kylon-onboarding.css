@@ -100,7 +100,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view :is(.dashboar
   color: var(--k-shell-ink);
 }
 
-/* This inline sentence action must not inflate the prerequisite line box. */
+/* Above 64rem this action stays inline and must not inflate the prerequisite line box; at 64rem
+ * and below it moves to its own 44px line (the media rule further down). */
 live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-prerequisite .dashboard__text-button {
   min-block-size: 0;
   padding: 0 4px;

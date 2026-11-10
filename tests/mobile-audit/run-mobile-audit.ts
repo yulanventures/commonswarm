@@ -6,6 +6,11 @@
  * For each screen x viewport x theme it records horizontal overflow, small tap targets and
  * horizontally clipped controls, and takes a viewport screenshot. It is report-only: findings go
  * into mobile-audit-report.json and the process exits 0 unless the harness itself cannot run.
+ *
+ * Witnesses (audit-checks.ts) are recorded beside the raw lists and never filter them: read-only
+ * geometry after the primary screenshot (front overlay and what it covers, small-target facts, link
+ * label fragments, disclosure summaries, overlap points), then native-key keyboard witnesses last.
+ * Witness findings are report-only; the job fails on capture errors and on the fixture matrix.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -17,6 +22,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
+import { CHECKS, GEOMETRY_WITNESS, runKeyboardWitness, witnessSummary, type KeyboardSpec } from "./audit-checks.js";
+// The fixture regression matrix registers first, so a broken witness contract fails before the long run.
+import "./witness-matrix.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -61,6 +69,28 @@ const STARTER: Screen[] = [
   { id: "menu.account", kind: "dialog", path: "/app?w={workspace}", setup: [{ click: "[data-user-menu-trigger]" }, { wait: 400 }] },
 ];
 
+/** Overlay roots the generic rules cannot recognise, counted only while shown. */
+const DECLARED_OVERLAYS: Record<string, string[]> = {
+  "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
+  "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
+  "menu.account": ["[data-user-menu]:not([hidden])"],
+};
+/** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
+const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
+  "menu.provider": [{
+    name: "provider-back",
+    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] .hm-ahp__title-anchor' },
+    keys: [{ key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] > [data-ahp-back]' }],
+    activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-host="claude"]' } },
+  }],
+  "route.terms": [{
+    name: "skip-link",
+    start: "document",
+    keys: [{ key: "Tab", expect: "a.skip-link" }],
+    activate: { key: "Enter", expect: { hash: "#main", inView: "#main" } },
+  }],
+};
+
 const loopback = (value: string) => ["127.0.0.1", "localhost", "[::1]"].includes(new URL(value).hostname);
 const fill = (value: string, ids: Record<string, string>) => value.replace(/\{([a-zA-Z.]+)\}/g, (_, key: string) => ids[key] ?? `missing-${key}`);
 
@@ -86,110 +116,6 @@ function serveDist(): Promise<() => Promise<void>> {
   });
   return new Promise(done => server.listen(SITE_PORT, "127.0.0.1", () => done(() => new Promise(close => server.close(() => close())))));
 }
-
-/** Runs in the page: overflow, small tap targets and horizontally clipped controls. */
-const CHECKS = () => {
-  const describe = (el: Element) => {
-    const h = el as HTMLElement;
-    const data = [...h.attributes].find(a => a.name.startsWith("data-"))?.name;
-    return `${el.tagName.toLowerCase()}${h.id ? `#${h.id}` : ""}${data ? `[${data}]` : ""}${typeof h.className === "string" && h.className ? `.${h.className.trim().split(/\s+/).slice(0, 2).join(".")}` : ""}`;
-  };
-  const visible = (el: Element) => {
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    const style = getComputedStyle(el);
-    // Content of a closed <details> (anything but its own summary) is not shown, even when the
-    // engine still reports a box for it (::details-content).
-    const closed = el.closest("details:not([open])");
-    if (closed && !closed.querySelector(":scope > summary")?.contains(el)) return false;
-    return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05 && !el.closest("[hidden],[inert]");
-  };
-  const inScroller = (el: Element) => {
-    for (let node = el.parentElement; node; node = node.parentElement) {
-      const overflowX = getComputedStyle(node).overflowX;
-      if (overflowX === "auto" || overflowX === "scroll") return true;
-    }
-    return false;
-  };
-  const width = window.innerWidth;
-  const doc = document.scrollingElement ?? document.documentElement;
-  const offenders = doc.scrollWidth > doc.clientWidth + 1
-    ? [...document.querySelectorAll("body *")].filter(el => visible(el) && el.getBoundingClientRect().right > width + 1 && !inScroller(el)).slice(0, 15).map(describe) : [];
-  const interactive = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=menuitem],[role=tab],[role=option]")].filter(visible);
-  // The ONLY effective-hitbox rule: a checkbox or radio inside (or named by) a label is tapped
-  // through that label, so it is measured by the label's box. Every such use is listed in
-  // `effective` with both sizes; nothing else is measured by anything but its own box.
-  const labelFor = (el: Element) => el.tagName === "INPUT" && ["checkbox", "radio"].includes((el as HTMLInputElement).type)
-    ? (el.closest("label") ?? (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null)) : null;
-  const measured = interactive.map(el => {
-    const own = el.getBoundingClientRect();
-    const label = labelFor(el)?.getBoundingClientRect();
-    const viaLabel = !!label && label.width * label.height > own.width * own.height;
-    return { el, own, rect: viaLabel ? label! : own, viaLabel };
-  });
-  const effective = measured.filter(m => m.viaLabel).slice(0, 40).map(m => ({ selector: describe(m.el), via: "label",
-    own: { w: Math.round(m.own.width), h: Math.round(m.own.height) }, hit: { w: Math.round(m.rect.width), h: Math.round(m.rect.height) } }));
-  const tapTargets = measured
-    .filter(({ el, rect }) => (rect.width < 44 || rect.height < 44) && !(el.tagName === "A" && getComputedStyle(el).display === "inline"))
-    .slice(0, 60).map(({ el, rect, viaLabel }) => ({ selector: describe(el), w: Math.round(rect.width), h: Math.round(rect.height), ...(viaLabel ? { via: "label" } : {}) }));
-  // Hit testing: the centre of each measured box must reach the control (or its label).
-  const reaches = (el: Element, x: number, y: number) => {
-    const hit = document.elementFromPoint(x, y);
-    const label = labelFor(el);
-    return !!hit && (el === hit || el.contains(hit) || (!!label && (label === hit || label.contains(hit))));
-  };
-  // While a modal dialog is open, only its own controls can be tapped: judge those alone.
-  const modal = [...document.querySelectorAll("dialog[open]")].find(d => d.matches(":modal"));
-  const tappable = modal ? measured.filter(m => modal.contains(m.el)) : measured;
-  const centreInView = (r: DOMRect) => { const x = r.left + r.width / 2, y = r.top + r.height / 2; return x >= 0 && y >= 0 && x < width && y < window.innerHeight; };
-  // Scrolling, not a defect: a centre clipped by the target's own scroll container, or content
-  // passing under a fixed or sticky bar. Both are skipped; anything else covering a target counts.
-  const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
-  const clipped = (el: Element, x: number, y: number) => {
-    for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
-      const st = getComputedStyle(n);
-      if (/(auto|scroll|hidden|clip)/u.test(st.overflowX + st.overflowY)) {
-        const r = n.getBoundingClientRect();
-        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return true;
-      }
-    }
-    return false;
-  };
-  const scrolledAway = (m: { el: Element; rect: DOMRect }) => {
-    const x = m.rect.left + m.rect.width / 2, y = m.rect.top + m.rect.height / 2;
-    const hit = document.elementFromPoint(x, y);
-    return clipped(m.el, x, y) || (pinned(hit) && !pinned(m.el));
-  };
-  const obscured = tappable.filter(m => centreInView(m.rect) && !scrolledAway(m) && !reaches(m.el, m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2))
-    .slice(0, 20).map(m => ({ selector: describe(m.el), by: describe(document.elementFromPoint(m.rect.left + m.rect.width / 2, m.rect.top + m.rect.height / 2) ?? document.body) }));
-  // Non-overlap: two different controls whose measured boxes intersect by more than 4px² share taps.
-  const pin = new Map(tappable.map(m => [m.el, pinned(m.el)] as const));
-  const overlaps: { a: string; b: string; area: number }[] = [];
-  for (let i = 0; i < tappable.length && overlaps.length < 20; i += 1) {
-    for (let j = i + 1; j < tappable.length && overlaps.length < 20; j += 1) {
-      const a = tappable[i]!, b = tappable[j]!;
-      if (a.el.contains(b.el) || b.el.contains(a.el) || labelFor(a.el)?.contains(b.el) || labelFor(b.el)?.contains(a.el)) continue;
-      if (pin.get(a.el) !== pin.get(b.el)) continue; // scrolling content under a fixed or sticky bar
-      const w = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
-      const h = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
-      if (w > 0 && h > 0 && w * h > 4) overlaps.push({ a: describe(a.el), b: describe(b.el), area: Math.round(w * h) });
-    }
-  }
-  const offscreen = interactive.filter(el => { const r = el.getBoundingClientRect(); return (r.left < -1 || r.right > width + 1) && !inScroller(el); }).slice(0, 20).map(describe);
-  // Collapsed text: a visible element holding a sentence but squeezed into a sliver, so it
-  // wraps a character or two per line (overflow cannot see it). Leaf text containers only.
-  const collapsed = [...document.querySelectorAll("body *")].filter(el => {
-    if (!visible(el) || el.children.length > 2) return false;
-    const text = (el.textContent ?? "").trim();
-    if (text.length < 12 || !/\s/u.test(text)) return false;
-    const r = el.getBoundingClientRect();
-    const line = parseFloat(getComputedStyle(el).lineHeight) || 16;
-    return r.width < 48 && r.height > line * 4;
-  }).slice(0, 10).map(el => ({ selector: describe(el), w: Math.round(el.getBoundingClientRect().width), h: Math.round(el.getBoundingClientRect().height) }));
-  const root = document.documentElement.getAttribute("data-theme");
-  const effectiveTheme = root === "light" || root === "dark" ? root : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps, collapsed, effectiveTheme };
-};
 
 async function main(): Promise<void> {
   assert.ok(existsSync(join(DIST, "app/index.html")), "build the site against the local stack first");
@@ -373,6 +299,16 @@ async function main(): Promise<void> {
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
+            // Witnesses: read-only geometry first, then native-key keyboard witnesses, which change state.
+            try { entry.witness = await page.evaluate(GEOMETRY_WITNESS, DECLARED_OVERLAYS[screen.id] ?? []); }
+            catch (error) { entry.witness = { error: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) }; }
+            const keyboardSpecs = KEYBOARD_WITNESSES[screen.id] ?? [];
+            if (keyboardSpecs.length) {
+              // Pointer to a corner first, so :hover cannot stand in for focus.
+              await page.mouse.move(1, 1);
+              entry.keyboard = [];
+              for (const spec of keyboardSpecs) (entry.keyboard as unknown[]).push(await runKeyboardWitness(page, spec));
+            }
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
@@ -394,7 +330,9 @@ async function main(): Promise<void> {
       withCollapsedText: report.filter(r => ((r.collapsed as unknown[] | undefined)?.length ?? 0) > 0).length,
       withBypassedInteractions: report.filter(r => ((r.bypassedInteractions as unknown[] | undefined)?.length ?? 0) > 0).length,
       themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
-      errors: report.filter(r => r.error && r.error !== "pending").length };
+      errors: report.filter(r => r.error && r.error !== "pending").length,
+      // Witness counters, appended; every key above keeps its meaning.
+      witnesses: witnessSummary(report) };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
