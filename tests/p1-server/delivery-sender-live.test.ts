@@ -153,6 +153,25 @@ test("a sender removed after the lease: hydration (claim, replay and H0) omits i
   assert.equal(await signalKept(gone), true);
 });
 
+test("a cancelled delivery stays cancelled on replay after the sender is re-added", async () => {
+  const r = await recipient();
+  const person = await user("Removed then re-added");
+  await join(r.ws, person);
+  const gone = await send(r.ws, person, "user", r.principal, "cancelled before replay");
+  const kept = await send(r.ws, r.owner, "user", r.principal, "replays normally");
+  const ledger = await claim(r);
+  assert.equal(ledger.delivery_refs.length, 2);
+  await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${r.ws}::uuid AND user_id = ${person}::uuid`;
+  assert.deepEqual((await hydrate(r, ledger))?.map((d) => d.signal.id), [kept]);
+  const ended = await delivery(r, gone);
+  assert.equal(ended.last_error_code, "sender_not_live");
+  await sql`UPDATE swarm.memberships SET revoked_at = NULL WHERE workspace_id = ${r.ws}::uuid AND user_id = ${person}::uuid`;
+  // Replaying the same stored refs: the re-added sender's cancelled message never comes back; the other still does.
+  assert.deepEqual((await hydrate(r, ledger))?.map((d) => d.signal.id), [kept]);
+  assert.deepEqual(await delivery(r, gone), ended, "the terminal row is unchanged");
+  assert.deepEqual((await claim(r)).delivery_refs.map((ref) => ref.signal_id), [], "and no fresh claim resumes it");
+});
+
 test("a channel listener re-takes its own outstanding lease without a new attempt; other routes do not", async () => {
   const r = await recipient();
   const signal = await send(r.ws, r.owner, "user", r.principal, "re-check after restart");

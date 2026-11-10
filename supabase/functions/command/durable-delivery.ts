@@ -614,9 +614,20 @@ export async function hydrateDeliveryRefs(
     recipient_position: number;
     recipient_count: number;
     sender_live: boolean;
+    sender_canceled: boolean;
   }[]>`
     SELECT
       ${senderLive(tx)} AS sender_live,
+      /* A delivery already ended as sender_not_live stays ended, even after the sender is re-added: a replay of an
+       * old claim reads its stored refs here and must not resume it. */
+      EXISTS (
+        SELECT 1 FROM swarm.signal_deliveries AS ended
+        WHERE ended.signal_id = s.id
+          AND ended.workspace_id = s.workspace_id
+          AND ended.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          AND ended.ack_outcome = 'failed_terminal'
+          AND ended.last_error_code = 'sender_not_live'
+      ) AS sender_canceled,
       s.id,
       s.workspace_id,
       s.from_principal,
@@ -729,6 +740,7 @@ export async function hydrateDeliveryRefs(
     if (!signal) return null;
     // A fresh claim, a replayed claim and an H0 poll all hydrate here: a sender removed since the lease was
     // taken never reaches the agent, and the rest of the batch still does.
+    if (signal.sender_canceled) continue;
     if (!signal.sender_live) { senderNotLive.push(signal.id); continue; }
     hydrated.push({
       signal: {
