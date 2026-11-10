@@ -482,8 +482,20 @@ test("revoke an invitation: only one the grantor created, under a grant that car
   const scoped = await grant({ level: "scoped", scope_names: ["admin:read"] });
   refused(await agentCommand({ kind: "revoke_invitation", invitation_id: mine!.invitation_id }), "seat_admin_scope_missing", "scoped without invites:revoke");
   await endGrant(scoped);
+  // The grantor's own invitations for an owner and an admin: never revocable by the agent.
+  const ownerInvite = randomUUID(), adminInvite = randomUUID();
+  await sql`INSERT INTO swarm.invitations (invitation_id, workspace_id, email, role, token_hash, expires_at, created_by)
+    VALUES (${ownerInvite}::uuid, ${workspace}::uuid, 'owner-invite@example.test', 'owner', ${createHash("sha256").update(randomUUID()).digest()},
+      now() + interval '1 day', ${owner.id}::uuid),
+    (${adminInvite}::uuid, ${workspace}::uuid, 'admin-invite@example.test', 'admin', ${createHash("sha256").update(randomUUID()).digest()},
+      now() + interval '1 day', ${owner.id}::uuid)`;
   const grantId = await grant();
   refused(await agentCommand({ kind: "revoke_invitation", invitation_id: theirs }), "seat_admin_target_protected", "another person's invitation");
+  refused(await agentCommand({ kind: "revoke_invitation", invitation_id: ownerInvite }), "seat_admin_target_protected", "an owner invitation");
+  refused(await agentCommand({ kind: "revoke_invitation", invitation_id: adminInvite }), "seat_admin_target_protected", "an admin invitation");
+  const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.invitations
+    WHERE invitation_id IN (${ownerInvite}::uuid, ${adminInvite}::uuid) AND revoked_at IS NULL`;
+  assert.equal(live, 2, "both unchanged");
   const revoked = await agentCommand({ kind: "revoke_invitation", invitation_id: mine!.invitation_id });
   assert.equal(revoked.status, 200, JSON.stringify(revoked.body) + functionLogs.slice(-2000));
   const rows = await sql<{ invitation_id: string; gone: boolean }[]>`SELECT invitation_id, revoked_at IS NOT NULL AS gone FROM swarm.invitations

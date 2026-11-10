@@ -13377,12 +13377,13 @@ async function handleTransaction(
       }
       if (kind === "rename_organization") return await renameOrganization(tx, body, auth, ignoredIdentity, authorized.value);
       if (kind === "revoke_invitation") {
-        // Only an invitation the grantor created in this workspace (2c-1a). Its creator never changes; the reducer then
-        // decides liveness under the workspace stream lock, as for a person.
+        // Only a member invitation the grantor created in this workspace (2c-1a): never one for an owner or an admin.
+        // Creator and role never change; this runs before dispatch and before any replay, and the reducer then decides
+        // liveness under the workspace stream lock, as for a person.
         const invitationId = typeof rawLocal?.invitation_id === "string" && UUID_RE.test(rawLocal.invitation_id) ? rawLocal.invitation_id : null;
-        const [invitation] = invitationId === null ? [] : await tx<{ created_by: string }[]>`SELECT created_by FROM swarm.invitations
-          WHERE invitation_id = ${invitationId}::uuid AND workspace_id = ${localWorkspace}::uuid`;
-        if (invitation && invitation.created_by !== authorized.value.grantor_user_id) {
+        const [invitation] = invitationId === null ? [] : await tx<{ created_by: string; role: string }[]>`SELECT created_by, role
+          FROM swarm.invitations WHERE invitation_id = ${invitationId}::uuid AND workspace_id = ${localWorkspace}::uuid`;
+        if (invitation && (invitation.created_by !== authorized.value.grantor_user_id || invitation.role !== "member")) {
           return seatRefuse("seat_admin_target_protected", authorized.value);
         }
       }
