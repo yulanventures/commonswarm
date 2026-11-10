@@ -336,7 +336,7 @@ test("remove a member: membership, their agents and household access end, attrib
   assert.equal(r!.gone, true, "their Lists & docs role ended");
   const audits = await sql<{ actor_user: string; actor_principal: string | null }[]>`SELECT actor_user, actor_principal FROM swarm.household_object_audit
     WHERE workspace_id = ${workspace}::uuid AND command_kind = 'remove_member'`;
-  assert.deepEqual(audits, [{ actor_user: owner.id, actor_principal: agent }], "household audit: the grantor authorizes, the agent acts");
+  assert.deepEqual([...audits], [{ actor_user: owner.id, actor_principal: agent }], "household audit: the grantor authorizes, the agent acts");
   const [event] = await sql<{ actor_agent_principal: string }[]>`SELECT actor_agent_principal FROM swarm.events
     WHERE workspace_id = ${workspace}::uuid AND type = 'MemberRemoved' ORDER BY seq DESC LIMIT 1`;
   assert.equal(event!.actor_agent_principal, agent);
