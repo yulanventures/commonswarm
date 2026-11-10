@@ -16,6 +16,8 @@ type Page = Parameters<typeof runKeyboardWitness>[0] & {
   close(): Promise<void>;
 };
 type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; declared?: string[]; keyboard?: KeyboardSpec;
+  /** Runs between CHECKS and GEOMETRY_WITNESS, where the runner takes the primary screenshot. */
+  between?: (page: Page) => Promise<void>;
   check: (result: { geometry: Geometry; keyboard?: Keyboard }) => void };
 
 const page = (body: string, style = "") =>
@@ -58,6 +60,8 @@ const menuPage = (blocker: "absolute" | "fixed") => page(`<div style="position:r
   <div id="menu" role="menu" style="position:absolute;left:0;top:0;width:160px;height:120px;background:#eee"><button id="item" role="menuitem" style="margin:60px 0 0 60px">Item</button></div>
   <button id="outside" style="position:absolute;left:250px;top:10px">Outside</button>
   <div id="blocker" style="position:${blocker};left:240px;top:0;width:120px;height:80px"></div></div>`);
+const listPage = page(`<div style="position:relative"><button id="trigger" style="position:absolute;left:10px;top:10px">Open</button>
+  <div id="list" style="position:absolute;left:0;top:0;width:200px;height:150px;background:#fff"><button id="opt" style="margin:80px 0 0 20px">Option</button></div></div>`);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
 const ROWS: Row[] = [
@@ -117,6 +121,59 @@ const ROWS: Row[] = [
       assert.equal(link.outcome, "all-blocked", show(link));
       assert.ok(link.fragments.some(f => "hitHref" in f && f.hitHref?.endsWith("/terms")), show(link.fragments));
     } },
+  // Links behind the front overlay: classified by who receives each fragment's hit.
+  { name: "a link under a modal backdrop is covered by the front, not blocked, and keeps its fragment records",
+    html: page(`<p style="margin:20px"><a id="bg" href="/bg">Background link text</a></p><dialog id="m"><button id="ok">OK</button></dialog>`), setup: openModals("m"),
+    check: ({ geometry: g }) => {
+      assert.ok(!g.links.some(l => l.selector === "a#bg"), `the covered link must not be a blocked finding: ${show(g.links)}`);
+      const covered = g.linksCoveredByFront.find(l => l.selector === "a#bg");
+      assert.ok(covered && covered.fragments.length > 0 && covered.fragments.every(f => f.coveredByFront), show(g.linksCoveredByFront));
+      assert.equal(witnessSummary([{ screenshot: "s.png", witness: g }]).withLinksAllBlocked, 0);
+    } },
+  { name: "a wrong-link collision outside a small menu's painted area stays reportable",
+    html: page(`<div id="menu" role="menu" style="position:absolute;left:0;top:0;width:140px;height:100px;background:#eee"><button id="mi" role="menuitem">Item</button></div>
+      <p style="position:absolute;left:200px;top:200px;margin:0;font:14px/20px sans-serif"><a id="t" href="/terms">Terms</a></p>`),
+    setup: coverFirstFragment("#t", "a", "/privacy"), check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, "div#menu", show(g.overlay));
+      const link = g.links.find(l => l.selector === "a#t");
+      assert.ok(link, `the collision must remain a finding: ${show({ links: g.links, covered: g.linksCoveredByFront })}`);
+      assert.equal(link.layer, "behind");
+      assert.equal(link.outcome, "all-blocked", show(link));
+      assert.ok(link.fragments.some(f => "hitHref" in f && f.hitHref?.endsWith("/privacy")), show(link.fragments));
+    } },
+  // Declared overlay roots (a picker list with no menu role).
+  { name: "a declared list root is the front overlay; the control under it is front coverage", html: listPage, declared: ["#list"], check: ({ geometry: g }) => {
+    assert.equal(g.overlay.front, "div#list", show(g.overlay));
+    assert.deepEqual(selectors(g.coverage.byForeground), ["button#trigger"]);
+    assert.deepEqual(g.unexpectedObscured, []);
+    assert.deepEqual(g.foregroundObscured, []);
+  } },
+  { name: "the same list undeclared leaves the covered control unexpected", html: listPage, check: ({ geometry: g }) => {
+    assert.equal(g.overlay.front, null, show(g.overlay));
+    assert.deepEqual(g.unexpectedObscured, [{ selector: "button#trigger", by: "div#list" }]);
+  } },
+  // Drift between CHECKS and the post-screenshot witness.
+  { name: "content replaced after CHECKS: the witness judges the live dialog and reports stale raw references",
+    html: page(`<dialog id="d"><div id="body"><button id="keep">Keep</button> <button id="old1" style="width:30px;height:30px">1</button> <button id="old2">Old</button></div></dialog>`),
+    setup: openModals("d"),
+    between: async p => {
+      await p.evaluate(() => {
+        const body = document.getElementById("body")!;
+        const spacer = document.createElement("div");
+        spacer.id = "spacer"; spacer.style.height = "120px";
+        body.prepend(spacer);
+        for (const id of ["old1", "old2"]) document.getElementById(id)!.remove();
+        for (const id of ["new1", "new2"]) { const b = document.createElement("button"); b.id = id; b.textContent = id; body.append(b); }
+      }, undefined);
+    },
+    check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, "dialog#d", show(g.overlay));
+      assert.deepEqual(g.overlay.frontControls, { inView: 3, reached: 3 }, "keep, new1 and new2, judged where they are now");
+      assert.deepEqual(g.foregroundObscured, [], show(g.foregroundObscured));
+      assert.equal(g.drift.detached, 2, show(g.drift));
+      assert.ok(g.drift.moved >= 1 && g.drift.added === 2, show(g.drift));
+      assert.equal(g.tapTargetFacts.find(f => f.selector === "button#old1")?.stale, "detached", show(g.tapTargetFacts));
+    } },
   // Keyboard reveal: native keys only.
   { name: "Shift+Tab reveals a clip-on-blur control and Enter returns focus", html: revealPage(revealCss), setup: p => p.focus("#anchor"), keyboard: backSpec,
     check: ({ keyboard: k }) => {
@@ -166,6 +223,7 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           await p.setContent(row.html);
           await row.setup?.(p);
           await p.evaluate(CHECKS, undefined);
+          await row.between?.(p);
           const geometry = await p.evaluate(GEOMETRY_WITNESS, row.declared ?? []);
           const keyboard = row.keyboard ? await runKeyboardWitness(p, row.keyboard) : undefined;
           row.check({ geometry, keyboard });

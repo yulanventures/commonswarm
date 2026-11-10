@@ -33,18 +33,23 @@ export const CHECKS = () => {
   const doc = document.scrollingElement ?? document.documentElement;
   const offenders = doc.scrollWidth > doc.clientWidth + 1
     ? [...document.querySelectorAll("body *")].filter(el => visible(el) && el.getBoundingClientRect().right > width + 1 && !inScroller(el)).slice(0, 15).map(describe) : [];
-  const interactive = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=menuitem],[role=tab],[role=option]")].filter(visible);
   // The ONLY effective-hitbox rule: a checkbox or radio inside (or named by) a label is tapped
   // through that label, so it is measured by the label's box. Every such use is listed in
   // `effective` with both sizes; nothing else is measured by anything but its own box.
   const labelFor = (el: Element) => el.tagName === "INPUT" && ["checkbox", "radio"].includes((el as HTMLInputElement).type)
     ? (el.closest("label") ?? (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null)) : null;
-  const measured = interactive.map(el => {
-    const own = el.getBoundingClientRect();
-    const label = labelFor(el)?.getBoundingClientRect();
-    const viaLabel = !!label && label.width * label.height > own.width * own.height;
-    return { el, own, rect: viaLabel ? label! : own, viaLabel };
-  });
+  // One collection, run once here for the raw lists; the post-screenshot witness runs it again on the live page.
+  const collect = () => {
+    const interactive = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=menuitem],[role=tab],[role=option]")].filter(visible);
+    const measured = interactive.map(el => {
+      const own = el.getBoundingClientRect();
+      const label = labelFor(el)?.getBoundingClientRect();
+      const viaLabel = !!label && label.width * label.height > own.width * own.height;
+      return { el, own, rect: viaLabel ? label! : own, viaLabel };
+    });
+    return { interactive, measured };
+  };
+  const { interactive, measured } = collect();
   const effective = measured.filter(m => m.viaLabel).slice(0, 40).map(m => ({ selector: describe(m.el), via: "label",
     own: { w: Math.round(m.own.width), h: Math.round(m.own.height) }, hit: { w: Math.round(m.rect.width), h: Math.round(m.rect.height) } }));
   const small = measured
@@ -109,7 +114,7 @@ export const CHECKS = () => {
   const root = document.documentElement.getAttribute("data-theme");
   const effectiveTheme = root === "light" || root === "dark" ? root : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   // The raw measurement's own elements and helpers, for the witnesses that run after the primary screenshot.
-  (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw = { describe, visible, reaches, interactive, measured, small, overlapPairs, modal: modal ?? null };
+  (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw = { describe, visible, reaches, collect, measured, small, overlapPairs, modal: modal ?? null };
   return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps, collapsed, effectiveTheme };
 };
 
@@ -120,7 +125,9 @@ export type AuditRaw = {
   describe: (el: Element) => string;
   visible: (el: Element) => boolean;
   reaches: (el: Element, x: number, y: number) => boolean;
-  interactive: Element[];
+  /** Re-collects the controls exactly as the raw lists did, on the page as it is now. */
+  collect: () => { interactive: Element[]; measured: Measured[] };
+  /** The raw measurement's own elements and rectangles, taken before the primary screenshot. */
   measured: Measured[];
   small: Measured[];
   overlapPairs: [Measured, Measured][];
@@ -144,8 +151,24 @@ export type WitnessHelpers = {
 export const GEOMETRY_WITNESS = (declared: string[]) => {
   const raw = (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw;
   if (!raw) throw new Error("CHECKS must run before GEOMETRY_WITNESS");
-  const { describe, visible, reaches, interactive, measured, small, overlapPairs, modal } = raw;
+  const { describe, visible, reaches, collect, measured: rawMeasured, small, overlapPairs, modal } = raw;
   const width = window.innerWidth, height = window.innerHeight;
+  // Judge the page as it is NOW (after the screenshot), not the elements and rectangles CHECKS saved
+  // before it: content can re-render in between (a dialog that renders, then renders again when a
+  // read lands). The raw references are compared with the live ones and the drift is reported; a
+  // raw-indexed fact whose element is gone or hidden says so (`stale`) instead of a hit finding.
+  const { interactive, measured } = collect();
+  const live = new Map(measured.map(m => [m.el, m] as const));
+  const movedBetween = (a: DOMRect, b: DOMRect) => [a.left - b.left, a.top - b.top, a.width - b.width, a.height - b.height].some(d => Math.abs(d) > 1);
+  const staleOf = (m: Measured) => (!m.el.isConnected ? "detached" : !live.has(m.el) ? "hidden" : null);
+  const rawEls = new Set(rawMeasured.map(m => m.el));
+  const drift = {
+    rawControls: rawMeasured.length, liveControls: measured.length,
+    detached: rawMeasured.filter(m => staleOf(m) === "detached").length,
+    hidden: rawMeasured.filter(m => staleOf(m) === "hidden").length,
+    moved: rawMeasured.filter(m => { const now = live.get(m.el); return !!now && movedBetween(m.rect, now.rect); }).length,
+    added: measured.filter(m => !rawEls.has(m.el)).length,
+  };
   const round = (n: number) => Math.round(n);
   const inView = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height;
   const hitAt = (x: number, y: number) => describe(document.elementFromPoint(x, y) ?? document.body);
@@ -252,11 +275,17 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   // ---- Small targets, index for index with tapTargets ----
   // Text beside a control is context, not an exemption: `inlineInText` marks only a control laid out
   // inline within running text; a block-level control beside text is still a discrete target.
-  const tapTargetFacts = small.map(({ el, rect }) => {
+  const tapTargetFacts = small.map(rawTarget => {
+    const { el } = rawTarget;
+    const stale = staleOf(rawTarget);
+    if (stale) return { selector: describe(el), stale, moved: false, layer: "stale", reached: 0, sampled: 0, by: null, display: "", fragments: 0, inText: false, inlineInText: false, opacity: 0, clippedBy: null };
+    const { rect } = live.get(el)!;
     const display = getComputedStyle(el).display;
     const inText = [...(el.parentElement?.childNodes ?? [])].some(n => n !== el && n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() !== "");
     return {
       selector: describe(el),
+      stale: null,
+      moved: movedBetween(rawTarget.rect, rect),
       layer: !front ? "page" : within(front, el) ? "front" : "behind",
       ...foreground(el, rect),
       display,
@@ -287,20 +316,29 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
       const shown = inView(x, y) && pointShown(el, x, y);
       const hit = shown ? document.elementFromPoint(x, y) : null;
       const other = hit?.closest("a[href]");
-      return { ...boxOf(r), point: [round(x), round(y)], shown, hit: hit ? describe(hit) : null, reached: shown && reaches(el, x, y),
+      // Behind the front overlay, a fragment that overlay covers is expected coverage, not a blocked link.
+      const coveredByFront = shown && !within(front, el) && within(front, hit);
+      return { ...boxOf(r), point: [round(x), round(y)], shown, hit: hit ? describe(hit) : null, reached: shown && reaches(el, x, y), coveredByFront,
         ...(other && other !== el && !el.contains(other) ? { hitHref: other.getAttribute("href") } : {}) };
     });
-    const shown = fragments.filter(f => f.shown), ok = shown.filter(f => f.reached).length;
-    const outcome = !shown.length ? "not-in-view" : ok === shown.length ? "all-hit" : ok === 0 ? "all-blocked" : "mixed";
+    const shown = fragments.filter(f => f.shown), judged = shown.filter(f => !f.coveredByFront), ok = judged.filter(f => f.reached).length;
+    const outcome = !shown.length ? "not-in-view" : !judged.length ? "covered-by-front"
+      : ok === judged.length ? "all-hit" : ok === 0 ? "all-blocked" : "mixed";
     return { source, outcome, fragments };
   };
-  const links = interactive.filter(el => el.tagName === "A").flatMap(el => {
+  // Each fragment is classified by who actually receives its hit: the front overlay (expected
+  // coverage) or anything else (a finding, even for a link that sits behind the front overlay).
+  // Links whose every shown fragment the front covers are kept, with all their fragment records, in
+  // linksCoveredByFront rather than in links, so they cannot crowd real findings out of the list.
+  const linkFacts = interactive.filter(el => el.tagName === "A").flatMap(el => {
     const [cx, cy] = centreOf(el.getBoundingClientRect());
     if (!inView(cx, cy) || !pointShown(el, cx, cy) || reaches(el, cx, cy)) return [];
     const facts = fragmentFacts(el);
-    return [{ selector: describe(el), href: el.getAttribute("href"), display: getComputedStyle(el).display, text: (el.textContent ?? "").trim().slice(0, 40),
-      unionHit: hitAt(cx, cy), source: facts.source, outcome: facts.outcome, fragments: facts.fragments.slice(0, 8) }];
-  }).slice(0, 30);
+    return [{ selector: describe(el), href: el.getAttribute("href"), layer: !front ? "page" : within(front, el) ? "front" : "behind", display: getComputedStyle(el).display,
+      text: (el.textContent ?? "").trim().slice(0, 40), unionHit: hitAt(cx, cy), source: facts.source, outcome: facts.outcome, fragments: facts.fragments.slice(0, 8) }];
+  });
+  const links = linkFacts.filter(l => l.outcome !== "covered-by-front").slice(0, 30);
+  const linksCoveredByFront = linkFacts.filter(l => l.outcome === "covered-by-front").slice(0, 30);
 
   // ---- Disclosure summaries (legal contents): open state, pointer-events, and whether the links they reveal are reachable ----
   const summaries = [...document.querySelectorAll("details > summary")].filter(visible).slice(0, 10).map(s => {
@@ -308,7 +346,8 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
     const contents = [...details.querySelectorAll("a[href]")].filter(a => visible(a) && !s.contains(a));
     const facts = contents.map(a => fragmentFacts(a)).filter(f => f.outcome !== "not-in-view");
     return { selector: describe(s), open: details.open, pointerEvents: getComputedStyle(s).pointerEvents, ...foreground(s),
-      contents: { links: contents.length, inView: facts.length, reached: facts.filter(f => f.outcome !== "all-blocked").length, mixedOrBlocked: facts.filter(f => f.outcome !== "all-hit").length } };
+      contents: { links: contents.length, inView: facts.length, reached: facts.filter(f => f.outcome === "all-hit" || f.outcome === "mixed").length,
+        mixedOrBlocked: facts.filter(f => f.outcome === "mixed" || f.outcome === "all-blocked").length } };
   });
 
   // ---- (4) Overlaps, index for index with the raw `overlaps` ----
@@ -323,7 +362,9 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
     ].filter(s => s.right - s.left >= 1 && s.bottom - s.top >= 1).sort((p, q) => areaOf(q) - areaOf(p));
     return strips[0] ? centreOf(strips[0]) : null;
   };
-  const overlapFacts = overlapPairs.map(([a, b]) => {
+  const overlapFacts = overlapPairs.map(([rawA, rawB]) => {
+    const a = live.get(rawA.el), b = live.get(rawB.el);
+    if (!a || !b) return { a: describe(rawA.el), b: describe(rawB.el), stale: staleOf(rawA) ?? staleOf(rawB), moved: false, area: 0, visibleArea: 0, clippedArea: 0, kind: "stale", wrongTarget: false, points: null };
     const shared: Box = { left: Math.max(a.rect.left, b.rect.left), right: Math.min(a.rect.right, b.rect.right),
       top: Math.max(a.rect.top, b.rect.top), bottom: Math.min(a.rect.bottom, b.rect.bottom) };
     const area = round(areaOf(shared)), visibleArea = round(areaOf(shownPart(shared, [a.el, b.el])));
@@ -336,13 +377,14 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
     };
     const points = { aCentre: probe(a, b, centreOf(a.rect)), bCentre: probe(b, a, centreOf(b.rect)), aOwn: probe(a, b, ownPoint(a.rect, b.rect)), bOwn: probe(b, a, ownPoint(b.rect, a.rect)) };
     const wrongTarget = Object.values(points).some(p => !!p && p.shown && !p.ok && p.toOther);
-    return { a: describe(a.el), b: describe(b.el), area, visibleArea, clippedArea: area - visibleArea, kind: visibleArea > 4 ? "visible" : "clipped", wrongTarget, points };
+    return { a: describe(a.el), b: describe(b.el), stale: null, moved: movedBetween(rawA.rect, a.rect) || movedBetween(rawB.rect, b.rect),
+      area, visibleArea, clippedArea: area - visibleArea, kind: visibleArea > 4 ? "visible" : "clipped", wrongTarget, points };
   });
 
   const media = { hoverNone: matchMedia("(hover: none)").matches, pointerCoarse: matchMedia("(pointer: coarse)").matches, anyHover: matchMedia("(any-hover: hover)").matches };
   (globalThis as unknown as { __auditHelpers?: WitnessHelpers }).__auditHelpers = { describe, opacityChain, clippedBy, foreground: (el: Element) => foreground(el) };
-  return { state: "after-primary-screenshot", media, overlay, foregroundObscured, coverage: { byForeground, byOtherOverlay }, unexpectedObscured,
-    tapTargetFacts, links, summaries, overlapFacts };
+  return { state: "after-primary-screenshot", media, drift, overlay, foregroundObscured, coverage: { byForeground, byOtherOverlay }, unexpectedObscured,
+    tapTargetFacts, links, linksCoveredByFront, summaries, overlapFacts };
 };
 
 // ---- (3) Keyboard witnesses: native keys only, run LAST (they change focus and may navigate) ----
@@ -457,6 +499,8 @@ export function witnessSummary(report: Item[]) {
     pending: report.filter(r => r.error === "pending").length,
     supplementaryImages: 0,
     witnessErrors: report.filter(r => !!geo(r).error).length,
+    // Raw references that changed between CHECKS and the post-screenshot witness (the witness judged the live page).
+    withRawDrift: count(g => !!g.drift && (g.drift.detached + g.drift.hidden + g.drift.moved + g.drift.added) > 0),
     withForegroundObscured: count(g => (g.foregroundObscured?.length ?? 0) > 0),
     withCoverageByOtherOverlay: count(g => (g.coverage?.byOtherOverlay.length ?? 0) > 0),
     withUnexpectedObscured: count(g => (g.unexpectedObscured?.length ?? 0) > 0),
@@ -465,6 +509,7 @@ export function witnessSummary(report: Item[]) {
     // the second count leaves out only controls laid out inline in running text (still listed in tapTargetFacts).
     withFrontSmallTargets: count(g => (g.tapTargetFacts ?? []).some(f => frontTarget(f))),
     withFrontSmallTargetsOutsideText: count(g => (g.tapTargetFacts ?? []).some(f => frontTarget(f) && !f.inlineInText)),
+    withLinksCoveredByFront: count(g => (g.linksCoveredByFront?.length ?? 0) > 0),
     withLinksMixed: count(g => (g.links ?? []).some(l => l.outcome === "mixed")),
     withLinksAllBlocked: count(g => (g.links ?? []).some(l => l.outcome === "all-blocked")),
     withLinkHitOnOtherLink: count(g => (g.links ?? []).some(l => l.fragments.some(f => "hitHref" in f))),

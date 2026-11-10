@@ -73,6 +73,7 @@ const STARTER: Screen[] = [
 const DECLARED_OVERLAYS: Record<string, string[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
+  "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
 };
 /** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
@@ -296,6 +297,12 @@ async function main(): Promise<void> {
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
             if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
+            // Let reads the setup started finish (and their re-renders land) before measuring: a dialog can
+            // render, then render again when its read returns (workspace settings and its organizations).
+            entry.settledBeforeChecks = await page.waitForFunction(() => {
+              const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
+              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
+            }, undefined, { timeout: 10_000 }).then(() => true, () => false);
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
