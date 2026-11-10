@@ -8,7 +8,7 @@ export const SEAT_ADMIN_ROLE_COPY = Object.freeze({
       'Add, renew and stop agent seats, and set up agent connections',
       'Rename this workspace and choose its lead agent',
       'Add agents to this workspace and remove them',
-      'Remove members and guests, and switch people between member and guest',
+      'Remove members',
       'See this admin access and its history',
     ]),
     excluded: Object.freeze([
