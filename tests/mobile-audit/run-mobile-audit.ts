@@ -38,12 +38,13 @@ export const VIEWPORTS = [
 ] as const;
 export const THEMES = ["light", "dark"] as const;
 
-/** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait.
+/** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait, settle.
+ *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string };
+type Step = { media?: string; waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[] }
@@ -91,6 +92,14 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     activate: { key: "Enter", expect: { hash: "#main", inView: "#main" } },
   }],
 };
+
+/** Wait (up to 10 s) until no page read is pending and none finished in the last 400 ms, so a view that
+ *  re-renders when its read returns has done so. Resolves false instead of throwing when reads never quiet. */
+type Settleable = { waitForFunction: (fn: () => boolean, arg: undefined, options: { timeout: number }) => Promise<unknown> };
+const settle = (page: Settleable) => page.waitForFunction(() => {
+  const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
+  return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
+}, undefined, { timeout: 10_000 }).then(() => true, () => false);
 
 const loopback = (value: string) => ["127.0.0.1", "localhost", "[::1]"].includes(new URL(value).hostname);
 const fill = (value: string, ids: Record<string, string>) => value.replace(/\{([a-zA-Z.]+)\}/g, (_, key: string) => ids[key] ?? `missing-${key}`);
@@ -294,15 +303,18 @@ async function main(): Promise<void> {
                 catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
               }
               if (step.wait) await page.waitForTimeout(step.wait);
+              if (step.settle) await settle(page);
             }
             // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
             if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
             // Let reads the setup started finish (and their re-renders land) before measuring: a dialog can
             // render, then render again when its read returns (workspace settings and its organizations).
-            entry.settledBeforeChecks = await page.waitForFunction(() => {
-              const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
-              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
-            }, undefined, { timeout: 10_000 }).then(() => true, () => false);
+            entry.settledBeforeChecks = await settle(page);
+            // The declared state must still be on screen after settling: a re-render that closed it would
+            // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
+            if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
+              throw new Error(`ready state lost after settling: ${screen.ready}`);
+            }
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });

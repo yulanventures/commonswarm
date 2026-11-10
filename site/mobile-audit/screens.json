@@ -1598,6 +1598,9 @@
         "waitFor": "live-dashboard:has([data-home-workspace-header=\"{emptyWorkspace}\"]) :is(#hm-ws-title:focus, .cs-org-phone-title #hm-phone-title:focus)"
       },
       {
+        "settle": true
+      },
+      {
         "media": "(width <= 52rem)",
         "click": "button[aria-label=\"Open navigation\"]"
       },
