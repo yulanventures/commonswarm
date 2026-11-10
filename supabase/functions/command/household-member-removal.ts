@@ -37,6 +37,8 @@ export async function revokeRemovedMemberHousehold(
   actorUserId: string | null,
   commandId: string,
   requestDigest: string,
+  // Seat admin: the agent removing the member under the actor's grant. Recorded beside the actor by the trigger.
+  agentPrincipalId: string | null = null,
 ): Promise<void> {
   if (typeof actorUserId !== "string") {
     throw new Error("MemberRemoved actor is missing");
@@ -49,7 +51,8 @@ export async function revokeRemovedMemberHousehold(
       set_config('cswarm.household_actor', ${actorUserId}, true),
       set_config('cswarm.household_request', ${commandId}, true),
       set_config('cswarm.household_digest', ${requestDigest}, true),
-      set_config('cswarm.household_command', 'remove_member', true)
+      set_config('cswarm.household_command', 'remove_member', true),
+      set_config('cswarm.household_agent_principal', ${agentPrincipalId ?? ""}, true)
   `;
   // Workspace, then membership, then content role and connections.
   await tx`

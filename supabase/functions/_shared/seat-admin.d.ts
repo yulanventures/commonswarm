@@ -153,7 +153,7 @@ export declare const SEAT_ADMIN_AGENT_KINDS: readonly ["rename_workspace", "set_
 export type SeatAdminAgentKind = (typeof SEAT_ADMIN_AGENT_KINDS)[number];
 /** Executed in 2b. remove_member waits for delegated attribution in its collateral writers; change_role has no
  *  member/guest transition (there is no guest role), so both refuse under seat admin. */
-export declare const SEAT_ADMIN_EXECUTED_KINDS: readonly ["rename_workspace", "set_workspace_lead", "add_agent_to_workspace", "remove_agent_from_workspace"];
+export declare const SEAT_ADMIN_EXECUTED_KINDS: readonly ["rename_workspace", "set_workspace_lead", "add_agent_to_workspace", "remove_agent_from_workspace", "remove_member"];
 export interface SeatAdminGrantFacts {
     grant_id: string;
     owner_user_id: string;

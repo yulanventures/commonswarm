@@ -198,7 +198,7 @@ test("agent targets: never itself, never another person's agent, never an agent 
   assert.ok(SEAT_ADMIN_AGENT_KINDS.every((k) => HUMAN_ONLY_COMMANDS.has(k as never)), "all six stay human-only without a grant");
 });
 
-test("the reducer admits only rename for a seat admin agent, at an Admin's level, with the agent as actor", () => {
+test("the reducer admits only rename and member removal for a seat admin agent, at an Admin's level, with the agent as actor", () => {
   const state = reduceWorkspace(null, { workspace_id: WS, stream_id: "s", command_id: "c", seq: 1, event_id: "e", type: "WorkspaceCreated",
     schema_version: 1, actor_user: OWNER, actor_agent_principal: null, actor_run: null, occurred_at_server: 1,
     payload: { workspace_id: WS, name: "Home", created_by: OWNER, created_at: 1 } } as never);
@@ -213,7 +213,7 @@ test("the reducer admits only rename for a seat admin agent, at an Admin's level
   const done = decideWorkspace(state, rename as never, ctx(true));
   assert.equal(done.ok, true);
   assert.equal(done.events[0]?.actor_agent_principal, AGENT);
-  for (const kind of ["archive_workspace", "remove_member", "change_role", "invite_member"]) {
+  for (const kind of ["archive_workspace", "change_role", "invite_member"]) {
     const d = decideWorkspace(state, { kind, user_id: OTHER, role: "member" } as never, ctx(true));
     assert.equal(d.ok, false, `${kind} is never admitted to the reducer for an agent`);
   }

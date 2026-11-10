@@ -4933,11 +4933,16 @@ async function updateWorkspaceProjection(
       ) {
         throw new Error("MemberRemoved payload is malformed");
       }
-      if (prepared.ctx.actor.agent_principal !== null || event.actor_user===null) throw new Error('Human membership removal required');
-      await tx`SELECT swarm.remove_local_agents_for_member(${route.workspaceId}::uuid,${payload.user_id}::uuid,${event.actor_user}::uuid)`;
+      // A person, or (seat admin) an agent under the grant selected after the locks: then the grantor is the
+      // authorizing user the definers check, and the agent is recorded beside it in tombstones and household audit.
+      const delegated = prepared.ctx.seat_admin ?? null;
+      if (event.actor_user===null || prepared.ctx.actor.agent_principal !== null && delegated === null) throw new Error('Human membership removal required');
+      const authorizer = delegated ? delegated.grantor_user_id : event.actor_user;
+      const delegatedAgent = delegated ? prepared.ctx.actor.agent_principal : null;
+      await tx`SELECT swarm.remove_local_agents_for_member(${route.workspaceId}::uuid,${payload.user_id}::uuid,${authorizer}::uuid)`;
       await revokeHostedWorkspaceApproval(tx, route.workspaceId, new Date(payload.revoked_at),
-        event.actor_user, { ownerUserId: payload.user_id }, plan ?? undefined);
-      await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
+        authorizer, { ownerUserId: payload.user_id }, plan ?? undefined, delegatedAgent);
+      await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), authorizer, event.command_id, requestDigest, delegatedAgent); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
         WHERE workspace_id = ${route.workspaceId}::uuid
@@ -12879,6 +12884,11 @@ class LocalBusinessRefused<T> extends Error {
 }
 /** Authenticated validation or scope refusal survives only after its business savepoint
  * (including first-use and predecessor handover) has rolled back. */
+/** What a seat admin reducer action is about, for the grantor's history: the removed member, or the workspace. */
+function seatAdminTarget(kind: string, command: unknown, workspaceId: string): { kind: string; id: string } {
+  const user = record(command)?.user_id;
+  return kind === "remove_member" && typeof user === "string" ? { kind: "member", id: user } : { kind: "workspace", id: workspaceId };
+}
 class LocalAuditedRefused extends Error {
   /** `after` writes what must survive with the audit row (a seat admin refusal's grantor history), on the outer
    * transaction, whose plan locks are still held. */
@@ -13293,15 +13303,21 @@ async function handleTransaction(
             reason_code: reason, request_digest: requestHash(auth.actor, (rawLocal ?? {}) as never) }) : null);
       };
       if (!authorized.ok) return seatRefuse(authorized.reason, null);
-      // remove_member waits for delegated attribution in its collateral writers; change_role has no member/guest
-      // transition (there is no guest role). Both refuse before touching a target.
+      // change_role has no member/guest transition (there is no guest role): it refuses before touching a target.
       if (!SEAT_ADMIN_EXECUTED_KIND_SET.has(kind)) {
         return seatRefuse(kind === "change_role" ? "seat_admin_target_protected" : "seat_admin_scope_missing", authorized.value);
       }
       if (kind === "set_workspace_lead" || kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace") {
         return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
       }
-      seatAdminContext = authorized.value; // rename_workspace: the workspace reducer, at an Admin's level
+      if (kind === "remove_member") {
+        // Members only, read under the plan's membership lock: never an owner (the grantor included) or an admin.
+        const targetUser = typeof rawLocal?.user_id === "string" && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id : null;
+        const [target] = targetUser === null ? [] : await tx<{ role: string }[]>`SELECT role FROM swarm.memberships
+          WHERE workspace_id = ${localWorkspace}::uuid AND user_id = ${targetUser}::uuid AND revoked_at IS NULL`;
+        if (target && target.role !== "member") return seatRefuse("seat_admin_target_protected", authorized.value);
+      }
+      seatAdminContext = authorized.value; // rename_workspace, remove_member: the workspace reducer, at an Admin's level
     }
     if (kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace")
       return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
@@ -15549,7 +15565,7 @@ async function handleTransaction(
           streamId: route.streamId, outcome: "authz", reason, hash,
           detail: seatAdminAuditDetail(value, [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; ")) },
           (outer: Sql) => recordSeatAdminAction(outer, { authorized: value, agent_principal_id: auth.actor.agent_principal!, agent_run_id: auth.actor.run,
-            command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace", target_id: route.workspaceId,
+            command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: seatAdminTarget(kind, command, route.workspaceId).kind, target_id: seatAdminTarget(kind, command, route.workspaceId).id,
             outcome: "refused", reason_code: reason, request_digest: hash }));
       }
       await insertAudit(tx, {
@@ -15673,8 +15689,9 @@ async function handleTransaction(
     });
     // The grantor's history, in this same transaction as the action and its ledger row.
     if (seatAdminContext) await recordSeatAdminAction(tx, { authorized: seatAdminContext, agent_principal_id: auth.actor.agent_principal!,
-      agent_run_id: auth.actor.run, command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace",
-      target_id: route.workspaceId, outcome: outcome.decision.ok ? "accepted" : "refused",
+      agent_run_id: auth.actor.run, command_id: commandId, kind, workspace_id: route.workspaceId,
+      target_kind: seatAdminTarget(kind, command, route.workspaceId).kind, target_id: seatAdminTarget(kind, command, route.workspaceId).id,
+      outcome: outcome.decision.ok ? "accepted" : "refused",
       reason_code: outcome.decision.ok ? null : outcome.decision.reason, request_digest: hash });
 
     // §8 spend proxies, charged on the accepted path only. A command the
