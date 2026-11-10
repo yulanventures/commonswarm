@@ -172,9 +172,7 @@ export const GEOMETRY_WITNESS = (declared: DeclaredOverlay[]) => {
     added: measured.filter(m => !rawEls.has(m.el)).length,
   };
   const round = (n: number) => Math.round(n);
-  // At least a pixel inside the viewport: hit testing rounds, so a point in the last fraction of the
-  // edge can resolve outside it and hit nothing.
-  const inView = (x: number, y: number) => x >= 0 && y >= 0 && x <= width - 1 && y <= height - 1;
+  const inView = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height;
   const hitAt = (x: number, y: number) => describe(document.elementFromPoint(x, y) ?? document.body);
   const centreOf = (r: Box) => [(r.left + r.right) / 2, (r.top + r.bottom) / 2] as const;
   const boxOf = (r: Box) => ({ x: round(r.left), y: round(r.top), w: round(r.right - r.left), h: round(r.bottom - r.top) });
@@ -267,8 +265,12 @@ export const GEOMETRY_WITNESS = (declared: DeclaredOverlay[]) => {
       const hit = document.elementFromPoint(...centreOf(m.rect));
       return { m, hit, row: { selector: describe(m.el), by: hit ? describe(hit) : null, ...(pinned(hit) && !pinned(m.el) ? { pinnedCover: true } : {}) } };
     });
-  // A centre that hits nothing is not covered by anything: it is listed on its own, not as obscured.
-  const noHitAtCentre = misses.filter(b => !b.hit).slice(0, 20).map(b => b.row.selector);
+  // A centre that hits nothing (hit testing rounds a point in the last fraction of a viewport edge to
+  // outside it) is not covered by anything: it is recorded on its own, with the exact point, not as obscured.
+  const noHitAtCentre = misses.filter(b => !b.hit).slice(0, 20).map(b => {
+    const [x, y] = centreOf(b.m.rect);
+    return { selector: b.row.selector, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
+  });
   const blocked = misses.filter(b => !!b.hit);
   const foregroundObscured = blocked.filter(b => within(front, b.m.el)).map(b => b.row);
   const byForeground = blocked.filter(b => !within(front, b.m.el) && within(front, b.hit)).map(b => b.row);
@@ -515,8 +517,14 @@ type TapPage = {
   locator: (selector: string) => { first: () => { scrollIntoViewIfNeeded: (options: { timeout: number }) => Promise<void> } };
   url: () => string;
 };
+// Self-contained: it runs again after goBack, which may load a fresh document without the helpers
+// GEOMETRY_WITNESS installed, so it must not depend on them (or on the back/forward cache).
 const LABEL_TARGET = (selector: string) => {
-  const h = (globalThis as unknown as { __auditHelpers: WitnessHelpers }).__auditHelpers;
+  const describe = (node: Element) => {
+    const e = node as HTMLElement;
+    const data = [...e.attributes].find(a => a.name.startsWith("data-"))?.name;
+    return `${node.tagName.toLowerCase()}${e.id ? `#${e.id}` : ""}${data ? `[${data}]` : ""}${typeof e.className === "string" && e.className ? `.${e.className.trim().split(/\s+/).slice(0, 2).join(".")}` : ""}`;
+  };
   const el = document.querySelector(selector);
   if (!el) return null;
   const range = document.createRange();
@@ -529,7 +537,7 @@ const LABEL_TARGET = (selector: string) => {
   const hitLink = hit?.closest("a[href]");
   return { found: true, point: [Math.round(x), Math.round(y)] as [number, number], fragments: shown.length,
     label: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
-    hit: hit ? h.describe(hit) : null, hitHref: hitLink ? hitLink.getAttribute("href") : null };
+    hit: hit ? describe(hit) : null, hitHref: hitLink ? hitLink.getAttribute("href") : null };
 };
 
 export async function runActivationWitness(page: TapPage, spec: ActivationSpec) {

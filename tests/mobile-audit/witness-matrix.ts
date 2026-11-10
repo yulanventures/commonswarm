@@ -14,7 +14,7 @@ type Activation = Awaited<ReturnType<typeof runActivationWitness>>;
 type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & {
   setContent(html: string): Promise<void>;
   goto(url: string): Promise<unknown>;
-  route(url: string, handler: (route: { request(): { url(): string }; fulfill(response: { contentType: string; body: string }): Promise<void> }) => Promise<void>): Promise<void>;
+  route(url: string, handler: (route: { request(): { url(): string }; fulfill(response: { contentType: string; headers: Record<string, string>; body: string }): Promise<void> }) => Promise<void>): Promise<void>;
   focus(selector: string): Promise<void>;
   close(): Promise<void>;
 };
@@ -215,11 +215,27 @@ const ROWS: Row[] = [
       assert.equal(f.frontCovered, true, show(f.points));
       assert.equal(f.wrongTarget, false, show(f.points));
     } },
-  // Viewport edge: a centre in the last fraction of a pixel is not judged as obscured.
-  { name: "a control centred in the viewport's last fractional pixel is not reported obscured",
-    html: page(`<button id="edge" style="position:fixed;left:10px;top:556.2px;width:80px;height:87px">Edge</button>`), check: ({ geometry: g }) => {
+  // Viewport edge: a centre whose hit test returns nothing is recorded as such, not as obscured.
+  { name: "a centre in the viewport edge's last fraction is recorded in noHitAtCentre, not as obscured",
+    html: page(`<button id="edge" style="position:fixed;left:0;top:0;width:40px;height:43px">E</button>`),
+    setup: async p => {
+      // Find a point inside the viewport that this engine's hit test still resolves to nothing, and centre the control there.
+      const y = await p.evaluate(() => {
+        for (let k = 1; k < 20; k += 1) {
+          const candidate = innerHeight - 1 + k / 20;
+          if (document.elementFromPoint(20, candidate) === null) {
+            document.getElementById("edge")!.style.top = `${candidate - 21.5}px`;
+            return candidate;
+          }
+        }
+        return null;
+      }, undefined);
+      assert.ok(y !== null, "fixture: no point inside the bottom edge hits nothing in this engine, so the case cannot be exercised");
+    },
+    check: ({ geometry: g }) => {
+      const edge = g.noHitAtCentre.find(n => n.selector === "button#edge");
+      assert.ok(edge && edge.y > 599 && edge.y < 600 && edge.x === 20, show(g.noHitAtCentre));
       assert.ok(!selectors(g.unexpectedObscured).includes("button#edge"), show(g.unexpectedObscured));
-      assert.ok(!g.noHitAtCentre.includes("button#edge"), show(g.noHitAtCentre));
     } },
   // Keyboard reveal: native keys only.
   { name: "Shift+Tab reveals a clip-on-blur control and Enter returns focus", html: revealPage(revealCss), setup: p => p.focus("#anchor"), keyboard: backSpec,
@@ -270,7 +286,9 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           if (row.served) {
             await p.route(`${ORIGIN}/**`, async route => {
               const path = new URL(route.request().url()).pathname;
-              await route.fulfill({ contentType: "text/html", body: path === "/" ? row.html : `<!doctype html><title>${path}</title><p>${path}</p>` });
+              // no-store keeps pages out of the back/forward cache, so going back loads a fresh document, as in the app.
+              await route.fulfill({ contentType: "text/html", headers: { "cache-control": "no-store" },
+                body: path === "/" ? row.html : `<!doctype html><title>${path}</title><p>${path}</p>` });
             });
             await p.goto(`${ORIGIN}/`);
           } else await p.setContent(row.html);
