@@ -10,7 +10,9 @@
  * Witnesses (audit-checks.ts) are recorded beside the raw lists and never filter them: read-only
  * geometry after the primary screenshot (front overlay and what it covers, small-target facts, link
  * label fragments, disclosure summaries, overlap points), then native-key keyboard witnesses last.
- * Witness findings are report-only; the job fails on capture errors and on the fixture matrix.
+ * Witness findings are report-only; the job fails on capture errors and on the fixture matrix. The one exception is
+ * hover stability (hover-witness.ts): a hover or focus that moves or resizes anything fails the job, at the six
+ * audit viewports and in a desktop pass at 1280 and 1440 wide with a mouse.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -25,6 +27,7 @@ import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
 import "./witness-matrix.js";
+import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from "./hover-witness.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -104,6 +107,27 @@ const settle = (page: Settleable) => page.waitForFunction(() => {
   return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
 }, undefined, { timeout: 10_000 }).then(() => true, () => false);
 
+/** Hover-stability witnesses, by screen (owner request, Nov 10): hovering or focusing a row must not move or resize
+ *  anything. Unlike the other witnesses, a shift fails the audit. Feed rows addressed to someone come first, and the
+ *  general channel must include one: that is the case the owner reported (the recipient appearing on hover). */
+const FEED_ROWS = ".dashboard__feed > .dashboard__message";
+const ADDRESSED = ':has(.dashboard__message-target:is([data-target-kind="agent"], [data-target-kind="person"]))';
+const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
+  "app.chat.general": [
+    { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, require: ADDRESSED, focus: true },
+    { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
+  ],
+  "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
+  "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
+  "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
+  "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
+  "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
+  "app.lists": [{ name: "lists", rows: '[data-hh-action="select"]', max: 6, focus: true }],
+  "dialog.command-palette": [{ name: "palette", rows: ".cp-item", max: 6 }],
+};
+/** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
+const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
+
 /** Activation witnesses, by screen: a native tap on each link's visible label must open its own page. */
 const ACTIVATION_WITNESSES: Record<string, ActivationSpec[]> = {
   "app.signin": [
@@ -159,6 +183,9 @@ async function main(): Promise<void> {
   let seedNotes: string[] = [];
   let captureErrors = -1;
   let witnessFailures = -1;
+  let hoverFailures = -1;
+  const hoverDesktop: Record<string, unknown>[] = [];
+  const hoverShots: string[] = [];
   try {
     for (const fn of ["command", "read"]) {
       await awaitFunctionRunning({ url: `${env.apiUrl}/functions/v1/${fn}`, fetcher: fetch, timeoutMs: 60_000,
@@ -199,11 +226,11 @@ async function main(): Promise<void> {
       const storage = await signInContext.storageState();
       await signInContext.close();
 
-      for (const theme of THEMES) for (const viewport of VIEWPORTS) {
-        const size = `${viewport.width}x${viewport.height}`;
+      /** One unsigned and one signed-in context, with the audit's page hooks and an explicit stored theme. */
+      const openContexts = async (viewport: { width: number; height: number }, theme: string, hasTouch = true) => {
         const phone = viewport.width < 768 || viewport.height < 500;
-        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
-        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1 });
+        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -214,6 +241,135 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
+        return { context, signedIn };
+      };
+
+      /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
+       *  Returns whether reads settled. Shared by the main captures and the desktop hover pass. */
+      const openScreen = async (page: any, screen: Screen): Promise<boolean> => {
+        await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => {
+          const app = document.querySelector("live-dashboard");
+          if (!app) return true;
+          if (app.getAttribute("data-state") === "loading") return false;
+          const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
+          return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
+        }, undefined, { timeout: 30_000 });
+        await page.waitForFunction(({ id, hasWorkspace }: { id: string; hasWorkspace: boolean }) => {
+          if (hasWorkspace && !document.querySelector('[data-home-workspace-shell] [data-home-pane="todos"]')) return false;
+          if (id.startsWith("app.definitions") && !document.querySelector('.household-definitions [data-def-action="select"]')) return false;
+          if (id.startsWith("app.skills") && !document.querySelector(".household-skills [data-skill-action]")) return false;
+          if (id === "app.lists" && !document.querySelector('[data-household-objects] [data-hh-action="select"]')) return false;
+          const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
+          return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
+        }, { id: screen.id, hasWorkspace: screen.path.includes("?w=") }, { timeout: screen.path.includes("v=lists") ? 45_000 : 30_000 }).catch(() => {});
+        await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
+        for (const step of screen.setup ?? []) {
+          if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
+          if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
+          if (step.click) {
+            const target = fill(step.click, seed.ids);
+            if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
+              && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
+              await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+              await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
+            }
+            if (target === '[data-brain-topic="overview"]') {
+              const waitBrainTopicLoaded = async () => {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                  await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-body-mode]:not([hidden]), [data-brain-retry]:not([hidden]):not([disabled]))", { state: "visible", timeout: 15_000 }).catch(() => {});
+                  const loaded = await page.evaluate(() => {
+                    const md = document.querySelector<HTMLElement>("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])");
+                    return Boolean(md && md.childElementCount > 0 && document.querySelector("[data-brain-body-mode]:not([hidden])"));
+                  });
+                  if (loaded) break;
+                  if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden]):not([disabled])")))) {
+                    await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
+                  } else {
+                    await page.click(target, { timeout: 8_000 }).catch(() => {});
+                  }
+                }
+              };
+              await page.click(target, { timeout: 8_000 });
+              await waitBrainTopicLoaded();
+              if (screen.id === "app.wiki.topic" && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches)) {
+                await page.click("[data-brain-back]", { timeout: 8_000 });
+                await page.waitForSelector('[data-channel-view="brain"][data-brain-selection="index"] [data-brain-topic="overview"]', { state: "visible", timeout: 8_000 });
+                await page.click(target, { timeout: 8_000 });
+                await waitBrainTopicLoaded();
+              }
+            } else if (target.startsWith("[data-rail-channel-menu=")) {
+              for (let attempt = 0; attempt < 3; attempt++) {
+                if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
+                  await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
+                  await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
+                }
+                await page.locator(target).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+                await page.waitForTimeout(150);
+                await page.click(target, { timeout: 8_000 });
+                const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                if (menuVisible) break;
+              }
+            } else {
+              await page.click(target, { timeout: 8_000 });
+              if (target === 'button[aria-label="Open navigation"]') {
+                const drawerOpen = await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                if (!drawerOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+              } else if (target.endsWith(".hm-menu__trigger")) {
+                const menuOpen = await page.waitForSelector(":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                if (!menuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+              } else if (target === "[data-user-menu-trigger]") {
+                const userMenuOpen = await page.waitForSelector("[data-user-menu]:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
+                if (!userMenuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
+              } else if (target.startsWith('[data-def-action="select"]')) {
+                const selected = await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 10_000 }).then(() => true, () => false);
+                if (!selected) {
+                  await page.click(target, { timeout: 5_000 }).catch(() => {});
+                  await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 15_000 }).catch(() => {});
+                }
+              }
+            }
+          }
+          if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
+          if (step.press) await page.keyboard.press(step.press);
+          if (step.scroll) {
+            const scrollTarget = fill(step.scroll, seed.ids);
+            try { await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
+            catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
+          }
+          if (step.wait) await page.waitForTimeout(step.wait);
+          if (step.settle) await settle(page);
+        }
+        // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
+        if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
+        // Let reads the setup started finish (and their re-renders land) before measuring: a dialog can
+        // render, then render again when its read returns (workspace settings and its organizations).
+        const settled = await settle(page);
+        // The declared state must still be on screen after settling: a re-render that closed it would
+        // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
+        if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
+          throw new Error(`ready state lost after settling: ${screen.ready}`);
+        }
+        return settled;
+      };
+
+      /** Hover witnesses for one capture; the first addressed row is photographed at rest and on hover. */
+      const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[]) => {
+        const results: HoverResult[] = [];
+        for (const spec of specs) {
+          results.push(await runHoverWitness(page, spec, spec.prefer ? async (label: string) => {
+            const shot = `shots/${id}--${state}--${size}--${theme}--${label}.png`;
+            await page.screenshot({ path: join(OUT, shot) });
+            hoverShots.push(shot);
+          } : undefined));
+        }
+        await page.mouse.move(1, 1);
+        return results;
+      };
+
+      for (const theme of THEMES) for (const viewport of VIEWPORTS) {
+        const size = `${viewport.width}x${viewport.height}`;
+        const { context, signedIn } = await openContexts(viewport, theme);
         const batch = await runPool(screens(), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -223,109 +379,7 @@ async function main(): Promise<void> {
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
-            await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
-            await page.waitForFunction(() => {
-              const app = document.querySelector("live-dashboard");
-              if (!app) return true;
-              if (app.getAttribute("data-state") === "loading") return false;
-              const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
-              return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
-            }, undefined, { timeout: 30_000 });
-            await page.waitForFunction(({ id, hasWorkspace }: { id: string; hasWorkspace: boolean }) => {
-              if (hasWorkspace && !document.querySelector('[data-home-workspace-shell] [data-home-pane="todos"]')) return false;
-              if (id.startsWith("app.definitions") && !document.querySelector('.household-definitions [data-def-action="select"]')) return false;
-              if (id.startsWith("app.skills") && !document.querySelector(".household-skills [data-skill-action]")) return false;
-              if (id === "app.lists" && !document.querySelector('[data-household-objects] [data-hh-action="select"]')) return false;
-              const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
-              return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
-            }, { id: screen.id, hasWorkspace: screen.path.includes("?w=") }, { timeout: screen.path.includes("v=lists") ? 45_000 : 30_000 }).catch(() => {});
-            await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
-            for (const step of screen.setup ?? []) {
-              if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
-              if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
-              if (step.click) {
-                const target = fill(step.click, seed.ids);
-                if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
-                  && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
-                  await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
-                  await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
-                }
-                if (target === '[data-brain-topic="overview"]') {
-                  const waitBrainTopicLoaded = async () => {
-                    for (let attempt = 0; attempt < 3; attempt++) {
-                      await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-body-mode]:not([hidden]), [data-brain-retry]:not([hidden]):not([disabled]))", { state: "visible", timeout: 15_000 }).catch(() => {});
-                      const loaded = await page.evaluate(() => {
-                        const md = document.querySelector<HTMLElement>("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])");
-                        return Boolean(md && md.childElementCount > 0 && document.querySelector("[data-brain-body-mode]:not([hidden])"));
-                      });
-                      if (loaded) break;
-                      if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden]):not([disabled])")))) {
-                        await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
-                      } else {
-                        await page.click(target, { timeout: 8_000 }).catch(() => {});
-                      }
-                    }
-                  };
-                  await page.click(target, { timeout: 8_000 });
-                  await waitBrainTopicLoaded();
-                  if (screen.id === "app.wiki.topic" && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches)) {
-                    await page.click("[data-brain-back]", { timeout: 8_000 });
-                    await page.waitForSelector('[data-channel-view="brain"][data-brain-selection="index"] [data-brain-topic="overview"]', { state: "visible", timeout: 8_000 });
-                    await page.click(target, { timeout: 8_000 });
-                    await waitBrainTopicLoaded();
-                  }
-                } else if (target.startsWith("[data-rail-channel-menu=")) {
-                  for (let attempt = 0; attempt < 3; attempt++) {
-                    if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
-                      await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
-                      await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
-                    }
-                    await page.locator(target).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
-                    await page.waitForTimeout(150);
-                    await page.click(target, { timeout: 8_000 });
-                    const menuVisible = await page.waitForSelector('.cs-context-menu[role="menu"] [role="menuitem"]', { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                    if (menuVisible) break;
-                  }
-                } else {
-                  await page.click(target, { timeout: 8_000 });
-                  if (target === 'button[aria-label="Open navigation"]') {
-                    const drawerOpen = await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                    if (!drawerOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
-                  } else if (target.endsWith(".hm-menu__trigger")) {
-                    const menuOpen = await page.waitForSelector(":is(.cs-kylon-workspace-menu, .hm-ws-header) .hm-menu__list:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                    if (!menuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
-                  } else if (target === "[data-user-menu-trigger]") {
-                    const userMenuOpen = await page.waitForSelector("[data-user-menu]:not([hidden])", { state: "visible", timeout: 1_500 }).then(() => true, () => false);
-                    if (!userMenuOpen) await page.click(target, { timeout: 5_000 }).catch(() => {});
-                  } else if (target.startsWith('[data-def-action="select"]')) {
-                    const selected = await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 10_000 }).then(() => true, () => false);
-                    if (!selected) {
-                      await page.click(target, { timeout: 5_000 }).catch(() => {});
-                      await page.waitForSelector(`${target}[aria-current="true"]`, { state: "visible", timeout: 15_000 }).catch(() => {});
-                    }
-                  }
-                }
-              }
-              if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
-              if (step.press) await page.keyboard.press(step.press);
-              if (step.scroll) {
-                const scrollTarget = fill(step.scroll, seed.ids);
-                try { await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
-                catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
-              }
-              if (step.wait) await page.waitForTimeout(step.wait);
-              if (step.settle) await settle(page);
-            }
-            // Ready is checked AFTER setup, so a dialog's ready selector can name the opened dialog.
-            if (screen.ready) await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 30_000 });
-            // Let reads the setup started finish (and their re-renders land) before measuring: a dialog can
-            // render, then render again when its read returns (workspace settings and its organizations).
-            entry.settledBeforeChecks = await settle(page);
-            // The declared state must still be on screen after settling: a re-render that closed it would
-            // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
-            if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
-              throw new Error(`ready state lost after settling: ${screen.ready}`);
-            }
+            entry.settledBeforeChecks = await openScreen(page, screen);
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
@@ -333,6 +387,8 @@ async function main(): Promise<void> {
             // Witnesses: read-only geometry first, then native-key keyboard witnesses, which change state.
             try { entry.witness = await page.evaluate(GEOMETRY_WITNESS, DECLARED_OVERLAYS[screen.id] ?? []); }
             catch (error) { entry.witness = { error: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) }; }
+            const hoverSpecs = HOVER_WITNESSES[screen.id] ?? [];
+            if (hoverSpecs.length) entry.hover = await runHovers(page, screen.id, state, size, theme, hoverSpecs);
             const keyboardSpecs = KEYBOARD_WITNESSES[screen.id] ?? [];
             if (keyboardSpecs.length) {
               // Pointer to a corner first, so :hover cannot stand in for focus.
@@ -357,6 +413,27 @@ async function main(): Promise<void> {
         console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
         await context.close(); await signedIn.close();
       }
+      // Desktop hover pass: only the screens with hover witnesses, at desktop widths, mouse only.
+      const hoverScreens = screens().filter(s => HOVER_WITNESSES[s.id] && s.status !== "pending" && !(s.requiresSeed ?? []).some(step => !seed.steps.includes(step)));
+      for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
+        const size = `${viewport.width}x${viewport.height}`;
+        const { context, signedIn } = await openContexts(viewport, theme, false);
+        const batch = await runPool(hoverScreens, 3, async (screen) => {
+          const state = screen.states?.length ? screen.states.join("+") : "default";
+          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null };
+          const page = await (screen.signedOut ? context : signedIn).newPage();
+          try {
+            entry.settledBeforeChecks = await openScreen(page, screen);
+            entry.hover = await runHovers(page, screen.id, state, size, theme, HOVER_WITNESSES[screen.id]!);
+          } catch (error) {
+            entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
+            console.log(JSON.stringify({ phase: "hover-capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
+          } finally { await page.close(); }
+          return entry;
+        });
+        hoverDesktop.push(...batch);
+        await context.close(); await signedIn.close();
+      }
     } finally { await browser.close(); }
   } finally {
     const summary = { screens: new Set(report.map(r => r.id)).size, items: report.length,
@@ -369,11 +446,15 @@ async function main(): Promise<void> {
       themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length,
       // Witness counters, appended; every key above keeps its meaning.
-      witnesses: witnessSummary(report) };
-    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
+      witnesses: witnessSummary(report),
+      // Hover stability: the six audit viewports plus the desktop pass. shifted, error and desktop capture errors fail.
+      hover: { ...hoverSummary([...report, ...hoverDesktop].flatMap(r => (r.hover as HoverResult[] | undefined) ?? [])),
+        desktopCaptures: hoverDesktop.length, desktopCaptureErrors: hoverDesktop.filter(r => r.error).length, shots: hoverShots.length } };
+    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
+    hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -385,6 +466,8 @@ async function main(): Promise<void> {
   // are not errors, and measured witness findings (blocked, obscured, mixed...) stay report-only.
   assert.equal(captureErrors, 0, `${captureErrors} capture(s) failed; see mobile-audit-report.json items[].error`);
   assert.equal(witnessFailures, 0, `${witnessFailures} witness measurement(s) failed; see items[].witness.error and items[].keyboard[] / items[].activation[] outcome "error"`);
+  // The one witness whose finding fails the job (owner request): a hover or focus that moves or resizes anything.
+  assert.equal(hoverFailures, 0, `${hoverFailures} hover witness(es) shifted layout or could not measure; see items[].hover[] and hoverDesktop[]`);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).

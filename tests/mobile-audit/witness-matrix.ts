@@ -7,11 +7,12 @@
 import assert from "node:assert/strict";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
+import { runHoverWitness, type HoverPage, type HoverResult, type HoverSpec } from "./hover-witness.js";
 
 type Geometry = ReturnType<typeof GEOMETRY_WITNESS>;
 type Keyboard = Awaited<ReturnType<typeof runKeyboardWitness>>;
 type Activation = Awaited<ReturnType<typeof runActivationWitness>>;
-type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & {
+type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & HoverPage & {
   setContent(html: string): Promise<void>;
   goto(url: string): Promise<unknown>;
   route(url: string, handler: (route: { request(): { url(): string }; fulfill(response: { contentType: string; headers: Record<string, string>; body: string }): Promise<void> }) => Promise<void>): Promise<void>;
@@ -24,7 +25,8 @@ type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; 
   /** Served from a fixture origin (real navigation) instead of setContent; other paths answer with a stub page. */
   served?: boolean;
   activation?: ActivationSpec[];
-  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[] }) => void };
+  hover?: HoverSpec;
+  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[]; hover?: HoverResult }) => void };
 
 const page = (body: string, style = "") =>
   `<!doctype html><html><head><style>body{margin:0;font:16px/1.4 sans-serif} button{width:80px;height:44px}${style}</style></head><body>${body}</body></html>`;
@@ -74,6 +76,15 @@ const legalSpecs: ActivationSpec[] = [
   { name: "terms", link: "#terms", expect: { path: "/terms" } },
   { name: "privacy", link: "#privacy", expect: { path: "/privacy" } },
 ];
+/** A three-row feed; `extra` styles what hover or focus does. Row 1 is addressed, like the owner's message. */
+const feed = (extra: string, short = false) => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
+  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr;padding:4px 8px">
+    <span class="to" data-target-kind="${i === 1 ? "agent" : "everyone"}">→ Lead</span>
+    <p class="body" style="margin:0">${short ? "Short note." : "A message long enough to wrap onto a second line in this narrow fixture column."}</p>
+    <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
+  </li>`).join("")}</ul>`, `.to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: '.msg:has([data-target-kind="agent"])', focus: true };
+const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
 const ROWS: Row[] = [
@@ -263,6 +274,44 @@ const ROWS: Row[] = [
     assert.equal(f.visibleArea, 0);
     assert.equal(f.wrongTarget, false);
   } },
+  // Hover stability (hover-witness.ts): anything a hover or focus moves or resizes is a shift; colour and opacity are not.
+  { name: "a recipient revealed in a column on hover moves a short body sideways: shifted (the owner's report)",
+    html: feed(".msg:hover .to{display:inline}", true), hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      const r = rowOf(h, "hover")!;
+      assert.equal(r.early?.hoverMatched, true, show(r));
+      assert.ok(r.early!.shifts.some(s => s.label.startsWith("p.body") && s.dx > 0), show(r.early));
+  } },
+  { name: "the same recipient revealed by opacity alone is stable", html: feed(".to{display:inline;opacity:0} .msg:hover .to{opacity:1}", true),
+    hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.equal(rowOf(h, "hover")?.early?.hoverMatched, true);
+  } },
+  { name: "an absolutely placed toolbar appearing on hover is stable", html: feed(".msg:hover .tools{display:block}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "a line added on hover pushes the next row down: the other row is a shift", html: feed(".msg:hover .extra{display:block}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+    assert.ok(rowOf(h, "hover")!.early!.shifts.some(s => s.who === "other-row" && s.dy > 0), show(rowOf(h, "hover")));
+  } },
+  { name: "a transitioned padding change is caught after the transition", html: feed(".msg{transition:padding-left .3s linear} .msg:hover{padding-left:40px}"),
+    hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      assert.ok((rowOf(h, "hover")!.late?.shifted ?? 0) > 0, show(rowOf(h, "hover")));
+  } },
+  { name: "bold text on hover changes the text box: shifted", html: feed(".msg:hover .body{font-weight:700}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "a recipient revealed by focus-within is shifted in focus mode only", html: feed(".msg:focus-within .to{display:inline}", true), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+    assert.equal(rowOf(h, "hover")?.outcome, "stable", show(h));
+    assert.equal(rowOf(h, "focus")?.outcome, "shifted", show(h));
+    assert.equal(rowOf(h, "focus")?.late?.focusWithin, true);
+  } },
+  { name: "with no addressed row to measure, the hover witness is an error, never a pass", html: feed(""),
+    hover: { ...feedSpec, require: '.msg:has([data-target-kind="person"])' }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+  } },
   { name: "the same overlap in view is a visible wrong-target finding", html: overlapPage(20), check: ({ geometry: g }) => {
     const f = pair(g);
     assert.ok(f, show(g.overlapFacts));
@@ -300,7 +349,8 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           const keyboard = row.keyboard ? await runKeyboardWitness(p, row.keyboard) : undefined;
           const activation: Activation[] = [];
           for (const spec of row.activation ?? []) activation.push(await runActivationWitness(p, spec));
-          row.check({ geometry, keyboard, activation });
+          const hover = row.hover ? await runHoverWitness(p, row.hover) : undefined;
+          row.check({ geometry, keyboard, activation, hover });
         } finally { await p.close(); }
       });
     }
