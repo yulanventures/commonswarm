@@ -128,6 +128,11 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
   // An element is one box; a text node is every line fragment it lays out, so a re-wrap that keeps every element box
   // (same width, same line count) still moves a fragment.
   const rectsOf = (node: Element | Text): Rect[] => {
+    // Content of a closed <details> (anything but its own summary) is not shown, though the engine still reports boxes
+    // for it (::details-content); the same rule as the audit's visible() check. It counts as not laid out.
+    const el = node instanceof Text ? node.parentElement : node;
+    const closed = el?.closest("details:not([open])");
+    if (el && closed && !closed.querySelector(":scope > summary")?.contains(el)) return [];
     let list: DOMRect[];
     if (node instanceof Text) { const range = document.createRange(); range.selectNodeContents(node); list = Array.from(range.getClientRects()); }
     else list = [node.getBoundingClientRect()];

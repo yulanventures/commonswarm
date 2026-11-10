@@ -241,6 +241,15 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
         steps.push("seed_addressed");
       } catch (error) { note("seed_addressed", error); }
+      // Every message addressed to the viewer starts already seen. Otherwise the first capture marks it seen, and the
+      // next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
+      try {
+        await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+          SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
+          WHERE workspace_id = ${workspace}::uuid AND to_user_id = ${owner.id}::uuid
+          ON CONFLICT DO NOTHING`;
+        steps.push("seed_viewer_seen");
+      } catch (error) { note("seed_viewer_seen", error); }
       // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
       // real feed rebuild.
       try {
