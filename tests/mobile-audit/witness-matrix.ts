@@ -276,7 +276,8 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
   const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
   const browser = await launchPlaywrightChromium<any>(chromium);
   try {
-    const context = await browser.newContext({ viewport: { width: 400, height: 600 }, deviceScaleFactor: 1 });
+    // hasTouch, as in every audit context: the activation rows tap with the touchscreen.
+    const context = await browser.newContext({ viewport: { width: 400, height: 600 }, deviceScaleFactor: 1, hasTouch: true });
     // tsx (esbuild keepNames) wraps nested functions in __name(); the page needs a no-op, as in the runner.
     await context.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
     for (const row of ROWS) {
