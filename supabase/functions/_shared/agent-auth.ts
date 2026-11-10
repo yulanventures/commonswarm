@@ -475,6 +475,8 @@ interface LocalPlanSnapshot {
   joins?: { credential: string; attempt: string | null }[];
   parentUpdates?: string[];
   adminAccounts?: string[];
+  /** Seat admin (2b): the acting agent's active grant ids, locked FOR SHARE right after its owner's admin account. */
+  seatAdminGrants?: string[];
   adminWorkspaces?: string[];
   workspaceRows?: string[];
   hostedGrants?: string[];
@@ -506,7 +508,7 @@ function canonicalBindings(rows: LocalCredentialIds[]): string {
   ]).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }
 function snapshotKey(s: LocalPlanSnapshot): string {
-  return JSON.stringify([s.hostedPrefix,canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows,s.todoBindings]);
+  return JSON.stringify([s.hostedPrefix,canonicalBindings(s.bindings),s.users,s.parents,s.memberships,s.sessions,s.approvals,s.members,s.hosted,s.objectStreams,s.todoStreams,s.joins,s.parentUpdates,s.routeStreams,s.restrictions,s.hostedGrants,s.hostedBindings,s.contentRoles,s.boundaryIds,s.adminAccounts,s.adminWorkspaces,s.workspaceRows,s.todoBindings,s.seatAdminGrants]);
 }
 /** This plan owns one exact local Allow target, including the exact current family proof.
  * Call before workspace/approval/principal/token reads in the permission writer.
@@ -606,6 +608,9 @@ export async function lockLocalAuthPlan(tx: Sql, plan: LocalAuthLockPlan, throug
     else await tx`SELECT user_id FROM swarm.users WHERE user_id=${id}::uuid FOR NO KEY UPDATE`;
   }
   for (const id of s.adminAccounts ?? []) await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${id}::uuid FOR UPDATE`;
+  // Seat admin: users, then the grantor's admin account, then the grants, the order #353's grant and end take. An end
+  // (grant FOR UPDATE) therefore commits before this action or after it.
+  for (const id of s.seatAdminGrants ?? []) await tx`SELECT grant_id FROM swarm.seat_admin_grants WHERE grant_id=${id}::uuid FOR SHARE`;
   await same();
   for (const id of s.parents) {
     if (s.parentUpdates?.includes(id)) await tx`SELECT grant_id FROM swarm.admin_grants WHERE grant_id=${id}::uuid FOR UPDATE`;
@@ -707,6 +712,8 @@ export async function planLocalOperation(tx: Sql, options: {
   admin?: {owner:string;grant:string;recipients:string[]};
   household?: boolean; memberTargets?: string[]; allowMissingWorkspace?: boolean; todo?: string; householdQueue?: boolean;
   revocation?: {user:string}|{principal:string}|{token:string};
+  /** Seat admin (2b): lock the presenting agent's owner admin account and the agent's active seat admin grants. */
+  seatAdmin?: boolean;
 }): Promise<LocalAuthLockPlan | null> {
   const credential = options.hash ? await discoverLocalCredential(tx, options.hash) : null;
   if (options.hash && !credential) return null;
@@ -789,8 +796,13 @@ export async function planLocalOperation(tx: Sql, options: {
       WHERE m.user_id=${options.admin.owner}::uuid
         AND w.workspace_id=ANY(${bound.workspace_ids.filter(w=>!bound.withdrawn_workspace_ids.includes(w))}::uuid[])
       ORDER BY w.workspace_id`).map(r=>r.workspace_id) : [];
-    const adminAccounts=options.admin ? (await tx<{owner_user_id:string}[]>`
-      SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${options.admin.owner}::uuid`).map(r=>r.owner_user_id) : [];
+    const accountOwner=options.admin?.owner ?? (options.seatAdmin ? exact?.owner_user_id ?? null : null);
+    const adminAccounts=accountOwner ? (await tx<{owner_user_id:string}[]>`
+      SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${accountOwner}::uuid`).map(r=>r.owner_user_id) : [];
+    // Discovery only: the grants are re-read under lock and decide nothing until then.
+    const seatAdminGrants=options.seatAdmin && exact ? (await tx<{grant_id:string}[]>`SELECT grant_id FROM swarm.seat_admin_grants
+      WHERE principal_id=${exact.principal_id}::uuid AND owner_user_id=${exact.owner_user_id}::uuid AND state='active'
+      ORDER BY grant_id`).map((r:{grant_id:string})=>r.grant_id) : [];
     const recipients=options.admin ? (await tx<{user_id:string}[]>`SELECT user_id FROM swarm.users
       WHERE user_id=ANY(${options.admin.recipients}::uuid[]) ORDER BY user_id`).map(r=>r.user_id) : [];
     const relatedWorkspaces=options.memberMutation ? (await tx<{workspace_id:string}[]>`SELECT workspace_id FROM swarm.agent_workspace_memberships WHERE principal_id=ANY(${sortedIds(bindings.map(r=>r.principal_id))}::uuid[]) ORDER BY workspace_id`).map(r=>r.workspace_id) : [];
@@ -847,7 +859,7 @@ export async function planLocalOperation(tx: Sql, options: {
       || sortedIds(bindings.map(r=>r.renewal_grant_id)).length>256
       || sortedIds(bindings.map(r=>r.run_id)).length>256 || sortedIds(bindings.map(r=>r.device_id)).length>256
       || members.length>4096 || contentRoles.length>4096 || adminWorkspaces.length+(workspace?1:0)>256 || users.length>256 || parents.length>256 || sessions.length>256 || hostedGrants.length>256 || bindings.length+approvals.length+hosted.length+hostedBindings.length+restrictions.length>4096 || objectStreams.length+todoStreams.length+(options.streamIds?.length ?? 0)>64)) throw Object.assign(new Error('Local authentication closure exceeds work bound'),{code:'54000'});
-    return {bindings,parents,users,sessions,approvals,todoBindings,members,contentRoles,boundaryIds,hosted,hostedGrants,hostedBindings,objectStreams,todoStreams,routeStreams,restrictions,adminAccounts,adminWorkspaces,workspaceRows,
+    return {bindings,parents,users,sessions,approvals,todoBindings,members,contentRoles,boundaryIds,hosted,hostedGrants,hostedBindings,objectStreams,todoStreams,routeStreams,restrictions,adminAccounts,adminWorkspaces,workspaceRows,seatAdminGrants,
       memberships:[...new Map([...members,...contentRoles].map(m=>[JSON.stringify([m.workspace,m.user]),m])).values()]
         .sort((a,b)=>a.workspace.localeCompare(b.workspace)||a.user.localeCompare(b.user)).map(m=>({...m,mode:"share" as const})),
       joins: joins.length ? [{credential:joins[0]!.join_credential_id,attempt:joins[0]!.attempt_id}] : [],

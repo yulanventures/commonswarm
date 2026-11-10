@@ -13,10 +13,11 @@
 import type postgres from 'npm:postgres@3.4.9';
 import { adminDigest } from './admin-delegation.ts';
 import {
-  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, reduceAdminAuthority, seatAdminGrantPrecheck,
+  decideSeatAdminEnd, decideSeatAdminGrant, parseSeatAdminCommand, reduceAdminAuthority, seatAdminGrantPrecheck, selectCoveringGrant,
 } from '../_shared/protocol.js';
 import type { AdminAccountEvent, AdminAccountState } from '../_shared/admin-authority.d.ts';
-import type { EndDecision, GrantDecision, GrantSeatAdminCommand, SeatAdminCommand, SeatAdminLevel } from '../_shared/seat-admin.d.ts';
+import type { CoverageDecision, EndDecision, GrantDecision, GrantSeatAdminCommand, SeatAdminCommand, SeatAdminGrantFacts,
+  SeatAdminLevel } from '../_shared/seat-admin.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 type Result = { status: number; body: Record<string, unknown> };
@@ -240,4 +241,78 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
       next_action: 'none', recovery_kind: 'none' });
   }
   return await finish({ status: 200, body: { status: 'accepted', seat_admin_grant: publicGrant(ended, now) } });
+}
+
+
+/* ---- 2b: an agent acts under its grant. Called inside the command transaction after the local-auth plan locked,
+ * in order, the agent's owner (the grantor) user row, their admin account, the agent's active grants FOR SHARE, the
+ * workspace, its memberships and agent memberships, streams, principals (FOR UPDATE), sessions and tokens. Nothing
+ * here takes a new lock out of that order; it re-reads what the plan holds, after every wait. ---- */
+
+export interface SeatAdminAuthorized { grant: SeatAdminGrantFacts; grantor_user_id: string; now: number }
+
+/**
+ * Re-decide coverage now: the grant is active and unexpired at the post-lock clock, the grantor is still a live
+ * owner of this unarchived workspace, the agent is still a live member, and organization coverage still holds.
+ */
+export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: string; grantor_user_id: string; kind: string; workspace_id: string }):
+  Promise<{ ok: true; value: SeatAdminAuthorized } | { ok: false; reason: string }> {
+  const grants = await tx<GrantRow[]>`SELECT * FROM swarm.seat_admin_grants
+    WHERE principal_id = ${a.principal_id}::uuid AND owner_user_id = ${a.grantor_user_id}::uuid AND state = 'active' ORDER BY grant_id`;
+  const now = await clock(tx);
+  const [workspace] = await tx<{ org_id: string | null; archived: boolean }[]>`SELECT org_id, archived_at IS NOT NULL AS archived
+    FROM swarm.workspaces WHERE workspace_id = ${a.workspace_id}::uuid`;
+  const [owner] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${a.workspace_id}::uuid
+    AND user_id = ${a.grantor_user_id}::uuid AND role = 'owner' AND revoked_at IS NULL) AS ok`;
+  const [member] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships
+    WHERE workspace_id = ${a.workspace_id}::uuid AND principal_id = ${a.principal_id}::uuid AND revoked_at IS NULL) AS ok`;
+  if (!grants.length) return { ok: false, reason: 'seat_admin_inactive' };
+  if (!workspace || workspace.archived || !owner?.ok || !member?.ok) return { ok: false, reason: 'seat_admin_workspace_not_covered' };
+  const orgOwner = new Map<string, boolean>();
+  for (const g of grants) {
+    if (g.level !== 'organization' || g.organization_id === null || orgOwner.has(g.organization_id)) continue;
+    const [o] = await tx<{ r: { owner: boolean; archived: boolean } | null }[]>`
+      SELECT swarm.seat_admin_org_owner(${g.organization_id}::uuid, ${a.grantor_user_id}::uuid) AS r`;
+    orgOwner.set(g.organization_id, o?.r?.owner === true && o.r.archived !== true);
+  }
+  const decision = selectCoveringGrant(grants.map(g => ({
+    grant_id: g.grant_id, owner_user_id: g.owner_user_id, level: g.level, workspace_ids: g.workspace_ids, organization_id: g.organization_id,
+    capability_names: g.manifest.capability_names ?? [], expires_at: g.expires_at?.getTime() ?? null, state: g.state,
+  })), { kind: a.kind, workspace_id: a.workspace_id, workspace_org_id: workspace.org_id, now,
+    org_owner_live: (id: string) => orgOwner.get(id) === true }) as CoverageDecision;
+  return decision.ok ? { ok: true, value: { grant: decision.grant, grantor_user_id: a.grantor_user_id, now } } : { ok: false, reason: decision.reason };
+}
+
+/** An agent action under a grant, in the grantor's history, in the same transaction as the action itself. */
+export async function recordSeatAdminAction(tx: Sql, r: { authorized: SeatAdminAuthorized; agent_principal_id: string; agent_run_id: string | null;
+  command_id: string; kind: string; workspace_id: string; target_kind: string; target_id: string | null; outcome: 'accepted' | 'refused';
+  reason_code: string | null; request_digest: string }): Promise<void> {
+  const owner = r.authorized.grantor_user_id;
+  // Already locked FOR UPDATE by the plan, in the canonical order; this re-reads the current sequence.
+  const [account] = await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`
+    SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE`;
+  if (!account) throw new Error('seat admin grantor has no admin account');
+  const event: AdminAccountEvent = {
+    stream_kind: 'account', owner_user_id: owner, stream_id: account.stream_id, seq: Number(account.seq) + 1,
+    event_id: crypto.randomUUID(), command_id: r.command_id, type: 'AdminActionRecorded', schema_version: 1,
+    occurred_at_server: r.authorized.now, actor_user: null, actor_agent_principal: r.agent_principal_id, actor_run: r.agent_run_id,
+    admin_identity_id: null, grant_id: null, grant_manifest_digest: null,
+    payload: { audit_record_id: crypto.randomUUID(), grant_id: null, admin_identity_id: null, connection_id: null, related_event_ids: [],
+      policy_check: { result: r.reason_code ?? 'passed', buckets: [] },
+      action: r.kind, capability: r.kind, target_kind: r.target_kind, target_id: r.target_id, workspace_id: r.workspace_id,
+      seat_admin_grant_id: r.authorized.grant.grant_id, seat_admin_level: r.authorized.grant.level,
+      acting_agent_principal_id: r.agent_principal_id, authorizing_user_id: owner,
+      request_digest: r.request_digest, outcome: r.outcome, reason_code: r.reason_code, next_action: 'none',
+      recovery_kind: r.outcome === 'accepted' ? 'none' : 'human' },
+  };
+  await tx`INSERT INTO swarm.admin_events(owner_user_id, seq, event_id, command_id, event)
+    VALUES (${owner}::uuid, ${event.seq}, ${event.event_id}::uuid, ${r.command_id}, ${tx.json(event as unknown as postgres.JSONValue)})`;
+  const projection = reduceAdminAuthority(account.projection, event);
+  await tx`UPDATE swarm.admin_accounts SET seq = ${event.seq}, projection = ${tx.json(projection as unknown as postgres.JSONValue)}
+    WHERE owner_user_id = ${owner}::uuid`;
+}
+
+/** Delegated attribution for the audit row's detail: the agent is the audit actor; this names the grant and its grantor. */
+export function seatAdminAuditDetail(a: SeatAdminAuthorized, extra: string | null): string {
+  return [`seat_admin grant=${a.grant.grant_id} level=${a.grant.level} authorizing_user=${a.grantor_user_id}`, extra].filter(Boolean).join('; ');
 }

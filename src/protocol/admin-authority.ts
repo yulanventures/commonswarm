@@ -59,7 +59,9 @@ export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEven
 export interface AdminAccountEvent {
   stream_kind: 'account'; owner_user_id: string; stream_id: string; seq: number;
   event_id: string; command_id: string; type: AdminEventType; schema_version: 1;
-  actor_user: string | null; actor_agent_principal: null; actor_run: null;
+  actor_user: string | null;
+  /** A seat admin agent acting under its grant (2b); null for a person or an admin credential. */
+  actor_agent_principal: string | null; actor_run: string | null;
   admin_identity_id: string | null; grant_id: string | null; grant_manifest_digest: string | null;
   occurred_at_server: number; payload: Record<string, unknown>;
 }
