@@ -151,6 +151,7 @@ interface RenewalGrantReadRequest {
 }
 
 interface HumanInvitationsReadRequest { resource: "human_invitations"; }
+interface SeatAdminStatusReadRequest { resource: "seat_admin_status"; }
 
 interface PendingAccessReadRequest {
   resource: "pending_access";
@@ -221,6 +222,8 @@ async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessa
  * its own resource: memory_search or memory_get.
  */
 const brainMemoryEnabled = Deno.env.get("SWARM_BRAIN_MEMORY") === "1";
+/** Seat admin: off when unset; the status read then answers {enabled:false} only. */
+const seatAdminEnabled = Deno.env.get("SWARM_SEAT_ADMIN") === "1";
 const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN_MEMORY_HOSTED") === "1";
 const MEMORY_QUERY_MAX = 200;
 interface MemorySearchReadRequest {
@@ -378,12 +381,13 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | {resource:"workspaces";workspace_id:string} |
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | {resource:"workspaces";workspace_id:string} |
   {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
   if (body.resource === "human_invitations" && exactKeys(body, ["resource"])) return { resource: "human_invitations" };
+  if (body.resource === "seat_admin_status" && exactKeys(body, ["resource"])) return { resource: "seat_admin_status" };
   if (isAdminReadResource(body.resource)) return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
       exactKeys(body, ["resource", "workspace_id"]) &&
@@ -659,6 +663,21 @@ async function handle(
       await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub: data.user!.id,role:'authenticated'})},true)`;
       const invitations = await tx`SELECT * FROM swarm_read.human_invitations()`;
       return json(200, { invitations });
+    });
+  }
+  // The site's admin switches: off, {enabled:false} and nothing else; on, the person's own agents with the ids each
+  // level may be granted for and their active grant ids. A person's session only.
+  if (body.resource === 'seat_admin_status') {
+    if (AGENT_TOKEN_RE.test(token)) return json(403, { error: 'credential_kind_forbidden' });
+    const { data, error } = await authClient.auth.getUser(token);
+    if (error || !data.user || !UUID_RE.test(data.user.id)) return json(401, { error: 'unauthenticated' });
+    if (!seatAdminEnabled) return json(200, { enabled: false });
+    return await withReadTransaction(async tx => {
+      await setReadTransaction(tx);
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub: data.user!.id.toLowerCase(),role:'authenticated'})},true)`;
+      const [row] = await tx<{ status: { agents: unknown[] } | null }[]>`SELECT swarm_read.my_seat_admin_status() AS status`;
+      if (!row?.status) return json(401, { error: 'unauthenticated' });
+      return json(200, { enabled: true, registry_version: 3, agents: row.status.agents });
     });
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);

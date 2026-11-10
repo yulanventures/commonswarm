@@ -416,3 +416,48 @@ test("rename the organization as its owner; a member and an ordinary agent canno
   const [org] = await sql<{ display_name: string }[]>`SELECT display_name FROM swarm.organizations WHERE id = ${workspace}::uuid`;
   assert.equal(org!.display_name, "By owner");
 });
+
+test("seat_admin_status: the person's own agents, what each level accepts, and active grants that always resolve", async () => {
+  const status = async (bearer: string) => {
+    const response = await fetch(`${local.API_URL}/functions/v1/read`, { method: "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify({ resource: "seat_admin_status" }) });
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  const asAgent = await status(agentToken);
+  assert.equal(asAgent.status, 403, "a person's session only");
+  const grantId = await grant();
+  const mine = await status(owner.jwt);
+  assert.equal(mine.status, 200, JSON.stringify(mine.body) + functionLogs.slice(-2000));
+  assert.equal(mine.body.enabled, true);
+  assert.equal(mine.body.registry_version, 3);
+  type Row = { principal_id: string; eligible: { workspace: string[]; organization: string[]; scoped: string[] }; active_grant_ids: string[] };
+  const rows = mine.body.agents as Row[];
+  assert.ok(!rows.some((r) => r.principal_id === foreign), "only the caller's own agents");
+  const row = rows.find((r) => r.principal_id === agent)!;
+  assert.deepEqual(row.eligible, { workspace: [workspace], organization: [workspace], scoped: [workspace] });
+  assert.deepEqual(row.active_grant_ids, [grantId]);
+  const theirs = await status(other.jwt);
+  assert.ok(!(theirs.body.agents as Row[]).some((r) => r.principal_id === agent), "never another person's agents");
+
+  // 101 newer ended grants: the active one is still in the grant list the site resolves against.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, level, organization_id, registry_version,
+        scope_names, workspace_ids, manifest, manifest_digest, expires_at, state, created_at, ended_at, end_reason)
+      SELECT (md5(${grantId} || n::text))::uuid, owner_user_id, principal_id, level, organization_id, registry_version, scope_names,
+        workspace_ids, manifest, manifest_digest, expires_at, 'downgraded', created_at + n * interval '1 second',
+        created_at + n * interval '1 second' + interval '1 millisecond', 'owner_downgrade'
+      FROM swarm.seat_admin_grants, generate_series(1, 101) AS n WHERE grant_id = ${grantId}::uuid`;
+  });
+  const listed = await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner.id, role: "authenticated" })}, true)`;
+    const [r] = await tx<{ g: { grants: Array<{ grant_id: string; state: string }> } }[]>`SELECT swarm_read.my_seat_admin_grants() AS g`;
+    return r!.g.grants;
+  });
+  assert.ok(listed.length > 100 && listed.filter((g) => g.state === "downgraded").length >= 100, "the latest 100, and more");
+  assert.equal(listed.find((g) => g.grant_id === grantId)?.state, "active");
+  await endGrant(grantId);
+  const after = await status(owner.jwt);
+  assert.deepEqual((after.body.agents as Row[]).find((r) => r.principal_id === agent)!.active_grant_ids, []);
+});

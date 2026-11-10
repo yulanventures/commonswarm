@@ -345,6 +345,7 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SWARM_ENV",
     "SWARM_COMMAND_ALLOWED_ORIGINS",
     "SWARM_BRAIN_MEMORY",
+    "SWARM_SEAT_ADMIN",
   ],
   capability: [
     ...DATABASE_ENV,
