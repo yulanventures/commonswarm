@@ -245,7 +245,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       // real feed rebuild.
       try {
         const long = randomUUID();
-        const body = Array.from({ length: 14 }, (_, i) => `Step ${i + 1}: check the boiler pressure gauge, note the reading, and compare it with the service sheet.`).join("\n\n");
+        // More than MESSAGE_COLLAPSE_LINES (60 line boxes, site/src/lib/message-markdown.ts) at every audited width.
+        const body = Array.from({ length: 75 }, (_, i) => `Step ${i + 1}: check the boiler pressure gauge, note the reading, and compare it with the service sheet.`).join("\n\n");
         await sql`INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
             about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel

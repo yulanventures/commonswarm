@@ -5145,6 +5145,9 @@ import "../../styles/kylon-command-palette.css";
       if (!activeWorkspaceId) return;
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       activeDm = { kind: entity.kind, id: entity.id } as EntityRef;
+      // The shell's title comes from activeDm: redraw it now, or it changes height on a later render and pushes the
+      // conversation down under the reader's pointer.
+      renderHomeShell();
       syncComposerAddress([{ kind: entity.kind, id: entity.id }]);
       renderFeed();
       syncComposerPlacement();
@@ -5155,6 +5158,7 @@ import "../../styles/kylon-command-palette.css";
     const closeDirectMessage = (): void => {
       if (!activeDm) return;
       activeDm = null;
+      renderHomeShell();
       syncComposerAddress([]);
       closeEntityPanel(false);
       renderFeed();
