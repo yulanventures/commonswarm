@@ -7847,6 +7847,33 @@ import "../../styles/kylon-command-palette.css";
       showChannelView("feed");
     };
 
+    /* FOCUS SURVIVES A FEED REBUILD. renderFeed replaces every row, so a keyboard user's focused
+       message control would drop to <body> on each poll. Before the rebuild, remember the focused
+       control by message id (which copy of that id, then which focusable inside it); once the rebuild
+       has finished, put focus back on the same control in the new row. Only focus this rebuild
+       displaced comes back: if anything else took focus, a dialog opened, or the workspace or view
+       changed in between, nothing moves. */
+    const FEED_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+    const keepFeedFocus = (list: HTMLElement): void => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !list.contains(active)) return;
+      const row = active.closest<HTMLElement>("[data-signal-id]");
+      const id = row?.dataset.signalId;
+      if (!row || !id) return;
+      const sameId = (root: ParentNode) => [...root.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(id)}"]`)];
+      const copy = sameId(list).indexOf(row);
+      const control = active === row ? -1 : [...row.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].indexOf(active);
+      const workspace = activeWorkspaceId, view = homeRoute.view;
+      queueMicrotask(() => {
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) return;
+        if (activeWorkspaceId !== workspace || homeRoute.view !== view || document.querySelector("dialog[open]")) return;
+        const next = sameId(list)[copy];
+        if (!next) return;
+        const target = control < 0 ? next : next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)[control];
+        target?.focus({ preventScroll: true });
+      });
+    };
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
@@ -7902,6 +7929,7 @@ import "../../styles/kylon-command-palette.css";
       }
       if (more) more.hidden = !signalHasMore;
       if (!list) return;
+      keepFeedFocus(list);
       list.replaceChildren();
       const homePeople = currentHomePeople();
       const streamWorkspace = { id: activeWorkspaceId, name: workspaces.find(row => row.id === activeWorkspaceId)?.name ?? "Workspace", href: routeHref({ view: "chat", workspaceId: activeWorkspaceId }) };
