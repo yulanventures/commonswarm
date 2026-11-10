@@ -236,7 +236,6 @@ export async function configureAgentReceive(options: {
   const host = checkedHostSessionId(options.hostSessionId);
   if (provider !== "instructions" && host === "manual") throw new AgentSetupError("host_session_required", "A host hook needs this session's ID. Supply --host-session-id, or use --provider instructions for prompt-based turn checks.");
   if (options.mode === "wake" && !(RECEIVE_WAKE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("wake_host_unsupported", `Wake supports --provider ${RECEIVE_WAKE_PROVIDERS.join(" or ")}. Use --mode turn on this host.`);
-  if (options.mode === "wake" && provider === "claude" && !options.previewChannel) throw new AgentSetupError("wake_preview_consent_required", "Claude custom channels are a research preview and need a host approval step. Explain that to the user before choosing wake; then add --preview-channel. Turn checks need no preview channel.");
   const grokAgentId = options.grokBotAgentId ?? (ONBOARDING_UUID.test(host) ? host : undefined);
   if (provider === "grok-bot" && options.mode === "wake") {
     if (!grokAgentId || !ONBOARDING_UUID.test(grokAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID, or use that UUID as --host-session-id.");
@@ -269,7 +268,10 @@ export async function configureAgentReceive(options: {
     if (options.mode === "wake" && provider === "claude") {
       const config = join(dirname(profile), `claude-channel-${profileScopeKey(host)}.json`);
       await writeSecureJsonFile(config, JSON.stringify({ mcpServers: {
-        cswarm: { command: options.execution.command, args: [...options.execution.args, "receive", "serve", "--profile", profile, "--host-session-id", host] },
+        // Claude Code registers a channel only on an MCP revision before 2026-07-28. Our SDK never offers that revision;
+        // the legacy setting keeps it so if either side changes.
+        cswarm: { command: options.execution.command, args: [...options.execution.args, "receive", "serve", "--profile", profile, "--host-session-id", host],
+          env: { MCP_PROTOCOL_NEGOTIATION: "legacy" } },
       } }, null, 2));
       binding = { ...binding, channel_config: config };
       startCommand = `claude --resume ${shellQuote(host)} --mcp-config ${shellQuote(config)} --dangerously-load-development-channels server:cswarm`;

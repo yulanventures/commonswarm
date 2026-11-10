@@ -14769,6 +14769,7 @@ async function handleTransaction(
         limit: command.limit,
         managed: agent.managed_at != null,
         session: sessionProofParse.ok ? sessionProofParse.proof : null,
+        reclaimOwnLeases: command.route === "channel",
       });
       if (ledger === null) {
         return { status: 403, body: { error: "delivery_unavailable" } };

@@ -1,4 +1,5 @@
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
 import { recordDispatch } from "./dispatch-trace.js";
 import {
   AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, turnCheckInstruction,
@@ -221,8 +222,24 @@ export async function runReceiveConfigure(args: OnboardingArguments): Promise<vo
     profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
     hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
     grokBotAgentId: args.optional("grok-bot-agent-id"),
-    execution: { command: process.execPath, args: [...process.execArgv, resolve(process.argv[1]!)] },
+    execution: { command: await stableNodePath(), args: [...process.execArgv, resolve(process.argv[1]!)] },
   }));
+}
+
+/**
+ * The node path written into hooks and the channel config. A package manager's versioned path
+ * (for example /opt/homebrew/Cellar/node/<version>/bin/node) breaks on the next upgrade, so prefer
+ * a `node` on PATH that resolves to this same binary, such as /opt/homebrew/bin/node.
+ */
+export async function stableNodePath(execPath = process.execPath, path = process.env.PATH ?? ""): Promise<string> {
+  const actual = await realpath(execPath).catch(() => execPath);
+  for (const dir of path.split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue;
+    const candidate = join(dir, process.platform === "win32" ? "node.exe" : "node");
+    if (candidate === execPath) break; // PATH reached this binary's own directory first: nothing steadier.
+    try { if (await realpath(candidate) === actual) return candidate; } catch { /* Not on this PATH entry. */ }
+  }
+  return execPath;
 }
 
 export async function runReceiveStatus(args: OnboardingArguments): Promise<void> {

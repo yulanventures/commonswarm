@@ -35,6 +35,7 @@ import {
   claimAgentInbox,
   DELIVERY_ACK_OUTCOMES,
   DELIVERY_CLIENT_ERROR_CODES,
+  authorInWorkspace,
   hydrateDeliveryRefs,
   type AckResult,
   type DeliveryAckOutcome,
@@ -442,9 +443,9 @@ async function ownLeaseRefs(
      AND s.workspace_id = d.workspace_id
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
-     AND author.workspace_id = s.workspace_id
      AND author.principal_id = s.from_principal
      AND author.revoked_at IS NULL
+     AND ${authorInWorkspace(tx)}
     LEFT JOIN swarm.memberships AS author_member
       ON author_member.workspace_id = s.workspace_id
      AND author_member.user_id = COALESCE(
@@ -513,9 +514,9 @@ async function listedLeaseRefs(
      AND s.workspace_id = d.workspace_id
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
-     AND author.workspace_id = s.workspace_id
      AND author.principal_id = s.from_principal
      AND author.revoked_at IS NULL
+     AND ${authorInWorkspace(tx)}
     LEFT JOIN swarm.memberships AS author_member
       ON author_member.workspace_id = s.workspace_id
      AND author_member.user_id = COALESCE(
@@ -616,6 +617,19 @@ async function collect(
     const refs = await listedLeaseRefs(tx, seat, listenerId, open.lease_ids);
     if (refs === null) throw new Error("h0 poll lease refs were unreadable");
     const hydrated = await hydrate(tx, seat, refs);
+    // A delivery whose sender was removed was terminalized during hydration. Batch leases are immutable and a
+    // replay already skips dead ones; a batch with nothing left to show is closed.
+    if (hydrated.length === 0) {
+      await tx`
+        UPDATE swarm.h0_poll_batches
+        SET status = 'closed', closed_at = statement_timestamp()
+        WHERE workspace_id = ${seat.workspaceId}::uuid
+          AND principal_id = ${seat.principalId}::uuid
+          AND batch_id = ${open.batch_id}::uuid
+          AND status = 'active'
+      `;
+      return { kind: "empty", body: { batchId: null, listener_instance_id: listenerId, deliveries: [] } };
+    }
     return {
       kind: "ready",
       body: {
@@ -661,8 +675,12 @@ async function collect(
     };
   }
   const hydrated = await hydrate(tx, seat, refs);
+  // A removed sender's delivery is terminalized during hydration and never enters the batch.
+  if (hydrated.length === 0) {
+    return { kind: "empty", body: { batchId: null, listener_instance_id: listenerId, deliveries: [] } };
+  }
   const batchId = crypto.randomUUID();
-  const leaseIds = refs.map((ref) => ref.lease_id);
+  const leaseIds = hydrated.map((delivery) => delivery.lease_id);
   const inserted = await tx<{ batch_id: string }[]>`
     INSERT INTO swarm.h0_poll_batches (
       workspace_id, principal_id, batch_id, lease_ids, status, expires_at

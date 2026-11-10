@@ -22,7 +22,60 @@ export function claimAgentInboxPersistsLedger(
   ledger: DeliveryClaimLedgerResponse,
 ): boolean {
   return ledger.delivery_refs.length > 0 ||
-    ledger.terminal_delivery_failure_count > 0;
+    ledger.terminal_delivery_failure_count > 0 ||
+    (ledger.sender_not_live_count ?? 0) > 0;
+}
+
+/**
+ * The sender's current admission in the signal's workspace, for a signal aliased `s` (security condition,
+ * 2026-11-10: a removed sender's queued message is not pushed into an agent's context). A person needs a live
+ * membership. An agent needs a live principal whose owner holds a live membership, and either a live membership
+ * row for the agent in this workspace or, for a principal with no row there at all (a registrar), this as its home
+ * workspace: an absent row is never read as removal. Credentials are never consulted, so rotating or expiring the
+ * sender's bearer after it posted does not cancel the message.
+ */
+function senderLive(tx: Sql) {
+  return tx`(
+    (s.from_kind = 'user' AND EXISTS (
+      SELECT 1 FROM swarm.memberships AS sender_member
+      WHERE sender_member.workspace_id = s.workspace_id
+        AND sender_member.user_id = s.from_principal
+        AND sender_member.revoked_at IS NULL))
+    OR (s.from_kind = 'agent' AND EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS sender_agent
+      JOIN swarm.memberships AS sender_owner
+        ON sender_owner.workspace_id = s.workspace_id
+       AND sender_owner.user_id = sender_agent.owner_user_id
+       AND sender_owner.revoked_at IS NULL
+      WHERE sender_agent.principal_id = s.from_principal
+        AND sender_agent.revoked_at IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM swarm.agent_workspace_memberships AS sender_seat
+            WHERE sender_seat.principal_id = sender_agent.principal_id
+              AND sender_seat.workspace_id = s.workspace_id
+              AND sender_seat.owner_user_id = sender_agent.owner_user_id
+              AND sender_seat.revoked_at IS NULL)
+          OR (sender_agent.workspace_id = s.workspace_id AND NOT EXISTS (
+            SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+            WHERE any_seat.principal_id = sender_agent.principal_id
+              AND any_seat.workspace_id = s.workspace_id))
+        )))
+  )`;
+}
+
+/** The author row for the relation label: its home workspace, or a live membership in the signal's workspace. */
+export function authorInWorkspace(tx: Sql) {
+  return tx`(
+    author.workspace_id = s.workspace_id
+    OR EXISTS (
+      SELECT 1 FROM swarm.agent_workspace_memberships AS author_seat
+      WHERE author_seat.principal_id = author.principal_id
+        AND author_seat.workspace_id = s.workspace_id
+        AND author_seat.owner_user_id = author.owner_user_id
+        AND author_seat.revoked_at IS NULL)
+  )`;
 }
 
 /** Fixed first-release lease duration; callers cannot widen it. */
@@ -87,6 +140,9 @@ export interface DeliveryClaimLedgerResponse {
   delivery_refs: DeliveryLedgerRef[];
   pending_delivery_count: number;
   terminal_delivery_failure_count: number;
+  /** Deliveries this claim terminalized because their sender is no longer admitted (sender_not_live). Kept apart
+   *  from terminal_delivery_failure_count, which raises the attempts-exhausted security alert. */
+  sender_not_live_count?: number;
   /**
    * When the OLDEST row in `pending_delivery_count` was enqueued, so a listener
    * can say how long its queue has been waiting instead of only how long it is.
@@ -200,9 +256,13 @@ export async function claimAgentInbox(
     managed?: boolean;
     /** Verified proof. Set at claim time; never read from the command body. */
     session?: { session_id: string; generation: number } | null;
+    /** A channel listener re-takes its own outstanding lease (a restarted channel re-checks before it shows the
+     *  message again); other routes never see a row they already hold. */
+    reclaimOwnLeases?: boolean;
   },
 ): Promise<DeliveryClaimLedgerResponse | null> {
   const managed = args.managed === true;
+  const reclaimOwn = args.reclaimOwnLeases === true;
   const sessionId = args.session?.session_id ?? null;
   const sessionGeneration = args.session?.generation ?? null;
   // 1. Serialize claims on this principal without blocking signal writers'
@@ -267,6 +327,41 @@ export async function claimAgentInbox(
       )
   `;
 
+  // 3b. Terminalize unsurfaced rows whose sender is no longer admitted, leased or not: a removal committed before
+  // this claim wins. The signal stays; the row is not observed, not expired, and never retried or resumed.
+  const senderNotLiveRows = await tx<{ signal_id: string }[]>`
+    UPDATE swarm.signal_deliveries AS d
+    SET
+      acked_at = statement_timestamp(),
+      ack_outcome = 'failed_terminal',
+      last_error_code = 'sender_not_live',
+      last_lease_id = COALESCE(d.lease_id, d.last_lease_id),
+      last_leased_by = CASE WHEN d.lease_id IS NULL THEN d.last_leased_by ELSE d.leased_by END,
+      lease_id = NULL,
+      leased_by = NULL,
+      leased_until = NULL,
+      session_id = NULL,
+      session_generation = NULL,
+      updated_at = statement_timestamp()
+    FROM swarm.signals AS s
+    WHERE s.id = d.signal_id
+      AND s.workspace_id = d.workspace_id
+      AND d.workspace_id = ${args.workspaceId}::uuid
+      AND d.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+      AND s.until > statement_timestamp()
+      AND (
+        d.acked_at IS NULL
+        OR (
+          ${managed}
+          AND d.ack_outcome = 'queued'
+          AND d.surfaced_at IS NULL
+        )
+      )
+      AND NOT ${senderLive(tx)}
+    RETURNING d.signal_id
+  `;
+  const senderNotLiveCount = senderNotLiveRows.length;
+
   // 4. Terminalize remaining unleased, signal-live rows at the ten-attempt ceiling.
   // Count rows newly failed in this transaction.
   const poisonRows = await tx<{ signal_id: string }[]>`
@@ -329,7 +424,10 @@ export async function claimAgentInbox(
       WHERE d.workspace_id = ${args.workspaceId}::uuid
         AND d.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
         AND d.acked_at IS NULL
-        AND d.lease_id IS NULL
+        AND (
+          d.lease_id IS NULL
+          OR (${reclaimOwn} AND d.leased_by = ${args.listenerInstanceId}::uuid AND d.leased_until > statement_timestamp())
+        )
         AND d.attempt_count < ${DELIVERY_MAX_ATTEMPTS}
         AND s.until > statement_timestamp()
         AND (
@@ -352,6 +450,9 @@ export async function claimAgentInbox(
         leased_until = statement_timestamp()
           + (${DELIVERY_LEASE_MS} * interval '1 millisecond'),
         attempt_count = CASE
+          -- Re-taking this listener's own live lease is the same attempt.
+          WHEN d.lease_id IS NOT NULL AND d.leased_by = ${args.listenerInstanceId}::uuid
+          THEN d.attempt_count
           WHEN ${managed}
             AND d.session_id IS NULL
             AND d.attempt_count > 0
@@ -401,9 +502,9 @@ export async function claimAgentInbox(
      AND s.workspace_id = u.workspace_id
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
-     AND author.workspace_id = s.workspace_id
      AND author.principal_id = s.from_principal
      AND author.revoked_at IS NULL
+     AND ${authorInWorkspace(tx)}
     LEFT JOIN swarm.memberships AS author_member
       ON author_member.workspace_id = s.workspace_id
      AND author_member.user_id = COALESCE(author.owner_user_id, CASE WHEN s.from_kind = 'user' THEN s.from_principal END)
@@ -448,6 +549,7 @@ export async function claimAgentInbox(
     })),
     pending_delivery_count: pending,
     terminal_delivery_failure_count: terminalDeliveryFailureCount,
+    ...(senderNotLiveCount > 0 ? { sender_not_live_count: senderNotLiveCount } : {}),
     /* min() over an empty set is NULL, which is exactly the "nothing pending"
      * state, so no separate branch on the count is needed or wanted: branching
      * would let the two disagree. */
@@ -511,8 +613,21 @@ export async function hydrateDeliveryRefs(
     sender_owner_relation: SenderOwnerRelation;
     recipient_position: number;
     recipient_count: number;
+    sender_live: boolean;
+    sender_canceled: boolean;
   }[]>`
     SELECT
+      ${senderLive(tx)} AS sender_live,
+      /* A delivery already ended as sender_not_live stays ended, even after the sender is re-added: a replay of an
+       * old claim reads its stored refs here and must not resume it. */
+      EXISTS (
+        SELECT 1 FROM swarm.signal_deliveries AS ended
+        WHERE ended.signal_id = s.id
+          AND ended.workspace_id = s.workspace_id
+          AND ended.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          AND ended.ack_outcome = 'failed_terminal'
+          AND ended.last_error_code = 'sender_not_live'
+      ) AS sender_canceled,
       s.id,
       s.workspace_id,
       s.from_principal,
@@ -597,9 +712,9 @@ export async function hydrateDeliveryRefs(
     FROM swarm.signals AS s
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
-     AND author.workspace_id = s.workspace_id
      AND author.principal_id = s.from_principal
      AND author.revoked_at IS NULL
+     AND ${authorInWorkspace(tx)}
     LEFT JOIN swarm.memberships AS author_member
       ON author_member.workspace_id = s.workspace_id
      AND author_member.user_id = COALESCE(author.owner_user_id, CASE WHEN s.from_kind = 'user' THEN s.from_principal END)
@@ -619,9 +734,14 @@ export async function hydrateDeliveryRefs(
   `;
   const byId = new Map(rows.map((row) => [row.id, row]));
   const hydrated: HydratedDelivery[] = [];
+  const senderNotLive: string[] = [];
   for (const ref of args.refs) {
     const signal = byId.get(ref.signal_id);
     if (!signal) return null;
+    // A fresh claim, a replayed claim and an H0 poll all hydrate here: a sender removed since the lease was
+    // taken never reaches the agent, and the rest of the batch still does.
+    if (signal.sender_canceled) continue;
+    if (!signal.sender_live) { senderNotLive.push(signal.id); continue; }
     hydrated.push({
       signal: {
         id: signal.id,
@@ -648,6 +768,30 @@ export async function hydrateDeliveryRefs(
       recipient_position: signal.recipient_position,
       recipient_count: signal.recipient_count,
     });
+  }
+  if (senderNotLive.length > 0) {
+    await tx`
+      UPDATE swarm.signal_deliveries AS d
+      SET
+        acked_at = statement_timestamp(),
+        ack_outcome = 'failed_terminal',
+        last_error_code = 'sender_not_live',
+        last_lease_id = COALESCE(d.lease_id, d.last_lease_id),
+        last_leased_by = CASE WHEN d.lease_id IS NULL THEN d.last_leased_by ELSE d.leased_by END,
+        lease_id = NULL,
+        leased_by = NULL,
+        leased_until = NULL,
+        session_id = NULL,
+        session_generation = NULL,
+        updated_at = statement_timestamp()
+      WHERE d.workspace_id = ${args.workspaceId}::uuid
+        AND d.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+        AND d.signal_id = ANY (${senderNotLive}::uuid[])
+        AND (
+          d.acked_at IS NULL
+          OR (d.ack_outcome = 'queued' AND d.surfaced_at IS NULL)
+        )
+    `;
   }
   return hydrated;
 }
@@ -1015,12 +1159,19 @@ export function parseClaimLedger(value: unknown): DeliveryClaimLedgerResponse | 
       return null;
     }
   }
+  let senderNotLive: { sender_not_live_count?: number } = {};
+  if (Object.hasOwn(body, "sender_not_live_count")) {
+    const val = body.sender_not_live_count;
+    if (!Number.isSafeInteger(val) || (val as number) < 0) return null;
+    senderNotLive = { sender_not_live_count: val as number };
+  }
   return {
     ok: true,
     event_ids: [],
     delivery_refs: refs,
     pending_delivery_count: body.pending_delivery_count as number,
     terminal_delivery_failure_count: terminalFailureCount,
+    ...senderNotLive,
     ...oldestPending,
   };
 }
