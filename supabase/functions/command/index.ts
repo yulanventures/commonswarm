@@ -13734,6 +13734,8 @@ async function handleTransaction(
     }
     if (
       auth.agent !== null &&
+      // A seat admin action's authority is the grant re-decided under lock above, not the token's scopes.
+      seatAdminContext === null &&
       !isRenewal &&
       !isAgentTokenRevoke &&
       !isModelDeclare &&
