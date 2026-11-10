@@ -43,6 +43,9 @@ const message = (id: string, toAgent: string, body: string) => ({
 /** A fake edge whose inbox is a queue: a claim returns the head until it is acked. */
 async function fixture(queue: Array<Record<string, unknown>>) {
   const root = await mkdtemp(join(tmpdir(), "cswarm-channel-default-"));
+  // Profile writes in this process stay inside the fixture HOME, as in agent-channel.test.ts.
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
   const cwd = join(root, "project");
   await mkdir(cwd);
   const profile = join(root, "agent", "profile.json");
@@ -109,7 +112,7 @@ async function fixture(queue: Array<Record<string, unknown>>) {
     return { client, events, transport, stderr: () => stderr };
   };
   const channelConfig = (await readReceiveBinding(profile, "host-session"))?.channel_config ?? null;
-  return { configured, channelConfig, acks, start, closeAll: async () => { for (const c of clients) await c.close().catch(() => undefined); }, close: () => new Promise<void>(done => server.close(() => done())) };
+  return { configured, channelConfig, acks, start, closeAll: async () => { for (const c of clients) await c.close().catch(() => undefined); }, close: () => new Promise<void>(done => server.close(() => { process.env.HOME = previousHome; done(); })) };
 }
 
 test("each message addressed to this seat arrives as one event; a restart never re-sends a confirmed one", { timeout: 40_000 }, async () => {
