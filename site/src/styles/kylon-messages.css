@@ -86,6 +86,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-avatar 
   font-weight: 600;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
+  position: relative;
   gap: 2px 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author {
@@ -217,6 +218,94 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown > * {
   max-inline-size: 70ch;
+}
+
+/* Image attachments reserve the same frame before load, on error, and after
+   decoding. Contain fitting keeps the complete image visible in the preview. */
+.hm-frame .hm-extras__images {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  min-inline-size: 0;
+}
+.hm-frame .hm-extras__image {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 0 1 24rem;
+  min-inline-size: 0;
+  inline-size: min(100%, 24rem);
+  max-inline-size: 100%;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: 10px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  text-decoration: none;
+}
+.hm-frame .hm-extras__image-frame {
+  position: relative;
+  display: block;
+  inline-size: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--k-shell-subtle);
+}
+.hm-frame .hm-extras__image-frame > img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+}
+.hm-frame .hm-extras__image > img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--k-shell-subtle);
+}
+.hm-frame .hm-extras__image :is(.hm-object-copy, .hm-extras__image-caption) {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+.hm-frame .hm-extras__image-name {
+  min-inline-size: 0;
+  color: var(--k-shell-ink);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.hm-frame .hm-extras__image-meta {
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.hm-frame .hm-extras__image[data-preview-state="unavailable"] .hm-extras__image-frame::after {
+  content: "Preview unavailable";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--k-shell-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.hm-frame .hm-extras__image:hover {
+  border-color: var(--k-shell-control);
+  box-shadow: var(--k-shell-shadow);
+}
+.hm-frame .hm-extras__image:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
 }
 /* Compact rich text only inside conversation messages, not the Brain reader.
  * Preserve semantic lists, task markers and the existing wrapped-code behavior. */

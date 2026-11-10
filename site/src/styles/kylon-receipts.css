@@ -6,13 +6,16 @@
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
   flex: 1 1 208px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) fit-content(50%);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   justify-content: start;
   gap: 2px 4px;
-  min-inline-size: 0;
+  inline-size: max-content;
+  min-inline-size: min(13rem, calc(100% - 32px));
+  max-inline-size: min(28rem, calc(100% - 32px));
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
+  display: block;
   grid-column: 1;
   grid-row: 1;
   min-inline-size: 0;
@@ -67,16 +70,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .
   grid-row: 2;
   min-inline-size: 0;
 }
-/* Both branches keep the summary shrinkable and let Reply wrap within its
- * half-bar budget. The native body's own second row can still use the full
- * strip. No display:contents or detached/generated summary is used. */
-@supports (grid-template-columns: subgrid) and selector(::details-content) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
-    display: grid;
-    grid-template-columns: subgrid;
-    grid-column: 1 / -1;
-  }
-}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > :not(summary) {
   grid-column: 1 / -1;
   margin-block-start: 4px;
@@ -90,33 +83,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt
   border-radius: 6px;
 }
 
-/* The channel hover rule also supplies display:flex with equal specificity.
-   Size the visible strip from its contents, within the message width, so the
-   receipt and native disclosure do not collapse to a single character column. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:is(:hover, :focus-within, :has(.dashboard__message-receipt[open])) .dashboard__message-body > .dashboard__message-tools {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  inline-size: max-content;
-  min-inline-size: min(13rem, calc(100% - 32px));
-  max-inline-size: min(28rem, calc(100% - 32px));
-}
-/* A details element owns its body. Keep it in the first column so both the
-   summary and any longer content wrap inside the available toolbar width. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:is(:hover, :focus-within, :has(.dashboard__message-receipt[open])) .dashboard__message-tools > .dashboard__message-receipt {
-  display: block;
-  grid-column: 1;
-  min-inline-size: 0;
-  max-inline-size: 100%;
-}
-
 /* Touch widths: the receipt rendered one character per line ("Seen by ..." as a vertical
    strip, 2026-11-03 audit). Its column was minmax(0, 1fr) and its text could break anywhere,
    so a narrow toolbar collapsed it to a sliver. Give the toolbar the full message width, the
    receipt column a real minimum, and break only between words. */
 @media (width <= 64rem) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:is(:hover, :focus-within, :has(.dashboard__message-receipt[open])) .dashboard__message-body > .dashboard__message-tools {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools {
     flex: 1 1 100%;
     inline-size: 100%;
     max-inline-size: 100%;

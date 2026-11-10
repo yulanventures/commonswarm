@@ -65,7 +65,7 @@
 }
 
 /* ==========================================================================
-   2. Interaction — hover lift and press
+   2. Interaction — stationary hover feedback and press
    These are transitions, not animations: they are reversible and interruptible,
    which is what makes them feel responsive rather than scripted.
    ========================================================================== */
@@ -79,16 +79,14 @@
     color var(--dur-1) var(--ease-standard);
 }
 
-/* Lift. translate3d keeps it on the compositor; `will-change` is deliberately NOT set —
-   promoting every card permanently costs more than the animation saves. */
+/* Existing lift classes retain paint feedback without moving their targets. */
 .motion-lift:hover,
 .motion-lift:focus-visible {
-  transform: translate3d(0, -2px, 0);
+  box-shadow: var(--shadow-md);
 }
 
 .motion-lift-lg:hover,
 .motion-lift-lg:focus-visible {
-  transform: translate3d(0, -3px, 0);
   box-shadow: var(--shadow-lg);
 }
 

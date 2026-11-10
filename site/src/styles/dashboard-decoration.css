@@ -18,11 +18,12 @@
     margin-block-start: var(--s-2);
     border-radius: var(--radius-pill);
     background: var(--accent);
-    transition: inline-size var(--dur-2) var(--ease-standard);
+    opacity: 0.75;
+    transition: opacity var(--dur-2) var(--ease-standard);
   }
 
   .dashboard__wordmark:hover::after {
-    inline-size: 100%;
+    opacity: 1;
   }
 
   .dashboard__popover-label {
