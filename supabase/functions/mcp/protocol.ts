@@ -2,7 +2,7 @@ import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { McpTokenError } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
-import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
+import { FILE_GET_IMAGE_MAX_BYTES, HOSTED_TOOL_TABLE, HostedToolImage, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
 
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { hostedToolError } from "./tool-errors.ts";
@@ -265,8 +265,9 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
     }
     concurrent += 1;
     const lifetime = requestSignal(request, options.limits.requestTimeoutMs);
-    let toolOperation: Promise<Record<string, unknown>> | null = null;
+    let toolOperation: Promise<Record<string, unknown> | HostedToolImage> | null = null;
     let toolSettled = false;
+    let responseLimit = options.limits.maxResponseBytes;
     try {
       let verified: VerifiedMcpToken;
       try {
@@ -358,7 +359,17 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
             () => { toolSettled = true; },
           );
           const output = await beforeAbort(toolOperation, lifetime.signal);
-          result = { content: [{ type: "text", text: JSON.stringify(withinResponseLimit(message.id, output, options.limits.maxResponseBytes)) }] };
+          if (output instanceof HostedToolImage) {
+            // The JSON keeps the ordinary budget; only the picture may use the image allowance.
+            const text = { type: "text", text: JSON.stringify(withinResponseLimit(message.id, output.output, options.limits.maxResponseBytes)) };
+            if (new TextEncoder().encode(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [text] } })).byteLength > options.limits.maxResponseBytes) {
+              return failed(500, rpcError(message.id, -32603, "Response exceeds limit"));
+            }
+            result = { content: [text, { type: "image", data: output.image.data, mimeType: output.image.mimeType }] };
+            responseLimit = options.limits.maxResponseBytes + IMAGE_RESPONSE_ALLOWANCE_BYTES;
+          } else {
+            result = { content: [{ type: "text", text: JSON.stringify(withinResponseLimit(message.id, output, options.limits.maxResponseBytes)) }] };
+          }
         } catch (error) {
           if (lifetime.signal.aborted) return failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
           if (error instanceof HostedToolInputError) {
@@ -386,7 +397,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       }
       const envelope = { jsonrpc: "2.0", id: message.id, result };
       const encoded = JSON.stringify(envelope);
-      if (new TextEncoder().encode(encoded).byteLength > options.limits.maxResponseBytes) {
+      if (new TextEncoder().encode(encoded).byteLength > responseLimit) {
         return failed(500, rpcError(message.id, -32603, "Response exceeds limit"));
       }
       return new Response(encoded, {
@@ -416,6 +427,9 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
     }
   };
 }
+
+/** Base64 of the largest picture file_get returns, on top of the ordinary response budget. */
+const IMAGE_RESPONSE_ALLOWANCE_BYTES = Math.ceil(FILE_GET_IMAGE_MAX_BYTES / 3) * 4;
 
 /** Read provenance is optional: shrink it, then drop it, before it alone would
  * push a tool result over the response limit. Other output is never changed. */

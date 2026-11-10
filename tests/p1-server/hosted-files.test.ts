@@ -58,8 +58,8 @@ async function owner(cmd) {
   return { status: response.status, body: await response.json() };
 }
 
-async function upload(name, contentType, text) {
-  const bytes = new TextEncoder().encode(text);
+async function upload(name, contentType, text, bytesB64) {
+  const bytes = bytesB64 ? Uint8Array.from(atob(bytesB64), (c) => c.charCodeAt(0)) : new TextEncoder().encode(text);
   const fileId = crypto.randomUUID();
   const versionId = crypto.randomUUID();
   const created = await owner({ kind: "file_version_create", file_id: fileId, version_id: versionId,
@@ -92,12 +92,21 @@ async function get(handle, fileId, versionN = null, tool = "file_get") {
 
 const op = input.operation;
 let result;
-if (op === "upload") result = await upload(input.name, input.contentType, input.text);
+if (op === "upload") result = await upload(input.name, input.contentType, input.text, input.bytesB64);
 else if (op === "note") result = await owner({ kind: "post_signal", signal_kind: "note", body: "files for you",
   to_user_id: null, to_agent_principal_id: input.to, in_reply_to: null, about: null,
   attachments: input.attachments });
 else if (op === "tombstone") result = await owner({ kind: "file_tombstone", file_id: input.fileId });
 else if (op === "ls") result = await ls(input.handle, input.extra ?? {});
+else if (op === "image") {
+  // The hosted picture path: the same authorization, then the bounded whole-file reader.
+  const cap = await capability(input.handle, "file_get", "command");
+  const resolved = await command.handleHostedCommand({ command_id: "mcpfile_" + crypto.randomUUID(),
+    client_version: "0.1.80", workspace_id: input.workspace, stream: { kind: "workspace" },
+    command: { kind: "file_download_url", file_id: input.fileId, version_n: null } }, cap);
+  result = resolved.status !== 200 ? resolved : { status: 200, body: await content.readImage(input.apiUrl,
+    String(resolved.body.download_path), String(resolved.body.content_type), Number(resolved.body.size_bytes), 2 * 1024 * 1024) };
+}
 else if (op === "get") result = await get(input.handle, input.fileId, input.versionN ?? null, input.tool ?? "file_get");
 else if (op === "wrong-kind") {
   // A file_get capability cannot carry any other command, and no other tool can download.
@@ -281,6 +290,21 @@ test("file_ls lists the seat's workspace and file_get pages text from the resolv
     const paged = run<Result>(fixture, { operation: "get", handle: fixture.handleA, fileId: notes.file_id, offset: 14 });
     assert.equal((paged.body.page as { text: string; offset: number }).text, "eggs, milk, bread €");
   }
+});
+
+test("file_get returns a stored PNG as image bytes, and a page that only claims to be a PNG as metadata", async () => {
+  const fixture = await seedFixture("hosted-files-image");
+  // A 1x1 transparent PNG.
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const stored = run<Result>(fixture, { operation: "upload", name: "dot.png", contentType: "image/png", bytesB64: png });
+  assert.equal(stored.status, 200, JSON.stringify(stored.body));
+  const image = run<Result>(fixture, { operation: "image", handle: fixture.handleA, fileId: stored.body.file_id });
+  assert.equal(image.status, 200, JSON.stringify(image.body));
+  assert.deepEqual(image.body, { kind: "image", data: png, mimeType: "image/png", bytes: Buffer.from(png, "base64").length });
+  noSecret(image.body);
+  const disguised = uploaded(fixture, "page.png", "<html><script>alert(1)</script></html>", "image/png");
+  const refused = run<Result>(fixture, { operation: "image", handle: fixture.handleA, fileId: disguised.file_id });
+  assert.deepEqual(refused.body, { kind: "not_image" });
 });
 
 test("signal_id lists attachments only for a message addressed to this seat", async () => {

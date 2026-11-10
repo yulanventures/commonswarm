@@ -7,7 +7,10 @@ import {
   FileContentUnavailable,
   encodedBytes,
   fitTextPage,
+  imageBytesMatch,
+  isImageContentType,
   isTextContentType,
+  readImage,
   readObjectPage,
   textPage,
   utf8BoundaryLength,
@@ -129,6 +132,51 @@ test("the reader refuses foreign paths and hides storage failures", async () => 
   const thrown = fakeFetch(() => { throw new Error(`network ${signed}`); });
   await assert.rejects(readObjectPage(base, signed, 0, 10, thrown.impl), (error: unknown) =>
     error instanceof FileContentUnavailable && !(error as Error).message.includes("token"));
+});
+
+const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+const signatures: Array<[string, Uint8Array]> = [
+  ["image/png", PNG],
+  ["image/jpeg", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16])],
+  ["image/gif", encoder.encode("GIF89a\x01\x00")],
+  ["image/gif", encoder.encode("GIF87a\x01\x00")],
+  ["image/webp", encoder.encode("RIFF\x00\x00\x00\x00WEBPVP8 ")],
+];
+
+test("a picture is returned only for PNG, JPEG, GIF and WebP whose bytes carry that type's signature", () => {
+  for (const type of ["image/png", "image/jpeg", "image/gif", "image/webp"]) assert.equal(isImageContentType(type), true, type);
+  for (const type of ["image/svg+xml", "image/heic", "image/jpg", "text/html", "", null]) assert.equal(isImageContentType(type), false, String(type));
+  for (const [type, bytes] of signatures) assert.equal(imageBytesMatch(type, bytes), true, type);
+  // Each signature under every other declared type, a cut signature, and HTML that calls itself a PNG.
+  for (const [type] of signatures) {
+    for (const [other, bytes] of signatures) if (other !== type) assert.equal(imageBytesMatch(type, bytes), false, `${other} bytes as ${type}`);
+  }
+  assert.equal(imageBytesMatch("image/png", PNG.subarray(0, 7)), false);
+  assert.equal(imageBytesMatch("image/webp", encoder.encode("RIFF\x00\x00\x00\x00WAVE")), false);
+  assert.equal(imageBytesMatch("image/png", encoder.encode("<html><script>alert(1)</script>")), false);
+  assert.equal(imageBytesMatch("image/svg+xml", encoder.encode("<svg/>")), false);
+});
+
+test("the picture reader stays within the cap, reads the whole declared size, and returns base64 of exactly those bytes", async () => {
+  const never = fakeFetch(() => { throw new Error("must not fetch"); });
+  assert.deepEqual(await readImage(base, signed, "image/png", 2049, 2048, never.impl), { kind: "too_large" });
+  assert.deepEqual(await readImage(base, signed, "image/svg+xml", 10, 2048, never.impl), { kind: "not_image" });
+  assert.deepEqual(await readImage(base, signed, "image/png", 0, 2048, never.impl), { kind: "not_image" });
+  assert.equal(never.seen.length, 0, "no byte is read past the cap or for a non-picture type");
+
+  const exact = fakeFetch(() => new Response(PNG, { status: 200 }));
+  const image = await readImage(base, signed, "image/png", PNG.length, 2048, exact.impl);
+  assert.deepEqual(image, { kind: "image", data: Buffer.from(PNG).toString("base64"), mimeType: "image/png", bytes: PNG.length });
+  assert.equal(exact.seen[0]!.range, `bytes=0-${PNG.length - 1}`);
+
+  const disguised = fakeFetch(() => new Response(encoder.encode("<html>hello</html>"), { status: 200 }));
+  assert.deepEqual(await readImage(base, signed, "image/png", 18, 2048, disguised.impl), { kind: "not_image" });
+  const short = fakeFetch(() => new Response(PNG.subarray(0, 10), { status: 200 }));
+  await assert.rejects(readImage(base, signed, "image/png", PNG.length, 2048, short.impl), FileContentUnavailable);
+  // A server that sends more than the declared size: only the declared bytes are kept.
+  const longer = fakeFetch(() => new Response(Uint8Array.from([...PNG, 1, 2, 3, 4]), { status: 200 }));
+  assert.deepEqual(await readImage(base, signed, "image/png", PNG.length, 2048, longer.impl),
+    { kind: "image", data: Buffer.from(PNG).toString("base64"), mimeType: "image/png", bytes: PNG.length });
 });
 
 test("file_put takes exactly one bounded content form and an allowed name; posts take bounded attachments", async () => {

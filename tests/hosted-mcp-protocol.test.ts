@@ -9,7 +9,7 @@ import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
-import { CORE_TOOL_TABLE, HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+import { CORE_TOOL_TABLE, FILE_GET_IMAGE_MAX_BYTES, HOSTED_TOOL_TABLE, HostedToolImage, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
 import { HOUSEHOLD_TOOL_REGISTRY } from "../src/protocol/household-tool-registry.js";
 
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
@@ -866,6 +866,32 @@ test("body, response, duration, and concurrency limits deny beside a small posit
   await new Promise((resolve) => setTimeout(resolve, 0));
   mode = "small";
   assert.equal((await serve(call())).status, 200, "settled work releases its slot");
+});
+
+test("a picture result is a text block plus an image block; only the picture may exceed the text budget", async () => {
+  const picture = "A".repeat(4 * 1024);
+  let output: Record<string, unknown> | HostedToolImage = new HostedToolImage({ name: "shot.png", content_warning: "untrusted" }, { data: picture, mimeType: "image/png" });
+  const serve = createMcpProtocolHandler({
+    issuer: MCP_ISSUER, resource: MCP_RESOURCE, publicEnabled: true, allowedOrigins: new Set(),
+    limits: { maxBodyBytes: 512, maxResponseBytes: 1024, requestTimeoutMs: 2_000, maxConcurrentRequests: 1 },
+    verifyToken: async () => verified,
+    executeTool: async () => output,
+  });
+  const call = () => post({ jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "file_get", arguments: { seat: "seat_ABCDEFGHIJKLMNOPQRSTUV", file_id: "11111111-1111-4111-8111-111111111111" } } });
+  const shown = await serve(call());
+  assert.equal(shown.status, 200);
+  const content = (await shown.json()).result.content;
+  assert.deepEqual(content, [
+    { type: "text", text: JSON.stringify({ name: "shot.png", content_warning: "untrusted" }) },
+    { type: "image", data: picture, mimeType: "image/png" },
+  ]);
+  output = { value: "x".repeat(4 * 1024) };
+  assert.equal((await serve(call())).status, 500, "a plain result of the same size still exceeds the text budget");
+  output = new HostedToolImage({ value: "x".repeat(4 * 1024) }, { data: "AAAA", mimeType: "image/png" });
+  assert.equal((await serve(call())).status, 500, "the image allowance never widens the text part");
+  output = new HostedToolImage({ name: "huge.png" }, { data: "A".repeat(Math.ceil(FILE_GET_IMAGE_MAX_BYTES / 3) * 4 + 2048), mimeType: "image/png" });
+  assert.equal((await serve(call())).status, 500, "a picture beyond the image cap's base64 is refused");
 });
 
 test("runtime dispatch stays in process and names both durable revocation boundaries", async () => {

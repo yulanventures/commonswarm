@@ -30,6 +30,7 @@ const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OWNER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const TOKEN = `swm_agt_${"C".repeat(43)}`;
+const STORED_PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 const DENIED = ["profile", "host-session-id", "session-context", "agent-token-file", "agent-token-stdin", "url", "anon-key", "force-file-store", "body-file", "body-stdin", "attach", "json", "wait", "follow", "notify", "ndjson", "hook", "force", "out"];
 function assertDenySchemas(tools: Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>) {
   for (const tool of tools) for (const bad of DENIED) for (const key of [bad, bad.replaceAll("-", "_")]) {
@@ -71,6 +72,9 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     let raw = "";
     req.on("data", chunk => raw += chunk);
     req.on("end", () => {
+      if (req.method === "GET" && (req.url ?? "").startsWith("/storage/v1/object/sign/")) {
+        return res.writeHead(200, { "content-type": "image/png" }).end(Buffer.from(STORED_PNG));
+      }
       if (req.method === "PUT") {
         if (putRefusal) return res.writeHead(putRefusal.status, { "content-type": "application/json" }).end(JSON.stringify(putRefusal.body));
         if (fileObjects.has(req.url ?? "")) return res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: "Duplicate" }));
@@ -98,6 +102,11 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         }
         if (killPhase === "create") { killPhase = null; setImmediate(() => killMcp?.()); }
         return send(200, created);
+      }
+      if (body.command?.kind === "file_download_url") {
+        return send(200, { file_id: body.command.file_id, version_n: 1, name: "shot.png", size_bytes: STORED_PNG.length,
+          content_type: "image/png", download_path: `/storage/v1/object/sign/swarm-files/${WS}/${body.command.file_id}/1?token=SECRET-DOWNLOAD-TOKEN`,
+          download_url_expires_in_seconds: 300, content_warning: "untrusted" });
       }
       if (body.command?.kind === "file_version_commit") {
         fileCommands.push(body);
@@ -357,6 +366,21 @@ test("MCP ask returns each chain refusal's server sentence unchanged", () => {
   const unsafe = mapMcpError(new CommandHttpError(429, `Retry\u001b[2J\n${"x".repeat(1_200)}`, "rate_limited"));
   assert.equal(unsafe.message.length, 1_000);
   assert.doesNotMatch(unsafe.message, /\u001b|\n/);
+});
+
+test("MCP stdio file_get returns a stored picture as an image block beside its details", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    assert.ok((await f.client.listTools()).tools.some(tool => tool.name === "file_get"));
+    const result = await f.client.callTool({ name: "file_get", arguments: { file_id: ID } }) as unknown as { content: Array<Record<string, string>>; isError?: boolean };
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    assert.equal(result.content.length, 2);
+    assert.deepEqual(result.content[1], { type: "image", data: Buffer.from(STORED_PNG).toString("base64"), mimeType: "image/png" });
+    const details = JSON.parse(result.content[0]!.text!);
+    assert.equal(details.encoding, "image");
+    assert.equal(details.content_warning, "untrusted");
+    assert.equal(JSON.stringify(result).includes("SECRET-DOWNLOAD-TOKEN"), false, "the signed path never reaches the model");
+  } finally { await f.close(); }
 });
 
 test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeout: 30_000 }, async () => {
