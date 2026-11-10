@@ -115,6 +115,8 @@ const ADDRESSED = ':has(.dashboard__message-target:is([data-target-kind="agent"]
 const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.chat.general": [
     { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, require: ADDRESSED, focus: true },
+    // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
+    { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: "[data-stream-grouped]", max: 3, focus: true },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
   ],
   "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
@@ -124,6 +126,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
   "app.lists": [{ name: "lists", rows: '[data-hh-action="select"]', max: 6, focus: true }],
   "dialog.command-palette": [{ name: "palette", rows: ".cp-item", max: 6 }],
+  // The provider detail's Back control is visually hidden until focused; focusing it must not move the detail.
+  "menu.provider": [{ name: "provider-back", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"]', max: 1,
+    focus: true, focusTarget: ":scope > [data-ahp-back]" }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
@@ -356,6 +361,8 @@ async function main(): Promise<void> {
       /** Hover witnesses for one capture; the first addressed row is photographed at rest and on hover. */
       const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[]) => {
         const results: HoverResult[] = [];
+        // Keep the app's own focus for the keyboard witnesses that start from it afterwards.
+        await page.evaluate(() => document.activeElement?.setAttribute("data-audit-hover-restore", ""));
         for (const spec of specs) {
           results.push(await runHoverWitness(page, spec, spec.prefer ? async (label: string) => {
             const shot = `shots/${id}--${state}--${size}--${theme}--${label}.png`;
@@ -364,6 +371,11 @@ async function main(): Promise<void> {
           } : undefined));
         }
         await page.mouse.move(1, 1);
+        await page.evaluate(() => {
+          const el = document.querySelector<HTMLElement>("[data-audit-hover-restore]");
+          el?.removeAttribute("data-audit-hover-restore");
+          if (el && el !== document.body) el.focus({ preventScroll: true });
+        });
         return results;
       };
 
