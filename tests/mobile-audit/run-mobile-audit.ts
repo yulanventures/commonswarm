@@ -209,6 +209,8 @@ async function main(): Promise<void> {
   let witnessFailures = -1;
   let hoverFailures = -1;
   const hoverDesktop: Record<string, unknown>[] = [];
+  /** Diagnostic mode only: per frozen pass, how many receipt RPC calls the control intercepted, fetched and replayed. */
+  const freezeCounts: Array<{ pass: string; viewport: string; theme: string; intercepted: number; fetched: number; replayed: number }> = [];
   const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
   let pictureFailures = -1;
   const hoverShots: string[] = [];
@@ -257,18 +259,25 @@ async function main(): Promise<void> {
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        // Diagnostic control only. The app reads receipts through the swarm_read RPC
+        // (site/src/lib/commonswarm.ts browserDeliveryReceipts -> /rest/v1/rpc/signal_delivery_receipts). Each distinct
+        // request body is fetched once; every later call, including one already in flight, gets that first response.
+        // Counts prove the control was exercised: intercepted = every receipt call seen, fetched = first responses,
+        // replayed = calls answered from the first response.
+        const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
         if (freeze) {
-          // Diagnostic control only: each distinct delivery-receipt read answers with its first response for the page's life.
-          const frozen = new Map<string, FrozenResponse>();
-          await signedIn.route("**/functions/v1/read", async (route: Route) => {
-            const body = route.request().postData() ?? "";
-            if (!body.includes('"delivery_receipts"')) return route.continue();
-            const kept = frozen.get(body);
-            if (kept) return route.fulfill(kept);
-            const response = await route.fetch();
-            const first = { status: response.status(), headers: response.headers(), body: await response.body() };
-            frozen.set(body, first);
-            return route.fulfill(first);
+          const frozen = new Map<string, Promise<FrozenResponse>>();
+          await signedIn.route("**/rest/v1/rpc/signal_delivery_receipts*", async (route: Route) => {
+            freezeStats.intercepted += 1;
+            const key = route.request().postData() ?? "";
+            let first = frozen.get(key);
+            if (first) freezeStats.replayed += 1;
+            else {
+              freezeStats.fetched += 1;
+              first = route.fetch().then(async response => ({ status: response.status(), headers: response.headers(), body: await response.body() }));
+              frozen.set(key, first);
+            }
+            return route.fulfill(await first);
           });
         }
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
@@ -281,7 +290,7 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        return { context, signedIn };
+        return { context, signedIn, freezeStats };
       };
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
@@ -418,7 +427,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, true, freeze);
         const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -459,6 +468,7 @@ async function main(): Promise<void> {
           return entry;
         });
         report.push(...batch);
+        if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats });
         console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
         await context.close(); await signedIn.close();
       }
@@ -467,7 +477,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn } = await openContexts(viewport, theme, false, freeze);
+        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, false, freeze);
         const batch = await runPool(hoverScreens.filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
@@ -482,6 +492,7 @@ async function main(): Promise<void> {
           return entry;
         });
         hoverDesktop.push(...batch);
+        if (freeze) freezeCounts.push({ pass: "desktop", viewport: size, theme, ...freezeStats });
         await context.close(); await signedIn.close();
       }
       // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
@@ -522,7 +533,8 @@ async function main(): Promise<void> {
       // Chat pictures in the served app: every check must hold.
       pictures: { runs: pictures.length, checks: pictures.reduce((n, r) => n + r.checks.length, 0),
         failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length } };
-    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures }, null, 2));
+    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures,
+      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts } } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
@@ -542,6 +554,12 @@ async function main(): Promise<void> {
   // The one witness whose finding fails the job (owner request): a hover or focus that moves or resizes anything.
   assert.equal(hoverFailures, 0, `${hoverFailures} hover witness(es) shifted layout or could not measure; see items[].hover[] and hoverDesktop[]`);
   assert.equal(pictureFailures, 0, `${pictureFailures} chat picture check(s) failed; see pictures[]`);
+  // A frozen diagnostic pass that never intercepted and replayed a receipt call controlled nothing.
+  if (DIAGNOSTIC) {
+    const idle = freezeCounts.filter(c => c.intercepted === 0 || c.replayed === 0);
+    assert.ok(freezeCounts.length > 0 && idle.length === 0,
+      `the receipt freeze control was not exercised in ${idle.map(c => `${c.pass} ${c.viewport} ${c.theme}`).join(", ") || "any pass"}; see diagnostic.freeze`);
+  }
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
