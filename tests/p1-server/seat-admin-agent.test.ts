@@ -235,3 +235,27 @@ test("the grantor stops owning the workspace: the grant no longer covers it", as
   }
   await endGrant(grantId);
 });
+
+test("a grant that expires while the organization lookup waits refuses and changes nothing", async () => {
+  const grantId = await grant({ level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspace,
+    expires_at: Date.now() + 86_400_000 });
+  // Shorten the end date below the lock wait. The grant trigger forbids this edit; bypass it in the fixture only.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE swarm.seat_admin_grants SET expires_at = clock_timestamp() + interval '2 seconds' WHERE grant_id = ${grantId}::uuid`;
+  });
+  const [{ before }] = await sql<{ before: string }[]>`SELECT name AS before FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid`;
+  let pending: ReturnType<typeof agentCommand> | undefined;
+  await sql.begin(async (tx) => {
+    // seat_admin_org_owner takes the organization row FOR SHARE: hold it past the grant's end.
+    await tx`SELECT id FROM swarm.organizations WHERE id = ${workspace}::uuid FOR UPDATE`;
+    pending = agentCommand({ kind: "rename_workspace", name: "Renamed after expiry" });
+    await delay(4_000);
+  });
+  refused(await pending!, "seat_admin_inactive", "expired during the organization lock wait");
+  const [{ after }] = await sql<{ after: string }[]>`SELECT name AS after FROM swarm.workspaces WHERE workspace_id = ${workspace}::uuid`;
+  assert.equal(after, before, "no change");
+  const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.events
+    WHERE workspace_id = ${workspace}::uuid AND type = 'WorkspaceRenamed' AND payload->>'name' = 'Renamed after expiry'`;
+  assert.equal(n, 0);
+});
