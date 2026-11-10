@@ -214,8 +214,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           )`;
         steps.push("seed_dm");
       } catch (error) { note("seed_dm", error); }
-      // The owner's hover report (Nov 10): their own long message addressed to an agent, newest in #general,
-      // so the hover witness measures a wrapped, addressed row of the viewer's own.
+      // The owner's hover report (Nov 10): their own long messages addressed to an agent, newest in #general, so the
+      // hover witness measures a wrapped, addressed row of the viewer's own; the second groups under the first.
       try {
         await sql`INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
@@ -224,6 +224,11 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
             ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
             NULL, 'note', ${"Please compare the three boiler service quotes, check which ones include the expansion vessel and the flue test, and post a short summary with the price difference before Friday so we can book the visit."},
             statement_timestamp() + interval '25 days', statement_timestamp() - interval '20 seconds',
+            NULL, NULL, false
+          ), (
+            ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', ${"Also include whether the quotes cover a return visit if the pressure drops again within a month."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '10 seconds',
             NULL, NULL, false
           )`;
         steps.push("seed_addressed_own");
