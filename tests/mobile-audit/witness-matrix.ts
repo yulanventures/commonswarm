@@ -382,7 +382,7 @@ const ROWS: Row[] = [
       assert.deepEqual(h!.coverage, [{ selector: '[data-signal-id="s7"]', mode: "hover", measured: true }], show(h));
   } },
   { name: "focus lost to a rebuild during the measurement is an error, never a stable pass",
-    html: keyedList("", { onFocus: "fresh();" }), hover: { ...keyedSpec, focus: true, focusTarget: "a" }, check: ({ hover: h }) => {
+    html: keyedList("", { onFocus: "setTimeout(fresh, 0);" }), hover: { ...keyedSpec, focus: true, focusTarget: "a" }, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.rows.find(r => r.mode === "focus")?.reason ?? "", /focus was lost/u, show(h));
   } },

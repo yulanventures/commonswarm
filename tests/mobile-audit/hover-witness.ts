@@ -320,7 +320,8 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
   async function park(): Promise<string | null> {
     const point = await page.evaluate(NEUTRAL_POINT, spec.rows);
     if (!point) return "no point outside the rows to park the pointer";
-    await page.mouse.move(point.x, point.y, { steps: 2 });
+    // One move straight to the point: stepping there would hover the rows it crosses before rest is taken.
+    await page.mouse.move(point.x, point.y);
     await page.evaluate(BLUR, null);
     const hovered = await page.evaluate(HOVERED_ROWS, spec.rows);
     return hovered > 0 ? `${hovered} row(s) still hovered with the pointer parked` : null;
