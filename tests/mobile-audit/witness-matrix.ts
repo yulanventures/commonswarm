@@ -6,19 +6,25 @@
  */
 import assert from "node:assert/strict";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
-import { CHECKS, GEOMETRY_WITNESS, runKeyboardWitness, witnessSummary, type KeyboardSpec } from "./audit-checks.js";
+import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 
 type Geometry = ReturnType<typeof GEOMETRY_WITNESS>;
 type Keyboard = Awaited<ReturnType<typeof runKeyboardWitness>>;
-type Page = Parameters<typeof runKeyboardWitness>[0] & {
+type Activation = Awaited<ReturnType<typeof runActivationWitness>>;
+type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & {
   setContent(html: string): Promise<void>;
+  goto(url: string): Promise<unknown>;
+  route(url: string, handler: (route: { request(): { url(): string }; fulfill(response: { contentType: string; headers: Record<string, string>; body: string }): Promise<void> }) => Promise<void>): Promise<void>;
   focus(selector: string): Promise<void>;
   close(): Promise<void>;
 };
-type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; declared?: string[]; keyboard?: KeyboardSpec;
+type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; declared?: DeclaredOverlay[]; keyboard?: KeyboardSpec;
   /** Runs between CHECKS and GEOMETRY_WITNESS, where the runner takes the primary screenshot. */
   between?: (page: Page) => Promise<void>;
-  check: (result: { geometry: Geometry; keyboard?: Keyboard }) => void };
+  /** Served from a fixture origin (real navigation) instead of setContent; other paths answer with a stub page. */
+  served?: boolean;
+  activation?: ActivationSpec[];
+  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[] }) => void };
 
 const page = (body: string, style = "") =>
   `<!doctype html><html><head><style>body{margin:0;font:16px/1.4 sans-serif} button{width:80px;height:44px}${style}</style></head><body>${body}</body></html>`;
@@ -62,6 +68,12 @@ const menuPage = (blocker: "absolute" | "fixed") => page(`<div style="position:r
   <div id="blocker" style="position:${blocker};left:240px;top:0;width:120px;height:80px"></div></div>`);
 const listPage = page(`<div style="position:relative"><button id="trigger" style="position:absolute;left:10px;top:10px">Open</button>
   <div id="list" style="position:absolute;left:0;top:0;width:200px;height:150px;background:#fff"><button id="opt" style="margin:80px 0 0 20px">Option</button></div></div>`);
+const ORIGIN = "http://fixture.test";
+const legalNote = page(`<p style="width:380px;font:14px/20px sans-serif;margin:40px 8px">Agree to the <a id="terms" href="/terms">Terms</a> and the <a id="privacy" href="/privacy">Privacy</a> notes.</p>`);
+const legalSpecs: ActivationSpec[] = [
+  { name: "terms", link: "#terms", expect: { path: "/terms" } },
+  { name: "privacy", link: "#privacy", expect: { path: "/privacy" } },
+];
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
 const ROWS: Row[] = [
@@ -148,6 +160,11 @@ const ROWS: Row[] = [
     assert.deepEqual(g.unexpectedObscured, []);
     assert.deepEqual(g.foregroundObscured, []);
   } },
+  { name: "a declared root whose media query does not match is not an overlay", html: listPage, declared: [{ selector: "#list", media: "(width > 9999px)" }],
+    check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, null, show(g.overlay));
+      assert.deepEqual(g.unexpectedObscured, [{ selector: "button#trigger", by: "div#list" }]);
+    } },
   { name: "the same list undeclared leaves the covered control unexpected", html: listPage, check: ({ geometry: g }) => {
     assert.equal(g.overlay.front, null, show(g.overlay));
     assert.deepEqual(g.unexpectedObscured, [{ selector: "button#trigger", by: "div#list" }]);
@@ -173,6 +190,52 @@ const ROWS: Row[] = [
       assert.equal(g.drift.detached, 2, show(g.drift));
       assert.ok(g.drift.moved >= 1 && g.drift.added === 2, show(g.drift));
       assert.equal(g.tapTargetFacts.find(f => f.selector === "button#old1")?.stale, "detached", show(g.tapTargetFacts));
+    } },
+  // Activation: a native tap on the visible label, then the page actually reached.
+  { name: "tapping each legal link's label opens its own page", html: legalNote, served: true, activation: legalSpecs, check: ({ activation: a }) => {
+    assert.deepEqual(a?.map(r => [r.name, r.outcome, r.landed?.path, r.returned]), [["terms", "pass", "/terms", true], ["privacy", "pass", "/privacy", true]], show(a));
+  } },
+  { name: "a Privacy link over the Terms label: tapping Terms opens /privacy and is blocked", html: legalNote, served: true, activation: legalSpecs,
+    setup: coverFirstFragment("#terms", "a", "/privacy"), check: ({ activation: a }) => {
+      const terms = a?.[0];
+      assert.equal(terms?.outcome, "blocked", show(terms));
+      assert.equal(terms.landed?.path, "/privacy");
+      assert.equal(terms.target?.hitHref?.endsWith("/privacy"), true, show(terms.target));
+      assert.equal(a?.[1]?.outcome, "pass", show(a?.[1]));
+    } },
+  // Overlaps: an open menu over a control behind it is front coverage, not a wrong-target collision.
+  { name: "an open menu overlapping a control behind it is front coverage, not a wrong target", html: page(`<div style="position:relative">
+      <button id="under" style="position:absolute;left:10px;top:10px;width:100px">Under</button>
+      <div id="menu" role="menu" style="position:absolute;left:40px;top:20px;width:160px;height:80px;background:#eee"><button id="item" role="menuitem" style="width:100px">Item</button></div></div>`),
+    check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, "div#menu", show(g.overlay));
+      const f = g.overlapFacts.find(o => o.a === "button#under" && o.b === "button#item");
+      assert.ok(f, `the raw overlap must still be recorded: ${show(g.overlapFacts)}`);
+      assert.equal(f.kind, "visible");
+      assert.equal(f.frontCovered, true, show(f.points));
+      assert.equal(f.wrongTarget, false, show(f.points));
+    } },
+  // Viewport edge: a centre whose hit test returns nothing is recorded as such, not as obscured.
+  { name: "a centre in the viewport edge's last fraction is recorded in noHitAtCentre, not as obscured",
+    html: page(`<button id="edge" style="position:fixed;left:0;top:0;width:40px;height:43px">E</button>`),
+    setup: async p => {
+      // Find a point inside the viewport that this engine's hit test still resolves to nothing, and centre the control there.
+      const y = await p.evaluate(() => {
+        for (let k = 1; k < 20; k += 1) {
+          const candidate = innerHeight - 1 + k / 20;
+          if (document.elementFromPoint(20, candidate) === null) {
+            document.getElementById("edge")!.style.top = `${candidate - 21.5}px`;
+            return candidate;
+          }
+        }
+        return null;
+      }, undefined);
+      assert.ok(y !== null, "fixture: no point inside the bottom edge hits nothing in this engine, so the case cannot be exercised");
+    },
+    check: ({ geometry: g }) => {
+      const edge = g.noHitAtCentre.find(n => n.selector === "button#edge");
+      assert.ok(edge && edge.y > 599 && edge.y < 600 && edge.x === 20, show(g.noHitAtCentre));
+      assert.ok(!selectors(g.unexpectedObscured).includes("button#edge"), show(g.unexpectedObscured));
     } },
   // Keyboard reveal: native keys only.
   { name: "Shift+Tab reveals a clip-on-blur control and Enter returns focus", html: revealPage(revealCss), setup: p => p.focus("#anchor"), keyboard: backSpec,
@@ -213,20 +276,31 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
   const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
   const browser = await launchPlaywrightChromium<any>(chromium);
   try {
-    const context = await browser.newContext({ viewport: { width: 400, height: 600 }, deviceScaleFactor: 1 });
+    // hasTouch, as in every audit context: the activation rows tap with the touchscreen.
+    const context = await browser.newContext({ viewport: { width: 400, height: 600 }, deviceScaleFactor: 1, hasTouch: true });
     // tsx (esbuild keepNames) wraps nested functions in __name(); the page needs a no-op, as in the runner.
     await context.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
     for (const row of ROWS) {
       await t.test(row.name, async () => {
         const p = await context.newPage() as Page;
         try {
-          await p.setContent(row.html);
+          if (row.served) {
+            await p.route(`${ORIGIN}/**`, async route => {
+              const path = new URL(route.request().url()).pathname;
+              // no-store keeps pages out of the back/forward cache, so going back loads a fresh document, as in the app.
+              await route.fulfill({ contentType: "text/html", headers: { "cache-control": "no-store" },
+                body: path === "/" ? row.html : `<!doctype html><title>${path}</title><p>${path}</p>` });
+            });
+            await p.goto(`${ORIGIN}/`);
+          } else await p.setContent(row.html);
           await row.setup?.(p);
           await p.evaluate(CHECKS, undefined);
           await row.between?.(p);
           const geometry = await p.evaluate(GEOMETRY_WITNESS, row.declared ?? []);
           const keyboard = row.keyboard ? await runKeyboardWitness(p, row.keyboard) : undefined;
-          row.check({ geometry, keyboard });
+          const activation: Activation[] = [];
+          for (const spec of row.activation ?? []) activation.push(await runActivationWitness(p, spec));
+          row.check({ geometry, keyboard, activation });
         } finally { await p.close(); }
       });
     }
