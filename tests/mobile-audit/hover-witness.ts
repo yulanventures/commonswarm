@@ -85,8 +85,13 @@ const REMARK = (arg: { index: number; key: string | null; rows: string }) => {
 };
 
 /** The coverage selectors the marked row matches. */
-const ROW_MATCHES = (arg: { index: number; selectors: string[] }) => {
-  const row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+const ROW_MATCHES = (arg: { index: number; key: string | null; rows: string; selectors: string[] }) => {
+  // Found again by key when a rebuild replaced the marked row (as HOVER_POINT does); serialized into the page, so inline.
+  let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+  if (!row && arg.key) {
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => el.getAttribute("data-signal-id") === arg.key) ?? null;
+    row?.setAttribute("data-audit-hover-row", String(arg.index));
+  }
   return row ? arg.selectors.filter(selector => row.matches(selector)) : [];
 };
 
@@ -284,8 +289,13 @@ const HOVER_POINT = (arg: { index: number; key: string | null; rows: string }) =
 };
 
 /** Focus the row's first visible control without scrolling; returns what was focused. */
-const FOCUS_ROW = (arg: { index: number; target?: string }) => {
-  const row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+const FOCUS_ROW = (arg: { index: number; key: string | null; rows: string; target?: string }) => {
+  // Found again by key when a rebuild replaced the marked row (as HOVER_POINT does); serialized into the page, so inline.
+  let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+  if (!row && arg.key) {
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => el.getAttribute("data-signal-id") === arg.key) ?? null;
+    row?.setAttribute("data-audit-hover-row", String(arg.index));
+  }
   if (!row) return null;
   const focusable = arg.target ? row.querySelector(arg.target) as HTMLElement | null ?? undefined : [row, ...Array.from(row.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])"))]
     .find(el => el.matches("a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])")
@@ -386,7 +396,7 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const rest = await page.evaluate(PROBE, { index: row.index, key: entry.key, rows: spec.rows, phase: "rest", tolerance }) as ProbeError | ProbeRest;
     if (failed(rest)) { Object.assign(entry, { outcome: "error", reason: rest.error }); return; }
     // Coverage is decided on the live row this measurement uses, not the row first chosen.
-    entry.matches = required.length ? await page.evaluate(ROW_MATCHES, { index: row.index, selectors: required }) : [];
+    entry.matches = required.length ? await page.evaluate(ROW_MATCHES, { index: row.index, key: entry.key, rows: spec.rows, selectors: required }) : [];
     if (rest.drift > 0) { Object.assign(entry, { outcome: "unstable", reason: `${rest.drift} box(es) moved at rest` }); return; }
     // The first preferred row is photographed at rest and in each mode.
     const preferredShot = !!shot && !shotTaken.has(mode) && row.preferred;
@@ -397,7 +407,7 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
       if (!entry.point) { Object.assign(entry, { outcome: "skipped", reason: `no point of the row receives the pointer: ${aim.why}` }); return; }
       await page.mouse.move(entry.point.x, entry.point.y, { steps: 2 });
     } else {
-      entry.focused = await page.evaluate(FOCUS_ROW, { index: row.index, target: spec.focusTarget });
+      entry.focused = await page.evaluate(FOCUS_ROW, { index: row.index, key: entry.key, rows: spec.rows, target: spec.focusTarget });
       // A named target that cannot take focus is a failed measurement; without one, a row with no control is skipped.
       if (!entry.focused) { Object.assign(entry, spec.focusTarget ? { outcome: "error", reason: `could not focus ${spec.focusTarget}` } : { outcome: "skipped", reason: "no focusable control in the row" }); return; }
     }
