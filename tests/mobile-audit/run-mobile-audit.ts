@@ -297,36 +297,34 @@ async function main(): Promise<void> {
               if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
               if (step.click) {
                 const target = fill(step.click, seed.ids);
-                const clickBrainTopic = async () => {
-                  if (await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && Boolean(document.querySelector("div[data-brain-selection-prompt]:not([hidden])")))) {
-                    try { await page.click(target, { timeout: 3_000 }); }
-                    catch {
-                      entry.bypassedInteractions = [{ selector: target, by: "div[data-brain-selection-prompt].dashboard__brain-selection-prompt" }];
-                      await page.locator(target).first().dispatchEvent("click");
-                    }
-                  } else {
-                    await page.click(target, { timeout: 8_000 });
-                  }
-                };
                 if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
                   && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches && !document.querySelector("dialog.cs-org-drawer[open]"))) {
                   await page.click('button[aria-label="Open navigation"]', { timeout: 5_000 }).catch(() => {});
                   await page.waitForSelector("dialog.cs-org-drawer[open]", { state: "visible", timeout: 5_000 }).catch(() => {});
                 }
                 if (target === '[data-brain-topic="overview"]') {
-                  await clickBrainTopic();
-                  for (let attempt = 0; attempt < 3; attempt++) {
-                    await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-body-mode]:not([hidden]), [data-brain-retry]:not([hidden]):not([disabled]))", { state: "visible", timeout: 15_000 }).catch(() => {});
-                    const loaded = await page.evaluate(() => {
-                      const md = document.querySelector<HTMLElement>("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])");
-                      return Boolean(md && md.childElementCount > 0 && document.querySelector("[data-brain-body-mode]:not([hidden])"));
-                    });
-                    if (loaded) break;
-                    if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden]):not([disabled])")))) {
-                      await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
-                    } else {
-                      await clickBrainTopic().catch(() => {});
+                  const waitBrainTopicLoaded = async () => {
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                      await page.waitForSelector("[data-brain-detail]:not([hidden]) :is([data-brain-body-mode]:not([hidden]), [data-brain-retry]:not([hidden]):not([disabled]))", { state: "visible", timeout: 15_000 }).catch(() => {});
+                      const loaded = await page.evaluate(() => {
+                        const md = document.querySelector<HTMLElement>("[data-brain-detail]:not([hidden]) [data-brain-markdown]:not([hidden])");
+                        return Boolean(md && md.childElementCount > 0 && document.querySelector("[data-brain-body-mode]:not([hidden])"));
+                      });
+                      if (loaded) break;
+                      if (await page.evaluate(() => Boolean(document.querySelector("[data-brain-retry]:not([hidden]):not([disabled])")))) {
+                        await page.click("[data-brain-retry]", { timeout: 5_000 }).catch(() => {});
+                      } else {
+                        await page.click(target, { timeout: 8_000 }).catch(() => {});
+                      }
                     }
+                  };
+                  await page.click(target, { timeout: 8_000 });
+                  await waitBrainTopicLoaded();
+                  if (screen.id === "app.wiki.topic" && await page.evaluate(() => window.matchMedia("(width <= 52rem)").matches)) {
+                    await page.click("[data-brain-back]", { timeout: 8_000 });
+                    await page.waitForSelector('[data-channel-view="brain"][data-brain-selection="index"] [data-brain-topic="overview"]', { state: "visible", timeout: 8_000 });
+                    await page.click(target, { timeout: 8_000 });
+                    await waitBrainTopicLoaded();
                   }
                 } else if (target.startsWith("[data-rail-channel-menu=")) {
                   for (let attempt = 0; attempt < 3; attempt++) {
