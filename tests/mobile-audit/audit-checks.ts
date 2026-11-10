@@ -170,7 +170,9 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
     added: measured.filter(m => !rawEls.has(m.el)).length,
   };
   const round = (n: number) => Math.round(n);
-  const inView = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height;
+  // At least a pixel inside the viewport: hit testing rounds, so a point in the last fraction of the
+  // edge can resolve outside it and hit nothing.
+  const inView = (x: number, y: number) => x >= 0 && y >= 0 && x <= width - 1 && y <= height - 1;
   const hitAt = (x: number, y: number) => describe(document.elementFromPoint(x, y) ?? document.body);
   const centreOf = (r: Box) => [(r.left + r.right) / 2, (r.top + r.bottom) / 2] as const;
   const boxOf = (r: Box) => ({ x: round(r.left), y: round(r.top), w: round(r.right - r.left), h: round(r.bottom - r.top) });
@@ -255,11 +257,14 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   // as the covering element, flagged pinnedCover, because a tap there really goes to it.
   const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
   const centreShown = (m: Measured) => { const [x, y] = centreOf(m.rect); return inView(x, y) && pointShown(m.el, x, y); };
-  const blocked = measured.filter(m => centreShown(m) && !reaches(m.el, ...centreOf(m.rect)))
+  const misses = measured.filter(m => centreShown(m) && !reaches(m.el, ...centreOf(m.rect)))
     .map(m => {
       const hit = document.elementFromPoint(...centreOf(m.rect));
       return { m, hit, row: { selector: describe(m.el), by: hit ? describe(hit) : null, ...(pinned(hit) && !pinned(m.el) ? { pinnedCover: true } : {}) } };
     });
+  // A centre that hits nothing is not covered by anything: it is listed on its own, not as obscured.
+  const noHitAtCentre = misses.filter(b => !b.hit).slice(0, 20).map(b => b.row.selector);
+  const blocked = misses.filter(b => !!b.hit);
   const foregroundObscured = blocked.filter(b => within(front, b.m.el)).map(b => b.row);
   const byForeground = blocked.filter(b => !within(front, b.m.el) && within(front, b.hit)).map(b => b.row);
   const byOtherOverlay = blocked.filter(b => !within(front, b.m.el) && !within(front, b.hit) && overlayEls.some(o => within(o, b.hit))).map(b => b.row);
@@ -364,7 +369,7 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   };
   const overlapFacts = overlapPairs.map(([rawA, rawB]) => {
     const a = live.get(rawA.el), b = live.get(rawB.el);
-    if (!a || !b) return { a: describe(rawA.el), b: describe(rawB.el), stale: staleOf(rawA) ?? staleOf(rawB), moved: false, area: 0, visibleArea: 0, clippedArea: 0, kind: "stale", wrongTarget: false, points: null };
+    if (!a || !b) return { a: describe(rawA.el), b: describe(rawB.el), stale: staleOf(rawA) ?? staleOf(rawB), moved: false, layers: null, area: 0, visibleArea: 0, clippedArea: 0, kind: "stale", wrongTarget: false, frontCovered: false, points: null };
     const shared: Box = { left: Math.max(a.rect.left, b.rect.left), right: Math.min(a.rect.right, b.rect.right),
       top: Math.max(a.rect.top, b.rect.top), bottom: Math.min(a.rect.bottom, b.rect.bottom) };
     const area = round(areaOf(shared)), visibleArea = round(areaOf(shownPart(shared, [a.el, b.el])));
@@ -372,18 +377,24 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
       if (!p) return null;
       const shown = inView(...p) && pointShown(intended.el, ...p);
       const hit = shown ? document.elementFromPoint(...p) : null;
+      // As for obscured controls and links: a point the front overlay takes, for a control behind it,
+      // is front coverage (an open menu over the rail), not a wrong-target collision.
+      const coveredByFront = shown && !!hit && !within(front, intended.el) && within(front, hit);
       return { point: [round(p[0]), round(p[1])], shown, recipient: hit ? describe(hit) : null, ok: shown && reaches(intended.el, ...p),
-        toOther: shown && reaches(other.el, ...p) };
+        toOther: shown && reaches(other.el, ...p), coveredByFront };
     };
     const points = { aCentre: probe(a, b, centreOf(a.rect)), bCentre: probe(b, a, centreOf(b.rect)), aOwn: probe(a, b, ownPoint(a.rect, b.rect)), bOwn: probe(b, a, ownPoint(b.rect, a.rect)) };
-    const wrongTarget = Object.values(points).some(p => !!p && p.shown && !p.ok && p.toOther);
+    const wrongTarget = Object.values(points).some(p => !!p && p.shown && !p.ok && p.toOther && !p.coveredByFront);
+    const frontCovered = Object.values(points).some(p => !!p && p.coveredByFront);
+    const layerOf = (el: Element) => (!front ? "page" : within(front, el) ? "front" : "behind");
     return { a: describe(a.el), b: describe(b.el), stale: null, moved: movedBetween(rawA.rect, a.rect) || movedBetween(rawB.rect, b.rect),
-      area, visibleArea, clippedArea: area - visibleArea, kind: visibleArea > 4 ? "visible" : "clipped", wrongTarget, points };
+      layers: { a: layerOf(a.el), b: layerOf(b.el) }, area, visibleArea, clippedArea: area - visibleArea, kind: visibleArea > 4 ? "visible" : "clipped",
+      wrongTarget, frontCovered, points };
   });
 
   const media = { hoverNone: matchMedia("(hover: none)").matches, pointerCoarse: matchMedia("(pointer: coarse)").matches, anyHover: matchMedia("(any-hover: hover)").matches };
   (globalThis as unknown as { __auditHelpers?: WitnessHelpers }).__auditHelpers = { describe, opacityChain, clippedBy, foreground: (el: Element) => foreground(el) };
-  return { state: "after-primary-screenshot", media, drift, overlay, foregroundObscured, coverage: { byForeground, byOtherOverlay }, unexpectedObscured,
+  return { state: "after-primary-screenshot", media, drift, overlay, foregroundObscured, coverage: { byForeground, byOtherOverlay }, unexpectedObscured, noHitAtCentre,
     tapTargetFacts, links, linksCoveredByFront, summaries, overlapFacts };
 };
 
@@ -484,16 +495,76 @@ export async function runKeyboardWitness(page: PageLike, spec: KeyboardSpec) {
   }
 }
 
+// ---- Activation witnesses: a native tap on a link's visible label, then where the page actually went ----
+
+/** `link` names the anchor; the tap lands at the centre of its largest visible label fragment (the text
+ *  a person aims at), not at the element, so a neighbour that covers the label takes the tap. The page
+ *  must reach `expect` (path and/or hash); the runner then goes back and waits for `link` again. */
+export type ActivationSpec = { name: string; link: string; expect: { path?: string; hash?: string } };
+type TapPage = {
+  evaluate: <R, A>(fn: (arg: A) => R | Promise<R>, arg: A) => Promise<R>;
+  touchscreen: { tap: (x: number, y: number) => Promise<void> };
+  waitForURL: (url: (url: URL) => boolean, options: { timeout: number; waitUntil?: "commit" }) => Promise<void>;
+  goBack: (options: { waitUntil: "domcontentloaded" }) => Promise<unknown>;
+  waitForSelector: (selector: string, options: { state: "visible"; timeout: number }) => Promise<unknown>;
+  locator: (selector: string) => { first: () => { scrollIntoViewIfNeeded: (options: { timeout: number }) => Promise<void> } };
+  url: () => string;
+};
+const LABEL_TARGET = (selector: string) => {
+  const h = (globalThis as unknown as { __auditHelpers: WitnessHelpers }).__auditHelpers;
+  const el = document.querySelector(selector);
+  if (!el) return null;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const shown = [...range.getClientRects()].filter(r => r.width >= 1 && r.height >= 1 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight);
+  const r = shown.sort((p, q) => q.width * q.height - p.width * p.height)[0];
+  if (!r) return { found: true, point: null, fragments: 0 };
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  const hitLink = hit?.closest("a[href]");
+  return { found: true, point: [Math.round(x), Math.round(y)] as [number, number], fragments: shown.length,
+    label: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+    hit: hit ? h.describe(hit) : null, hitHref: hitLink ? hitLink.getAttribute("href") : null };
+};
+
+export async function runActivationWitness(page: TapPage, spec: ActivationSpec) {
+  const result: { name: string; state: string; link: string; expect: ActivationSpec["expect"]; target: Awaited<ReturnType<typeof LABEL_TARGET>> | null;
+    landed: { path: string; hash: string } | null; returned: boolean | null; outcome: "pass" | "blocked" | "error"; reason: string | null } =
+    { name: spec.name, state: "after-keyboard-witnesses", link: spec.link, expect: spec.expect, target: null, landed: null, returned: null, outcome: "pass", reason: null };
+  const start = page.url();
+  const matches = (url: URL) => (!spec.expect.path || url.pathname === spec.expect.path) && (!spec.expect.hash || url.hash === spec.expect.hash);
+  try {
+    await page.locator(spec.link).first().scrollIntoViewIfNeeded({ timeout: 5_000 });
+    result.target = await page.evaluate(LABEL_TARGET, spec.link);
+    if (!result.target?.point) return Object.assign(result, { outcome: "blocked" as const, reason: result.target ? "no label fragment is shown" : `${spec.link} not found` });
+    await page.touchscreen.tap(...result.target.point);
+    const reached = await page.waitForURL(matches, { timeout: 8_000, waitUntil: "commit" }).then(() => true, () => false);
+    const now = new URL(page.url());
+    result.landed = { path: now.pathname, hash: now.hash };
+    if (!reached) Object.assign(result, { outcome: "blocked" as const, reason: now.href === start ? "the tap navigated nowhere" : `the tap opened ${now.pathname}${now.hash}` });
+    if (now.href !== start) {
+      await page.goBack({ waitUntil: "domcontentloaded" });
+      result.returned = await page.waitForSelector(spec.link, { state: "visible", timeout: 20_000 }).then(() => true, () => false);
+      if (!result.returned) return Object.assign(result, { outcome: "error" as const, reason: "could not return to the starting page" });
+    }
+    return result;
+  } catch (error) {
+    return Object.assign(result, { outcome: "error" as const, reason: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) });
+  }
+}
+
 // ---- Summary counters for the witnesses (captures counted; raw summary keys are untouched) ----
 type Item = Record<string, unknown>;
 type Geometry = Partial<ReturnType<typeof GEOMETRY_WITNESS>> & { error?: string };
 type KeyboardResult = Awaited<ReturnType<typeof runKeyboardWitness>>;
+type ActivationResult = Awaited<ReturnType<typeof runActivationWitness>>;
 type TargetFact = ReturnType<typeof GEOMETRY_WITNESS>["tapTargetFacts"][number];
 const frontTarget = (f: TargetFact) => f.layer !== "behind" && f.reached > 0 && f.opacity > 0.05 && f.clippedBy === null;
 export function witnessSummary(report: Item[]) {
   const geo = (r: Item) => (r.witness ?? {}) as Geometry;
   const count = (test: (g: Geometry) => boolean) => report.filter(r => r.witness && !geo(r).error && test(geo(r))).length;
   const keyboard = report.flatMap(r => (r.keyboard as KeyboardResult[] | undefined) ?? []);
+  const activation = report.flatMap(r => (r.activation as ActivationResult[] | undefined) ?? []);
   return {
     primaryShots: report.filter(r => r.screenshot && !r.error).length,
     pending: report.filter(r => r.error === "pending").length,
@@ -518,5 +589,8 @@ export function witnessSummary(report: Item[]) {
     withVisibleWrongTarget: count(g => (g.overlapFacts ?? []).some(f => f.kind === "visible" && f.wrongTarget)),
     // pass/blocked are measured outcomes (report-only); error means the measurement itself failed.
     keyboard: { pass: keyboard.filter(k => k.outcome === "pass").length, blocked: keyboard.filter(k => k.outcome === "blocked").length, error: keyboard.filter(k => k.outcome === "error").length },
+    activation: { pass: activation.filter(k => k.outcome === "pass").length, blocked: activation.filter(k => k.outcome === "blocked").length, error: activation.filter(k => k.outcome === "error").length },
+    withNoHitAtCentre: count(g => (g.noHitAtCentre?.length ?? 0) > 0),
+    withFrontCoveredOverlaps: count(g => (g.overlapFacts ?? []).some(f => f.frontCovered)),
   };
 }

@@ -22,7 +22,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
-import { CHECKS, GEOMETRY_WITNESS, runKeyboardWitness, witnessSummary, type KeyboardSpec } from "./audit-checks.js";
+import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
 import "./witness-matrix.js";
 
@@ -76,6 +76,8 @@ const DECLARED_OVERLAYS: Record<string, string[]> = {
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
+  // Between 52rem and 1399px the channel details panel is a side sheet over the main column.
+  "dialog.details-sheet": [".hm-frame > #cs-channel-details.hm-frame__side"],
 };
 /** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
 const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
@@ -100,6 +102,14 @@ const settle = (page: Settleable) => page.waitForFunction(() => {
   const w = globalThis as unknown as { __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
   return (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
 }, undefined, { timeout: 10_000 }).then(() => true, () => false);
+
+/** Activation witnesses, by screen: a native tap on each link's visible label must open its own page. */
+const ACTIVATION_WITNESSES: Record<string, ActivationSpec[]> = {
+  "app.signin": [
+    { name: "terms", link: '[data-panel="signed-out"] .dashboard__legal-note a[href="/terms"]', expect: { path: "/terms" } },
+    { name: "privacy", link: '[data-panel="signed-out"] .dashboard__legal-note a[href="/privacy"]', expect: { path: "/privacy" } },
+  ],
+};
 
 const loopback = (value: string) => ["127.0.0.1", "localhost", "[::1]"].includes(new URL(value).hostname);
 const fill = (value: string, ids: Record<string, string>) => value.replace(/\{([a-zA-Z.]+)\}/g, (_, key: string) => ids[key] ?? `missing-${key}`);
@@ -329,6 +339,12 @@ async function main(): Promise<void> {
               entry.keyboard = [];
               for (const spec of keyboardSpecs) (entry.keyboard as unknown[]).push(await runKeyboardWitness(page, spec));
             }
+            // Activation last: it navigates away and back.
+            const activationSpecs = ACTIVATION_WITNESSES[screen.id] ?? [];
+            if (activationSpecs.length) {
+              entry.activation = [];
+              for (const spec of activationSpecs) (entry.activation as unknown[]).push(await runActivationWitness(page, spec));
+            }
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
@@ -356,7 +372,7 @@ async function main(): Promise<void> {
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
-    witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error;
+    witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -367,7 +383,7 @@ async function main(): Promise<void> {
   // workflow can never hide a missing capture or a witness that could not measure. Pending entries
   // are not errors, and measured witness findings (blocked, obscured, mixed...) stay report-only.
   assert.equal(captureErrors, 0, `${captureErrors} capture(s) failed; see mobile-audit-report.json items[].error`);
-  assert.equal(witnessFailures, 0, `${witnessFailures} witness measurement(s) failed; see items[].witness.error and items[].keyboard[] outcome "error"`);
+  assert.equal(witnessFailures, 0, `${witnessFailures} witness measurement(s) failed; see items[].witness.error and items[].keyboard[] / items[].activation[] outcome "error"`);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
