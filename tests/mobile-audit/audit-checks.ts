@@ -513,6 +513,8 @@ type TapPage = {
   touchscreen: { tap: (x: number, y: number) => Promise<void> };
   waitForURL: (url: (url: URL) => boolean, options: { timeout: number; waitUntil?: "commit" }) => Promise<void>;
   goBack: (options: { waitUntil: "domcontentloaded" }) => Promise<unknown>;
+  goto: (url: string, options: { waitUntil: "domcontentloaded" }) => Promise<unknown>;
+  waitForLoadState: (state: "domcontentloaded", options: { timeout: number }) => Promise<void>;
   waitForSelector: (selector: string, options: { state: "visible"; timeout: number }) => Promise<unknown>;
   locator: (selector: string) => { first: () => { scrollIntoViewIfNeeded: (options: { timeout: number }) => Promise<void> } };
   url: () => string;
@@ -542,8 +544,8 @@ const LABEL_TARGET = (selector: string) => {
 
 export async function runActivationWitness(page: TapPage, spec: ActivationSpec) {
   const result: { name: string; state: string; link: string; expect: ActivationSpec["expect"]; target: Awaited<ReturnType<typeof LABEL_TARGET>> | null;
-    landed: { path: string; hash: string } | null; returned: boolean | null; outcome: "pass" | "blocked" | "error"; reason: string | null } =
-    { name: spec.name, state: "after-keyboard-witnesses", link: spec.link, expect: spec.expect, target: null, landed: null, returned: null, outcome: "pass", reason: null };
+    landed: { path: string; hash: string } | null; returned: boolean | null; returnedVia: "back" | "reload" | null; outcome: "pass" | "blocked" | "error"; reason: string | null } =
+    { name: spec.name, state: "after-keyboard-witnesses", link: spec.link, expect: spec.expect, target: null, landed: null, returned: null, returnedVia: null, outcome: "pass", reason: null };
   const start = page.url();
   const matches = (url: URL) => (!spec.expect.path || url.pathname === spec.expect.path) && (!spec.expect.hash || url.hash === spec.expect.hash);
   try {
@@ -556,7 +558,14 @@ export async function runActivationWitness(page: TapPage, spec: ActivationSpec) 
     result.landed = { path: now.pathname, hash: now.hash };
     if (!reached) Object.assign(result, { outcome: "blocked" as const, reason: now.href === start ? "the tap navigated nowhere" : `the tap opened ${now.pathname}${now.hash}` });
     if (now.href !== start) {
-      await page.goBack({ waitUntil: "domcontentloaded" });
+      // Let the landed page finish loading before leaving it: going back while its navigation is still
+      // committing is refused by the browser. If going back still fails, load the start page again.
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+      result.returnedVia = await page.goBack({ waitUntil: "domcontentloaded" }).then(() => "back" as const, () => null);
+      if (!result.returnedVia || page.url() !== start) {
+        await page.goto(start, { waitUntil: "domcontentloaded" });
+        result.returnedVia = "reload";
+      }
       result.returned = await page.waitForSelector(spec.link, { state: "visible", timeout: 20_000 }).then(() => true, () => false);
       if (!result.returned) return Object.assign(result, { outcome: "error" as const, reason: "could not return to the starting page" });
     }
