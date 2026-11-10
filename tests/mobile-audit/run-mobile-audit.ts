@@ -26,7 +26,7 @@ import { seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
-import "./witness-matrix.js";
+import { matrixResult } from "./witness-matrix.js";
 import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from "./hover-witness.js";
 import { runPictureChecks, type PictureCheck } from "./picture-check.js";
 
@@ -520,5 +520,8 @@ async function main(): Promise<void> {
 // 75 minutes: twelve viewport batches with hover witnesses take about four minutes each, then the desktop hover
 // pass and the picture check. The workflow job cap must stay above this.
 test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 75 * 60_000 }, async () => {
+  // The fixture matrix runs first; a witness that fails its own fixtures would make the long run meaningless.
+  assert.ok(matrixResult.done && matrixResult.failed.length === 0,
+    `the witness fixture matrix did not pass (${matrixResult.failed.join("; ") || "it did not finish"}); not starting the audit`);
   await main();
 });

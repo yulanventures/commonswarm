@@ -355,6 +355,9 @@ const ROWS: Row[] = [
   } },
 ];
 
+/** The matrix's result, so the long audit run can refuse to start after a failed row. */
+export const matrixResult = { done: false, failed: [] as string[] };
+
 browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 }, async (t) => {
   const playwrightModule = "playwright";
   const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
@@ -365,7 +368,11 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
     // tsx (esbuild keepNames) wraps nested functions in __name(); the page needs a no-op, as in the runner.
     await context.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
     for (const row of ROWS) {
-      await t.test(row.name, async () => {
+      await t.test(row.name, async () => { try { await runRow(row); } catch (error) { matrixResult.failed.push(row.name); throw error; } });
+    }
+    matrixResult.done = true;
+    async function runRow(row: Row) {
+      {
         const p = await context.newPage() as Page;
         try {
           if (row.served) {
@@ -387,7 +394,7 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           const hover = row.hover ? await runHoverWitness(p, row.hover) : undefined;
           row.check({ geometry, keyboard, activation, hover });
         } finally { await p.close(); }
-      });
+      }
     }
   } finally { await browser.close(); }
 });
