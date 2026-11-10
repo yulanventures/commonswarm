@@ -10,7 +10,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { saveAgentProfile, parseAgentConnection } from "../../src/cloud/agent-profile.js";
 import { configureAgentReceive, readReceiveBinding, receiveHookEvent, receiveStatus, requestReceiveCanary, type ReceiveBinding } from "../../src/cloud/agent-receive.js";
-import { CHANNEL_ASK_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
+import { CHANNEL_ASK_TOOL, CHANNEL_FILE_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
 import { SIGNAL_BODY_MAX } from "../../src/cloud/signal-limits.js";
 import { handledAskIds } from "../../src/cloud/ask-chain-context.js";
 
@@ -205,7 +205,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await client.connect(transport);
     assert.ok(client.getServerCapabilities()?.experimental?.["claude/channel"]);
     const tools = (await client.listTools()).tools;
-    assert.deepEqual(tools.map(tool => tool.name), [CHANNEL_RECEIPT_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_ASK_TOOL]);
+    assert.deepEqual(tools.map(tool => tool.name), [CHANNEL_RECEIPT_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_ASK_TOOL, CHANNEL_FILE_TOOL]);
     assert.deepEqual(tools[1]!.inputSchema, {
       type: "object", additionalProperties: false,
       properties: {
@@ -229,7 +229,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const notification = notifications.find(n => n.method === "notifications/claude/channel")!;
     const meta = notification.params!.meta as Record<string, string>;
     assert.deepEqual(meta, {
-      signal_id: SIGNAL, receipt: meta.receipt, sender_id: AGENT, sender_kind: "agent",
+      signal_id: SIGNAL, message_id: SIGNAL, receipt: meta.receipt, workspace_id: WS, sender_id: AGENT, sender_kind: "agent",
       sender_owner_relation: "same_owner", kind: "note", attachment_count: "0",
     });
     assert.equal(meta.signal_id, SIGNAL);

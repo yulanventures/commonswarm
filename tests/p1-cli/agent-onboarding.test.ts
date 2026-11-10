@@ -448,11 +448,14 @@ test("Claude hook verifies only the configured session; Stop records idle withou
   assert.equal((await readReceiveBinding(profilePath, "session-one"))!.idle, true);
 });
 
-test("wake requires explicit preview choice and cannot claim support on Codex", async () => {
+test("Claude wake is the default channel setup without a preview flag; Codex cannot claim wake", async () => {
   const { profilePath } = await setup();
-  const common = { profilePath, mode: "wake", hostSessionId: "session-one", execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
+  const cwd = await mkdtemp(join(root, "claude-default-wake-"));
+  const common = { profilePath, mode: "wake", hostSessionId: "session-one", cwd, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
   await assert.rejects(configureAgentReceive({ ...common, provider: "codex" }), { code: "wake_host_unsupported" });
-  await assert.rejects(configureAgentReceive({ ...common, provider: "claude" }), { code: "wake_preview_consent_required" });
+  const claude = await configureAgentReceive({ ...common, provider: "claude" });
+  assert.match(String(claude.start_command), /--dangerously-load-development-channels server:cswarm/u);
+  assert.match(String(claude.host_step), /approve the channel/u);
   await assert.rejects(configureAgentReceive({ ...common, provider: "codex", mode: "turn", grokBotAgentId: AGENT }), { code: "grok_bot_agent_id_unsupported" });
   assert.equal(receiveStatus(null).wake_verified, false);
 });
