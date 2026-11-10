@@ -149,6 +149,9 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   title.id = `${id}-title`;
   header.append(title);
   const body = element(doc, "div", "sa-confirm__body");
+  body.tabIndex = 0;
+  body.setAttribute("role", "region");
+  body.setAttribute("aria-label", "Admin permissions and end date");
   const scopeLabel = element(doc, "label", "sa-field");
   scopeLabel.append(element(doc, "span", "", options.level === "workspace" ? "Workspace" : "Organization"));
   const scope = element(doc, "select", "sa-select");

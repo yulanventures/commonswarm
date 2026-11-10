@@ -30,6 +30,7 @@
 .sa-confirm__header { padding: 20px; border-block-end: 1px solid var(--k-shell-line); }
 .sa-confirm__header h2 { margin: 0; color: var(--k-shell-ink); font: 600 18px/1.4 var(--k-shell-font); letter-spacing: -.2px; overflow-wrap: anywhere; }
 .sa-confirm__body { display: grid; align-content: start; min-block-size: 0; gap: 20px; padding: 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.sa-confirm__body:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: -3px; }
 .sa-confirm__permissions h3 { margin: 0 0 8px; color: var(--k-shell-ink); font: 600 13px/1.5 var(--k-shell-font); }
 .sa-confirm__permissions ul { display: grid; gap: 6px; margin: 0; padding-inline-start: 20px; color: var(--k-shell-secondary); }
 .sa-confirm__permissions li { margin: 0; padding-inline-start: 2px; overflow-wrap: anywhere; }

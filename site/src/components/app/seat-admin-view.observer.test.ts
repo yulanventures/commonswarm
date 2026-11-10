@@ -37,6 +37,8 @@ const geometry = dialog => {
   const footer = dialog.querySelector('footer').getBoundingClientRect();
   check('actions stay visible outside the scrolling permissions', footer.top >= rect.top && footer.bottom <= innerHeight);
   const body = dialog.querySelector('.sa-confirm__body');
+  body.focus({preventScroll:true});
+  check('permission scroller is in the keyboard focus order', body.tabIndex === 0 && document.activeElement === body);
   body.scrollTop = body.scrollHeight;
   check('permission content can scroll to the end-date field', body.scrollHeight <= body.clientHeight + 1 || body.scrollTop > 0);
   check('dialog content has no horizontal overflow', dialog.scrollWidth <= dialog.clientWidth + 1 && body.scrollWidth <= body.clientWidth + 1);
