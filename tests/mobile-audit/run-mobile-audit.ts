@@ -41,6 +41,18 @@ export const VIEWPORTS = [
   { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
 ] as const;
 export const THEMES = ["light", "dark"] as const;
+/**
+ * Targeted diagnostics, set only on a never-merge diagnostic branch: capture only these screens at these sizes
+ * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
+ * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
+ */
+const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const PASSES = DIAGNOSTIC ? [false, true] : [false];
+/** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
+type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
+type Route = { request(): { postData(): string | null }; continue(): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
+  fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
+const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
 /** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait, settle.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -241,10 +253,24 @@ async function main(): Promise<void> {
       await signInContext.close();
 
       /** One unsigned and one signed-in context, with the audit's page hooks and an explicit stored theme. */
-      const openContexts = async (viewport: { width: number; height: number }, theme: string, hasTouch = true) => {
+      const openContexts = async (viewport: { width: number; height: number }, theme: string, hasTouch = true, freeze = false) => {
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1 });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        if (freeze) {
+          // Diagnostic control only: each distinct delivery-receipt read answers with its first response for the page's life.
+          const frozen = new Map<string, FrozenResponse>();
+          await signedIn.route("**/functions/v1/read", async (route: Route) => {
+            const body = route.request().postData() ?? "";
+            if (!body.includes('"delivery_receipts"')) return route.continue();
+            const kept = frozen.get(body);
+            if (kept) return route.fulfill(kept);
+            const response = await route.fetch();
+            const first = { status: response.status(), headers: response.headers(), body: await response.body() };
+            frozen.set(body, first);
+            return route.fulfill(first);
+          });
+        }
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -389,13 +415,14 @@ async function main(): Promise<void> {
         return results;
       };
 
-      for (const theme of THEMES) for (const viewport of VIEWPORTS) {
+      for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
-        const { context, signedIn } = await openContexts(viewport, theme);
-        const batch = await runPool(screens(), 3, async (screen) => {
+        if (!screens().some(s => diagnosed(s.id, size))) continue;
+        const { context, signedIn } = await openContexts(viewport, theme, true, freeze);
+        const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
-          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
+          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null, ...(freeze ? { freeze } : {}) };
           if (screen.status === "pending") return { ...entry, error: "pending", reason: screen.reason ?? null };
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
@@ -437,12 +464,13 @@ async function main(): Promise<void> {
       }
       // Desktop hover pass: only the screens with hover witnesses, at desktop widths, mouse only.
       const hoverScreens = screens().filter(s => HOVER_WITNESSES[s.id] && s.status !== "pending" && !(s.requiresSeed ?? []).some(step => !seed.steps.includes(step)));
-      for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
+      for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
-        const { context, signedIn } = await openContexts(viewport, theme, false);
-        const batch = await runPool(hoverScreens, 3, async (screen) => {
+        if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
+        const { context, signedIn } = await openContexts(viewport, theme, false, freeze);
+        const batch = await runPool(hoverScreens.filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
-          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null };
+          const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
           const page = await (screen.signedOut ? context : signedIn).newPage();
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);

@@ -96,7 +96,10 @@ type Shift = { who: string; label: string; dx: number; dy: number; dw: number; d
 type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; focusWithin: boolean; focusVisible: boolean;
   /** Lifecycle facts, kept whatever the outcome: boxes found again after the app rebuilt them, and how far the
    *  row's lists scrolled. Neither is discounted: positions are compared in scroll-content coordinates. */
-  rebuilt: number; scrolled: { x: number; y: number } };
+  rebuilt: number; scrolled: { x: number; y: number };
+  /** Diagnostics, never a gate: surrounding boxes that changed since rest, and what holds focus. */
+  context: Array<{ label: string; replaced?: true; dx?: number; dy?: number; dw?: number; dh?: number; text?: number; children?: number }>;
+  active: string };
 /**
  * phase "rest": settle the page's reads, wait for transitions, snapshot twice a frame apart (a difference is drift),
  * store. phase "early" / "late": compare with the stored rest snapshot.
@@ -109,7 +112,8 @@ type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; 
 const PROBE = async (arg: { index: number; key?: string | null; rows: string; phase: "rest" | "early" | "late"; tolerance: number }): Promise<ProbeError | ProbeRest | ProbeCompared> => {
   type Rect = { x: number; y: number; w: number; h: number };
   type Tracked = { node: Element | Text; who: "row" | "inside" | "text" | "other-row"; label: string; rowKey: string | null; path: number[] };
-  const w = globalThis as unknown as { __auditHoverRest?: { tracked: Tracked[]; rects: Rect[][]; scroll: { x: number; y: number } };
+  type Context = { label: string; node: Element; rect: Rect; text: number; children: number };
+  const w = globalThis as unknown as { __auditHoverRest?: { tracked: Tracked[]; rects: Rect[][]; scroll: { x: number; y: number }; context: Context[] };
     __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
   const frame = () => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
   // An element is one box; a text node is every line fragment it lays out, so a re-wrap that keeps every element box
@@ -185,7 +189,21 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     await frame();
     const second = tracked.map(t => rectsOf(t.node));
     const drift = first.filter((r, i) => r.length > 0 && delta(r, second[i]!) > arg.tolerance).length;
-    w.__auditHoverRest = { tracked, rects: second, scroll: scrollOf(row.parentElement) };
+    // Diagnostics only (they gate nothing): what surrounds the row, so a movement of the whole row can be traced to its
+    // cause. The rows before it (and whether their text or children changed), its ancestors, the feed controls and
+    // the composer.
+    const context: Context[] = [];
+    const note = (label: string, node: Element | null) => {
+      if (!node) return;
+      const r = node.getBoundingClientRect();
+      context.push({ label, node, rect: { x: r.left, y: r.top, w: r.width, h: r.height }, text: (node.textContent ?? "").length, children: node.querySelectorAll("*").length });
+    };
+    let before = row.previousElementSibling;
+    for (let i = 1; before && i <= 3; i += 1, before = before.previousElementSibling) note(`preceding ${i} ${describe(before)}`, before);
+    let up = row.parentElement;
+    for (let i = 1; up && up !== document.body && i <= 6; i += 1, up = up.parentElement) note(`ancestor ${i} ${describe(up)}`, up);
+    for (const selector of ["[data-feed-filter]", "[data-feed-more]", "[data-composer]"]) note(selector, document.querySelector(selector));
+    w.__auditHoverRest = { tracked, rects: second, scroll: scrollOf(row.parentElement), context };
     return { tracked: tracked.length, measured: second.filter(r => r.length > 0).length, drift };
   }
   const rest = w.__auditHoverRest;
@@ -215,9 +233,21 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
   });
   const row = liveRow instanceof Element ? liveRow : null;
   const active = document.activeElement;
+  // Every surrounding box that moved, resized, was replaced, or whose text or descendant count changed since rest.
+  const context = rest.context.flatMap((c): ProbeCompared["context"] => {
+    const node = c.node.isConnected ? c.node : null;
+    if (!node) return [{ label: c.label, replaced: true as const }];
+    const r = node.getBoundingClientRect();
+    const d = { dx: round(r.left - c.rect.x), dy: round(r.top - c.rect.y), dw: round(r.width - c.rect.w), dh: round(r.height - c.rect.h) };
+    const text = (node.textContent ?? "").length - c.text, children = node.querySelectorAll("*").length - c.children;
+    return Math.max(Math.abs(d.dx), Math.abs(d.dy), Math.abs(d.dw), Math.abs(d.dh)) > arg.tolerance || text || children
+      ? [{ label: c.label, ...d, ...(text ? { text } : {}), ...(children ? { children } : {}) }] : [];
+  });
   return {
     shifted: shifts.length,
-    shifts: shifts.sort((a, b) => Number(b.gone) - Number(a.gone) || Math.max(Math.abs(b.dx), Math.abs(b.dy), Math.abs(b.dw), Math.abs(b.dh)) - Math.max(Math.abs(a.dx), Math.abs(a.dy), Math.abs(a.dw), Math.abs(a.dh))).slice(0, 6),
+    shifts: shifts.sort((a, b) => Number(b.gone) - Number(a.gone) || Math.max(Math.abs(b.dx), Math.abs(b.dy), Math.abs(b.dw), Math.abs(b.dh)) - Math.max(Math.abs(a.dx), Math.abs(a.dy), Math.abs(a.dw), Math.abs(a.dh))).slice(0, 40),
+    context,
+    active: active && active !== document.body ? `${active.tagName.toLowerCase()}${active.closest("[data-signal-id]") ? ` in ${active.closest("[data-signal-id]")!.getAttribute("data-signal-id")}` : ""}` : "body",
     hoverMatched: !!row?.matches(":hover"),
     focusWithin: !!row?.matches(":focus-within"),
     focusVisible: !!active && active !== document.body && active.matches(":focus-visible"),
@@ -227,18 +257,26 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
 };
 
 /** A point inside the row that the row itself receives (not an overlay or a neighbour), in the viewport. */
-const HOVER_POINT = (index: number) => {
-  const row = document.querySelector(`[data-audit-hover-row="${index}"]`);
-  if (!row) return null;
+const HOVER_POINT = (arg: { index: number; key: string | null; rows: string }) => {
+  // The row is found again by key right here: a rebuild since rest would otherwise leave no marked row.
+  let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+  if (!row && arg.key) {
+    row = Array.from(document.querySelectorAll(arg.rows)).find(el => el.getAttribute("data-signal-id") === arg.key) ?? null;
+    row?.setAttribute("data-audit-hover-row", String(arg.index));
+  }
+  if (!row) return { point: null, why: "row missing" };
   const r = row.getBoundingClientRect();
   const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight), left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth);
-  if (bottom - top < 1 || right - left < 1) return null;
+  if (bottom - top < 1 || right - left < 1) return { point: null, why: `row outside the viewport (${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight})` };
+  const hits: string[] = [];
   for (const [fx, fy] of [[0.5, 0.5], [0.75, 0.5], [0.5, 0.25], [0.9, 0.5], [0.25, 0.5], [0.5, 0.75]] as const) {
     const x = left + (right - left) * fx, y = top + (bottom - top) * fy;
     const hit = document.elementFromPoint(x, y);
-    if (hit && row.contains(hit)) return { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
+    if (hit && row.contains(hit)) return { point: { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 }, why: null };
+    const holder = hit?.closest("[data-composer], header, nav, dialog, [role=dialog]") ?? hit;
+    hits.push(holder ? `${holder.tagName.toLowerCase()}${holder.classList[0] ? `.${holder.classList[0]}` : ""}` : "nothing");
   }
-  return null;
+  return { point: null, why: `every sample point is covered: ${[...new Set(hits)].join(", ")}` };
 };
 
 /** Focus the row's first visible control without scrolling; returns what was focused. */
@@ -344,8 +382,9 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const preferredShot = !!shot && !shotTaken.has(mode) && row.preferred;
     if (preferredShot && mode === "hover") await shot!(`hover-${spec.name}-rest`);
     if (mode === "hover") {
-      entry.point = await page.evaluate(HOVER_POINT, row.index);
-      if (!entry.point) { Object.assign(entry, { outcome: "skipped", reason: "no point of the row receives the pointer" }); return; }
+      const aim = await page.evaluate(HOVER_POINT, { index: row.index, key: entry.key, rows: spec.rows });
+      entry.point = aim.point;
+      if (!entry.point) { Object.assign(entry, { outcome: "skipped", reason: `no point of the row receives the pointer: ${aim.why}` }); return; }
       await page.mouse.move(entry.point.x, entry.point.y, { steps: 2 });
     } else {
       entry.focused = await page.evaluate(FOCUS_ROW, { index: row.index, target: spec.focusTarget });
