@@ -213,12 +213,16 @@ export function decideSeatAdminEnd(f: EndFacts): EndDecision {
 
 /** The workspace commands an agent may ask for under a grant (switch on). Everything else stays human-only. */
 export const SEAT_ADMIN_AGENT_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
-  'remove_agent_from_workspace', 'remove_member', 'change_role', 'rename_organization'] as const);
+  'remove_agent_from_workspace', 'remove_member', 'change_role', 'rename_organization', 'revoke_invitation'] as const);
 export type SeatAdminAgentKind = (typeof SEAT_ADMIN_AGENT_KINDS)[number];
 /** Executed in 2b. remove_member waits for delegated attribution in its collateral writers; change_role has no
  *  member/guest transition (there is no guest role), so both refuse under seat admin. */
 export const SEAT_ADMIN_EXECUTED_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
-  'remove_agent_from_workspace', 'remove_member', 'rename_organization'] as const);
+  'remove_agent_from_workspace', 'remove_member', 'rename_organization', 'revoke_invitation'] as const);
+/** The registry capability a grant must carry for an agent's command, where the names differ (2c: routine names). */
+export function seatAdminCapability(kind: string): string {
+  return kind === 'revoke_invitation' ? 'admin_revoke_invitation' : kind;
+}
 
 export interface SeatAdminGrantFacts {
   grant_id: string;

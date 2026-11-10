@@ -159,7 +159,7 @@ import {
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
   HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS, WORKSPACE_NAME_MAX,
-  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminPrincipalTargetRefusal, validWorkspaceName,
+  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminCapability, seatAdminPrincipalTargetRefusal, validWorkspaceName,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -12944,8 +12944,10 @@ class LocalBusinessRefused<T> extends Error {
  * (including first-use and predecessor handover) has rolled back. */
 /** What a seat admin reducer action is about, for the grantor's history: the removed member, or the workspace. */
 function seatAdminTarget(kind: string, command: unknown, workspaceId: string): { kind: string; id: string } {
-  const user = record(command)?.user_id;
-  return kind === "remove_member" && typeof user === "string" ? { kind: "member", id: user } : { kind: "workspace", id: workspaceId };
+  const user = record(command)?.user_id, invitation = record(command)?.invitation_id;
+  if (kind === "remove_member" && typeof user === "string") return { kind: "member", id: user };
+  if (kind === "revoke_invitation" && typeof invitation === "string") return { kind: "invitation", id: invitation };
+  return { kind: "workspace", id: workspaceId };
 }
 class LocalAuditedRefused extends Error {
   /** `after` writes what must survive with the audit row (a seat admin refusal's grantor history), on the outer
@@ -13356,7 +13358,7 @@ async function handleTransaction(
         await tx`SELECT swarm.lock_workspace_organization(${localWorkspace}::uuid)`;
       }
       const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
-        kind, workspace_id: localWorkspace });
+        kind: seatAdminCapability(kind), workspace_id: localWorkspace });
       const seatRefuse = (reason: string, value: SeatAdminAuthorized | null): never => {
         throw new LocalAuditedRefused({ status: 403, body: { error: reason, message: (SEAT_ADMIN_REFUSAL_COPY as Record<string, string>)[reason] } },
           { auth, commandKind: kind, workspaceId: localWorkspace, outcome: "authz", reason,
@@ -13374,6 +13376,16 @@ async function handleTransaction(
         return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
       }
       if (kind === "rename_organization") return await renameOrganization(tx, body, auth, ignoredIdentity, authorized.value);
+      if (kind === "revoke_invitation") {
+        // Only an invitation the grantor created in this workspace (2c-1a). Its creator never changes; the reducer then
+        // decides liveness under the workspace stream lock, as for a person.
+        const invitationId = typeof rawLocal?.invitation_id === "string" && UUID_RE.test(rawLocal.invitation_id) ? rawLocal.invitation_id : null;
+        const [invitation] = invitationId === null ? [] : await tx<{ created_by: string }[]>`SELECT created_by FROM swarm.invitations
+          WHERE invitation_id = ${invitationId}::uuid AND workspace_id = ${localWorkspace}::uuid`;
+        if (invitation && invitation.created_by !== authorized.value.grantor_user_id) {
+          return seatRefuse("seat_admin_target_protected", authorized.value);
+        }
+      }
       if (kind === "remove_member") {
         // Members only, read under the plan's membership lock: never an owner (the grantor included) or an admin.
         const targetUser = typeof rawLocal?.user_id === "string" && UUID_RE.test(rawLocal.user_id) ? rawLocal.user_id : null;

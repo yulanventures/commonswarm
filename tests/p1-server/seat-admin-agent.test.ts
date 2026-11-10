@@ -461,3 +461,34 @@ test("seat_admin_status: the person's own agents, what each level accepts, and a
   const after = await status(owner.jwt);
   assert.deepEqual((after.body.agents as Row[]).find((r) => r.principal_id === agent)!.active_grant_ids, []);
 });
+
+test("revoke an invitation: only one the grantor created, under a grant that carries it", async () => {
+  const human = async (command: Record<string, unknown>) => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, { method: "POST",
+      headers: { authorization: `Bearer ${owner.jwt}`, "content-type": "application/json", origin: ORIGIN },
+      body: JSON.stringify({ command_id: randomUUID(), client_version: "0.1.93", workspace_id: workspace, stream: { kind: "workspace" }, command }) });
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  const invited = await human({ kind: "invite_member", email: `seat-invite-${randomUUID()}@example.test` });
+  assert.equal(invited.status, 200, JSON.stringify(invited.body) + functionLogs.slice(-2000));
+  const [mine] = await sql<{ invitation_id: string }[]>`SELECT invitation_id FROM swarm.invitations
+    WHERE workspace_id = ${workspace}::uuid AND created_by = ${owner.id}::uuid AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`;
+  // Someone else's invitation: refused before any change.
+  const theirs = randomUUID();
+  await sql`INSERT INTO swarm.invitations (invitation_id, workspace_id, email, role, token_hash, expires_at, created_by)
+    VALUES (${theirs}::uuid, ${workspace}::uuid, 'other@example.test', 'member', ${createHash("sha256").update(randomUUID()).digest()},
+      now() + interval '1 day', ${other.id}::uuid)`;
+  refused(await agentCommand({ kind: "revoke_invitation", invitation_id: mine!.invitation_id }), "seat_admin_inactive", "no grant");
+  const scoped = await grant({ level: "scoped", scope_names: ["admin:read"] });
+  refused(await agentCommand({ kind: "revoke_invitation", invitation_id: mine!.invitation_id }), "seat_admin_scope_missing", "scoped without invites:revoke");
+  await endGrant(scoped);
+  const grantId = await grant();
+  refused(await agentCommand({ kind: "revoke_invitation", invitation_id: theirs }), "seat_admin_target_protected", "another person's invitation");
+  const revoked = await agentCommand({ kind: "revoke_invitation", invitation_id: mine!.invitation_id });
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body) + functionLogs.slice(-2000));
+  const rows = await sql<{ invitation_id: string; gone: boolean }[]>`SELECT invitation_id, revoked_at IS NOT NULL AS gone FROM swarm.invitations
+    WHERE invitation_id IN (${mine!.invitation_id}::uuid, ${theirs}::uuid) ORDER BY invitation_id`;
+  assert.deepEqual(Object.fromEntries(rows.map((r) => [r.invitation_id, r.gone])), { [mine!.invitation_id]: true, [theirs]: false });
+  const accepted = (await agentHistory()).filter((h) => h.seat_admin_grant_id === grantId && h.outcome === "accepted");
+  assert.deepEqual(accepted.map((h) => [h.action, h.target_kind, h.target_id]), [["revoke_invitation", "invitation", mine!.invitation_id]]);
+});

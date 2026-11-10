@@ -406,7 +406,7 @@ var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
 var RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1e3;
 var RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
 var RENEWAL_IDLE_PAUSE_DAYS = 14;
-var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace", "remove_member"]);
+var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace", "remove_member", "revoke_invitation"]);
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
   // An organization owner, or a seat admin agent under an organization grant (its own handler, not the reducer).
@@ -6072,7 +6072,8 @@ var SEAT_ADMIN_AGENT_KINDS = Object.freeze([
   "remove_agent_from_workspace",
   "remove_member",
   "change_role",
-  "rename_organization"
+  "rename_organization",
+  "revoke_invitation"
 ]);
 var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "rename_workspace",
@@ -6080,8 +6081,12 @@ var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "add_agent_to_workspace",
   "remove_agent_from_workspace",
   "remove_member",
-  "rename_organization"
+  "rename_organization",
+  "revoke_invitation"
 ]);
+function seatAdminCapability(kind) {
+  return kind === "revoke_invitation" ? "admin_revoke_invitation" : kind;
+}
 var LEVEL_ORDER = { workspace: 0, organization: 1, scoped: 2 };
 function selectCoveringGrant(grants, f) {
   const live = grants.filter((g) => g.state === "active" && (g.expires_at === null || g.expires_at > f.now)).sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || a.grant_id.localeCompare(b.grant_id));
@@ -6324,6 +6329,7 @@ export {
   registerUpcaster,
   requestHash,
   saveWorkspaceSkill,
+  seatAdminCapability,
   seatAdminGrantPrecheck,
   seatAdminManifest,
   seatAdminManifestJson,
