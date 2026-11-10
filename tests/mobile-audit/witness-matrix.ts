@@ -5,6 +5,7 @@
  * (RUN_BROWSER_TESTS=1); run-mobile-audit.ts imports this file so it runs first in the audit job.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 import { runHoverWitness, type HoverPage, type HoverResult, type HoverSpec } from "./hover-witness.js";
@@ -105,6 +106,26 @@ const keyedList = (onHover: string, options: { onLoad?: string; onFocus?: string
     if (!row || focused) return; focused = true;
     ${options.onFocus ?? ""}
   });</script>`);
+};
+/** The app's own receipt rules (LiveDashboard.astro), so the fixture exercises the real closed-<details> layout. */
+const RECEIPT_CSS = (() => {
+  const source = readFileSync(new URL("../../site/src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const rules = source.match(/^ {2}\.dashboard__message-receipt[^{\n]*\{[^}]*\}/gm) ?? [];
+  if (rules.length < 5) throw new Error("receipt CSS not found in LiveDashboard.astro");
+  return rules.join("\n");
+})();
+/** Keyed rows like keyedList; row s5 carries a native receipt <details> (open or closed) whose content `onHover` changes. */
+const receiptList = (open: boolean, onHover: string) => {
+  const receipt = `<details class="dashboard__message-receipt"${open ? " open" : ""}><summary><span class="dashboard__message-receipt-glyph">✓</span> Sent</summary>
+    <p>Delivered to 1 of 2.</p><section class="dashboard__message-receipt-section"><h4>Seen</h4><ul><li>Lead</li></ul></section></details>`;
+  const rows = Array.from({ length: 10 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="margin:0;padding:8px 0">Row ${i} <a href="#s${i}">open</a>${i === 5 ? receipt : ""}</li>`).join("");
+  return page(`<div id="scroller" style="height:300px;overflow:auto;width:320px"><ul id="feed" style="list-style:none;margin:0;padding:0">${rows}</ul></div>
+  <script>const feed = document.getElementById("feed"); let fired = false;
+  document.getElementById("scroller").addEventListener("mouseover", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || fired) return; fired = true; const details = row.querySelector("details");
+    ${onHover}
+  });</script>`, RECEIPT_CSS);
 };
 const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
@@ -350,6 +371,21 @@ const ROWS: Row[] = [
   } },
   // The app's list lifecycle: identity is by key and positions are scroll-content coordinates, so a benign rebuild
   // or scroll is recorded but never a shift, and neither can turn a hover shift into a pass.
+  // Receipts: Chromium still reports boxes for the content of a closed <details> (::details-content). Changes there are
+  // not shown, so they are not shifts; the summary and open content are shown, so changes there still are.
+  { name: "content added inside a closed receipt during hover is stable (it is not shown)",
+    html: receiptList(false, "details.querySelector('ul').insertAdjacentHTML('beforeend', '<li>Two</li><li>Three</li><li>Four</li>'); details.querySelector('p').textContent = 'Delivered to 2 of 2, and read by both people in this conversation.';"),
+    hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "content of an open receipt that disappears during hover is still a shift",
+    html: receiptList(true, "details.querySelector('section').remove();"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "a closed receipt's summary that changes during hover is still a shift",
+    html: receiptList(false, "details.querySelector('summary').lastChild.textContent = ' Seen by everyone';"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
   { name: "a same-key rebuild with identical layout during hover is stable, and the rebuild is recorded",
     html: keyedList("feed.innerHTML = feed.innerHTML;"), hover: keyedSpec, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "stable", show(h));
