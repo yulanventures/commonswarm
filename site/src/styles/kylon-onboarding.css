@@ -306,6 +306,16 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__waitin
   }
 }
 
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view .dashboard__invite-prerequisite .dashboard__text-button {
+    display: block;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    margin-block-start: 4px;
+    padding: 8px 4px;
+  }
+}
+
 /* Forced-colour users need a focus indicator independent of box shadows. */
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view :is(button, input, [tabindex]):focus-visible,

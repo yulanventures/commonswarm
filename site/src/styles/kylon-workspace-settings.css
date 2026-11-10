@@ -258,4 +258,5 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is([data-workspace-details-close], [data-copy-workspace-id], [data-workspace-close-submit], [data-workspace-rename], .dashboard__workspace-rename button) { min-inline-size: 44px; min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-rename button[type="submit"] { min-inline-size: 44px; min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(.dashboard__workspace-danger input, [data-workspace-rename-input]) { min-block-size: 44px; font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-move-destination] { min-inline-size: 44px; min-block-size: 44px; font-size: 16px; }
 }
