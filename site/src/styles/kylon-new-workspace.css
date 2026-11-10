@@ -91,3 +91,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-new-workspace__preview-note {
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] :is(.hm-new-workspace__card, .hm-new-workspace__preview) { padding: 16px; }
 }
+
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="create"][data-create-rail] .hm-frame__rail :is(.hm-rail__catch-up, .hm-rail__person) {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+}
