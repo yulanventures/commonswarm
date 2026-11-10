@@ -84,6 +84,16 @@ const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" s
     <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
   </li>`).join("")}</ul>${after}`, // Row padding is a stylesheet rule, not inline, so a fixture's :hover rule can change it.
   `.msg{padding:4px 8px} .to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+/** Ten keyed rows in a 200px scroller; `onHover` runs once, on the first pointer entry into row s5. */
+const keyedList = (onHover: string) => page(`<div id="scroller" style="height:200px;overflow:auto;width:300px">
+  <ul id="feed" style="list-style:none;margin:0;padding:0">${Array.from({ length: 10 }, (_, i) =>
+    `<li class="msg" data-signal-id="s${i}" style="height:40px;margin:0">Row ${i}</li>`).join("")}</ul></div>
+  <script>let fired = false; document.getElementById("scroller").addEventListener("mouseover", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || fired) return; fired = true; const feed = document.getElementById("feed"); const scroller = document.getElementById("scroller");
+    ${onHover}
+  });</script>`);
+const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
@@ -324,6 +334,33 @@ const ROWS: Row[] = [
     hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.rows[0]!.reason ?? "", /no point outside the rows/u, show(h));
+  } },
+  // The app's list lifecycle: identity is by key and positions are scroll-content coordinates, so a benign rebuild
+  // or scroll is recorded but never a shift, and neither can turn a hover shift into a pass.
+  { name: "a same-key rebuild with identical layout during hover is stable, and the rebuild is recorded",
+    html: keyedList("feed.innerHTML = feed.innerHTML;"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      const r = h!.rows[0]!;
+      assert.ok((r.early?.rebuilt ?? 0) + (r.late?.rebuilt ?? 0) > 0, show(r));
+  } },
+  { name: "a rebuild caused by hover that makes the row taller is a shift, not a re-measure",
+    html: keyedList("feed.innerHTML = feed.innerHTML.replace('Row 5<', 'Row 5<br>a second line<');"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      assert.ok((h!.rows[0]!.early?.rebuilt ?? 0) + (h!.rows[0]!.late?.rebuilt ?? 0) > 0, show(h));
+  } },
+  { name: "a one-time hover mutation is a shift even though it never repeats",
+    html: keyedList("row.insertAdjacentHTML('afterbegin', '<div>added once</div>');"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "hover growth above the row absorbed by scroll anchoring is still a shift",
+    html: keyedList("feed.firstElementChild.style.height = '70px';"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "the list scrolling by itself during hover is recorded, not a shift",
+    html: keyedList("scroller.scrollTop -= 10;"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      const r = h!.rows[0]!;
+      assert.ok([r.early, r.late].some(c => c && c.scrolled.y !== 0), show(r));
   } },
   { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
     html: feed(".left .body{padding-left:12px}", false,
