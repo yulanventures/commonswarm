@@ -24,6 +24,7 @@ import { mapMcpError, OutcomeStillUnknown } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
 import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
 import { FILE_MAX_VERSION_BYTES, FileCommandRefused, FileTransportError } from "../cloud/files.js";
+import { mcpFileGet } from "./file-image.js";
 import { ASK_PARENT_CONTEXT_SENTENCE, defaultAskParent } from "../cloud/ask-chain-context.js";
 
 import { validateHouseholdToolArguments, HouseholdToolInputError } from "../protocol/household-tool-registry.js";
@@ -273,6 +274,15 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
               extra.signal.addEventListener("abort", () => commitAfterWrite.delete(extra.requestId), { once: true });
             }
           }
+          break;
+        }
+        case "file_get": {
+          const { fetcher, token } = await authenticated();
+          const read = await mcpFileGet({ target: profileTarget(profile), workspaceId: profile.workspace_id, credential: token, fetcher,
+            fileId: args.file_id!.toLowerCase(), versionN: args.version_n === undefined ? null : Number(args.version_n) });
+          // A picture travels as an MCP image block beside its details; nothing else changes shape.
+          if (read.image) return { content: [{ type: "text", text: JSON.stringify(capMcpResult(read.output)) }, { type: "image", data: read.image.data, mimeType: read.image.mimeType }] };
+          output = read.output;
           break;
         }
         case "file_put":

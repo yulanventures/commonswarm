@@ -5,8 +5,10 @@
  * that path and returns text. The signed path never leaves this module: it is not in the
  * result, the error, or a log line.
  *
- * Only declared text types are returned as content. Everything else, PDF included, is
- * metadata only until a parser can run with enforced work and memory limits. */
+ * Declared text types are returned as text. Declared PNG, JPEG, GIF and WebP pictures within
+ * the image cap are returned as an image only when their bytes start with that type's own
+ * signature; nothing here decodes them. Everything else (PDF text is extracted elsewhere)
+ * is metadata only. */
 
 /** Raw bytes read per page before the encoded-size budget trims it. */
 export const FILE_PAGE_MAX_BYTES = 32 * 1024;
@@ -19,6 +21,61 @@ const TEXT_TYPES = new Set(["application/json", "application/yaml", "application
 export function isTextContentType(contentType: unknown): boolean {
   return typeof contentType === "string" &&
     (/^text\/[a-z0-9.+-]+$/u.test(contentType) || TEXT_TYPES.has(contentType));
+}
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+export function isImageContentType(contentType: unknown): boolean {
+  return typeof contentType === "string" && IMAGE_TYPES.has(contentType);
+}
+
+/** The bytes must start with the declared type's own signature: the declared type alone is untrusted. */
+export function imageBytesMatch(contentType: string, bytes: Uint8Array): boolean {
+  const at = (index: number, ...expected: number[]) =>
+    bytes.length >= index + expected.length && expected.every((byte, k) => bytes[index + k] === byte);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  switch (contentType) {
+    case "image/png": return at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    case "image/jpeg": return at(0, 0xff, 0xd8, 0xff);
+    case "image/gif": return at(0, ...ascii("GIF87a")) || at(0, ...ascii("GIF89a"));
+    case "image/webp": return at(0, ...ascii("RIFF")) && at(8, ...ascii("WEBP"));
+    default: return false;
+  }
+}
+
+/** Standard base64, in chunks so a large picture never builds one huge argument list. */
+export function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+export type ImageRead =
+  | { kind: "image"; data: string; mimeType: string; bytes: number }
+  | { kind: "too_large" | "not_image" };
+
+/**
+ * Read a whole stored picture from a server-resolved, signed path, within `maxBytes`.
+ * The declared size was measured at commit; a short or long read is unavailable, and
+ * bytes that do not carry the declared type's signature are not returned.
+ */
+export async function readImage(
+  baseUrl: string,
+  signedPath: string,
+  contentType: string,
+  sizeBytes: number,
+  maxBytes: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ImageRead> {
+  if (!isImageContentType(contentType)) return { kind: "not_image" };
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > maxBytes) return { kind: "too_large" };
+  if (sizeBytes === 0) return { kind: "not_image" };
+  const bytes = await readObjectPage(baseUrl, signedPath, 0, sizeBytes, fetchImpl);
+  if (bytes.length !== sizeBytes) throw new FileContentUnavailable();
+  if (!imageBytesMatch(contentType, bytes)) return { kind: "not_image" };
+  return { kind: "image", data: encodeBase64(bytes), mimeType: contentType, bytes: bytes.length };
 }
 
 export interface FileMetadata {

@@ -24,9 +24,11 @@ import {
   FILE_PAGE_MAX_BYTES,
   FileContentUnavailable,
   fitTextPage,
+  isImageContentType,
   isTextContentType,
   PDF_TEXT_MAX_INPUT_BYTES,
   pdfTextFor,
+  readImage,
   readObjectPage,
 } from "./file-content.ts";
 import { executeFilePut } from "./file-put.ts";
@@ -45,6 +47,7 @@ import type {
   HostedToolCall,
   HostedToolName,
 } from "./tools.ts";
+import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage } from "./tools.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -269,7 +272,7 @@ function hostedCommand(
   };
 }
 
-async function executeTool(call: HostedToolCall): Promise<Record<string, unknown>> {
+async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
   try {
     return await executeToolCall(call);
   } catch (error) {
@@ -282,7 +285,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
   }
 }
 
-async function executeToolCall(call: HostedToolCall): Promise<Record<string, unknown>> {
+async function executeToolCall(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
   if (call.name === "claim_seat") {
@@ -512,6 +515,8 @@ const handleProtocolRequest = createMcpProtocolHandler({
 });
 
 const FILE_METADATA_ONLY = "This file type is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.";
+const FILE_IMAGE_TOO_LARGE = `This picture is larger than ${FILE_GET_IMAGE_MAX_BYTES / (1024 * 1024)} MiB, so it is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.`;
+const FILE_IMAGE_NOT_IMAGE = "This file's bytes do not match its declared picture type, so it is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.";
 const FILE_NOT_TEXT = "This file is not valid UTF-8 text, so it is returned as metadata only. Ask a workspace member to open it in the CommonSwarm web app or with cswarm file get.";
 
 function fileProvenanceSource(row: Record<string, unknown>) {
@@ -553,10 +558,11 @@ function fileListOutput(output: Record<string, unknown>, args: HostedToolArgumen
 }
 
 /**
- * Metadata from the resolved version, plus one bounded text page for declared text types.
- * The signed path in `body.download_path` is consumed here and never returned.
+ * Metadata from the resolved version, plus one bounded text page for declared text types, or the
+ * picture itself for a declared image whose bytes match. The signed path in `body.download_path`
+ * is consumed here and never returned.
  */
-async function fileGetOutput(body: Record<string, unknown>, offset: number, workspaceId: string): Promise<Record<string, unknown>> {
+async function fileGetOutput(body: Record<string, unknown>, offset: number, workspaceId: string): Promise<Record<string, unknown> | HostedToolImage> {
   const meta = {
     file_id: String(body.file_id),
     version_n: Number(body.version_n),
@@ -574,6 +580,7 @@ async function fileGetOutput(body: Record<string, unknown>, offset: number, work
   if (meta.content_type === "application/pdf") {
     return await pdfGetOutput(body, meta, base, offset, workspaceId, provenance);
   }
+  if (isImageContentType(meta.content_type)) return await imageGetOutput(body, meta, base, provenance(null, 0));
   if (!isTextContentType(meta.content_type)) {
     return { ...base, text: null, next_action: FILE_METADATA_ONLY, provenance: provenance(null, 0) };
   }
@@ -593,6 +600,27 @@ async function fileGetOutput(body: Record<string, unknown>, offset: number, work
       provenance: provenance(cut.next_offset, cut.offset),
     }));
     return page ?? { ...base, text: null, next_action: FILE_NOT_TEXT, provenance: provenance(null, offset) };
+  } catch (error) {
+    if (error instanceof FileContentUnavailable) throw new HostedToolFailure("file_content_unavailable");
+    throw error;
+  }
+}
+
+/** A whole stored picture as an MCP image block beside the usual metadata; an offset does not apply. */
+async function imageGetOutput(
+  body: Record<string, unknown>,
+  meta: { content_type: string; size_bytes: number },
+  base: Record<string, unknown>,
+  provenance: Record<string, unknown>,
+): Promise<Record<string, unknown> | HostedToolImage> {
+  const baseUrl = Deno.env.get("SUPABASE_URL");
+  if (!baseUrl) throw new HostedToolFailure("file_content_unavailable");
+  try {
+    const image = await readImage(baseUrl, String(body.download_path), meta.content_type, meta.size_bytes, FILE_GET_IMAGE_MAX_BYTES);
+    if (image.kind !== "image") {
+      return { ...base, text: null, next_action: image.kind === "too_large" ? FILE_IMAGE_TOO_LARGE : FILE_IMAGE_NOT_IMAGE, provenance };
+    }
+    return new HostedToolImage({ ...base, encoding: "image", text: null, provenance }, { data: image.data, mimeType: image.mimeType });
   } catch (error) {
     if (error instanceof FileContentUnavailable) throw new HostedToolFailure("file_content_unavailable");
     throw error;
