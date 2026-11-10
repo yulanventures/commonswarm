@@ -175,6 +175,23 @@ const FOCUS_ROW = (arg: { index: number; target?: string }) => {
   focusable.focus({ preventScroll: true });
   return document.activeElement === focusable ? `${focusable.tagName.toLowerCase()}${focusable.className ? `.${String(focusable.className).split(" ")[0]}` : ""}` : null;
 };
+/**
+ * A parking point whose hit target is outside every row of the list (and not a row itself), so rest is never taken
+ * with a row already hovered. Viewport corners and edge midpoints first; null when no such point exists.
+ */
+const NEUTRAL_POINT = (rows: string) => {
+  const listed = Array.from(document.querySelectorAll(rows));
+  const w = innerWidth, h = innerHeight;
+  const candidates = [[w - 2, h - 2], [w - 2, 1], [1, h - 2], [1, 1], [w / 2, h - 2], [w - 2, h / 2], [w / 2, 1], [1, h / 2]];
+  for (const [x, y] of candidates) {
+    const hit = document.elementFromPoint(x!, y!);
+    if (hit && listed.some(row => row === hit || row.contains(hit))) continue;
+    return { x: x!, y: y! };
+  }
+  return null;
+};
+/** How many rows of the list the browser currently reports as hovered. */
+const HOVERED_ROWS = (rows: string) => Array.from(document.querySelectorAll(rows)).filter(row => row.matches(":hover")).length;
 const BLUR = (_: null) => { (document.activeElement as HTMLElement | null)?.blur?.(); };
 const HOVER_CAPABLE = (_: null) => matchMedia("(hover: hover)").matches;
 
@@ -221,12 +238,22 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
   }
   return result;
 
+  /** Move to a neutral point and blur; a reason when no row-free point exists or a row still reports :hover. */
+  async function park(): Promise<string | null> {
+    const point = await page.evaluate(NEUTRAL_POINT, spec.rows);
+    if (!point) return "no point outside the rows to park the pointer";
+    await page.mouse.move(point.x, point.y, { steps: 2 });
+    await page.evaluate(BLUR, null);
+    const hovered = await page.evaluate(HOVERED_ROWS, spec.rows);
+    return hovered > 0 ? `${hovered} row(s) still hovered with the pointer parked` : null;
+  }
+
   async function measure(index: number, mode: "hover" | "focus", entry: HoverRowResult): Promise<void> {
     const row = { index, preferred: entry.preferred };
     await page.locator(`[data-audit-hover-row="${row.index}"]`).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
-    // Park the pointer away from the list (setup clicks leave it over a control), then take rest.
-    await page.mouse.move(1, 1);
-    await page.evaluate(BLUR, null);
+    // Park the pointer outside every row of the list (setup clicks leave it over a control), then take rest.
+    const parked = await park();
+    if (parked) { Object.assign(entry, { outcome: "error", reason: `rest: ${parked}` }); return; }
     const rest = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "rest", tolerance }) as ProbeError | ProbeRest;
     if (failed(rest)) { Object.assign(entry, { outcome: "error", reason: rest.error }); return; }
     if (rest.drift > 0) { Object.assign(entry, { outcome: "unstable", reason: `${rest.drift} box(es) moved at rest` }); return; }
@@ -249,8 +276,8 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     if (early.shifted + late.shifted > 0) entry.outcome = "shifted";
     if (preferredShot) { await shot!(`hover-${spec.name}-${mode}`); shotTaken.add(mode); }
     // Leaving must restore rest exactly as well: a failed or moved return is a failure too.
-    await page.mouse.move(1, 1);
-    await page.evaluate(BLUR, null);
+    const left = await park();
+    if (left) { Object.assign(entry, { outcome: "error", reason: `return to rest: ${left}` }); return; }
     const restored = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "late", tolerance }) as ProbeError | ProbeCompared;
     if (failed(restored)) { Object.assign(entry, { outcome: "error", reason: `return to rest: ${restored.error}`, restoredShifts: -1 }); return; }
     Object.assign(entry, { restored, restoredShifts: restored.shifted });

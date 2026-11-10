@@ -318,6 +318,12 @@ const ROWS: Row[] = [
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.reason ?? "", /required rows not measured/u);
   } },
+  { name: "rows that cover the whole viewport leave no neutral rest: an error, never a pass",
+    html: page(`<div id="feed">${[0, 1].map(i => `<div class="msg" data-i="${i}" style="height:50vh">Row ${i}</div>`).join("")}</div>`),
+    hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /no point outside the rows/u, show(h));
+  } },
   { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
     html: feed(".left .body{padding-left:12px}", false,
       "<script>for (const m of document.querySelectorAll('.msg')) m.addEventListener('mouseleave', () => m.classList.add('left'));</script>"),
