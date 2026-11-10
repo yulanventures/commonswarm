@@ -149,3 +149,72 @@ test("the precheck settles who, confirmation and shape with no database facts at
     assert.equal(seatAdminGrantPrecheck(command, who, NOW), reason, name);
   }
 });
+
+/* ---- 2b: an agent uses its grant ---- */
+import {
+  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, selectCoveringGrant, seatAdminPrincipalTargetRefusal, type SeatAdminGrantFacts,
+} from "../src/protocol/seat-admin.js";
+import { decideWorkspace, reduceWorkspace, type DecideWorkspaceCtx } from "../src/protocol/index.js";
+
+const G = (patch: Partial<SeatAdminGrantFacts>): SeatAdminGrantFacts => ({ grant_id: "g-ws", owner_user_id: OWNER, level: "workspace",
+  workspace_ids: [WS], organization_id: null, capability_names: [...SEAT_ADMIN_ROLE_BUNDLES["role:workspace_admin"].commands],
+  expires_at: null, state: "active", ...patch });
+const cover = (kind: string, patch: { org?: string | null; orgLive?: boolean; now?: number } = {}) => ({ kind, workspace_id: WS,
+  workspace_org_id: patch.org === undefined ? ORG : patch.org, org_owner_live: () => patch.orgLive ?? true, now: patch.now ?? NOW });
+
+test("one covering grant authorizes, in a fixed order; powers never combine across grants", () => {
+  const ws = G({}), org = G({ grant_id: "g-org", level: "organization", workspace_ids: [], organization_id: ORG,
+    capability_names: [...SEAT_ADMIN_ROLE_BUNDLES["role:organization_admin"].commands] });
+  const scoped = G({ grant_id: "g-sc", level: "scoped", capability_names: seatAdminScopedCommands(["admin:read", "workspaces:rename"]) });
+  const cases: Array<[string, SeatAdminGrantFacts[], ReturnType<typeof cover>, string]> = [
+    ["workspace grant first", [scoped, org, ws], cover("set_workspace_lead"), "g-ws"],
+    ["organization when no workspace grant", [scoped, org], cover("add_agent_to_workspace"), "g-org"],
+    ["scoped rename", [scoped], cover("rename_workspace"), "g-sc"],
+    ["expired grants do not count", [G({ expires_at: NOW })], cover("rename_workspace"), "seat_admin_inactive"],
+    ["ended grants do not count", [G({ state: "downgraded" })], cover("rename_workspace"), "seat_admin_inactive"],
+    ["no grant", [], cover("rename_workspace"), "seat_admin_inactive"],
+    ["another workspace", [G({ workspace_ids: [WS2] })], cover("rename_workspace"), "seat_admin_workspace_not_covered"],
+    ["organization moved away", [org], cover("rename_workspace", { org: WS2 }), "seat_admin_workspace_not_covered"],
+    ["organization owner lost", [org], cover("rename_workspace", { orgLive: false }), "seat_admin_workspace_not_covered"],
+    // A scoped grant covering the workspace but not the command does not borrow the lead power from elsewhere.
+    ["scoped lacks the command", [scoped], cover("set_workspace_lead"), "seat_admin_scope_missing"],
+  ];
+  for (const [name, grants, facts, expected] of cases) {
+    const d = selectCoveringGrant(grants, facts);
+    assert.equal(d.ok ? d.grant.grant_id : d.reason, expected, name);
+  }
+});
+
+test("agent targets: never itself, never another person's agent, never an agent with admin access", () => {
+  const t = (patch: Partial<{ principal_id: string; owner_user_id: string; holds_active_seat_admin_grant: boolean }> | null) =>
+    seatAdminPrincipalTargetRefusal({ acting_principal_id: AGENT, grantor_user_id: OWNER,
+      target: patch === null ? null : { principal_id: "target", owner_user_id: OWNER, holds_active_seat_admin_grant: false, ...patch } });
+  assert.equal(t({}), null);
+  assert.equal(t({ principal_id: AGENT }), "seat_admin_target_protected");
+  assert.equal(t({ owner_user_id: OTHER }), "seat_admin_target_protected");
+  assert.equal(t({ holds_active_seat_admin_grant: true }), "seat_admin_target_protected");
+  assert.equal(t(null), "forbidden");
+  assert.deepEqual([...SEAT_ADMIN_EXECUTED_KINDS].filter((k) => !SEAT_ADMIN_AGENT_KINDS.includes(k)), [], "executed is a subset of admitted");
+  assert.ok(SEAT_ADMIN_AGENT_KINDS.every((k) => HUMAN_ONLY_COMMANDS.has(k as never)), "all six stay human-only without a grant");
+});
+
+test("the reducer admits only rename for a seat admin agent, at an Admin's level, with the agent as actor", () => {
+  const state = reduceWorkspace(null, { workspace_id: WS, stream_id: "s", command_id: "c", seq: 1, event_id: "e", type: "WorkspaceCreated",
+    schema_version: 1, actor_user: OWNER, actor_agent_principal: null, actor_run: null, occurred_at_server: 1,
+    payload: { workspace_id: WS, name: "Home", created_by: OWNER, created_at: 1 } } as never);
+  let seq = 1;
+  const ctx = (seatAdmin: boolean): DecideWorkspaceCtx => ({ now: 2, actor: { user: OWNER, agent_principal: AGENT, run: "run" },
+    credential_kind: "agent", presenting_token_id: "token", command_id: "c2", workspace_id: WS, stream_id: "s",
+    operatorAllowed: () => false, role: () => "owner", inviteeAlreadyMember: () => false, identityVerified: () => false,
+    humanRights: () => [], landingAuthorityChangeResolved: () => true, nextSeq: () => ++seq, nextEventId: () => "e2",
+    ...(seatAdmin ? { seat_admin: { grant_id: "g", grantor_user_id: OWNER } } : {}) });
+  const rename = { kind: "rename_workspace", name: "Renamed" } as const;
+  assert.equal(decideWorkspace(state, rename as never, ctx(false)).ok, false, "without the grant context: human only");
+  const done = decideWorkspace(state, rename as never, ctx(true));
+  assert.equal(done.ok, true);
+  assert.equal(done.events[0]?.actor_agent_principal, AGENT);
+  for (const kind of ["archive_workspace", "remove_member", "change_role", "invite_member"]) {
+    const d = decideWorkspace(state, { kind, user_id: OTHER, role: "member" } as never, ctx(true));
+    assert.equal(d.ok, false, `${kind} is never admitted to the reducer for an agent`);
+  }
+});

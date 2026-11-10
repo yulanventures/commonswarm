@@ -107,8 +107,9 @@ export interface AdminAccountEvent {
     type: AdminEventType;
     schema_version: 1;
     actor_user: string | null;
-    actor_agent_principal: null;
-    actor_run: null;
+    /** A seat admin agent acting under its grant (2b); null for a person or an admin credential. */
+    actor_agent_principal: string | null;
+    actor_run: string | null;
     admin_identity_id: string | null;
     grant_id: string | null;
     grant_manifest_digest: string | null;

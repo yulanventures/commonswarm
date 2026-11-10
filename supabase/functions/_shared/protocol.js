@@ -406,6 +406,7 @@ var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
 var RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1e3;
 var RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
 var RENEWAL_IDLE_PAUSE_DAYS = 14;
+var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace"]);
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
   "set_workspace_lead",
@@ -616,7 +617,8 @@ function decideWorkspace(state, cmd, ctx) {
   if (ctx.credential_kind === "hosted_seat" && cmd.kind !== "submit_feedback") {
     return authz2("credential_kind_forbidden", "hosted seat credential cannot execute workspace management commands");
   }
-  if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== "human") {
+  const seatAdminAction = ctx.credential_kind === "agent" && !!ctx.seat_admin && SEAT_ADMIN_REDUCER_KINDS.has(cmd.kind);
+  if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== "human" && !seatAdminAction) {
     return authz2("credential_kind_forbidden", "command requires an interactive human credential");
   }
   if (cmd.kind === "create_workspace") {
@@ -734,7 +736,7 @@ function decideWorkspace(state, cmd, ctx) {
       })
     ]);
   }
-  const actorRole = ctx.role(user_id);
+  const actorRole = seatAdminAction ? "admin" : ctx.role(user_id);
   if (actorRole === null && cmd.kind !== "renew_agent_token") {
     return authz2("bad_state", "caller is not a current workspace member");
   }
@@ -6059,6 +6061,41 @@ function decideSeatAdminEnd(f) {
   if (!f.grant || f.grant.owner_user_id !== f.actor.user_id && !f.actor_owns_covered_target) return { ok: false, reason: "not_found" };
   return { ok: true, already_ended: f.grant.state !== "active" };
 }
+var SEAT_ADMIN_AGENT_KINDS = Object.freeze([
+  "rename_workspace",
+  "set_workspace_lead",
+  "add_agent_to_workspace",
+  "remove_agent_from_workspace",
+  "remove_member",
+  "change_role"
+]);
+var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
+  "rename_workspace",
+  "set_workspace_lead",
+  "add_agent_to_workspace",
+  "remove_agent_from_workspace"
+]);
+var LEVEL_ORDER = { workspace: 0, organization: 1, scoped: 2 };
+function selectCoveringGrant(grants, f) {
+  const live = grants.filter((g) => g.state === "active" && (g.expires_at === null || g.expires_at > f.now)).sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || a.grant_id.localeCompare(b.grant_id));
+  if (!live.length) return { ok: false, reason: "seat_admin_inactive" };
+  const covering = live.filter((g) => g.level === "organization" ? g.organization_id !== null && g.organization_id === f.workspace_org_id && f.org_owner_live(g.organization_id) : g.workspace_ids.includes(f.workspace_id));
+  if (!covering.length) return { ok: false, reason: "seat_admin_workspace_not_covered" };
+  const grant = covering.find((g) => g.capability_names.includes(f.kind));
+  return grant ? { ok: true, grant } : { ok: false, reason: "seat_admin_scope_missing" };
+}
+function seatAdminPrincipalTargetRefusal(f) {
+  if (!f.target) return "forbidden";
+  if (f.target.principal_id === f.acting_principal_id || f.target.holds_active_seat_admin_grant) return "seat_admin_target_protected";
+  if (f.target.owner_user_id !== f.grantor_user_id) return "seat_admin_target_protected";
+  return null;
+}
+var SEAT_ADMIN_REFUSAL_COPY = Object.freeze({
+  seat_admin_inactive: "This agent's admin access has ended.",
+  seat_admin_scope_missing: "This agent's admin access doesn't include that command.",
+  seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.",
+  seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves."
+});
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -6142,12 +6179,16 @@ export {
   RENEWAL_IDLE_PAUSE_DAYS,
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
   SCHEMA_VERSION,
+  SEAT_ADMIN_AGENT_KINDS,
   SEAT_ADMIN_COMMAND_KINDS,
+  SEAT_ADMIN_EXECUTED_KINDS,
   SEAT_ADMIN_FRESH_SIGN_IN_SECONDS,
   SEAT_ADMIN_LEVELS,
   SEAT_ADMIN_MAX_DAYS,
   SEAT_ADMIN_MAX_WORKSPACES,
   SEAT_ADMIN_NO_END_DATE_LINE,
+  SEAT_ADMIN_REDUCER_KINDS,
+  SEAT_ADMIN_REFUSAL_COPY,
   SEAT_ADMIN_REGISTRY_VERSION,
   SEAT_ADMIN_ROLE_BUNDLES,
   SEAT_ADMIN_ROLE_COPY,
@@ -6279,7 +6320,9 @@ export {
   seatAdminGrantPrecheck,
   seatAdminManifest,
   seatAdminManifestJson,
+  seatAdminPrincipalTargetRefusal,
   seatAdminScopedCommands,
+  selectCoveringGrant,
   tidyWorkspaceSkills,
   todoNoticeAbout,
   upcastEnvelope,

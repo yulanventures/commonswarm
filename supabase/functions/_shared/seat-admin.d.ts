@@ -148,3 +148,63 @@ export type EndDecision = {
 };
 /** End: human only, CSRF, no freshness requirement. The grantor, or a current owner of a covered target. Idempotent. */
 export declare function decideSeatAdminEnd(f: EndFacts): EndDecision;
+/** The workspace commands an agent may ask for under a grant (switch on). Everything else stays human-only. */
+export declare const SEAT_ADMIN_AGENT_KINDS: readonly ["rename_workspace", "set_workspace_lead", "add_agent_to_workspace", "remove_agent_from_workspace", "remove_member", "change_role"];
+export type SeatAdminAgentKind = (typeof SEAT_ADMIN_AGENT_KINDS)[number];
+/** Executed in 2b. remove_member waits for delegated attribution in its collateral writers; change_role has no
+ *  member/guest transition (there is no guest role), so both refuse under seat admin. */
+export declare const SEAT_ADMIN_EXECUTED_KINDS: readonly ["rename_workspace", "set_workspace_lead", "add_agent_to_workspace", "remove_agent_from_workspace"];
+export interface SeatAdminGrantFacts {
+    grant_id: string;
+    owner_user_id: string;
+    level: SeatAdminLevel;
+    workspace_ids: string[];
+    organization_id: string | null;
+    capability_names: string[];
+    /** Epoch ms, or null for no end date. */
+    expires_at: number | null;
+    state: string;
+}
+export interface CoverageFacts {
+    kind: string;
+    workspace_id: string;
+    /** The workspace's current organization, read under lock. */
+    workspace_org_id: string | null;
+    /** Organization grants: is the grantor a live owner of that organization (seat_admin_org_owner)? */
+    org_owner_live: (organization_id: string) => boolean;
+    now: number;
+}
+export type CoverageDecision = {
+    ok: true;
+    grant: SeatAdminGrantFacts;
+} | {
+    ok: false;
+    reason: string;
+};
+/**
+ * One grant authorizes the action: the first, in a fixed order (workspace, organization, scoped, then grant id), that
+ * is active, unexpired at `now`, covers the workspace and pins the command. Powers never combine across grants.
+ */
+export declare function selectCoveringGrant(grants: readonly SeatAdminGrantFacts[], f: CoverageFacts): CoverageDecision;
+export interface PrincipalTargetFacts {
+    acting_principal_id: string;
+    grantor_user_id: string;
+    /** null when the target does not exist or is retired. */
+    target: {
+        principal_id: string;
+        owner_user_id: string;
+        holds_active_seat_admin_grant: boolean;
+    } | null;
+}
+/**
+ * Agent targets (add/remove agent, workspace lead): never the acting agent, never an agent holding admin access,
+ * and only an agent the grantor owns. Read under the target principal's lock, the same serialization point as a grant.
+ */
+export declare function seatAdminPrincipalTargetRefusal(f: PrincipalTargetFacts): string | null;
+/** Fixed agent-facing copy for seat-admin refusals. */
+export declare const SEAT_ADMIN_REFUSAL_COPY: Readonly<{
+    readonly seat_admin_inactive: "This agent's admin access has ended.";
+    readonly seat_admin_scope_missing: "This agent's admin access doesn't include that command.";
+    readonly seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.";
+    readonly seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves.";
+}>;

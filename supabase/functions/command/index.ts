@@ -9,7 +9,8 @@ import {
   adminTransaction, adminDigest, recordAdminFailure,
   type AdminAuthentication, type AdminInput,
 } from "./admin-delegation.ts";
-import { seatAdminTransaction, type SeatAdminHuman } from "./seat-admin.ts";
+import { authorizeSeatAdminAction, recordSeatAdminAction, seatAdminAuditDetail, seatAdminTransaction, type SeatAdminAuthorized,
+  type SeatAdminHuman } from "./seat-admin.ts";
 import {
   REGISTRATION_SEAT_REVOKED,
   REGISTRATION_TOKEN_ALREADY_USED,
@@ -158,6 +159,7 @@ import {
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
   HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS, WORKSPACE_NAME_MAX,
+  SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminPrincipalTargetRefusal,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -626,6 +628,8 @@ interface WorkspaceDecideCtx {
     successor_user_id: string | null,
   ): boolean;
   renewalFacts?(predecessor_token_id: string): RenewalFacts;
+  /** Seat admin (2b): the selected grant, set only after it was re-decided under lock (mirrors the protocol type). */
+  seat_admin?: { grant_id: string; grantor_user_id: string } | null;
   nextSeq(): number;
   nextEventId(): string;
 }
@@ -911,6 +915,8 @@ const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN
 const interactiveRepliesEnabled = Deno.env.get("SWARM_INTERACTIVE_REPLIES") === "1";
 /** Seat admin: owners give their own agents admin powers on the seat they hold. Off when unset. */
 const seatAdminEnabled = Deno.env.get("SWARM_SEAT_ADMIN") === "1";
+const SEAT_ADMIN_AGENT_KIND_SET = new Set<string>(SEAT_ADMIN_AGENT_KINDS);
+const SEAT_ADMIN_EXECUTED_KIND_SET = new Set<string>(SEAT_ADMIN_EXECUTED_KINDS);
 
 /**
  * §9 P5 caps free-tier workspaces per *verified* identity so one attacker
@@ -5834,6 +5840,98 @@ async function changeAgentWorkspace(tx:Sql,body:RequestBody,auth:AuthContext,det
   await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
     VALUES('user',${auth.actor.user},${body.command_id},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response)})`;
   await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,detail});
+  return {status:200,body:{status:'accepted',...response}};
+}
+
+/**
+ * Seat admin (2b): an agent sets the workspace lead, or adds or removes an agent, under the one grant
+ * authorizeSeatAdminAction selected after the plan's locks. The grantor (the grant's owner, who owns this agent) is
+ * the authorizing user passed to the existing definers; the agent is the event and audit actor; the grantor's
+ * history records the grant. Targets: never the acting agent, never an agent holding admin access, only an agent
+ * the grantor owns, and only one the plan locked (FOR UPDATE, the same point #353's grant and end serialize on).
+ */
+async function seatAdminAgentCommand(tx:Sql,body:RequestBody,auth:AuthContext,authorized:SeatAdminAuthorized,plan:LocalAuthLockPlan,detail:string|null):Promise<HttpResult> {
+  const command=record(body.command),kind=String(command?.kind),add=kind==='add_agent_to_workspace';
+  const workspace=typeof body.workspace_id==='string' ? body.workspace_id : '';
+  const actor=auth.actor.agent_principal!;
+  const commandId=String(body.command_id);
+  const audited=(extra:string|null)=>seatAdminAuditDetail(authorized,extra);
+  // Agent refusals commit only after the business savepoint rolls back (LocalAuditedRefused): the audit row and the
+  // grantor's history are written then, never alongside a half-done action.
+  const refuse=async(status:number,error:string,target:string|null,digest:string|null):Promise<HttpResult>=>{
+    const message=(SEAT_ADMIN_REFUSAL_COPY as Record<string,string>)[error];
+    throw new LocalAuditedRefused({status,body:{error,...(message?{message}:{})}},
+      {auth,commandKind:kind,workspaceId:workspace||undefined,outcome:status===400?'validation':'authz',reason:error,detail:audited(detail)},
+      digest ? (outer:Sql)=>recordSeatAdminAction(outer,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,
+        kind,workspace_id:workspace,target_kind:kind==='set_workspace_lead'?'workspace_lead':'agent',target_id:target,outcome:'refused',
+        reason_code:error,request_digest:digest}) : null);
+  };
+  const lead=kind==='set_workspace_lead';
+  if(!command || !exactKeys(command,['kind','principal_id'])
+    || (lead ? command.principal_id!==null && (typeof command.principal_id!=='string' || !UUID_RE.test(command.principal_id))
+      : typeof command.principal_id!=='string' || !UUID_RE.test(command.principal_id))
+    || !UUID_RE.test(workspace) || record(body.stream)?.kind!=='workspace' || !exactKeys(record(body.stream)!,['kind'])
+    || typeof body.client_version!=='string') return await refuse(400,'invalid_request',null,null);
+  const [configuration]=await tx<{value:unknown}[]>`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const minimum=configuration?.value;
+  const version=typeof minimum==='string'?compareSemver(body.client_version,minimum):null;
+  if(version===null) return await refuse(400,'invalid_request',null,null);
+  if(version<0) return {status:426,body:{error:'upgrade_required',min_client_version:minimum}};
+  const principal=command.principal_id as string|null;
+  const hash=requestHash(auth.actor,command as never);
+  if(principal!==null) {
+    // Only a target the plan locked: anything else would need a lock out of the canonical order.
+    if(!plan.snapshot.bindings.some(b=>b.principal_id===principal)) return await refuse(403,'forbidden',principal,hash);
+    const [target]=await tx<{principal_id:string;owner_user_id:string;admin:boolean}[]>`SELECT p.principal_id,p.owner_user_id,
+        EXISTS(SELECT 1 FROM swarm.seat_admin_grants g WHERE g.principal_id=p.principal_id AND g.state='active'
+          AND (g.expires_at IS NULL OR g.expires_at>clock_timestamp())) AS admin
+      FROM swarm.agent_principals p WHERE p.principal_id=${principal}::uuid AND p.revoked_at IS NULL`;
+    const protectedTarget=seatAdminPrincipalTargetRefusal({acting_principal_id:actor,grantor_user_id:authorized.grantor_user_id,
+      target:target?{principal_id:target.principal_id,owner_user_id:target.owner_user_id,holds_active_seat_admin_grant:target.admin}:null});
+    if(protectedTarget) return await refuse(403,protectedTarget,principal,hash);
+  }
+  const [stream]=await tx<{stream_id:string;head_seq:number}[]>`SELECT stream_id,head_seq FROM swarm.streams
+    WHERE workspace_id=${workspace}::uuid AND kind='workspace' FOR UPDATE`;
+  if(!stream) return await refuse(403,'forbidden',principal,hash);
+  const principalKind=auth.credentialKind, principalKey=canonicalPrincipal(auth.actor);
+  const [prior]=await tx<{request_hash:string;workspace_id:string;stream_id:string;response:unknown}[]>`SELECT request_hash,workspace_id,stream_id,response
+    FROM swarm.idempotency_keys WHERE principal_kind=${principalKind} AND principal_id=${principalKey} AND command_id=${commandId}`;
+  if(prior) {
+    // The grant, coverage and target were all re-decided above, so a replay after an end or a downgrade never gets here.
+    if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==stream.stream_id) return {status:409,body:{error:'command_id_conflict'}};
+    if(!lead) {
+      const [current]=await tx<{live:boolean}[]>`SELECT revoked_at IS NULL AS live FROM swarm.agent_workspace_memberships WHERE principal_id=${principal}::uuid AND workspace_id=${workspace}::uuid`;
+      if ((current?.live ?? false)!==add) return await refuse(403,'forbidden',principal,hash);
+    }
+    await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'replayed',hash,detail:audited(detail)});
+    return replayResult(storedResponse(prior.response),kind);
+  }
+  const grantor=authorized.grantor_user_id;
+  let response:Record<string,unknown>;
+  if(lead) {
+    const [changed]=await tx<{ok:boolean}[]>`SELECT swarm.set_workspace_lead(${workspace}::uuid,${principal}::uuid,${grantor}::uuid) AS ok`;
+    if(!changed?.ok) return await refuse(403,'forbidden',principal,hash);
+    response={ok:true,workspace_id:workspace,lead_agent_principal_id:principal};
+  } else {
+    const [allowed]=await tx<{ok:boolean}[]>`SELECT swarm.local_agent_membership_allowed(${workspace}::uuid,${principal}::uuid,${grantor}::uuid,${add}) AS ok`;
+    if(!allowed?.ok) return await refuse(403,'forbidden',principal,hash);
+    const [changed]=await tx<{ok:boolean}[]>`SELECT swarm.change_local_agent_membership(${workspace}::uuid,${principal}::uuid,${grantor}::uuid,${add}) AS ok`;
+    if(!changed?.ok) return await refuse(403,'forbidden',principal,hash);
+    const [agent]=await tx<{owner_user_id:string;name:string;model:string|null;created_at:Date;transport:string;turn_only:boolean}[]>`SELECT owner_user_id,name,model,created_at,transport,turn_only FROM swarm.agent_principals WHERE principal_id=${principal}::uuid`;
+    if(!agent) return await refuse(403,'forbidden',principal,hash);
+    const eventId=crypto.randomUUID(),occurredAt=Date.now();
+    await appendEvents(tx,[{workspace_id:workspace,stream_id:stream.stream_id,seq:Number(stream.head_seq)+1,event_id:eventId,command_id:commandId,
+      type:add?'AgentAddedToWorkspace':'AgentRemovedFromWorkspace',schema_version:1,
+      actor_user:auth.actor.user,actor_agent_principal:actor,actor_run:auth.actor.run,occurred_at_server:occurredAt,
+      payload:add?{principal_id:principal,owner_user_id:agent.owner_user_id,name:agent.name,model:agent.model,created_at:new Date(agent.created_at).getTime(),transport:agent.transport,turn_only:agent.turn_only}:{principal_id:principal,revoked_at:occurredAt}}]);
+    await tx`UPDATE swarm.streams SET head_seq=head_seq+1 WHERE stream_id=${stream.stream_id}::uuid`;
+    response={ok:true,event_ids:[eventId],principal_id:principal,workspace_id:workspace};
+  }
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES(${principalKind},${principalKey},${commandId},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response as never)})`;
+  await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,detail:audited(detail)});
+  await recordSeatAdminAction(tx,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace,
+    target_kind:lead?'workspace_lead':'agent',target_id:principal,outcome:'accepted',reason_code:null,request_digest:hash});
   return {status:200,body:{status:'accepted',...response}};
 }
 
@@ -12782,7 +12880,11 @@ class LocalBusinessRefused<T> extends Error {
 /** Authenticated validation or scope refusal survives only after its business savepoint
  * (including first-use and predecessor handover) has rolled back. */
 class LocalAuditedRefused extends Error {
-  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local audited refusal'); }
+  /** `after` writes what must survive with the audit row (a seat admin refusal's grantor history), on the outer
+   * transaction, whose plan locks are still held. */
+  constructor(readonly result: HttpResult, readonly audit: Audit, readonly after: ((tx: Sql) => Promise<void>) | null = null) {
+    super('Local audited refusal');
+  }
 }
 class LocalCommandRefused extends Error {
   constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
@@ -12839,8 +12941,11 @@ async function handleTransaction(
       localWorkspace=hint?.workspace_id;
     }
     const rawLocal = record(body.command);
+    // Seat admin (switch on): the six workspace commands an agent may ask for under a grant. Switch off, or any other
+    // human-only kind: refused exactly as before, before any grant is looked up.
+    const seatAdminAgent = seatAdminEnabled && agentTokenHash !== null && SEAT_ADMIN_AGENT_KIND_SET.has(kind);
     if (agentTokenHash && HUMAN_ONLY_COMMANDS.has(kind as never)) {
-      if (kind!=='change_role') return {status:403,body:{error:'forbidden'}};
+      if (kind!=='change_role' && !seatAdminAgent) return {status:403,body:{error:'forbidden'}};
       // Transport discovery grants no authority. Only a known local bearer may
       // reach actor-only planning and verified authentication for the audit.
       const [localAgent]=await tx`SELECT t.token_id FROM swarm.agent_tokens t
@@ -12895,7 +13000,9 @@ async function handleTransaction(
     // change_role is always agent-forbidden, including when named in scopes.
     // Authenticate and audit the refusal without locking its submitted target.
     const actorOnlyRefusal = humanBusinessRefusal || agentTokenRevocationRefusal
-      || agentTokenHash !== null && kind==='change_role';
+      || agentTokenHash !== null && kind==='change_role'
+      // Seat admin kinds not executed in 2b refuse after authentication without locking their targets.
+      || seatAdminAgent && !SEAT_ADMIN_EXECUTED_KIND_SET.has(kind);
     if (kind===RESUME_RENEWAL_GRANT_KIND && (!rawLocal || !exactKeys(rawLocal,['kind','renewal_grant_id'])
       || typeof rawLocal.renewal_grant_id!=='string' || !UUID_RE.test(rawLocal.renewal_grant_id)))
       return {status:400,body:{error:'invalid_request'}};
@@ -13010,13 +13117,16 @@ async function handleTransaction(
         ...(agentTokenHash ? {hash:agentTokenHash}:{}), memberMutation:['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','enable_agent_management','disable_agent_management'].includes(kind), connectionOnly:kind===RENEW_AGENT_TOKEN_KIND, workspace:localWorkspace,actor:verifiedHuman?.userId,
         household,householdQueue:rawLocal?.tool==='todo_queue',...(todoId ? {todo:todoId}:{}),
         streamIds:[CLAIM_AGENT_INBOX_KIND,ACK_AGENT_DELIVERY_KIND,TOUCH_PRESENCE_KIND].includes(kind) ? [] : localStreams.map(r=>r.stream_id),
-        workspaceMode: household || revocation || localExpiry || verifiedHuman
+        workspaceMode: household || revocation || localExpiry || verifiedHuman || seatAdminAgent
           || (WORKSPACE_COMMAND_KINDS as readonly string[]).includes(kind) && kind!==RENEW_AGENT_TOKEN_KIND ? 'update':'share',
         ...(target && !revocation ? {target}:tokenTargets.length ? {target:{principals:[],tokens:tokenTargets}}:{}),
         ...(revocation ? {revocation}:{}),
         memberTargets:removeUser ? [removeUser] : !actorOnlyRefusal && kind==='change_role' && typeof rawLocal?.user_id==='string' && UUID_RE.test(rawLocal.user_id) ? [rawLocal.user_id]:[],
+        // Seat admin: the grantor's admin account and the agent's grants lock right after users, and every principal
+        // (the actor and any target) FOR UPDATE: the serialization point #353's grant and end use.
+        ...(seatAdminAgent ? {seatAdmin:true}:{}),
         principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
-          : kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
+          : seatAdminAgent || kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
         sessionMode:agentTokenHash!==null || ['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
         hostedMode:revocation || ['add_agent_to_workspace','remove_agent_from_workspace'].includes(kind) ? 'update':'share',
         ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
@@ -13164,6 +13274,35 @@ async function handleTransaction(
       return await registerLoginDevice(tx, body, auth, ignoredIdentity);
     }
 
+    // Seat admin (switch on, agent credential): one covering grant, re-decided under the plan's locks before any
+    // replay or dispatch. A refusal is audited with the grant when one was selected.
+    let seatAdminContext: SeatAdminAuthorized | null = null;
+    if (seatAdminAgent) {
+      const agent = auth.agent, actingPrincipal = auth.actor.agent_principal;
+      if (auth.credentialKind !== "agent" || !agent || !actingPrincipal || !localWorkspace || !localState.localPlan) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
+        kind, workspace_id: localWorkspace });
+      const seatRefuse = (reason: string, value: SeatAdminAuthorized | null): never => {
+        throw new LocalAuditedRefused({ status: 403, body: { error: reason, message: (SEAT_ADMIN_REFUSAL_COPY as Record<string, string>)[reason] } },
+          { auth, commandKind: kind, workspaceId: localWorkspace, outcome: "authz", reason,
+            detail: value ? seatAdminAuditDetail(value, ignoredIdentity) : ignoredIdentity },
+          value ? (outer: Sql) => recordSeatAdminAction(outer, { authorized: value, agent_principal_id: actingPrincipal, agent_run_id: auth.actor.run,
+            command_id: commandId, kind, workspace_id: localWorkspace, target_kind: "workspace", target_id: null, outcome: "refused",
+            reason_code: reason, request_digest: requestHash(auth.actor, (rawLocal ?? {}) as never) }) : null);
+      };
+      if (!authorized.ok) return seatRefuse(authorized.reason, null);
+      // remove_member waits for delegated attribution in its collateral writers; change_role has no member/guest
+      // transition (there is no guest role). Both refuse before touching a target.
+      if (!SEAT_ADMIN_EXECUTED_KIND_SET.has(kind)) {
+        return seatRefuse(kind === "change_role" ? "seat_admin_target_protected" : "seat_admin_scope_missing", authorized.value);
+      }
+      if (kind === "set_workspace_lead" || kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace") {
+        return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
+      }
+      seatAdminContext = authorized.value; // rename_workspace: the workspace reducer, at an Admin's level
+    }
     if (kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace")
       return await changeAgentWorkspace(tx,body,auth,ignoredIdentity);
     if (kind === "set_workspace_lead") return await setWorkspaceLead(tx,body,auth,ignoredIdentity);
@@ -13595,6 +13734,8 @@ async function handleTransaction(
     }
     if (
       auth.agent !== null &&
+      // A seat admin action's authority is the grant re-decided under lock above, not the token's scopes.
+      seatAdminContext === null &&
       !isRenewal &&
       !isAgentTokenRevoke &&
       !isModelDeclare &&
@@ -15002,6 +15143,11 @@ async function handleTransaction(
         now,
         renewalRecovery,
       );
+      // Seat admin rename: the reducer admits it for this agent at an Admin's level, under the selected grant.
+      if (seatAdminContext !== null) {
+        prepared = { ...prepared, ctx: { ...prepared.ctx, seat_admin: { grant_id: seatAdminContext.grant.grant_id,
+          grantor_user_id: seatAdminContext.grantor_user_id } } };
+      }
     } else {
       const taskCommand = command as Command;
       const taskRows = await tx<Record<string, unknown>[]>`
@@ -15396,6 +15542,16 @@ async function handleTransaction(
     await afterStep(10);
 
     if (!outcome.decision.ok && outcome.decision.class === "authz") {
+      if (seatAdminContext) {
+        // Committed only after the business savepoint rolls back, with the grantor's history.
+        const value = seatAdminContext, reason = outcome.decision.reason;
+        throw new LocalAuditedRefused({ status: 403, body: { error: "forbidden" } }, { auth, commandKind: kind, workspaceId: route.workspaceId,
+          streamId: route.streamId, outcome: "authz", reason, hash,
+          detail: seatAdminAuditDetail(value, [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; ")) },
+          (outer: Sql) => recordSeatAdminAction(outer, { authorized: value, agent_principal_id: auth.actor.agent_principal!, agent_run_id: auth.actor.run,
+            command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace", target_id: route.workspaceId,
+            outcome: "refused", reason_code: reason, request_digest: hash }));
+      }
       await insertAudit(tx, {
         auth,
         commandKind: kind,
@@ -15507,12 +15663,19 @@ async function handleTransaction(
       streamId: route.streamId,
       outcome: outcome.decision.ok ? "accepted" : "domain",
       reason: outcome.decision.ok ? null : outcome.decision.reason,
-      detail: [
-        ignoredIdentity,
-        outcome.decision.ok ? null : outcome.decision.detail,
-      ].filter(Boolean).join("; "),
+      detail: seatAdminContext
+        ? seatAdminAuditDetail(seatAdminContext, [ignoredIdentity, outcome.decision.ok ? null : outcome.decision.detail].filter(Boolean).join("; "))
+        : [
+          ignoredIdentity,
+          outcome.decision.ok ? null : outcome.decision.detail,
+        ].filter(Boolean).join("; "),
       hash,
     });
+    // The grantor's history, in this same transaction as the action and its ledger row.
+    if (seatAdminContext) await recordSeatAdminAction(tx, { authorized: seatAdminContext, agent_principal_id: auth.actor.agent_principal!,
+      agent_run_id: auth.actor.run, command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace",
+      target_id: route.workspaceId, outcome: outcome.decision.ok ? "accepted" : "refused",
+      reason_code: outcome.decision.ok ? null : outcome.decision.reason, request_digest: hash });
 
     // §8 spend proxies, charged on the accepted path only. A command the
     // reducer refused created no cost, and metering refusals would let a caller
@@ -15591,6 +15754,7 @@ async function handleTransaction(
       // also runs before this outer transaction can retain its one audit row.
       if (!await recheckLocalCredential(tx, agentTokenHash, localState.localPlan)) throw new LocalCredentialDenied(true);
       await insertAudit(tx, error.audit);
+      if (error.after) await error.after(tx);
       return decided(error.result);
     }
     })();

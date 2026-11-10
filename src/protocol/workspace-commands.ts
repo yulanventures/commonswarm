@@ -341,6 +341,12 @@ export interface DecideWorkspaceCtx {
    * that have not loaded them; removal then emits no invitation events.
    */
   pendingInvitationIds?(user_id: string): readonly string[];
+  /**
+   * Seat admin (switch on): the agent acts under one grant its owner confirmed. Set by the edge only after the
+   * grant, the grantor's live ownership and the agent's membership were rechecked under lock. It admits exactly
+   * SEAT_ADMIN_REDUCER_KINDS for an agent credential, at an Admin's level, never the grantor's own role.
+   */
+  seat_admin?: { grant_id: string; grantor_user_id: string } | null;
 
   nextSeq(): number;
   nextEventId(): string;
@@ -413,6 +419,9 @@ export type WorkspaceDecision = WorkspaceDecisionAccepted | WorkspaceDecisionRej
  * agent may not issue is still listed here — adding renewal to the list, or
  * removing anything else from it, both break §2.3.
  */
+/** Workspace-reducer commands a seat admin agent executes in 2b (see SEAT_ADMIN_EXECUTED_KINDS). */
+export const SEAT_ADMIN_REDUCER_KINDS = new Set<string>(['rename_workspace']);
+
 export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead'>([
   'add_agent_to_workspace',
   'set_workspace_lead',
@@ -688,7 +697,8 @@ export function decideWorkspace(
     return authz('credential_kind_forbidden', 'hosted seat credential cannot execute workspace management commands');
   }
 
-  if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== 'human') {
+  const seatAdminAction = ctx.credential_kind === 'agent' && !!ctx.seat_admin && SEAT_ADMIN_REDUCER_KINDS.has(cmd.kind);
+  if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== 'human' && !seatAdminAction) {
     return authz('credential_kind_forbidden', 'command requires an interactive human credential');
   }
 
@@ -828,7 +838,8 @@ export function decideWorkspace(
     ]);
   }
 
-  const actorRole = ctx.role(user_id);
+  // A seat admin agent acts at an Admin's level, never with its grantor's (Owner) role.
+  const actorRole = seatAdminAction ? 'admin' : ctx.role(user_id);
   if (actorRole === null && cmd.kind !== 'renew_agent_token') {
     return authz('bad_state', 'caller is not a current workspace member');
   }

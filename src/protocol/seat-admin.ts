@@ -242,3 +242,79 @@ export function decideSeatAdminEnd(f: EndFacts): EndDecision {
   if (!f.grant || (f.grant.owner_user_id !== f.actor.user_id && !f.actor_owns_covered_target)) return { ok: false, reason: 'not_found' };
   return { ok: true, already_ended: f.grant.state !== 'active' };
 }
+
+/* ---- 2b: an agent uses its grant for workspace commands ---- */
+
+/** The workspace commands an agent may ask for under a grant (switch on). Everything else stays human-only. */
+export const SEAT_ADMIN_AGENT_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
+  'remove_agent_from_workspace', 'remove_member', 'change_role'] as const);
+export type SeatAdminAgentKind = (typeof SEAT_ADMIN_AGENT_KINDS)[number];
+/** Executed in 2b. remove_member waits for delegated attribution in its collateral writers; change_role has no
+ *  member/guest transition (there is no guest role), so both refuse under seat admin. */
+export const SEAT_ADMIN_EXECUTED_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
+  'remove_agent_from_workspace'] as const);
+
+export interface SeatAdminGrantFacts {
+  grant_id: string;
+  owner_user_id: string;
+  level: SeatAdminLevel;
+  workspace_ids: string[];
+  organization_id: string | null;
+  capability_names: string[];
+  /** Epoch ms, or null for no end date. */
+  expires_at: number | null;
+  state: string;
+}
+export interface CoverageFacts {
+  kind: string;
+  workspace_id: string;
+  /** The workspace's current organization, read under lock. */
+  workspace_org_id: string | null;
+  /** Organization grants: is the grantor a live owner of that organization (seat_admin_org_owner)? */
+  org_owner_live: (organization_id: string) => boolean;
+  now: number;
+}
+export type CoverageDecision = { ok: true; grant: SeatAdminGrantFacts } | { ok: false; reason: string };
+
+const LEVEL_ORDER: Record<SeatAdminLevel, number> = { workspace: 0, organization: 1, scoped: 2 };
+
+/**
+ * One grant authorizes the action: the first, in a fixed order (workspace, organization, scoped, then grant id), that
+ * is active, unexpired at `now`, covers the workspace and pins the command. Powers never combine across grants.
+ */
+export function selectCoveringGrant(grants: readonly SeatAdminGrantFacts[], f: CoverageFacts): CoverageDecision {
+  const live = grants.filter(g => g.state === 'active' && (g.expires_at === null || g.expires_at > f.now))
+    .sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || a.grant_id.localeCompare(b.grant_id));
+  if (!live.length) return { ok: false, reason: 'seat_admin_inactive' };
+  const covering = live.filter(g => g.level === 'organization'
+    ? g.organization_id !== null && g.organization_id === f.workspace_org_id && f.org_owner_live(g.organization_id)
+    : g.workspace_ids.includes(f.workspace_id));
+  if (!covering.length) return { ok: false, reason: 'seat_admin_workspace_not_covered' };
+  const grant = covering.find(g => g.capability_names.includes(f.kind));
+  return grant ? { ok: true, grant } : { ok: false, reason: 'seat_admin_scope_missing' };
+}
+
+export interface PrincipalTargetFacts {
+  acting_principal_id: string;
+  grantor_user_id: string;
+  /** null when the target does not exist or is retired. */
+  target: { principal_id: string; owner_user_id: string; holds_active_seat_admin_grant: boolean } | null;
+}
+/**
+ * Agent targets (add/remove agent, workspace lead): never the acting agent, never an agent holding admin access,
+ * and only an agent the grantor owns. Read under the target principal's lock, the same serialization point as a grant.
+ */
+export function seatAdminPrincipalTargetRefusal(f: PrincipalTargetFacts): string | null {
+  if (!f.target) return 'forbidden';
+  if (f.target.principal_id === f.acting_principal_id || f.target.holds_active_seat_admin_grant) return 'seat_admin_target_protected';
+  if (f.target.owner_user_id !== f.grantor_user_id) return 'seat_admin_target_protected';
+  return null;
+}
+
+/** Fixed agent-facing copy for seat-admin refusals. */
+export const SEAT_ADMIN_REFUSAL_COPY = Object.freeze({
+  seat_admin_inactive: "This agent's admin access has ended.",
+  seat_admin_scope_missing: "This agent's admin access doesn't include that command.",
+  seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.",
+  seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves.",
+} as const);
