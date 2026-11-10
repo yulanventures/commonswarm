@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { BROWSER_ATTACHMENT_MAX_BYTES } from "./commonswarm.ts";
 import {
+  CHAT_IMAGE_PREVIEW_MAX_BYTES,
+  canPreviewChatAttachment,
   canPreviewChatImage,
   ChatImagePreviewCache,
   chatImagePreviewFailure,
@@ -13,6 +16,15 @@ test("chat previews allow only PNG, JPEG, GIF and WebP", () => {
   }
   for (const type of ["image/svg+xml", "image/heic", "text/html", "", "image/jpg"]) {
     assert.equal(canPreviewChatImage(type), false, type);
+  }
+});
+
+test("a chat picture needs a previewable type and a declared size within the attachment cap", () => {
+  assert.equal(CHAT_IMAGE_PREVIEW_MAX_BYTES, BROWSER_ATTACHMENT_MAX_BYTES);
+  assert.equal(canPreviewChatAttachment("image/png", 0), true);
+  assert.equal(canPreviewChatAttachment("image/webp", CHAT_IMAGE_PREVIEW_MAX_BYTES), true);
+  for (const [type, size] of [["image/png", CHAT_IMAGE_PREVIEW_MAX_BYTES + 1], ["image/png", -1], ["image/png", Number.NaN], ["image/svg+xml", 10]]) {
+    assert.equal(canPreviewChatAttachment(type, size), false, `${type} ${size}`);
   }
 });
 
@@ -67,8 +79,9 @@ test("chat attachment rendering cannot fetch blobs or opt into CORS", () => {
     'image.setAttribute("crossorigin", "anonymous");',
   ]) assert.equal(forbiddenPreviewTransport(fixture), true, fixture);
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
-  const start = dashboard.indexOf("const renderMessageAttachments =");
-  const end = dashboard.indexOf("\n    };", start);
+  // The shared loader (both the Kylon pictures and the older cards) through the end of the older renderer.
+  const start = dashboard.indexOf("const loadAttachmentPreview =");
+  const end = dashboard.indexOf("\n    };", dashboard.indexOf("const renderMessageAttachments =", start));
   assert.ok(start >= 0 && end > start, "the renderer must be present for this probe");
   assert.equal(forbiddenPreviewTransport(dashboard.slice(start, end)), false);
 });

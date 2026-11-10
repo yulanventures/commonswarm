@@ -5,6 +5,13 @@ const PREVIEW_CONTENT_TYPES = new Set([
 export const canPreviewChatImage = (contentType: string): boolean =>
   PREVIEW_CONTENT_TYPES.has(contentType);
 
+/** Matches BROWSER_ATTACHMENT_MAX_BYTES in commonswarm.ts: a larger declared size is never drawn as a picture. */
+export const CHAT_IMAGE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
+
+/** A chat attachment is shown as a picture only for a known image type within the attachment cap. */
+export const canPreviewChatAttachment = (contentType: string, sizeBytes: number): boolean =>
+  canPreviewChatImage(contentType) && Number.isFinite(sizeBytes) && sizeBytes >= 0 && sizeBytes <= CHAT_IMAGE_PREVIEW_MAX_BYTES;
+
 interface SignedPreviewUrl {
   url: string;
   /** Unix time in milliseconds. */
