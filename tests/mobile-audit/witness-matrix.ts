@@ -78,11 +78,12 @@ const legalSpecs: ActivationSpec[] = [
 ];
 /** A three-row feed; `extra` styles what hover or focus does. Row 1 is addressed, like the owner's message. */
 const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
-  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr;padding:4px 8px">
+  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr">
     <span class="to" data-target-kind="${i === 1 ? "agent" : "everyone"}">→ Lead</span>
     <p class="body" style="margin:0">${short ? "Short note." : "A message long enough to wrap onto a second line in this narrow fixture column."}</p>
     <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
-  </li>`).join("")}</ul>${after}`, `.to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+  </li>`).join("")}</ul>${after}`, // Row padding is a stylesheet rule, not inline, so a fixture's :hover rule can change it.
+  `.msg{padding:4px 8px} .to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");

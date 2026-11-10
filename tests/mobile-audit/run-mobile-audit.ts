@@ -517,6 +517,8 @@ async function main(): Promise<void> {
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
-test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 50 * 60_000 }, async () => {
+// 75 minutes: twelve viewport batches with hover witnesses take about four minutes each, then the desktop hover
+// pass and the picture check. The workflow job cap must stay above this.
+test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 75 * 60_000 }, async () => {
   await main();
 });
