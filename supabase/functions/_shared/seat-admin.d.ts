@@ -20,18 +20,7 @@ export type SeatAdminRole = keyof typeof SEAT_ADMIN_ROLE_BUNDLES;
 /** Scoped grants: v2's available routine commands per scope, plus workspaces:rename (v3 only). */
 export declare const SEAT_ADMIN_SCOPED_SCOPES: readonly string[];
 export declare function seatAdminScopedCommands(scopes: readonly string[]): string[];
-/** Fixed confirmation copy. Plain words; the site renders these lines as given. */
-export declare const SEAT_ADMIN_ROLE_COPY: Readonly<{
-    'role:workspace_admin': Readonly<{
-        included: readonly string[];
-        excluded: readonly string[];
-    }>;
-    'role:organization_admin': Readonly<{
-        included: readonly string[];
-        excluded: readonly string[];
-    }>;
-}>;
-export declare const SEAT_ADMIN_NO_END_DATE_LINE = "Admin access stays on until you remove it or retire this agent.";
+export { SEAT_ADMIN_NO_END_DATE_LINE, SEAT_ADMIN_ROLE_COPY } from './seat-admin-copy.d.ts';
 export interface GrantSeatAdminCommand {
     kind: 'grant_seat_admin';
     principal_id: string;

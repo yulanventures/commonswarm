@@ -5882,6 +5882,42 @@ function formatWorkspaceSkillView(skill, now) {
   };
 }
 
+// src/protocol/seat-admin-copy.ts
+var SEAT_ADMIN_ROLE_COPY = Object.freeze({
+  "role:workspace_admin": Object.freeze({
+    included: Object.freeze([
+      "Invite people as members and cancel invitations",
+      "Add, renew and stop agent seats, and set up agent connections",
+      "Rename this workspace and choose its lead agent",
+      "Add agents to this workspace and remove them",
+      "Remove members and guests, and switch people between member and guest",
+      "See this admin access and its history"
+    ]),
+    excluded: Object.freeze([
+      "Anything about owners or admins",
+      "Creating, archiving or moving workspaces",
+      "Giving anyone admin access",
+      "Billing, sign-in and passwords",
+      "Its own seat, or another admin agent"
+    ])
+  }),
+  "role:organization_admin": Object.freeze({
+    included: Object.freeze([
+      "Everything an agent workspace admin can do, in each of this organization's workspaces you own and it belongs to",
+      "Rename the organization"
+    ]),
+    excluded: Object.freeze([
+      "Organization members and roles",
+      "Anything about owners or admins",
+      "Creating, archiving or moving workspaces",
+      "Giving anyone admin access",
+      "Billing, sign-in and passwords",
+      "Its own seat, or another admin agent"
+    ])
+  })
+});
+var SEAT_ADMIN_NO_END_DATE_LINE = "Admin access stays on until you remove it or retire this agent.";
+
 // src/protocol/seat-admin.ts
 var SEAT_ADMIN_REGISTRY_VERSION = 3;
 var SEAT_ADMIN_MAX_DAYS = 90;
@@ -5935,40 +5971,6 @@ function seatAdminScopedCommands(scopes2) {
   if (scopes2.includes("workspaces:rename")) commands.push("rename_workspace");
   return [...new Set(commands)].sort();
 }
-var SEAT_ADMIN_ROLE_COPY = Object.freeze({
-  "role:workspace_admin": Object.freeze({
-    included: Object.freeze([
-      "Invite people as members and cancel invitations",
-      "Add, renew and stop agent seats, and set up agent connections",
-      "Rename this workspace and choose its lead agent",
-      "Add agents to this workspace and remove them",
-      "Remove members and guests, and switch people between member and guest",
-      "See this admin access and its history"
-    ]),
-    excluded: Object.freeze([
-      "Anything about owners or admins",
-      "Creating, archiving or moving workspaces",
-      "Giving anyone admin access",
-      "Billing, sign-in and passwords",
-      "Its own seat, or another admin agent"
-    ])
-  }),
-  "role:organization_admin": Object.freeze({
-    included: Object.freeze([
-      "Everything an agent workspace admin can do, in each of this organization's workspaces you own and it belongs to",
-      "Rename the organization"
-    ]),
-    excluded: Object.freeze([
-      "Organization members and roles",
-      "Anything about owners or admins",
-      "Creating, archiving or moving workspaces",
-      "Giving anyone admin access",
-      "Billing, sign-in and passwords",
-      "Its own seat, or another admin agent"
-    ])
-  })
-});
-var SEAT_ADMIN_NO_END_DATE_LINE = "Admin access stays on until you remove it or retire this agent.";
 var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 var isUuid = (v) => typeof v === "string" && UUID.test(v);
 var record = (v) => v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;

@@ -52,41 +52,7 @@ export function seatAdminScopedCommands(scopes: readonly string[]): string[] {
   return [...new Set(commands)].sort();
 }
 
-/** Fixed confirmation copy. Plain words; the site renders these lines as given. */
-export const SEAT_ADMIN_ROLE_COPY = Object.freeze({
-  'role:workspace_admin': Object.freeze({
-    included: Object.freeze([
-      'Invite people as members and cancel invitations',
-      'Add, renew and stop agent seats, and set up agent connections',
-      'Rename this workspace and choose its lead agent',
-      'Add agents to this workspace and remove them',
-      'Remove members and guests, and switch people between member and guest',
-      'See this admin access and its history',
-    ]),
-    excluded: Object.freeze([
-      'Anything about owners or admins',
-      'Creating, archiving or moving workspaces',
-      'Giving anyone admin access',
-      'Billing, sign-in and passwords',
-      'Its own seat, or another admin agent',
-    ]),
-  }),
-  'role:organization_admin': Object.freeze({
-    included: Object.freeze([
-      'Everything an agent workspace admin can do, in each of this organization\'s workspaces you own and it belongs to',
-      'Rename the organization',
-    ]),
-    excluded: Object.freeze([
-      'Organization members and roles',
-      'Anything about owners or admins',
-      'Creating, archiving or moving workspaces',
-      'Giving anyone admin access',
-      'Billing, sign-in and passwords',
-      'Its own seat, or another admin agent',
-    ]),
-  }),
-});
-export const SEAT_ADMIN_NO_END_DATE_LINE = 'Admin access stays on until you remove it or retire this agent.';
+export { SEAT_ADMIN_NO_END_DATE_LINE, SEAT_ADMIN_ROLE_COPY } from './seat-admin-copy.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID.test(v);
