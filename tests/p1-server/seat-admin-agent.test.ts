@@ -157,7 +157,7 @@ test("a workspace grant: rename, lead and agent membership run as the agent, att
     WHERE workspace_id = ${workspace}::uuid AND type = 'WorkspaceRenamed' ORDER BY seq DESC LIMIT 1`;
   assert.equal(event!.actor_agent_principal, agent, "the event's actor is the agent");
   const [audit] = await sql<{ actor_agent_principal: string; detail: string }[]>`SELECT actor_agent_principal, detail FROM swarm.audit_log
-    WHERE command_kind = 'rename_workspace' AND workspace_id = ${workspace}::uuid AND outcome = 'accepted' ORDER BY created_at DESC LIMIT 1`;
+    WHERE command_kind = 'rename_workspace' AND workspace_id = ${workspace}::uuid AND outcome = 'accepted' ORDER BY audit_id DESC LIMIT 1`;
   assert.equal(audit!.actor_agent_principal, agent);
   assert.match(audit!.detail, new RegExp(`seat_admin grant=${grantId} level=workspace authorizing_user=${owner.id}`));
 
@@ -197,6 +197,17 @@ test("targets: never itself, never another person's agent, never an agent with a
   const [{ live }] = await sql<{ live: boolean }[]>`SELECT revoked_at IS NULL AS live FROM swarm.memberships
     WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
   assert.equal(live, true, "the member is untouched");
+  // Refusals survive the business rollback: each is in the audit log and the grantor's history, under this grant.
+  const refusedHistory = (await agentHistory()).filter((h) => h.outcome === "refused" && h.seat_admin_grant_id === grantId);
+  assert.deepEqual(refusedHistory.map((h) => [h.action, h.reason_code]), [
+    ["set_workspace_lead", "seat_admin_target_protected"], ["remove_agent_from_workspace", "seat_admin_target_protected"],
+    ["remove_agent_from_workspace", "seat_admin_target_protected"], ["set_workspace_lead", "seat_admin_target_protected"],
+    ["remove_agent_from_workspace", "seat_admin_target_protected"],
+    ["remove_member", "seat_admin_scope_missing"], ["change_role", "seat_admin_target_protected"],
+  ]);
+  const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.audit_log WHERE workspace_id = ${workspace}::uuid
+    AND outcome = 'authz' AND actor_agent_principal = ${agent}::uuid AND detail LIKE ${`%seat_admin grant=${grantId}%`}`;
+  assert.equal(n, 7, "each refusal has its audit row naming the grant");
   await endGrant(grantId);
 });
 

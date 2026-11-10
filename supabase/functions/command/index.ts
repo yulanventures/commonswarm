@@ -5856,14 +5856,15 @@ async function seatAdminAgentCommand(tx:Sql,body:RequestBody,auth:AuthContext,au
   const actor=auth.actor.agent_principal!;
   const commandId=String(body.command_id);
   const audited=(extra:string|null)=>seatAdminAuditDetail(authorized,extra);
-  const history=async(outcome:'accepted'|'refused',reason:string|null,target:string|null,digest:string)=>recordSeatAdminAction(tx,{authorized,
-    agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace,
-    target_kind:kind==='set_workspace_lead'?'workspace_lead':'agent',target_id:target,outcome,reason_code:reason,request_digest:digest});
+  // Agent refusals commit only after the business savepoint rolls back (LocalAuditedRefused): the audit row and the
+  // grantor's history are written then, never alongside a half-done action.
   const refuse=async(status:number,error:string,target:string|null,digest:string|null):Promise<HttpResult>=>{
-    await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace||undefined,outcome:status===400?'validation':'authz',reason:error,detail:audited(detail)});
-    if(digest) await history('refused',error,target,digest);
     const message=(SEAT_ADMIN_REFUSAL_COPY as Record<string,string>)[error];
-    return {status,body:{error,...(message?{message}:{})}};
+    throw new LocalAuditedRefused({status,body:{error,...(message?{message}:{})}},
+      {auth,commandKind:kind,workspaceId:workspace||undefined,outcome:status===400?'validation':'authz',reason:error,detail:audited(detail)},
+      digest ? (outer:Sql)=>recordSeatAdminAction(outer,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,
+        kind,workspace_id:workspace,target_kind:kind==='set_workspace_lead'?'workspace_lead':'agent',target_id:target,outcome:'refused',
+        reason_code:error,request_digest:digest}) : null);
   };
   const lead=kind==='set_workspace_lead';
   if(!command || !exactKeys(command,['kind','principal_id'])
@@ -5929,7 +5930,8 @@ async function seatAdminAgentCommand(tx:Sql,body:RequestBody,auth:AuthContext,au
   await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
     VALUES(${principalKind},${principalKey},${commandId},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response as never)})`;
   await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,detail:audited(detail)});
-  await history('accepted',null,principal,hash);
+  await recordSeatAdminAction(tx,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace,
+    target_kind:lead?'workspace_lead':'agent',target_id:principal,outcome:'accepted',reason_code:null,request_digest:hash});
   return {status:200,body:{status:'accepted',...response}};
 }
 
@@ -12878,7 +12880,11 @@ class LocalBusinessRefused<T> extends Error {
 /** Authenticated validation or scope refusal survives only after its business savepoint
  * (including first-use and predecessor handover) has rolled back. */
 class LocalAuditedRefused extends Error {
-  constructor(readonly result: HttpResult, readonly audit: Audit) { super('Local audited refusal'); }
+  /** `after` writes what must survive with the audit row (a seat admin refusal's grantor history), on the outer
+   * transaction, whose plan locks are still held. */
+  constructor(readonly result: HttpResult, readonly audit: Audit, readonly after: ((tx: Sql) => Promise<void>) | null = null) {
+    super('Local audited refusal');
+  }
 }
 class LocalCommandRefused extends Error {
   constructor(readonly result: HttpResult) { super('Local credential operation refused'); }
@@ -13278,19 +13284,19 @@ async function handleTransaction(
       }
       const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
         kind, workspace_id: localWorkspace });
-      const seatRefuse = async (reason: string, value: SeatAdminAuthorized | null): Promise<HttpResult> => {
-        await insertAudit(tx, { auth, commandKind: kind, workspaceId: localWorkspace, outcome: "authz", reason,
-          detail: value ? seatAdminAuditDetail(value, ignoredIdentity) : ignoredIdentity });
-        if (value) await recordSeatAdminAction(tx, { authorized: value, agent_principal_id: actingPrincipal, agent_run_id: auth.actor.run,
-          command_id: commandId, kind, workspace_id: localWorkspace, target_kind: "workspace", target_id: null, outcome: "refused",
-          reason_code: reason, request_digest: requestHash(auth.actor, (rawLocal ?? {}) as never) });
-        return { status: 403, body: { error: reason, message: (SEAT_ADMIN_REFUSAL_COPY as Record<string, string>)[reason] } };
+      const seatRefuse = (reason: string, value: SeatAdminAuthorized | null): never => {
+        throw new LocalAuditedRefused({ status: 403, body: { error: reason, message: (SEAT_ADMIN_REFUSAL_COPY as Record<string, string>)[reason] } },
+          { auth, commandKind: kind, workspaceId: localWorkspace, outcome: "authz", reason,
+            detail: value ? seatAdminAuditDetail(value, ignoredIdentity) : ignoredIdentity },
+          value ? (outer: Sql) => recordSeatAdminAction(outer, { authorized: value, agent_principal_id: actingPrincipal, agent_run_id: auth.actor.run,
+            command_id: commandId, kind, workspace_id: localWorkspace, target_kind: "workspace", target_id: null, outcome: "refused",
+            reason_code: reason, request_digest: requestHash(auth.actor, (rawLocal ?? {}) as never) }) : null);
       };
-      if (!authorized.ok) return await seatRefuse(authorized.reason, null);
+      if (!authorized.ok) return seatRefuse(authorized.reason, null);
       // remove_member waits for delegated attribution in its collateral writers; change_role has no member/guest
       // transition (there is no guest role). Both refuse before touching a target.
       if (!SEAT_ADMIN_EXECUTED_KIND_SET.has(kind)) {
-        return await seatRefuse(kind === "change_role" ? "seat_admin_target_protected" : "seat_admin_scope_missing", authorized.value);
+        return seatRefuse(kind === "change_role" ? "seat_admin_target_protected" : "seat_admin_scope_missing", authorized.value);
       }
       if (kind === "set_workspace_lead" || kind === "add_agent_to_workspace" || kind === "remove_agent_from_workspace") {
         return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
@@ -15534,6 +15540,16 @@ async function handleTransaction(
     await afterStep(10);
 
     if (!outcome.decision.ok && outcome.decision.class === "authz") {
+      if (seatAdminContext) {
+        // Committed only after the business savepoint rolls back, with the grantor's history.
+        const value = seatAdminContext, reason = outcome.decision.reason;
+        throw new LocalAuditedRefused({ status: 403, body: { error: "forbidden" } }, { auth, commandKind: kind, workspaceId: route.workspaceId,
+          streamId: route.streamId, outcome: "authz", reason, hash,
+          detail: seatAdminAuditDetail(value, [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; ")) },
+          (outer: Sql) => recordSeatAdminAction(outer, { authorized: value, agent_principal_id: auth.actor.agent_principal!, agent_run_id: auth.actor.run,
+            command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace", target_id: route.workspaceId,
+            outcome: "refused", reason_code: reason, request_digest: hash }));
+      }
       await insertAudit(tx, {
         auth,
         commandKind: kind,
@@ -15541,13 +15557,9 @@ async function handleTransaction(
         streamId: route.streamId,
         outcome: "authz",
         reason: outcome.decision.reason,
-        detail: seatAdminContext ? seatAdminAuditDetail(seatAdminContext, [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; "))
-          : [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; "),
+        detail: [ignoredIdentity, outcome.decision.detail].filter(Boolean).join("; "),
         hash,
       });
-      if (seatAdminContext) await recordSeatAdminAction(tx, { authorized: seatAdminContext, agent_principal_id: auth.actor.agent_principal!,
-        agent_run_id: auth.actor.run, command_id: commandId, kind, workspace_id: route.workspaceId, target_kind: "workspace",
-        target_id: route.workspaceId, outcome: "refused", reason_code: outcome.decision.reason, request_digest: hash });
       return { status: 403, body: { error: "forbidden" } };
     }
 
@@ -15740,6 +15752,7 @@ async function handleTransaction(
       // also runs before this outer transaction can retain its one audit row.
       if (!await recheckLocalCredential(tx, agentTokenHash, localState.localPlan)) throw new LocalCredentialDenied(true);
       await insertAudit(tx, error.audit);
+      if (error.after) await error.after(tx);
       return decided(error.result);
     }
     })();
