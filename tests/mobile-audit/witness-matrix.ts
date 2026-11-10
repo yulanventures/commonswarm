@@ -78,11 +78,12 @@ const legalSpecs: ActivationSpec[] = [
 ];
 /** A three-row feed; `extra` styles what hover or focus does. Row 1 is addressed, like the owner's message. */
 const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
-  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr;padding:4px 8px">
+  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr">
     <span class="to" data-target-kind="${i === 1 ? "agent" : "everyone"}">→ Lead</span>
     <p class="body" style="margin:0">${short ? "Short note." : "A message long enough to wrap onto a second line in this narrow fixture column."}</p>
     <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
-  </li>`).join("")}</ul>${after}`, `.to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+  </li>`).join("")}</ul>${after}`, // Row padding is a stylesheet rule, not inline, so a fixture's :hover rule can change it.
+  `.msg{padding:4px 8px} .to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
@@ -318,6 +319,12 @@ const ROWS: Row[] = [
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.reason ?? "", /required rows not measured/u);
   } },
+  { name: "rows that cover the whole viewport leave no neutral rest: an error, never a pass",
+    html: page(`<div id="feed">${[0, 1].map(i => `<div class="msg" data-i="${i}" style="height:50vh">Row ${i}</div>`).join("")}</div>`),
+    hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /no point outside the rows/u, show(h));
+  } },
   { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
     html: feed(".left .body{padding-left:12px}", false,
       "<script>for (const m of document.querySelectorAll('.msg')) m.addEventListener('mouseleave', () => m.classList.add('left'));</script>"),
@@ -348,6 +355,9 @@ const ROWS: Row[] = [
   } },
 ];
 
+/** The matrix's result, so the long audit run can refuse to start after a failed row. */
+export const matrixResult = { done: false, failed: [] as string[] };
+
 browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 }, async (t) => {
   const playwrightModule = "playwright";
   const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
@@ -358,7 +368,11 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
     // tsx (esbuild keepNames) wraps nested functions in __name(); the page needs a no-op, as in the runner.
     await context.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
     for (const row of ROWS) {
-      await t.test(row.name, async () => {
+      await t.test(row.name, async () => { try { await runRow(row); } catch (error) { matrixResult.failed.push(row.name); throw error; } });
+    }
+    matrixResult.done = true;
+    async function runRow(row: Row) {
+      {
         const p = await context.newPage() as Page;
         try {
           if (row.served) {
@@ -380,7 +394,7 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           const hover = row.hover ? await runHoverWitness(p, row.hover) : undefined;
           row.check({ geometry, keyboard, activation, hover });
         } finally { await p.close(); }
-      });
+      }
     }
   } finally { await browser.close(); }
 });
