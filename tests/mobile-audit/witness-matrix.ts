@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
-import { CHECKS, GEOMETRY_WITNESS, runKeyboardWitness, type KeyboardSpec } from "./audit-checks.js";
+import { CHECKS, GEOMETRY_WITNESS, runKeyboardWitness, witnessSummary, type KeyboardSpec } from "./audit-checks.js";
 
 type Geometry = ReturnType<typeof GEOMETRY_WITNESS>;
 type Keyboard = Awaited<ReturnType<typeof runKeyboardWitness>>;
@@ -53,6 +53,11 @@ const overlapPage = (top: number) => page(`<div id="scroller" style="position:re
     <button id="x" style="position:absolute;left:10px;top:${top}px;width:100px">X</button>
     <button id="y" style="position:absolute;left:40px;top:${top + 10}px;width:100px">Y</button>
   </div></div>`);
+const menuPage = (blocker: "absolute" | "fixed") => page(`<div style="position:relative">
+  <button id="under" style="position:absolute;left:10px;top:10px">Under</button>
+  <div id="menu" role="menu" style="position:absolute;left:0;top:0;width:160px;height:120px;background:#eee"><button id="item" role="menuitem" style="margin:60px 0 0 60px">Item</button></div>
+  <button id="outside" style="position:absolute;left:250px;top:10px">Outside</button>
+  <div id="blocker" style="position:${blocker};left:240px;top:0;width:120px;height:80px"></div></div>`);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
 const ROWS: Row[] = [
@@ -76,14 +81,22 @@ const ROWS: Row[] = [
       assert.deepEqual(g.foregroundObscured, [{ selector: "button#b-ok", by: "div#blocker" }]);
     } },
   // Nonmodal overlay: coverage is expected only inside its painted area.
-  { name: "a menu covers inside its area; a blocked control outside it stays unexpected", html: page(`<div style="position:relative">
-      <button id="under" style="position:absolute;left:10px;top:10px">Under</button>
-      <div id="menu" role="menu" style="position:absolute;left:0;top:0;width:160px;height:120px;background:#eee"><button id="item" role="menuitem" style="margin:60px 0 0 60px">Item</button></div>
-      <button id="outside" style="position:absolute;left:250px;top:10px">Outside</button>
-      <div id="blocker" style="position:absolute;left:240px;top:0;width:120px;height:80px"></div></div>`), check: ({ geometry: g }) => {
-      assert.equal(g.overlay.front, "div#menu", show(g.overlay));
-      assert.deepEqual(selectors(g.coverage.byForeground), ["button#under"]);
-      assert.deepEqual(g.unexpectedObscured, [{ selector: "button#outside", by: "div#blocker" }]);
+  { name: "a menu covers inside its area; a blocked control outside it stays unexpected", html: menuPage("absolute"), check: ({ geometry: g }) => {
+    assert.equal(g.overlay.front, "div#menu", show(g.overlay));
+    assert.deepEqual(selectors(g.coverage.byForeground), ["button#under"]);
+    assert.deepEqual(g.unexpectedObscured, [{ selector: "button#outside", by: "div#blocker" }]);
+  } },
+  { name: "a FIXED blocker over a visible control outside the menu still stays unexpected", html: menuPage("fixed"), check: ({ geometry: g }) => {
+    assert.equal(g.overlay.front, "div#menu", show(g.overlay));
+    assert.deepEqual(selectors(g.unexpectedObscured), ["button#outside"], show(g.unexpectedObscured));
+    assert.equal(g.unexpectedObscured[0]?.by, "div#blocker");
+  } },
+  // Small targets: text beside a control is context, not an exemption.
+  { name: "a small block button beside paragraph text still counts as a front small target",
+    html: page(`<p>Choose <button id="open" style="display:block;width:80px;height:20px">Open</button></p>`), check: ({ geometry: g }) => {
+      const fact = g.tapTargetFacts.find(f => f.selector === "button#open");
+      assert.ok(fact?.inText, `fixture: parent text must sit beside the button; ${show(g.tapTargetFacts)}`);
+      assert.equal(witnessSummary([{ screenshot: "s.png", witness: g }]).withFrontSmallTargets, 1, show(fact));
     } },
   // Wrapped inline link: fragments are judged one by one.
   { name: "a wrapped link whose union centre misses still has every fragment reachable", html: page(wrapped), check: ({ geometry: g }) => {

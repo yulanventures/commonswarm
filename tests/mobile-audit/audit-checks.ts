@@ -109,7 +109,7 @@ export const CHECKS = () => {
   const root = document.documentElement.getAttribute("data-theme");
   const effectiveTheme = root === "light" || root === "dark" ? root : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   // The raw measurement's own elements and helpers, for the witnesses that run after the primary screenshot.
-  (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw = { describe, visible, reaches, centreInView, scrolledAway, interactive, measured, small, overlapPairs, modal: modal ?? null };
+  (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw = { describe, visible, reaches, interactive, measured, small, overlapPairs, modal: modal ?? null };
   return { overflow: { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, offenders }, tapTargets, offscreen, effective, obscured, overlaps, collapsed, effectiveTheme };
 };
 
@@ -120,8 +120,6 @@ export type AuditRaw = {
   describe: (el: Element) => string;
   visible: (el: Element) => boolean;
   reaches: (el: Element, x: number, y: number) => boolean;
-  centreInView: (r: DOMRect) => boolean;
-  scrolledAway: (m: { el: Element; rect: DOMRect }) => boolean;
   interactive: Element[];
   measured: Measured[];
   small: Measured[];
@@ -146,7 +144,7 @@ export type WitnessHelpers = {
 export const GEOMETRY_WITNESS = (declared: string[]) => {
   const raw = (globalThis as unknown as { __auditRaw?: AuditRaw }).__auditRaw;
   if (!raw) throw new Error("CHECKS must run before GEOMETRY_WITNESS");
-  const { describe, visible, reaches, centreInView, scrolledAway, interactive, measured, small, overlapPairs, modal } = raw;
+  const { describe, visible, reaches, interactive, measured, small, overlapPairs, modal } = raw;
   const width = window.innerWidth, height = window.innerHeight;
   const round = (n: number) => Math.round(n);
   const inView = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height;
@@ -229,13 +227,21 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   const exposed = overlays.filter(o => o.reached > 0);
   const front = exposed.filter(o => !exposed.some(p => p !== o && o.el.contains(p.el))).at(-1)?.el ?? null;
   const within = (root: Element | null, el: Element | null) => !!root && !!el && (root === el || root.contains(el));
-  const blocked = measured.filter(m => centreInView(m.rect) && !scrolledAway(m) && !reaches(m.el, ...centreOf(m.rect)))
-    .map(m => { const hit = document.elementFromPoint(...centreOf(m.rect)); return { m, hit, row: { selector: describe(m.el), by: hit ? describe(hit) : null } }; });
+  // A control counts when its centre is actually shown (viewport and every clipping parent's client
+  // area). Unlike the raw check, a fixed or sticky element over it is NOT excused: it is recorded
+  // as the covering element, flagged pinnedCover, because a tap there really goes to it.
+  const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
+  const centreShown = (m: Measured) => { const [x, y] = centreOf(m.rect); return inView(x, y) && pointShown(m.el, x, y); };
+  const blocked = measured.filter(m => centreShown(m) && !reaches(m.el, ...centreOf(m.rect)))
+    .map(m => {
+      const hit = document.elementFromPoint(...centreOf(m.rect));
+      return { m, hit, row: { selector: describe(m.el), by: hit ? describe(hit) : null, ...(pinned(hit) && !pinned(m.el) ? { pinnedCover: true } : {}) } };
+    });
   const foregroundObscured = blocked.filter(b => within(front, b.m.el)).map(b => b.row);
   const byForeground = blocked.filter(b => !within(front, b.m.el) && within(front, b.hit)).map(b => b.row);
   const byOtherOverlay = blocked.filter(b => !within(front, b.m.el) && !within(front, b.hit) && overlayEls.some(o => within(o, b.hit))).map(b => b.row);
   const unexpectedObscured = blocked.filter(b => !within(front, b.m.el) && !overlayEls.some(o => within(o, b.hit))).map(b => b.row);
-  const frontControls = front ? measured.filter(m => within(front, m.el) && centreInView(m.rect) && !scrolledAway(m)) : [];
+  const frontControls = front ? measured.filter(m => within(front, m.el) && centreShown(m)) : [];
   const overlay = {
     rawModal: modal ? describe(modal) : null,
     front: front ? describe(front) : null,
@@ -244,16 +250,23 @@ export const GEOMETRY_WITNESS = (declared: string[]) => {
   };
 
   // ---- Small targets, index for index with tapTargets ----
-  const tapTargetFacts = small.map(({ el, rect }) => ({
-    selector: describe(el),
-    layer: !front ? "page" : within(front, el) ? "front" : "behind",
-    ...foreground(el, rect),
-    display: getComputedStyle(el).display,
-    fragments: el.getClientRects().length,
-    inText: [...(el.parentElement?.childNodes ?? [])].some(n => n !== el && n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() !== ""),
-    opacity: opacityChain(el),
-    clippedBy: clippedBy(el),
-  }));
+  // Text beside a control is context, not an exemption: `inlineInText` marks only a control laid out
+  // inline within running text; a block-level control beside text is still a discrete target.
+  const tapTargetFacts = small.map(({ el, rect }) => {
+    const display = getComputedStyle(el).display;
+    const inText = [...(el.parentElement?.childNodes ?? [])].some(n => n !== el && n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() !== "");
+    return {
+      selector: describe(el),
+      layer: !front ? "page" : within(front, el) ? "front" : "behind",
+      ...foreground(el, rect),
+      display,
+      fragments: el.getClientRects().length,
+      inText,
+      inlineInText: inText && display.startsWith("inline"),
+      opacity: opacityChain(el),
+      clippedBy: clippedBy(el),
+    };
+  });
 
   // ---- (2) Links: label fragments when the union-box centre misses ----
   // Any display: an inline anchor wraps into line fragments; an inline-flex anchor has one box whose
@@ -433,6 +446,8 @@ export async function runKeyboardWitness(page: PageLike, spec: KeyboardSpec) {
 type Item = Record<string, unknown>;
 type Geometry = Partial<ReturnType<typeof GEOMETRY_WITNESS>> & { error?: string };
 type KeyboardResult = Awaited<ReturnType<typeof runKeyboardWitness>>;
+type TargetFact = ReturnType<typeof GEOMETRY_WITNESS>["tapTargetFacts"][number];
+const frontTarget = (f: TargetFact) => f.layer !== "behind" && f.reached > 0 && f.opacity > 0.05 && f.clippedBy === null;
 export function witnessSummary(report: Item[]) {
   const geo = (r: Item) => (r.witness ?? {}) as Geometry;
   const count = (test: (g: Geometry) => boolean) => report.filter(r => r.witness && !geo(r).error && test(geo(r))).length;
@@ -446,13 +461,17 @@ export function witnessSummary(report: Item[]) {
     withCoverageByOtherOverlay: count(g => (g.coverage?.byOtherOverlay.length ?? 0) > 0),
     withUnexpectedObscured: count(g => (g.unexpectedObscured?.length ?? 0) > 0),
     rawModalNotFront: count(g => !!g.overlay?.rawModal && g.overlay.rawModal !== g.overlay.front),
-    withFrontSmallTargets: count(g => (g.tapTargetFacts ?? []).some(f => f.layer !== "behind" && f.reached > 0 && !f.inText && f.opacity > 0.05 && f.clippedBy === null)),
+    // Every small target that is hittable, painted and unclipped and not behind the front overlay;
+    // the second count leaves out only controls laid out inline in running text (still listed in tapTargetFacts).
+    withFrontSmallTargets: count(g => (g.tapTargetFacts ?? []).some(f => frontTarget(f))),
+    withFrontSmallTargetsOutsideText: count(g => (g.tapTargetFacts ?? []).some(f => frontTarget(f) && !f.inlineInText)),
     withLinksMixed: count(g => (g.links ?? []).some(l => l.outcome === "mixed")),
     withLinksAllBlocked: count(g => (g.links ?? []).some(l => l.outcome === "all-blocked")),
     withLinkHitOnOtherLink: count(g => (g.links ?? []).some(l => l.fragments.some(f => "hitHref" in f))),
     withVisibleOverlaps: count(g => (g.overlapFacts ?? []).some(f => f.kind === "visible")),
     withClippedOverlaps: count(g => (g.overlapFacts ?? []).some(f => f.kind === "clipped")),
     withVisibleWrongTarget: count(g => (g.overlapFacts ?? []).some(f => f.kind === "visible" && f.wrongTarget)),
+    // pass/blocked are measured outcomes (report-only); error means the measurement itself failed.
     keyboard: { pass: keyboard.filter(k => k.outcome === "pass").length, blocked: keyboard.filter(k => k.outcome === "blocked").length, error: keyboard.filter(k => k.outcome === "error").length },
   };
 }
