@@ -259,7 +259,6 @@ export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: strin
   Promise<{ ok: true; value: SeatAdminAuthorized } | { ok: false; reason: string }> {
   const grants = await tx<GrantRow[]>`SELECT * FROM swarm.seat_admin_grants
     WHERE principal_id = ${a.principal_id}::uuid AND owner_user_id = ${a.grantor_user_id}::uuid AND state = 'active' ORDER BY grant_id`;
-  const now = await clock(tx);
   const [workspace] = await tx<{ org_id: string | null; archived: boolean }[]>`SELECT org_id, archived_at IS NOT NULL AS archived
     FROM swarm.workspaces WHERE workspace_id = ${a.workspace_id}::uuid`;
   const [owner] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${a.workspace_id}::uuid
@@ -275,6 +274,9 @@ export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: strin
       SELECT swarm.seat_admin_org_owner(${g.organization_id}::uuid, ${a.grantor_user_id}::uuid) AS r`;
     orgOwner.set(g.organization_id, o?.r?.owner === true && o.r.archived !== true);
   }
+  // The authoritative clock, after every helper that can wait (seat_admin_org_owner's FOR SHARE locks): a grant
+  // that expires during a wait refuses. History and audit use this same instant.
+  const now = await clock(tx);
   const decision = selectCoveringGrant(grants.map(g => ({
     grant_id: g.grant_id, owner_user_id: g.owner_user_id, level: g.level, workspace_ids: g.workspace_ids, organization_id: g.organization_id,
     capability_names: g.manifest.capability_names ?? [], expires_at: g.expires_at?.getTime() ?? null, state: g.state,
