@@ -106,7 +106,7 @@ type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; 
  * anything is a shift). Positions are viewport positions plus the scroll offsets of the row's scrolling ancestors:
  * the app scrolling its list is not a shift, and hover reflow absorbed by scroll anchoring still is.
  */
-const PROBE = async (arg: { index: number; rows: string; phase: "rest" | "early" | "late"; tolerance: number }): Promise<ProbeError | ProbeRest | ProbeCompared> => {
+const PROBE = async (arg: { index: number; key?: string | null; rows: string; phase: "rest" | "early" | "late"; tolerance: number }): Promise<ProbeError | ProbeRest | ProbeCompared> => {
   type Rect = { x: number; y: number; w: number; h: number };
   type Tracked = { node: Element | Text; who: "row" | "inside" | "text" | "other-row"; label: string; rowKey: string | null; path: number[] };
   const w = globalThis as unknown as { __auditHoverRest?: { tracked: Tracked[]; rects: Rect[][]; scroll: { x: number; y: number } };
@@ -142,6 +142,7 @@ const PROBE = async (arg: { index: number; rows: string; phase: "rest" | "early"
   const scrollOf = (start: Element | null) => {
     let x = 0, y = 0;
     for (let e: Element | null = start; e; e = e.parentElement) {
+      if (e === document.scrollingElement) continue; // The page scroll is added once, below.
       if (e.scrollHeight > e.clientHeight || e.scrollWidth > e.clientWidth) { x += e.scrollLeft; y += e.scrollTop; }
     }
     const page = document.scrollingElement;
@@ -156,7 +157,12 @@ const PROBE = async (arg: { index: number; rows: string; phase: "rest" | "early"
       if ((w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400) break;
       await new Promise(done => setTimeout(done, 50));
     }
-    const row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+    // Only now, with reads settled, find the row: by its marker, or by its key when the list was rebuilt meanwhile.
+    let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
+    if (!row && arg.key) {
+      row = rowByKey(arg.key);
+      row?.setAttribute("data-audit-hover-row", String(arg.index));
+    }
     if (!row) return { error: "row gone" };
     const key = row.getAttribute("data-signal-id");
     const tracked: Tracked[] = [{ node: row, who: "row", label: describe(row), rowKey: key, path: [] }];
@@ -270,6 +276,8 @@ type Compared = ProbeCompared;
 const failed = (p: ProbeError | ProbeRest | ProbeCompared): p is ProbeError => "error" in p;
 export type HoverRowResult = {
   index: number; key: string | null; preferred: boolean; targetKind: string | null; authorKind: string | null; mode: "hover" | "focus";
+  /** Coverage selectors the live, measured row matched. */
+  matches?: string[];
   outcome: "stable" | "shifted" | "unstable" | "skipped" | "error"; reason: string | null;
   point?: { x: number; y: number } | null; focused?: string | null;
   early?: Compared; late?: Compared; restored?: Compared; restoredShifts?: number;
@@ -289,14 +297,13 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const marked = await page.evaluate(MARK_ROWS, { rows: spec.rows, prefer: spec.prefer, first: required, max: spec.max ?? 8 });
     result.found = marked.found;
     for (const row of marked.rows) {
-      const matches = required.length ? await page.evaluate(ROW_MATCHES, { index: row.index, selectors: required }) : [];
       for (const mode of modes) {
         const entry: HoverRowResult = { ...row, mode, outcome: "stable", reason: null };
         result.rows.push(entry);
         await measure(row.index, mode, entry);
         // Coverage counts only a completed measurement of this row in this mode.
         if (entry.outcome === "stable" || entry.outcome === "shifted") {
-          for (const item of coverage) if (item.mode === mode && matches.includes(item.selector)) item.measured = true;
+          for (const item of coverage) if (item.mode === mode && (entry.matches ?? []).includes(item.selector)) item.measured = true;
         }
       }
     }
@@ -321,17 +328,16 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
 
   async function measure(index: number, mode: "hover" | "focus", entry: HoverRowResult): Promise<void> {
     const row = { index, preferred: entry.preferred };
-    // The app may have rebuilt its list since the rows were chosen: find this one again by its key.
-    if (!await page.evaluate(REMARK, { index, key: entry.key, rows: spec.rows })) {
-      Object.assign(entry, { outcome: "skipped", reason: "row no longer rendered" });
-      return;
-    }
+    // Bring the row (found again by key if the list was rebuilt) into view; PROBE re-finds it after settling.
+    await page.evaluate(REMARK, { index, key: entry.key, rows: spec.rows });
     await page.locator(`[data-audit-hover-row="${row.index}"]`).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
     // Park the pointer outside every row of the list (setup clicks leave it over a control), then take rest.
     const parked = await park();
     if (parked) { Object.assign(entry, { outcome: "error", reason: `rest: ${parked}` }); return; }
-    const rest = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "rest", tolerance }) as ProbeError | ProbeRest;
+    const rest = await page.evaluate(PROBE, { index: row.index, key: entry.key, rows: spec.rows, phase: "rest", tolerance }) as ProbeError | ProbeRest;
     if (failed(rest)) { Object.assign(entry, { outcome: "error", reason: rest.error }); return; }
+    // Coverage is decided on the live row this measurement uses, not the row first chosen.
+    entry.matches = required.length ? await page.evaluate(ROW_MATCHES, { index: row.index, selectors: required }) : [];
     if (rest.drift > 0) { Object.assign(entry, { outcome: "unstable", reason: `${rest.drift} box(es) moved at rest` }); return; }
     // The first preferred row is photographed at rest and in each mode.
     const preferredShot = !!shot && !shotTaken.has(mode) && row.preferred;
@@ -349,6 +355,9 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const late = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "late", tolerance }) as ProbeError | ProbeCompared;
     if (failed(early) || failed(late)) { Object.assign(entry, { outcome: "error", reason: failed(early) ? early.error : (late as ProbeError).error }); return; }
     Object.assign(entry, { early, late });
+    // The state being measured must still hold at both reads, or the measurement proves nothing.
+    const held = mode === "hover" ? early.hoverMatched && late.hoverMatched : early.focusWithin && late.focusWithin;
+    if (!held) { Object.assign(entry, { outcome: "error", reason: mode === "hover" ? "hover was not held during the measurement" : "focus was lost during the measurement" }); return; }
     if (early.shifted + late.shifted > 0) entry.outcome = "shifted";
     if (preferredShot) { await shot!(`hover-${spec.name}-${mode}`); shotTaken.add(mode); }
     // Leaving must restore rest exactly as well: a failed or moved return is a failure too.
