@@ -994,12 +994,12 @@ test('chat pictures and file cards each open their own attachment through its si
     setComposerStatus: () => { throw new Error('no download may fail here'); }, readableError: String,
   });
   runInContext(`
-    const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='tom', now=0;
+    const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='viewer', now=0;
     const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map();
     const removedAgentOwners=new Map(), agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6;
     const streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
-    const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'tom',
-      ownerFirstName:'Tom',ownerInitial:'T',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
+    const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'viewer',
+      ownerFirstName:'Owner',ownerInitial:'O',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
     const signalIsDirectToViewer=()=>false, initials=()=>'', kindLabel=kind=>kind, routeHref=()=>'/app?w=W&v=files';
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>[];
     const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
@@ -1009,7 +1009,7 @@ test('chat pictures and file cards each open their own attachment through its si
   const attachments = [file('shot', 'image/png', 2048), file('vector', 'image/svg+xml', 900), file('report', 'application/pdf', 4096),
     file('huge', 'image/png', 25 * 1024 * 1024 + 1)];
   const row = runInContext(`buildMessageRow(${JSON.stringify({ id: 'S-files', from: 'claude', fromKind: 'agent', kind: 'note', body: 'Screens attached',
-    to: 'tom', toAgent: null, about: null, attachments, channelId: null, createdAt: '2026-10-05T12:00:00Z' })},false)`, context) as RowNode;
+    to: 'viewer', toAgent: null, about: null, attachments, channelId: null, createdAt: '2026-10-05T12:00:00Z' })},false)`, context) as RowNode;
   const pictures = row.querySelectorAll('.hm-extras__image');
   assert.equal(pictures.length, 1, 'only a known image type within the cap is a picture; SVG and oversize stay files');
   assert.equal(pictures[0]!.querySelectorAll('.hm-extras__image-frame').length, 1, 'the picture sits in its reserved frame');

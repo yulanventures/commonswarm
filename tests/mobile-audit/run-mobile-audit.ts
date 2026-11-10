@@ -28,6 +28,7 @@ import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, wit
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
 import "./witness-matrix.js";
 import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from "./hover-witness.js";
+import { runPictureChecks, type PictureCheck } from "./picture-check.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -108,15 +109,17 @@ const settle = (page: Settleable) => page.waitForFunction(() => {
 }, undefined, { timeout: 10_000 }).then(() => true, () => false);
 
 /** Hover-stability witnesses, by screen (owner request, Nov 10): hovering or focusing a row must not move or resize
- *  anything. Unlike the other witnesses, a shift fails the audit. Feed rows addressed to someone come first, and the
- *  general channel must include one: that is the case the owner reported (the recipient appearing on hover). */
+ *  anything. Unlike the other witnesses, a shift fails the audit. `require` names rows that must be measured in every
+ *  mode the spec runs ({...} is filled from the seed): in the general channel, the owner's two reported cases, an
+ *  agent's message addressed to the viewer and the viewer's own message addressed to an agent. */
 const FEED_ROWS = ".dashboard__feed > .dashboard__message";
 const ADDRESSED = ':has(.dashboard__message-target:is([data-target-kind="agent"], [data-target-kind="person"]))';
 const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.chat.general": [
-    { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, require: ADDRESSED, focus: true },
+    { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, focus: true,
+      require: ['[data-signal-id="{message.addressedAgent}"]', '[data-signal-id="{message.addressedOwn}"]'] },
     // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
-    { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: "[data-stream-grouped]", max: 3, focus: true },
+    { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"]'], max: 3, focus: true },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
   ],
   "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
@@ -126,9 +129,12 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
   "app.lists": [{ name: "lists", rows: '[data-hh-action="select"]', max: 6, focus: true }],
   "dialog.command-palette": [{ name: "palette", rows: ".cp-item", max: 6 }],
+  // The composer's text inset and controls must not change when it takes focus.
+  "app.composer": [{ name: "composer", rows: ".dashboard__composer", max: 1, focus: true, focusTarget: "[data-composer-input]",
+    require: [".dashboard__composer"] }],
   // The provider detail's Back control is visually hidden until focused; focusing it must not move the detail.
   "menu.provider": [{ name: "provider-back", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"]', max: 1,
-    focus: true, focusTarget: ":scope > [data-ahp-back]" }],
+    focus: true, focusTarget: ":scope > [data-ahp-back]", require: ['[data-ahp-detail="claude"]'] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
@@ -190,6 +196,8 @@ async function main(): Promise<void> {
   let witnessFailures = -1;
   let hoverFailures = -1;
   const hoverDesktop: Record<string, unknown>[] = [];
+  const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
+  let pictureFailures = -1;
   const hoverShots: string[] = [];
   try {
     for (const fn of ["command", "read"]) {
@@ -364,7 +372,8 @@ async function main(): Promise<void> {
         // Keep the app's own focus for the keyboard witnesses that start from it afterwards.
         await page.evaluate(() => document.activeElement?.setAttribute("data-audit-hover-restore", ""));
         for (const spec of specs) {
-          results.push(await runHoverWitness(page, spec, spec.prefer ? async (label: string) => {
+          const filled = { ...spec, ...(spec.require ? { require: spec.require.map(selector => fill(selector, seed.ids)) } : {}) };
+          results.push(await runHoverWitness(page, filled, spec.prefer ? async (label: string) => {
             const shot = `shots/${id}--${state}--${size}--${theme}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
@@ -446,6 +455,24 @@ async function main(): Promise<void> {
         hoverDesktop.push(...batch);
         await context.close(); await signedIn.close();
       }
+      // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
+      const general = screens().find(s => s.id === "app.chat.general");
+      for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const) {
+        const size = `${viewport.width}x${viewport.height}`;
+        if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
+        const { context, signedIn } = await openContexts(viewport, theme, !desktop);
+        const result = await runPictureChecks(async () => {
+          const page = await signedIn.newPage();
+          await openScreen(page, general);
+          return page;
+        }, async (page, label) => {
+          const shot = `shots/app.chat.general--${label}--${size}--${theme}.png`;
+          await page.screenshot({ path: join(OUT, shot) });
+          hoverShots.push(shot);
+        }, { click: desktop });
+        pictures.push({ viewport: size, theme, ...result });
+        await context.close(); await signedIn.close();
+      }
     } finally { await browser.close(); }
   } finally {
     const summary = { screens: new Set(report.map(r => r.id)).size, items: report.length,
@@ -461,12 +488,16 @@ async function main(): Promise<void> {
       witnesses: witnessSummary(report),
       // Hover stability: the six audit viewports plus the desktop pass. shifted, error and desktop capture errors fail.
       hover: { ...hoverSummary([...report, ...hoverDesktop].flatMap(r => (r.hover as HoverResult[] | undefined) ?? [])),
-        desktopCaptures: hoverDesktop.length, desktopCaptureErrors: hoverDesktop.filter(r => r.error).length, shots: hoverShots.length } };
-    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop }, null, 2));
+        desktopCaptures: hoverDesktop.length, desktopCaptureErrors: hoverDesktop.filter(r => r.error).length, shots: hoverShots.length },
+      // Chat pictures in the served app: every check must hold.
+      pictures: { runs: pictures.length, checks: pictures.reduce((n, r) => n + r.checks.length, 0),
+        failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length } };
+    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
+    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === 2 ? 0 : 1);
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -480,6 +511,7 @@ async function main(): Promise<void> {
   assert.equal(witnessFailures, 0, `${witnessFailures} witness measurement(s) failed; see items[].witness.error and items[].keyboard[] / items[].activation[] outcome "error"`);
   // The one witness whose finding fails the job (owner request): a hover or focus that moves or resizes anything.
   assert.equal(hoverFailures, 0, `${hoverFailures} hover witness(es) shifted layout or could not measure; see items[].hover[] and hoverDesktop[]`);
+  assert.equal(pictureFailures, 0, `${pictureFailures} chat picture check(s) failed; see pictures[]`);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).

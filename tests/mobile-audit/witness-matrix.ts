@@ -77,13 +77,13 @@ const legalSpecs: ActivationSpec[] = [
   { name: "privacy", link: "#privacy", expect: { path: "/privacy" } },
 ];
 /** A three-row feed; `extra` styles what hover or focus does. Row 1 is addressed, like the owner's message. */
-const feed = (extra: string, short = false) => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
+const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
   ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr;padding:4px 8px">
     <span class="to" data-target-kind="${i === 1 ? "agent" : "everyone"}">→ Lead</span>
     <p class="body" style="margin:0">${short ? "Short note." : "A message long enough to wrap onto a second line in this narrow fixture column."}</p>
     <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
-  </li>`).join("")}</ul>`, `.to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
-const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: '.msg:has([data-target-kind="agent"])', focus: true };
+  </li>`).join("")}</ul>${after}`, `.to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
@@ -309,8 +309,36 @@ const ROWS: Row[] = [
     assert.equal(rowOf(h, "focus")?.late?.focusWithin, true);
   } },
   { name: "with no addressed row to measure, the hover witness is an error, never a pass", html: feed(""),
-    hover: { ...feedSpec, require: '.msg:has([data-target-kind="person"])' }, check: ({ hover: h }) => {
+    hover: { ...feedSpec, require: ['.msg:has([data-target-kind="person"])'] }, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "error", show(h));
+  } },
+  { name: "a required row the pointer cannot reach is an error, never a pass", html: feed("", false, '<div id="cover" style="position:fixed;inset:0;z-index:9"></div>'),
+    hover: { ...feedSpec, focus: false }, check: ({ hover: h }) => {
+      assert.equal(rowOf(h, "hover")?.outcome, "skipped", show(h));
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.reason ?? "", /required rows not measured/u);
+  } },
+  { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
+    html: feed(".left .body{padding-left:12px}", false,
+      "<script>for (const m of document.querySelectorAll('.msg')) m.addEventListener('mouseleave', () => m.classList.add('left'));</script>"),
+    hover: { ...feedSpec, focus: false }, check: ({ hover: h }) => {
+      const r = rowOf(h, "hover")!;
+      assert.equal(r.early?.shifted, 0, show(r));
+      assert.equal(r.late?.shifted, 0, show(r));
+      assert.ok((r.restored?.shifted ?? 0) > 0, show(r));
+      assert.equal(r.outcome, "shifted");
+      assert.equal(h?.outcome, "shifted");
+  } },
+  { name: "a body that re-wraps under a fixed header, with every element box unchanged, is a shift",
+    html: page(`<ul id="feed" style="list-style:none;margin:0;padding:0">${[0, 1].map(i => `<li class="msg" data-i="${i}" style="padding:4px 8px">
+      <strong class="author">Agent</strong><p class="body" style="margin:0;width:30ch;font:16px/20px monospace">aaaa bbbb cccc dddd eeee ffff gggg hhhh</p></li>`).join("")}</ul>`,
+      ".msg:hover .body{text-indent:2ch}"),
+    hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
+      const r = h!.rows.find(row => row.index === 0)!;
+      assert.equal(r.outcome, "shifted", show(r));
+      const shifts = [...(r.early?.shifts ?? []), ...(r.late?.shifts ?? [])];
+      assert.ok(shifts.some(s => s.who === "text" && s.label === "text in p.body"), show(shifts));
+      assert.ok(!shifts.some(s => s.who !== "text"), `only text fragments move: ${show(shifts)}`);
   } },
   { name: "the same overlap in view is a visible wrong-target finding", html: overlapPage(20), check: ({ geometry: g }) => {
     const f = pair(g);

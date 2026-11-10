@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { auditPng } from "./picture-check.js";
 
 export interface SeedEnvironment { apiUrl: string; anonKey: string; serviceRoleKey: string; dbUrl: string }
 export interface SeedResult {
@@ -214,31 +215,38 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           )`;
         steps.push("seed_dm");
       } catch (error) { note("seed_dm", error); }
-      // The owner's hover report (Nov 10): their own long messages addressed to an agent, newest in #general, so the
-      // hover witness measures a wrapped, addressed row of the viewer's own; the second groups under the first.
+      // The owner's hover report (Nov 10), newest in the general channel: an agent's long message addressed to the
+      // viewer, the viewer's own long message addressed to an agent, and a second one that groups under it.
       try {
+        const addressedAgent = randomUUID(), addressedOwn = randomUUID(), groupedOwn = randomUUID();
         await sql`INSERT INTO swarm.signals (
             id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
             about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
           ) VALUES (
-            ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            ${addressedAgent}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+            NULL, 'note', ${"Security advisory: the boiler controller firmware has an update that fixes the pressure sensor reading. Please install it this week, one unit at a time, and reply with each unit's version once it is done."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '25 seconds',
+            ${channels.general}::uuid, NULL, false
+          ), (
+            ${addressedOwn}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
             NULL, 'note', ${"Please compare the three boiler service quotes, check which ones include the expansion vessel and the flue test, and post a short summary with the price difference before Friday so we can book the visit."},
             statement_timestamp() + interval '25 days', statement_timestamp() - interval '20 seconds',
-            NULL, NULL, false
+            ${channels.general}::uuid, NULL, false
           ), (
-            ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            ${groupedOwn}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
             NULL, 'note', ${"Also include whether the quotes cover a return visit if the pressure drops again within a month."},
             statement_timestamp() + interval '25 days', statement_timestamp() - interval '10 seconds',
-            NULL, NULL, false
+            ${channels.general}::uuid, NULL, false
           )`;
-        steps.push("seed_addressed_own");
-      } catch (error) { note("seed_addressed_own", error); }
+        Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
+        steps.push("seed_addressed");
+      } catch (error) { note("seed_addressed", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
-    const seedFile = async (stepName: string, name: string, contentType: string, text: string, existingFileId?: string): Promise<string | null> => {
+    const seedFile = async (stepName: string, name: string, contentType: string, text: string | Uint8Array, existingFileId?: string): Promise<string | null> => {
       try {
-        const bytes = new TextEncoder().encode(text);
+        const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
         const requestedFileId = existingFileId ?? randomUUID();
         const requestedVersionId = randomUUID();
         const created = await command(owner.token, {
@@ -258,7 +266,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         const put = await fetch(new URL(created.body.upload_path, `${env.apiUrl.replace(/\/+$/, "")}/`).href, {
           method: "PUT",
           headers: { "content-type": contentType },
-          body: bytes,
+          body: bytes as Uint8Array<ArrayBuffer>,
         });
         if (!put.ok) {
           note(stepName, `PUT HTTP ${put.status}`);
@@ -276,12 +284,22 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         return null;
       }
     };
-    await seedFile(
+    const quoteFileId = await seedFile(
       "seed_file boiler-service-quote-2026-11.txt",
       "boiler-service-quote-2026-11.txt",
       "text/plain",
       "Boiler service quote — $240 including filter check and expansion vessel inspection.\nValid until 2026-11-30.\n",
     );
+    // A real PNG and the text quote on one message in the general channel: one picture beside one file card.
+    const pictureFileId = await seedFile("seed_file boiler-label.png", "boiler-label.png", "image/png", auditPng());
+    if (pictureFileId && quoteFileId) {
+      ok("seed_picture", await command(owner.token, {
+        kind: "post_signal", signal_kind: "note", body: "Photo of the boiler label, with the service quote.",
+        to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null,
+        attachments: [{ file_id: pictureFileId, version_n: 1 }, { file_id: quoteFileId, version_n: 1 }],
+        channel: "household",
+      }, workspace));
+    }
     const wikiFileId = await seedFile(
       "seed_wiki overview v1",
       "brain--overview.md",
