@@ -263,7 +263,8 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-history > ul {
     overflow: auto;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view[data-brain-selection="document"] > .dashboard__brain-index,
-  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt {
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt,
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-selection-prompt:not([hidden]) {
     display: none;
   }
   live-dashboard.dashboard[data-kylon-shell] .dashboard__brain-view .dashboard__brain-topic .dashboard__brain-back {
