@@ -61,11 +61,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff-word,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-operator,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta:not(:has(> :not(.dashboard__message-identity-badge, .dashboard__message-operator, .dashboard__message-kind--note, .dashboard__message-kind--ask, .dashboard__message-target[data-target-kind="everyone"]))) { display: none; }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
-  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: 0; border: 0; overflow: hidden; clip-path: inset(50%); opacity: 0; pointer-events: none;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
-  opacity: 0; pointer-events: none;
+/* Recipient/channel metadata keeps the same header slot in every state. Tab
+   can reach its controls while opacity hides the secondary text at rest. */
+@media (hover: hover) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
+    opacity: 0; pointer-events: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
+    opacity: 0; pointer-events: none;
+  }
 }
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
