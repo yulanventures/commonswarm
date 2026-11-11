@@ -28,6 +28,7 @@ function installExistingAgentFixture() {
     const body = request.method === "POST" ? await request.json().catch(() => null) : null;
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.origin + url.pathname); return Response.json({}, { status: 404 }); }
     if (url.pathname === "/auth/v1/user") return Response.json(user);
+    if (url.pathname === "/auth/v1/logout") return Response.json({});
     if (url.pathname === "/rest/v1/workspaces") return Response.json([
       { workspace_id: workspace, org_id: org, name: "Home", archived_at: null },
       { workspace_id: other, org_id: org, name: "Studio", archived_at: null },
@@ -36,7 +37,8 @@ function installExistingAgentFixture() {
     if (url.pathname === "/rest/v1/account_agents") {
       f.accountReads++;
       if (scenario === "read-error" && f.accountReads === 1) return Response.json({ message: "synthetic read failure" }, { status: 503 });
-      if (scenario === "stale-read") { f.held = true; await new Promise<void>(resolve => { f.release = resolve; }); }
+      if (scenario === "stale-read" || scenario === "stale-account") { f.held = true; await new Promise<void>(resolve => { f.release = resolve; }); }
+      if (scenario === "empty") return Response.json([]);
       return Response.json([{ principal_id: agent, name: "Atlas Research & Long-Running Investigations", model: "Claude", transport: "hosted_mcp", revoked_at: null,
         workspaces: [{ workspace_id: other, workspace_name: "Studio", org_id: org, org_name: "Household", revoked_at: null, archived_at: null }] }]);
     }
@@ -99,17 +101,28 @@ async function observeExistingAgent() {
       && !visible(one("[data-ahp-existing-view]")));
   };
   try {
-    const desktop = Number(new URL(location.href).searchParams.get("width")) > 1000;
-    check(innerWidth === (desktop ? 1440 : 390), "wrong viewport: " + innerWidth);
+    const width = Number(new URL(location.href).searchParams.get("width")), desktop = width >= 1024;
+    check(innerWidth === width, "wrong viewport: " + innerWidth);
     check(matchMedia("(hover: hover) and (pointer: fine)").matches === desktop, "wrong mouse/touch media");
     await wait("Add an agent entry", () => visible(one("[data-add-agent]")));
     one<HTMLButtonElement>("[data-add-agent]")!.click(); // action 1, existing route navigation
     await wait("host picker", () => visible(one("[data-ahp-existing]")));
     one<HTMLButtonElement>("[data-ahp-existing]")!.click(); // action 2
     await wait("existing view", () => visible(one("[data-ahp-existing-view]")));
-    if (f.scenario === "stale-read") {
+    if (f.scenario === "empty") {
+      await wait("empty directory", () => notice()?.textContent === "No agents to add to this workspace.");
+      check(!add() && f.commands.length === 0, "an empty directory offered an add");
+      one<HTMLButtonElement>("[data-ahp-existing-back]")!.click();
+      check(!visible(one("[data-ahp-existing-view]")) && document.activeElement === one("[data-ahp-existing]"), "Back did not restore the opener");
+    } else if (f.scenario === "stale-read" || f.scenario === "stale-account") {
       await wait("held directory", () => f.held);
-      await switchWorkspace(); f.release(); await fetch("/__observer-tick");
+      if (f.scenario === "stale-account") {
+        one<HTMLButtonElement>("[data-user-menu-trigger]")!.click();
+        await wait("account menu", () => visible(one("[data-user-menu] [data-signout]")));
+        one<HTMLButtonElement>("[data-user-menu] [data-signout]")!.click();
+        await wait("signed out", () => visible(one('[data-panel="signed-out"]')));
+      } else await switchWorkspace();
+      f.release(); await fetch("/__observer-tick");
       check(f.commands.length === 0 && !visible(one("[data-ahp-existing-view]")) && !add()
         && one<HTMLElement>("[data-ahp-existing-list]")?.dataset.agentPickerState === "loading", "a stale read painted the old picker");
     } else {
@@ -180,12 +193,14 @@ test("existing agents: three real clicks add the selected identity; reads, refus
     const evidence = join(process.cwd(), "../site-observer-evidence/existing-agent");
     await mkdir(evidence, { recursive: true });
     const outcomes: Record<string, unknown> = {}, chrome = await findChrome();
-    const cases = ["success-390-light", "success-390-dark", "success-1440-light", "success-1440-dark",
-      "read-error-390-dark", "refused-390-dark", "refresh-error-390-dark", "stale-read-1440-dark", "stale-write-1440-dark"];
+    const sizes = { 360: 740, 390: 844, 430: 932, 768: 1024, 820: 1180, 844: 390, 1024: 1366, 1440: 900 };
+    const cases = [...Object.keys(sizes).flatMap(size => ["light", "dark"].map(theme => `success-${size}-${theme}`)),
+      "read-error-390-dark", "empty-390-dark", "refused-390-dark", "refresh-error-390-dark",
+      "stale-read-1440-dark", "stale-write-1440-dark", "stale-account-1440-dark"];
     for (const entry of cases) {
-      const [, scenario, size, theme] = entry.match(/^(.*)-(390|1440)-(light|dark)$/)!;
-      const { stdout } = await launchChrome(chrome, [`--window-size=${size},${size === "390" ? 844 : 900}`,
-        ...(size === "1440" ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []),
+      const [, scenario, size, theme] = entry.match(/^(.*)-(\d+)-(light|dark)$/)!;
+      const { stdout } = await launchChrome(chrome, [`--window-size=${size},${sizes[Number(size) as keyof typeof sizes]}`,
+        ...(Number(size) >= 1024 ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []),
         "--virtual-time-budget=60000", "--dump-dom",
         `--screenshot=${join(evidence, entry + ".png")}`,
         `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=${scenario}&theme=${theme}&width=${size}`],
