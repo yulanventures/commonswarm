@@ -20,11 +20,14 @@ function installExistingAgentFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated", email: "synthetic@example.test",
     app_metadata: {}, user_metadata: {}, created_at: recent };
   const f = w.existingFixture = { workspace, other, owner, agent, scenario, commands: [] as any[], accountReads: 0,
-    added: false, failRoster: false, held: false, release: null as null | (() => void), unexpected: [] as string[] };
+    added: false, failRoster: false, held: false, release: null as null | (() => void), unexpected: [] as string[],
+    requests: [] as string[], errors: [] as string[] };
+  window.addEventListener("error", event => { f.errors.push(event.message); });
   const network = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const request = new Request(input, init), url = new URL(request.url);
     if (url.origin === location.origin) return network(input, init);
+    f.requests.push(request.method + " " + url.pathname);
     const body = request.method === "POST" ? await request.json().catch(() => null) : null;
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.origin + url.pathname); return Response.json({}, { status: 404 }); }
     if (url.pathname === "/auth/v1/user") return Response.json(user);
@@ -87,8 +90,13 @@ async function observeExistingAgent() {
   const check = (value: unknown, message: string) => { if (!value) throw new Error(message); };
   const wait = async (name: string, predicate: () => unknown) => {
     stage = name;
-    for (let i = 0; i < 250; i++) { if (predicate()) return; await fetch("/__observer-tick"); }
-    throw new Error("timed out at " + name);
+    if (predicate()) return;
+    // Node's clock is real elapsed time; Chromium's virtual-time budget can jump
+    // while the full app bundle is still parsing. The old 250 ticks allowed only ~0.5s.
+    const now = async () => (await (await fetch("/__observer-tick")).json()).now as number;
+    const deadline = await now() + 10_000;
+    while (await now() < deadline) { if (predicate()) return; }
+    throw new Error("timed out after 10 real seconds at " + name);
   };
   const notice = () => one<HTMLElement>("[data-ahp-existing-list] .workspace-agent-picker__notice")!;
   const add = () => one<HTMLButtonElement>("[data-ahp-existing-list] .pd-choice-add")!;
@@ -173,6 +181,7 @@ async function observeExistingAgent() {
     document.documentElement.dataset.existingObservation = JSON.stringify({ error: String(error), stage,
       notice: notice()?.textContent, view: document.querySelector("live-dashboard")?.getAttribute("data-channel-view"),
       accountReads: f.accountReads, pickerHost: (one("agent-host-picker") as any)?.hostId,
+      appState: document.querySelector("live-dashboard")?.getAttribute("data-state"), requests: f.requests.slice(-12), errors: f.errors,
       commands: f.commands.map((c: any) => ({ kind: c.command?.kind, principal: c.command?.principal_id, workspace: c.workspace_id })) });
   }
 }
@@ -184,7 +193,10 @@ test("existing agents: three real clicks add the selected identity; reads, refus
     "<script>" + await compileFixtureFunction(new URL(import.meta.url), "observeExistingAgent") + "</script></body></html>";
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
   const server = createServer((request, response) => {
-    if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
+    if (request.url === "/__observer-tick") {
+      setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2);
+      return;
+    }
     if (request.url?.startsWith("/fonts/") && request.url.endsWith(".woff2")) {
       void readFile(join(fonts, basename(request.url))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return;
     }
