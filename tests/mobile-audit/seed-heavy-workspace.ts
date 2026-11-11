@@ -275,6 +275,25 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
         steps.push("seed_addressed");
       } catch (error) { note("seed_addressed", error); }
+      // Two of the viewer's messages to everyone, seconds apart: the second groups under the first with no recipient, so
+      // its author is the focus-revealed label (an addressed message keeps its header).
+      try {
+        const lead = randomUUID(), groupedBroadcast = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${lead}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'Reminder for everyone: the boiler service visit is on Friday morning.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '8 seconds', ${channels.general}::uuid, NULL, false
+          ), (
+            ${groupedBroadcast}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'Please keep the hallway clear for the engineer.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 seconds', ${channels.general}::uuid, NULL, false
+          )`;
+        ids["message.groupedBroadcast"] = groupedBroadcast;
+        steps.push("seed_grouped_broadcast");
+      } catch (error) { note("seed_grouped_broadcast", error); }
       // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
       // real feed rebuild.
       try {

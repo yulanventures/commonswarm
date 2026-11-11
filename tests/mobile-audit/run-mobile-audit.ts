@@ -131,7 +131,12 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, focus: true,
       require: ['[data-signal-id="{message.addressedAgent}"]', '[data-signal-id="{message.addressedOwn}"]'] },
     // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
+    // An addressed grouped message keeps its persistent header (#382); focusing its author must not move anything.
     { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"][data-stream-grouped]'], max: 1,
+      focus: true, focusTarget: ".hm-author .dashboard__message-author" },
+    // An unaddressed grouped message: its author is a focus-revealed floating label, which must not move anything either.
+    { name: "grouped-unaddressed", rows: FEED_ROWS, prefer: '[data-signal-id="{message.groupedBroadcast}"]',
+      require: ['[data-signal-id="{message.groupedBroadcast}"][data-stream-grouped]'], max: 1,
       focus: true, focusTarget: ".hm-author .dashboard__message-author" },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
     // A focused Show more survives a real feed rebuild: the control is created a frame after its row. Last, because the
