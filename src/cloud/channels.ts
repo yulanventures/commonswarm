@@ -206,8 +206,10 @@ export async function listChannelsAsAgent(
   credential: string,
   workspaceId: string,
   fetcher: typeof fetch = fetch,
-  timeoutMs = 30_000,
+  timeoutMs?: number,
 ): Promise<ChannelRow[]> {
+  // The deadline is listChannelsWithUnreadAsAgent's own default; a second literal here would be an
+  // unmapped timeout (tests/p1-cli/timeout-table.test.ts).
   return (await listChannelsWithUnreadAsAgent(target, credential, workspaceId, fetcher, timeoutMs)).channels;
 }
 
