@@ -5482,6 +5482,7 @@ import "../../styles/kylon-command-palette.css";
       window.requestAnimationFrame(() => {
         // Allow's settled access render owns focus, including while consent is being completed.
         if (homeRoute.view === "lists" && listsAllowLanding) return;
+        if (homeRoute.view === "add-agent" && existingAgentChoiceIsCurrent?.()) return;
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
           : homeRoute.view === "people" ? "[data-people-context]"
           : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
@@ -6871,13 +6872,12 @@ import "../../styles/kylon-command-palette.css";
         const add=document.createElement('button'); add.type='button'; add.className='pd-page-primary'; add.textContent='Add your agents';
         const picker=document.createElement('section'); picker.hidden=true; picker.className='pd-agent-picker'; picker.id='pd-agent-picker'; picker.setAttribute('aria-label','Add your agents');
         add.setAttribute('aria-expanded','false'); add.setAttribute('aria-controls',picker.id);
-        const status=document.createElement('p'); status.setAttribute('role','status'); picker.append(status);
         actions.append(add); actions.after(picker);
-        add.addEventListener('click',async()=>{
+        add.addEventListener('click',()=>{
           if(!session || !activeWorkspaceId) return;
           if(!picker.hidden) { picker.hidden=true; add.setAttribute('aria-expanded','false'); return; }
           const value=session,workspaceId=activeWorkspaceId,navigation=homeNavigation;
-          add.disabled=true; picker.hidden=false; add.setAttribute('aria-expanded','true'); status.textContent='Loading…';
+          picker.hidden=false; add.setAttribute('aria-expanded','true');
           mountWorkspaceAgentPicker(picker, {
             session: value, workspaceId, orgId: workspace.orgId,
             isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && navigation === homeNavigation && !picker.hidden && homeRoute.view === "people",
@@ -6887,7 +6887,6 @@ import "../../styles/kylon-command-palette.css";
               }
             },
           });
-          add.disabled=false;
         });
       }
       if (peopleDialogState.selected?.type === "agent") {
@@ -13684,6 +13683,8 @@ import "../../styles/kylon-command-palette.css";
           if (!current()) return;
           if (!next.some(item => item.principalId === agent.id)) throw new Error("Added agent not yet in the roster");
           agents = next;
+          removedAgents.delete(agent.id);
+          removedAgentOwners.delete(agent.id);
           renderRoster();
         },
       });

@@ -1174,7 +1174,7 @@ test('each navigation focuses the visible H1 for that view', async () => {
   const context = createContext({ ...MESSAGE_STATUS_STUBS, homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
     document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
     all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
+  runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, existingAgentChoiceIsCurrent, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;

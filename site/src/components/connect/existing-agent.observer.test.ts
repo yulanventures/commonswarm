@@ -43,6 +43,7 @@ function installExistingAgentFixture() {
         workspaces: [{ workspace_id: other, workspace_name: "Studio", org_id: org, org_name: "Household", revoked_at: null, archived_at: null }] }]);
     }
     if (url.pathname === "/rest/v1/agent_principals") {
+      if (url.searchParams.get("revoked_at") !== "is.null") return Response.json([]);
       if (f.failRoster) return Response.json({ message: "synthetic roster failure" }, { status: 503 });
       const target = url.searchParams.get("workspace_id");
       return Response.json(f.added && target === "eq." + workspace ? [{ principal_id: agent, name: "Atlas Research & Long-Running Investigations", model: "Claude",
@@ -131,6 +132,8 @@ async function observeExistingAgent() {
         one<HTMLButtonElement>("[data-ahp-existing-list] .workspace-agent-picker__retry")!.click();
       }
       await wait("eligible identity", () => visible(add()));
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      check(one("[data-ahp-existing-view]")?.contains(document.activeElement), "a background render stole the picker focus");
       check(f.commands.length === 0, "opening the list submitted a command");
       const rect = add().getBoundingClientRect();
       check(rect.width >= 44 && rect.height >= 44, "Add target is under 44px");
@@ -185,7 +188,7 @@ test("existing agents: three real clicks add the selected identity; reads, refus
     if (request.url?.startsWith("/fonts/") && request.url.endsWith(".woff2")) {
       void readFile(join(fonts, basename(request.url))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return;
     }
-    response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
+    response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(request.url === "/app.js" ? bundled.join("\n") : app);
   });
   try {
