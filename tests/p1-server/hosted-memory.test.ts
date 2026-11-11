@@ -253,7 +253,7 @@ test("a hosted seat's channel_read moves its read position only through what the
 
   const [before, fitted, between, rest, after, otherSeat] = run(f, [
     channelLs(f.handleA),
-    channelRead(f.handleA, { channel: "ops", fit_bytes: 4096 }),
+    channelRead(f.handleA, { channel: "ops", fit_bytes: 8192 }),
     channelLs(f.handleA),
     channelRead(f.handleA, { channel: "ops", after_id: posted[0] }),
     channelLs(f.handleA),
@@ -268,4 +268,22 @@ test("a hosted seat's channel_read moves its read position only through what the
   assert.deepEqual((rest!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [posted[1]]);
   assert.equal(unreadOf(after, "ops"), false);
   assert.equal(unreadOf(otherSeat, "ops"), null, "each seat's agent has its own position");
+
+  // One message over the tool's budget: the fit keeps it, the protocol would refuse the response, so
+  // the position stays put. A read without fit_bytes never moves it either.
+  const oversized = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
+    VALUES (${oversized}::uuid, ${f.workspace}::uuid, ${f.owner}::uuid, 'user', 'note', ${`big ${"z".repeat(9000)}`},
+      statement_timestamp() + interval '1 day', statement_timestamp(), ${channelId}::uuid)`;
+  const [tooBig, unfitted, still] = run(f, [
+    channelRead(f.handleA, { channel: "ops", after_id: posted[1], fit_bytes: 8192 }),
+    channelRead(f.handleA, { channel: "ops", after_id: posted[1] }),
+    channelLs(f.handleA),
+  ]);
+  assert.deepEqual((tooBig!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [oversized]);
+  assert.deepEqual((unfitted!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [oversized]);
+  assert.equal(unreadOf(still, "ops"), true, "neither read moved the position");
+  const [position] = await sql<{ read_through_id: string }[]>`SELECT read_through_id FROM swarm.agent_channel_reads
+    WHERE principal_id = ${f.principalA}::uuid AND channel_id = ${channelId}::uuid`;
+  assert.equal(position?.read_through_id, posted[1]);
 });

@@ -2034,7 +2034,9 @@ test("an agent reads a channel's whole-workspace messages, never addressed ones"
  * ------------------------------------------------------------------------- */
 
 test("an agent's channel_ls unread clears only once channel_read has returned every newer message", async () => {
-  const read = (extra: Record<string, unknown>) => readResource(f.agentToken, { resource: "channel_messages", workspace_id: f.workspace, ...extra });
+  // Only a read that declares max_bytes (the caller delivers the page whole) moves the position.
+  const read = (extra: Record<string, unknown>) => readResource(f.agentToken, { resource: "channel_messages", workspace_id: f.workspace, max_bytes: 64 * 1024, ...extra });
+  const legacyRead = (extra: Record<string, unknown>) => readResource(f.agentToken, { resource: "channel_messages", workspace_id: f.workspace, ...extra });
   const unreadOf = async (slug: string) => {
     const listed = await readResource(f.agentToken, { resource: "channels", workspace_id: f.workspace });
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
@@ -2068,6 +2070,24 @@ test("an agent's channel_ls unread clears only once channel_read has returned ev
   const newer = await send(f.ownerJwt, installedPost({ channel: slug }));
   assert.equal(newer.status, 200, JSON.stringify(newer.body));
   assert.equal(await unreadOf(slug), true, "a newer message is unread again");
+
+  // A read without max_bytes (every installed client today, including a local MCP server that trims
+  // a 64 KiB page to its own 32 KiB) still reads, but never moves the position.
+  const notes: string[] = [];
+  for (let i = 0; i < 5; i += 1) {
+    const note = await send(f.ownerJwt, installedPost({ channel: slug, body: `legacy ${i} ${"y".repeat(8000)}` }));
+    assert.equal(note.status, 200, JSON.stringify(note.body));
+    notes.push(String(signalOf(note.body).id));
+  }
+  const legacy = await legacyRead({ channel: slug, after_id: posted[1] });
+  assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+  const legacyIds = (legacy.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id);
+  assert.deepEqual(legacyIds, [String(signalOf(newer.body).id), ...notes], "the legacy read returns the whole page");
+  assert.equal(await unreadOf(slug), true, "and leaves every one of them unread");
+  // An empty page past the end records the read without moving the position to its cursor.
+  const empty = await read({ channel: slug, after_id: notes[4] });
+  assert.deepEqual(empty.body.messages, []);
+  assert.equal(await unreadOf(slug), true);
 
   for (const max_bytes of [1023, 64 * 1024 + 1, 2048.5, "2048"]) {
     assert.equal((await read({ channel: slug, max_bytes })).status, 400, `max_bytes ${max_bytes}`);

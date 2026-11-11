@@ -3,8 +3,10 @@
 --
 -- An agent's read position in a channel (and in general, the unfiled messages) is the newest message
 -- channel_read has returned to it there, by (created_at, id), or none when every read there came back
--- empty. Only channel_read moves it, only forward, and only to a message that read could return.
--- The agent's first read in a workspace, empty or not, starts its unread there. Per channel, unread is:
+-- empty. Only channel_read moves it, only forward, only to a message that read could return, and only
+-- for a read whose caller delivers the page whole (the read function decides that; see
+-- supabase/functions/read/index.ts). The agent's first read in a workspace, empty or not, starts its
+-- unread there. Per channel, unread is:
 --   null  - the agent has no read position anywhere in this workspace yet;
 --   true  - a message channel_read would return there (whole-workspace, unexpired), not from this
 --           agent, newer than the read position in that channel, the agent's first read in the
@@ -93,8 +95,8 @@ REVOKE ALL ON FUNCTION swarm.channel_reading_agent(uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
 -- Moves the calling agent's read position in one channel forward to p_through_id, the last message of
--- a channel_read page (or its cursor, when the page was empty). NULL records a read that returned
--- nothing. Anything channel_read could not have returned there leaves the position unchanged.
+-- a delivered channel_read page. NULL records a read that returned nothing. Anything channel_read could
+-- not have returned there leaves the position unchanged.
 CREATE FUNCTION swarm.agent_channel_read_advance(p_workspace_id uuid, p_channel text, p_through_id uuid)
 RETURNS void
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER

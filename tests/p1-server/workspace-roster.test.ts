@@ -486,14 +486,18 @@ test("agent_channel_unread: unknown before any read, then unread only for newer 
     VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'design', ${owner}::uuid, 'user', statement_timestamp()) RETURNING channel_id`;
   const channelId = design!.channel_id;
 
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: null, design: null }, "no read position yet");
+  // An empty first read, recorded an hour ago, starts the agent's unread before the messages below.
+  await asAgent(ws, owner, reader, (tx) => tx`SELECT swarm.agent_channel_read_advance(${ws}::uuid, 'general', NULL)`);
+  await sql`UPDATE swarm.agent_channel_reads SET first_read_at = statement_timestamp() - interval '1 hour'
+    WHERE principal_id = ${reader}::uuid`;
   const older = await filed(ws, writer, "OLDER", { channel: channelId, ago: "10 minutes" });
   const newest = await filed(ws, writer, "NEWEST", { channel: channelId, ago: "9 minutes" });
-  assert.deepEqual(await agentUnread(ws, owner, reader), { general: null, design: null }, "no read position yet");
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true });
 
   // Reading the older message leaves the newer one unread; reading through the newest clears it.
   await advance(ws, owner, reader, "design", older);
-  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true },
-    "general has nothing newer than the agent's first read");
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true });
   await advance(ws, owner, reader, "design", newest);
   assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: false });
   // Only forward: an older message never moves the position back.
