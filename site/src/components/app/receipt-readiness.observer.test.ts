@@ -29,7 +29,8 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", replies: [] as string[], scenario, receiptsInFlight: 0, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
+  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", replies: [] as string[], scenario, receiptsInFlight: 0,
+    held: "", releaseHeld: null as null | (() => void), seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
@@ -46,9 +47,17 @@ function installReceiptFixture() {
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
   // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Behavior coverage of
   // opening a thread from a warm start (see the observer); not a scheduling regression proof.
+  // first-receipt-*: five notes from the owner to the assistant; the middle one's first receipt read is held while the
+  // others answer at once, and releasing it with a settled receipt must not move or resize any row (#385).
+  const firstReceiptRows = Array.from({ length: 5 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
+  const held = firstReceiptRows[2]!;
+  const settledAgentReceipt = () => ({ addressed: true, receipts: [{ recipient_agent_principal_id: agent, enqueued_at: recent,
+    delivered_at: recent, leased_until: null, acked_at: recent, ack_outcome: "observed", attempt_count: 1, lease_expiry_count: 0,
+    last_error_code: null }] });
   const root = "55555555-5555-4555-8555-555555555555";
   const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
   f.replies = replies;
+  f.held = held;
   const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
     to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
     thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
@@ -65,6 +74,11 @@ function installReceiptFixture() {
       const id = String(body?.p_signal_id ?? "");
       const read = { at: ++f.clock, id, seen: f.seen, release: () => {}, released: false };
       f.log.push("read:" + id.slice(0, 2));
+      if (scenario.startsWith("first-receipt-")) {
+        f.log.push("read-id:" + id);
+        if (id === held) await new Promise<void>(resolve => { f.releaseHeld = resolve; });
+        return Response.json(settledAgentReceipt());
+      }
       if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) {
         f.log.push("read-id:" + id); f.receiptsInFlight++;
         try { await Promise.resolve(); return Response.json(null); } finally { f.receiptsInFlight--; }
@@ -107,6 +121,8 @@ function installReceiptFixture() {
       f.log.push("signals");
       if (scenario === "pre-ack") return Response.json([row(signal, owner, null, agent, "agent", "A note for you.")]);
       if (scenario === "beyond-eight") return Response.json(many.map((id, i) => row(id, null, agent, owner, "user", "Note " + i + " for the assistant.")));
+      if (scenario.startsWith("first-receipt-")) return Response.json(firstReceiptRows.map((id, i) => ({ ...row(id, null, agent, owner, "user",
+        "Note " + i + " for the assistant."), created_at: new Date(Date.now() - 60000 + i * 1000).toISOString() })));
       if (scenario === "awaiting-beyond-eight") return Response.json(many.map((id, i) => row(id, owner, null, agent, "agent", "Note " + i + " for you.")));
       if (scenario === "scroll-into-view") return Response.json(scrolled.map((id, i) => ({ ...row(id, null, agent, owner, "user", "Older note " + i + " for the assistant."),
         created_at: new Date(Date.now() - 60000 - i * 60000).toISOString() })));
@@ -158,6 +174,43 @@ async function observeReceiptReadiness() {
       check(late === 0, name + ": " + late + " of " + ids.length + " rows waited for a feed poll");
     };
     const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
+    if (f.scenario.startsWith("first-receipt-")) {
+      // #385: the row's first receipt arrives after the row has rendered. Nothing may move or resize when it does.
+      const ownReceipt = (id: string) => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${id}"] .dashboard__message-receipt`))
+        .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === id);
+      const geometry = () => {
+        const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"));
+        const list = document.querySelector<HTMLElement>("[data-feed-list]")!.getBoundingClientRect();
+        const heldRow = document.querySelector<HTMLElement>(`[data-signal-id="${f.held}"]`)!;
+        const body = heldRow.querySelector<HTMLElement>(".dashboard__message-body")!.getBoundingClientRect();
+        const r = heldRow.getBoundingClientRect();
+        return { held: { top: r.top - list.top, height: r.height, bodyTop: body.top - r.top, bodyHeight: body.height },
+          rows: rows.map(row => ({ id: row.dataset.signalId!.slice(-4), top: Math.round((row.getBoundingClientRect().top - list.top) * 100) / 100,
+            height: Math.round(row.getBoundingClientRect().height * 100) / 100 })) };
+      };
+      await wait(() => ownReceipt(f.held) && f.releaseHeld, "the row rendered with its first read held");
+      await wait(() => Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"))
+        .filter(row => row.dataset.signalId !== f.held).every(row => ownReceipt(row.dataset.signalId!)?.dataset.receiptLoaded === "true"), "the other rows loaded");
+      for (let i = 0; i < 5; i++) await tick();
+      const before = geometry();
+      const stateBefore = ownReceipt(f.held)!.dataset.receiptState;
+      f.releaseHeld();
+      await wait(() => ownReceipt(f.held)?.dataset.receiptLoaded === "true", "the held row's first receipt loaded");
+      for (let i = 0; i < 5; i++) await tick();
+      const after = geometry();
+      const stateAfter = ownReceipt(f.held)!.dataset.receiptState;
+      steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held));
+      const moved = (a: number, b: number) => Math.abs(a - b) > 0.5;
+      const changes: string[] = [];
+      for (const key of ["top", "height", "bodyTop", "bodyHeight"] as const) {
+        if (moved(before.held[key], after.held[key])) changes.push(`held ${key} ${before.held[key]} -> ${after.held[key]}`);
+      }
+      before.rows.forEach((row, i) => { const next = after.rows[i];
+        if (!next || next.id !== row.id || moved(row.top, next.top) || moved(row.height, next.height)) changes.push(`row ${row.id} ${JSON.stringify(row)} -> ${JSON.stringify(next)}`); });
+      check(changes.length === 0, "the first receipt moved or resized rows: " + changes.join("; "));
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario === "thread-expand") {
       // Behavior coverage of opening a thread, from a warm start: not a regression proof for the open's own trigger (the
       // cold scroll case proves that path). Receipts prefetched while collapsed are valid, and the control may pass.
@@ -348,10 +401,12 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
     const address = server.address(); assert.ok(address && typeof address === "object");
     const chrome = await findChrome();
     const outcomes: Record<string, unknown> = {};
-    for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight", "scroll-into-view", "thread-expand"]) {
-      // The seventeen-row cases need every row on screen at once.
+    for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight", "scroll-into-view", "thread-expand",
+      "first-receipt-phone", "first-receipt-desktop"]) {
+      // The seventeen-row cases need every row on screen at once; the first-receipt cases run at a phone and a desktop width.
       const height = ["beyond-eight", "awaiting-beyond-eight", "thread-expand"].includes(scenario) ? 2400 : 900;
-      const { stdout } = await launchChrome(chrome, [`--window-size=1280,${height}`, "--virtual-time-budget=120000", "--dump-dom",
+      const width = scenario === "first-receipt-phone" ? 390 : 1280;
+      const { stdout } = await launchChrome(chrome, [`--window-size=${width},${scenario === "first-receipt-phone" ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
       outcomes[scenario] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"))
