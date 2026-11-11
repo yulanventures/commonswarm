@@ -2306,8 +2306,8 @@
           "endpoints": [
             "/functions/v1/read"
           ],
-          "citation": "src/cloud/channels.ts:248",
-          "detail": "listChannelsAsAgent default timeout, covering the read response body.",
+          "citation": "src/cloud/channels.ts:222",
+          "detail": "listChannelsWithUnreadAsAgent default timeout (listChannelsAsAgent passes through), covering the read response body.",
           "operation": {
             "name": "channel-ls",
             "class": "safe-read",
@@ -2322,14 +2322,16 @@
           "endpoints": [
             "/functions/v1/read"
           ],
-          "citation": "src/cloud/channels.ts:289",
+          "citation": "src/cloud/channels.ts:327",
           "detail": "readChannelMessagesAsAgent default timeout, covering the read response body.",
           "operation": {
             "name": "channel-read",
             "class": "not-run",
-            "writes": [],
+            "writes": [
+              "the calling agent's own channel read position"
+            ],
             "removes": [],
-            "reason": "cswarm channel read POSTs resource channel_messages to the read edge and changes no workspace state.",
+            "reason": "cswarm channel read POSTs resource channel_messages to the read edge. With max_bytes it moves only the calling agent's own read position; it changes no workspace state.",
             "proxy_operation": "channel-ls",
             "proxy": "Agent channel ls hits the same read edge with the same timeout and body handling."
           }
@@ -2340,7 +2342,7 @@
           "endpoints": [
             "/rest/v1/channels"
           ],
-          "citation": "src/cloud/channels.ts:343",
+          "citation": "src/cloud/channels.ts:400",
           "detail": "listChannelsAsHuman default timeout, covering the PostgREST body.",
           "operation": {
             "name": "channel-ls-human",

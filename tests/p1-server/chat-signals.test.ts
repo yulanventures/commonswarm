@@ -2090,6 +2090,19 @@ test("an agent's channel_ls unread clears only once channel_read has returned ev
   assert.deepEqual(empty.body.messages, []);
   assert.equal(await unreadOf(slug), true);
 
+  // One message over the caller's budget comes back alone (the bound keeps one), but a caller that
+  // can't deliver it would refuse the result, so the read never moves the position.
+  await read({ channel: slug, after_id: posted[1] }); // caught up through the notes
+  assert.equal(await unreadOf(slug), false);
+  const big = await send(f.ownerJwt, installedPost({ channel: slug, body: `big ${"z".repeat(1500)}` }));
+  assert.equal(big.status, 200, JSON.stringify(big.body));
+  assert.equal(await unreadOf(slug), true);
+  const over = await read({ channel: slug, after_id: notes[4], max_bytes: 1024 });
+  assert.deepEqual((over.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id), [String(signalOf(big.body).id)]);
+  assert.equal(await unreadOf(slug), true, "a page over the declared budget leaves the position");
+  await read({ channel: slug, after_id: notes[4] });
+  assert.equal(await unreadOf(slug), false, "the same message within budget moves it");
+
   for (const max_bytes of [1023, 64 * 1024 + 1, 2048.5, "2048"]) {
     assert.equal((await read({ channel: slug, max_bytes })).status, 400, `max_bytes ${max_bytes}`);
   }
