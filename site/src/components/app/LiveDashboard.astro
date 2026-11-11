@@ -1166,6 +1166,7 @@ import "../../styles/kylon-command-palette.css";
   import { projectHomeLayout } from "../../lib/kylon-shell/projection";
   import { greetingName } from "../../lib/greeting-name";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
+  import { completePasswordChange, type CurrentCheck } from "../../lib/password-change-completion";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail, type RailChannelsVM } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
@@ -1294,6 +1295,7 @@ import "../../styles/kylon-command-palette.css";
     signInWithPassword,
     signInWithProvider,
     signOut,
+    signOutEverywhere,
     signOutOtherDevices,
     setPassword,
     sendPasswordCode,
@@ -5812,6 +5814,38 @@ import "../../styles/kylon-command-palette.css";
       | { phase: "loaded"; grants: SeatAdminGrantRow[] } = { phase: "idle" };
     let seatAdminOrganizations: Organization[] = [];
     let pendingSeatAdminReauthNotice = false;
+    // The account whose password change is signing it out; the signed-out view then asks it to sign
+    // in again. Cleared as soon as any account is signed in, or by Sign out.
+    let passwordChangeNotice: { userId: string; email: string } | null = null;
+    const PASSWORD_CHANGED_NOTICE = "Password changed. Sign in again.";
+    // On a signed-out page: the password-changed notice, its account's email and focus, while that
+    // notice is still pending. Returns false when there is none to show.
+    const showPasswordChangedNotice = (): boolean => {
+      const shown = passwordChangeNotice;
+      if (!shown) return false;
+      authError(PASSWORD_CHANGED_NOTICE);
+      const emailInput = one<HTMLInputElement>("#dashboard-email");
+      if (emailInput && shown.email) emailInput.value = shown.email;
+      window.requestAnimationFrame(() => {
+        // Only while this notice still owns a signed-out page.
+        if (passwordChangeNotice !== shown || session) return;
+        const focusField = emailInput && emailInput.value.trim()
+          ? one<HTMLInputElement>("#dashboard-password") ?? emailInput
+          : emailInput;
+        focusField?.focus({ preventScroll: true });
+      });
+      return true;
+    };
+    // The page's identity-safe check (currentSession): it removes this device's copy only when the
+    // server no longer knows the SDK's current credential, under the SDK's lock.
+    const verifyCurrentForPasswordChange = async (): Promise<CurrentCheck> => {
+      try {
+        const current = await currentSession();
+        return current ? { kind: "session", userId: current.user.id } : { kind: "none" };
+      } catch (error) {
+        return error instanceof SessionExpired ? { kind: "expired" } : { kind: "unknown" };
+      }
+    };
     const seatAdminRemovingLevels = new Map<string, Set<SeatAdminRoleLevel>>();
     const seatAdminReceipts = new Map<string, string>();
     const seatAdminErrors = new Map<string, string>();
@@ -11926,13 +11960,14 @@ import "../../styles/kylon-command-palette.css";
           showPanel("signed-out");
           if (pendingSeatAdminReauthNotice && !returnedAuthError) {
             authError("Sign in again to confirm agent admin access.");
-          } else {
+          } else if (returnedAuthError || !showPasswordChangedNotice()) {
             authLinkError(returnedAuthError);
             returnedAuthError = null;
           }
           return;
         }
         pendingSeatAdminReauthNotice = false;
+        passwordChangeNotice = null;
         if (!readSeatAdminReauthIntent(session.user.id)) {
           clearSeatAdminReauthIntent();
         }
@@ -11984,7 +12019,9 @@ import "../../styles/kylon-command-palette.css";
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
-          authError(error.message);
+          // The removal that follows a password change lands here too (the SDK has just dropped the
+          // session); it keeps the password-changed notice.
+          if (!showPasswordChangedNotice()) authError(error.message);
           return;
         }
         if (session) {
@@ -12136,6 +12173,7 @@ import "../../styles/kylon-command-palette.css";
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
         pendingSeatAdminReauthNotice = false;
+        passwordChangeNotice = null;
         clearSeatAdminReauthIntent();
         if (session) clearCreateIntent(session.user.id);
         requestVersion += 1;
@@ -12459,14 +12497,33 @@ import "../../styles/kylon-command-palette.css";
         try {
           await setPassword(ownSession(ticket), fresh.value, codeRow.hidden ? undefined : code.value);
           if (!passwordGuard.live(ticket, session?.user.id)) return;
-          fresh.value = ""; code.value = ""; fresh.disabled = true; codeRow.hidden = true;
-          save.hidden = true; cancel.textContent = "Done";
-          let others = true;
-          try { await signOutOtherDevices(ownSession(ticket)); } catch { others = false; }
+          fresh.value = ""; code.value = "";
+          // A changed password signs every device out, this one included (CS-E04), then asks for a
+          // fresh sign-in. Bound to the opening account; the password is not kept or replayed.
+          const opening = ownSession(ticket);
+          if (!opening) return;
+          const notice = { userId: opening.user.id, email: opening.user.email ?? "" };
+          passwordChangeNotice = notice;
+          const outcome = await completePasswordChange({ userId: notice.userId, accessToken: opening.access_token }, {
+            signOutEverywhere: (accessToken) => signOutEverywhere({ access_token: accessToken }),
+            verifyCurrent: verifyCurrentForPasswordChange,
+            live: () => passwordChangeNotice === notice && (session === null || session.user.id === notice.userId),
+          });
+          // Signed out: the signed-out render shows the notice. If this page has not seen the
+          // sign-out yet (no SDK session was left to remove), close the dialog and render it now.
+          if (outcome.kind === "signed-out") {
+            if (session !== null && passwordChangeNotice === notice) { closePasswordDialog(); queueAuthReload(null, false, true); }
+            return;
+          }
+          if (passwordChangeNotice === notice) passwordChangeNotice = null;
+          if (outcome.kind === "superseded") return;
           if (!passwordGuard.live(ticket, session?.user.id)) return;
-          status.textContent = others ? "Password saved. Other devices are signed out."
-            : "Password saved. Other devices could not be signed out; use Sign out other devices.";
+          fresh.disabled = true; codeRow.hidden = true; save.hidden = true; cancel.textContent = "Done";
+          status.textContent = outcome.kind === "still-signed-in"
+            ? "Password changed. Not every device could be signed out. Sign out, then sign in again."
+            : "Password changed. Reload the page, then sign in again.";
           cancel.focus();
+          return;
         } catch (error) {
           if (!passwordGuard.live(ticket, session?.user.id)) return;
           if (error instanceof PasswordCodeRequired) await sendCode(ticket);

@@ -753,6 +753,23 @@ export async function signOutOtherDevices(
   session: Pick<Session, "access_token"> | null,
   options: { fetcher?: typeof fetch; target?: Deployment | null } = {},
 ): Promise<void> {
+  await logoutScope(session, "others", options);
+}
+
+/** Ends every session of this account, this one included (`scope=global`), with the same strict
+ *  rules as signOutOtherDevices. Used after a password change: every device signs in again. */
+export async function signOutEverywhere(
+  session: Pick<Session, "access_token"> | null,
+  options: { fetcher?: typeof fetch; target?: Deployment | null } = {},
+): Promise<void> {
+  await logoutScope(session, "global", options);
+}
+
+async function logoutScope(
+  session: Pick<Session, "access_token"> | null,
+  scope: "others" | "global",
+  options: { fetcher?: typeof fetch; target?: Deployment | null },
+): Promise<void> {
   const target = options.target === undefined ? deployment() : options.target;
   if (!target) throw new Error("CommonSwarm is not configured on this page. No device was signed out.");
   if (!session || typeof session.access_token !== "string" || !session.access_token) {
@@ -761,13 +778,13 @@ export async function signOutOtherDevices(
   const deadline = requestDeadline();
   let response: Response;
   try {
-    response = await (options.fetcher ?? fetch)(`${target.url}/auth/v1/logout?scope=others`, {
+    response = await (options.fetcher ?? fetch)(`${target.url}/auth/v1/logout?scope=${scope}`, {
       method: "POST",
       headers: { authorization: `Bearer ${session.access_token}`, apikey: target.anonKey },
       signal: deadline.controller.signal,
     });
   } catch {
-    throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
+    throw new Error(`CommonSwarm could not confirm that ${scope === "others" ? "other devices were" : "every device was"} signed out. Try again.`);
   } finally {
     deadline.clear();
   }
@@ -775,7 +792,7 @@ export async function signOutOtherDevices(
   if (response.status === 401 || response.status === 403 || response.status === 404) {
     throw new Error("Your sign-in could not be confirmed. Sign in again, then try once more. No device was signed out.");
   }
-  throw new Error("CommonSwarm could not confirm that other devices were signed out. Try again.");
+  throw new Error(`CommonSwarm could not confirm that ${scope === "others" ? "other devices were" : "every device was"} signed out. Try again.`);
 }
 
 /** Minimum password length; GoTrue enforces the same (GOTRUE_PASSWORD_MIN_LENGTH=12, #273). */
