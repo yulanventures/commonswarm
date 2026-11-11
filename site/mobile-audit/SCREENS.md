@@ -6,7 +6,7 @@ Owners: Product Lead sets priorities; Engineer owns the simulated seed and CI ha
 
 **Status vocabulary:** SC = source-confirmed implementation; HR = harness reachability/fixture still required; F = future, not implemented. All SC entries remain HR until an actual CI capture demonstrates the surface. Do not count DOM existence or a test filename as rendered coverage.
 
-Source-confirmed coverage totals: R01–R17 (17 routes), V01–V26 (26 app/state families), D01–D14 (14 dialog definition families: 11 static + 3 dynamic), M01–M15 (15 menu/overlay presentations; some deliberately overlap V/D at different anchors). IDs count inventory units, not unique DOM nodes.
+Baseline source-confirmed coverage totals: R01–R17 (17 routes), V01–V26 (26 app/state families), D01–D14 (14 dialog definition families: 11 static + 3 dynamic), M01–M15 (15 menu/overlay presentations; some deliberately overlap V/D at different anchors). IDs count inventory units, not unique DOM nodes. D15 records the restored outer People & agents modal added on 2026-11-11.
 
 ## Required capture matrix and seed
 
@@ -39,9 +39,9 @@ Seed one dense workspace (12 long-named agents, 5 people, mixed providers/avatar
 | R17 | /terms | SC screen | `site/src/pages/terms.astro:300` | Base, LegalDoc | Default; long scroll; header mobile menu; footer; keyboard links; code/table overflow where present |
 
 
-## Native dialogs: 11 static declarations + 3 dynamic families
+## Native dialog inventory
 
-Counts are definitions, not instances: role-change confirmations can repeat per member. People & agents is a page, not the retired people dialog.
+The November 3 baseline comprises 11 static declarations and 3 dynamic families; D15 adds the restored outer People & agents modal. Counts are definitions, not instances: role-change confirmations can repeat per member.
 
 | ID | Surface | Source | Selector | Opening trigger (SC; HR for end-to-end) | Required states |
 | --- | --- | --- | --- | --- | --- |
@@ -59,6 +59,7 @@ Counts are definitions, not instances: role-change confirmations can repeat per 
 | D12 | Navigation drawer | `site/src/lib/kylon-shell/shell.js:88` | .cs-org-drawer | button[aria-label="Open navigation"] | mobile only; account/org/workspace switch; dense agents; close/resize/focus/inert; same nodes move |
 | D13 | Details sheet | `site/src/lib/kylon-shell/channel-details.ts:9` | .cs-details-sheet | [data-channel-details-toggle] | phone sheet vs desktop side pane; person/agent/entity selection; long details; close/back/Escape |
 | D14 | Own-role lowering confirmation | `site/src/lib/people-dialog-view.ts:362` | .hm-role-confirm / [data-role-confirm] | own role select + Save | cancel/confirm, refusal/busy, focus restoration; disposable owner only |
+| D15 | People & agents outer modal | `site/src/components/app/LiveDashboard.astro` | dialog[data-roster-dialog] | existing roster/person doors; cold ?v=people | dense roster; desktop columns/phone sheet; selected detail; accepted receipt; native nested confirmation; Esc/opener return; workspace/route/sign-out retirement |
 
 
 ## App screens and state families
