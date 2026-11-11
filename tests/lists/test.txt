@@ -124,3 +124,4 @@ tests/household-managed-file-fence.test.ts
 tests/admin-release-w4-second-pass.test.ts
 tests/workspace-skills.test.ts
 tests/interactive-replies-client.test.ts
+tests/api-md-contract.test.ts
