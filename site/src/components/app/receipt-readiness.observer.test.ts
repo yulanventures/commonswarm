@@ -29,7 +29,7 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", scenario, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
+  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", scenario, receiptsInFlight: 0, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
@@ -64,7 +64,10 @@ function installReceiptFixture() {
       const id = String(body?.p_signal_id ?? "");
       const read = { at: ++f.clock, id, seen: f.seen, release: () => {}, released: false };
       f.log.push("read:" + id.slice(0, 2));
-      if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) { f.log.push("read-id:" + id); return Response.json(null); }
+      if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) {
+        f.log.push("read-id:" + id); f.receiptsInFlight++;
+        try { await Promise.resolve(); return Response.json(null); } finally { f.receiptsInFlight--; }
+      }
       if (scenario === "awaiting-beyond-eight") {
         f.log.push("read-id:" + id);
         return Response.json({ addressed: true, receipts: [{ recipient_user_id: owner, display_name: "Synthetic owner",
@@ -168,7 +171,11 @@ async function observeReceiptReadiness() {
         const rootReceipt = () => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${f.root}"] .dashboard__message-receipt`))
           .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === f.root);
         await wait(() => rootReceipt()?.dataset.receiptLoaded === "true", "the first pass ended");
-        for (let i = 0; i < 10; i++) await tick();
+        // A refresh asked for during that pass queues one more pass, whose own drain would read rows the open brings into
+        // view. Open only when no receipt read is in flight and none has started for 20 ticks: no pass is running.
+        let idle = 0, seen = f.log.length;
+        while (idle < 20) { await tick(); idle = f.receiptsInFlight === 0 && f.log.length === seen ? idle + 1 : 0; seen = f.log.length; }
+        steps.push("no pass running before the open");
       } else {
         // Let the reads of the rows on screen at load finish.
         let stable = 0, size = -1;
