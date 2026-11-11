@@ -553,19 +553,7 @@
 .hm-ahp__back:hover { color: var(--home-ink); }
 .hm-ahp__back[hidden] { display: none; }
 
-/* In the add-agent panel, "← Which app?" stays for keyboard users (the pills above already show
-   the choice): it appears when it takes focus, the skip-link pattern. */
-.hm-ahp__detail > .hm-ahp__back:not(:focus) {
-  position: absolute;
-  inline-size: 1px;
-  block-size: 1px;
-  min-block-size: 0;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
+/* Back is consistently visible and laid out; focusing it never inserts a row. */
 .hm-ahp__detail > .hm-ahp__back:focus { color: var(--home-ink); background: var(--home-card); }
 
 .hm-ahp__title {

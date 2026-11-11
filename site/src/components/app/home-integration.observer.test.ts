@@ -7,6 +7,7 @@ import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client'
 import { CommandOutcomeUnknown, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
+import { canPreviewChatAttachment } from '../../lib/chat-image-preview';
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
@@ -523,8 +524,10 @@ class RowNode {
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
 test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
-  const code = await dashboardFunctions(['syncListsChrome', 'addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
-    'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
+  // renderFeed keeps keyboard focus across its rebuild: include that real helper and its own dependencies.
+  const code = await dashboardFunctions(['FEED_FOCUSABLE', 'controlIdentity', 'feedIdentity', 'keepFeedFocus', 'syncListsChrome', 'addAgentViewOpen',
+    'showChannelView', 'renderFeed', 'loadSignals', 'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds',
+    'refreshDeliveryReceipts']);
   for (const [route, workspaceView, channelView] of [
     ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
     ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
@@ -543,15 +546,19 @@ test('a signal page settling after a same-workspace view change retains data wit
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
       queueMicrotask: () => {}, window: { clearTimeout() {} },
+      // Nothing is focused in this fixture, so keepFeedFocus records nothing and schedules no restore.
+      document: { activeElement: null }, HTMLElement: class {},
     });
     runInContext(`
       const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
-      let listsAllowLanding=null;
+      let listsAllowLanding=null, feedFocus=null, feedRenderGeneration=0;
       let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
       let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
       let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
       const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
-      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='';
+      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='', deliveryReceiptRefreshAgain=false;
+      // renderFeed asks for first receipt reads of rows it brought into view; this case is about the pane, not receipts.
+      const requestVisibleReceipts=()=>{};
       const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
       const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
       // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.
@@ -941,7 +948,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     let threadReplyRoot=null; const composerSending=false, threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
     const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot']), context);
+  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   for (const [id, channelId, expected] of [
     ['orbit', null, 'Replying to your Orbit in All messages.'],
     ['river', 'mobile', 'Replying to your River in #mobile.'],
@@ -982,6 +989,45 @@ test('replying from a stream row preserves the agent ownership label and the roo
   runInContext('threadReplyRoot=null; syncComposerPlacement()', context);
   assert.deepEqual(marked(), [], 'the direct reset-state projection also clears the old root');
 });
+test('chat pictures and file cards each open their own attachment through its signed link', async () => {
+  const document = { createElement: (tag: string) => new RowNode(tag) };
+  const signed: string[] = [], opened: string[] = [], previews: string[] = [];
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras,
+    canPreviewChatAttachment, homeAskAnswered, window: { requestAnimationFrame() {}, location: { assign: (url: unknown) => opened.push(String(url)) } },
+    setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
+    freshAttachmentDownload: async (fileId: string) => { signed.push(fileId); return { url: `https://storage.test/${fileId}`, contentWarning: 'untrusted' }; },
+    loadAttachmentPreview: (_image: RowNode, _holder: RowNode, attachment: { file_id: string }) => { previews.push(attachment.file_id); },
+    setComposerStatus: () => { throw new Error('no download may fail here'); }, readableError: String,
+  });
+  runInContext(`
+    const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='viewer', now=0;
+    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map();
+    const removedAgentOwners=new Map(), agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6;
+    const streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
+    const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'viewer',
+      ownerFirstName:'Owner',ownerInitial:'O',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
+    const signalIsDirectToViewer=()=>false, initials=()=>'', kindLabel=kind=>kind, routeHref=()=>'/app?w=W&v=files';
+    const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>[];
+    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
+  `, context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
+  const file = (id: string, type: string, size: number) => ({ file_id: id, version_n: 1, name: `${id}.bin`, content_type: type, size_bytes: size });
+  const attachments = [file('shot', 'image/png', 2048), file('vector', 'image/svg+xml', 900), file('report', 'application/pdf', 4096),
+    file('huge', 'image/png', 25 * 1024 * 1024 + 1)];
+  const row = runInContext(`buildMessageRow(${JSON.stringify({ id: 'S-files', from: 'claude', fromKind: 'agent', kind: 'note', body: 'Screens attached',
+    to: 'viewer', toAgent: null, about: null, attachments, channelId: null, createdAt: '2026-10-05T12:00:00Z' })},false)`, context) as RowNode;
+  const pictures = row.querySelectorAll('.hm-extras__image');
+  assert.equal(pictures.length, 1, 'only a known image type within the cap is a picture; SVG and oversize stay files');
+  assert.equal(pictures[0]!.querySelectorAll('.hm-extras__image-frame').length, 1, 'the picture sits in its reserved frame');
+  assert.deepEqual(previews, ['shot'], 'the picture loads its own attachment');
+  const cards = row.querySelector('.hm-extras__files')!.querySelectorAll('a');
+  assert.deepEqual(cards.map(card => card.dataset.objectId), ['vector', 'report', 'huge']);
+  const click = async (node: RowNode) => { Reflect.apply(node.handlers.get('click')!, node, [{ preventDefault() {}, stopPropagation() {} }]); await new Promise(done => setImmediate(done)); };
+  await click(cards[1]!);
+  await click(pictures[0]!);
+  assert.deepEqual(signed, ['report', 'shot'], 'each link signs its own attachment, not the one at the same index');
+  assert.deepEqual(opened, ['https://storage.test/report', 'https://storage.test/shot'], 'the browser opens the signed URL itself');
+});
 test('an ask card keeps the full sanitized question, links, topic controls and Show more', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const frames: (() => void)[] = [];
@@ -1006,7 +1052,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>['Budget'];
     const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
   `, context);
-  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot']), context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   for (const [kind, from, reply, missingTitle] of [['ask','claude',null,false],['note','claude',null,false],['ask','claude','removed-own',false],['ask','claude','removed-other',false],['ask','claude',null,true]] as const) {
     withoutTitle = missingTitle;
     runInContext(`expandedSignalIds.clear(); signals.splice(0, signals.length, ...${reply ? JSON.stringify([{id:'reply',from:reply,fromKind:'agent',kind:'note',inReplyTo:`S-${kind}`}]) : '[]'});`, context);

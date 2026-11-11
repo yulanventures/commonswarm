@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { auditPng } from "./picture-check.js";
 
 export interface SeedEnvironment { apiUrl: string; anonKey: string; serviceRoleKey: string; dbUrl: string }
 export interface SeedResult {
@@ -52,6 +53,40 @@ const BODIES = [
   "Can you look at the boiler service quote? It's attached in Files.",
   "Heads up: the plumber is coming between 8 and 10am tomorrow.",
 ];
+
+/**
+ * A real refresh for a witness: a note in #general, already seen by the viewer (so its receipt never changes), that the
+ * app's own polling shows, rebuilding the feed. It lives long enough for any poll interval; the returned function
+ * removes it at once, so no later page ever opens with it showing.
+ */
+export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, string>): Promise<() => Promise<void>> {
+  assert.ok(loopback(env.dbUrl), "local stack only");
+  const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
+  const id = randomUUID();
+  try {
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
+        VALUES (${id}::uuid, ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
+          statement_timestamp() + interval '60 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+      await tx`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+        SELECT ${ids.workspace!}::uuid, ${id}::uuid, m.user_id FROM swarm.memberships m
+        WHERE m.workspace_id = ${ids.workspace!}::uuid AND m.role = 'owner' AND m.revoked_at IS NULL ON CONFLICT DO NOTHING`;
+    });
+  } finally { await sql.end({ timeout: 5 }); }
+  return async () => {
+    // Signals are append-only (prevent_append_only_mutation), so the CI-only note is removed with triggers bypassed for
+    // this one transaction on the local test stack: its receipt rows, then the note itself.
+    const done = postgres(env.dbUrl, { prepare: false, max: 1 });
+    try {
+      await done.begin(async (tx) => {
+        await tx`SET LOCAL session_replication_role = replica`;
+        await tx`DELETE FROM swarm.signal_human_receipts WHERE signal_id = ${id}::uuid`;
+        const removed = await tx`DELETE FROM swarm.signals WHERE id = ${id}::uuid`;
+        if (removed.count !== 1) throw new Error(`refresh note ${id} was not removed`);
+      });
+    } finally { await done.end({ timeout: 5 }); }
+  };
+}
 
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
   for (const url of [env.apiUrl, env.dbUrl]) assert.ok(loopback(url), `seed refuses non-local target ${new URL(url).hostname}`);
@@ -214,12 +249,83 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           )`;
         steps.push("seed_dm");
       } catch (error) { note("seed_dm", error); }
+      // The owner's hover report (Nov 10), newest in the general channel: an agent's long message addressed to the
+      // viewer, the viewer's own long message addressed to an agent, and a second one that groups under it.
+      try {
+        const addressedAgent = randomUUID(), addressedOwn = randomUUID(), groupedOwn = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${addressedAgent}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+            NULL, 'note', ${"Security advisory: the boiler controller firmware has an update that fixes the pressure sensor reading. Please install it this week, one unit at a time, and reply with each unit's version once it is done."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '25 seconds',
+            ${channels.general}::uuid, NULL, false
+          ), (
+            ${addressedOwn}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', ${"Please compare the three boiler service quotes, check which ones include the expansion vessel and the flue test, and post a short summary with the price difference before Friday so we can book the visit."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '20 seconds',
+            ${channels.general}::uuid, NULL, false
+          ), (
+            ${groupedOwn}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', ${"Also include whether the quotes cover a return visit if the pressure drops again within a month."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '10 seconds',
+            ${channels.general}::uuid, NULL, false
+          )`;
+        Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
+        steps.push("seed_addressed");
+      } catch (error) { note("seed_addressed", error); }
+      // Two of the viewer's messages to everyone, seconds apart: the second groups under the first with no recipient, so
+      // its author is the focus-revealed label (an addressed message keeps its header).
+      try {
+        const lead = randomUUID(), groupedBroadcast = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${lead}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'Reminder for everyone: the boiler service visit is on Friday morning.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '8 seconds', ${channels.general}::uuid, NULL, false
+          ), (
+            ${groupedBroadcast}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'Please keep the hallway clear for the engineer.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 seconds', ${channels.general}::uuid, NULL, false
+          )`;
+        ids["message.groupedBroadcast"] = groupedBroadcast;
+        steps.push("seed_grouped_broadcast");
+      } catch (error) { note("seed_grouped_broadcast", error); }
+      // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
+      // real feed rebuild.
+      try {
+        const long = randomUUID();
+        // More than MESSAGE_COLLAPSE_LINES (60 line boxes, site/src/lib/message-markdown.ts) at every audited width.
+        const body = Array.from({ length: 75 }, (_, i) => `Step ${i + 1}: check the boiler pressure gauge, note the reading, and compare it with the service sheet.`).join("\n\n");
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${long}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', NULL, NULL, NULL,
+            NULL, 'note', ${body}, statement_timestamp() + interval '25 days', statement_timestamp() - interval '40 seconds',
+            ${channels.general}::uuid, NULL, false
+          )`;
+        ids["message.long"] = long;
+        steps.push("seed_long_message");
+      } catch (error) { note("seed_long_message", error); }
+      // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
+      // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
+      try {
+        await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+          SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
+          WHERE workspace_id = ${workspace}::uuid AND from_principal <> ${owner.id}::uuid
+          ON CONFLICT DO NOTHING`;
+        steps.push("seed_viewer_seen");
+      } catch (error) { note("seed_viewer_seen", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
-    const seedFile = async (stepName: string, name: string, contentType: string, text: string, existingFileId?: string): Promise<string | null> => {
+    const seedFile = async (stepName: string, name: string, contentType: string, text: string | Uint8Array, existingFileId?: string): Promise<string | null> => {
       try {
-        const bytes = new TextEncoder().encode(text);
+        const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
         const requestedFileId = existingFileId ?? randomUUID();
         const requestedVersionId = randomUUID();
         const created = await command(owner.token, {
@@ -239,7 +345,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         const put = await fetch(new URL(created.body.upload_path, `${env.apiUrl.replace(/\/+$/, "")}/`).href, {
           method: "PUT",
           headers: { "content-type": contentType },
-          body: bytes,
+          body: bytes as Uint8Array<ArrayBuffer>,
         });
         if (!put.ok) {
           note(stepName, `PUT HTTP ${put.status}`);
@@ -257,12 +363,22 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         return null;
       }
     };
-    await seedFile(
+    const quoteFileId = await seedFile(
       "seed_file boiler-service-quote-2026-11.txt",
       "boiler-service-quote-2026-11.txt",
       "text/plain",
       "Boiler service quote — $240 including filter check and expansion vessel inspection.\nValid until 2026-11-30.\n",
     );
+    // A real PNG and the text quote on one message in the general channel: one picture beside one file card.
+    const pictureFileId = await seedFile("seed_file boiler-label.png", "boiler-label.png", "image/png", auditPng());
+    if (pictureFileId && quoteFileId) {
+      ok("seed_picture", await command(owner.token, {
+        kind: "post_signal", signal_kind: "note", body: "Photo of the boiler label, with the service quote.",
+        to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null,
+        attachments: [{ file_id: pictureFileId, version_n: 1 }, { file_id: quoteFileId, version_n: 1 }],
+        channel: "household",
+      }, workspace));
+    }
     const wikiFileId = await seedFile(
       "seed_wiki overview v1",
       "brain--overview.md",

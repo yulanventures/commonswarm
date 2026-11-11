@@ -1227,6 +1227,7 @@ import "../../styles/kylon-command-palette.css";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
+    canPreviewChatAttachment,
     canPreviewChatImage,
     ChatImagePreviewCache,
     chatImagePreviewFailure,
@@ -1982,6 +1983,7 @@ import "../../styles/kylon-command-palette.css";
     const attachmentPreviewUrls = new ChatImagePreviewCache();
     const deliveryReceiptCache = new Map<string, BrowserDeliveryReceiptCacheEntry>();
     let deliveryReceiptRefreshOwner = "";
+    let deliveryReceiptRefreshAgain = false;
     /* Message status: only the signed-in person's latest message to each agent, from
        message_status. Agent status events (working or idle, no message or label) trigger a
        re-read and the agent panel's bare "Working". */
@@ -2027,9 +2029,39 @@ import "../../styles/kylon-command-palette.css";
       messageStatusExpiryTimer = undefined;
     };
     let humanSeenObserver: IntersectionObserver | null = null;
+    /* Rows whose seen report the server acknowledged and whose receipt the app will read again, each with the
+       acknowledgement's epoch: the shown receipt is out of date until a read that STARTED after it completes. A read
+       already in flight at the acknowledgement carries pre-acknowledgement data and settles nothing. */
+    const seenAwaitingRead = new Map<string, number>();
+    let seenAckEpoch = 0;
+    /* A row's receipt is loaded once a read completed with a result (not a request just issued, a failed read or a
+       fallback), and no seen report of this viewer's for it is still queued, in flight, or not yet read back. Receipts
+       load only for rows on screen, and a row on screen is reported seen, so a row's receipt can change shortly after it
+       scrolls into view; the hover audit waits on data-receipt-loaded before taking rest. */
+    /** The scope a row is reported seen under, or null for rows this viewer never reports (agent-addressed or someone
+     *  else's direct message). */
+    const humanSeenScopeFor = (signal: Signal): string | null =>
+      !sampleMode && session && activeWorkspaceId && signal.toAgent === null &&
+        (signal.to === null || signal.to === session.user.id)
+        ? `${session.user.id}:${activeWorkspaceId}`
+        : null;
+    const receiptLoaded = (signal: Signal): boolean => {
+      const result = deliveryReceiptCache.get(signal.id)?.result;
+      if (result === undefined || result === null || seenAwaitingRead.has(signal.id)) return false;
+      const scope = humanSeenScopeFor(signal);
+      return scope === null || !humanSeenReporter.owes(scope, signal.id);
+    };
+    const syncReceiptMarkers = (): void => {
+      const byId = new Map(signals.map(signal => [signal.id, signal]));
+      for (const details of document.querySelectorAll<HTMLElement>(".dashboard__message-receipt[data-receipt-loaded]")) {
+        const signal = byId.get(details.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "");
+        if (signal) details.dataset.receiptLoaded = String(receiptLoaded(signal));
+      }
+    };
 
     const humanSeenReporter = new HumanSeenReporter({
       hasFocus: () => document.hasFocus(),
+      changed: () => syncReceiptMarkers(),
       send: async (scope, signalIds) => {
         const separator = scope.indexOf(":");
         const userId = separator < 0 ? "" : scope.slice(0, separator);
@@ -2049,6 +2081,13 @@ import "../../styles/kylon-command-palette.css";
           const cached = deliveryReceiptCache.get(signalId);
           if (cached) deliveryReceiptCache.set(signalId, { ...cached, checkedAt: 0 });
         }
+        // Only rows the app will actually read again wait for that read; a settled receipt is never re-read.
+        const owed = new Set(signalIds);
+        const epoch = ++seenAckEpoch;
+        for (const signal of browserDeliveryReceiptCandidates(signals.filter(row => owed.has(row.id)), deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER)) {
+          seenAwaitingRead.set(signal.id, epoch);
+        }
+        syncReceiptMarkers();
         void refreshDeliveryReceipts(workspaceId, requestVersion);
       },
     });
@@ -4064,7 +4103,7 @@ import "../../styles/kylon-command-palette.css";
         const prepared = prepareBrowserAttachments(files, stagedAttachments.length);
         stagedAttachments.push(...prepared.map((intent) => ({
           intent,
-          previewUrl: intent.contentType.startsWith("image/")
+          previewUrl: canPreviewChatImage(intent.contentType)
             ? URL.createObjectURL(intent.file)
             : null,
         })));
@@ -5144,6 +5183,9 @@ import "../../styles/kylon-command-palette.css";
       if (!activeWorkspaceId) return;
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       activeDm = { kind: entity.kind, id: entity.id } as EntityRef;
+      // The shell's title comes from activeDm: redraw it now, or it changes height on a later render and pushes the
+      // conversation down under the reader's pointer.
+      renderHomeShell();
       syncComposerAddress([{ kind: entity.kind, id: entity.id }]);
       renderFeed();
       syncComposerPlacement();
@@ -5154,6 +5196,7 @@ import "../../styles/kylon-command-palette.css";
     const closeDirectMessage = (): void => {
       if (!activeDm) return;
       activeDm = null;
+      renderHomeShell();
       syncComposerAddress([]);
       closeEntityPanel(false);
       renderFeed();
@@ -7516,6 +7559,7 @@ import "../../styles/kylon-command-palette.css";
       const details = document.createElement("details");
       details.className = "dashboard__message-receipt";
       details.dataset.receiptState = indicator.state;
+      details.dataset.receiptLoaded = String(receiptLoaded(signal));
       if (indicator.outcome !== null) details.dataset.receiptOutcome = indicator.outcome;
       /* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a receipt shows on the row only while it is a
          problem or still moving: pending, stuck, failed, expired, or a mix that may hide a failure.
@@ -7689,6 +7733,65 @@ import "../../styles/kylon-command-palette.css";
       );
     };
 
+    /** Sign and load one attachment picture once its holder nears the feed's view, with one retry. The signed link only
+     *  ever becomes the image's src: no fetch, blob or CORS (chat-image-preview.test.mjs). `holder` carries the state. */
+    const loadAttachmentPreview = (
+      image: HTMLImageElement,
+      holder: HTMLElement,
+      attachment: { file_id: string; version_n: number; name: string },
+    ): void => {
+      let failures = 0;
+      let signing = false;
+      const unavailable = (): void => {
+        image.alt = `${attachment.name} preview unavailable`;
+        holder.dataset.previewState = "unavailable";
+      };
+      const load = async (): Promise<void> => {
+        if (signing) return;
+        signing = true;
+        const signedAt = Date.now();
+        try {
+          const signed = await freshAttachmentDownload(
+            attachment.file_id,
+            attachment.version_n,
+          );
+          if (!image.isConnected) return;
+          attachmentPreviewUrls.remember(
+            attachment.file_id, attachment.version_n, signed, signedAt,
+          );
+          image.src = signed.url;
+        } catch {
+          if (image.isConnected) unavailable();
+        } finally {
+          signing = false;
+        }
+      };
+      const cachedUrl = attachmentPreviewUrls.get(
+        attachment.file_id, attachment.version_n, Date.now(),
+      );
+      if (cachedUrl) {
+        image.src = cachedUrl;
+      } else if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver((entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          observer.disconnect();
+          void load();
+        }, { root: feedScroller(), rootMargin: "120px" });
+        observer.observe(holder);
+      } else {
+        void load();
+      }
+      image.addEventListener("load", () => {
+        image.alt = attachment.name;
+        delete holder.dataset.previewState;
+      });
+      image.addEventListener("error", () => {
+        attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
+        if (chatImagePreviewFailure(failures++) === "retry") void load();
+        else unavailable();
+      });
+    };
+
     const renderMessageAttachments = (body: HTMLElement, signal: Signal): void => {
       const attachments = signal.attachments ?? [];
       if (attachments.length === 0) return;
@@ -7697,7 +7800,7 @@ import "../../styles/kylon-command-palette.css";
       list.dataset.messageAttachments = String(attachments.length);
       for (const attachment of attachments) {
         const card = document.createElement("article");
-        const inlineImage = canPreviewChatImage(attachment.content_type);
+        const inlineImage = canPreviewChatAttachment(attachment.content_type, attachment.size_bytes);
         card.className = `dashboard__attachment-card${
           inlineImage ? " dashboard__attachment-card--image" : ""
         }`;
@@ -7707,56 +7810,7 @@ import "../../styles/kylon-command-palette.css";
           image.alt = attachment.name;
           image.loading = "lazy";
           image.referrerPolicy = "no-referrer";
-          let failures = 0;
-          let signing = false;
-          const unavailable = (): void => {
-            image.alt = `${attachment.name} preview unavailable`;
-            card.dataset.previewState = "unavailable";
-          };
-          const load = async (): Promise<void> => {
-            if (signing) return;
-            signing = true;
-            const signedAt = Date.now();
-            try {
-              const signed = await freshAttachmentDownload(
-                attachment.file_id,
-                attachment.version_n,
-              );
-              if (!image.isConnected) return;
-              attachmentPreviewUrls.remember(
-                attachment.file_id, attachment.version_n, signed, signedAt,
-              );
-              image.src = signed.url;
-            } catch {
-              if (image.isConnected) unavailable();
-            } finally {
-              signing = false;
-            }
-          };
-          const cachedUrl = attachmentPreviewUrls.get(
-            attachment.file_id, attachment.version_n, Date.now(),
-          );
-          if (cachedUrl) {
-            image.src = cachedUrl;
-          } else if ("IntersectionObserver" in window) {
-            const observer = new IntersectionObserver((entries) => {
-              if (!entries.some((entry) => entry.isIntersecting)) return;
-              observer.disconnect();
-              void load();
-            }, { root: feedScroller(), rootMargin: "120px" });
-            observer.observe(card);
-          } else {
-            void load();
-          }
-          image.addEventListener("load", () => {
-            image.alt = attachment.name;
-            delete card.dataset.previewState;
-          });
-          image.addEventListener("error", () => {
-            attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
-            if (chatImagePreviewFailure(failures++) === "retry") void load();
-            else unavailable();
-          });
+          loadAttachmentPreview(image, card, attachment);
           card.append(image);
         }
         const details = document.createElement("div");
@@ -7836,6 +7890,53 @@ import "../../styles/kylon-command-palette.css";
       showChannelView("feed");
     };
 
+    /* FOCUS SURVIVES A FEED REBUILD. renderFeed replaces every row, so a keyboard user's focused
+       message control would drop to <body> on each poll. Before the rebuild, remember the focused
+       control by what it is, not where it sits: the message id (and which copy of it), plus the
+       control's own identity (tag, class, aria-label, data attributes; then which of the row's
+       controls with that identity). Some controls are created a frame after the row (Show more /
+       Show less is added once the text is measured), so focus returns only after that frame. Only
+       focus this rebuild displaced comes back: at that moment focus must still be on nothing, no
+       dialog open, and the feed the same one (route, workspace, channel and filter). If the exact
+       control is gone, nothing moves. */
+    const FEED_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+    const controlIdentity = (el: Element): string => JSON.stringify([el.tagName, el.className, el.getAttribute("aria-label"),
+      Array.from(el.attributes).filter(a => a.name.startsWith("data-") && !a.name.startsWith("data-audit")).map(a => [a.name, a.value])]);
+    const feedIdentity = (): string => JSON.stringify([homeRoute, activeWorkspaceId, activeChannelId, signalFilter, activeWorkspaceView]);
+    /* Back-to-back rebuilds: the latest one owns the restore, so the restore always runs after the
+       frame in which that rebuild adds its deferred controls. A remembered control survives a
+       rebuild that runs while focus is still on nothing, and is forgotten as soon as focus is
+       anywhere else. */
+    let feedFocus: { id: string; copy: number; identity: string | null; ordinal: number; feed: string } | null = null;
+    let feedRenderGeneration = 0;
+    const keepFeedFocus = (list: HTMLElement): void => {
+      const generation = ++feedRenderGeneration;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && list.contains(active)) {
+        const row = active.closest<HTMLElement>("[data-signal-id]");
+        const id = row?.dataset.signalId;
+        if (!row || !id) { feedFocus = null; return; }
+        const identity = active === row ? null : controlIdentity(active);
+        const alike = [...row.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => identity !== null && controlIdentity(el) === identity);
+        feedFocus = { id, copy: [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(id)}"]`)].indexOf(row),
+          identity, ordinal: identity === null ? -1 : alike.indexOf(active), feed: feedIdentity() };
+      } else if (active !== null && active !== document.body) feedFocus = null;
+      if (!feedFocus) return;
+      // After the rebuild returns, then after the frame its deferred controls are added in.
+      queueMicrotask(() => window.requestAnimationFrame(() => {
+        if (generation !== feedRenderGeneration || !feedFocus) return;
+        const pending = feedFocus;
+        feedFocus = null;
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) return;
+        if (feedIdentity() !== pending.feed || document.querySelector("dialog[open]")) return;
+        const next = [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(pending.id)}"]`)][pending.copy];
+        if (!next) return;
+        const target = pending.identity === null ? next
+          : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === pending.identity)[pending.ordinal] ?? null;
+        target?.focus({ preventScroll: true });
+      }));
+    };
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
@@ -7891,6 +7992,7 @@ import "../../styles/kylon-command-palette.css";
       }
       if (more) more.hidden = !signalHasMore;
       if (!list) return;
+      keepFeedFocus(list);
       list.replaceChildren();
       const homePeople = currentHomePeople();
       const streamWorkspace = { id: activeWorkspaceId, name: workspaces.find(row => row.id === activeWorkspaceId)?.name ?? "Workspace", href: routeHref({ view: "chat", workspaceId: activeWorkspaceId }) };
@@ -7987,12 +8089,9 @@ import "../../styles/kylon-command-palette.css";
         /* Working-on posts are status, not conversation: a compact activity line. */
         if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
         markThreadReplyRoot(row);
-        if (
-          !sampleMode && session && activeWorkspaceId &&
-          signal.toAgent === null &&
-          (signal.to === null || signal.to === session.user.id)
-        ) {
-          row.dataset.humanSeenScope = `${session.user.id}:${activeWorkspaceId}`;
+        const seenScope = humanSeenScopeFor(signal);
+        if (seenScope !== null) {
+          row.dataset.humanSeenScope = seenScope;
           row.dataset.humanSeenSignalId = signal.id;
         }
         if ((feedWasEmpty || previousSignalIds.size > 0) && !previousSignalIds.has(signal.id)) {
@@ -8213,10 +8312,21 @@ import "../../styles/kylon-command-palette.css";
           });
           if (decoration) {
             if (sampleMode) for (const control of decoration.querySelectorAll("button")) control.remove();
-            for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>("[data-stream-files] a")).entries()) {
-              const attachment = signal.attachments?.[index]; if (!attachment) continue;
-              link.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
-                void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(url => window.location.assign(url), error => setComposerStatus(readableError(error), "error")); });
+            // Pictures and file cards split the attachments the same way deriveStreamExtras does, in order.
+            type SignalAttachment = NonNullable<Signal["attachments"]>[number];
+            const pictured = (file: SignalAttachment) => canPreviewChatAttachment(file.content_type, file.size_bytes);
+            const openAttachment = (attachment: SignalAttachment) => (event: Event) => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
+              void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(signed => window.location.assign(signed.url), error => setComposerStatus(readableError(error), "error")); };
+            const pictures = (signal.attachments ?? []).filter(pictured);
+            for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>(".hm-extras__image")).entries()) {
+              const attachment = pictures[index]; const image = link.querySelector<HTMLImageElement>("img"); if (!attachment || !image) continue;
+              link.addEventListener("click", openAttachment(attachment));
+              if (!sampleMode) loadAttachmentPreview(image, link, attachment);
+            }
+            const files = (signal.attachments ?? []).filter(file => !pictured(file));
+            for (const [index, link] of Array.from(decoration.querySelector(".hm-extras__files")?.querySelectorAll<HTMLAnchorElement>("a") ?? []).entries()) {
+              const attachment = files[index]; if (!attachment) continue;
+              link.addEventListener("click", openAttachment(attachment));
             }
             if (extras?.ask) {
               const title = decoration.querySelector<HTMLElement>(".hm-needs-title");
@@ -8375,6 +8485,7 @@ import "../../styles/kylon-command-palette.css";
           replies.hidden = !next;
           if (next) expandedThreadIds.add(group.root.id);
           else expandedThreadIds.delete(group.root.id);
+          if (next) requestVisibleReceipts();
         });
         thread.append(toggle, replies);
         list.append(thread);
@@ -8406,6 +8517,8 @@ import "../../styles/kylon-command-palette.css";
         }
       }
       focusComposerOnEntry();
+      // A rebuild can bring rows into view that were never read (an opened thread, a permalink, a reply target).
+      requestVisibleReceipts();
     };
 
     const syncConnectWorkspace = (workspace: Workspace): void => {
@@ -8435,6 +8548,20 @@ import "../../styles/kylon-command-palette.css";
       );
     };
 
+    /* Rows that came into view without a feed change (scrolled to, or a thread opened) have never been read: ask once the
+       scroll settles. Reads only when such a row is on screen; the pass itself drains past the per-pass cap. */
+    let visibleReceiptTimer: number | undefined;
+    const requestVisibleReceipts = (): void => {
+      if (visibleReceiptTimer !== undefined) return;
+      visibleReceiptTimer = window.setTimeout(() => {
+        visibleReceiptTimer = undefined;
+        if (!activeWorkspaceId || sampleMode) return;
+        const onScreen = visibleReceiptSignalIds();
+        if (signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+          void refreshDeliveryReceipts(activeWorkspaceId, requestVersion);
+        }
+      }, 150);
+    };
     const refreshDeliveryReceipts = async (
       workspaceId: string,
       version: number,
@@ -8442,7 +8569,9 @@ import "../../styles/kylon-command-palette.css";
       const viewerId = session?.user.id ?? "";
       if (sampleMode || !viewerId) return;
       const owner = `${workspaceId}:${version}`;
-      if (deliveryReceiptRefreshOwner === owner) return;
+      // A refresh asked for while a read is in flight (a seen acknowledgement's, for one) runs once that read ends; with
+      // push connected nothing else may ask again until the next reconcile, 30 s later.
+      if (deliveryReceiptRefreshOwner === owner) { deliveryReceiptRefreshAgain = true; return; }
       const now = Date.now();
       const candidates = browserDeliveryReceiptCandidates(
         signals,
@@ -8453,6 +8582,7 @@ import "../../styles/kylon-command-palette.css";
       );
       if (candidates.length === 0) return;
       deliveryReceiptRefreshOwner = owner;
+      const startedEpoch = seenAckEpoch;
       try {
         const reads = await Promise.all(candidates.map(async (signal) => {
           try {
@@ -8474,11 +8604,36 @@ import "../../styles/kylon-command-palette.css";
             cached?.phase !== undefined ||
             JSON.stringify(previous) !== JSON.stringify(read.result)
           ) changed = true;
-          deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
+          const ackedAt = seenAwaitingRead.get(read.signalId);
+          if (ackedAt !== undefined && ackedAt > startedEpoch) {
+            // Acknowledged while this read was in flight: keep the re-read the acknowledgement asked for.
+            deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt: 0 });
+            deliveryReceiptRefreshAgain = true;
+          } else {
+            deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
+            if (read.result !== null) seenAwaitingRead.delete(read.signalId);
+          }
+        }
+        // A row the app will no longer re-read (its receipt settled meanwhile) waits for nothing.
+        const rereadable = new Set(browserDeliveryReceiptCandidates(signals.filter(row => seenAwaitingRead.has(row.id)),
+          deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER).map(signal => signal.id));
+        for (const id of [...seenAwaitingRead.keys()]) if (!rereadable.has(id)) seenAwaitingRead.delete(id);
+        /* At most BROWSER_RECEIPT_REQUESTS_PER_TICK rows are read per pass, and with push connected the next pass may be a
+           30 s reconcile away. Keep going while a row on screen has never been read or a row still owes a re-read: each
+           such row leaves that set after one read (a failed read is cached too), so this always ends. Rows that are only
+           due again by cadence wait for the next pass as before. */
+        const onScreen = visibleReceiptSignalIds();
+        if (rereadable.size > 0 || signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+          deliveryReceiptRefreshAgain = true;
         }
         if (changed && !addAgentViewOpen()) renderFeed();
       } finally {
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
+        syncReceiptMarkers();
+      }
+      if (deliveryReceiptRefreshAgain) {
+        deliveryReceiptRefreshAgain = false;
+        if (version === requestVersion && workspaceId === activeWorkspaceId) void refreshDeliveryReceipts(workspaceId, version);
       }
     };
 
@@ -13782,6 +13937,9 @@ import "../../styles/kylon-command-palette.css";
       }, { passive: true });
     };
     wireFeedAutoLoad();
+    // Rows scrolled into view (by the reader, a permalink or an opened thread) need their first receipt read now; with
+    // push connected nothing else may ask for 30 s.
+    feedScroller()?.addEventListener("scroll", () => requestVisibleReceipts(), { passive: true });
 
     one<HTMLButtonElement>("[data-load-older]")?.addEventListener("click", async (event) => {
       if (!activeWorkspaceId || !signalHasMore) return;
@@ -14299,12 +14457,7 @@ import "../../styles/kylon-command-palette.css";
     cursor: pointer;
     transition:
       background var(--dur-2) var(--ease-standard),
-      border-color var(--dur-2) var(--ease-standard),
-      transform var(--dur-2) var(--ease-standard);
-  }
-
-  .dashboard__button:hover:not(:disabled) {
-    transform: translateY(-1px);
+      border-color var(--dur-2) var(--ease-standard);
   }
 
   .dashboard__button:disabled {
@@ -16257,7 +16410,6 @@ import "../../styles/kylon-command-palette.css";
   }
 
   .dashboard__choice:hover {
-    padding-inline: var(--s-4);
     background: var(--accent-dim);
   }
 
@@ -16819,9 +16971,10 @@ import "../../styles/kylon-command-palette.css";
   }
 
   .dashboard__attachment-chip img {
-    inline-size: 2rem;
-    block-size: 2rem;
-    object-fit: cover;
+    flex: 0 0 64px;
+    inline-size: 64px;
+    block-size: 48px;
+    object-fit: contain;
     border-radius: calc(var(--radius-sm) / 2);
   }
 

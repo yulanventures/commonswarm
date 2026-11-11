@@ -5,13 +5,15 @@
  * (RUN_BROWSER_TESTS=1); run-mobile-audit.ts imports this file so it runs first in the audit job.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { browserTest, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
+import { runHoverWitness, type HoverPage, type HoverResult, type HoverSpec } from "./hover-witness.js";
 
 type Geometry = ReturnType<typeof GEOMETRY_WITNESS>;
 type Keyboard = Awaited<ReturnType<typeof runKeyboardWitness>>;
 type Activation = Awaited<ReturnType<typeof runActivationWitness>>;
-type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & {
+type Page = Parameters<typeof runKeyboardWitness>[0] & Parameters<typeof runActivationWitness>[0] & HoverPage & {
   setContent(html: string): Promise<void>;
   goto(url: string): Promise<unknown>;
   route(url: string, handler: (route: { request(): { url(): string }; fulfill(response: { contentType: string; headers: Record<string, string>; body: string }): Promise<void> }) => Promise<void>): Promise<void>;
@@ -24,7 +26,8 @@ type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; 
   /** Served from a fixture origin (real navigation) instead of setContent; other paths answer with a stub page. */
   served?: boolean;
   activation?: ActivationSpec[];
-  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[] }) => void };
+  hover?: HoverSpec;
+  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[]; hover?: HoverResult }) => void };
 
 const page = (body: string, style = "") =>
   `<!doctype html><html><head><style>body{margin:0;font:16px/1.4 sans-serif} button{width:80px;height:44px}${style}</style></head><body>${body}</body></html>`;
@@ -74,6 +77,72 @@ const legalSpecs: ActivationSpec[] = [
   { name: "terms", link: "#terms", expect: { path: "/terms" } },
   { name: "privacy", link: "#privacy", expect: { path: "/privacy" } },
 ];
+/** A three-row feed; `extra` styles what hover or focus does. Row 1 is addressed, like the owner's message. */
+const feed = (extra: string, short = false, after = "") => page(`<ul id="feed" style="list-style:none;margin:0;padding:0;width:360px">
+  ${[0, 1, 2].map(i => `<li class="msg" data-i="${i}" style="position:relative;display:grid;grid-template-columns:auto 1fr">
+    <span class="to" data-target-kind="${i === 1 ? "agent" : "everyone"}">→ Lead</span>
+    <p class="body" style="margin:0">${short ? "Short note." : "A message long enough to wrap onto a second line in this narrow fixture column."}</p>
+    <span class="extra">Thread</span><span class="tools" style="position:absolute;right:0;top:0">⋯</span><a href="#m${i}">link</a>
+  </li>`).join("")}</ul>${after}`, // Row padding is a stylesheet rule, not inline, so a fixture's :hover rule can change it.
+  `.msg{padding:4px 8px} .to{display:none} .extra{display:none} .tools{display:none} ${extra}`);
+/** Ten keyed rows (each with a link), in a 200px scroller or in the page itself. `onHover` runs once, on the first pointer
+ *  entry into row s5; `onFocus` once, on the first focus inside it; `onLoad` at load. `fresh()` rebuilds the list from
+ *  new markup, so rebuilt rows carry no audit marker. */
+const keyedList = (onHover: string, options: { onLoad?: string; onFocus?: string; inPage?: boolean } = {}) => {
+  const rows = Array.from({ length: 10 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="line-height:40px;margin:0">Row ${i} <a href="#s${i}">open</a></li>`).join("");
+  return page(`${options.inPage ? '<div style="height:600px"></div>' : ""}
+  <div id="scroller" style="${options.inPage ? "" : "height:200px;overflow:auto;"}width:300px">
+  <ul id="feed" style="list-style:none;margin:0;padding:0">${rows}</ul></div>${options.inPage ? '<div style="height:1200px"></div>' : ""}
+  <script>const feed = document.getElementById("feed"); const scroller = document.getElementById("scroller");
+  const fresh = () => { feed.innerHTML = ${JSON.stringify(rows)}; };
+  ${options.onLoad ?? ""}
+  let fired = false; scroller.addEventListener("mouseover", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || fired) return; fired = true;
+    ${onHover}
+  });
+  let focused = false; scroller.addEventListener("focusin", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || focused) return; focused = true;
+    ${options.onFocus ?? ""}
+  });</script>`);
+};
+/** The app's own receipt rules (LiveDashboard.astro), so the fixture exercises the real closed-<details> layout. */
+const RECEIPT_CSS = (() => {
+  const source = readFileSync(new URL("../../site/src/components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const rules = source.match(/^ {2}\.dashboard__message-receipt[^{\n]*\{[^}]*\}/gm) ?? [];
+  if (rules.length < 5) throw new Error("receipt CSS not found in LiveDashboard.astro");
+  return rules.join("\n");
+})();
+/** Keyed rows like keyedList; row s5 carries a native receipt <details> (open or closed) whose content `onHover` changes. */
+const receiptList = (open: boolean, onHover: string) => {
+  const receipt = `<details class="dashboard__message-receipt"${open ? " open" : ""}><summary><span class="dashboard__message-receipt-glyph">✓</span> Sent</summary>
+    <p>Delivered to 1 of 2.</p><section class="dashboard__message-receipt-section"><h4>Seen</h4><ul><li>Lead</li></ul></section></details>`;
+  const rows = Array.from({ length: 10 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="margin:0;padding:8px 0">Row ${i} <a href="#s${i}">open</a>${i === 5 ? receipt : ""}</li>`).join("");
+  return page(`<div id="scroller" style="height:300px;overflow:auto;width:320px"><ul id="feed" style="list-style:none;margin:0;padding:0">${rows}</ul></div>
+  <script>const feed = document.getElementById("feed"); let fired = false;
+  document.getElementById("scroller").addEventListener("mouseover", (event) => {
+    const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
+    if (!row || fired) return; fired = true; const details = row.querySelector("details");
+    ${onHover}
+  });</script>`, RECEIPT_CSS);
+};
+/** Keyed rows inside a feed view, each with its own receipt. `flipAfterMs`: when the first receipt read "arrives" (marker
+ *  set to true and the summary text grows), or null for never. `hidden`: the feed view is not shown at all, and a
+ *  separate measured list sits outside it. */
+const receiptFeed = (flipAfterMs: number | null, hidden = false, neverQuiet = false) => {
+  const receipt = '<details class="dashboard__message-receipt" data-receipt-loaded="false"><summary>✓ Sent</summary></details>';
+  const rows = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="margin:0;padding:6px 0">Row ${i} <a href="#s${i}">open</a>${receipt}</li>`).join("");
+  const outside = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="o${i}" style="margin:0;padding:6px 0">Other ${i} <a href="#o${i}">open</a></li>`).join("");
+  return page(`<div class="dashboard__feed-view" style="width:300px;height:320px;overflow:auto${hidden ? ";display:none" : ""}">
+    <ul id="${hidden ? "hidden-feed" : "feed"}" style="list-style:none;margin:0;padding:0">${rows}</ul></div>
+    ${hidden ? `<ul id="feed" style="list-style:none;margin:0;padding:0;width:300px">${outside}</ul>` : ""}
+    <script>${neverQuiet ? "globalThis.__auditPendingFetches = 1;" : ""}${flipAfterMs === null ? "" : `setTimeout(() => { for (const d of document.querySelectorAll(".dashboard__message-receipt")) {
+      d.setAttribute("data-receipt-loaded", "true"); d.querySelector("summary").textContent = "✓✓ Seen by everyone in this conversation, including the agents"; } }, ${flipAfterMs});`}</script>`);
+};
+const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
+const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
+const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
 const pair = (g: Geometry) => g.overlapFacts.find(f => f.a === "button#x" && f.b === "button#y");
 
 const ROWS: Row[] = [
@@ -263,6 +332,156 @@ const ROWS: Row[] = [
     assert.equal(f.visibleArea, 0);
     assert.equal(f.wrongTarget, false);
   } },
+  // Hover stability (hover-witness.ts): anything a hover or focus moves or resizes is a shift; colour and opacity are not.
+  { name: "a recipient revealed in a column on hover moves a short body sideways: shifted (the owner's report)",
+    html: feed(".msg:hover .to{display:inline}", true), hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      const r = rowOf(h, "hover")!;
+      assert.equal(r.early?.hoverMatched, true, show(r));
+      assert.ok(r.early!.shifts.some(s => s.label.startsWith("p.body") && s.dx > 0), show(r.early));
+  } },
+  { name: "the same recipient revealed by opacity alone is stable", html: feed(".to{display:inline;opacity:0} .msg:hover .to{opacity:1}", true),
+    hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.equal(rowOf(h, "hover")?.early?.hoverMatched, true);
+  } },
+  { name: "an absolutely placed toolbar appearing on hover is stable", html: feed(".msg:hover .tools{display:block}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "a line added on hover pushes the next row down: the other row is a shift", html: feed(".msg:hover .extra{display:block}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+    assert.ok(rowOf(h, "hover")!.early!.shifts.some(s => s.who === "other-row" && s.dy > 0), show(rowOf(h, "hover")));
+  } },
+  { name: "a transitioned padding change is caught after the transition", html: feed(".msg{transition:padding-left .3s linear} .msg:hover{padding-left:40px}"),
+    hover: feedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      assert.ok((rowOf(h, "hover")!.late?.shifted ?? 0) > 0, show(rowOf(h, "hover")));
+  } },
+  { name: "bold text on hover changes the text box: shifted", html: feed(".msg:hover .body{font-weight:700}"), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "a recipient revealed by focus-within is shifted in focus mode only", html: feed(".msg:focus-within .to{display:inline}", true), hover: feedSpec, check: ({ hover: h }) => {
+    assert.equal(h?.outcome, "shifted", show(h));
+    assert.equal(rowOf(h, "hover")?.outcome, "stable", show(h));
+    assert.equal(rowOf(h, "focus")?.outcome, "shifted", show(h));
+    assert.equal(rowOf(h, "focus")?.late?.focusWithin, true);
+  } },
+  { name: "with no addressed row to measure, the hover witness is an error, never a pass", html: feed(""),
+    hover: { ...feedSpec, require: ['.msg:has([data-target-kind="person"])'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+  } },
+  { name: "a required row the pointer cannot reach is an error, never a pass", html: feed("", false, '<div id="cover" style="position:fixed;inset:0;z-index:9"></div>'),
+    hover: { ...feedSpec, focus: false }, check: ({ hover: h }) => {
+      assert.equal(rowOf(h, "hover")?.outcome, "skipped", show(h));
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.reason ?? "", /required rows not measured/u);
+  } },
+  { name: "rows that cover the whole viewport leave no neutral rest: an error, never a pass",
+    html: page(`<div id="feed">${[0, 1].map(i => `<div class="msg" data-i="${i}" style="height:50vh">Row ${i}</div>`).join("")}</div>`),
+    hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /no point outside the rows/u, show(h));
+  } },
+  // The app's list lifecycle: identity is by key and positions are scroll-content coordinates, so a benign rebuild
+  // or scroll is recorded but never a shift, and neither can turn a hover shift into a pass.
+  // Receipts: Chromium still reports boxes for the content of a closed <details> (::details-content). Changes there are
+  // not shown, so they are not shifts; the summary and open content are shown, so changes there still are.
+  { name: "content added inside a closed receipt during hover is stable (it is not shown)",
+    html: receiptList(false, "details.querySelector('ul').insertAdjacentHTML('beforeend', '<li>Two</li><li>Three</li><li>Four</li>'); details.querySelector('p').textContent = 'Delivered to 2 of 2, and read by both people in this conversation.';"),
+    hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "content of an open receipt that disappears during hover is still a shift",
+    html: receiptList(true, "details.querySelector('section').remove();"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "a closed receipt's summary that changes during hover is still a shift",
+    html: receiptList(false, "details.querySelector('summary').lastChild.textContent = ' Seen by everyone';"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  // First receipts: rest waits until every row on screen has its own receipt loaded, so a first read is never measured as a
+  // hover shift; a read that never lands is a failed measurement; a hidden feed never holds up another list.
+  { name: "a first receipt read that lands after the row scrolls into view is waited for, not measured as a shift",
+    html: receiptFeed(1_500), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "a first receipt read that never lands is a failed measurement, never a pass or a skip",
+    html: receiptFeed(null), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /did not load within 20 s/, show(h));
+  } },
+  { name: "receipts loaded but a read that never finishes is a failed measurement, never a pass or a skip",
+    html: receiptFeed(0, false, true), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /did not go quiet within 20 s/, show(h));
+  } },
+  { name: "unloaded receipts in a hidden feed do not hold up a list measured elsewhere",
+    html: receiptFeed(null, true), hover: { ...keyedSpec, prefer: '[data-signal-id="o3"]', require: ['[data-signal-id="o3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "a same-key rebuild with identical layout during hover is stable, and the rebuild is recorded",
+    html: keyedList("feed.innerHTML = feed.innerHTML;"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      const r = h!.rows[0]!;
+      assert.ok((r.early?.rebuilt ?? 0) + (r.late?.rebuilt ?? 0) > 0, show(r));
+  } },
+  { name: "a rebuild caused by hover that makes the row taller is a shift, not a re-measure",
+    html: keyedList("feed.innerHTML = feed.innerHTML.replace('Row 5 ', 'Row 5<br>a second line ');"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+      assert.ok((h!.rows[0]!.early?.rebuilt ?? 0) + (h!.rows[0]!.late?.rebuilt ?? 0) > 0, show(h));
+  } },
+  { name: "a one-time hover mutation is a shift even though it never repeats",
+    html: keyedList("row.insertAdjacentHTML('afterbegin', '<div>added once</div>');"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "hover growth above the row absorbed by scroll anchoring is still a shift",
+    html: keyedList("feed.firstElementChild.style.height = '70px';"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  { name: "the list scrolling by itself during hover is recorded, not a shift",
+    html: keyedList("scroller.scrollTop -= 10;"), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      const r = h!.rows[0]!;
+      assert.ok([r.early, r.late].some(c => c && c.scrolled.y !== 0), show(r));
+  } },
+  { name: "a list rebuilt by a pending read before rest is measured on the live rows, and a later required row is covered",
+    html: keyedList("", { onLoad: "globalThis.__auditPendingFetches = 1; setTimeout(() => { fresh(); globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = performance.now(); }, 300);" }),
+    hover: { name: "keyed", rows: "#feed > .msg", require: ['[data-signal-id="s7"]'], max: 2 }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.deepEqual(h!.coverage, [{ selector: '[data-signal-id="s7"]', mode: "hover", measured: true }], show(h));
+  } },
+  { name: "focus lost to a rebuild during the measurement is an error, never a stable pass",
+    html: keyedList("", { onFocus: "setTimeout(fresh, 0);" }), hover: { ...keyedSpec, focus: true, focusTarget: "a" }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows.find(r => r.mode === "focus")?.reason ?? "", /focus was lost/u, show(h));
+  } },
+  { name: "the page itself scrolling during hover is counted once and recorded, not a shift",
+    html: keyedList("window.scrollBy(0, -10);", { inPage: true }), hover: keyedSpec, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+      assert.ok([h!.rows[0]!.early, h!.rows[0]!.late].some(c => c && c.scrolled.y === -10), show(h));
+  } },
+  { name: "a row that moves when the pointer leaves is a shift, though hovering it was stable",
+    html: feed(".left .body{padding-left:12px}", false,
+      "<script>for (const m of document.querySelectorAll('.msg')) m.addEventListener('mouseleave', () => m.classList.add('left'));</script>"),
+    hover: { ...feedSpec, focus: false }, check: ({ hover: h }) => {
+      const r = rowOf(h, "hover")!;
+      assert.equal(r.early?.shifted, 0, show(r));
+      assert.equal(r.late?.shifted, 0, show(r));
+      assert.ok((r.restored?.shifted ?? 0) > 0, show(r));
+      assert.equal(r.outcome, "shifted");
+      assert.equal(h?.outcome, "shifted");
+  } },
+  { name: "a body that re-wraps under a fixed header, with every element box unchanged, is a shift",
+    html: page(`<ul id="feed" style="list-style:none;margin:0;padding:0">${[0, 1].map(i => `<li class="msg" data-i="${i}" style="padding:4px 8px">
+      <strong class="author">Agent</strong><p class="body" style="margin:0;width:30ch;font:16px/20px monospace">aaaa bbbb cccc dddd eeee ffff gggg hhhh</p></li>`).join("")}</ul>`,
+      ".msg:hover .body{text-indent:2ch}"),
+    hover: { name: "feed", rows: "#feed > .msg", require: ['.msg[data-i="0"]'] }, check: ({ hover: h }) => {
+      const r = h!.rows.find(row => row.index === 0)!;
+      assert.equal(r.outcome, "shifted", show(r));
+      const shifts = [...(r.early?.shifts ?? []), ...(r.late?.shifts ?? [])];
+      assert.ok(shifts.some(s => s.who === "text" && s.label === "text in p.body"), show(shifts));
+      assert.ok(!shifts.some(s => s.who !== "text"), `only text fragments move: ${show(shifts)}`);
+  } },
   { name: "the same overlap in view is a visible wrong-target finding", html: overlapPage(20), check: ({ geometry: g }) => {
     const f = pair(g);
     assert.ok(f, show(g.overlapFacts));
@@ -270,6 +489,9 @@ const ROWS: Row[] = [
     assert.equal(f.wrongTarget, true, show(f.points));
   } },
 ];
+
+/** The matrix's result, so the long audit run can refuse to start after a failed row. */
+export const matrixResult = { done: false, failed: [] as string[] };
 
 browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 }, async (t) => {
   const playwrightModule = "playwright";
@@ -281,7 +503,11 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
     // tsx (esbuild keepNames) wraps nested functions in __name(); the page needs a no-op, as in the runner.
     await context.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
     for (const row of ROWS) {
-      await t.test(row.name, async () => {
+      await t.test(row.name, async () => { try { await runRow(row); } catch (error) { matrixResult.failed.push(row.name); throw error; } });
+    }
+    matrixResult.done = true;
+    async function runRow(row: Row) {
+      {
         const p = await context.newPage() as Page;
         try {
           if (row.served) {
@@ -300,9 +526,10 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           const keyboard = row.keyboard ? await runKeyboardWitness(p, row.keyboard) : undefined;
           const activation: Activation[] = [];
           for (const spec of row.activation ?? []) activation.push(await runActivationWitness(p, spec));
-          row.check({ geometry, keyboard, activation });
+          const hover = row.hover ? await runHoverWitness(p, row.hover) : undefined;
+          row.check({ geometry, keyboard, activation, hover });
         } finally { await p.close(); }
-      });
+      }
     }
   } finally { await browser.close(); }
 });
