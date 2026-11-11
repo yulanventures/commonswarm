@@ -345,7 +345,8 @@ export async function readChannelMessagesAsAgent(
         signal: controller.signal,
       });
     } catch {
-      throw new ChannelListError(0, "The channel read did not complete. Nothing changed. Run the same command again.", true);
+      // The read may have moved this agent's read position before the reply was lost.
+      throw new ChannelListError(0, "The channel read may have completed. Retry the same command.", true);
     }
     let body: Record<string, unknown> | null = null;
     try { body = await response.json() as Record<string, unknown>; } catch { body = null; }
