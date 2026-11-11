@@ -16075,7 +16075,9 @@ async function handlePostRequest(request: Request): Promise<Response> {
   }
   if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' });
   const parsed = await readBody(request);
-  if (!parsed.ok) return parsed.response;
+  // Authenticate before validating the body: with no bearer, a body this function can't read is
+  // refused as unauthenticated, like any other anonymous command.
+  if (!parsed.ok) return credential === null && parsed.response.status === 400 ? json(401, { error: "unauthenticated" }) : parsed.response;
   const body = parsed.body;
 
   // Ordinary DPoP remains on ordinary authentication. An explicit admin-resource
@@ -16103,19 +16105,6 @@ async function handlePostRequest(request: Request): Promise<Response> {
   if (publicHostedClaim || bodyClaimsHostedContext || headerClaimsHostedContext) {
     return json(403, { error: "forbidden" });
   }
-  if (
-    typeof body.command_id !== "string" ||
-    !COMMAND_ID_RE.test(body.command_id)
-  ) {
-    logCommandFailure(
-      "command_pre_auth_failure",
-      kind,
-      "validation",
-      "invalid command_id",
-    );
-    return json(400, { error: "invalid_request" });
-  }
-
   const sessionProofParse = parseAgentSessionProofHeaders(request.headers);
   const acquireProofParse = parseAgentSessionAcquireHeaders(request.headers);
 
@@ -16204,6 +16193,20 @@ let verifiedHuman: VerifiedHuman | null = null;
     if (typeof claimsData.claims.session_id === "string") {
       adminSessionBinding = await adminDigest({ user_id: data.user.id, session_id: claimsData.claims.session_id });
     }
+  }
+
+  // The bearer is classified (and a person's session verified) before the envelope is validated.
+  if (
+    typeof body.command_id !== "string" ||
+    !COMMAND_ID_RE.test(body.command_id)
+  ) {
+    logCommandFailure(
+      "command_pre_auth_failure",
+      kind,
+      "validation",
+      "invalid command_id",
+    );
+    return json(400, { error: "invalid_request" });
   }
 
   if (record(body.stream)?.kind === "account") {

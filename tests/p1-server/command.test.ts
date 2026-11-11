@@ -1181,8 +1181,48 @@ test("pre-principal failures never write audit rows while authenticated validati
   const logStart = functionLogs.length;
   const requests = [
     {
-      label: "malformed command_id",
+      // Authentication comes before body validation: no bearer is 401 whatever the body.
+      label: "malformed command_id without a bearer",
       headers: { "content-type": "application/json" },
+      body: { ...validEnvelope, command_id: "!" },
+      status: 401,
+      error: "unauthenticated",
+    },
+    {
+      label: "empty body without a bearer",
+      headers: { "content-type": "application/json" },
+      body: {},
+      status: 401,
+      error: "unauthenticated",
+    },
+    {
+      label: "malformed command_id with a bad agent token shape",
+      headers: {
+        authorization: "Bearer swm_agt_bad",
+        "content-type": "application/json",
+      },
+      body: { ...validEnvelope, command_id: "!" },
+      status: 401,
+      error: "unauthenticated",
+    },
+    {
+      label: "malformed command_id with a failed getUser",
+      headers: {
+        authorization: "Bearer not-a-valid-user-jwt",
+        "content-type": "application/json",
+      },
+      body: { ...validEnvelope, command_id: "!" },
+      status: 401,
+      error: "unauthenticated",
+    },
+    {
+      // A well-shaped agent token is checked against the database inside the command
+      // transaction, which the envelope must reach first.
+      label: "malformed command_id with a well-shaped agent token",
+      headers: {
+        authorization: `Bearer ${unknownAgentToken}`,
+        "content-type": "application/json",
+      },
       body: { ...validEnvelope, command_id: "!" },
       status: 400,
       error: "invalid_request",

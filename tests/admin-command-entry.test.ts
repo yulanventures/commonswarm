@@ -81,7 +81,10 @@ function request(authorization: string, body: object = {}) {
 test('ordinary command import and requests create only the existing pool; first admin request creates and reuses its proof pool', async () => {
   const entry = await commandEntry();
   assert.deepEqual(entry.poolOptions.map(o => o.max), [2]);
-  assert.equal((await entry.handleRequest(request('Bearer swm_agt_ordinary'))).status, 400);
+  // A malformed agent token is refused by ordinary authentication before body validation (CS-E22).
+  const ordinaryRefusal = await entry.handleRequest(request('Bearer swm_agt_ordinary'));
+  assert.equal(ordinaryRefusal.status, 401);
+  assert.deepEqual(await ordinaryRefusal.json(), { error: 'unauthenticated' });
   assert.deepEqual(entry.poolOptions.map(o => o.max), [2]);
   const admin = `DPoP ${token({ grant_class: 'delegated_admin', aud: resource })}`;
   assert.equal((await entry.handleRequest(request(admin))).status, 401);
@@ -90,11 +93,15 @@ test('ordinary command import and requests create only the existing pool; first 
   assert.deepEqual(entry.poolOptions.map(o => o.max), [2, 1]);
 });
 
-test('ordinary DPoP and long Bearer retain command validation and GoTrue; only admin resource or credential enters admin admission', async () => {
+test('ordinary DPoP and long Bearer stay on ordinary authentication and GoTrue; only admin resource or credential enters admin admission', async () => {
   const entry = await commandEntry();
-  // Ordinary DPoP reaches command validation (not the admin 401).
+  // Ordinary DPoP stays on ordinary authentication, which refuses it before body validation
+  // (CS-E22): the ordinary 401, never the admin verifier (its pool is still not created).
   const ordinary = `DPoP ${token({ grant_class: 'hosted_mcp', aud: 'https://mcp.commonswarm.com/mcp' })}`;
-  assert.equal((await entry.handleRequest(request(ordinary))).status, 400);
+  const ordinaryDpop = await entry.handleRequest(request(ordinary));
+  assert.equal(ordinaryDpop.status, 401);
+  assert.deepEqual(await ordinaryDpop.json(), { error: 'unauthenticated' });
+  assert.deepEqual(entry.poolOptions.map(o => o.max), [2], 'ordinary DPoP never reaches admin admission');
   const longBearer = `Bearer ${token({ aud: 'authenticated', padding: 'x'.repeat(17 * 1024) })}`;
   const body = { command_id: 'ordinary-auth-path', command: { kind: 'post_signal' } };
   assert.equal((await entry.handleRequest(request(longBearer, body))).status, 401);

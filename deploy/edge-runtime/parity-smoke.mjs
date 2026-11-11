@@ -63,9 +63,9 @@ try {
     headers: { "content-type": "application/json" },
     body: "{}",
   });
-  assert.equal(command.status, 400);
-  assert.deepEqual(await json(command), { error: "invalid_request" });
-  report("malformed command", command.status);
+  assert.equal(command.status, 401);
+  assert.deepEqual(await json(command), { error: "unauthenticated" });
+  report("unauthenticated command", command.status);
 
   const read = await response("/functions/v1/read", {
     method: "POST",
