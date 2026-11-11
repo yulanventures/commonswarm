@@ -62,6 +62,9 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.move_workspace_to_org(uuid,uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.org_allows_workspace_create(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.remove_hosted_agents_for_member(uuid,uuid,uuid)', 'EXECUTE', false],
+  // Seat admin 2b-2: delegated member removal records the agent beside the grantor, behind a live-grant floor.
+  ['swarm_command', 'FUNCTION', 'swarm.remove_hosted_agents_for_member(uuid,uuid,uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'FUNCTION', 'swarm.seat_admin_delegation_live(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.remove_local_agents_for_member(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.revoke_hosted_seat_membership(uuid,uuid,uuid)', 'EXECUTE', false],

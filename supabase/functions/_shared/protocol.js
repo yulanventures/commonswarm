@@ -406,7 +406,7 @@ var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
 var RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1e3;
 var RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
 var RENEWAL_IDLE_PAUSE_DAYS = 14;
-var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace"]);
+var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace", "remove_member"]);
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
   "set_workspace_lead",
@@ -6075,7 +6075,8 @@ var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "rename_workspace",
   "set_workspace_lead",
   "add_agent_to_workspace",
-  "remove_agent_from_workspace"
+  "remove_agent_from_workspace",
+  "remove_member"
 ]);
 var LEVEL_ORDER = { workspace: 0, organization: 1, scoped: 2 };
 function selectCoveringGrant(grants, f) {

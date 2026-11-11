@@ -217,8 +217,8 @@ test("targets: never itself, never another person's agent, never an agent with a
   assert.equal(siblingGrant.status, 200, JSON.stringify(siblingGrant.body));
   refused(await agentCommand({ kind: "remove_agent_from_workspace", principal_id: sibling }), "seat_admin_target_protected", "remove: an admin agent");
   await endGrant((siblingGrant.body.seat_admin_grant as { grant_id: string }).grant_id);
-  // remove_member and change_role do not run under a grant in this slice.
-  refused(await agentCommand({ kind: "remove_member", user_id: other.id }), "seat_admin_scope_missing", "remove_member");
+  // Never an owner (the grantor included); change_role never runs under a grant.
+  refused(await agentCommand({ kind: "remove_member", user_id: owner.id }), "seat_admin_target_protected", "remove_member: the owner");
   refused(await agentCommand({ kind: "change_role", user_id: other.id, role: "admin" }), "seat_admin_target_protected", "change_role");
   const [{ live }] = await sql<{ live: boolean }[]>`SELECT revoked_at IS NULL AS live FROM swarm.memberships
     WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
@@ -229,7 +229,7 @@ test("targets: never itself, never another person's agent, never an agent with a
     ["set_workspace_lead", "seat_admin_target_protected"], ["remove_agent_from_workspace", "seat_admin_target_protected"],
     ["remove_agent_from_workspace", "seat_admin_target_protected"], ["set_workspace_lead", "seat_admin_target_protected"],
     ["remove_agent_from_workspace", "seat_admin_target_protected"],
-    ["remove_member", "seat_admin_scope_missing"], ["change_role", "seat_admin_target_protected"],
+    ["remove_member", "seat_admin_target_protected"], ["change_role", "seat_admin_target_protected"],
   ]);
   const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.audit_log WHERE workspace_id = ${workspace}::uuid
     AND outcome = 'authz' AND actor_agent_principal = ${agent}::uuid AND detail LIKE ${`%seat_admin grant=${grantId}%`}`;
@@ -284,4 +284,80 @@ test("a grant that expires while the organization lookup waits refuses and chang
   const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.events
     WHERE workspace_id = ${workspace}::uuid AND type = 'WorkspaceRenamed' AND payload->>'name' = 'Renamed after expiry'`;
   assert.equal(n, 0);
+});
+
+test("remove a member: membership, their agents and household access end, attributed to the agent and the grantor", async () => {
+  const member = await person("seat-agent-member"), adminPerson = await person("seat-agent-admin");
+  const memberAgent = randomUUID();
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${member.id}::uuid, 'SeatMember'), (${adminPerson.id}::uuid, 'SeatAdminPerson')`;
+  await joinWorkspace(member.id, "member");
+  await joinWorkspace(adminPerson.id, "admin");
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${memberAgent}::uuid, ${workspace}::uuid, ${member.id}::uuid, 'member-agent')`;
+    await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+      VALUES (${workspace}::uuid, ${member.id}::uuid, 'reader', ${randomUUID()}::uuid, now())`;
+  });
+  const grantId = await grant();
+  refused(await agentCommand({ kind: "remove_member", user_id: adminPerson.id }), "seat_admin_target_protected", "an admin");
+
+  // The member's own agent is an admin agent in another workspace the member owns: removing the member would remove
+  // it from this one, so the removal refuses and nothing changes.
+  const elsewhere = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${elsewhere}::uuid, 'MemberOwned', ${member.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${elsewhere}::uuid, ${member.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${elsewhere}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${memberAgent}::uuid, ${elsewhere}::uuid, ${member.id}::uuid, ${member.id}::uuid)`;
+  });
+  const memberGrant = await account(member.jwt, grantCmd({ principal_id: memberAgent, workspace_ids: [elsewhere] }));
+  assert.equal(memberGrant.status, 200, `the member's own grant: ${JSON.stringify(memberGrant.body)}`);
+  refused(await agentCommand({ kind: "remove_member", user_id: member.id }), "seat_admin_target_protected", "owns an admin agent");
+  const [still] = await sql<{ member: boolean; agent: boolean; role: boolean }[]>`SELECT
+    EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid AND revoked_at IS NULL) AS member,
+    EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships WHERE workspace_id = ${workspace}::uuid AND principal_id = ${memberAgent}::uuid
+      AND revoked_at IS NULL) AS agent,
+    EXISTS(SELECT 1 FROM swarm.household_member_content_roles WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid
+      AND revoked_at IS NULL) AS role`;
+  assert.deepEqual(still, { member: true, agent: true, role: true }, "membership, the agent and household access unchanged");
+  const ended = await account(member.jwt, { kind: "end_seat_admin", grant_id: (memberGrant.body.seat_admin_grant as { grant_id: string }).grant_id });
+  assert.equal(ended.status, 200, JSON.stringify(ended.body));
+  const removed = await agentCommand({ kind: "remove_member", user_id: member.id });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body) + functionLogs.slice(-3000));
+  const [m] = await sql<{ gone: boolean }[]>`SELECT revoked_at IS NOT NULL AS gone FROM swarm.memberships
+    WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid`;
+  assert.equal(m!.gone, true, "membership ended");
+  const [a] = await sql<{ gone: boolean }[]>`SELECT revoked_at IS NOT NULL AS gone FROM swarm.agent_workspace_memberships
+    WHERE workspace_id = ${workspace}::uuid AND principal_id = ${memberAgent}::uuid`;
+  assert.equal(a!.gone, true, "their agent left the workspace");
+  const [r] = await sql<{ gone: boolean }[]>`SELECT revoked_at IS NOT NULL AS gone FROM swarm.household_member_content_roles
+    WHERE workspace_id = ${workspace}::uuid AND user_id = ${member.id}::uuid`;
+  assert.equal(r!.gone, true, "their Lists & docs role ended");
+  const audits = await sql<{ actor_user: string; actor_principal: string | null }[]>`SELECT actor_user, actor_principal FROM swarm.household_object_audit
+    WHERE workspace_id = ${workspace}::uuid AND command_kind = 'remove_member'`;
+  assert.deepEqual([...audits], [{ actor_user: owner.id, actor_principal: agent }], "household audit: the grantor authorizes, the agent acts");
+  const [event] = await sql<{ actor_agent_principal: string }[]>`SELECT actor_agent_principal FROM swarm.events
+    WHERE workspace_id = ${workspace}::uuid AND type = 'MemberRemoved' ORDER BY seq DESC LIMIT 1`;
+  assert.equal(event!.actor_agent_principal, agent);
+  const accepted = (await agentHistory()).filter((h) => h.seat_admin_grant_id === grantId && h.outcome === "accepted");
+  assert.deepEqual(accepted.map((h) => [h.action, h.target_kind, h.target_id]), [["remove_member", "member", member.id]]);
+  await endGrant(grantId);
+});
+
+test("the database floor: a delegated removal without a live grant is refused", async () => {
+  // sibling holds no grant: the hosted-seat definer and the household trigger both refuse it as the delegated agent.
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_command`;
+    await tx`SELECT swarm.remove_hosted_agents_for_member(${workspace}::uuid, ${other.id}::uuid, ${owner.id}::uuid, ${sibling}::uuid)`;
+  }), /delegated member removal refused/);
+  await sql`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+    VALUES (${workspace}::uuid, ${other.id}::uuid, 'reader', ${randomUUID()}::uuid, now()) ON CONFLICT DO NOTHING`;
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_command`;
+    await tx`SELECT set_config('cswarm.household_actor', ${owner.id}, true), set_config('cswarm.household_request', 'r', true),
+      set_config('cswarm.household_digest', ${"a".repeat(64)}, true), set_config('cswarm.household_command', 'remove_member', true),
+      set_config('cswarm.household_agent_principal', ${sibling}, true)`;
+    await tx`UPDATE swarm.household_member_content_roles SET revoked_at = now() WHERE workspace_id = ${workspace}::uuid AND revoked_at IS NULL`;
+  }), /household delegated actor refused/);
 });

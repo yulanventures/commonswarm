@@ -310,6 +310,7 @@ export async function revokeHostedWorkspaceApproval(
   tx: Sql, workspaceId: string, revokedAt: Date, createdBy: string | null,
   target: { ownerUserId: string } | { principalId: string },
   plan?: LocalAuthLockPlan,
+  agentPrincipalId: string | null = null,
 ): Promise<void> {
   const owner = "ownerUserId" in target ? target.ownerUserId : null;
   const principal = "principalId" in target ? target.principalId : null;
@@ -319,7 +320,7 @@ export async function revokeHostedWorkspaceApproval(
     if (!plan?.locked || plan.principalMode !== "update" || plan.hostedMode !== "update") {
       throw new LocalAuthDiscoveryChanged();
     }
-    await tx`SELECT swarm.remove_hosted_agents_for_member(${workspaceId}::uuid,${owner}::uuid,${createdBy}::uuid)`;
+    await tx`SELECT swarm.remove_hosted_agents_for_member(${workspaceId}::uuid,${owner}::uuid,${createdBy}::uuid,${agentPrincipalId}::uuid)`;
     return;
 
   }
