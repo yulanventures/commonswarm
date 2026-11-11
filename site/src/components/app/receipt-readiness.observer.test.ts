@@ -62,8 +62,9 @@ function installReceiptFixture() {
     if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
     if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent, name: "Synthetic assistant", model: null,
       transport: "local", turn_only: false, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: before }]);
-    if (url.pathname === "/rest/v1/signals") return Response.json([{ id: signal, from: agent, from_kind: "agent", to: null, to_agent: null,
-      kind: "note", body: "A note to everyone.", about: null, until: null, created_at: recent, attachments: [], channel_id: null,
+    // A note directed to this viewer: the audience whose receipt is one human row that goes Sent to Seen.
+    if (url.pathname === "/rest/v1/signals") return Response.json([{ id: signal, from: agent, from_kind: "agent", to: owner, to_agent: null,
+      kind: "note", body: "A note for you.", about: null, until: null, created_at: recent, attachments: [], channel_id: null,
       thread_root_id: null, broadcast_to_channel: false, in_reply_to: null }]);
     if (url.pathname.startsWith("/rest/v1/")) return Response.json([]);
     if (url.pathname === "/functions/v1/read") return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
