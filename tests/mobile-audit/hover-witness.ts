@@ -230,12 +230,21 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     };
     for (const started = performance.now(); !receiptsSettled();) {
       if (performance.now() - started > 20_000) {
-        const fetches = w as unknown as { __auditInflight?: Map<number, string>; __auditRecentFetches?: Array<[string, number]> };
+        const fetches = w as unknown as { __auditInflight?: Map<number, string>; __auditRecentFetches?: Array<[string, number]>;
+          __auditTrace?: Array<{ what: string; ids: string[]; n: number; start: number; end?: number; http?: number; answer?: string }> };
+        // For each waiting row: its seen reports and receipt reads in request order (no headers or tokens), and its marker.
+        const traceOf = (key: string) => {
+          const id = key.split(":")[0]!;
+          const rows = (fetches.__auditTrace ?? []).filter(t => t.ids.includes(id)).slice(-8)
+            .map(t => `${t.what}#${t.n}@-${Math.round(performance.now()) - t.start}ms${t.end === undefined ? " pending" : ` ${t.http} ${t.answer ?? "?"} in ${t.end - t.start}ms`}`);
+          const row = document.querySelector(`[data-signal-id="${id}"]`);
+          return `${id.slice(0, 8)} [scope=${row?.getAttribute("data-human-seen-scope") ? "reported" : "none"}; ${rows.join("; ") || "no seen report or receipt read"}]`;
+        };
         const at = Math.round(performance.now());
         const inflight = Array.from(fetches.__auditInflight?.values() ?? []).slice(0, 8).join(", ");
         const recent = (fetches.__auditRecentFetches ?? []).map(([path, done]) => `${path} -${at - done}ms`).join(", ");
         return { error: unsettled === "quiet" ? `reads on the page did not go quiet within 20 s (in flight: ${inflight || "none"}; recent: ${recent || "none"})`
-          : `receipts for the rows on screen did not load within 20 s (waiting: ${waitingOn.slice(0, 12).join(", ")}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""})` };
+          : `receipts for the rows on screen did not load within 20 s (waiting: ${waitingOn.slice(0, 12).join(", ")}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""}; trace: ${waitingOn.slice(0, 3).map(traceOf).join(" | ")})` };
       }
       await new Promise(done => setTimeout(done, 100));
     }
