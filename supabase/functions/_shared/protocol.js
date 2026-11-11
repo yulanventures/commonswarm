@@ -5885,36 +5885,48 @@ function formatWorkspaceSkillView(skill, now) {
 }
 
 // src/protocol/seat-admin-copy.ts
+var DEFERRED_ACTIONS = Object.freeze([
+  "Invite people as members",
+  "Create or renew agent seats",
+  "Stop agent seats or revoke their credentials",
+  "Set up agent connections",
+  "Change member roles"
+]);
 var SEAT_ADMIN_ROLE_COPY = Object.freeze({
   "role:workspace_admin": Object.freeze({
     included: Object.freeze([
-      "Invite people as members and cancel invitations",
-      "Add, renew and stop agent seats, and set up agent connections",
-      "Rename this workspace and choose its lead agent",
-      "Add agents to this workspace and remove them",
-      "Remove members",
-      "See this admin access and its history"
+      "Rename this workspace",
+      "Choose one of your agents in this workspace as its lead",
+      "Add your agents to this workspace or remove them",
+      "Remove members, including their agents and Lists & docs access in this workspace",
+      "Cancel member invitations you created"
     ]),
+    deferred: DEFERRED_ACTIONS,
     excluded: Object.freeze([
-      "Anything about owners or admins",
+      "Changes to owners or admins",
+      "Choosing other people's agents as lead, or adding or removing them directly",
+      "Changing itself or another agent with admin access",
+      "Removing members whose agents in that workspace have admin access",
       "Creating, archiving or moving workspaces",
       "Giving anyone admin access",
-      "Billing, sign-in and passwords",
-      "Its own seat, or another admin agent"
+      "Billing, sign-in and passwords"
     ])
   }),
   "role:organization_admin": Object.freeze({
     included: Object.freeze([
-      "Everything an agent workspace admin can do, in each of this organization's workspaces you own and it belongs to",
-      "Rename the organization"
+      "Everything available now to a workspace admin, in this organization's workspaces you own and this agent belongs to",
+      "Rename the organization's display name"
     ]),
+    deferred: DEFERRED_ACTIONS,
     excluded: Object.freeze([
       "Organization members and roles",
-      "Anything about owners or admins",
+      "Changes to owners or admins",
+      "Choosing other people's agents as lead, or adding or removing them directly",
+      "Changing itself or another agent with admin access",
+      "Removing members whose agents in that workspace have admin access",
       "Creating, archiving or moving workspaces",
       "Giving anyone admin access",
-      "Billing, sign-in and passwords",
-      "Its own seat, or another admin agent"
+      "Billing, sign-in and passwords"
     ])
   })
 });

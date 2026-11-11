@@ -3,10 +3,12 @@
 export declare const SEAT_ADMIN_ROLE_COPY: Readonly<{
     'role:workspace_admin': Readonly<{
         included: readonly string[];
+        deferred: readonly string[];
         excluded: readonly string[];
     }>;
     'role:organization_admin': Readonly<{
         included: readonly string[];
+        deferred: readonly string[];
         excluded: readonly string[];
     }>;
 }>;
