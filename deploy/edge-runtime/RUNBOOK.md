@@ -116,8 +116,9 @@ repository. The examples below call that file `/run/commonswarm-smoke.curl`.
 
 - [ ] **NOT RUN** — H0 agent document: GET
   `/functions/v1/h0/agent-doc/smoke`. Expect 200 and a JSON agent document.
-- [ ] **NOT RUN** — command: POST `{}` to `/functions/v1/command`. Expect the
-  stable 400 body `{"error":"invalid_request"}`.
+- [ ] **NOT RUN** — command: POST `{}` to `/functions/v1/command` without an
+  Authorization header. Expect the stable 401 body `{"error":"unauthenticated"}`;
+  releases before CS-E22 returned 400 `invalid_request`.
 - [ ] **NOT RUN** — read: POST an allowed authenticated read request to
   `/functions/v1/read` with `curl --config /run/commonswarm-smoke.curl`. Expect
   200 and JSON. This is the required database and agent-auth control.
