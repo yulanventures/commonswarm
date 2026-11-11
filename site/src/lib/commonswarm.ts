@@ -2251,6 +2251,7 @@ export interface BrowserDeliveryReceiptCacheEntry {
 }
 
 export type BrowserDeliveryIndicatorState =
+  | "checking"
   | "pending"
   | "unavailable"
   | "no-recipient"
@@ -2824,6 +2825,22 @@ export function browserPostingDeliveryIndicator(): BrowserDeliveryIndicator {
     glyph: "…",
     label: "Sending",
     detail: "Posting to CommonSwarm. This is still in progress; delivery is not confirmed yet.",
+    terminal: false,
+  };
+}
+
+/**
+ * A row whose first receipt read has not completed yet. Its status is not known, which is not a problem: it stays quiet
+ * (in the row's tools) instead of claiming "unavailable", "no recipients" or "sent" before any read, so the row keeps
+ * its layout when the first real status arrives. A read that failed is a different state: it stays "unavailable".
+ */
+export function browserCheckingDeliveryIndicator(): BrowserDeliveryIndicator {
+  return {
+    state: "checking",
+    outcome: null,
+    glyph: "·",
+    label: "Checking delivery",
+    detail: "Checking delivery status.",
     terminal: false,
   };
 }

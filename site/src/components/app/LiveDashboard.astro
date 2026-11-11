@@ -1274,6 +1274,7 @@ import "../../styles/kylon-command-palette.css";
     browserHumanDeliveryIndicator,
     browserRosterSectionLines,
     browserDeliveryReceiptCandidates,
+    browserCheckingDeliveryIndicator,
     browserDeliveryReceipts,
     browserPostingDeliveryIndicator,
     browserSignalAddress,
@@ -7549,6 +7550,9 @@ import "../../styles/kylon-command-palette.css";
         ? browserPostingDeliveryIndicator()
         : cached?.phase === "accepted"
         ? browserAcceptedDeliveryIndicator(recipient)
+        // No read has completed for this row yet: say so, quietly, rather than render a status no read established.
+        : cached === undefined
+        ? browserCheckingDeliveryIndicator()
         : signal.to !== null && signal.toAgent === null
         ? browserHumanDeliveryIndicator(signal.to, cached?.result ?? null)
         : signal.toAgent === null
