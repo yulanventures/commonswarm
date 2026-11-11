@@ -106,7 +106,7 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "Shift+Tab", expect: 'dialog[data-roster-dialog][open] [data-pd-focus="page-workspaces"]' },
       { key: "Tab", expect: 'dialog[data-roster-dialog][open] [data-roster-close]' },
     ],
-    activate: { key: "Escape", expect: { active: ':is([data-roster-open], button[aria-label="Open navigation"])', inView: ':is([data-roster-open], button[aria-label="Open navigation"])' } },
+    activate: { key: "Escape", expect: { active: ':is([data-roster-open], button[aria-label="Open navigation"])', inView: ':is([data-roster-open], button[aria-label="Open navigation"]):focus' } },
   }],
   "dialog.people-confirm": [{
     name: "people-confirm-escape-keeps-roster",
