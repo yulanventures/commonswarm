@@ -54,13 +54,13 @@ type Route = { request(): { postData(): string | null }; continue(): Promise<voi
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait, settle.
+/** One setup step; fields run in this order: media, waitFor, hover, click, type (with text), press, scroll, wait, settle.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string; settle?: true };
+type Step = { media?: string; waitFor?: string; hover?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[] }
@@ -98,6 +98,43 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
 };
 /** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
 const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
+  "dialog.admin-access": [
+    {
+      name: "seat-admin-confirm-escape",
+      start: { active: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+      keys: [
+        { key: "Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-grant]:not([hidden]):not([disabled])' },
+        { key: "Shift+Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+        { key: "Shift+Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-duration]:not([disabled])' },
+        { key: "Shift+Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-scope]:not([disabled])' },
+        { key: "Shift+Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__body[tabindex="0"]' },
+        { key: "Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-scope]:not([disabled])' },
+        { key: "Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-duration]:not([disabled])' },
+        { key: "Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+      ],
+      activate: {
+        key: "Escape",
+        expect: {
+          active: '[data-home-route-pane]:not([hidden]) [data-hm-agent="{agent}"] [data-seat-admin-slot="{agent}"][data-seat-admin-surface="agent"]:not([hidden]) [data-seat-admin="ready"] [data-seat-admin-toggle="workspace"]:not([disabled])[aria-checked="false"]',
+          inView: '[data-home-route-pane]:not([hidden]) [data-hm-agent="{agent}"] [data-seat-admin-slot="{agent}"][data-seat-admin-surface="agent"]:not([hidden]) [data-seat-admin="ready"] [data-seat-admin-toggle="workspace"]',
+        },
+      },
+    },
+    {
+      name: "seat-admin-confirm-cancel",
+      start: { active: '[data-home-route-pane]:not([hidden]) [data-hm-agent="{agent}"] [data-seat-admin-slot="{agent}"][data-seat-admin-surface="agent"]:not([hidden]) [data-seat-admin="ready"] [data-seat-admin-toggle="workspace"]:not([disabled])[aria-checked="false"]' },
+      keys: [
+        { key: "Enter", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+      ],
+      activate: {
+        key: "Enter",
+        expect: {
+          active: '[data-home-route-pane]:not([hidden]) [data-hm-agent="{agent}"] [data-seat-admin-slot="{agent}"][data-seat-admin-surface="agent"]:not([hidden]) [data-seat-admin="ready"] [data-seat-admin-toggle="workspace"]:not([disabled])[aria-checked="false"]',
+          inView: '[data-home-route-pane]:not([hidden]) [data-hm-agent="{agent}"] [data-seat-admin-slot="{agent}"][data-seat-admin-surface="agent"]:not([hidden]) [data-seat-admin="ready"] [data-seat-admin-toggle="workspace"]',
+        },
+      },
+    },
+  ],
   "menu.provider": [{
     name: "provider-back",
     start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] .hm-ahp__title-anchor' },
@@ -204,10 +241,10 @@ async function main(): Promise<void> {
 
   const envDir = mkdtempSync(join(tmpdir(), "cswarm-mobile-audit-"));
   const envFile = join(envDir, "functions.env");
-  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\n");
+  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_SELF_SERVE=1\nSWARM_SEAT_ADMIN=1\n");
   let functionLogs = "";
   const functions = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
-    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: ROOT, env: { ...process.env, SWARM_ENV: "test", SWARM_SELF_SERVE: "1", SWARM_SEAT_ADMIN: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   const cliState = observeFunctionCli(functions);
   const capture = (chunk: Buffer) => { functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000); };
   functions.stdout?.on("data", capture); functions.stderr?.on("data", capture);
@@ -325,6 +362,7 @@ async function main(): Promise<void> {
         for (const step of screen.setup ?? []) {
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
           if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
+          if (step.hover) await page.hover(fill(step.hover, seed.ids), { timeout: 8_000 });
           if (step.click) {
             const target = fill(step.click, seed.ids);
             if ((target.startsWith(".cs-kylon-workspace-menu") || target === "[data-user-menu-trigger]" || target === "[data-account-agents-open]" || target.startsWith("[data-rail-channel-menu="))
@@ -467,7 +505,24 @@ async function main(): Promise<void> {
               // Pointer to a corner first, so :hover cannot stand in for focus.
               await page.mouse.move(1, 1);
               entry.keyboard = [];
-              for (const spec of keyboardSpecs) (entry.keyboard as unknown[]).push(await runKeyboardWitness(page, spec));
+              for (const spec of keyboardSpecs) {
+                const filled: KeyboardSpec = {
+                  ...spec,
+                  start: spec.start === "document" ? "document" : { active: fill(spec.start.active, seed.ids) },
+                  keys: spec.keys.map(step => ({ ...step, expect: fill(step.expect, seed.ids) })),
+                  ...(spec.activate ? {
+                    activate: {
+                      ...spec.activate,
+                      expect: {
+                        ...spec.activate.expect,
+                        ...(spec.activate.expect.active ? { active: fill(spec.activate.expect.active, seed.ids) } : {}),
+                        ...(spec.activate.expect.inView ? { inView: fill(spec.activate.expect.inView, seed.ids) } : {}),
+                      },
+                    },
+                  } : {}),
+                };
+                (entry.keyboard as unknown[]).push(await runKeyboardWitness(page, filled));
+              }
             }
             // Activation last: it navigates away and back.
             const activationSpecs = ACTIVATION_WITNESSES[screen.id] ?? [];

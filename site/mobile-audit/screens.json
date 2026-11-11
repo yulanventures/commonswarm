@@ -855,14 +855,29 @@
   {
     "id": "dialog.admin-access",
     "kind": "dialog",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [
+      {
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-seat-admin-slot=\"{agent}\"][data-seat-admin-surface=\"agent\"]:not([hidden]) [data-seat-admin=\"ready\"] [data-seat-admin-toggle=\"workspace\"]:not([disabled])[aria-checked=\"false\"]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-seat-admin-slot=\"{agent}\"][data-seat-admin-surface=\"agent\"]:not([hidden]) [data-seat-admin=\"ready\"] [data-seat-admin-toggle=\"workspace\"]:not([disabled])[aria-checked=\"false\"]"
+      },
+      {
+        "click": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-seat-admin-slot=\"{agent}\"][data-seat-admin-surface=\"agent\"]:not([hidden]) [data-seat-admin=\"ready\"] [data-seat-admin-toggle=\"workspace\"]:not([disabled])[aria-checked=\"false\"]"
+      }
+    ],
+    "ready": "dialog.sa-confirm[data-seat-admin-confirm=\"workspace\"][data-seat-admin-phase=\"confirm\"][open]:has([data-seat-admin-scope]:not([disabled])):has([data-seat-admin-duration]:not([disabled])):has([data-seat-admin-grant]:not([hidden]):not([disabled]))",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
   },
   {
     "id": "dialog.invitation-review",
@@ -1055,14 +1070,37 @@
   {
     "id": "menu.receipt",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.addressedOwn}\"] details.dashboard__message-receipt[data-receipt-loaded=\"true\"] > summary"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.addressedOwn}\"]"
+      },
+      {
+        "media": "(hover: hover)",
+        "hover": "[data-signal-id=\"{message.addressedOwn}\"]"
+      },
+      {
+        "click": "[data-signal-id=\"{message.addressedOwn}\"] details.dashboard__message-receipt > summary"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.addressedOwn}\"] details.dashboard__message-receipt[open] > p"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.addressedOwn}\"] details.dashboard__message-receipt[open] > p",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_addressed"
+    ]
   },
   {
     "id": "menu.wiki-version",

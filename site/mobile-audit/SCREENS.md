@@ -290,7 +290,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V13 | `app.list-conflict` — pending |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
-| V16 | `app.wiki-editor` — pending |
+| V16 | `app.wiki-editor` — superseded pending alias; covered by `app.wiki.editor` |
 | V17 | `app.agent-chooser` — pending |
 | V18 | `app.agent-connect` — pending |
 | V19 | `app.invite-person` — pending |
@@ -298,7 +298,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V21 | `app.invitation-inbox` — pending |
 | V22 | `app.update-toast` — pending |
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
-| V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate; `app.definitions-diff` remains pending |
+| V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate; `app.definitions-diff` remains a superseded pending alias |
 | V25 | `app.todo-offer` — pending |
 | V26 | `app.lists-approval` — pending |
 | D01 | `dialog.public-menu` — pending |
@@ -310,7 +310,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D07 | `dialog.command-palette` — candidate; other states pending |
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
-| D10 | `dialog.admin-access` — pending |
+| D10 | `dialog.admin-access` — candidate; native `dialog.sa-confirm[data-seat-admin-confirm="workspace"]` opened from seeded Atlas `[data-seat-admin-toggle="workspace"]` (confirm phase only, grant never submitted); `AdminDelegations` history/recovery states pending |
 | D11 | `dialog.invitation-review` — pending |
 | D12 | `dialog.navigation-drawer` — pending |
 | D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
@@ -321,7 +321,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M03 | `menu.channels` — pending |
 | M04 | `menu.assignee` — pending |
 | M05 | `menu.mention` — pending |
-| M06 | `menu.receipt` — pending |
+| M06 | `menu.receipt` — candidate; seeded `{message.addressedOwn}` expanded in-flow `<details class="dashboard__message-receipt">` in `#general` |
 | M07 | `menu.wiki-version` — pending |
 | M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action |
 | M09 | `menu.provider` — pending |
@@ -329,8 +329,8 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — pending |
 | M13 | `menu.context` — pending |
-| M14 | `menu.workspace-dock` — pending |
-| M15 | `menu.profile-inspector` — pending |
+| M14 | `menu.workspace-dock` — superseded pending alias; covered by `menu.workspace` |
+| M15 | `menu.profile-inspector` — superseded pending alias; covered by `app.entity-detail` and `dialog.details-sheet` |
 
 The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
 
