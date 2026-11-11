@@ -210,6 +210,11 @@ async function observeReceiptReadiness() {
       for (let i = 0; i < 5; i++) await tick();
       const after = geometry();
       const stateAfter = ownReceipt(f.held)!.dataset.receiptState;
+      // The receipt stylesheet must actually apply here (a receipt in the tools footer sits in grid column 1); without it
+      // these measurements say nothing about the product.
+      const styled = feedRows().map(row => ownReceipt(row.dataset.signalId!)).find(d => d?.parentElement?.classList.contains("dashboard__message-tools"));
+      check(styled && getComputedStyle(styled).gridColumnStart === "1", "the receipt stylesheet is applied: grid-column-start " +
+        (styled ? getComputedStyle(styled).gridColumnStart : "no receipt in the tools"));
       if (f.scenario.startsWith("first-receipt-growth-")) {
         // A real problem must be shown on the row, not hidden in the quiet tools.
         const receipt = ownReceipt(f.held)!;
@@ -374,6 +379,9 @@ async function observeReceiptReadiness() {
 test("receipt reads: a pre-acknowledgement read never marks a row loaded; dropped refreshes, rows past the pass cap and rows brought into view are read without waiting for a poll", { timeout: 180_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
+  // The page shell's global stylesheet comes from Base.astro, not this component.
+  styles.push((await build({ entryPoints: [fileURLToPath(new URL("../../styles/global.css", import.meta.url))], bundle: true, write: false,
+    external: ["/fonts/*"] })).outputFiles[0]!.text);
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
     builder.onLoad({ filter: /\.astro$/ }, async args => {
       const compiled = transform(await readFile(args.path, "utf8"), { filename: args.path,
@@ -383,7 +391,12 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
       styles.push(...compiled.css);
       return { contents: compiled.code.replace(/import "[^"\n]+\?astro&type=style[^"\n]+";\n/gu, ""), loader: "ts", resolveDir: dirname(args.path) };
     });
-    builder.onLoad({ filter: /\.css$/ }, async args => { styles.push(await readFile(args.path, "utf8")); return { contents: "", loader: "js" }; });
+    // Bundle each stylesheet so its @imports (receipts, channel, workspace) are inlined: pasted raw, they would be fetched
+    // from this test server and never load. Fonts stay external and are answered empty below.
+    builder.onLoad({ filter: /\.css$/ }, async args => {
+      styles.push((await build({ entryPoints: [args.path], bundle: true, write: false, external: ["/fonts/*"] })).outputFiles[0]!.text);
+      return { contents: "", loader: "js" };
+    });
   } };
   const rendered = await build({ entryPoints: [component], bundle: true, write: false, format: "esm", platform: "node",
     plugins: [compiler], external: ["astro/compiler-runtime"], define: { "import.meta.env": "{}" } });
@@ -410,6 +423,7 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
     "<script>" + await compileFixture("observeReceiptReadiness") + "</script></body></html>";
   const server = createServer((request, response) => {
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
+    if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
     response.end(request.url === "/app.js" ? bundled.join("\n") : app);
   });
