@@ -11,7 +11,7 @@ import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from ".
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
 import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
-import { listChannelsAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
+import { listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
   type MemoryKind, type MemorySaveInput,
@@ -19,7 +19,7 @@ import {
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { choiceOptions } from "../cloud/choices.js";
 import { signalDuration } from "../cloud/signal-duration.js";
-import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
+import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, MCP_CHANNEL_PAGE_MAX_BYTES, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
 import { mapMcpError, OutcomeStillUnknown } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
 import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
@@ -231,7 +231,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         case "members": output = tool.mapResult(await directory(), profile.workspace_id); break;
         case "channel_ls": {
           const auth = await authenticated();
-          output = tool.mapResult(await listChannelsAsAgent(profileTarget(profile), auth.token, profile.workspace_id, auth.fetcher));
+          output = tool.mapResult(await listChannelsWithUnreadAsAgent(profileTarget(profile), auth.token, profile.workspace_id, auth.fetcher));
           break;
         }
         case "channel_read": {
@@ -241,6 +241,8 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             channel: String(raw.channel).toLowerCase(),
             ...(typeof raw.after_id === "string" ? { after_id: raw.after_id.toLowerCase() } : {}),
             ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
+            // Within this server's own result cap, so every message the edge keeps is delivered.
+            max_bytes: MCP_CHANNEL_PAGE_MAX_BYTES,
           }, auth.fetcher));
           break;
         }

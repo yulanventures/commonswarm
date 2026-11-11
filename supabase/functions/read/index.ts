@@ -324,6 +324,13 @@ async function memoryRead(
  * A caller that delivers pages whole passes its own budget as max_bytes (see ChannelMessagesReadRequest).
  */
 const CHANNEL_PAGE_MAX_BYTES = 64 * 1024;
+/** The bytes boundChannelPage counts for a page's messages. */
+function channelMessagesBytes(messages: unknown): number {
+  if (!Array.isArray(messages)) return 0;
+  const encoder = new TextEncoder();
+  return messages.reduce((total: number, message) => total + encoder.encode(JSON.stringify(message)).length, 0);
+}
+
 function boundChannelPage(page: Record<string, unknown>, maxBytes: number): Record<string, unknown> {
   const messages = Array.isArray(page.messages) ? page.messages as Array<Record<string, unknown>> : [];
   const encoder = new TextEncoder();
@@ -1140,7 +1147,10 @@ async function handle(
     }
     if (body.resource === "channel_messages") {
       const page = await channelMessages(tx, agent.principal_workspace_id, body);
-      if (page.status === 200 && body.max_bytes !== null) {
+      // The bound keeps one message even when it alone is over the caller's budget, and a caller
+      // that can't deliver it refuses the result; such a page never moves the position.
+      if (page.status === 200 && body.max_bytes !== null &&
+          channelMessagesBytes(page.body.messages) <= body.max_bytes) {
         await advanceChannelRead(tx, agent.principal_workspace_id, body.channel, page.body.messages);
       }
       return json(page.status, page.body);

@@ -109,7 +109,8 @@ import {
   CHANNEL_PURPOSE_MAX,
   channelSlugProblem,
   findChannelBySlug,
-  listChannelsAsAgent,
+  CHANNEL_PAGE_MAX_BYTES,
+  listChannelsWithUnreadAsAgent,
   readChannelMessagesAsAgent,
   listChannelsAsHuman,
   normalizeChannelSlug,
@@ -9526,23 +9527,34 @@ async function runFeedback(args: Arguments): Promise<void> {
 }
 
 async function channelRows(context: FileCliContext): Promise<ChannelRow[]> {
+  return (await channelList(context)).rows;
+}
+
+/** The rows, plus general's unread for an agent (null for a person, whose list has no unread). */
+async function channelList(context: FileCliContext): Promise<{ rows: ChannelRow[]; generalUnread: boolean | null }> {
   /* BOTH CREDENTIALS, two transports, one view. The read function accepts agent
    * credentials only and a person reads swarm_read over PostgREST, which is the
    * same split `cswarm file ls` and `cswarm members` take. Until 2026-09-05
    * this refused an agent outright, because the read function had no channels
    * resource; the retired sentence is kept in src/cloud/channels.ts. */
-  const read = async (): Promise<ChannelRow[]> =>
-    context.selected.kind === "agent"
-      ? await listChannelsAsAgent(
+  const read = async (): Promise<{ rows: ChannelRow[]; generalUnread: boolean | null }> => {
+    if (context.selected.kind === "agent") {
+      const list = await listChannelsWithUnreadAsAgent(
         context.cloud,
         context.selected.bearer,
         context.selected.selectedWorkspace,
-      )
-      : await listChannelsAsHuman(
+      );
+      return { rows: list.channels, generalUnread: list.general_unread };
+    }
+    return {
+      rows: await listChannelsAsHuman(
         context.cloud,
         context.selected.human!.accessToken,
         context.selected.selectedWorkspace,
-      );
+      ),
+      generalUnread: null,
+    };
+  };
   try {
     return await read();
   } catch (error) {
@@ -9646,7 +9658,7 @@ export const RUN_CHANNEL_LS_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "include-archi
 async function runChannelLs(args: Arguments): Promise<void> {
   args.assertShape(RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
   const context = await fileContext(args, RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
-  const rows = await channelRows(context);
+  const { rows, generalUnread } = await channelList(context);
   const includeArchived = args.has("include-archived");
   if (args.has("json")) {
     printJson({
@@ -9654,10 +9666,11 @@ async function runChannelLs(args: Arguments): Promise<void> {
       channels: includeArchived
         ? rows
         : rows.filter((row) => row.archived_at === null),
+      ...(context.selected.kind === "agent" ? { general_unread: generalUnread } : {}),
     });
     return;
   }
-  process.stdout.write(renderChannelList(rows, { includeArchived }));
+  process.stdout.write(renderChannelList(rows, { includeArchived, generalUnread }));
 }
 
 export const RUN_CHANNEL_READ_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "after", "limit"] as const;
@@ -9678,7 +9691,9 @@ async function runChannelRead(args: Arguments): Promise<void> {
   const limit = limitText === undefined ? undefined : Number(limitText);
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) throw new UsageError("--limit takes 1 to 50");
   const page = await readChannelMessagesAsAgent(context.cloud, context.selected.bearer, context.selected.selectedWorkspace,
-    { channel: slug, ...(after === undefined ? {} : { after_id: after.toLowerCase() }), ...(limit === undefined ? {} : { limit }) },
+    // The CLI prints every message it gets, so its reads count as read (channel ls unread).
+    { channel: slug, ...(after === undefined ? {} : { after_id: after.toLowerCase() }), ...(limit === undefined ? {} : { limit }),
+      max_bytes: CHANNEL_PAGE_MAX_BYTES },
     context.selected.fetcher);
   if (args.has("json")) { printJson({ ...page }); return; }
   process.stdout.write(`#${sanitizeDisplayLabel(page.channel, "general")}${page.archived ? " (archived)" : ""}\n`);

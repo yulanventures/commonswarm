@@ -151,6 +151,18 @@ export interface ChannelRow {
   created_by_kind: "user" | "agent";
   created_at: string;
   archived_at: string | null;
+  /**
+   * An agent's own unread for this channel: true when channel_read has messages there it hasn't
+   * read, null until its first channel_read in the workspace. Agent lists only; a person's list
+   * has no unread here.
+   */
+  unread?: boolean | null;
+}
+
+/** An agent's channel list: the rows, and general's (unfiled messages) unread beside them. */
+export interface AgentChannelList {
+  channels: ChannelRow[];
+  general_unread: boolean | null;
 }
 
 /**
@@ -196,6 +208,17 @@ export async function listChannelsAsAgent(
   fetcher: typeof fetch = fetch,
   timeoutMs = 30_000,
 ): Promise<ChannelRow[]> {
+  return (await listChannelsWithUnreadAsAgent(target, credential, workspaceId, fetcher, timeoutMs)).channels;
+}
+
+/** The agent channel list with unread: each row's, and general's. */
+export async function listChannelsWithUnreadAsAgent(
+  target: CloudTarget,
+  credential: string,
+  workspaceId: string,
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<AgentChannelList> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   // Same body-covering deadline as listChannelsAsHuman BELOW, same reason.
@@ -242,9 +265,9 @@ export async function listChannelsAsAgent(
         true,
       );
     }
-    let body: { channels?: unknown } | null = null;
+    let body: { channels?: unknown; general_unread?: unknown } | null = null;
     try {
-      body = JSON.parse(raw) as { channels?: unknown };
+      body = JSON.parse(raw) as { channels?: unknown; general_unread?: unknown };
     } catch {
       body = null;
     }
@@ -254,11 +277,19 @@ export async function listChannelsAsAgent(
         "The channel list came back in a shape this version does not understand.",
       );
     }
-    return body.channels as ChannelRow[];
+    // Absent from another workspace's empty answer and from older deployments: unknown, not read.
+    return { channels: body.channels as ChannelRow[],
+      general_unread: typeof body.general_unread === "boolean" ? body.general_unread : null };
   } finally {
     clearTimeout(timer);
   }
 }
+
+/**
+ * The read edge's own byte bound for a channel page. A caller that delivers every message it gets
+ * (the CLI prints them all) sends this as max_bytes, so its reads move the agent's read position.
+ */
+export const CHANNEL_PAGE_MAX_BYTES = 64 * 1024;
 
 /** Channels C3: one channel's whole-workspace messages ("general" = unfiled), oldest first. */
 export interface ChannelMessage {
@@ -284,7 +315,12 @@ export async function readChannelMessagesAsAgent(
   target: CloudTarget,
   credential: string,
   workspaceId: string,
-  request: { channel: string; after_id?: string; limit?: number },
+  /**
+   * max_bytes: the byte budget for the page's messages that the caller delivers whole. Sending it
+   * lets the read move the agent's read position (channel_ls unread); a caller that trims pages
+   * further must send its own smaller budget, or none.
+   */
+  request: { channel: string; after_id?: string; limit?: number; max_bytes?: number },
   fetcher: typeof fetch = fetch,
   timeoutMs = 30_000,
 ): Promise<ChannelMessagePage> {
@@ -304,6 +340,7 @@ export async function readChannelMessagesAsAgent(
           resource: "channel_messages", workspace_id: workspaceId, channel: request.channel,
           ...(request.after_id === undefined ? {} : { after_id: request.after_id }),
           ...(request.limit === undefined ? {} : { limit: request.limit }),
+          ...(request.max_bytes === undefined ? {} : { max_bytes: request.max_bytes }),
         }),
         signal: controller.signal,
       });
@@ -459,6 +496,16 @@ export function unknownChannelMessage(
 
 export function renderChannelList(
   rows: readonly ChannelRow[],
+  options: { includeArchived: boolean; generalUnread?: boolean | null },
+): string {
+  const general = options.generalUnread === true
+    ? "Unread in general (unfiled messages): cswarm channel read general\n"
+    : "";
+  return renderChannelRows(rows, options) + general;
+}
+
+function renderChannelRows(
+  rows: readonly ChannelRow[],
   options: { includeArchived: boolean },
 ): string {
   const live = rows.filter((row) => row.archived_at === null);
@@ -474,7 +521,7 @@ export function renderChannelList(
       ? ""
       : "  [archived; it keeps its history and takes no new messages]";
     const purpose = row.purpose === null ? "" : `: ${row.purpose}`;
-    return `- ${row.slug}${purpose}${marker}`;
+    return `- ${row.slug}${purpose}${marker}${row.unread === true ? "  [unread]" : ""}`;
   });
   const head = `Channels in this workspace (${shown.length}):`;
   const tail = options.includeArchived || archived.length === 0
