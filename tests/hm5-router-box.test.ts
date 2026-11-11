@@ -148,7 +148,7 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
   const allowlists = {
     command, admin: command,
     read: [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
-      "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_BRAIN_MEMORY"],
+      "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_BRAIN_MEMORY", "SWARM_SEAT_ADMIN"],
     h0: command.filter(name => name !== "SUPABASE_SERVICE_ROLE_KEY"),
     activity: database,
     capability: [...database, "SWARM_ENV", "SWARM_CAPABILITY_URLS", "SWARM_CAPABILITY_ALLOWED_ORIGINS"],
