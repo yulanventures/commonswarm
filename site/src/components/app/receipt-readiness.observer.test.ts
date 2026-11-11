@@ -164,7 +164,11 @@ async function observeReceiptReadiness() {
       while (stable < 20) { await tick(); const n = readIds().size; stable = n === size ? stable + 1 : 0; size = n; }
       const before = readIds();
       const from = f.log.length - 1;
-      if (f.scenario === "scroll-into-view") feedView()!.scrollTop = 0;
+      if (f.scenario === "scroll-into-view") {
+        const view = feedView()!;
+        check(view.scrollHeight > view.clientHeight + 100, "the feed must overflow before scrolling: " + view.clientHeight + "/" + view.scrollHeight + " px");
+        view.scrollTop = 0;
+      }
       else {
         const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`);
         check(toggle, "thread toggle rendered"); toggle!.click();
