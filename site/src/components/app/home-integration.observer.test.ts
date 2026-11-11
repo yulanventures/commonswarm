@@ -946,7 +946,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     let threadReplyRoot=null; const composerSending=false, threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
     const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
   `, context);
-  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot']), context);
+  runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   for (const [id, channelId, expected] of [
     ['orbit', null, 'Replying to your Orbit in All messages.'],
     ['river', 'mobile', 'Replying to your River in #mobile.'],
@@ -1008,7 +1008,7 @@ test('chat pictures and file cards each open their own attachment through its si
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>[];
     const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
   `, context);
-  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot']), context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   const file = (id: string, type: string, size: number) => ({ file_id: id, version_n: 1, name: `${id}.bin`, content_type: type, size_bytes: size });
   const attachments = [file('shot', 'image/png', 2048), file('vector', 'image/svg+xml', 900), file('report', 'application/pdf', 4096),
     file('huge', 'image/png', 25 * 1024 * 1024 + 1)];
@@ -1050,7 +1050,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>['Budget'];
     const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
   `, context);
-  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot']), context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   for (const [kind, from, reply, missingTitle] of [['ask','claude',null,false],['note','claude',null,false],['ask','claude','removed-own',false],['ask','claude','removed-other',false],['ask','claude',null,true]] as const) {
     withoutTitle = missingTitle;
     runInContext(`expandedSignalIds.clear(); signals.splice(0, signals.length, ...${reply ? JSON.stringify([{id:'reply',from:reply,fromKind:'agent',kind:'note',inReplyTo:`S-${kind}`}]) : '[]'});`, context);
