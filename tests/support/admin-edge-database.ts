@@ -7,7 +7,8 @@ import postgres from 'postgres';
 import { databaseContainer, localClusterAdminUrl, openIssuanceForTest } from './admin-schema-db.js';
 import { edgeSetupCause } from './admin-edge-setup-diagnostic.js';
 
-const schemas = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+// swarm_session holds the credential-fence wrappers the Realtime policies, PostgREST hook and human commands use (CS-E04).
+const schemas = ['auth', 'swarm', 'swarm_read', 'swarm_session', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
 export async function adminEdgeDatabase(localUrl: string, beforeCutoverSql = '') {
   const adminUrl = localClusterAdminUrl(localUrl);
   const master = postgres(adminUrl, { prepare: false, max: 1 });

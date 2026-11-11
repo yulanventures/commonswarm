@@ -511,7 +511,8 @@ export function classifyMinClientVersion(row) {
 /** The stage error for a refused read: the code, and the observed value only when it may be echoed. */
 export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
 
-const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+// swarm_session holds the credential-fence wrappers that the Realtime policies and PostgREST hook name (CS-E04).
+const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'swarm_session', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
 const HISTORICAL_SCHEMAS = [...DUMP_SCHEMAS, 'public', 'extensions'];
 /** Pinned pre-fix source for an unsupported diagnostic comparison on ACTIVE.
  * Live read/renewal controls must succeed before its expiry refusal counts.
@@ -1587,7 +1588,10 @@ async function human(ctx, label) {
   const userId = id(), email = `lock-${label}-${userId}@example.test`, displayName = `Lock ${label} ${ctx.tag}`;
   await ctx.observer`INSERT INTO auth.users (id, aud, role, email) VALUES (${userId}::uuid, 'authenticated', 'authenticated', ${email})`;
   await ctx.observer`INSERT INTO swarm.users (user_id, display_name, email) VALUES (${userId}::uuid, ${displayName}, ${email})`;
-  return { userId, email, identity: { userId, email, displayName, identityVerified: true, interactiveAuthAtSeconds: null } };
+  // A live GoTrue session: the command transaction admits it under the credential fence (CS-E04).
+  const sessionId = id();
+  await ctx.observer`INSERT INTO auth.sessions (id, user_id, created_at, updated_at) VALUES (${sessionId}::uuid, ${userId}::uuid, now(), now())`;
+  return { userId, email, identity: { userId, email, displayName, identityVerified: true, interactiveAuthAtSeconds: null, sessionId } };
 }
 async function workspace(ctx, owner, household, workspaceId = id()) {
   const streamId = id();

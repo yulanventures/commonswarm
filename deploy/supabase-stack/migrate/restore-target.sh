@@ -25,8 +25,7 @@ for file in roles.sql database.dump manifest.txt source-counts.tsv storage-objec
 done
 
 manifest_schemas="$(sed -n 's/^schemas=//p' "$MIGRATION_ARTIFACT_DIR/manifest.txt")"
-expected_schemas="$(selected_schema_csv)"
-if [[ "$manifest_schemas" != "$expected_schemas" ]]; then
+if ! manifest_schema_set_supported "$manifest_schemas"; then
   log "artifact schema set is incomplete or unsupported"
   exit 1
 fi
@@ -64,4 +63,14 @@ PGSERVICE="$destination" pg_restore \
   >>"$LOG_FILE" 2>&1 </dev/null
 
 log "selected schemas restored in one transaction to $destination"
+
+# The credential fence's PostgREST pre-request is a role setting on authenticator, which neither
+# database.dump nor roles.sql carries. An archive that includes the fence schema needs it back, or
+# PostgREST never runs the session check (CS-E04).
+if [[ ",$manifest_schemas," == *",$CREDENTIAL_FENCE_SCHEMA,"* ]]; then
+  database_psql "$destination" --command \
+    "ALTER ROLE authenticator SET pgrst.db_pre_request TO '$CREDENTIAL_FENCE_SCHEMA.require_live_human_session'; NOTIFY pgrst, 'reload config';" \
+    >>"$LOG_FILE" 2>&1
+  log "credential fence pre-request restored on authenticator"
+fi
 log "complete restore-$destination"

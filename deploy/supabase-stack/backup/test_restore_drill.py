@@ -55,6 +55,7 @@ class DrillTests(unittest.TestCase):
             applied_at='2026-10-01T00:00:00+00:00', source='release', released_sha='b'*40)]
         self.target_ops_rows = None
         self.ops_inventory = True
+        self.fence_inventory = True
         self.ops_gate = 0
         self.calls = []
         self.resources = {'container': {}, 'network': {}}
@@ -163,11 +164,14 @@ class DrillTests(unittest.TestCase):
                         output = ''.join(json.dumps(row, sort_keys=True) + '\n' for row in rows)
                     elif "WHERE nspname='commonswarm_ops'" in query:
                         output = ('t' if self.ops_inventory else 'f') + '\n'
+                    elif "WHERE nspname='swarm_session'" in query:
+                        output = ('t' if self.fence_inventory else 'f') + '\n'
                     elif 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures()' in query:
                         output = str(self.ops_gate) + '\n'
                     else:
+                        kept = {name.strip().strip("'") for name in re.search(r'NOT IN \(([^)]*)\)', query)[1].split(',')}
                         output = ''.join(schema + '\n' for schema in sorted({obj[0] for obj in self.databases[service]}
-                            - drill.REQUIRED_DATABASE_SCHEMAS - {'-'}))
+                            - kept - {'-'}))
             if args[-1].startswith('/work/migrate/') and args[-1].endswith(str(self.fail_script)):
                 return subprocess.CompletedProcess(args,1,'','injected partial restore')
             if args[-1].endswith('/restore-target.sh'):
@@ -605,6 +609,69 @@ class DrillTests(unittest.TestCase):
         )
         self.sums()
         self.assert_failed(before_docker=True)
+
+    BASE_SCHEMAS = 'auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth,commonswarm_ops'
+
+    def write_manifest_schemas(self, schemas):
+        (self.source/'manifest.txt').write_text('format=commonswarm-n-db-v2\nschemas=' + schemas + '\n')
+        self.sums()
+
+    def fence_queries(self):
+        return [i for i, a in enumerate(self.calls) if any("WHERE nspname='swarm_session'" in v for v in a)]
+
+    def test_base_archive_skips_credential_fence_check(self):
+        # Archives from before migration 20261111000003 legitimately lack swarm_session.
+        self.fence_inventory = False  # Would fail if the check ran.
+        self.assertEqual((drill.main(), self.status()['ok']), (0, True))
+        self.assertEqual(self.fence_queries(), [])
+        self.assertNotIn('credential_fence_verified', self.status())
+
+    def test_fence_archive_verifies_restored_wrappers_before_bootstrap(self):
+        self.write_manifest_schemas(self.BASE_SCHEMAS + ',swarm_session')
+        for inventory in (True, False):
+            with self.subTest(inventory=inventory):
+                self.calls.clear()
+                self.fence_inventory = inventory
+                self.assertEqual(drill.main(), int(not inventory))
+                [fence] = self.fence_queries()
+                restore = next(i for i, a in enumerate(self.calls) if a[-1].endswith('/restore-target.sh'))
+                self.assertLess(restore, fence)
+                self.assertTrue(any('--dbname=service=target' in a for a in [self.calls[fence]]))
+                self.assertFalse(any(self.resources.values()))
+                if inventory:
+                    self.assertTrue(self.status()['credential_fence_verified'])
+                    prepare = next(i for i, a in enumerate(self.calls) if a[-1].endswith('/prepare-target.sh'))
+                    self.assertLess(fence, prepare)
+                else:
+                    self.assertFalse(self.status()['ok'])
+                    self.assertEqual(self.status()['error_type'], 'ValueError')
+                    self.assertFalse(any(a[-1].endswith('/prepare-target.sh') for a in self.calls))
+                    self.assertFalse(any('public.ecr.aws/supabase/storage-api:v1.77.5' in a for a in self.calls))
+
+    def test_fence_archive_schema_checksums_cover_swarm_session(self):
+        wrapper = ('swarm_session', 'require_live_human_session()', 'FUNCTION',
+                   'CREATE FUNCTION swarm_session.require_live_human_session() RETURNS void SECURITY DEFINER AS $$ $$;\n')
+        self.schema.append(wrapper)
+        self.target_extra = [(*wrapper[:3], wrapper[3].replace(' SECURITY DEFINER', ''))]
+        self.write_schema()
+        for schemas, covered in ((self.BASE_SCHEMAS, False), (self.BASE_SCHEMAS + ',swarm_session', True)):
+            with self.subTest(schemas=schemas):
+                self.write_manifest_schemas(schemas)
+                self.assertEqual(drill.main(), 0)
+                checksums = self.status()['schema_checksums']
+                self.assertEqual(checksums['source'] != checksums['target'], covered)
+
+    def test_unsupported_schema_sets_are_refused_before_docker(self):
+        for schemas in (self.BASE_SCHEMAS + ',swarm_session,extra',
+                        self.BASE_SCHEMAS + ',swarm_session,swarm_session',
+                        self.BASE_SCHEMAS + ',commonswarm_ops',
+                        self.BASE_SCHEMAS.replace(',commonswarm_ops', '') + ',swarm_session',
+                        self.BASE_SCHEMAS + ',extra'):
+            with self.subTest(schemas=schemas):
+                self.calls.clear()
+                self.write_manifest_schemas(schemas)
+                self.assert_failed(before_docker=True)
+                self.assertFalse(any(a[:3] == ['docker', 'network', 'create'] for a in self.calls))
 
     def test_counts_without_migration_checksums_are_refused(self):
         del self.counts['commonswarm_ops.migration_checksums']

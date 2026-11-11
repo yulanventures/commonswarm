@@ -103,12 +103,14 @@ async function invitationEntry(surface: 'read' | 'command') {
               ...(token === 'confirmed' ? { email_confirmed_at: '2026-10-01T00:00:00Z' } :
                 token === 'null-confirmation' ? { email_confirmed_at: null } : {})
             } } }; },
-            async getClaims() { return { error: null, data: { claims: {} } }; }
+            async getClaims() { return { error: null, data: { claims: { session_id: '00000000-0000-4000-8000-00000000c504' } } }; }
           } }; }` };
         if (args.path === 'npm:postgres@3.4.9') return { loader: 'js', contents: `
           export default function postgres() {
             const sql = async (strings, ...values) => {
               const query = strings.join('?'); queries.push({ query, values });
+              // CS-E04: the person's session is admitted first; this fixture's session is live.
+              if (query.includes('swarm_session.admit_human_session')) return [{ ok: true }];
               if (query.includes('INSERT INTO swarm.users')) return [{ user_id: userId, email: 'recipient@example.test' }];
               if (query.includes('swarm_read.human_invitations()')) return [{ invitation_id: 'inbox-invite', workspace_name: 'Synthetic shared' }];
               if (query.includes('FROM swarm.config')) return [{ value: '0.1.0' }];

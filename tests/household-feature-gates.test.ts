@@ -41,6 +41,8 @@ async function commandEntry(flags: Record<string, string | undefined> = {}, boun
           export default function postgres() {
             const read = (strings, ...values) => {
               const query = strings.join('?'); queries.push(query);
+              // CS-E04: the person's session is admitted first; this fixture's session is live.
+              if (query.includes('swarm_session.admit_human_session')) return [{ ok: true }];
               if (query.includes('INSERT INTO swarm.users')) return [{ user_id: '${owner}', email: null }];
               // Both admission and route resolution read the same live member.
               if (query.includes('SELECT m.role')) return [{ role: 'owner', revoked_at: null }];
@@ -68,7 +70,7 @@ async function commandEntry(flags: Record<string, string | undefined> = {}, boun
         if (args.path === 'npm:@supabase/supabase-js@2.110.8') return { contents: `
           export function createClient() { return { auth: {
             async getUser() { return { data: { user: { id: '${owner}' } }, error: null }; },
-            async getClaims() { return { data: { claims: {} }, error: null }; }
+            async getClaims() { return { data: { claims: { session_id: '00000000-0000-4000-8000-00000000c504' } }, error: null }; }
           } }; }`, loader: 'js' };
         throw new Error('unexpected edge dependency');
       });

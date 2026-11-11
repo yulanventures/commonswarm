@@ -135,6 +135,9 @@ try {
   const owner = id();
   const email = `r12b-owner-${owner}@example.test`;
   await observer`INSERT INTO auth.users (id, aud, role, email) VALUES (${owner}::uuid, 'authenticated', 'authenticated', ${email})`;
+  // The owner's live GoTrue session, admitted by every management command (CS-E04 credential fence).
+  const ownerSession = id();
+  await observer`INSERT INTO auth.sessions (id, user_id, created_at, updated_at) VALUES (${ownerSession}::uuid, ${owner}::uuid, now(), now())`;
   await observer`INSERT INTO swarm.users (user_id, display_name, email) VALUES (${owner}::uuid, ${`R12b owner ${tag}`}, ${email})`;
   const W = id(), streamId = id();
   await observer.begin(async (tx) => {
@@ -348,7 +351,7 @@ try {
       const priorAuditIds=new Set(auditBefore.map(row=>row.audit_id));
       const result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
         workspace_id:W,stream:{kind:'workspace'},command:{kind:'resume_renewal_grant',renewal_grant_id:secured.grant}},
-        {userId:owner,email,displayName:`R12b owner ${tag}`,identityVerified:true,interactiveAuthAtSeconds:null});
+        {userId:owner,email,displayName:`R12b owner ${tag}`,identityVerified:true,interactiveAuthAtSeconds:null,sessionId:ownerSession});
       if(result.status!==200 || result.body?.ok!==true) throw new Error('security_owner_resume_failed');
       const [state]=await observer`SELECT NOT suspension_active AND resumed_by=${owner}::uuid AND resume_count>0
         AND suspended_at IS NOT NULL AND resumed_at>suspended_at AS ok FROM swarm.renewal_grants
@@ -1034,7 +1037,7 @@ try {
         result=await command.handleHostedManagementCommand({command_id:id(),client_version:CLIENT_PROTOCOL_VERSION,
           workspace_id:workspace,stream:{kind:'workspace'},command:{kind:'household_tool',tool:'todo_queue',
             arguments:{seat:HOUSEHOLD_LOCAL_SEAT,principal_id:principal}}},
-          {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null});
+          {userId:owner,email,displayName:'Read truth owner',identityVerified:true,interactiveAuthAtSeconds:null,sessionId:ownerSession});
       } catch(error) {
         // Round 6 extension: F's trusted entry rethrows for these three bindings.
         // No HTTP response or diagnostic is fabricated at this boundary.

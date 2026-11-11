@@ -42,6 +42,8 @@ test('hosted migration rollback/reapply preserves the prior authority catalog an
 
 const A='13000000-0000-4000-8000-000000000001',B='13000000-0000-4000-8000-000000000002';
 const P='23000000-0000-4000-8000-000000000001',U='03000000-0000-4000-8000-000000000001',G='33000000-0000-4000-8000-000000000001';
+// Live GoTrue sessions for the owner and the peer: the command transaction admits each one (CS-E04).
+const S='43000000-0000-4000-8000-000000000001',S2='43000000-0000-4000-8000-000000000002',U2='03000000-0000-4000-8000-000000000002';
 
 test('real hosted content withdrawal revokes only the target workspace and retains origin, inactive and local behavior',async()=>{
  const {isolated}=await commandDatabase();
@@ -57,6 +59,7 @@ test('real hosted commands add without OAuth, claim the same agent, replay safel
  try {
   await isolated.db.unsafe(repoSql(`${root}-rollback.sql`)+legacy()+repoSql(migration));
   await isolated.db`INSERT INTO swarm.config(key,value) VALUES('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`;
+  await isolated.db`INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES(${S}::uuid,${U}::uuid,now(),now()),(${S2}::uuid,${U2}::uuid,now(),now())`;
   const commandUrl=new URL('../../supabase/functions/command/index.ts',import.meta.url).href;
   const authUrl=new URL('../../supabase/functions/_shared/hosted-seat-auth.ts',import.meta.url).href;
   const harness=join(dir,'commands.ts');
@@ -64,8 +67,8 @@ test('real hosted commands add without OAuth, claim the same agent, replay safel
 import assert from 'node:assert/strict';
 const {db,handleHostedCommand,handleHostedManagementCommand}=await import(${JSON.stringify(commandUrl)});
 const {authenticateHostedGrantCapability,authenticateHostedSeatCapability}=await import(${JSON.stringify(authUrl)});
-const A=${JSON.stringify(A)},B=${JSON.stringify(B)},P=${JSON.stringify(P)},U=${JSON.stringify(U)},G=${JSON.stringify(G)};
-const human={userId:U,email:null,displayName:'Hosted owner',identityVerified:true,interactiveAuthAtSeconds:Math.floor(Date.now()/1000)};
+const A=${JSON.stringify(A)},B=${JSON.stringify(B)},P=${JSON.stringify(P)},U=${JSON.stringify(U)},G=${JSON.stringify(G)},S2=${JSON.stringify(S2)};
+const human={userId:U,email:null,displayName:'Hosted owner',identityVerified:true,interactiveAuthAtSeconds:Math.floor(Date.now()/1000),sessionId:${JSON.stringify(S)}};
 const manage=(workspace,add)=>handleHostedManagementCommand({command_id:crypto.randomUUID(),client_version:'0.1.83',workspace_id:workspace,stream:{kind:'workspace'},command:{kind:add?'add_agent_to_workspace':'remove_agent_from_workspace',principal_id:P}},human);
 async function claim(workspace,id=crypto.randomUUID()) {
  const cap=await db.begin(tx=>authenticateHostedGrantCapability(tx,{grantId:G,ownerUserId:U,providerGrantId:'hosted-workspace-family',workspaceId:workspace,tool:'claim_hosted_seat',providerStatus:async()=>({active:true})}));
@@ -76,7 +79,7 @@ try {
  assert.equal((await manage(B,true)).status,200);
  // Discover and revoke a human-added binding before it has a seat.
  await db\x60UPDATE swarm.memberships SET role='owner' WHERE workspace_id=\x24{B}::uuid AND user_id='03000000-0000-4000-8000-000000000002'\x60;
- const removal=await handleHostedManagementCommand({command_id:crypto.randomUUID(),client_version:'0.1.83',workspace_id:B,stream:{kind:'workspace'},command:{kind:'remove_member',user_id:U}}, {...human,userId:'03000000-0000-4000-8000-000000000002'});
+ const removal=await handleHostedManagementCommand({command_id:crypto.randomUUID(),client_version:'0.1.83',workspace_id:B,stream:{kind:'workspace'},command:{kind:'remove_member',user_id:U}}, {...human,userId:'03000000-0000-4000-8000-000000000002',sessionId:S2});
  assert.equal(removal.status,200);
  await db\x60UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=\x24{B}::uuid AND user_id=\x24{U}::uuid\x60;
  assert.equal((await claim(B)).status,403);

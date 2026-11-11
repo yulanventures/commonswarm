@@ -1460,6 +1460,13 @@ interface VerifiedHuman {
   displayName: string;
   identityVerified: boolean;
   interactiveAuthAtSeconds: number | null;
+  /** The GoTrue session the verified token names (its session_id claim), when it is a UUID. */
+  sessionId: string | null;
+}
+
+/** The person's session ended (a credential change revoked it) after the request's entry check. */
+class HumanSessionEnded extends Error {
+  constructor() { super("human session ended"); this.name = "HumanSessionEnded"; }
 }
 
 interface PreparedWorkspace {
@@ -3365,6 +3372,20 @@ async function authenticateAgent(
     email: null,
     interactiveAuthAtSeconds: null,
   };
+}
+
+/**
+ * CS-E04 final fence. Every human transaction calls this FIRST, right after setTransaction and before
+ * any planning, row lock or write: the shared credential-fence lock, held to commit, then a fresh
+ * liveness read of the person's session. A credential change (exclusive lock) either waits for
+ * this transaction and then revokes the session, or has already revoked it. Taking it before any
+ * other lock means a queued change can never sit between this transaction's locks.
+ */
+async function admitHumanSession(tx: Sql, verified: VerifiedHuman): Promise<boolean> {
+  const [admitted] = await tx<{ ok: boolean }[]>`
+    SELECT swarm_session.admit_human_session(${verified.userId}::uuid, ${verified.sessionId}::uuid) AS ok
+  `;
+  return admitted?.ok === true;
 }
 
 async function authenticateHuman(
@@ -11581,6 +11602,9 @@ export interface HostedHumanManagementIdentity {
   displayName: string;
   identityVerified: boolean;
   interactiveAuthAtSeconds: number | null;
+  /** The GoTrue session the authorization service's browser session is bound to. The command
+   * transaction admits it under the credential fence (CS-E04); a missing one is refused. */
+  sessionId: string | null;
 }
 
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
@@ -12990,6 +13014,11 @@ async function handleTransaction(
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
     await setTransaction(tx);
+    // A person's session is admitted before anything else this transaction locks or writes.
+    if (verifiedHuman !== null && !(await admitHumanSession(tx, verifiedHuman))) {
+      logCommandFailure("command_pre_auth_failure", kind, "authn", "human session ended");
+      return { status: 401, body: { error: "unauthenticated" } };
+    }
     if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
       await assertHouseholdContentServiceReady(tx);
     }
@@ -16189,6 +16218,8 @@ let verifiedHuman: VerifiedHuman | null = null;
       identityVerified: data.user.email_confirmed_at !== undefined &&
         data.user.email_confirmed_at !== null,
       interactiveAuthAtSeconds: newestInteractiveAmrSeconds(claimsData.claims),
+      sessionId: typeof claimsData.claims.session_id === "string" && UUID_RE.test(claimsData.claims.session_id)
+        ? claimsData.claims.session_id.toLowerCase() : null,
     };
     if (typeof claimsData.claims.session_id === "string") {
       adminSessionBinding = await adminDigest({ user_id: data.user.id, session_id: claimsData.claims.session_id });
@@ -16335,10 +16366,12 @@ async function runSeatAdminCommand(input: RequestBody, human: SeatAdminHuman, ve
   try {
     return await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
+      if (!(await admitHumanSession(tx, verified))) throw new HumanSessionEnded();
       await authenticateHuman(tx, verified);
       return await seatAdminTransaction(tx, input, human);
     }));
   } catch (error) {
+    if (error instanceof HumanSessionEnded) return { status: 401, body: { error: "unauthenticated" } };
     console.error("seat_admin_command_failed", safeAdminError(error));
     return { status: 500, body: { error: "seat_admin_command_failed" } };
   }
@@ -16352,11 +16385,15 @@ async function runAdminAccountCommand(
   try {
     const outcome = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
-      if (human !== null) await authenticateHuman(tx, human);
+      if (human !== null) {
+        if (!(await admitHumanSession(tx, human))) throw new HumanSessionEnded();
+        await authenticateHuman(tx, human);
+      }
       return await adminTransaction(tx, input, authentication);
     }));
     return outcome.result;
   } catch (error) {
+    if (error instanceof HumanSessionEnded) return { status: 401, body: { error: "unauthenticated" } };
     console.error("admin_command_failed", safeAdminError(error));
     // Account failure auditing follows in a fresh transaction after rollback.
     try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }

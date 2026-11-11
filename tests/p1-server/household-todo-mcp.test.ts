@@ -11,9 +11,11 @@ function fixture() {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), foreign = randomUUID(), consent = randomUUID();
   const principal = randomUUID(), sibling = randomUUID(), grant = randomUUID(), connection = randomUUID();
   const local = randomUUID(), device = randomUUID(), run = randomUUID(), credential = randomUUID(), family = randomUUID();
+  const ownerSession = randomUUID();
   const name = 'Synthetic hosted to-do agent', handle = `seat_${'L'.repeat(22)}`;
   const setup = `
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),('${other}','authenticated','authenticated','${other}@example.test');
+    INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES ('${ownerSession}','${owner}',now(),now());
     INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','Synthetic owner'),('${other}','Synthetic other');
     INSERT INTO swarm.config(key,value) VALUES ('min_client_version','"0.1.0"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value;
     INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic household','${owner}'),('${foreign}','Synthetic foreign','${other}');
@@ -43,7 +45,7 @@ function fixture() {
       VALUES ('${connection}','${grant}','${workspace}','${principal}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,'${grant}',NULL),
         ('${credential}','${run}','${workspace}','${local}','${owner}','shared',ARRAY['read','create','update'],'${consent}',NULL,NULL,'${family}');
   `;
-  return { owner, other, workspace, foreign, principal, sibling, grant, connection, local, run, credential, family, handle, setup };
+  return { owner, other, workspace, foreign, principal, sibling, grant, connection, local, run, credential, family, handle, ownerSession, setup };
 }
 
 const harness = `
@@ -112,7 +114,7 @@ try {
     type Result = { status: number; body: Record<string, any> };
     const envelope = (command: Record<string, unknown>, id=crypto.randomUUID(), workspace=f.workspace) => ({ command_id:id, client_version:'0.1.80', workspace_id:workspace, stream:{kind:'workspace'}, command });
     const human = async (command: Parameters<typeof api.handleHostedManagementCommand>[0]): Promise<Result> => api.handleHostedManagementCommand(command, {
-      userId:f.owner, email:null, displayName:'Synthetic owner', identityVerified:true, interactiveAuthAtSeconds:null });
+      userId:f.owner, email:null, displayName:'Synthetic owner', identityVerified:true, interactiveAuthAtSeconds:null, sessionId:f.ownerSession });
     const capability = async (tool: string) => {
       const use = reads(tool) ? 'read' : 'command';
       const cap = await isolate(async (sql) => {

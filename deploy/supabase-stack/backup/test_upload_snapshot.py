@@ -13,6 +13,11 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+REFUSED = ('no-ops-schema', 'no-ops-count', 'zero-ops-count', 'unknown-schema',
+           'duplicate-fence-schema', 'fence-without-ops')
+ACCEPTED = (None, 'positive-ops-count', 'fence-schema')
+
+
 class UploadFailures(unittest.TestCase):
     def exercise(self, failure=None):
         with tempfile.TemporaryDirectory() as temp:
@@ -35,6 +40,14 @@ class UploadFailures(unittest.TestCase):
                     'format=commonswarm-n-db-v2\n'
                     'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
                 )
+            base = 'auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth,commonswarm_ops'
+            manifest_schemas = {'fence-schema': base + ',swarm_session',
+                                'unknown-schema': base + ',swarm_session,extra',
+                                'duplicate-fence-schema': base + ',swarm_session,swarm_session',
+                                'fence-without-ops': base.replace(',commonswarm_ops', '') + ',swarm_session'}
+            if failure in manifest_schemas:
+                (artifact / 'manifest.txt').write_text(
+                    'format=commonswarm-n-db-v2\nschemas=' + manifest_schemas[failure] + '\n')
             if failure == 'no-ops-count':
                 (artifact / 'source-counts.tsv').write_text(
                     'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
@@ -86,10 +99,10 @@ class UploadFailures(unittest.TestCase):
                 return subprocess.CompletedProcess(args, code, stdout=output, stderr='')
 
             with patch.dict(os.environ, {'COMMONSWARM_ENV_FILE': str(env)}), patch.object(module.subprocess, 'run', fake_run):
-                if failure in ('no-ops-schema', 'no-ops-count', 'zero-ops-count'):
+                if failure in REFUSED:
                     with self.assertRaises(ValueError):
                         module.upload(artifact, evidence)
-                elif failure not in (None, 'positive-ops-count'):
+                elif failure not in ACCEPTED:
                     with self.assertRaises(RuntimeError):
                         module.upload(artifact, evidence)
                 else:
@@ -100,8 +113,8 @@ class UploadFailures(unittest.TestCase):
                     self.assertTrue(result['offsite_encrypted'])
                     self.assertTrue(result['ciphertext_download_verified'])
             marker_writes = [args for args in calls if len(args) > 1 and args[1] == 'copyto']
-            self.assertEqual(len(marker_writes), 1 if failure in (None, 'wrong-marker', 'positive-ops-count') else 0)
-            if failure in ('no-ops-schema', 'no-ops-count', 'zero-ops-count'):
+            self.assertEqual(len(marker_writes), 1 if failure in ACCEPTED + ('wrong-marker',) else 0)
+            if failure in REFUSED:
                 self.assertFalse(any(len(args) > 1 and args[1] in ('copy', 'copyto') for args in calls))
             self.assertFalse(any(args[1] in ('delete', 'purge', 'sync', 'move') for args in calls))
 
@@ -114,6 +127,10 @@ class UploadFailures(unittest.TestCase):
     def test_counts_without_migration_checksums_are_refused(self): self.exercise('no-ops-count')
     def test_zero_migration_checksum_rows_are_refused(self): self.exercise('zero-ops-count')
     def test_positive_migration_checksum_rows_are_accepted(self): self.exercise('positive-ops-count')
+    def test_manifest_with_credential_fence_schema_is_accepted(self): self.exercise('fence-schema')
+    def test_manifest_with_unknown_schema_is_refused(self): self.exercise('unknown-schema')
+    def test_manifest_with_duplicate_fence_schema_is_refused(self): self.exercise('duplicate-fence-schema')
+    def test_fence_schema_cannot_replace_a_base_schema(self): self.exercise('fence-without-ops')
 
 
 if __name__ == '__main__': unittest.main()

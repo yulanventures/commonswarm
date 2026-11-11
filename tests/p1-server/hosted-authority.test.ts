@@ -64,6 +64,10 @@ let local: LocalEnvironment;
 let admin: SupabaseClient;
 let harnessDir: string;
 let harnessPath: string;
+// Each signed-in person's live GoTrue session, which management commands present (CS-E04 fence).
+const humanSessions = new Map<string, string>();
+const withHumanSessions = (input: Record<string, unknown>) =>
+  JSON.stringify({ ...input, humanSessions: Object.fromEntries(humanSessions) });
 
 interface LocalEnvironment {
   API_URL: string;
@@ -186,6 +190,7 @@ async function managementCommand(
     displayName: "HM owner",
     identityVerified: true,
     interactiveAuthAtSeconds: input.interactiveAuthAtSeconds ?? null,
+    sessionId: input.humanSessions?.[ownerUserId] ?? null,
   }));
 }
 
@@ -988,6 +993,9 @@ async function createAuthUser(label: string): Promise<{ id: string; jwt: string 
   const signedIn = await client.auth.signInWithPassword({ email, password });
   assert.ifError(signedIn.error);
   assert.ok(signedIn.data.session?.access_token);
+  const claims = JSON.parse(Buffer.from(signedIn.data.session.access_token.split(".")[1]!, "base64url").toString());
+  assert.equal(typeof claims.session_id, "string");
+  humanSessions.set(created.data.user.id, claims.session_id);
   return { id: created.data.user.id, jwt: signedIn.data.session.access_token };
 }
 
@@ -1007,6 +1015,9 @@ async function seedHostedFixture(grantBOwnerIsOther = false, providerBinding = f
     if (isolatedAuthUsers) await tx`INSERT INTO auth.users(id, aud, role)
       VALUES (${fixture.owner}::uuid, 'authenticated', 'authenticated'),
              (${fixture.other}::uuid, 'authenticated', 'authenticated')`;
+    if (isolatedAuthUsers) await tx`INSERT INTO auth.sessions(id, user_id, created_at, updated_at)
+      VALUES (${humanSessions.get(fixture.owner)!}::uuid, ${fixture.owner}::uuid, now(), now()),
+             (${humanSessions.get(fixture.other)!}::uuid, ${fixture.other}::uuid, now(), now())`;
     await tx`
       INSERT INTO swarm.users (user_id, display_name)
       VALUES (${fixture.owner}::uuid, 'HM owner'), (${fixture.other}::uuid, 'HM other')
@@ -1109,7 +1120,7 @@ function runHostedHarness<T>(input: Record<string, unknown>, options: {
   databaseUrl?: string; rollbackBeforeStep?: number; harnessPath?: string;
 } = {}): T {
   const config = hostedHarnessLaunch(input, options);
-  const result = spawnSync("deno", config.args, {...config.options, input:JSON.stringify(input)});
+  const result = spawnSync("deno", config.args, {...config.options, input:withHumanSessions(input)});
   if (result.error) {
     assert.fail(`hosted harness failed to start deno: ${result.error.message}`);
   }
@@ -1152,7 +1163,7 @@ function runHostedHarnessAsync<T>(input: Record<string, unknown>, databaseUrl: s
         resolve(JSON.parse(line.slice('HM_RESULT:'.length)) as T);
       } catch (error) { reject(error); }
     });
-    child.stdin.end(JSON.stringify(input));
+    child.stdin.end(withHumanSessions(input));
   });
 }
 

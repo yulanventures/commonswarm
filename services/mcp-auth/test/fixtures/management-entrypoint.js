@@ -23,6 +23,8 @@ const postgresStub = moduleUrl(`
     async function sql(strings, ...values) {
       const text = strings.join("?").replace(/\\s+/gu, " ").trim();
       probe.queries.push({ text, values });
+      // CS-E04: the person's session is admitted first; the fixture's session is live.
+      if (text.includes("swarm_session.admit_human_session")) return [{ ok: true }];
       if (text.includes("INSERT INTO swarm.users")) return [{ user_id: values[0], email: null }];
       // Admission sees only this fixture human's workspace membership.
       if (text === "SELECT m.role FROM swarm.memberships m JOIN swarm.workspaces w USING(workspace_id) WHERE m.workspace_id=?::uuid AND m.user_id=?::uuid AND m.revoked_at IS NULL AND w.archived_at IS NULL") {
@@ -93,7 +95,8 @@ try {
       command_id: "50000000-0000-4000-8000-000000000001",
       stream: { kind: "workspace" },
       command: { kind: "revoke_hosted_mcp_grant", grant_id: grantId },
-    }, { userId, displayName: "Fixture", email: null, identityVerified: true, interactiveAuthAtSeconds: null });
+    }, { userId, displayName: "Fixture", email: null, identityVerified: true, interactiveAuthAtSeconds: null,
+      sessionId: "00000000-0000-4000-8000-00000000c504" });
     assert.deepEqual(result, { status: 403, body: { error: "forbidden" } });
     assert.equal(probe.pools, 1);
     assert.equal(probe.max, 2, "management pool must cap at two connections");

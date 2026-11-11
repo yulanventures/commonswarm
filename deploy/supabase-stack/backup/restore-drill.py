@@ -38,6 +38,41 @@ REQUIRED_DATABASE_SCHEMAS = frozenset({
     'auth', 'public', 'realtime', 'storage', 'supabase_migrations', 'swarm',
     'swarm_read', 'commonswarm_oauth', 'commonswarm_ops',
 })
+# Present once migration 20261111000003 (credential fence) is in the ledger; see migrate/lib.sh.
+CREDENTIAL_FENCE_SCHEMA = 'swarm_session'
+ACCEPTED_DATABASE_SCHEMA_SETS = (REQUIRED_DATABASE_SCHEMAS,
+                                 REQUIRED_DATABASE_SCHEMAS | {CREDENTIAL_FENCE_SCHEMA})
+# Restored credential fence: schema and wrappers owned by the fence role, SECURITY DEFINER, closed to
+# PUBLIC, and reachable by exactly the callers migration 20261111000003 grants. NULL-safe: a missing
+# role, schema or function yields 'f', never an error.
+CREDENTIAL_FENCE_INVENTORY = '''
+WITH fence AS (
+  SELECT to_regrole('commonswarm_credential_fence')::oid AS owner,
+         (SELECT oid FROM pg_namespace WHERE nspname='swarm_session') AS nsp),
+wrappers(signature, grantees) AS (VALUES
+  ('swarm_session.require_live_human_session()', ARRAY['anon', 'authenticated', 'service_role']),
+  ('swarm_session.current_human_session_live()', ARRAY['authenticated']),
+  ('swarm_session.admit_human_session(uuid,uuid)', ARRAY['swarm_command', 'commonswarm_oauth_runtime'])),
+callers(role_name) AS (VALUES
+  ('anon'), ('authenticated'), ('service_role'), ('swarm_command'), ('commonswarm_oauth_runtime'))
+SELECT COALESCE((
+  SELECT f.owner IS NOT NULL AND f.nsp IS NOT NULL
+    AND (SELECT n.nspowner = f.owner FROM pg_namespace n WHERE n.oid = f.nsp) IS TRUE
+    AND has_schema_privilege('public'::name, f.nsp, 'USAGE') IS FALSE
+    AND (SELECT count(*) = 3 FROM wrappers w JOIN pg_proc p ON p.oid = to_regprocedure(w.signature)
+         WHERE p.pronamespace = f.nsp AND p.proowner = f.owner AND p.prosecdef
+           AND has_function_privilege('public'::name, p.oid, 'EXECUTE') IS FALSE)
+    AND NOT EXISTS (SELECT 1 FROM callers c
+         WHERE has_schema_privilege(to_regrole(c.role_name)::oid, f.nsp, 'USAGE') IS NOT TRUE)
+    AND NOT EXISTS (SELECT 1 FROM wrappers w CROSS JOIN callers c
+         WHERE has_function_privilege(to_regrole(c.role_name)::oid, to_regprocedure(w.signature)::oid, 'EXECUTE')
+               IS DISTINCT FROM (c.role_name = ANY (w.grantees)))
+    -- restore-target.sh re-applies PostgREST's pre-request, which lives outside the dump.
+    AND EXISTS (SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = to_regrole('authenticator')::oid
+         AND s.setdatabase = 0
+         AND 'pgrst.db_pre_request=swarm_session.require_live_human_session' = ANY (s.setconfig))
+  FROM fence f), false);
+'''
 WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
 # DRILL_WORKDIR_KEEP = 2 counts the current run: that directory plus one earlier run.
 DRILL_WORKDIR_KEEP = 2
@@ -94,8 +129,9 @@ def validate_manifest(text):
         entries[key] = value
     schemas = entries.get('schemas', '').split(',')
     if (entries.get('format') != 'commonswarm-n-db-v2' or
-            len(schemas) != len(set(schemas)) or set(schemas) != REQUIRED_DATABASE_SCHEMAS):
+            len(schemas) != len(set(schemas)) or set(schemas) not in ACCEPTED_DATABASE_SCHEMA_SETS):
         raise ValueError('unsupported database artifact format or schema set')
+    return frozenset(schemas)
 
 
 def cleanup(workdir, label):
@@ -297,6 +333,7 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
             shutil.copyfile(local_artifact / name, db_artifact / name)
         rows, counts = validate_artifact(db_artifact)  # Verify the bytes actually mounted.
     result['key_table_counts'] = {table: {'source': counts[table]} for table in KEY_TABLES}
+    archive_schemas = validate_manifest((db_artifact / 'manifest.txt').read_text())
     db_name = 'cold-db-' + secrets.token_hex(4)
     net_name = 'cold-net-' + secrets.token_hex(4)
     image = 'public.ecr.aws/supabase/postgres:17.6.1.147'
@@ -355,7 +392,7 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
     def schema_checksum(service, ops_only=False):
         # PG17 --schema disables include_everything and silently omits all
         # publications/subscriptions. --exclude-schema keeps them dumpable.
-        schemas = ','.join("'" + schema + "'" for schema in sorted(REQUIRED_DATABASE_SCHEMAS))
+        schemas = ','.join("'" + schema + "'" for schema in sorted(archive_schemas))
         excluded = artifact_tool('psql', '--dbname=service=' + service, '-XAt', '-v', 'ON_ERROR_STOP=1',
             '-c', f'SELECT pg_catalog.quote_ident(nspname) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ({schemas}) ORDER BY nspname;')
         if ops_only:
@@ -417,6 +454,12 @@ SELECT
 ''')
             if inventory.strip() != 't':
                 raise ValueError('required ops functions, owners or RLS are missing')
+            if CREDENTIAL_FENCE_SCHEMA in archive_schemas:
+                fence = artifact_tool('psql', '--dbname=service=target', '-XAtq',
+                    '-v', 'ON_ERROR_STOP=1', '-c', CREDENTIAL_FENCE_INVENTORY)
+                if fence.strip() != 't':
+                    raise ValueError('restored credential fence schema, wrappers, owners or grants differ')
+                result['credential_fence_verified'] = True
             gate = artifact_tool('psql', '--dbname=service=target', '-XAtq',
                 '-v', 'ON_ERROR_STOP=1', '-c',
                 'BEGIN READ ONLY; SET LOCAL ROLE commonswarm_oauth_runtime; '

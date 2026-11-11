@@ -41,6 +41,12 @@ const hostedHelpers = [
 // Keep its exact signature and grantability literal; no OAuth/issuer allowance.
 const literal = JSON.stringify([
   ...allowlist.map((entry: unknown[]) => entry.slice(0, 5)),
+  // CS-E04 credential fence: the one admission wrapper, reached through its own schema, never swarm
+  // for the OAuth runtime. Not grantable; the issuer itself gets nothing.
+  ['commonswarm_oauth_runtime', 'SCHEMA', 'swarm_session', 'USAGE', false],
+  ['commonswarm_oauth_runtime', 'FUNCTION', 'swarm_session.admit_human_session(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'SCHEMA', 'swarm_session', 'USAGE', false],
+  ['swarm_command', 'FUNCTION', 'swarm_session.admit_human_session(uuid,uuid)', 'EXECUTE', false],
   // Roster R1b: re-raise reads the shared answer rule and writes its per-ask cap ledger.
   ['swarm_command', 'FUNCTION', 'swarm.ask_answered(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'INSERT', false],

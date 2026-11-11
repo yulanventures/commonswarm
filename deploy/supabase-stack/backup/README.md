@@ -57,6 +57,10 @@ that lock, the other exits 75 and does not start.
    `prepare-target.sh`, `restore-cron-jobs.sh`, and `verify-counts.sh` in that order.
    All selected table counts and all cron definitions must match the artifact.
    commonswarm_ops holds the C1 migration checksums; a restore without it must re-apply the C1 migrations before admin issuance (FOLLOW-UPS-C1 #38).
+   swarm_session holds the credential fence wrappers that the PostgREST pre-request and the Realtime
+   policies call. A dump includes it when the ledger has migration 20261111000003; sets taken before
+   that migration lack it, and both schema sets are accepted. When the set includes it, the drill checks
+   the restored schema and wrappers: owner, SECURITY DEFINER, no PUBLIC access, and the exact callers.
 4. Check the offsite `objects/` keys against `physical-object-keys.txt`, including
    cardinality. Restore those exact physical keys into a separate test bucket,
    preserve database object versions, and prove a Storage API download against
