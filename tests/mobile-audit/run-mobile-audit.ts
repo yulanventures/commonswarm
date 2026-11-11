@@ -133,10 +133,11 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     // A grouped row's author is a focus-reveal: focusing it must not put it back into the flow.
     { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"][data-stream-grouped]'], max: 1,
       focus: true, focusTarget: ".hm-author .dashboard__message-author" },
-    // A focused Show more survives a real feed rebuild: the control is created a frame after its row.
+    { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
+    // A focused Show more survives a real feed rebuild: the control is created a frame after its row. Last, because it
+    // posts a short-lived note; the page then waits for the note to expire before it closes (see runHovers).
     { name: "show-more", rows: FEED_ROWS, prefer: '[data-signal-id="{message.long}"]', require: ['[data-signal-id="{message.long}"]'], max: 1,
       focus: true, focusTarget: ".dashboard__message-toggle", focusAcrossRebuild: true },
-    { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
   ],
   "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
   "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
@@ -409,6 +410,7 @@ async function main(): Promise<void> {
       // The frozen diagnostic control writes its own images; the normal names never change.
       const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[], variant = "") => {
         const results: HoverResult[] = [];
+        let noteAt = 0;
         // Keep the app's own focus for the keyboard witnesses that start from it afterwards.
         await page.evaluate(() => document.activeElement?.setAttribute("data-audit-hover-restore", ""));
         for (const spec of specs) {
@@ -418,7 +420,7 @@ async function main(): Promise<void> {
             const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
-          } : undefined, spec.focusAcrossRebuild ? () => postExpiringNote(env, seed.ids) : undefined));
+          } : undefined, spec.focusAcrossRebuild ? async () => { await postExpiringNote(env, seed.ids); noteAt = Date.now(); } : undefined));
         }
         await page.mouse.move(1, 1);
         await page.evaluate(() => {
@@ -426,6 +428,9 @@ async function main(): Promise<void> {
           el?.removeAttribute("data-audit-hover-restore");
           if (el && el !== document.body) el.focus({ preventScroll: true });
         });
+        // A note this page posted expires 4 s after it was written; outlive it here, so no later page opens with it showing
+        // and then rebuilds when it expires mid-measurement.
+        if (noteAt) await delay(Math.max(0, noteAt + 5_500 - Date.now()));
         return results;
       };
 

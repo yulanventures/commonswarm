@@ -326,6 +326,21 @@ const NEUTRAL_POINT = (rows: string) => {
 };
 /** How many rows of the list the browser currently reports as hovered. */
 const HOVERED_ROWS = (rows: string) => Array.from(document.querySelectorAll(rows)).filter(row => row.matches(":hover")).length;
+/** Resolves once no row of the list has been added or removed for five consecutive frames, or after 3 s. */
+const QUIET_LIST = (rows: string) => new Promise<void>(done => {
+  const list = document.querySelector(rows)?.parentElement;
+  if (!list) { done(); return; }
+  let quiet = 0;
+  const observer = new MutationObserver(() => { quiet = 0; });
+  observer.observe(list, { childList: true });
+  const started = performance.now();
+  const tick = () => {
+    quiet += 1;
+    if (quiet >= 5 || performance.now() - started > 3_000) { observer.disconnect(); done(); return; }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+});
 /** After a rebuild: focus is on the target control inside the live row with this key. */
 const SAME_CONTROL = (arg: { key: string | null; target: string | null; rows: string }) => {
   const active = document.activeElement;
@@ -425,7 +440,9 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
       const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: 20_000 })
         .then(() => true, () => false);
       if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: "the feed did not rebuild the focused row within 20 s" }); return; }
-      await page.evaluate((_: null) => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => done())))), null);
+      // Read focus once the list has been quiet for five frames (up to 3 s): a later rebuild's own restore is a frame after
+      // that rebuild, so reading earlier would see its momentary <body>. A real loss stays on <body> after the quiet.
+      await page.evaluate(QUIET_LIST, spec.rows);
       const same = await page.evaluate(SAME_CONTROL, { key: entry.key, target: spec.focusTarget ?? null, rows: spec.rows });
       if (!same) { Object.assign(entry, { outcome: "error", reason: "focus did not return to the same control after the rebuild" }); return; }
     }
