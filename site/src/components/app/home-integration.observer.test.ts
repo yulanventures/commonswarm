@@ -556,7 +556,7 @@ test('a signal page settling after a same-workspace view change retains data wit
       let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
       let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
       const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
-      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='';
+      const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='', deliveryReceiptRefreshAgain=false;
       const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
       const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
       // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.

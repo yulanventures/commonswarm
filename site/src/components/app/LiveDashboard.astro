@@ -1983,6 +1983,7 @@ import "../../styles/kylon-command-palette.css";
     const attachmentPreviewUrls = new ChatImagePreviewCache();
     const deliveryReceiptCache = new Map<string, BrowserDeliveryReceiptCacheEntry>();
     let deliveryReceiptRefreshOwner = "";
+    let deliveryReceiptRefreshAgain = false;
     /* Message status: only the signed-in person's latest message to each agent, from
        message_status. Agent status events (working or idle, no message or label) trigger a
        re-read and the agent panel's bare "Working". */
@@ -8551,7 +8552,9 @@ import "../../styles/kylon-command-palette.css";
       const viewerId = session?.user.id ?? "";
       if (sampleMode || !viewerId) return;
       const owner = `${workspaceId}:${version}`;
-      if (deliveryReceiptRefreshOwner === owner) return;
+      // A refresh asked for while a read is in flight (a seen acknowledgement's, for one) runs once that read ends; with
+      // push connected nothing else may ask again until the next reconcile, 30 s later.
+      if (deliveryReceiptRefreshOwner === owner) { deliveryReceiptRefreshAgain = true; return; }
       const now = Date.now();
       const candidates = browserDeliveryReceiptCandidates(
         signals,
@@ -8563,7 +8566,6 @@ import "../../styles/kylon-command-palette.css";
       if (candidates.length === 0) return;
       deliveryReceiptRefreshOwner = owner;
       const startedEpoch = seenAckEpoch;
-      let rereadOwed = false;
       try {
         const reads = await Promise.all(candidates.map(async (signal) => {
           try {
@@ -8589,7 +8591,7 @@ import "../../styles/kylon-command-palette.css";
           if (ackedAt !== undefined && ackedAt > startedEpoch) {
             // Acknowledged while this read was in flight: keep the re-read the acknowledgement asked for.
             deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt: 0 });
-            rereadOwed = true;
+            deliveryReceiptRefreshAgain = true;
           } else {
             deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
             if (read.result !== null) seenAwaitingRead.delete(read.signalId);
@@ -8604,9 +8606,9 @@ import "../../styles/kylon-command-palette.css";
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
         syncReceiptMarkers();
       }
-      // The acknowledgement's own refresh was dropped while this read held the slot; run it now.
-      if (rereadOwed && version === requestVersion && workspaceId === activeWorkspaceId) {
-        void refreshDeliveryReceipts(workspaceId, version);
+      if (deliveryReceiptRefreshAgain) {
+        deliveryReceiptRefreshAgain = false;
+        if (version === requestVersion && workspaceId === activeWorkspaceId) void refreshDeliveryReceipts(workspaceId, version);
       }
     };
 

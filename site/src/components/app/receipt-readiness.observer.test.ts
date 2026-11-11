@@ -22,14 +22,22 @@ function installReceiptFixture() {
   const agent = "22222222-2222-4222-8222-222222222222";
   const workspace = "11111111-1111-4111-8111-111111111111";
   const signal = "99999999-9999-4999-8999-999999999999";
+  const later = "88888888-8888-4888-8888-888888888888";
+  const scenario = new URL(location.href).searchParams.get("case") || "pre-ack";
   const recent = new Date(Date.now() - 60000).toISOString();
   const before = new Date(Date.now() - 86400000).toISOString();
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, seen: false, ackedAt: 0, clock: 0,
-    reads: [] as Array<{ at: number; seen: boolean; release: () => void; released: boolean }>,
-    unreadAfterAck: 0, unexpected: [] as string[] };
+  const f = w.receiptFixture = { owner, workspace, signal, later, scenario, seen: false, ackedAt: 0, clock: 0, withLater: false,
+    reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
+    log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
+  // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
+  // dropped-refresh: the held read is for the owner's note to an agent (never reported seen); a note to the viewer arrives
+  // and is acknowledged while that read holds the slot, so the refresh it asks for is dropped and must run after.
+  const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
+    to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
+    thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
   // The reporter only reports while the document has focus; a headless page may not hold it.
   Object.defineProperty(document, "hasFocus", { value: () => true });
   const network = window.fetch.bind(window);
@@ -40,13 +48,17 @@ function installReceiptFixture() {
     if (url.origin !== "https://api.test.invalid") { f.unexpected.push(url.href); return Response.json({}, { status: 404 }); }
     if (url.pathname === "/auth/v1/user") return Response.json(user);
     if (url.pathname === "/rest/v1/rpc/signal_delivery_receipts") {
-      const read = { at: ++f.clock, seen: f.seen, release: () => {}, released: false };
+      const id = String(body?.p_signal_id ?? "");
+      const read = { at: ++f.clock, id, seen: f.seen, release: () => {}, released: false };
+      f.log.push("read:" + id.slice(0, 2));
       await new Promise<void>(resolve => { read.release = () => { read.released = true; resolve(); }; f.reads.push(read); });
+      if (scenario === "dropped-refresh" && id === signal) return Response.json(null);
       return Response.json({ addressed: true, receipts: [{ recipient_user_id: owner, display_name: "Synthetic owner",
         seen_at: read.seen ? new Date().toISOString() : null }] });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "signals_seen") {
-      if (body.command.signal_ids?.includes(signal)) { f.seen = true; f.ackedAt = ++f.clock; }
+      const target = scenario === "dropped-refresh" ? later : signal;
+      if (body.command.signal_ids?.includes(target)) { f.seen = true; f.ackedAt = ++f.clock; f.log.push("ack"); }
       return Response.json({ status: "accepted" });
     }
     if (url.pathname === "/rest/v1/rpc/channel_unread") {
@@ -63,9 +75,13 @@ function installReceiptFixture() {
     if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent, name: "Synthetic assistant", model: null,
       transport: "local", turn_only: false, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: before }]);
     // A note directed to this viewer: the audience whose receipt is one human row that goes Sent to Seen.
-    if (url.pathname === "/rest/v1/signals") return Response.json([{ id: signal, from: agent, from_kind: "agent", to: owner, to_agent: null,
-      kind: "note", body: "A note for you.", about: null, until: null, created_at: recent, attachments: [], channel_id: null,
-      thread_root_id: null, broadcast_to_channel: false, in_reply_to: null }]);
+    if (url.pathname === "/rest/v1/signals") {
+      f.log.push("signals");
+      if (scenario === "pre-ack") return Response.json([row(signal, owner, null, agent, "agent", "A note for you.")]);
+      const rows = [row(signal, null, agent, owner, "human", "A note for the assistant.")];
+      if (f.withLater) rows.unshift({ ...row(later, owner, null, agent, "agent", "A note for you."), created_at: new Date().toISOString() });
+      return Response.json(rows);
+    }
     if (url.pathname.startsWith("/rest/v1/")) return Response.json([]);
     if (url.pathname === "/functions/v1/read") return Response.json(body?.resource === "pending_access" ? { pending: [], agents: [] } : { grants: [] });
     if (url.pathname === "/functions/v1/command") return Response.json({ status: "refused", reason: "content_consent_required" });
@@ -90,6 +106,32 @@ async function observeReceiptReadiness() {
   };
   const check = (value: unknown, message: string) => { if (!value) throw new Error(message + "; receipt " + state() + "; steps " + steps.join(" | ")); };
   try {
+    if (f.scenario === "dropped-refresh") {
+      const laterReceipt = () => document.querySelector<HTMLElement>(`[data-signal-id="${f.later}"] .dashboard__message-receipt`);
+      // 1. The owner's note to the assistant renders and its receipt read is held: it holds the read slot.
+      await wait(() => receipt(), "agent-addressed row rendered");
+      await wait(() => f.reads.length >= 1, "its read in flight");
+      check(f.reads.every((r: any) => r.id === f.signal), "only the held row is being read");
+      // 2. A note to the viewer arrives by the feed's own poll, is reported seen and acknowledged while that read holds the slot.
+      f.withLater = true;
+      await wait(() => laterReceipt(), "note to the viewer rendered");
+      await wait(() => f.ackedAt > 0 && f.unreadAfterAck > 0, "its seen acknowledged and handled");
+      for (let i = 0; i < 10; i++) await tick();
+      check(!f.reads.some((r: any) => r.id === f.later), "no read of the new note while the slot is held");
+      check(laterReceipt()?.dataset.receiptLoaded === "false", "the new note is not loaded before any read");
+      // 3. Releasing the held read runs the refreshes asked for meanwhile: the new note is read before the next feed poll.
+      const releasedAt = f.log.length;
+      f.reads[0].release();
+      await wait(() => f.reads.some((r: any) => r.id === f.later), "the new note's read in flight");
+      const after = f.log.slice(releasedAt);
+      check(after.indexOf("read:" + f.later.slice(0, 2)) !== -1 && (after.indexOf("signals") === -1 || after.indexOf("read:" + f.later.slice(0, 2)) < after.indexOf("signals")),
+        "the refresh dropped while the read held the slot waited for the next feed poll: " + after.join(" "));
+      check(laterReceipt()?.dataset.receiptLoaded === "false", "loaded before its read completed");
+      f.reads.find((r: any) => r.id === f.later).release();
+      await wait(() => laterReceipt()?.dataset.receiptState === "seen" && laterReceipt()?.dataset.receiptLoaded === "true", "new note Seen and loaded");
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     // 1. The row renders, its first receipt read is held (no data yet), and the row is reported seen and acknowledged.
     await wait(() => receipt(), "row rendered");
     await wait(() => f.reads.length >= 1, "first read in flight");
@@ -110,15 +152,15 @@ async function observeReceiptReadiness() {
     check(receipt()?.dataset.receiptLoaded === "false", "loaded before the post-ack read completed");
     fresh.release();
     await wait(() => receipt()?.dataset.receiptState === "seen" && receipt()?.dataset.receiptLoaded === "true", "post-ack Seen loaded");
-    document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, steps, unexpected: f.unexpected });
+    document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
   } catch (error) {
-    document.documentElement.dataset.receiptObservation = JSON.stringify({ error: String(error), steps, unexpected: f.unexpected });
+    document.documentElement.dataset.receiptObservation = JSON.stringify({ error: String(error), scenario: f.scenario, steps, unexpected: f.unexpected });
   } finally {
     for (const read of f.reads) if (!read.released) read.release();
   }
 }
 
-test("a receipt read begun before this viewer's seen acknowledgement never marks the row loaded", { timeout: 180_000 }, async () => {
+test("a read begun before the seen acknowledgement never marks the row loaded, and a refresh dropped during a read runs after it", { timeout: 180_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
@@ -163,13 +205,17 @@ test("a receipt read begun before this viewer's seen acknowledgement never marks
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
     const address = server.address(); assert.ok(address && typeof address === "object");
-    const { stdout } = await launchChrome(await findChrome(), ["--window-size=1280,900", "--virtual-time-budget=120000", "--dump-dom",
-      "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111"], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
-    const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
-    assert.ok(raw, "the rendered app must finish the observation: " + stdout.slice(0, 1000));
-    const result = JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"));
-    assert.equal(result.error, undefined, JSON.stringify(result));
-    assert.equal(result.ok, true, JSON.stringify(result));
+    const chrome = await findChrome();
+    for (const scenario of ["pre-ack", "dropped-refresh"]) {
+      const { stdout } = await launchChrome(chrome, ["--window-size=1280,900", "--virtual-time-budget=120000", "--dump-dom",
+        "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+      const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
+      assert.ok(raw, scenario + ": the rendered app must finish the observation: " + stdout.slice(0, 1000));
+      const result = JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"));
+      assert.equal(result.error, undefined, JSON.stringify(result));
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.scenario, scenario);
+    }
   } finally {
     if (server.listening) { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   }
