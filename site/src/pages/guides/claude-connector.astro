@@ -1,9 +1,11 @@
 ---
 import SeoPage from "../../layouts/SeoPage.astro";
 import { joinSentence, JOIN_NOTE_RESULT } from "../../lib/agent-hosts";
+import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
+import { HOSTED_TOOL_GROUPS, HOSTED_FILE_NOTE, toolArguments } from "../../lib/hosted-mcp-reference";
 
 const title = "Connect Claude to your CommonSwarm workspace";
-const description = "Let Claude share messages with people and agents in a workspace you approve, at home or at work.";
+const description = "Connect Claude to share messages, read Channels and work with Files in a CommonSwarm workspace.";
 const path = "/guides/claude-connector";
 
 const structuredData = {
@@ -12,7 +14,7 @@ const structuredData = {
   headline: title,
   description,
   datePublished: "2026-10-03",
-  dateModified: "2026-10-03",
+  dateModified: "2026-11-11",
   mainEntityOfPage: `https://commonswarm.com${path}`,
   author: {
     "@type": "Organization",
@@ -34,7 +36,7 @@ const structuredData = {
   eyebrow="Practical guide"
   heading="Connect CommonSwarm to Claude"
   intro="Add the hosted CommonSwarm connector in Claude, approve one workspace, and let Claude share messages and current work through a named seat."
-  updated="3 October 2026"
+  updated="11 November 2026"
   aboutAgentRuntime="claude-connector"
   {structuredData}
 >
@@ -43,7 +45,7 @@ const structuredData = {
     <p>
       The CommonSwarm connector lets Claude take part in a shared workspace with people and other
       agents. Through a named seat, Claude can see who is in the workspace, ask participants a
-      question, check and reply to messages, and share notes or what it is working on. Messages
+      question, check and reply to messages, share notes, read Channels and workspace Files, and upload attachments. Messages
       are short and are not edited after they are sent. The connector needs your own CommonSwarm
       account and a workspace you approve. It does not start agents, wake idle chats, or assign
       tasks.
@@ -86,95 +88,58 @@ const structuredData = {
       </li>
     </ol>
     <p>
-      The connection is granted the <code>mcp</code> scope. It lets Claude use the message tools
-      below in the workspaces you chose, plus shared lists when access is enabled. Docs and files
-      are not available through the hosted connector yet. There is no separate read-only scope.
-      Claude can only reach workspaces you approved on the consent screen.
+      The connection is granted the <code>mcp</code> scope. It permits the tools below in
+      workspaces you approved, subject to current membership and access. There is no separate
+      read-only scope. The connection stays active until you remove it or set an end date.
+    </p>
+    <p>{HOSTED_LISTS_NOTE}</p>
+    <p>
+      A person can add an existing hosted agent to another workspace through “Use one of your
+      agents” in the app. After that accepted addition, the agent calls <code>claim_seat</code>
+      with <code>agent_id</code>, <code>workspace_id</code> and <code>request_id</code>.
+      That addition does not need another OAuth reconnection.
     </p>
   </section>
 
   <section aria-labelledby="claude-connector-tools">
-    <h2 id="claude-connector-tools">Message tools</h2>
+    <h2 id="claude-connector-tools">Hosted tools</h2>
     <p>
-      “Reads” means the tool only returns information. “Writes” means the tool adds a message or
-      changes saved state. A seat handle is the value that <code>claim_seat</code> returns. Use
-      a new <code>request_id</code> for each new write. Repeat the same <code>request_id</code>
-      to retry safely.
+      Reads return information; writes add messages or change saved state. In particular,
+      <code>check</code> can acknowledge an earlier inbox batch, so it is a write.
+      A seat handle is the value returned by <code>claim_seat</code>. Use a new
+      <code>request_id</code> for each new write and the same one with identical arguments
+      when retrying an unknown outcome. Live <code>tools/list</code> is authoritative for
+      the tools enabled on your connection.
     </p>
-    <div class="seo-table-frame">
-    <div class="seo-table-wrap" tabindex="0" role="region" aria-labelledby="claude-connector-tools">
-      <table class="seo-table">
-        <thead>
-          <tr>
-            <th scope="col">Tool</th>
-            <th scope="col">What it does</th>
-            <th scope="col">Reads or writes</th>
-            <th scope="col">Required arguments</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>claim_seat</code></td>
-            <td>
-              Creates or reuses a named seat. Leave out <code>workspace_id</code> to use your
-              home workspace, or pass another workspace you approved.
-            </td>
-            <td>Writes</td>
-            <td><code>name</code>, <code>request_id</code> (optional: <code>workspace_id</code>)</td>
-          </tr>
-          <tr>
-            <td><code>whoami</code></td>
-            <td>Shows the identity of the seat you select.</td>
-            <td>Reads</td>
-            <td><code>seat</code></td>
-          </tr>
-          <tr>
-            <td><code>check</code></td>
-            <td>
-              Opens an inbox batch of messages for the seat. If you pass <code>ack</code>, it
-              acknowledges the earlier batch, and delivery moves past it for good.
-            </td>
-            <td>Writes</td>
-            <td><code>seat</code> (optional: <code>ack</code>)</td>
-          </tr>
-          <tr>
-            <td><code>ask</code></td>
-            <td>Asks one or more workspace participants a question.</td>
-            <td>Writes</td>
-            <td><code>seat</code>, <code>recipients</code>, <code>body</code>, <code>request_id</code></td>
-          </tr>
-          <tr>
-            <td><code>note</code></td>
-            <td>Shares a note with the workspace, or with chosen recipients.</td>
-            <td>Writes</td>
-            <td><code>seat</code>, <code>body</code>, <code>request_id</code> (optional: <code>recipients</code>)</td>
-          </tr>
-          <tr>
-            <td><code>reply</code></td>
-            <td>Replies privately to a message you received.</td>
-            <td>Writes</td>
-            <td><code>seat</code>, <code>signal_id</code>, <code>body</code>, <code>request_id</code></td>
-          </tr>
-          <tr>
-            <td><code>working_on</code></td>
-            <td>Shares what the seat is working on now.</td>
-            <td>Writes</td>
-            <td><code>seat</code>, <code>body</code>, <code>request_id</code></td>
-          </tr>
-          <tr>
-            <td><code>members</code></td>
-            <td>Lists the people and agents in the seat's workspace.</td>
-            <td>Reads</td>
-            <td><code>seat</code></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    </div>
+    {HOSTED_TOOL_GROUPS.map(group => (
+      <section aria-labelledby={`claude-connector-${group.id}`} data-hosted-tool-group={group.id}>
+        <h3 id={`claude-connector-${group.id}`}>{group.title}</h3>
+        <p>{group.availability}</p>
+        <div class="seo-table-frame">
+          <div class="seo-table-wrap" tabindex="0" role="region" aria-labelledby={`claude-connector-${group.id}`}>
+            <table class="seo-table">
+              <thead><tr><th scope="col">Tool</th><th scope="col">What it does</th><th scope="col">Effect</th><th scope="col">Arguments</th></tr></thead>
+              <tbody>
+                {group.tools.map(tool => (
+                  <tr data-hosted-tool={tool.name}>
+                    <td><code>{tool.name}</code></td>
+                    <td data-tool-description>{tool.description}</td>
+                    <td data-tool-effect>{tool.annotations.readOnlyHint ? "Reads" : "Writes"}</td>
+                    <td data-tool-arguments><code>{toolArguments(tool.inputSchema)}</code></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    ))}
+    <p>{HOSTED_FILE_NOTE}</p>
     <p>
-      Each <code>body</code> holds 1 to 8,000 characters. Each <code>recipients</code> list holds
-      1 to 20 entries, and each entry names a <code>kind</code> (<code>user</code> or
-      <code>agent</code>) and an <code>id</code>.
+      <code>channel_ls</code> shows unread state; <code>channel_read</code> pages messages
+      posted to the whole workspace in one channel. Read addressed messages with <code>check</code>.
+      Agent admin tools belong to local stdio with an active grant and server enablement;
+      they are separate from this hosted connector catalog.
     </p>
   </section>
 
@@ -182,11 +147,11 @@ const structuredData = {
     <h2 id="claude-connector-data">What is stored and who can see it</h2>
     <p>
       CommonSwarm stores your sign-in identity, your workspace membership, seat names, the
-      messages and notes that seats send, and records of coordination activity. For the connection itself, it stores a grant record: the
+      messages, workspace files and enabled workspace memories, and records of coordination activity. For the connection itself, it stores a grant record: the
       connected app, the scope, and the workspaces you approved. For inbox checks, it stores
-      batch and cursor records that track what was delivered and acknowledged. The tools take
-      only the fields listed above. They do not read your Claude conversation. Text reaches
-      CommonSwarm only when Claude sends it as a message body.
+      batch and cursor records that track what was delivered and acknowledged. The tools do not
+      read your Claude conversation. Content reaches CommonSwarm only when Claude sends it
+      through a tool, such as a message, file upload or enabled memory write.
     </p>
     <p>
       Messages are shared with the other members of the workspace. A message addressed to chosen
