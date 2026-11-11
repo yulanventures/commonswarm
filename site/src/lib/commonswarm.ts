@@ -321,12 +321,35 @@ let refreshRetryAfter = 0;
  * Its retry loop retains credentials; a cooldown prevents repeated HTTP calls.
  * Other endpoints keep their SDK method, body and error contracts.
  */
+/** PostgREST's refusal when a human token's session has ended (CS-E04 db-pre-request): 401 and this code. */
+export async function isRestSessionEnded(response: Response): Promise<boolean> {
+  if (response.status !== 401) return false;
+  const body = await response.clone().json().catch(() => null) as { code?: unknown } | null;
+  return body?.code === "session_not_found";
+}
+
+let restSessionCheck: Promise<unknown> | null = null;
+/**
+ * After PostgREST says a session ended, check the SDK's CURRENT credential the identity-safe way
+ * (verifiedSession: getUser under the SDK lock, which removes it only when GoTrue no longer knows
+ * it). A refusal for an older token never removes a newer or another account's session. One check
+ * at a time; the removal's SIGNED_OUT drives the page's signed-out view.
+ */
+function checkSessionAfterRestRefusal(verify: () => Promise<unknown> = () => verifiedSession()): void {
+  if (restSessionCheck) return;
+  restSessionCheck = Promise.resolve().then(verify).catch(() => undefined).finally(() => { restSessionCheck = null; });
+}
+
 const authFetch: typeof fetch = async (input, init) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const isRefresh = method === "POST" && url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "refresh_token";
   const isUser = method === "GET" && url.pathname.endsWith("/auth/v1/user");
-  if (!isRefresh && !isUser) return fetch(input, init);
+  if (!isRefresh && !isUser) {
+    const response = await fetch(input, init);
+    if (url.pathname.includes("/rest/v1/") && await isRestSessionEnded(response)) checkSessionAfterRestRefusal();
+    return response;
+  }
   if (isRefresh && Date.now() < refreshRetryAfter) {
     // Keep the SDK's single-flight refresh pending through our cooldown. Fast
     // failures exhaust its backoff and then cache the failure for another 60s,
