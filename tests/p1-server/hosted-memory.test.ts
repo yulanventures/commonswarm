@@ -225,3 +225,66 @@ test("hosted memory needs both switches; local memory alone isn't enough", async
   const [count] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.memories WHERE workspace_id = ${f.workspace}::uuid`;
   assert.equal(count!.n, 0, "nothing was saved while either switch was off");
 });
+
+/* Channels C1b for agents, on this file's hosted-seat harness: the read position stops at the last
+ * message the MCP tool returns after its own response fit, and channel_ls reports unread from it. */
+test("a hosted seat's channel_read moves its read position only through what the tool returns", async () => {
+  const f = await seedFixture();
+  const channelRead = (handle: string, input: Record<string, unknown>): Step =>
+    ({ op: "read", handle, tool: "channel_read", input: { resource: "channel_messages", limit: 50, after_id: null, ...input } });
+  const channelLs = (handle: string): Step => ({ op: "read", handle, tool: "channel_ls", input: { resource: "channels" } });
+  const unreadOf = (result: Result | undefined, slug: string) =>
+    (result!.body.channels as Array<{ slug: string; unread: boolean | null }>).find((row) => row.slug === slug)?.unread;
+
+  // The MCP tool always passes its response budget; only such reads move the position.
+  const [never, baseline] = run(f, [channelLs(f.handleA), channelRead(f.handleA, { channel: "general", fit_bytes: 64 * 1024 })]);
+  assert.equal(never!.status, 200, JSON.stringify(never));
+  assert.equal(unreadOf(never, "general"), null, "no read position before the first channel_read");
+  assert.equal(baseline!.status, 200, JSON.stringify(baseline));
+
+  const channelId = randomUUID();
+  await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
+    VALUES (${channelId}::uuid, ${f.workspace}::uuid, 'ops', ${f.owner}::uuid, 'user', statement_timestamp())`;
+  const posted = [randomUUID(), randomUUID()];
+  for (const [i, id] of posted.entries()) {
+    await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
+      VALUES (${id}::uuid, ${f.workspace}::uuid, ${f.owner}::uuid, 'user', 'note', ${`ops ${i} ${"x".repeat(3000)}`},
+        statement_timestamp() + interval '1 day', statement_timestamp() + ${`${i} milliseconds`}::interval, ${channelId}::uuid)`;
+  }
+
+  const [before, fitted, between, rest, after, otherSeat] = run(f, [
+    channelLs(f.handleA),
+    channelRead(f.handleA, { channel: "ops", fit_bytes: 8192 }),
+    channelLs(f.handleA),
+    channelRead(f.handleA, { channel: "ops", after_id: posted[0], fit_bytes: 64 * 1024 }),
+    channelLs(f.handleA),
+    channelLs(f.handleB),
+  ]);
+  assert.equal(unreadOf(before, "ops"), true);
+  assert.equal(fitted!.status, 200, JSON.stringify(fitted));
+  assert.deepEqual((fitted!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [posted[0]],
+    "the fit keeps whole messages within the tool's budget");
+  assert.deepEqual(fitted!.body.next, { after_id: posted[0] });
+  assert.equal(unreadOf(between, "ops"), true, "the message the fit left out is still unread");
+  assert.deepEqual((rest!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [posted[1]]);
+  assert.equal(unreadOf(after, "ops"), false);
+  assert.equal(unreadOf(otherSeat, "ops"), null, "each seat's agent has its own position");
+
+  // One message over the tool's budget: the fit keeps it, the protocol would refuse the response, so
+  // the position stays put. A read without fit_bytes never moves it either.
+  const oversized = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
+    VALUES (${oversized}::uuid, ${f.workspace}::uuid, ${f.owner}::uuid, 'user', 'note', ${`big ${"z".repeat(5000)}`},
+      statement_timestamp() + interval '1 day', statement_timestamp(), ${channelId}::uuid)`;
+  const [tooBig, unfitted, still] = run(f, [
+    channelRead(f.handleA, { channel: "ops", after_id: posted[1], fit_bytes: 4096 }),
+    channelRead(f.handleA, { channel: "ops", after_id: posted[1] }),
+    channelLs(f.handleA),
+  ]);
+  assert.deepEqual((tooBig!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [oversized]);
+  assert.deepEqual((unfitted!.body.messages as Array<{ signal_id: string }>).map((m) => m.signal_id), [oversized]);
+  assert.equal(unreadOf(still, "ops"), true, "neither read moved the position");
+  const [position] = await sql<{ read_through_id: string }[]>`SELECT read_through_id FROM swarm.agent_channel_reads
+    WHERE principal_id = ${f.principalA}::uuid AND channel_id = ${channelId}::uuid`;
+  assert.equal(position?.read_through_id, posted[1]);
+});

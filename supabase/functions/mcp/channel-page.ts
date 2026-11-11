@@ -22,6 +22,11 @@ export function channelPageWireBytes(value: unknown): number {
     result: { content: [{ type: "text", text: JSON.stringify(value) }] } })).byteLength;
 }
 
+/** Whether a fitted page is within the budget, so the response carrying it can be delivered. */
+export function channelPageDeliverable(page: ChannelPageShape, maxResponseBytes: number): boolean {
+  return channelPageWireBytes(page) <= maxResponseBytes - CHANNEL_READ_MARGIN_BYTES;
+}
+
 export function fitChannelPage(page: ChannelPageShape, maxResponseBytes: number): ChannelPageShape {
   const budget = maxResponseBytes - CHANNEL_READ_MARGIN_BYTES;
   let kept = page.messages.length;

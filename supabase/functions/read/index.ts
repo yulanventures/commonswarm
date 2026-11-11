@@ -27,6 +27,7 @@ import {
   unknownChannelMessage,
 } from "../_shared/channels.ts";
 import { optionalWake } from "../_shared/wake.ts";
+import { channelPageDeliverable, fitChannelPage } from "../mcp/channel-page.ts";
 import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
@@ -181,9 +182,16 @@ interface ChannelMessagesReadRequest {
   channel: string;
   after_id: string | null;
   limit: number;
+  /**
+   * The caller's byte budget for the messages, when it delivers every message of the page it gets.
+   * Only a read that declares it moves the agent's read position: a caller that sends none (every
+   * client before this field) may trim the page after it returns, so its reads never do.
+   */
+  max_bytes: number | null;
 }
 
-const CHANNEL_MESSAGES_KEYS = ["resource", "workspace_id", "channel", "after_id", "limit"];
+const CHANNEL_MESSAGES_KEYS = ["resource", "workspace_id", "channel", "after_id", "limit", "max_bytes"];
+const CHANNEL_PAGE_MIN_BYTES = 1024;
 
 function parseChannelMessages(body: Record<string, unknown>): ChannelMessagesReadRequest | null {
   if (body.resource !== "channel_messages" || Object.keys(body).some(key => !CHANNEL_MESSAGES_KEYS.includes(key)) ||
@@ -194,8 +202,11 @@ function parseChannelMessages(body: Record<string, unknown>): ChannelMessagesRea
   if (afterId !== null && (typeof afterId !== "string" || !UUID_RE.test(afterId))) return null;
   const limit = body.limit ?? 50;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 50) return null;
+  const maxBytes = body.max_bytes ?? null;
+  if (maxBytes !== null && (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) ||
+      maxBytes < CHANNEL_PAGE_MIN_BYTES || maxBytes > CHANNEL_PAGE_MAX_BYTES)) return null;
   return { resource: "channel_messages", workspace_id: body.workspace_id.toLowerCase(), channel,
-    after_id: afterId === null ? null : (afterId as string).toLowerCase(), limit };
+    after_id: afterId === null ? null : (afterId as string).toLowerCase(), limit, max_bytes: maxBytes };
 }
 
 /** The definer returns only messages every member can already read; see 20261105000002. */
@@ -212,7 +223,30 @@ async function channelMessages(tx: Sql, workspaceId: string, input: ChannelMessa
   if (page.error === "channel_not_found") {
     return { status: 404, body: { error: "channel_not_found", message: "There is no channel with that name in this workspace." } };
   }
-  return { status: 200, body: boundChannelPage(page) };
+  return { status: 200, body: boundChannelPage(page, input.max_bytes ?? CHANNEL_PAGE_MAX_BYTES) };
+}
+
+/**
+ * Channels C1b for agents: a channel_read page the caller will deliver whole moves the calling agent's
+ * read position there to the last message it returns, so the position never passes a message the
+ * caller wasn't given. An empty page only records the read. Callers decide deliverability first; the
+ * definer re-admits the caller from the installed claims and moves only forward.
+ */
+async function advanceChannelRead(tx: Sql, workspaceId: string, channel: string, messages: unknown): Promise<void> {
+  const last = Array.isArray(messages) && messages.length > 0
+    ? (messages[messages.length - 1] as Record<string, unknown>).signal_id
+    : null;
+  await tx`SELECT swarm.agent_channel_read_advance(${workspaceId}::uuid, ${channel},
+    ${typeof last === "string" ? last : null}::uuid)`;
+}
+
+/** Each channel's unread for the calling agent (null when it has no read position yet), by lowercase slug. */
+async function agentChannelUnread(tx: Sql, workspaceId: string): Promise<Map<string, boolean | null>> {
+  const [row] = await tx<{ unread: Array<{ slug: string; unread: boolean | null }> | null }[]>`
+    SELECT swarm_read.agent_channel_unread(${workspaceId}::uuid) AS unread
+  `;
+  if (!Array.isArray(row?.unread)) throw new Error("channel unread unavailable for an authorized caller");
+  return new Map(row.unread.map((entry) => [entry.slug.toLowerCase(), entry.unread]));
 }
 
 /**
@@ -285,15 +319,18 @@ async function memoryRead(
   return { status: 200, body: row.result };
 }
 
-/** Rows are capped at 50 in SQL; bytes are capped here, keeping whole messages and a cursor to the rest. */
+/**
+ * Rows are capped at 50 in SQL; bytes are capped here, keeping whole messages and a cursor to the rest.
+ * A caller that delivers pages whole passes its own budget as max_bytes (see ChannelMessagesReadRequest).
+ */
 const CHANNEL_PAGE_MAX_BYTES = 64 * 1024;
-function boundChannelPage(page: Record<string, unknown>): Record<string, unknown> {
+function boundChannelPage(page: Record<string, unknown>, maxBytes: number): Record<string, unknown> {
   const messages = Array.isArray(page.messages) ? page.messages as Array<Record<string, unknown>> : [];
   const encoder = new TextEncoder();
   let bytes = 0, kept = 0;
   for (const message of messages) {
     const size = encoder.encode(JSON.stringify(message)).length;
-    if (kept > 0 && bytes + size > CHANNEL_PAGE_MAX_BYTES) break;
+    if (kept > 0 && bytes + size > maxBytes) break;
     bytes += size; kept += 1;
   }
   if (kept === messages.length) return page;
@@ -981,7 +1018,11 @@ async function handle(
          ORDER BY lower(slug) ASC`,
         [body.workspace_id],
       );
-      return json(200, { channels });
+      const unread = await agentChannelUnread(tx, body.workspace_id);
+      return json(200, {
+        channels: channels.map((row) => ({ ...row, unread: unread.get(String(row.slug).toLowerCase()) ?? null })),
+        general_unread: unread.get("general") ?? null,
+      });
     }
     if (body.resource === "renewal_grants") {
       const grants = await tx<Record<string, unknown>[]>`
@@ -1099,6 +1140,9 @@ async function handle(
     }
     if (body.resource === "channel_messages") {
       const page = await channelMessages(tx, agent.principal_workspace_id, body);
+      if (page.status === 200 && body.max_bytes !== null) {
+        await advanceChannelRead(tx, agent.principal_workspace_id, body.channel, page.body.messages);
+      }
       return json(page.status, page.body);
     }
     if (isMemoryRead(body)) {
@@ -1304,7 +1348,7 @@ export type HostedReadInput =
   | { resource: "members"; workspace_id: string }
   | { resource: "roster"; workspace_id: string }
   | { resource: "channels"; workspace_id: string }
-  | ChannelMessagesReadRequest
+  | (Omit<ChannelMessagesReadRequest, "max_bytes"> & { fit_bytes?: number })
   | MemorySearchReadRequest
   | MemoryGetReadRequest
   | {
@@ -1350,6 +1394,9 @@ export interface ReadResult {
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
   if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
+  if (input.resource === "channel_messages" && input.fit_bytes !== undefined) {
+    return Number.isSafeInteger(input.fit_bytes) && input.fit_bytes >= CHANNEL_PAGE_MIN_BYTES;
+  }
   if (input.resource === "files") {
     const offset = input.offset ?? 0;
     const limit = input.limit ?? HOSTED_FILE_PAGE_LIMIT;
@@ -1460,11 +1507,25 @@ export async function handleHostedRead(
         WHERE workspace_id = ${seat.workspace_id}::uuid AND archived_at IS NULL
         ORDER BY lower(slug) LIMIT 200
       `;
-      return { status: 200, body: { channels: [{ slug: "general", purpose: null, archived_at: null }, ...channels], context } };
+      const unread = await agentChannelUnread(tx, seat.workspace_id);
+      return { status: 200, body: { channels: [{ slug: "general", purpose: null, archived_at: null }, ...channels]
+        .map((row) => ({ ...row, unread: unread.get(String(row.slug).toLowerCase()) ?? null })), context } };
     }
     if (input.resource === "channel_messages") {
-      const page = await channelMessages(tx, seat.workspace_id, input);
-      return { status: page.status, body: page.status === 200 ? { ...page.body, context } : page.body };
+      const page = await channelMessages(tx, seat.workspace_id, { ...input, max_bytes: null });
+      if (page.status !== 200) return page;
+      if (input.fit_bytes === undefined) return { status: 200, body: { ...page.body, context } };
+      // The MCP tool's own fit, applied here first so the read position stops at what the tool returns.
+      const fitted = fitChannelPage({
+        context, workspace_id: page.body.workspace_id, channel: page.body.channel, archived: page.body.archived,
+        messages: Array.isArray(page.body.messages) ? page.body.messages as Array<Record<string, unknown>> : [],
+        next: page.body.next ?? null }, input.fit_bytes);
+      // The fit keeps one message even when it alone is over budget, and the protocol then refuses the
+      // whole response. Decide that here, before the position moves.
+      if (channelPageDeliverable(fitted, input.fit_bytes)) {
+        await advanceChannelRead(tx, seat.workspace_id, input.channel, fitted.messages);
+      }
+      return { status: 200, body: { ...page.body, ...fitted } };
     }
     if (isMemoryRead(input)) {
       // The canonical form the agent route reads (trimmed query, lowercase id); validated above.
