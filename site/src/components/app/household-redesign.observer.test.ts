@@ -808,6 +808,7 @@ test("openWorkspace settles each read independently so sibling failures keep loa
       settledUnknownAgents: new Set(),
       stopPendingPoll: () => {},
       disposeCleanup: () => {},
+      disposeSeatAdminDialog: () => {},
       resetHomeWorkspace: () => {},
       homeWorkClaims: [],
       homePeopleReadState: "pending",

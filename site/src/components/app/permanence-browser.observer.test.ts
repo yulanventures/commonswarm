@@ -82,6 +82,7 @@ function installConnectionFixture() {
       if (url.pathname === "/functions/v1/read") {
         if (body.resource === "renewal_grants") { await policyRead("renewal"); return Response.json({ grants: home && !["home-mismatch", "home-matched-ended"].includes(scenario) ? [] : [f.grant] }); }
         if (body.resource === "pending_access") return Response.json({ pending: [], agents: [] });
+        if (body.resource === "seat_admin_status") return Response.json({ enabled: false });
       }
       if (url.pathname === "/functions/v1/command") {
         const c = body.command;
