@@ -5271,13 +5271,12 @@ import "../../styles/kylon-command-palette.css";
         } };
       layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
         buildWorkspaceNav(document, vm, callbacks, "tablet")]));
-      /* The doors open the People & agents PAGE. A page is not a popup, so the door carries no
-         aria-controls/aria-expanded; on the page itself it is the current page. */
+      /* Every existing People door opens the same native modal. */
       for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
         if (button.tagName !== "BUTTON") continue;
         button.dataset.rosterOpen = "";
-        if (homeRoute.view === "people") button.setAttribute("aria-current", "page");
-        else button.removeAttribute("aria-current");
+        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
+        button.removeAttribute("aria-current");
       }
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
