@@ -47,12 +47,16 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
   const close = (): void => finish(false);
   const onOutside = (pointer: Event): void => { if (!menu.contains(pointer.target as Node)) finish(false); };
   const onDismiss = (): void => finish(false);
-  // Close on a scroll only when the anchor itself moved: the page, or a pane that contains it. Another pane
-  // scrolling (a feed updating behind the menu) or the menu's own list leaves it open where it belongs.
+  // Close on a scroll only when the anchor itself moved: the page, or a pane that contains it, scrolled AND the
+  // anchor is no longer where the menu was placed. Another pane scrolling (a feed updating behind the menu), the
+  // menu's own list, or a scroll event that arrives a frame late for a scroll made before opening (bringing the
+  // row into view on a short screen) leaves it open where it belongs.
   const onScroll = (scroll: Event): void => {
     const target = scroll.target;
-    if (target === doc || target === doc.documentElement || target === doc.body ||
-      (target instanceof Node && target !== menu && target.contains(anchor))) finish(false);
+    if (!(target === doc || target === doc.documentElement || target === doc.body ||
+      (target instanceof Node && target !== menu && target.contains(anchor)))) return;
+    const now = anchor.getBoundingClientRect();
+    if (Math.abs(now.top - rect.top) > 1 || Math.abs(now.left - rect.left) > 1) finish(false);
   };
   let lastWasSeparator = true;
   for (const entry of entries) {
