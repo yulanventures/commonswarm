@@ -10,6 +10,8 @@
  *
  * Page functions are self-contained: they run in the page through evaluate().
  */
+import { FEED_RECONCILE_MS } from "../../site/src/lib/feed-push.js";
+
 export type HoverSpec = {
   name: string;
   /** Rows of one list; the first `max` visible ones are measured, `prefer` matches first. */
@@ -26,9 +28,14 @@ export type HoverSpec = {
   /** In focus mode, wait for the app to rebuild the focused row (a real poll), then require the same control in the
    *  new row to hold focus. No rebuild within the wait is an error, so the case is never passed vacuously. */
   focusAcrossRebuild?: boolean;
+  /** Override FOCUS_REBUILD_TIMEOUT_MS in fast fixture matrix cases. */
+  rebuildTimeoutMs?: number;
 };
 
 export const HOVER_TOLERANCE_PX = 0.5;
+/** Fetch/render allowance beyond one full FEED_RECONCILE_MS cycle when a hint wake is missed. */
+export const FOCUS_REBUILD_ALLOWANCE_MS = 10_000;
+export const FOCUS_REBUILD_TIMEOUT_MS = FEED_RECONCILE_MS + FOCUS_REBUILD_ALLOWANCE_MS;
 
 export type HoverPage = {
   evaluate: <R, A>(fn: (arg: A) => R | Promise<R>, arg: A) => Promise<R>;
@@ -522,10 +529,11 @@ export async function runHoverWitness(page: HoverPage, spec: HoverSpec, shot?: (
     const early = await page.evaluate(PROBE, { index: row.index, rows: spec.rows, phase: "early", tolerance }) as ProbeError | ProbeCompared;
     if (mode === "focus" && spec.focusAcrossRebuild) {
       // New data the app's own polling picks up; the marked row node leaves the document when the app rebuilds the list.
+      const waitMs = spec.rebuildTimeoutMs ?? FOCUS_REBUILD_TIMEOUT_MS;
       if (refresh) await refresh();
-      const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: 20_000 })
+      const rebuilt = await page.waitForFunction((i: number) => !document.querySelector(`[data-audit-hover-row="${i}"]`), row.index, { timeout: waitMs })
         .then(() => true, () => false);
-      if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: "the feed did not rebuild the focused row within 20 s" }); return; }
+      if (!rebuilt) { Object.assign(entry, { outcome: "error", reason: `the feed did not rebuild the focused row within ${waitMs / 1_000} s` }); return; }
       // Read focus once the list has been quiet for five frames (up to 3 s): a later rebuild's own restore is a frame after
       // that rebuild, so reading earlier would see its momentary <body>. A real loss stays on <body> after the quiet.
       await page.evaluate(QUIET_LIST, spec.rows);
