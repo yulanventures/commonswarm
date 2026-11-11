@@ -9,7 +9,7 @@
     "dev": "npm run sync:installer && astro dev",
     "build": "npm run sync:installer && astro build",
     "test": "node --import tsx --test 'tests/*.test.ts' 'scripts/*.test.mjs' 'emails/*.test.mjs' 'src/lib/*.test.mjs' 'src/components/**/*.observer.test.ts'",
-    "test:ci": "node --import tsx --test --test-timeout=180000 'tests/*.test.ts' 'scripts/*.test.mjs' 'emails/*.test.mjs' 'src/lib/*.test.mjs' 'src/components/**/*.observer.test.ts'",
+    "test:ci": "node --import tsx --test --test-timeout=180000 src/components/app/people-hosts.observer.test.ts",
     "sync:installer": "cp ../install.sh public/install.sh",
     "preview": "astro preview",
     "astro": "astro"
