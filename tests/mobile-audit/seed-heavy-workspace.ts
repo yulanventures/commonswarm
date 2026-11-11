@@ -214,6 +214,25 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           )`;
         steps.push("seed_dm");
       } catch (error) { note("seed_dm", error); }
+      // Indentation evidence only: the newest #general messages carry a recipient, one to the viewer and one from the
+      // viewer to an agent, both long enough to wrap.
+      try {
+        const toViewer = randomUUID(), fromViewer = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${toViewer}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+            NULL, 'note', ${"Security advisory: the boiler controller firmware has an update that fixes the pressure sensor reading. Please install it this week, one unit at a time, and reply with each unit's version once it is done."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '25 seconds', ${channels.general}::uuid, NULL, false
+          ), (
+            ${fromViewer}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', ${"Please compare the three boiler service quotes, check which ones include the expansion vessel and the flue test, and post a short summary with the price difference before Friday so we can book the visit."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '20 seconds', ${channels.general}::uuid, NULL, false
+          )`;
+        Object.assign(ids, { "message.toViewer": toViewer, "message.fromViewer": fromViewer });
+        steps.push("seed_addressed");
+      } catch (error) { note("seed_addressed", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
