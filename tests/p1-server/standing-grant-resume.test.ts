@@ -395,9 +395,16 @@ test('R5 eligible callers get exact private refusal audits without target locks'
       await blocker`SELECT renewal_grant_id FROM swarm.renewal_grants
         WHERE renewal_grant_id=ANY(${[target.grant,foreign.suspendedGrant]}::uuid[]) FOR UPDATE`;
       pending=resume(row.jwt,row.grant,commandId,{actor_user:randomUUID()});
-      completed=await Promise.race([pending,delay(1500).then(()=>null)]);
-      const [{n}]=await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${Number(pid)}::int=ANY(pg_blocking_pids(pid))`;
-      assert.equal(n,0,'known refusal must not wait on an unauthorized target');
+      // The refusal must finish while the target rows stay locked, and never wait on them. Lock waits
+      // are observed directly (any backend blocked by this one), not inferred from a wall-clock race,
+      // so a slow runner can't fail it; the ceiling only bounds a hang.
+      const ceiling=Date.now()+20_000;
+      while (completed===null) {
+        completed=await Promise.race([pending,delay(100).then(()=>null)]);
+        const [{n}]=await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${Number(pid)}::int=ANY(pg_blocking_pids(pid))`;
+        assert.equal(n,0,'known refusal must not wait on an unauthorized target');
+        assert.ok(completed!==null || Date.now()<ceiling,'refusal did not finish within 20s while the target stayed locked');
+      }
     });
     const first=await pending!;
     assert.ok(completed,'refusal completed before target unlock');

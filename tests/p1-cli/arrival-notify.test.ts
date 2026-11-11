@@ -36,6 +36,18 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     ack_outcome: null,
   };
   const receiptBefore = structuredClone(receipt);
+  // SIGTERM goes out only after both lines are rendered AND the server has seen the best-effort
+  // attest (signals_seen) and the attended-seat canary (post_signal), never on a fixed delay that a
+  // loaded runner can beat.
+  let rendered = false;
+  let stopped = false;
+  let stop = (): void => {};
+  const commandKinds = () => requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
+  const maybeStop = () => {
+    if (stopped || !rendered || !commandKinds().includes("signals_seen") || !commandKinds().includes("post_signal")) return;
+    stopped = true;
+    stop();
+  };
 
   const server = createServer((req, res) => {
     let raw = "";
@@ -45,6 +57,7 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     req.on("end", () => {
       const body = raw.length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>;
       requests.push({ path: req.url ?? "", body });
+      res.once("finish", maybeStop);
       const command = body.command as Record<string, unknown> | undefined;
       if (req.url === "/functions/v1/command" && command?.kind === "claim_wake_lease") {
         res.writeHead(200, { "content-type": "application/json" }).end(
@@ -164,12 +177,14 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     child.stdin.end(credential);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    stop = () => child.kill("SIGTERM");
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
       if (stdout.trimEnd().split("\n").length >= 2) {
-        setTimeout(() => child.kill("SIGTERM"), 100);
+        rendered = true;
+        maybeStop();
       }
     });
     child.stderr.on("data", (chunk: string) => {
