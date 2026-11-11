@@ -83,6 +83,34 @@ jobs:
         if: matrix.suite == 'server-repeat'
         with:
           deno-version: v2.x
+      # Playwright's bundled chromium-headless-shell, written from this workflow (not the checked-out ref) so
+      # any tested commit gets it. GitHub's Ubuntu images already carry every shared library the shell
+      # needs, so `--with-deps` (apt, which reaches *.ubuntu.com, whose DNS failed on the runners on
+      # 2026-11-11) runs only if ldd reports a missing library.
+      - name: Write the Playwright shell installer
+        if: matrix.suite == 'site' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
+        run: |
+          cat > "$RUNNER_TEMP/install-playwright-shell.sh" <<'INSTALLER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          version=1.64.1
+          npx --yes "playwright@${version}" install chromium-headless-shell
+          browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+          # The same two Linux layouts site/tests/chrome.ts looks for.
+          shell="$(ls -d "$browsers"/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell \
+            "$browsers"/chromium_headless_shell-*/chrome-linux/headless_shell 2>/dev/null | head -n 1 || true)"
+          if [ -z "$shell" ]; then
+            echo "chromium-headless-shell was not found under $browsers after install" >&2
+            exit 1
+          fi
+          missing="$(ldd "$shell" | grep 'not found' || true)"
+          if [ -n "$missing" ]; then
+            echo "chromium-headless-shell is missing shared libraries; installing system dependencies:" >&2
+            echo "$missing" >&2
+            npx --yes "playwright@${version}" install-deps chromium-headless-shell
+          fi
+          echo "chromium-headless-shell ready: $shell"
+          INSTALLER
       - run: npm ci
       - name: Typecheck edge functions
         if: matrix.suite == 'unit'
@@ -329,7 +357,7 @@ jobs:
           PG_BIN=/usr/lib/postgresql/17/bin C1_DOCKER_PSQL_IMAGE=postgres:17 bash scripts/c1-docker-stdin-check.sh 2>&1 | tee -a server.log
       - name: Install bundled Chromium for p1-local
         if: matrix.suite == 'p1-local'
-        run: npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
+        run: bash "$RUNNER_TEMP/install-playwright-shell.sh"
       - name: p1-local suite
         if: matrix.suite == 'p1-local'
         env:
@@ -351,7 +379,7 @@ jobs:
           npm run build:command-core
           npm ci --prefix site
           npm install --no-save --no-audit --no-fund playwright@1.64.1
-          npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
+          bash "$RUNNER_TEMP/install-playwright-shell.sh"
           # Point the site build at the local stack; the anon key is a public local fixture.
           eval "$(supabase status -o json | python3 -c 'import json,sys,shlex; s=json.load(sys.stdin); assert s["API_URL"].startswith("http://127.0.0.1"); print("export PUBLIC_SUPABASE_URL="+shlex.quote(s["API_URL"])); print("export PUBLIC_SUPABASE_ANON_KEY="+shlex.quote(s["ANON_KEY"]))')"
           npm --prefix site run build
@@ -377,9 +405,7 @@ jobs:
         run: |
           set -o pipefail
           npm ci --prefix site
-          cd site
-          npx --yes playwright@1.64.1 install --with-deps chromium-headless-shell
-          cd ..
+          (cd site && bash "$RUNNER_TEMP/install-playwright-shell.sh")
           npm --prefix site run build
           # Runner CHROME_BIN may name installed Chrome; discover the bundled shell instead.
           unset CHROME_BIN
