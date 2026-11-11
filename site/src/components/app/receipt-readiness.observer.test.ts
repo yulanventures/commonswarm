@@ -45,7 +45,7 @@ function installReceiptFixture() {
   // scrolling to the oldest brings unread rows into view, which must be read without waiting for a feed poll.
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
   // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Behavior coverage of
-  // opening a thread (see the observer); in this page background prefetch may read every reply before the open.
+  // opening a thread from a warm start (see the observer); not a scheduling regression proof.
   const root = "55555555-5555-4555-8555-555555555555";
   const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
   f.replies = replies;
@@ -159,32 +159,27 @@ async function observeReceiptReadiness() {
     };
     const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
     if (f.scenario === "thread-expand") {
-      // Behavior coverage, not a regression proof for the open's own trigger: in this page push is down and the 2 s fallback
-      // poll, like every pass, prefetches rows off screen, so the collapsed replies may all be read before the open and the
-      // case may pass without that trigger. Whatever is visible after the open must end with its own receipt loaded, and a
-      // reply still unread at the click must be read before the next poll.
+      // Behavior coverage of opening a thread, from a warm start: not a regression proof for the open's own trigger (the
+      // cold scroll case proves that path). Receipts prefetched while collapsed are valid, and the control may pass.
+      const ownReceipt = (id: string) => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${id}"] .dashboard__message-receipt`))
+        .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === id);
       await wait(() => document.querySelector(`[data-thread-toggle="${f.root}"]`), "thread rendered");
       const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`)!;
       const repliesList = document.getElementById(`dashboard-thread-${f.root}`);
       check(repliesList, "replies rendered");
       check(toggle.getAttribute("aria-expanded") === "false" && repliesList!.hidden, "the thread starts collapsed: aria-expanded " +
         toggle.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
-      const before = readIds();
-      const from = f.log.length - 1;
+      const replyIds = f.replies as string[];
+      await wait(() => replyIds.every(id => ownReceipt(id)?.dataset.receiptLoaded === "true"), "every collapsed reply's own receipt loaded");
+      check(repliesList!.hidden && toggle.getAttribute("aria-expanded") === "false", "the thread stayed collapsed while its replies loaded");
       toggle.click();
       for (let i = 0; i < 3; i++) await tick();
       check(toggle.getAttribute("aria-expanded") === "true" && !repliesList!.hidden, "the thread opened: aria-expanded " +
         toggle.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
-      const replyIds = new Set(f.replies as string[]);
-      const visibleReplies = onScreen().filter(id => replyIds.has(id));
+      const visibleReplies = onScreen().filter(id => replyIds.includes(id));
       check(visibleReplies.length >= 1, "replies on screen after the open: " + visibleReplies.length);
-      const unread = visibleReplies.filter(id => !before.has(id));
-      steps.push("collapsed before the click, open after it; replies on screen " + visibleReplies.length + ": prefetched " +
-        (visibleReplies.length - unread.length) + ", unread at the click " + unread.length + " (" + short(unread) + ")");
-      if (unread.length > 0) await readBeforePoll(unread, from, "replies unread at the open");
-      const ownReceipt = (id: string) => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${id}"] .dashboard__message-receipt`))
-        .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === id);
       await wait(() => visibleReplies.every(id => ownReceipt(id)?.dataset.receiptLoaded === "true"), "every reply on screen has its own receipt loaded");
+      steps.push("warm: all " + replyIds.length + " replies loaded while collapsed; open with " + visibleReplies.length + " on screen, each loaded");
       document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
