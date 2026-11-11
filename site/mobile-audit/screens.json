@@ -1507,7 +1507,41 @@
     "id": "app.agent.queue",
     "kind": "view",
     "path": "/app?w={workspace}&agent={agent}",
-    "setup": [],
+    "setup": [
+      {
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-up-next] .hm-agent__queue li"
+      },
+      {
+        "scroll": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-up-next]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has([data-hm-up-next] .hm-agent__queue li:nth-child(3)) [data-hm-not-yet] .hm-agent__gated:nth-child(2) .hm-agent__queue li",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_agent_queue"
+    ]
+  },
+  {
+    "id": "app.agent.queue.not-yet",
+    "kind": "view",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [
+      {
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-not-yet] .hm-agent__queue li"
+      },
+      {
+        "scroll": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-not-yet]"
+      },
+      {
+        "settle": true
+      }
+    ],
     "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has([data-hm-up-next] .hm-agent__queue li:nth-child(3)) [data-hm-not-yet] .hm-agent__gated:nth-child(2) .hm-agent__queue li",
     "states": [
       "dense"
