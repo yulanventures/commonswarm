@@ -41,6 +41,8 @@ const hostedHelpers = [
 // Keep its exact signature and grantability literal; no OAuth/issuer allowance.
 const literal = JSON.stringify([
   ...allowlist.map((entry: unknown[]) => entry.slice(0, 5)),
+  // Goal 3: the to-do queue reads the same hosted connection as home_overview.
+  ['swarm_command', 'FUNCTION', 'swarm.hosted_connection_policy(uuid,uuid,uuid)', 'EXECUTE', false],
   // CS-E04 credential fence: the one admission wrapper, reached through its own schema, never swarm
   // for the OAuth runtime. Not grantable; the issuer itself gets nothing.
   ['commonswarm_oauth_runtime', 'SCHEMA', 'swarm_session', 'USAGE', false],
