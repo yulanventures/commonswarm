@@ -6,7 +6,7 @@ Owners: Product Lead sets priorities; Engineer owns the simulated seed and CI ha
 
 **Status vocabulary:** SC = source-confirmed implementation; HR = harness reachability/fixture still required; F = future, not implemented. All SC entries remain HR until an actual CI capture demonstrates the surface. Do not count DOM existence or a test filename as rendered coverage.
 
-Source-confirmed coverage totals: R01–R17 (17 routes), V01–V26 (26 app/state families), D01–D14 (14 dialog definition families: 11 static + 3 dynamic), M01–M15 (15 menu/overlay presentations; some deliberately overlap V/D at different anchors). IDs count inventory units, not unique DOM nodes.
+Baseline source-confirmed coverage totals: R01–R17 (17 routes), V01–V26 (26 app/state families), D01–D14 (14 dialog definition families: 11 static + 3 dynamic), M01–M15 (15 menu/overlay presentations; some deliberately overlap V/D at different anchors). IDs count inventory units, not unique DOM nodes. D15 records the restored outer People & agents modal added on 2026-11-11.
 
 ## Required capture matrix and seed
 
@@ -39,9 +39,9 @@ Seed one dense workspace (12 long-named agents, 5 people, mixed providers/avatar
 | R17 | /terms | SC screen | `site/src/pages/terms.astro:300` | Base, LegalDoc | Default; long scroll; header mobile menu; footer; keyboard links; code/table overflow where present |
 
 
-## Native dialogs: 11 static declarations + 3 dynamic families
+## Native dialog inventory
 
-Counts are definitions, not instances: role-change confirmations can repeat per member. People & agents is a page, not the retired people dialog.
+The November 3 baseline comprises 11 static declarations and 3 dynamic families; D15 adds the restored outer People & agents modal. Counts are definitions, not instances: role-change confirmations can repeat per member.
 
 | ID | Surface | Source | Selector | Opening trigger (SC; HR for end-to-end) | Required states |
 | --- | --- | --- | --- | --- | --- |
@@ -59,6 +59,7 @@ Counts are definitions, not instances: role-change confirmations can repeat per 
 | D12 | Navigation drawer | `site/src/lib/kylon-shell/shell.js:88` | .cs-org-drawer | button[aria-label="Open navigation"] | mobile only; account/org/workspace switch; dense agents; close/resize/focus/inert; same nodes move |
 | D13 | Details sheet | `site/src/lib/kylon-shell/channel-details.ts:9` | .cs-details-sheet | [data-channel-details-toggle] | phone sheet vs desktop side pane; person/agent/entity selection; long details; close/back/Escape |
 | D14 | Own-role lowering confirmation | `site/src/lib/people-dialog-view.ts:362` | .hm-role-confirm / [data-role-confirm] | own role select + Save | cancel/confirm, refusal/busy, focus restoration; disposable owner only |
+| D15 | People & agents outer modal | `site/src/components/app/LiveDashboard.astro` | dialog[data-roster-dialog] | existing roster/person doors; cold ?v=people | dense roster; desktop columns/phone sheet; selected detail; accepted receipt; native nested confirmation; Esc/opener return; workspace/route/sign-out retirement |
 
 
 ## App screens and state families
@@ -72,7 +73,7 @@ Counts are definitions, not instances: role-change confirmations can repeat per 
 | V05 | DM/group chat | `site/src/lib/home-route.ts:4` | chat route and participant actions | self/other DM, group roster, no access/archived, long titles; composer and history |
 | V06 | Thread | `site/src/components/app/LiveDashboard.astro:6942` | Reply/thread toggle in feed | empty/dense replies; composing/failed/unknown send; pending; long Markdown, attachment; parent context |
 | V07 | Composer | `site/src/components/app/LiveDashboard.astro:731` | [data-composer] | recipient chips; @ mention picker; keyboard; attachments pending/failed; paste/images; long input; sending/retry/draft preserved on view switch |
-| V08 | People & agents | `site/src/lib/people-dialog-view.ts:259` | /app?w=W&v=people; [data-people-detail] | 12 agents/5 people; owner grouping; names/email wrap; invite actions; role controls; removed/offline/working states; detail selection |
+| V08 | People & agents native modal | `site/src/lib/people-dialog-view.ts:259` | /app?w=W&v=people opens `dialog[data-roster-dialog]` over the workspace; [data-people-detail] | 12 agents/5 people; owner grouping; names/email wrap; invite actions; role controls; removed/offline/working states; detail selection |
 | V09 | Agent detail/work | `site/src/lib/home-route.ts:6` | /app?w=W&agent=A | assigned work/dense queue; unavailable/refused/removed; edit model/name, reconnect/revoke via supported controls |
 | V10 | To-dos list | `site/src/lib/home-todo-list.ts:11` | /app?w=W&v=todos | pending/empty/dense; all state filters; adding; long title/assignees; refused access; retry |
 | V11 | To-do detail | `site/src/lib/home-route.ts:5` | /app?w=W&todo=T | state transitions, dependencies/queue, comments/@picker, assignee picker; draft edits; not found; permissions; unknown write |
@@ -357,3 +358,9 @@ Capture success is not an all-app visual pass. Account writes, full authenticati
 ## Navigation capture update
 
 The account trigger is inside the phone drawer and remains separate at the desktop sidebar bottom. Responsive setup opens the drawer only at phone widths before the account menu, its four dialogs, and workspace actions. The picker and workspace-switch candidates open the same drawer conditionally; the switch waits for useful focus and then confirms the selected empty workspace using `aria-current`. The phone-header candidate checks the phone header or desktop workspace header as appropriate. Details opens a focused phone sheet or the expanded desktop pane. The picker lists every readable, non-archived workspace, including siblings in one organization. `nav.scrolled` scrolls the actual participant list to its last agent or person with the account control still present; the resulting frame needs visual inspection for reachability and overlap. These are 51 candidates and 44 pending entries in the 95-entry manifest; no new capture coverage is claimed before CI. Inline 24 px mentions remain reported separately from navigation targets.
+
+## People & agents modal restoration (2026-11-11)
+
+V08 is now a native `dialog[data-roster-dialog]`, opened with `showModal()` through existing doors. The compact roster, filter, row menus, persistent detail column, spoken receipt, Add your agents and admin controls live inside it. Desktop uses a bounded modal; <=52rem uses a bottom sheet with a pushed detail view. The app route remains behind it. A cold `?v=people` opens over workspace chat; close clears the overlay URL and returns focus. Esc closes the outer modal, while native nested confirmation cancel closes only that confirmation.
+
+`app.people` now waits for the native modal and seeded agent. `dialog.people-detail` selects that agent. `dialog.people-confirm` and `menu.member-actions` remain within the outer modal. `dialog.people-admin-access` opens admin confirmation above the selected agent without submitting. Native foreground detection already handles stacked dialogs; raw measurement arrays are unchanged. Keyboard and mounted browser proof cover native containment, closing, return focus, preserved detail, spoken receipt after refresh and direct links. No coverage is claimed until CI artifacts land.

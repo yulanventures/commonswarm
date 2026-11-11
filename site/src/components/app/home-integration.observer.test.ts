@@ -40,6 +40,7 @@ import type { HomeOverview } from '../../lib/home/contract';
 /* Message status has its own tests (src/lib/message-status.test.mjs); lifted feed functions only
    need its three entry points to exist. */
 const MESSAGE_STATUS_STUBS = {
+  peopleDialogOpen: () => false,
   refreshMessageStatus: async () => undefined,
   appendMessageStatus: () => undefined,
   resetMessageStatus: () => undefined,
@@ -1261,8 +1262,9 @@ test('an accepted role save stays successful when the roster refresh fails', asy
   }
 });
 
-test('People arrival prefers an eligible requested detail and otherwise the eligible page heading', async () => {
-  const frames: (()=>void)[] = [], focused: string[] = [], navigations: unknown[] = []; let rendered = 0;
+test('People modal arrival prefers an eligible requested detail and otherwise its eligible heading', async () => {
+  const frames: (()=>void)[] = [], focused: string[] = [];
+  const modal = { open: true, querySelector: () => null };
   // Independent DOM facts only; the actual production declarations choose the target.
   const heading = (name: string) => ({ present: true, rects: true, blocked: null as 'hidden' | 'inert' | null,
     getClientRects() { return this.rects ? [{}] : []; },
@@ -1270,13 +1272,13 @@ test('People arrival prefers an eligible requested detail and otherwise the elig
     focus() { focused.push(name); } });
   const page = heading('page'), detail = heading('detail');
   const context = createContext({ ...MESSAGE_STATUS_STUBS, window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
-    one:(selector:string)=>selector==='#pd-page-title' ? (page.present ? page : null)
+    document: { activeElement: { closest: () => modal } },
+    one:(selector:string)=>selector==='[data-roster-dialog]' ? modal : selector==='#dashboard-roster-title' ? (page.present ? page : null)
       : selector==='#pd-detail-title' ? (detail.present ? detail : null) : null,
-    all:()=>[], renderDialogRoster:()=>{ rendered++; }, loadHouseholdConnections:()=>{},
-    navigateHome:(route:unknown, mode:string)=>{ navigations.push([route, mode]); return Promise.resolve(); },
+    all:()=>[],
     peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
   runInContext("let peopleDialogFocus,rosterFilter='',activeWorkspaceId='W',homeRoute={view:'people',workspaceId:'W'};",context);
-  runInContext(await dashboardFunctions(['openRosterDialog','focusPeoplePage']),context);
+  runInContext(await dashboardFunctions(['focusPeoplePage']),context);
   const rows: Array<{ label: string; request: boolean; detailPresent?: boolean; detailRects?: boolean;
     detailBlocked?: 'hidden' | 'inert'; pageRects?: boolean; pageBlocked?: 'hidden' | 'inert'; want: string[] }> = [
     { label: 'ordinary entry ignores an unrequested visible detail', request: false, want: ['page'] },
@@ -1293,19 +1295,12 @@ test('People arrival prefers an eligible requested detail and otherwise the elig
     focused.length = 0;
     Object.assign(detail, { present: row.detailPresent ?? true, rects: row.detailRects ?? true, blocked: row.detailBlocked ?? null });
     Object.assign(page, { rects: row.pageRects ?? true, blocked: row.pageBlocked ?? null });
-    const before = rendered;
-    await runInContext(row.request ? "openRosterDialog({kind:'person',id:'requested'})" : 'openRosterDialog()', context);
+    runInContext(row.request ? "peopleDialogFocus={kind:'person',id:'requested'};focusPeoplePage()" : "peopleDialogFocus=undefined;focusPeoplePage()", context);
     const facts = JSON.stringify({ row, page: { rects: page.rects, blocked: page.blocked },
       detail: { present: detail.present, rects: detail.rects, blocked: detail.blocked } });
-    assert.equal(rendered, before + 1, `already on People re-renders in place: ${facts}`);
     for (const frame of frames.splice(0)) frame();
     assert.deepEqual(focused, row.want, `the real owner requests the eligible target: ${facts}`);
-    assert.deepEqual(navigations, [], `the current People visit does not navigate: ${facts}`);
   }
-  /* Positive control on the same context: from the workspace, the door navigates to the page. */
-  runInContext("homeRoute={view:'chat',workspaceId:'W'}",context);
-  await runInContext("openRosterDialog()",context);
-  assert.deepEqual(JSON.parse(JSON.stringify(navigations)),[[{view:'people',workspaceId:'W'},'push']]);
 });
 
 

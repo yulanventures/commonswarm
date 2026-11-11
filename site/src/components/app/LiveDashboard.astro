@@ -42,6 +42,7 @@ import "../../styles/kylon-workspace-settings-integration.css";
 import "../../styles/kylon-files.css";
 import "../../styles/kylon-lists.css";
 import "../../styles/kylon-people.css";
+import "../../styles/kylon-people-modal.css";
 import "../../styles/kylon-wiki.css";
 import "../../styles/kylon-wiki-context.css";
 import "../../styles/kylon-account-dialogs.css";
@@ -1140,15 +1141,17 @@ import "../../styles/kylon-command-palette.css";
     </div>
   </dialog>
 
-  {/* PEOPLE & AGENTS IS A PAGE (the canvas Members artboard, route `?v=people`), rendered by
-      renderPeopleDialog(..., { layout: "page" }) into the route pane. ~~"The agent management dialog. A
-      native <dialog> ... At ≤52rem it is a bottom sheet"~~, retired 2026-10-07 (home visual lane): the
-      dialog was the old form. What it hosted that the page still needs lives here, outside every panel,
-      so a closed container never hides it: the detail column (the page moves it into its side column),
-      the spoken receipt, and the confirmation, which is still a native modal alertdialog. */}
-  <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
-  <p class="pd-sr-only" role="status" aria-live="polite" data-people-receipt></p>
-  <dialog class="pd-confirm" data-people-confirm role="alertdialog" aria-labelledby="pd-confirm-title" aria-describedby="pd-confirm-description"></dialog>
+  {/* One native modal owns the roster, persistent detail and nested confirmations. */}
+  <dialog class="dashboard__roster-dialog cs-people-modal" id="dashboard-roster-dialog" data-roster-dialog aria-labelledby="dashboard-roster-title">
+    <header class="cs-people-modal__head">
+      <h2 id="dashboard-roster-title" tabindex="-1">People &amp; agents</h2>
+      <button class="dashboard__icon-button" type="button" data-roster-close aria-label="Close People &amp; agents">×</button>
+    </header>
+    <div class="cs-people-modal__body" data-dialog-agent-list></div>
+    <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
+    <p class="pd-sr-only" role="status" aria-live="polite" data-people-receipt></p>
+    <dialog class="pd-confirm" data-people-confirm role="alertdialog" aria-labelledby="pd-confirm-title" aria-describedby="pd-confirm-description"></dialog>
+  </dialog>
   {/* The page is not running what the server serves (a rollback counts too, so "updated", never
       "new version"). A floating card outside .dashboard__root: it shows in every state, never moves
       the layout, and its text is written only when it appears so the status is announced once. */}
@@ -4709,7 +4712,7 @@ import "../../styles/kylon-command-palette.css";
         for (const person of overview.workspaces.find(row => row.workspace_id === workspaceId)?.people ?? [])
           for (const agent of person.agents) { const row = agents.find(row => row.principalId === agent.principal_id && row.ownerUserId === person.user_id); if (row) row.work = agent.status; }
         renderHomeRail(); renderHomeShell(); renderHomeSide(); renderHomeObjectPane();
-        if (homeRoute.view === "people") renderDialogRoster();
+        if (peopleDialogOpen()) renderDialogRoster();
       }, () => { /* Status falls back to measured roster facts when overview is unavailable. */ });
       try {
         if (sampleMode) householdAccess = { workspaceId, status: "ok", contentRole: "editor" };
@@ -4920,7 +4923,7 @@ import "../../styles/kylon-command-palette.css";
            control, so every action keeps its one confirmation and its one server call. */
         const manage = () => openRosterDialog({ kind: "agent", id });
         const pressOnPage = (key: string) => {
-          if (activeWorkspaceId !== workspace.id || homeRoute.view !== "people") return;
+          if (activeWorkspaceId !== workspace.id || !peopleDialogOpen()) return;
           all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === key)?.click();
         };
         replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: () => { void manage(); },
@@ -5270,13 +5273,12 @@ import "../../styles/kylon-command-palette.css";
         } };
       layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
         buildWorkspaceNav(document, vm, callbacks, "tablet")]));
-      /* The doors open the People & agents PAGE. A page is not a popup, so the door carries no
-         aria-controls/aria-expanded; on the page itself it is the current page. */
+      /* Every existing People door opens the same native modal. */
       for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
         if (button.tagName !== "BUTTON") continue;
         button.dataset.rosterOpen = "";
-        if (homeRoute.view === "people") button.setAttribute("aria-current", "page");
-        else button.removeAttribute("aria-current");
+        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
+        button.removeAttribute("aria-current");
       }
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
@@ -5482,6 +5484,7 @@ import "../../styles/kylon-command-palette.css";
       // home-map.ts has no label for this route yet; the page names itself.
       document.title = homeRoute.view === "people" ? ["People & agents", workspace?.name, "CommonSwarm"].filter(Boolean).join(" · ") : homeViewTitle(homeRoute, workspace?.name);
       window.requestAnimationFrame(() => {
+        if (one<HTMLDialogElement>("[data-roster-dialog]")?.open) return;
         // Allow's settled access render owns focus, including while consent is being completed.
         if (homeRoute.view === "lists" && listsAllowLanding) return;
         if (homeRoute.view === "add-agent" && existingAgentChoiceIsCurrent?.()) return;
@@ -5503,6 +5506,7 @@ import "../../styles/kylon-command-palette.css";
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop", allowLanding = false): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      if (route.view === "people") { await openRosterDialog(undefined, route.workspaceId); return; }
       /* Any navigation leaves a Direct Message; openDirectMessage sets it again after navigating. */
       if (typeof activeDm !== "undefined") activeDm = null;
       const previous = window.history.state?.home === true;
@@ -5516,7 +5520,7 @@ import "../../styles/kylon-command-palette.css";
       if (historyMode !== "pop") window.history[historyMode === "push" ? "pushState" : "replaceState"](
         { home: true, homePrevious: historyMode === "push" ? previous : window.history.state?.homePrevious === true }, "", routeHref(route));
       catchUpGeneration += 1;
-      closeEntityPanel(false); disposeSeatAdminDialog(); if (route.view !== "people") closeRosterDialog(); closeWorkspaceDetailsDialog();
+      closeEntityPanel(false); disposeSeatAdminDialog(); closeRosterDialog(); closeWorkspaceDetailsDialog();
       if (route.view === "new") { openNewWorkspace(); focusHomeView(); return; }
       if (route.view === "catchup") {
         // The old workspace cannot repaint while cross-workspace reads are in flight.
@@ -5613,6 +5617,7 @@ import "../../styles/kylon-command-palette.css";
       renderHomeShell();
       for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
         button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
+        button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-roster-dialog");
         button.toggleAttribute("data-pending-access", pendingTotal > 0);
         button.title = pendingTotal ? `${pendingTotal} pending access` : "People & agents";
       }
@@ -5652,7 +5657,7 @@ import "../../styles/kylon-command-palette.css";
         .find(element => element.dataset.connectionEndDate === focus.key)?.querySelector<HTMLElement>(`[data-end-date-field="${focus.field}"]`)?.focus({ preventScroll: true });
     };
     const refreshConnectionDateViews = (): void => {
-      if (homeRoute.view === "people") renderDialogRoster();
+      if (peopleDialogOpen()) renderDialogRoster();
       else if (homeRoute.view === "agent") renderHomeObjectPane();
       if (one<HTMLDialogElement>("[data-connected-apps-dialog]")?.open) renderConnectedApps();
     };
@@ -6386,7 +6391,7 @@ import "../../styles/kylon-command-palette.css";
           saveSeatAdminReauthIntent({
             userId: ownerUserId,
             workspaceId: ownerWorkspaceId,
-            routeView: homeRoute.view === "people" ? "people" : "agent",
+            routeView: peopleDialogOpen() ? "people" : "agent",
             principalId: lowerAgentId,
             level: draft.level,
             ...(draft.scopeId ? { scopeId: draft.scopeId } : {}),
@@ -6796,36 +6801,33 @@ import "../../styles/kylon-command-palette.css";
       };
     };
 
-    /* ~~The sheet layout sync (a pushed detail pane, inert list, scroll cues)~~ retired with the dialog
-       2026-10-07: the page scrolls with the app and shows the detail beside the roster. Kept as the one
-       place a later layout rule would go, and so the render keeps calling one function. */
-    const syncPeopleDialogLayout = (): void => {};
-    let peopleDialogFocus: PeopleDialogFocus | undefined;
-    /* THE PAGE (route `?v=people`). It renders into the route pane, and only while that route is
-       current: every other route owns the pane. The doors, the filter, Add an agent and Invite
-       someone are the page's own (people-dialog-view.ts, layout "page"). */
-    /* The page borrows two persistent hosts: the sign-in block (moved under the page header) and the
-       detail column (moved into the page's side column). Both live in the route pane only while the
-       page shows, so every path that replaces or clears that pane parks them first (leaving the page,
-       an agent, to-do or To-dos render, a pane message, the session reset). Missed once, the next visit
-       found no detail host and the page stayed blank until a reload (code review, release 7). */
-    const parkPeopleHosts = (): void => {
-      layout.peopleContext(null);
-      const detail = one<HTMLElement>("[data-people-detail]");
-      // Hidden while parked: a selection's open details must not show at the foot of another route.
-      if (detail && detail.parentElement !== app) { detail.hidden = true; app.append(detail); }
+    const peopleDialogOpen = (): boolean => one<HTMLDialogElement>("[data-roster-dialog]")?.open === true;
+    const syncPeopleDialogLayout = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const pushed = !!peopleDialogState.selected && matchMedia("(width <= 52rem)").matches;
+      const context = dialog?.querySelector<HTMLElement>("[data-people-context]");
+      if (context) context.inert = pushed;
     };
-    /** The detail host, or a new empty one when a render lost it: the page never stays blank. */
+    let peopleDialogFocus: PeopleDialogFocus | undefined;
+    let peopleDialogReturn: { href: string; opener: HTMLElement | null } | null = null;
+    // Persistent hosts belong to the closed modal too; no route can remove them.
+    const parkPeopleHosts = (): void => {
+      if (peopleDialogOpen()) return;
+      layout.peopleContext(null);
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const detail = one<HTMLElement>("[data-people-detail]");
+      if (dialog && detail) { detail.hidden = true; if (detail.parentElement !== dialog) dialog.append(detail); }
+    };
     const peopleDetailHost = (): HTMLElement => {
       const found = one<HTMLElement>("[data-people-detail]"); if (found) return found;
       const detail = document.createElement("section"); detail.className = "pd-detail"; detail.id = "pd-detail";
       detail.setAttribute("aria-labelledby", "pd-detail-title"); detail.dataset.peopleDetail = ""; detail.hidden = true;
-      app.append(detail); return detail;
+      one<HTMLElement>("[data-roster-dialog]")!.append(detail); return detail;
     };
     const renderDialogRoster = (): void => {
-      const list = one<HTMLElement>("[data-home-route-pane]");
+      const list = one<HTMLElement>("[data-dialog-agent-list]");
       const workspace = workspaces.find((row) => row.id === activeWorkspaceId);
-      if (!list || !workspace || homeRoute.view !== "people") return;
+      if (!list || !workspace || !peopleDialogOpen()) return;
       const detail = peopleDetailHost();
       const endDateFocus = connectionDateFocus(detail);
       const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
@@ -6854,10 +6856,10 @@ import "../../styles/kylon-command-palette.css";
         if (button.disabled) return; button.disabled = true;
         const workspaceId = activeWorkspaceId, userId = session?.user.id;
         try { await peopleDialogAction(action, id, button, notice); }
-        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id || homeRoute.view !== "people") return;
+        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id || !peopleDialogOpen()) return;
           const selected = peopleDialogState.selected;
           const errorTarget = selected?.type === "agent" && selected.id === id
-            ? list.querySelector<HTMLElement>("[data-people-detail] [data-agent-error]")
+            ? detail.querySelector<HTMLElement>("[data-agent-error]")
             : Array.from(app.querySelectorAll<HTMLElement>("[data-people-context] [data-agent-row-error]")).find((element) => element.dataset.agentRowError === id);
           if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
         } finally { button.disabled = false; }
@@ -6892,7 +6894,7 @@ import "../../styles/kylon-command-palette.css";
           const owner = peopleDialogModel().agents.find((agent) => agent.id === agentId)?.ownerId ?? null;
           return personTint(owner, owner !== null && owner === session?.user.id);
         }, page: {
-          homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => homeBack(),
+          homeLabel: workspace.name, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }), back: () => closeRosterDialog(true),
           workspacesHref: routeHref({ view: "catchup" }),
           addAgentHref: routeHref({ view: "add-agent", workspaceId: workspace.id }),
           agentHref: (agentId) => routeHref({ view: "agent", workspaceId: workspace.id, agentId }),
@@ -6914,9 +6916,9 @@ import "../../styles/kylon-command-palette.css";
           picker.hidden=false; add.setAttribute('aria-expanded','true');
           mountWorkspaceAgentPicker(picker, {
             session: value, workspaceId, orgId: workspace.orgId,
-            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && navigation === homeNavigation && !picker.hidden && homeRoute.view === "people",
+            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && navigation === homeNavigation && !picker.hidden && peopleDialogOpen(),
             added: async agent => {
-              if (activeWorkspaceId === workspaceId && session?.user.id === value.user.id && homeRoute.view === "people") {
+              if (activeWorkspaceId === workspaceId && session?.user.id === value.user.id && peopleDialogOpen()) {
                 await reloadPeopleDialog(workspaceId, agent.id, `${agent.name} added.`);
               }
             },
@@ -6928,18 +6930,18 @@ import "../../styles/kylon-command-palette.css";
         mountSeatAdminPanel(detail, peopleDialogState.selected.id, "people");
       }
       restoreConnectionDateFocus(detail, endDateFocus);
-      // Keep the members panel in the main pane beside the workspace rail.
+      // Keep this content inside the modal; never project it into the workspace rail.
       layout.peopleContext(null);
       syncPeopleDialogLayout();
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
       const selected = peopleDialogState.selected; const query = rosterFilter;
       const userId = session?.user.id;
-      const wasOpen = homeRoute.view === "people";
+      const wasOpen = peopleDialogOpen();
       await openWorkspace(workspaceId);
       if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
       if (receipt && principalId) peopleDialogReceipts.set(`${workspaceId}:${principalId}`, receipt);
-      if (wasOpen && homeRoute.view === "people") { rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
+      if (wasOpen && peopleDialogOpen()) { rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
         const target = peopleDialogFocusTarget(action, principalId);
         target?.focus({ preventScroll: true }); window.requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true })); }
       const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
@@ -6950,9 +6952,9 @@ import "../../styles/kylon-command-palette.css";
         if (section && !section.hidden) return one<HTMLElement>("#dashboard-roster-pending-title");
       }
       if (action === "remove-person" || action === "cancel-invite") {
-        return one<HTMLElement>(".pd-person-disclosure") ?? one<HTMLElement>("#pd-page-title");
+        return one<HTMLElement>(".pd-person-disclosure") ?? one<HTMLElement>("#dashboard-roster-title");
       }
-      return one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${id}`) ?? one<HTMLElement>("#pd-page-title");
+      return one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${id}`) ?? one<HTMLElement>("#dashboard-roster-title");
     };
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
@@ -7004,34 +7006,56 @@ import "../../styles/kylon-command-palette.css";
         () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
     };
 
-    /*
-     * OPENING IS NAVIGATION (2026-10-07): every door goes to the People & agents page, and the
-     * promise settles once the page is on screen, so a caller can act on a control in it. A new
-     * visit resets the filter and the selection to the full roster. A focus target opens that
-     * person's or agent's details; focus lands on them, or on the page heading.
-     */
-    const openRosterDialog = (focus?: PeopleDialogFocus, workspaceId = activeWorkspaceId): Promise<void> => {
-      peopleDialogFocus = focus; peopleDialogState.focusApplied = null;
-      if (homeRoute.view === "people" && workspaceId === activeWorkspaceId) {
-        renderDialogRoster(); focusPeoplePage(); return Promise.resolve();
+    /** Open above the current view; a cold People link first opens its workspace chat. */
+    const openRosterDialog = async (focus?: PeopleDialogFocus, workspaceId = activeWorkspaceId): Promise<void> => {
+      if (!workspaceId) return;
+      const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+      if (activeWorkspaceId !== workspaceId) await navigateHome({ view: "chat", workspaceId }, "replace");
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      if (!dialog || activeWorkspaceId !== workspaceId) return;
+      if (!dialog.open) {
+        layout.closeNavigation(false);
+        peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
+        rosterFilter = "";
+        peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
+        dialog.showModal();
       }
-      rosterFilter = "";
-      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
-      if (!workspaceId) return Promise.resolve();
-      return navigateHome({ view: "people", workspaceId }, "push");
+      peopleDialogFocus = focus; peopleDialogState.focusApplied = null;
+      renderDialogRoster();
+      const modalUrl = new URL(window.location.href);
+      modalUrl.searchParams.set("w", workspaceId); modalUrl.searchParams.set("v", "people");
+      window.history.replaceState(window.history.state, "", modalUrl.pathname + modalUrl.search + modalUrl.hash);
+      focusPeoplePage();
+      if (!sampleMode) void loadHouseholdConnections();
     };
     const focusPeoplePage = (): void => {
-      window.requestAnimationFrame(() => [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#pd-page-title")]
-        .find(element => !!element?.getClientRects().length && !element.closest("[hidden], [inert]"))?.focus({ preventScroll: false }));
+      const focus = () => {
+        const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+        const activeModal = document.activeElement?.closest("dialog[open]");
+        if (!dialog?.open || dialog.querySelector("dialog[open]") || (activeModal && activeModal !== dialog)) return;
+        const visible = (node: HTMLElement | null): node is HTMLElement => !!node?.getClientRects().length && !node.closest("[hidden],[inert]");
+        [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#dashboard-roster-title")].find(visible)?.focus({ preventScroll: true });
+      };
+      focus();
+      window.requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) focus(); });
     };
-
-    /** Leaving the page: the confirmation closes and every draft that belonged to it is dropped. */
-    const closeRosterDialog = (): void => {
-      const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (confirm?.open) confirm.close();
-      // An in-page action reopens the workspace with the page still current: both hosts stay put, and the
-      // page's next render (renderDialogRoster) moves and remounts them, keeping focus. Any other route parks them.
-      if (homeRoute.view !== "people") parkPeopleHosts();
-      peopleDialogFocus = undefined; peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
+    const closeRosterDialog = (restoreFocus = false): void => {
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const returned = peopleDialogReturn; peopleDialogReturn = null;
+      dialog?.querySelectorAll<HTMLDialogElement>("dialog[open]").forEach(child => child.close());
+      disposeSeatAdminDialog();
+      if (dialog?.open) dialog.close();
+      if (returned && new URLSearchParams(window.location.search).get("v") === "people") {
+        window.history.replaceState(window.history.state, "", returned.href);
+      }
+      peopleDialogFocus = undefined; peopleDialogState.selected = null;
+      peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
+      parkPeopleHosts();
+      if (restoreFocus && returned) {
+        const target = returned.opener?.isConnected && returned.opener.getClientRects().length && !returned.opener.closest("[hidden],[inert]") ? returned.opener
+          : [...all<HTMLElement>("[data-roster-open]"), ...all<HTMLElement>('button[aria-label="Open navigation"]'), ...all<HTMLElement>("[data-home-workspace-shell] h1")].find(node => !!node.getClientRects().length && !node.closest("[hidden],[inert]"));
+        target?.focus({ preventScroll: true });
+      }
     };
 
     const openWorkspaceDetailsDialog = (): void => {
@@ -9745,7 +9769,7 @@ import "../../styles/kylon-command-palette.css";
       }
       /* The dialogs show the OLD workspace's data from here on; close them rather than
          let either outlive its data. The refresh cooldown resets with the workspace. */
-      closeRosterDialog();
+      if (selected.id !== activeWorkspaceId) closeRosterDialog();
       closeWorkspaceDetailsDialog();
       rosterRefreshAttemptedAt = 0;
       pendingRefreshGate.resetCooldown();
@@ -11202,6 +11226,7 @@ import "../../styles/kylon-command-palette.css";
 
     /** The URL is the address of what you are reading: `?w=` the workspace, `?c=` the channel. */
     const syncChannelUrl = (): void => {
+      if (one<HTMLDialogElement>("[data-roster-dialog]")?.open) return;
       if (sampleMode) return;
       const url = new URL(window.location.href);
       if (activeWorkspaceId === "") url.searchParams.delete("w");
@@ -13945,15 +13970,11 @@ import "../../styles/kylon-command-palette.css";
         }
       });
     }
-    /* Escape on the page closes an open details column first, as the dialog's cancel did. With
-       nothing selected it does nothing: the page is not a popup. */
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || homeRoute.view !== "people" || !peopleDialogState.selected) return;
-      if (one<HTMLDialogElement>("[data-people-confirm]")?.open || document.querySelector("dialog[open]")) return;
-      event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
-      if (!document.getElementById(`pd-${selection.type}-${selection.id}`)) { rosterFilter = ""; peopleDialogState.filter = "all"; }
-      renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: false });
-    });
+    const rosterDialog = one<HTMLDialogElement>("[data-roster-dialog]");
+    one<HTMLButtonElement>("[data-roster-close]")?.addEventListener("click", () => closeRosterDialog(true));
+    rosterDialog?.addEventListener("cancel", event => { if (event.target !== rosterDialog) return; event.preventDefault(); closeRosterDialog(true); });
+    rosterDialog?.addEventListener("close", event => { if (event.target === rosterDialog && !rosterDialog.open && peopleDialogReturn) closeRosterDialog(true); });
+    window.addEventListener("resize", syncPeopleDialogLayout);
     for (const button of all<HTMLButtonElement>("[data-agent-owner-self]")) {
       button.addEventListener("click", openConnect);
     }

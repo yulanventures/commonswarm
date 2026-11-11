@@ -98,6 +98,40 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
 };
 /** Keyboard witnesses, by screen. They start from the focus the app itself set, or the document entry. */
 const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
+  "app.people": [
+    {
+      name: "people-modal-native-document-boundary",
+      start: { active: 'dialog[data-roster-dialog][open] #dashboard-roster-title' },
+      keys: [{ key: "Tab", expect: 'dialog[data-roster-dialog][open] [data-roster-close]' }],
+      // Chromium's native reverse-tab crosses document entry before returning to the last modal
+      // control. Record that state, then require re-entry below; never accept a background control.
+      activate: { key: "Shift+Tab", expect: { active: "body" } },
+    },
+    {
+      name: "people-modal-native-reentry-and-escape",
+      start: "document",
+      keys: [{ key: "Shift+Tab", expect: 'dialog[data-roster-dialog][open] [data-pd-focus="page-workspaces"]' }],
+      activate: { key: "Escape", expect: { active: ':is([data-roster-open], button[aria-label="Open navigation"])', inView: ':is([data-roster-open], button[aria-label="Open navigation"]):focus' } },
+    },
+  ],
+  "dialog.people-confirm": [{
+    name: "people-confirm-escape-keeps-roster",
+    start: { active: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:last-child' },
+      { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-pd-focus="row-remove-agent-{agent}"]' } },
+  }],
+  "dialog.people-admin-access": [{
+    name: "people-admin-escape-keeps-roster",
+    start: { active: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+    keys: [
+      { key: "Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] [data-seat-admin-grant]:not([hidden]):not([disabled])' },
+      { key: "Shift+Tab", expect: 'dialog.sa-confirm[data-seat-admin-confirm="workspace"][open] .sa-confirm__footer > button[type="button"]:not([hidden])' },
+    ],
+    activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-people-detail] [data-seat-admin-toggle="workspace"]:not([disabled])' } },
+  }],
   "dialog.admin-access": [
     {
       name: "seat-admin-confirm-escape",
