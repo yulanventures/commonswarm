@@ -401,11 +401,12 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     ok("household_permissions", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, workspace));
     // The same owner grant on the empty workspace, so its Lists and to-do empty states are captured without consent clicks.
     ok("household_permissions empty", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, emptyWorkspace));
-    const tool = async (name: string, args: Record<string, unknown>, write = true) => {
+    const toolAs = async (token: string, workspaceId: string, name: string, args: Record<string, unknown>, write = true) => {
       const commandId = `audit_${randomBytes(9).toString("base64url")}`;
-      return await command(owner.token, { kind: "household_tool", tool: name,
-        arguments: { seat: LOCAL_SEAT, ...(write ? { request_id: commandId } : {}), ...args } }, workspace, commandId);
+      return await command(token, { kind: "household_tool", tool: name,
+        arguments: { seat: LOCAL_SEAT, ...(write ? { request_id: commandId } : {}), ...args } }, workspaceId, commandId);
     };
+    const tool = (name: string, args: Record<string, unknown>, write = true) => toolAs(owner.token, workspace, name, args, write);
     const items = Array.from({ length: 36 }, (_, n) => ({ item_id: `item-${n}`, text: n % 9 === 4 ? `Order replacement filter ${UNBROKEN.slice(0, 40)}` : `Grocery item ${n + 1}: ${["oat milk", "sourdough", "eggs", "basil", "limes", "rice"][n % 6]}`, order: n, checked: n % 4 === 0 }));
     ok("object_create list", await tool("object_create", { object_id: "groceries", title: "Weekly groceries", content: { kind: "list", items } }));
     ok("object_create doc", await tool("object_create", { object_id: "house-notes", title: "House notes", content: { kind: "doc", markdown: "# House notes\n\n" + BODIES.join("\n\n") } }));
@@ -441,6 +442,65 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         if (n === 5) ok("todo start", await tool("todo_start", { todo_id: todo.todo_id }));
       }
     }
+
+    // A dense queue on {agent}'s own page (app.agent.queue): three more queued to-dos under Up next, and two held under
+    // Not yet (a hold with a note, and one waiting on another to-do; an "at" gate would sit under At a set time instead).
+    // Each queued one also posts its "added" note to the agent, so the owner's DM with it gains three rows.
+    if (ids.agent) {
+      const queued: string[] = [];
+      for (const title of ["Compare the three boiler service quotes", "Check which quotes include the flue test",
+        "Summarise the insurance renewal options with the price difference for each provider"]) {
+        const created = await tool("todo_create", { title, assign: { to: { kind: "agent", id: ids.agent }, start: "queue", gate: { kind: "none" } } });
+        const todoId = (created.body.value as { todo_id?: string } | undefined)?.todo_id;
+        if (ok(`agent queue ${title}`, created) && todoId) queued.push(todoId);
+      }
+      const held = queued[0] ? [
+        await tool("todo_create", { title: "Book the boiler service visit",
+          assign: { to: { kind: "agent", id: ids.agent }, start: "queue", gate: { kind: "after", todo_id: queued[0] } } }),
+        await tool("todo_create", { title: "Order the expansion vessel part",
+          assign: { to: { kind: "agent", id: ids.agent }, start: "queue", gate: { kind: "hold", note: "Waiting for the engineer to confirm the size" } } }),
+      ] : [];
+      const heldOk = held.map((result, n) => ok(`agent not yet ${n}`, result));
+      if (queued.length === 3 && heldOk.length === 2 && heldOk.every(Boolean)) steps.push("seed_agent_queue");
+    }
+
+    // A pending to-do offer to the viewer (app.todo-offer), in a workspace of its own: an offer the viewer decides on is
+    // drawn atop every feed in its workspace. A member offers the to-do; both need Lists consent (the owner's first, which
+    // sets the workspace's boundary). The feed needs an agent and messages, or it shows a setup or empty state instead.
+    try {
+      const offerWorkspace = randomUUID();
+      const offerer = people[3]!;
+      ok("create_workspace offer", await command(owner.token, { kind: "create_workspace", workspace_id: offerWorkspace, name: "Weekend errands", org_id: workspace }, null));
+      ids.offerWorkspace = offerWorkspace;
+      const invited = await command(owner.token, { kind: "invite_member", email: offerer.email, ttl_ms: 7 * 24 * 3_600_000 }, offerWorkspace);
+      const token = String(invited.body.invitation_token ?? "");
+      const joined = ok(`invite offer ${offerer.name}`, invited) && !!token
+        && ok(`accept offer ${offerer.name}`, await command(offerer.token, { kind: "accept_invitation", token }, null));
+      // With no agent the workspace opens on its no-agents setup view instead of the feed.
+      const consented = joined
+        && ok("create_agent_principal offer", await command(owner.token, { kind: "create_agent_principal", name: "Errands", model: "claude-opus-5-5" }, offerWorkspace))
+        && ok("household_permissions offer", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, offerWorkspace))
+        && ok("household_permissions offer member", await command(offerer.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, offerWorkspace));
+      if (consented) {
+        await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, broadcast_to_channel) VALUES
+          (${randomUUID()}::uuid, ${offerWorkspace}::uuid, ${offerer.id}::uuid, 'user', 'note', 'I can do the dry cleaning run, but Saturday is tight for me.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', false),
+          (${randomUUID()}::uuid, ${offerWorkspace}::uuid, ${owner.id}::uuid, 'user', 'note', 'Send it my way and I will pick it up with the groceries.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', false)`;
+        const offered = await toolAs(offerer.token, offerWorkspace, "todo_create", { title: "Pick up the dry cleaning on Saturday morning",
+          assign: { to: { kind: "user", id: owner.id }, start: "queue", gate: { kind: "none" } } });
+        const value = offered.body.value as { todo_id?: string; offer?: { decider_user_id?: string } | null } | undefined;
+        if (ok("todo_create offer", offered) && value?.todo_id && value.offer?.decider_user_id === owner.id) {
+          ids["todo.offer"] = value.todo_id;
+          // The offer's notice and the member's note start already seen by the viewer, as in the main workspace.
+          await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+            SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
+            WHERE workspace_id = ${offerWorkspace}::uuid AND from_principal <> ${owner.id}::uuid
+            ON CONFLICT DO NOTHING`;
+          steps.push("seed_todo_offer");
+        } else if (value?.todo_id) note("todo_create offer", `no pending offer to the viewer: ${JSON.stringify(value).slice(0, 200)}`);
+      }
+    } catch (error) { note("seed_todo_offer", error); }
     return { owner: { email: owner.email, password: owner.password }, ids, notes, steps };
   } finally {
     await sql.end({ timeout: 5 });

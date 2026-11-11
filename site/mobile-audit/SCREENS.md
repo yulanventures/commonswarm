@@ -117,7 +117,7 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | V24 | Definitions proposal diff/certify | `site/src/lib/workspace-definitions-view.ts:176`; `[data-def-diff]`, `[data-def-certify-bar]` | certified/current comparison; long unbroken source; stale revision; human certification; permission refusal; keyboard-visible review; `[data-def-action=certify]` at :200, update form Save changes at :218; create/cancel/select at :127–155 |
 | V25 | Inline to-do offer | `site/src/lib/home-stream-approvals.ts:34`; `[data-offer-card]`, `[data-offer-answer]` in Chat | pending offer, accept/refuse, busy, already answered, wrong decider; long todo/agent name; no actual production mutation |
 | V26 | Lists agent approval prompt | `site/src/components/app/LiveDashboard.astro:615`; `[data-household-agents]`, `[data-household-agent-list]` | no agents, 12 agents, approval absent/present/revoked; consent prerequisites; owner vs viewer; request pending/refused |
-| M13 | Context menu | `site/src/lib/context-menu.ts:23`; `.cs-context-menu`; `LiveDashboard.astro:4859` row contextmenu binding | mouse right-click, Shift+F10/Menu key; touch long-press requires harness/platform witness; viewport edge, many long entries; Escape/Tab/arrow focus return |
+| M13 | Context menu | `site/src/lib/context-menu.ts:23`; `.cs-context-menu`; `contextmenu` bound only on Direct messages rail rows (`site/src/lib/home-rail.ts:198`, `:215`); message rows have none | mouse right-click, Shift+F10/Menu key; touch long-press requires harness/platform witness; viewport edge, many long entries; Escape/Tab/arrow focus return |
 | M14 | Workspace header menu dock | `site/src/lib/kylon-shell/host.ts:123`; `.cs-kylon-workspace-menu .hm-menu__trigger` | same semantic menu as M02, distinct relocated mobile anchor; open above keyboard and near screen edge; no duplicate focusable menu |
 | M15 | Profile inspector | `site/src/components/app/LiveDashboard.astro:868`; `.hm-frame__profile[data-entity-panel]` | same entity detail as V20, separately capture phone/landscape open inspector and close; 12-agent dense metadata; retained selection |
 
@@ -284,7 +284,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V06 | `app.thread` — pending |
 | V07 | `app.composer` — pending |
 | V08 | `app.people` — candidate; other states pending |
-| V09 | `app.agent` — candidate; other states pending |
+| V09 | `app.agent` — candidate; `app.agent.queue` candidate: seeded `{agent}` with four Up next and two Not yet to-dos (`seed_agent_queue`: a hold with a note and one after another to-do); other states pending |
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — candidate; `todo_create 0` required |
 | V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
@@ -300,7 +300,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V22 | `app.update-toast` — candidate; `[data-update-notice]` over `#general`, raised by the app's own boot poll answered with the served page plus one extra `/_astro/` asset (`newBuild`); Update and Not now never pressed; Toast pending |
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
 | V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
-| V25 | `app.todo-offer` — pending; an offer to the owner renders atop every owner feed in its workspace, so it needs its own workspace and the offering member's Lists consent |
+| V25 | `app.todo-offer` — candidate; `{offerWorkspace}` (its own workspace, so the card floats over no other capture) with one owner agent, a member's pending offer to the owner, both with Lists consent, and two notes so the feed shows; `[data-offer-card="{todo.offer}"]` with its answer buttons; Accept and Decline never pressed |
 | V26 | `app.lists-approval` — pending; no route opens the approvals (only the roster allow action or host-picker approve) and seeded principals have no `household_connections` |
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
@@ -329,11 +329,11 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — pending |
-| M13 | `menu.context` — pending |
+| M13 | `menu.context` — candidate; right-click on the `{agent}` Direct messages row (`[data-rail-agent]`, inside the navigation drawer at <=52rem) opens `.cs-context-menu`; nothing is run; Shift+F10 and touch long-press pending |
 | M14 | `menu.workspace` — covers mobile drawer and desktop header anchors (`menu.workspace-dock` superseded duplicate removed) |
 | M15 | `app.entity-detail`, `dialog.details-sheet` — cover entity panel, phone details sheet and desktop details pane (`menu.profile-inspector` superseded duplicate removed) |
 
-The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
+The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` waits for at least three Up next rows and two Not yet rows on the same agent.
 
 Additional detail captures: `app.wiki.topic`, `app.wiki.editor`, `app.add-agent.existing`. `app.chat.dm` separately tracks V05; `app.definitions.diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
