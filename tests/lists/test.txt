@@ -16,6 +16,7 @@ tests/plan-baseline-inputs.test.ts
 tests/window-rerun.test.ts
 tests/hosted-mcp-auth.test.ts
 tests/hosted-mcp-protocol.test.ts
+tests/command-human-admission-order.test.ts
 tests/hosted-todo-tools.test.ts
 tests/hosted-list-tools.test.ts
 tests/hosted-mcp-errors.test.ts

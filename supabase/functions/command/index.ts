@@ -3374,17 +3374,24 @@ async function authenticateAgent(
   };
 }
 
+/**
+ * CS-E04 final fence. Every human transaction calls this FIRST, right after setTransaction and before
+ * any planning, row lock or write: the shared credential-fence lock, held to commit, then a fresh
+ * liveness read of the person's session. A credential change (exclusive lock) either waits for
+ * this transaction and then revokes the session, or has already revoked it. Taking it before any
+ * other lock means a queued change can never sit between this transaction's locks.
+ */
+async function admitHumanSession(tx: Sql, verified: VerifiedHuman): Promise<boolean> {
+  const [admitted] = await tx<{ ok: boolean }[]>`
+    SELECT swarm_session.admit_human_session(${verified.userId}::uuid, ${verified.sessionId}::uuid) AS ok
+  `;
+  return admitted?.ok === true;
+}
+
 async function authenticateHuman(
   tx: Sql,
   verified: VerifiedHuman,
 ): Promise<AuthContext | null> {
-  // CS-E04 final fence, before anything else this transaction writes: the shared credential fence
-  // lock, held to commit, then a fresh liveness read. A credential change either waits for this
-  // transaction (and then revokes the session) or has already revoked it.
-  const [admitted] = await tx<{ ok: boolean }[]>`
-    SELECT swarm_session.admit_human_session(${verified.userId}::uuid, ${verified.sessionId}::uuid) AS ok
-  `;
-  if (admitted?.ok !== true) throw new HumanSessionEnded();
   const rows = await tx<{ user_id: string; email: string | null }[]>`
     INSERT INTO swarm.users (user_id, display_name, email)
     VALUES (
@@ -13007,6 +13014,11 @@ async function handleTransaction(
     const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
     await setTransaction(tx);
+    // A person's session is admitted before anything else this transaction locks or writes.
+    if (verifiedHuman !== null && !(await admitHumanSession(tx, verifiedHuman))) {
+      logCommandFailure("command_pre_auth_failure", kind, "authn", "human session ended");
+      return { status: 401, body: { error: "unauthenticated" } };
+    }
     if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
       await assertHouseholdContentServiceReady(tx);
     }
@@ -13253,10 +13265,7 @@ async function handleTransaction(
       : agentTokenHash !== null
       ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
-      ? await authenticateHuman(tx, verifiedHuman).catch((error) => {
-        if (error instanceof HumanSessionEnded) return null;
-        throw error;
-      })
+      ? await authenticateHuman(tx, verifiedHuman)
       : null;
     if (!auth) {
       logCommandFailure(
@@ -16357,6 +16366,7 @@ async function runSeatAdminCommand(input: RequestBody, human: SeatAdminHuman, ve
   try {
     return await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
+      if (!(await admitHumanSession(tx, verified))) throw new HumanSessionEnded();
       await authenticateHuman(tx, verified);
       return await seatAdminTransaction(tx, input, human);
     }));
@@ -16375,7 +16385,10 @@ async function runAdminAccountCommand(
   try {
     const outcome = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async tx => {
       await setTransaction(tx);
-      if (human !== null) await authenticateHuman(tx, human);
+      if (human !== null) {
+        if (!(await admitHumanSession(tx, human))) throw new HumanSessionEnded();
+        await authenticateHuman(tx, human);
+      }
       return await adminTransaction(tx, input, authentication);
     }));
     return outcome.result;

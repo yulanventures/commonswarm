@@ -112,6 +112,16 @@ try {
     assert.deepEqual(retry.body,first.body);
     assert.deepEqual(await snapshot(),before);
   }
+  // CS-E04: once the person's session has ended, neither a replay nor a new command is admitted,
+  // and nothing is written; a missing session is refused the same way.
+  await db\x60DELETE FROM auth.sessions WHERE id=\x24{session}::uuid\x60;
+  for(const [label,command_id,identity] of [['replay',input.command_id,human],['new',crypto.randomUUID(),human],
+    ['missing session',crypto.randomUUID(),{...human,sessionId:null}]]) {
+    const refused=await handleHostedManagementCommand({...input,command_id},identity);
+    assert.equal(refused.status,401,label+': '+JSON.stringify(refused.body));
+    assert.deepEqual(refused.body,{error:'unauthenticated'},label);
+    assert.deepEqual(await snapshot(),before,label+' writes nothing');
+  }
   console.log('WORKSPACE_ORG_RETRY_PASS');
 } finally {await db.end();}
 `);
