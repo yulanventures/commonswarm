@@ -7,7 +7,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-approval-card {
 live-dashboard.dashboard[data-kylon-shell] .hm-approval-card__text { flex: 1 1 260px; margin: 0; font: 500 14px/1.4 var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] .hm-approval-card__actions { display: flex; gap: 8px; }
 live-dashboard.dashboard[data-kylon-shell] .hm-approval-card__button {
-  min-block-size: 36px; padding: 0 16px; border: 0; border-radius: 999px; font: 600 13px var(--k-shell-font); cursor: pointer;
+  min-block-size: 44px; min-inline-size: 44px; padding: 0 16px; border: 0; border-radius: 999px; font: 600 13px var(--k-shell-font); cursor: pointer;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-approval-card__button--accept { color: var(--k-shell-accent-ink); background: var(--k-shell-accent); }
 live-dashboard.dashboard[data-kylon-shell] .hm-approval-card__button--accept:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
