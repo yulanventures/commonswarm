@@ -50,7 +50,17 @@ const INDENT = (ids: string[]) => ids.map((id) => {
   }
   const style = (el: Element | null, keys: string[]) => el ? Object.fromEntries(keys.map(k => [k, getComputedStyle(el).getPropertyValue(k)])) : null;
   const b = box(body)?.x ?? 0;
-  return { id, found: true, targetVisible: !!target && target.getBoundingClientRect().width > 0, targetText: target?.textContent?.trim() ?? null,
+  // Visible means laid out AND painted: no ancestor (or itself) at opacity ~0, hidden or display:none.
+  const painted = (el: Element | null) => {
+    if (!el || el.getBoundingClientRect().width === 0) return false;
+    for (let e: Element | null = el; e; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) < 0.05) return false;
+    }
+    return true;
+  };
+  return { id, found: true, targetVisible: painted(target), targetText: target?.textContent?.trim() ?? null,
+    hovered: row.matches(":hover"), hoverMedia: matchMedia("(hover: hover)").matches,
     row: box(row), body: box(body), meta: box(meta), author: box(author), target: box(target), markdown: box(markdown), firstLine,
     relative: { author: (box(author)?.x ?? 0) - b, target: (box(target)?.x ?? 0) - b, markdown: (box(markdown)?.x ?? 0) - b, firstLine: (firstLine?.x ?? 0) - b },
     styles: { meta: style(meta, ["display", "flex-wrap", "min-width"]), markdown: style(markdown, ["display", "max-width", "flex", "width", "margin-left", "padding-left", "text-indent"]),
@@ -222,8 +232,9 @@ async function main(): Promise<void> {
       for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         const phone = viewport.width < 768 || viewport.height < 500;
-        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1 });
-        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: true, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        // The desktop width is a mouse desktop (no touch), so :hover behaves as for the owner.
+        const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch: phone, isMobile: phone, deviceScaleFactor: 1 });
+        const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch: phone, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -358,6 +369,21 @@ async function main(): Promise<void> {
               const rowShot = `shots/indent--${i === 0 ? "to-viewer" : "from-viewer"}--${size}--${theme}.png`;
               await page.locator(`[data-signal-id="${id}"]`).first().screenshot({ path: join(OUT, rowShot) }).then(() => rowShots.push(rowShot), () => {});
             }
+            // Then each row with the pointer resting on it (the owner's report: mouse-over indents the message).
+            const hovered: unknown[] = [];
+            for (const [i, id] of indentIds.entries()) {
+              const row = page.locator(`[data-signal-id="${id}"]`).first();
+              const box = await row.boundingBox().catch(() => null);
+              if (!box) { hovered.push({ id, found: false }); continue; }
+              await page.mouse.move(1, 1);
+              await page.mouse.move(box.x + box.width * 0.6, box.y + Math.min(box.height / 2, 30), { steps: 4 });
+              await page.waitForTimeout(400);
+              hovered.push(...await page.evaluate(INDENT, [id]));
+              const rowShot = `shots/indent--${i === 0 ? "to-viewer" : "from-viewer"}--${size}--${theme}--hover.png`;
+              await row.screenshot({ path: join(OUT, rowShot) }).then(() => rowShots.push(rowShot), () => {});
+            }
+            await page.mouse.move(1, 1);
+            entry.indentHover = hovered;
             entry.indentShots = rowShots;
             // Witnesses: read-only geometry first, then native-key keyboard witnesses, which change state.
             try { entry.witness = await page.evaluate(GEOMETRY_WITNESS, DECLARED_OVERLAYS[screen.id] ?? []); }
