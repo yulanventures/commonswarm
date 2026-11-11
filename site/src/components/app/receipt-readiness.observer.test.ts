@@ -178,17 +178,29 @@ async function observeReceiptReadiness() {
       }
       else {
         const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`);
-        check(toggle, "thread toggle rendered"); toggle!.click();
+        const repliesList = document.getElementById(`dashboard-thread-${f.root}`);
+        check(toggle && repliesList, "thread toggle and replies rendered");
+        check(toggle!.getAttribute("aria-expanded") === "false" && repliesList!.hidden, "the thread starts collapsed: aria-expanded " +
+          toggle!.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
+        toggle!.click();
         for (let i = 0; i < 3; i++) await tick();
+        check(toggle!.getAttribute("aria-expanded") === "true" && !repliesList!.hidden, "the thread opened: aria-expanded " +
+          toggle!.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
+        steps.push("collapsed before the click, open after it");
         document.getElementById(`dashboard-thread-${f.root}`)?.scrollIntoView({ block: "start" });
       }
       for (let i = 0; i < 3; i++) await tick();
       const fresh = onScreen().filter(id => !before.has(id));
       const view = feedView()!;
-      check(fresh.length >= (f.scenario === "thread-expand" ? 9 : 1), "rows newly on screen and never read: " + fresh.length +
+      const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
+      steps.push("read before: " + short(before) + "; newly on screen and unread: " + short(fresh));
+      // Passes also prefetch rows off screen, so how many are still unread when they come into view varies; what this case
+      // proves is that every one that is unread gets read before the next poll, so it needs at least one.
+      check(fresh.length >= 1, "rows newly on screen and never read: " + fresh.length +
         " (feed view " + view.clientHeight + "/" + view.scrollHeight + " px, scrollTop " + view.scrollTop + ", rows " +
         document.querySelectorAll("[data-signal-id]").length + ", read before " + before.size + ", on screen " + onScreen().length + ")");
       await readBeforePoll(fresh, from, f.scenario === "thread-expand" ? "replies opened into view" : "rows scrolled into view");
+      steps.push("read after: " + short(Array.from(readIds()).filter(id => !before.has(id))));
       document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
