@@ -8398,12 +8398,13 @@ import "../../styles/kylon-command-palette.css";
           actions.append(reply);
           body.append(actions);
         }
-        /* THE ROW'S TOOLS (ruling 1): a quiet receipt and "Reply in thread" share one control strip
-           that shows on hover or keyboard focus. A tap on a touch screen focuses the row (it is
-           focusable but not a tab stop), which shows the strip the same way. */
+        /* THE ROW'S TOOLS (ruling 1): the receipt, whatever its state, and "Reply in thread" share one permanent
+           footer, so a receipt changing between quiet and problem never moves it or reorders the DOM (#385). A quiet
+           receipt is hidden at rest by opacity only and shows on hover or keyboard focus; a problem receipt
+           (data-receipt-quiet absent) stays painted. A tap on a touch screen focuses the row (it is focusable but not
+           a tab stop), which shows the strip the same way. */
         const quietTools = Array.from(body.children as ArrayLike<HTMLElement>).filter((child) =>
-          (child.className === "dashboard__message-receipt" && child.dataset.receiptQuiet !== undefined) ||
-          child.className === "dashboard__message-actions");
+          child.className === "dashboard__message-receipt" || child.className === "dashboard__message-actions");
         if (quietTools.length) {
           const tools = document.createElement("div");
           tools.className = "dashboard__message-tools";
