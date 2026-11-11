@@ -116,6 +116,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(
  * labels/profile controls. A renderer metadata redesign is a separate slice.
  * Do not revive SR-only labels or introduce new hidden actions here. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta {
+  flex: 1 1 auto;
+  min-inline-size: 0;
   gap: 2px 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown,
@@ -128,6 +130,11 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   line-height: var(--lh-base);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown {
+  /* Keep the body on its own flex line when recipient metadata is visible. */
+  flex: 1 0 100%;
+  max-inline-size: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown > * {
   max-inline-size: 70ch;
 }
 /* Compact rich text only inside conversation messages, not the Brain reader.
