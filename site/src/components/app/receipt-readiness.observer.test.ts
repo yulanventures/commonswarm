@@ -51,9 +51,11 @@ function installReceiptFixture() {
   // note's read (so no row has a receipt yet), and releasing it with settled receipts must not move or resize any row (#385).
   const firstReceiptRows = Array.from({ length: 5 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
   const held = firstReceiptRows[2]!;
-  const settledAgentReceipt = () => ({ addressed: true, receipts: [{ recipient_agent_principal_id: agent, enqueued_at: recent,
-    delivered_at: recent, leased_until: null, acked_at: recent, ack_outcome: "observed", attempt_count: 1, lease_expiry_count: 0,
-    last_error_code: null }] });
+  // first-receipt-growth-*: the same rows, but the held row's first read answers a real problem (a terminal failure),
+  // which must stay visible and still not move or resize any row.
+  const settledAgentReceipt = (outcome = "observed") => ({ addressed: true, receipts: [{ recipient_agent_principal_id: agent, enqueued_at: recent,
+    delivered_at: recent, leased_until: null, acked_at: recent, ack_outcome: outcome, attempt_count: 1, lease_expiry_count: 0,
+    last_error_code: outcome === "failed_terminal" ? "delivery_failed" : null }] });
   const root = "55555555-5555-4555-8555-555555555555";
   const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
   f.replies = replies;
@@ -81,6 +83,7 @@ function installReceiptFixture() {
         f.reads.push(read);
         if (id === held) await new Promise<void>(resolve => { f.releaseHeld = resolve; read.release = resolve; });
         read.released = true;
+        if (id === held && scenario.startsWith("first-receipt-growth-")) return Response.json(settledAgentReceipt("failed_terminal"));
         return Response.json(settledAgentReceipt());
       }
       if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) {
@@ -207,6 +210,12 @@ async function observeReceiptReadiness() {
       for (let i = 0; i < 5; i++) await tick();
       const after = geometry();
       const stateAfter = ownReceipt(f.held)!.dataset.receiptState;
+      if (f.scenario.startsWith("first-receipt-growth-")) {
+        // A real problem must be shown on the row, not hidden in the quiet tools.
+        const receipt = ownReceipt(f.held)!;
+        check(receipt.dataset.receiptOutcome === "failed_terminal" && receipt.dataset.receiptQuiet === undefined && receipt.getClientRects().length > 0,
+          "the failed receipt is a visible problem: outcome " + receipt.dataset.receiptOutcome + ", quiet " + (receipt.dataset.receiptQuiet !== undefined));
+      }
       steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held));
       const moved = (a: number, b: number) => Math.abs(a - b) > 0.5;
       const changes: string[] = [];
@@ -410,11 +419,12 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
     const chrome = await findChrome();
     const outcomes: Record<string, unknown> = {};
     for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight", "scroll-into-view", "thread-expand",
-      "first-receipt-phone", "first-receipt-desktop"]) {
+      "first-receipt-phone", "first-receipt-desktop", "first-receipt-growth-phone", "first-receipt-growth-desktop"]) {
       // The seventeen-row cases need every row on screen at once; the first-receipt cases run at a phone and a desktop width.
       const height = ["beyond-eight", "awaiting-beyond-eight", "thread-expand"].includes(scenario) ? 2400 : 900;
-      const width = scenario === "first-receipt-phone" ? 390 : 1280;
-      const { stdout } = await launchChrome(chrome, [`--window-size=${width},${scenario === "first-receipt-phone" ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
+      const phone = scenario.startsWith("first-receipt-") && scenario.endsWith("-phone");
+      const width = phone ? 390 : 1280;
+      const { stdout } = await launchChrome(chrome, [`--window-size=${width},${phone ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
       outcomes[scenario] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"))
