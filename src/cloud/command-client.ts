@@ -194,6 +194,24 @@ export interface ChannelCommandResult {
   channel: ChannelRow;
 }
 
+/** The seven workspace commands a local agent may send under its own admin grant (seat admin). */
+export type SeatAdminCommand =
+  | { kind: "rename_workspace"; name: string }
+  | { kind: "set_workspace_lead"; principal_id: string | null }
+  | { kind: "add_agent_to_workspace"; principal_id: string }
+  | { kind: "remove_agent_from_workspace"; principal_id: string }
+  | { kind: "remove_member"; user_id: string }
+  | { kind: "revoke_invitation"; invitation_id: string }
+  | { kind: "rename_organization"; display_name: string };
+
+export interface SeatAdminCommandRequest {
+  workspaceId: string;
+  command: SeatAdminCommand;
+  credential: string;
+  commandId: string;
+  signal?: AbortSignal;
+}
+
 export class ChannelCommandError extends Error {
   constructor(
     readonly status: number,
@@ -1476,5 +1494,56 @@ export class ThinCommandClient {
       clearTimeout(timer);
       callerSignal?.removeEventListener("abort", onCallerAbort);
     }
+  }
+
+  /**
+   * Seat-admin refusals are 403s whose body names the reason ({error, message}); unlike send() and
+   * sendConnect(), this reads that body so the agent sees why. The caller owns commandId, so an
+   * uncertain attempt is retried with the same id and payload.
+   */
+  async sendSeatAdmin(request: SeatAdminCommandRequest): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    const onCallerAbort = () => controller.abort();
+    request.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    let response: Response;
+    try {
+      response = await this.fetcher(commandEndpoint(this.target), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${request.credential}`,
+          apikey: this.target.anonKey,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(withClientBuild({
+          command_id: request.commandId,
+          client_version: CLIENT_PROTOCOL_VERSION,
+          workspace_id: request.workspaceId,
+          stream: { kind: "workspace" },
+          command: request.command,
+        })),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof HumanSessionError) throw error;
+      if ((error as Error).name === "AbortError") throw new CommandTransportError("command request timed out");
+      throw new CommandTransportError("command request failed before a response");
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onCallerAbort);
+    }
+    let raw: unknown = null;
+    try {
+      raw = await parsedJson(response);
+    } catch (error) {
+      if (response.ok || error instanceof CommandTransportError) throw error;
+    }
+    if (!response.ok) {
+      const fields = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const code = typeof fields.error === "string" ? fields.error : undefined;
+      const message = typeof fields.message === "string" && fields.message.length > 0 ? fields.message : code;
+      throw new CommandHttpError(response.status, message ?? `command failed (HTTP ${response.status})`, code);
+    }
+    return { httpStatus: response.status, response: responseBody(raw) };
   }
 }
