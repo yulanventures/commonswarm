@@ -236,7 +236,8 @@ test("a hosted seat's channel_read moves its read position only through what the
   const unreadOf = (result: Result | undefined, slug: string) =>
     (result!.body.channels as Array<{ slug: string; unread: boolean | null }>).find((row) => row.slug === slug)?.unread;
 
-  const [never, baseline] = run(f, [channelLs(f.handleA), channelRead(f.handleA, { channel: "general" })]);
+  // The MCP tool always passes its response budget; only such reads move the position.
+  const [never, baseline] = run(f, [channelLs(f.handleA), channelRead(f.handleA, { channel: "general", fit_bytes: 64 * 1024 })]);
   assert.equal(never!.status, 200, JSON.stringify(never));
   assert.equal(unreadOf(never, "general"), null, "no read position before the first channel_read");
   assert.equal(baseline!.status, 200, JSON.stringify(baseline));
@@ -255,7 +256,7 @@ test("a hosted seat's channel_read moves its read position only through what the
     channelLs(f.handleA),
     channelRead(f.handleA, { channel: "ops", fit_bytes: 8192 }),
     channelLs(f.handleA),
-    channelRead(f.handleA, { channel: "ops", after_id: posted[0] }),
+    channelRead(f.handleA, { channel: "ops", after_id: posted[0], fit_bytes: 64 * 1024 }),
     channelLs(f.handleA),
     channelLs(f.handleB),
   ]);
@@ -273,10 +274,10 @@ test("a hosted seat's channel_read moves its read position only through what the
   // the position stays put. A read without fit_bytes never moves it either.
   const oversized = randomUUID();
   await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
-    VALUES (${oversized}::uuid, ${f.workspace}::uuid, ${f.owner}::uuid, 'user', 'note', ${`big ${"z".repeat(9000)}`},
+    VALUES (${oversized}::uuid, ${f.workspace}::uuid, ${f.owner}::uuid, 'user', 'note', ${`big ${"z".repeat(5000)}`},
       statement_timestamp() + interval '1 day', statement_timestamp(), ${channelId}::uuid)`;
   const [tooBig, unfitted, still] = run(f, [
-    channelRead(f.handleA, { channel: "ops", after_id: posted[1], fit_bytes: 8192 }),
+    channelRead(f.handleA, { channel: "ops", after_id: posted[1], fit_bytes: 4096 }),
     channelRead(f.handleA, { channel: "ops", after_id: posted[1] }),
     channelLs(f.handleA),
   ]);

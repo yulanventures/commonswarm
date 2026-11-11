@@ -2072,10 +2072,11 @@ test("an agent's channel_ls unread clears only once channel_read has returned ev
   assert.equal(await unreadOf(slug), true, "a newer message is unread again");
 
   // A read without max_bytes (every installed client today, including a local MCP server that trims
-  // a 64 KiB page to its own 32 KiB) still reads, but never moves the position.
+  // a 64 KiB page to its own 32 KiB) still reads, but never moves the position. Five notes near the
+  // 8,000-character body limit make a page the local MCP server would trim.
   const notes: string[] = [];
   for (let i = 0; i < 5; i += 1) {
-    const note = await send(f.ownerJwt, installedPost({ channel: slug, body: `legacy ${i} ${"y".repeat(8000)}` }));
+    const note = await send(f.ownerJwt, installedPost({ channel: slug, body: `legacy ${i} ${"y".repeat(7900)}` }));
     assert.equal(note.status, 200, JSON.stringify(note.body));
     notes.push(String(signalOf(note.body).id));
   }
