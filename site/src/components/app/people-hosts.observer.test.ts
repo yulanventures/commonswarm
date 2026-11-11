@@ -20,15 +20,25 @@ async function observePeopleModal() {
     const until = await now() + 10_000;
     while (!predicate()) { if (await now() >= until) throw new Error("timed out at " + name); }
   };
-  const door = () => [...document.querySelectorAll<HTMLButtonElement>("[data-roster-open]")].find(visible)!;
+  const door = () => [...document.querySelectorAll<HTMLButtonElement>('[data-roster-open], button[aria-label="Open navigation"]')].find(visible)!;
+  const openPeople = async () => {
+    const entry = door(); entry.focus();
+    if (entry.matches('[aria-label="Open navigation"]')) {
+      entry.click();
+      await wait("drawer person", () => visible(one(`[data-rail-person="${f.owner}"]`)));
+      const person = one<HTMLElement>(`[data-rail-person="${f.owner}"]`)!;
+      person.focus(); person.click(); return person;
+    }
+    entry.click(); return entry;
+  };
   const modal = () => one<HTMLDialogElement>("[data-roster-dialog]")!;
   const deepLink = new URL(location.href).searchParams.get("deep") === "1";
   try {
     await wait("workspace door", () => visible(door()));
-    const opener = door(), background = one<HTMLElement>("[data-home-route-pane]")!;
+    let opener: HTMLElement = door(); const background = one<HTMLElement>("[data-home-route-pane]")!;
     let before = location.pathname + location.search;
-    if (!deepLink) { opener.focus(); opener.click(); }
-    await wait("People content", () => visible(one("[data-people-context]")));
+    if (!deepLink) opener = await openPeople();
+    await wait("People content", () => visible(one("[data-people-context]")) || visible(one("#pd-detail-title")));
     check(modal()?.matches(":modal"), "People & agents must be a native modal, not a page");
     check(new URL(location.href).searchParams.get("v") === "people", "open modal URL is missing");
     check(!background.contains(one("[data-people-context]")), "People replaced the background route");
@@ -62,9 +72,9 @@ async function observePeopleModal() {
     one<HTMLButtonElement>("[data-roster-close]")!.click();
     check(!modal().open && !new URL(location.href).searchParams.has("v"), "Close left People in the URL");
     if (!deepLink) check(location.pathname + location.search === before, "Close changed the underlying route");
-    check(document.activeElement === opener || document.activeElement?.matches("[data-roster-open]"), "Close did not return focus to a workspace door");
-    door().click();
-    await wait("reopen", () => modal().open && visible(one("[data-people-context]")));
+    check(document.activeElement === opener || document.activeElement?.matches('[data-roster-open], button[aria-label="Open navigation"]'), "Close did not return focus to a workspace door");
+    await openPeople();
+    await wait("reopen", () => modal().open && (visible(one("[data-people-context]")) || visible(one("#pd-detail-title"))));
     check(one("[data-people-detail]") === detail, "reopen lost the persistent detail host");
     one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
     await wait("reopened agent detail", () => visible(one("#pd-detail-title")));
