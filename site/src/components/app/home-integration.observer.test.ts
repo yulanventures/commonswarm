@@ -1341,6 +1341,7 @@ test('Add agent receives the viewer first name and Home and Done leave that scre
     const session = { user: { id: 'tom', email: 'tom@example.test', user_metadata: { user_name: 'Tom Langridge' } } };
     const accountName = () => accountLabel;
     const picker = { reset() {}, setContext(value) { seen.push(value); } };
+    const existingAgentChoiceIsCurrent = undefined;
     const one = selector => selector === 'agent-host-picker' ? picker : null;
     const navigated = [], stopped = [];
     const navigateHome = (route, mode) => { navigated.push({ route, mode }); };

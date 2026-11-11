@@ -43,7 +43,7 @@ function installExistingAgentFixture() {
         workspaces: [{ workspace_id: other, workspace_name: "Studio", org_id: org, org_name: "Household", revoked_at: null, archived_at: null }] }]);
     }
     if (url.pathname === "/rest/v1/agent_principals") {
-      if (f.failRoster) { f.failRoster = false; return Response.json({ message: "synthetic roster failure" }, { status: 503 }); }
+      if (f.failRoster) return Response.json({ message: "synthetic roster failure" }, { status: 503 });
       const target = url.searchParams.get("workspace_id");
       return Response.json(f.added && target === "eq." + workspace ? [{ principal_id: agent, name: "Atlas Research & Long-Running Investigations", model: "Claude",
         transport: "hosted_mcp", turn_only: true, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: recent }] : []);
@@ -151,6 +151,7 @@ async function observeExistingAgent() {
         await wait("added receipt", () => notice().textContent?.includes("added.") && add().textContent === "Added");
         if (f.scenario === "refresh-error") {
           await wait("refresh accepted add", () => notice().textContent?.includes("Couldn't refresh"));
+          f.failRoster = false; // The read service recovers; the UI retry must not post another add.
           one<HTMLButtonElement>("[data-ahp-existing-list] .workspace-agent-picker__retry")!.click();
         }
         await wait("authoritative roster", () => !!one(`[data-kylon-agent="${f.agent}"], [data-home-agent="${f.agent}"], [data-rail-agent="${f.agent}"]`));
@@ -175,7 +176,7 @@ async function observeExistingAgent() {
 
 test("existing agents: three real clicks add the selected identity; reads, refusals and stale results remain honest", { timeout: 180_000 }, async () => {
   const { markup, styles, bundled } = await renderAstroFixture(new URL("../app/LiveDashboard.astro", import.meta.url));
-  const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
+  const app = "<!doctype html><html><head><meta charset='utf-8'><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixtureFunction(new URL(import.meta.url), "installExistingAgentFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixtureFunction(new URL(import.meta.url), "observeExistingAgent") + "</script></body></html>";
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));

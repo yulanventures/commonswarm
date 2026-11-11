@@ -474,10 +474,10 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       }
     }
 
-    /* One page: the title and the app pills never leave; the chosen app's panel sits under them,
-       and stays there with the lime joined line once its agent joins. */
+    /* Cold setup keeps its app pills. Existing identities have their own short list
+       with a return to app selection, keeping the third action in view on phones. */
     #show(view: string): void {
-      this.querySelector<HTMLElement>("[data-ahp-view='grid']")!.hidden = false;
+      this.querySelector<HTMLElement>("[data-ahp-view='grid']")!.hidden = view === "existing";
       const panelId = view === "joined" ? this.#shownHost : view;
       for (const panel of this.querySelectorAll<HTMLElement>("[data-ahp-detail]")) {
         panel.hidden = panel.dataset.ahpDetail !== panelId;
