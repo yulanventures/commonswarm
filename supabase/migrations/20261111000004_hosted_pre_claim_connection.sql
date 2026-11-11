@@ -39,13 +39,16 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
   LEFT JOIN commonswarm_oauth.refresh_family_tombstones family ON family.grant_id = g.provider_grant_id
   WHERE ga.principal_id = p_principal AND ga.owner_user_id = p_owner AND ga.revoked_at IS NULL
    AND swarm.hosted_binding_eligible(g.grant_id, p_workspace, p_principal)
-   -- A seat ended deliberately here (seat_release, or removal) is final until a person adds the agent
-   -- again: only a live add receipt newer than that seat's end restores the pre-claim reading.
+   -- An ended seat here is final until a person adds the agent again: this grant's own ended seat, or any
+   -- deliberately ended one (seat_release or removal, which tombstone it). Only a live add receipt newer than
+   -- that seat's end restores the pre-claim reading. A different grant's seat closed without a tombstone
+   -- (reconnect moving the agent to this grant) does not block it.
    AND NOT EXISTS (
     SELECT 1 FROM swarm.hosted_mcp_seats prior
-    JOIN swarm.revocation_tombstones ended ON ended.kind = 'hosted_seat' AND ended.target_id = prior.seat_id
     WHERE prior.workspace_id = p_workspace AND prior.principal_id = p_principal AND prior.owner_user_id = p_owner
      AND prior.revoked_at IS NOT NULL
+     AND (prior.grant_id = g.grant_id OR EXISTS (
+      SELECT 1 FROM swarm.revocation_tombstones ended WHERE ended.kind = 'hosted_seat' AND ended.target_id = prior.seat_id))
      AND NOT EXISTS (
       SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds again
       WHERE again.grant_id = g.grant_id AND again.workspace_id = p_workspace AND again.principal_id = p_principal
