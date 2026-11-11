@@ -52,6 +52,7 @@ async function observePeopleModal() {
     check(new URL(location.href).searchParams.get("v") === "people", "open modal URL is missing");
     check(!background.contains(one("[data-people-context]")), "People replaced the background route");
     const detail = one<HTMLElement>("[data-people-detail]")!;
+    await wait("modal entry focus", () => modal().contains(document.activeElement));
     door().focus();
     check(modal().contains(document.activeElement), "background control took modal focus");
     const rect = modal().getBoundingClientRect();
@@ -91,7 +92,7 @@ async function observePeopleModal() {
     document.documentElement.dataset.peopleObservation = JSON.stringify({ ok: true, width: innerWidth, deepLink });
   } catch (error) {
     document.documentElement.dataset.peopleObservation = JSON.stringify({ error: String(error), stage,
-      state: one("live-dashboard")?.getAttribute("data-state"), open: modal()?.open, requests: f.requests.slice(-10), errors: f.errors });
+      state: one("live-dashboard")?.getAttribute("data-state"), open: modal()?.open, active: document.activeElement?.outerHTML.slice(0,300), openDialogs: [...document.querySelectorAll("dialog[open]")].map(d => d.className), requests: f.requests.slice(-10), errors: f.errors });
   }
 }
 
