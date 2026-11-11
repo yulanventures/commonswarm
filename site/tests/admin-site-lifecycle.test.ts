@@ -135,6 +135,8 @@ async function componentView(fetcher: typeof fetch) {
         export const client = () => ({ auth: { onAuthStateChange() {} } });
         export const uuid = () => "unused";
         export const postCommand = () => { throw new Error("Unexpected command"); };
+        export const myOrganizations = async () => [];
+        export const myWorkspaces = async () => [];
       ` }));
     } }] });
   const elements = new Map<string, ViewElement>();
@@ -174,6 +176,7 @@ test("admin-site-lifecycle renders owned dependencies and plain renewal labels, 
     const one = await componentView(async (url, options) => {
       if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
       const body = JSON.parse(String(options?.body));
+      if (body.resource === "seat_admin_status") return Response.json({ enabled: false });
       const page: typeof fixture = { ...fixture, grants: [], clients: [], workers: [], coverage: [], actions: [] };
       if (body.resource === "admin_grants") page.grants = [{ ...grant, capability_names: ["admin_archive_workspace"] }];
       if (body.resource === "admin_workers") page.workers = fixture.workers.map(row => ({ ...row, grant_id: foreignRow && collection === "workers" ? foreign : owner }));

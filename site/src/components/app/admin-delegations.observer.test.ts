@@ -55,6 +55,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
         else throw new Error("Unexpected command kind");
         return Response.json({ status: "accepted", events: [] });
       }
+      if (body.resource === "seat_admin_status") return Response.json({ enabled: false });
       const visibleClient = metadataChanged ? { ...fixture.clients[0], verification_version: 3, reapproval_required: !reapproved,
         approval: reapproved ? { ...fixture.clients[0].approval, verification_version: 3 } : null } :
         { ...fixture.clients[0], approval: { ...fixture.clients[0].approval, withdrawn_at: approvalWithdrawn ? fixture.grants[0].created_at : null } };

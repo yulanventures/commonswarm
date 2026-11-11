@@ -48,6 +48,7 @@ import "../../styles/kylon-account-dialogs.css";
 import "../../styles/account-agents.css";
 import "../../styles/dashboard-welcome.css";
 import "../../styles/kylon-todos.css";
+import "../../styles/kylon-seat-admin.css";
 import "../../styles/kylon-todos-context.css";
 import "../../styles/kylon-onboarding.css";
 import "../../styles/kylon-entity-profile.css";
@@ -1487,6 +1488,32 @@ import "../../styles/kylon-command-palette.css";
     revokeConnectedAppSeat,
     type ConnectedApp,
   } from "../../lib/connected-apps";
+  import {
+    buildSeatAdminConfirmation,
+    buildSeatAdminPanel,
+    type SeatAdminDuration,
+    type SeatAdminGrantDraft,
+    type SeatAdminRoleLevel,
+  } from "../../lib/seat-admin-view";
+  import {
+    clearSeatAdminReauthIntent,
+    endSeatAdmin,
+    grantSeatAdmin,
+    hasActiveGrantForTarget,
+    hasFreshInteractiveSession,
+    nonActiveSeatAdminGrantMessage,
+    readMySeatAdminGrants,
+    readSeatAdminReauthIntent,
+    readSeatAdminStatus,
+    resolveSeatAdminPanelModel,
+    saveSeatAdminReauthIntent,
+    seatAdminRemovalReceipt,
+    type SeatAdminGrantRow,
+    type SeatAdminStatusResponse,
+    type SeatAdminUnresolvedAttempt,
+  } from "../../lib/seat-admin";
+
+  type SeatAdminConfirmationHandle = ReturnType<typeof buildSeatAdminConfirmation>;
 
   interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string; leadAgentPrincipalId?: string | null }
 
@@ -4879,7 +4906,7 @@ import "../../styles/kylon-command-palette.css";
             else if (action === "release") steerHomeTodo(row.todoId, { kind: "gate", gate: { kind: "none" } });
             else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
           } })]);
-        mountRenewalEndDate(slot, id); restoreConnectionDateFocus(slot, endDateFocus); return;
+        mountRenewalEndDate(slot, id); mountSeatAdminPanel(slot, id, "agent"); restoreConnectionDateFocus(slot, endDateFocus); return;
       }
       if (homeTodosState === "absent") {
         if (homeRoute.view === "todo") homePaneMessage("Could not load this to-do.", "");
@@ -5441,7 +5468,7 @@ import "../../styles/kylon-command-palette.css";
       if (historyMode !== "pop") window.history[historyMode === "push" ? "pushState" : "replaceState"](
         { home: true, homePrevious: historyMode === "push" ? previous : window.history.state?.homePrevious === true }, "", routeHref(route));
       catchUpGeneration += 1;
-      closeEntityPanel(false); if (route.view !== "people") closeRosterDialog(); closeWorkspaceDetailsDialog();
+      closeEntityPanel(false); disposeSeatAdminDialog(); if (route.view !== "people") closeRosterDialog(); closeWorkspaceDetailsDialog();
       if (route.view === "new") { openNewWorkspace(); focusHomeView(); return; }
       if (route.view === "catchup") {
         // The old workspace cannot repaint while cross-workspace reads are in flight.
@@ -5725,6 +5752,902 @@ import "../../styles/kylon-command-palette.css";
         } }));
     };
 
+    let seatAdminSessionGeneration = 0;
+    let seatAdminGeneration = 0;
+    let nextSeatAdminAttemptId = 0;
+    let seatAdminUserId = "";
+    let seatAdminStatusState:
+      | { phase: "idle" | "loading" }
+      | { phase: "error"; message: string }
+      | { phase: "loaded"; status: SeatAdminStatusResponse } = { phase: "idle" };
+    let seatAdminGrantsState:
+      | { phase: "idle" | "loading" }
+      | { phase: "error"; message: string }
+      | { phase: "loaded"; grants: SeatAdminGrantRow[] } = { phase: "idle" };
+    let seatAdminOrganizations: Organization[] = [];
+    let pendingSeatAdminReauthNotice = false;
+    const seatAdminRemovingLevels = new Map<string, Set<SeatAdminRoleLevel>>();
+    const seatAdminReceipts = new Map<string, string>();
+    const seatAdminErrors = new Map<string, string>();
+    const seatAdminRemoveCommandIds = new Map<string, string>();
+    const seatAdminUnresolvedAttempts = new Map<string, SeatAdminUnresolvedAttempt>();
+    const seatAdminRetainedConfirmations = new Map<
+      string,
+      {
+        handle: SeatAdminConfirmationHandle;
+        userId: string;
+        workspaceId: string;
+        setOpener: (next: HTMLElement | null) => void;
+      }
+    >();
+    const seatAdminAttemptKey = (
+      userId: string,
+      workspaceId: string,
+      principalId: string,
+      level: SeatAdminRoleLevel,
+    ): string =>
+      level === "workspace"
+        ? `${userId.toLowerCase()}:${workspaceId.toLowerCase()}:${principalId.toLowerCase()}:workspace`
+        : `${userId.toLowerCase()}:org:${principalId.toLowerCase()}:organization`;
+    const seatAdminNoticeKey = (workspaceId: string, principalId: string): string =>
+      `${workspaceId.toLowerCase()}:${principalId.toLowerCase()}`;
+    const setSeatAdminReceipt = (workspaceId: string, principalId: string, text: string): void => {
+      seatAdminReceipts.set(seatAdminNoticeKey(workspaceId, principalId), text);
+    };
+    const clearSeatAdminReceipt = (workspaceId: string, principalId: string): void => {
+      seatAdminReceipts.delete(seatAdminNoticeKey(workspaceId, principalId));
+    };
+    const setSeatAdminError = (workspaceId: string, principalId: string, text: string): void => {
+      seatAdminErrors.set(seatAdminNoticeKey(workspaceId, principalId), text);
+    };
+    const clearSeatAdminError = (workspaceId: string, principalId: string): void => {
+      seatAdminErrors.delete(seatAdminNoticeKey(workspaceId, principalId));
+    };
+    let activeSeatAdminDialog: {
+      handle: SeatAdminConfirmationHandle;
+      principalId: string;
+      level: SeatAdminRoleLevel;
+      userId: string;
+      workspaceId: string;
+    } | null = null;
+
+    const disposeSeatAdminDialog = (): void => {
+      const current = activeSeatAdminDialog;
+      activeSeatAdminDialog = null;
+      if (!current) return;
+      current.handle.close();
+      current.handle.dialog.remove();
+    };
+
+    const deleteSeatAdminAttempt = (attemptKey: string): void => {
+      seatAdminUnresolvedAttempts.delete(attemptKey);
+      const retained = seatAdminRetainedConfirmations.get(attemptKey);
+      seatAdminRetainedConfirmations.delete(attemptKey);
+      if (retained && activeSeatAdminDialog?.handle !== retained.handle) {
+        retained.handle.dispose();
+      }
+    };
+
+    const resetSeatAdminState = (): void => {
+      disposeSeatAdminDialog();
+      for (const retained of seatAdminRetainedConfirmations.values()) {
+        retained.handle.dispose();
+      }
+      seatAdminRetainedConfirmations.clear();
+      seatAdminSessionGeneration += 1;
+      seatAdminGeneration += 1;
+      seatAdminUserId = "";
+      seatAdminStatusState = { phase: "idle" };
+      seatAdminGrantsState = { phase: "idle" };
+      seatAdminOrganizations = [];
+      seatAdminRemovingLevels.clear();
+      seatAdminReceipts.clear();
+      seatAdminErrors.clear();
+      seatAdminRemoveCommandIds.clear();
+      seatAdminUnresolvedAttempts.clear();
+      if (session && !readSeatAdminReauthIntent(session.user.id)) {
+        clearSeatAdminReauthIntent();
+      }
+    };
+
+    const knownSeatAdminOrganizations = (): Array<{ id: string; name: string }> => {
+      const byId = new Map<string, string>();
+      for (const ws of workspaces) {
+        if (ws.orgId && ws.orgName?.trim()) {
+          byId.set(ws.orgId.toLowerCase(), ws.orgName.trim());
+        }
+      }
+      for (const org of moveOrganizations) {
+        if (org.id && org.name?.trim()) {
+          byId.set(org.id.toLowerCase(), org.name.trim());
+        }
+      }
+      for (const org of seatAdminOrganizations) {
+        if (org.id && org.name?.trim()) {
+          byId.set(org.id.toLowerCase(), org.name.trim());
+        }
+      }
+      return Array.from(byId, ([id, name]) => ({ id, name }));
+    };
+
+    const resolveAgentSeatAdmin = (principalId: string) => {
+      const lowerId = principalId.toLowerCase();
+      const currentUserId = session?.user.id.toLowerCase() ?? "";
+      const currentWorkspaceId = activeWorkspaceId.toLowerCase();
+      const agent = agents.find(row => row.principalId.toLowerCase() === lowerId) ?? null;
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId) ?? null;
+      const wsAttempt =
+        currentUserId && currentWorkspaceId
+          ? seatAdminUnresolvedAttempts.get(seatAdminAttemptKey(currentUserId, currentWorkspaceId, lowerId, "workspace"))
+          : undefined;
+      const orgAttempt =
+        currentUserId && currentWorkspaceId
+          ? seatAdminUnresolvedAttempts.get(seatAdminAttemptKey(currentUserId, currentWorkspaceId, lowerId, "organization"))
+          : undefined;
+      const unresolvedLevels = new Set<SeatAdminRoleLevel>();
+      if (wsAttempt && (wsAttempt.phase === "pending" || wsAttempt.phase === "unknown")) {
+        unresolvedLevels.add("workspace");
+      }
+      if (orgAttempt && (orgAttempt.phase === "pending" || orgAttempt.phase === "unknown")) {
+        unresolvedLevels.add("organization");
+      }
+      const unresolvedNotice =
+        (wsAttempt?.phase === "unknown" ? wsAttempt.notice : null) ??
+        (orgAttempt?.phase === "unknown" ? orgAttempt.notice : null) ??
+        (wsAttempt?.phase === "reconciled" ? wsAttempt.notice : null) ??
+        (orgAttempt?.phase === "reconciled" ? orgAttempt.notice : null);
+      const noticeKey = seatAdminNoticeKey(currentWorkspaceId, lowerId);
+      return resolveSeatAdminPanelModel({
+        signedIn: Boolean(session),
+        sampleMode,
+        viewerUserId: session?.user.id ?? null,
+        agent: agent
+          ? {
+              principalId: agent.principalId,
+              name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, identityRoster().agents),
+              ownerUserId: agent.ownerUserId,
+              transport: agent.transport ?? "local",
+              turnOnly: agent.turnOnly === true,
+              revokedAt: null,
+            }
+          : null,
+        currentWorkspace: workspace ? { id: workspace.id, name: workspace.name, orgId: workspace.orgId } : null,
+        knownOrganizations: knownSeatAdminOrganizations(),
+        statusState: seatAdminStatusState,
+        grantsState: seatAdminGrantsState,
+        removingLevels: seatAdminRemovingLevels.get(noticeKey),
+        unresolvedLevels,
+        receipt: seatAdminReceipts.get(noticeKey) ?? null,
+        error: seatAdminErrors.get(noticeKey) ?? unresolvedNotice,
+        historyHref: "/app?admin=history",
+      });
+    };
+
+    const syncSeatAdminSlots = (): void => {
+      for (const slotEl of all<HTMLElement>("[data-seat-admin-slot]")) {
+        const principalId = slotEl.dataset.seatAdminSlot ?? "";
+        if (!principalId) continue;
+        const activeEl = document.activeElement instanceof HTMLElement && slotEl.contains(document.activeElement)
+          ? document.activeElement
+          : null;
+        const focusSelector = activeEl?.dataset.seatAdminToggle
+          ? `[data-seat-admin-toggle="${CSS.escape(activeEl.dataset.seatAdminToggle)}"]`
+          : activeEl?.classList.contains("sa-admin__history")
+          ? ".sa-admin__history"
+          : activeEl?.tagName === "BUTTON" && activeEl.textContent === "Retry"
+          ? "button.sa-button:not([data-seat-admin-toggle])"
+          : null;
+        const resolved = resolveAgentSeatAdmin(principalId);
+        if (resolved.panel.state === "hidden") {
+          slotEl.hidden = true;
+          slotEl.replaceChildren();
+          continue;
+        }
+        const panelEl = buildSeatAdminPanel(document, resolved.panel, {
+          enable: (level, trigger) => {
+            openSeatAdminConfirmation(principalId, level, trigger);
+          },
+          remove: (grantId, trigger) => {
+            const loadedGrant =
+              seatAdminGrantsState.phase === "loaded"
+                ? seatAdminGrantsState.grants.find(g => g.grantId === grantId.toLowerCase())
+                : undefined;
+            const level: SeatAdminRoleLevel =
+              loadedGrant?.level ??
+              (resolved.activeGrants.organization?.grantId === grantId.toLowerCase()
+                ? "organization"
+                : "workspace");
+            void removeSeatAdminLevel(principalId, level, grantId, trigger);
+          },
+          retry: () => {
+            void refreshSeatAdminState(true);
+          },
+          history: (event) => {
+            if (
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey ||
+              event.defaultPrevented
+            ) {
+              return;
+            }
+            event.preventDefault();
+            window.dispatchEvent(new CustomEvent("commonswarm:admin-access-open", { detail: { scope: "account" } }));
+          },
+        });
+        if (!panelEl) {
+          slotEl.hidden = true;
+          slotEl.replaceChildren();
+          continue;
+        }
+        slotEl.hidden = false;
+        slotEl.replaceChildren(panelEl);
+        if (focusSelector) {
+          slotEl.querySelector<HTMLElement>(focusSelector)?.focus({ preventScroll: true });
+        }
+      }
+    };
+
+    const removeSeatAdminLevel = async (
+      principalId: string,
+      level: SeatAdminRoleLevel,
+      grantId: string,
+      trigger: HTMLElement,
+    ): Promise<void> => {
+      if (!session || sampleMode || !activeWorkspaceId) return;
+      const ownSession = session;
+      const ownerUserId = ownSession.user.id.toLowerCase();
+      const ownerWorkspaceId = activeWorkspaceId.toLowerCase();
+      const lowerAgentId = principalId.toLowerCase();
+      const lowerGrantId = grantId.toLowerCase();
+      const noticeKey = seatAdminNoticeKey(ownerWorkspaceId, lowerAgentId);
+      const attemptSessionGen = seatAdminSessionGeneration;
+      let removing = seatAdminRemovingLevels.get(noticeKey);
+      if (!removing) {
+        removing = new Set<SeatAdminRoleLevel>();
+        seatAdminRemovingLevels.set(noticeKey, removing);
+      }
+      if (removing.has(level)) return;
+      removing.add(level);
+      clearSeatAdminReceipt(ownerWorkspaceId, lowerAgentId);
+      clearSeatAdminError(ownerWorkspaceId, lowerAgentId);
+      syncSeatAdminSlots();
+
+      const commandId = seatAdminRemoveCommandIds.get(lowerGrantId) ?? uuid();
+      seatAdminRemoveCommandIds.set(lowerGrantId, commandId);
+      const outcome = await endSeatAdmin(ownSession, commandId, lowerGrantId);
+      if (
+        seatAdminSessionGeneration !== attemptSessionGen ||
+        session?.user.id.toLowerCase() !== ownerUserId ||
+        sampleMode
+      ) {
+        return;
+      }
+      removing.delete(level);
+      if (outcome.kind === "accepted") {
+        seatAdminRemoveCommandIds.delete(lowerGrantId);
+        await refreshSeatAdminState(true);
+        if (
+          seatAdminSessionGeneration !== attemptSessionGen ||
+          session?.user.id.toLowerCase() !== ownerUserId ||
+          sampleMode
+        ) {
+          return;
+        }
+        if (activeWorkspaceId.toLowerCase() === ownerWorkspaceId) {
+          const afterResolved = resolveAgentSeatAdmin(principalId);
+          const receipt = seatAdminRemovalReceipt(
+            level,
+            afterResolved.activeGrants.workspace !== null,
+            afterResolved.activeGrants.organization !== null,
+          );
+          setSeatAdminReceipt(ownerWorkspaceId, lowerAgentId, receipt);
+          clearSeatAdminError(ownerWorkspaceId, lowerAgentId);
+          syncSeatAdminSlots();
+          const focusBtn =
+            app.querySelector<HTMLElement>(
+              `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+            ) ?? trigger;
+          if (focusBtn?.isConnected) focusBtn.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (outcome.kind === "refused") {
+        seatAdminRemoveCommandIds.delete(lowerGrantId);
+      }
+      setSeatAdminError(ownerWorkspaceId, lowerAgentId, outcome.message);
+      await refreshSeatAdminState(true);
+      if (activeWorkspaceId.toLowerCase() === ownerWorkspaceId) {
+        syncSeatAdminSlots();
+      }
+    };
+
+    const openSeatAdminConfirmation = (
+      principalId: string,
+      level: SeatAdminRoleLevel,
+      trigger?: HTMLElement | null,
+      reauthOptions?: {
+        scopeId?: string;
+        days?: SeatAdminDuration;
+        initialMessage?: string;
+      },
+    ): void => {
+      if (!session || sampleMode || !activeWorkspaceId) return;
+      const ownerUserId = session.user.id.toLowerCase();
+      const ownerWorkspaceId = activeWorkspaceId.toLowerCase();
+      const lowerAgentId = principalId.toLowerCase();
+      const resolved = resolveAgentSeatAdmin(principalId);
+      if (resolved.panel.state !== "ready") return;
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId);
+      const scopes =
+        level === "workspace"
+          ? workspace
+            ? [{ id: workspace.id.toLowerCase(), name: workspace.name }]
+            : []
+          : resolved.eligibleOrganizations;
+      if (scopes.length === 0) return;
+
+      disposeSeatAdminDialog();
+      const attemptKey = seatAdminAttemptKey(ownerUserId, ownerWorkspaceId, lowerAgentId, level);
+      if (reauthOptions) {
+        deleteSeatAdminAttempt(attemptKey);
+      }
+      const existingAttempt = seatAdminUnresolvedAttempts.get(attemptKey);
+      const retained = !reauthOptions ? seatAdminRetainedConfirmations.get(attemptKey) : undefined;
+      const returnTrigger =
+        trigger ??
+        app.querySelector<HTMLElement>(
+          `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+        );
+
+      if (
+        existingAttempt &&
+        retained &&
+        retained.userId === ownerUserId &&
+        retained.workspaceId === ownerWorkspaceId
+      ) {
+        retained.setOpener(returnTrigger ?? null);
+        activeSeatAdminDialog = {
+          handle: retained.handle,
+          principalId: lowerAgentId,
+          level,
+          userId: ownerUserId,
+          workspaceId: ownerWorkspaceId,
+        };
+        app.append(retained.handle.dialog);
+        retained.handle.open(returnTrigger ?? undefined);
+        if (existingAttempt.phase === "pending") {
+          retained.handle.setState({ phase: "pending" });
+        } else if (existingAttempt.phase === "unknown") {
+          retained.handle.setState({
+            phase: "unknown",
+            ...(existingAttempt.notice ? { notice: existingAttempt.notice } : {}),
+          });
+        } else {
+          retained.handle.setState({
+            phase: "confirm",
+            ...(existingAttempt.notice ? { notice: existingAttempt.notice } : {}),
+          });
+        }
+        return;
+      }
+
+      const candidateScopeId = reauthOptions?.scopeId ?? existingAttempt?.draft.scopeId;
+      const retainedScopeId =
+        candidateScopeId && scopes.some(s => s.id.toLowerCase() === candidateScopeId.toLowerCase())
+          ? candidateScopeId.toLowerCase()
+          : scopes.length === 1
+          ? scopes[0]!.id
+          : undefined;
+      const retainedDays =
+        reauthOptions?.days !== undefined
+          ? reauthOptions.days
+          : existingAttempt
+          ? existingAttempt.draft.days
+          : undefined;
+
+      let currentOpener: HTMLElement | null = returnTrigger ?? null;
+      const setOpener = (next: HTMLElement | null): void => {
+        currentOpener = next;
+      };
+
+      const handle = buildSeatAdminConfirmation(document, {
+        principalId: lowerAgentId,
+        agentName: resolved.panel.agentName ?? "this agent",
+        level,
+        scopes,
+        ...(retainedScopeId ? { scopeId: retainedScopeId } : {}),
+        ...(retainedDays !== undefined ? { days: retainedDays } : {}),
+        confirm: async draft => {
+          if (
+            activeSeatAdminDialog?.handle !== handle ||
+            !session ||
+            session.user.id.toLowerCase() !== ownerUserId ||
+            activeWorkspaceId.toLowerCase() !== ownerWorkspaceId ||
+            sampleMode
+          ) {
+            return;
+          }
+          const liveSession = session;
+          const attemptSessionGen = seatAdminSessionGeneration;
+          const priorAttempt = seatAdminUnresolvedAttempts.get(attemptKey);
+          const reusePrior =
+            priorAttempt !== undefined &&
+            priorAttempt.userId === ownerUserId &&
+            priorAttempt.workspaceId === ownerWorkspaceId &&
+            priorAttempt.principalId === lowerAgentId &&
+            priorAttempt.level === draft.level &&
+            priorAttempt.draft.scopeId.toLowerCase() === draft.scopeId.toLowerCase() &&
+            priorAttempt.draft.days === draft.days &&
+            priorAttempt.draft.expiresAt === draft.expiresAt;
+          const commandId = reusePrior ? priorAttempt.commandId : uuid();
+          const effectiveDraft: SeatAdminGrantDraft = {
+            principalId: lowerAgentId,
+            level: draft.level,
+            scopeId: draft.scopeId.toLowerCase(),
+            days: draft.days,
+            expiresAt: draft.expiresAt,
+          };
+          const attempt: SeatAdminUnresolvedAttempt = {
+            attemptId: ++nextSeatAdminAttemptId,
+            userId: ownerUserId,
+            workspaceId: ownerWorkspaceId,
+            principalId: lowerAgentId,
+            level: draft.level,
+            commandId,
+            draft: effectiveDraft,
+            phase: "pending",
+          };
+          seatAdminUnresolvedAttempts.set(attemptKey, attempt);
+          seatAdminRetainedConfirmations.set(attemptKey, {
+            handle,
+            userId: ownerUserId,
+            workspaceId: ownerWorkspaceId,
+            setOpener,
+          });
+          clearSeatAdminReceipt(ownerWorkspaceId, lowerAgentId);
+          clearSeatAdminError(ownerWorkspaceId, lowerAgentId);
+          handle.setState({ phase: "pending" });
+          syncSeatAdminSlots();
+
+          const outcome = await grantSeatAdmin(liveSession, commandId, effectiveDraft);
+          if (
+            seatAdminSessionGeneration !== attemptSessionGen ||
+            session?.user.id.toLowerCase() !== ownerUserId ||
+            sampleMode ||
+            seatAdminUnresolvedAttempts.get(attemptKey)?.attemptId !== attempt.attemptId
+          ) {
+            return;
+          }
+          const sameWorkspace = activeWorkspaceId.toLowerCase() === ownerWorkspaceId;
+          const dialogStillOpen = sameWorkspace && activeSeatAdminDialog?.handle === handle;
+          if (outcome.kind === "accepted") {
+            if (dialogStillOpen) disposeSeatAdminDialog();
+            deleteSeatAdminAttempt(attemptKey);
+            if (outcome.grant.state === "active") {
+              setSeatAdminReceipt(
+                ownerWorkspaceId,
+                lowerAgentId,
+                `${level === "workspace" ? "Workspace" : "Organization"} admin enabled.`,
+              );
+              clearSeatAdminError(ownerWorkspaceId, lowerAgentId);
+            } else {
+              clearSeatAdminReceipt(ownerWorkspaceId, lowerAgentId);
+              setSeatAdminError(
+                ownerWorkspaceId,
+                lowerAgentId,
+                nonActiveSeatAdminGrantMessage(outcome.grant.state),
+              );
+            }
+            await refreshSeatAdminState(true);
+            if (activeWorkspaceId.toLowerCase() === ownerWorkspaceId) {
+              syncSeatAdminSlots();
+              if (dialogStillOpen) {
+                const toggleBtn = app.querySelector<HTMLElement>(
+                  `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+                );
+                toggleBtn?.focus({ preventScroll: true });
+              }
+            }
+            return;
+          }
+          if (outcome.kind === "already_exists") {
+            if (dialogStillOpen) disposeSeatAdminDialog();
+            deleteSeatAdminAttempt(attemptKey);
+            setSeatAdminReceipt(ownerWorkspaceId, lowerAgentId, outcome.message);
+            clearSeatAdminError(ownerWorkspaceId, lowerAgentId);
+            await refreshSeatAdminState(true);
+            if (activeWorkspaceId.toLowerCase() === ownerWorkspaceId) {
+              syncSeatAdminSlots();
+              if (dialogStillOpen) {
+                const toggleBtn = app.querySelector<HTMLElement>(
+                  `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+                );
+                toggleBtn?.focus({ preventScroll: true });
+              }
+            }
+            return;
+          }
+          if (outcome.kind === "reauth_required") {
+            deleteSeatAdminAttempt(attemptKey);
+            if (dialogStillOpen) {
+              handle.setState({ phase: "reauthenticate", notice: outcome.message });
+            } else {
+              setSeatAdminError(ownerWorkspaceId, lowerAgentId, outcome.message);
+            }
+            if (sameWorkspace) syncSeatAdminSlots();
+            return;
+          }
+          if (outcome.kind === "refused") {
+            deleteSeatAdminAttempt(attemptKey);
+            if (dialogStillOpen) {
+              handle.setState({ phase: "error", notice: outcome.message });
+            } else {
+              setSeatAdminError(ownerWorkspaceId, lowerAgentId, outcome.message);
+            }
+            if (sameWorkspace) syncSeatAdminSlots();
+            return;
+          }
+          attempt.phase = "unknown";
+          attempt.notice = outcome.message;
+          if (dialogStillOpen) {
+            handle.setState({ phase: "unknown", notice: outcome.message });
+            syncSeatAdminSlots();
+          } else {
+            if (sameWorkspace) syncSeatAdminSlots();
+            void refreshSeatAdminState(true);
+          }
+        },
+        signIn: async draft => {
+          if (!session || session.user.id.toLowerCase() !== ownerUserId) return;
+          const userEmail = session.user.email ?? "";
+          saveSeatAdminReauthIntent({
+            userId: ownerUserId,
+            workspaceId: ownerWorkspaceId,
+            routeView: homeRoute.view === "people" ? "people" : "agent",
+            principalId: lowerAgentId,
+            level: draft.level,
+            ...(draft.scopeId ? { scopeId: draft.scopeId } : {}),
+            days: draft.days,
+          });
+          disposeSeatAdminDialog();
+          pendingSeatAdminReauthNotice = true;
+          clearCreateIntent(session.user.id);
+          requestVersion += 1;
+          householdDashboard?.clear();
+          renderedAuthUserId = "";
+          resetWorkspaceSessionState();
+          await client()?.auth.signOut({ scope: "local" });
+          session = null;
+          showAuthView("choices");
+          showPanel("signed-out");
+          const emailInput = one<HTMLInputElement>("#dashboard-email");
+          if (emailInput && userEmail) emailInput.value = userEmail;
+          authError("Sign in again to confirm agent admin access.");
+          window.requestAnimationFrame(() => {
+            const focusField =
+              emailInput && emailInput.value.trim()
+                ? one<HTMLInputElement>("#dashboard-password") ?? emailInput
+                : emailInput;
+            focusField?.focus({ preventScroll: true });
+          });
+        },
+        refresh: async () => {
+          if (
+            activeSeatAdminDialog?.handle !== handle ||
+            session?.user.id.toLowerCase() !== ownerUserId ||
+            activeWorkspaceId.toLowerCase() !== ownerWorkspaceId ||
+            sampleMode
+          ) {
+            return;
+          }
+          await refreshSeatAdminState(true);
+          if (
+            activeSeatAdminDialog?.handle !== handle ||
+            session?.user.id.toLowerCase() !== ownerUserId ||
+            activeWorkspaceId.toLowerCase() !== ownerWorkspaceId ||
+            sampleMode
+          ) {
+            return;
+          }
+          if (seatAdminGrantsState.phase !== "loaded") {
+            handle.setState({
+              phase: "unknown",
+              notice: "Could not refresh admin access yet. Try refreshing again.",
+            });
+            return;
+          }
+          const currentAttempt = seatAdminUnresolvedAttempts.get(attemptKey);
+          if (!currentAttempt) {
+            disposeSeatAdminDialog();
+            syncSeatAdminSlots();
+            const toggleBtn = app.querySelector<HTMLElement>(
+              `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+            );
+            toggleBtn?.focus({ preventScroll: true });
+            return;
+          }
+          handle.setState({
+            phase: "confirm",
+            notice: "Admin access is still off. You can retry the same request.",
+          });
+        },
+        cancel: () => {
+          const fallback = app.querySelector<HTMLElement>(
+            `[data-seat-admin-slot="${CSS.escape(principalId)}"] [data-seat-admin-toggle="${level}"]`,
+          );
+          activeSeatAdminDialog = null;
+          handle.dialog.remove();
+          syncSeatAdminSlots();
+          const currentAttempt = seatAdminUnresolvedAttempts.get(attemptKey);
+          if (currentAttempt?.phase === "unknown") {
+            void refreshSeatAdminState(true);
+          }
+          if (currentOpener && !currentOpener.isConnected && fallback?.isConnected) {
+            fallback.focus({ preventScroll: true });
+          }
+        },
+      });
+
+      activeSeatAdminDialog = {
+        handle,
+        principalId: lowerAgentId,
+        level,
+        userId: ownerUserId,
+        workspaceId: ownerWorkspaceId,
+      };
+      app.append(handle.dialog);
+      handle.open(returnTrigger ?? undefined);
+      const initialNotice =
+        reauthOptions?.initialMessage ??
+        (existingAttempt?.phase === "reconciled" ? existingAttempt.notice : null);
+      if (initialNotice) {
+        handle.setState({ phase: "confirm", notice: initialNotice });
+      }
+    };
+
+    const reauthSearchForBoot = (userId: string): string => {
+      const intent = readSeatAdminReauthIntent(userId);
+      if (!intent) return window.location.search;
+      const ws = workspaces.find((workspace) => workspace.id.toLowerCase() === intent.workspaceId);
+      if (!ws) return window.location.search;
+      const targetHref =
+        intent.routeView === "people"
+          ? routeHref({ view: "people", workspaceId: ws.id })
+          : routeHref({ view: "agent", workspaceId: ws.id, agentId: intent.principalId });
+      return targetHref.slice("/app".length);
+    };
+
+    const maybeResumeSeatAdminReauth = (): void => {
+      if (!session || sampleMode || !activeWorkspaceId) return;
+      if (seatAdminStatusState.phase !== "loaded" || !seatAdminStatusState.status.enabled) return;
+      if (seatAdminGrantsState.phase !== "loaded") return;
+      const intent = readSeatAdminReauthIntent(session.user.id);
+      if (!intent) return;
+      const currentWorkspaceId = activeWorkspaceId.toLowerCase();
+      if (intent.workspaceId !== currentWorkspaceId) return;
+      const matchingSlot = all<HTMLElement>("[data-seat-admin-slot]").find(
+        el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === intent.principalId,
+      );
+      if (!matchingSlot) return;
+
+      clearSeatAdminReauthIntent(session.user.id);
+      if (!hasFreshInteractiveSession(session.access_token)) {
+        setSeatAdminError(
+          currentWorkspaceId,
+          intent.principalId,
+          "Your session was refreshed without an interactive sign-in. Sign in again to confirm agent admin access.",
+        );
+        syncSeatAdminSlots();
+        return;
+      }
+      const resolved = resolveAgentSeatAdmin(intent.principalId);
+      if (resolved.panel.state !== "ready") return;
+      const levelSwitch = intent.level === "workspace" ? resolved.panel.workspace : resolved.panel.organization;
+      if (!levelSwitch) return;
+      const targetScopeId =
+        intent.scopeId ??
+        (intent.level === "workspace"
+          ? currentWorkspaceId
+          : resolved.eligibleOrganizations.length === 1
+          ? resolved.eligibleOrganizations[0]!.id.toLowerCase()
+          : "");
+      if (
+        targetScopeId &&
+        hasActiveGrantForTarget(seatAdminGrantsState.grants, {
+          principalId: intent.principalId,
+          level: intent.level,
+          scopeId: targetScopeId,
+        })
+      ) {
+        setSeatAdminReceipt(
+          currentWorkspaceId,
+          intent.principalId,
+          `${intent.level === "workspace" ? "Workspace" : "Organization"} admin is already active.`,
+        );
+        syncSeatAdminSlots();
+        return;
+      }
+      const scopeEligible =
+        intent.level === "workspace"
+          ? levelSwitch.mayGrant && (!targetScopeId || targetScopeId === currentWorkspaceId)
+          : levelSwitch.mayGrant &&
+            (!intent.scopeId ||
+              resolved.eligibleOrganizations.some(
+                org => org.id.toLowerCase() === intent.scopeId!.toLowerCase(),
+              ));
+      if (!scopeEligible) {
+        setSeatAdminError(
+          currentWorkspaceId,
+          intent.principalId,
+          "This admin access can no longer be enabled.",
+        );
+        syncSeatAdminSlots();
+        return;
+      }
+      const trigger = matchingSlot.querySelector<HTMLElement>(
+        `[data-seat-admin-toggle="${intent.level}"]`,
+      );
+      openSeatAdminConfirmation(intent.principalId, intent.level, trigger, {
+        scopeId: intent.scopeId,
+        days: intent.days,
+        initialMessage: "Signed in. Confirm admin access to finish.",
+      });
+    };
+
+    const refreshSeatAdminState = async (force = false): Promise<void> => {
+      if (!session || sampleMode) return;
+      const ownSession = session;
+      const userId = ownSession.user.id.toLowerCase();
+      if (seatAdminUserId && seatAdminUserId !== userId) {
+        resetSeatAdminState();
+      }
+      seatAdminUserId = userId;
+      if (!readSeatAdminReauthIntent(userId)) {
+        clearSeatAdminReauthIntent();
+      }
+      if (!force && (seatAdminStatusState.phase === "loading" || seatAdminGrantsState.phase === "loading")) {
+        return;
+      }
+      const gen = ++seatAdminGeneration;
+      if (seatAdminStatusState.phase === "idle") {
+        seatAdminStatusState = { phase: "loading" };
+      }
+      const statusRes = await readSeatAdminStatus(ownSession);
+      if (gen !== seatAdminGeneration || session?.user.id.toLowerCase() !== userId || sampleMode) {
+        return;
+      }
+      if (!statusRes.ok) {
+        if (seatAdminStatusState.phase === "loaded" && seatAdminStatusState.status.enabled) {
+          seatAdminGrantsState = { phase: "error", message: statusRes.message };
+        } else {
+          seatAdminStatusState = { phase: "error", message: statusRes.message };
+        }
+        syncSeatAdminSlots();
+        return;
+      }
+      seatAdminStatusState = { phase: "loaded", status: statusRes.status };
+      if (!statusRes.status.enabled) {
+        seatAdminGrantsState = { phase: "idle" };
+        disposeSeatAdminDialog();
+        syncSeatAdminSlots();
+        return;
+      }
+      if (seatAdminGrantsState.phase !== "loaded") {
+        seatAdminGrantsState = { phase: "loading" };
+        syncSeatAdminSlots();
+      }
+      const [grantsRes, orgsRes] = await Promise.all([
+        readMySeatAdminGrants(ownSession),
+        myOrganizations().catch(() => [] as Organization[]),
+      ]);
+      if (gen !== seatAdminGeneration || session?.user.id.toLowerCase() !== userId || sampleMode) {
+        return;
+      }
+      if (orgsRes.length > 0) {
+        seatAdminOrganizations = orgsRes;
+      }
+      if (!grantsRes.ok) {
+        seatAdminGrantsState = { phase: "error", message: grantsRes.message };
+        syncSeatAdminSlots();
+        return;
+      }
+      seatAdminGrantsState = { phase: "loaded", grants: grantsRes.grants };
+      let focusAfterReconcile: { principalId: string; level: SeatAdminRoleLevel } | null = null;
+      for (const [key, attempt] of seatAdminUnresolvedAttempts) {
+        if (attempt.userId !== userId || attempt.phase !== "unknown") continue;
+        if (hasActiveGrantForTarget(grantsRes.grants, attempt.draft)) {
+          if (
+            activeSeatAdminDialog &&
+            activeSeatAdminDialog.userId === attempt.userId &&
+            activeSeatAdminDialog.workspaceId === attempt.workspaceId &&
+            activeSeatAdminDialog.principalId === attempt.principalId &&
+            activeSeatAdminDialog.level === attempt.level
+          ) {
+            focusAfterReconcile = {
+              principalId: attempt.principalId,
+              level: attempt.level,
+            };
+            disposeSeatAdminDialog();
+          }
+          deleteSeatAdminAttempt(key);
+          setSeatAdminReceipt(
+            attempt.workspaceId,
+            attempt.principalId,
+            `${attempt.level === "workspace" ? "Workspace" : "Organization"} admin enabled.`,
+          );
+          clearSeatAdminError(attempt.workspaceId, attempt.principalId);
+        } else {
+          attempt.phase = "reconciled";
+          attempt.notice = "Admin access is still off. You can retry the same request.";
+        }
+      }
+      syncSeatAdminSlots();
+      if (focusAfterReconcile) {
+        const toggleBtn = all<HTMLElement>("[data-seat-admin-slot]")
+          .find(el => (el.dataset.seatAdminSlot ?? "").toLowerCase() === focusAfterReconcile.principalId)
+          ?.querySelector<HTMLElement>(`[data-seat-admin-toggle="${focusAfterReconcile.level}"]`);
+        toggleBtn?.focus({ preventScroll: true });
+      }
+      maybeResumeSeatAdminReauth();
+    };
+
+    const mountSeatAdminPanel = (
+      host: HTMLElement,
+      principalId: string,
+      surface: "agent" | "people",
+    ): void => {
+      if (!session || sampleMode) return;
+      const agent = agents.find(row => row.principalId.toLowerCase() === principalId.toLowerCase());
+      if (!agent || agent.ownerUserId.toLowerCase() !== session.user.id.toLowerCase()) return;
+      if (activeSeatAdminDialog && activeSeatAdminDialog.principalId !== principalId.toLowerCase()) {
+        disposeSeatAdminDialog();
+      }
+      const slotEl = document.createElement("div");
+      slotEl.dataset.seatAdminSlot = agent.principalId;
+      slotEl.dataset.seatAdminSurface = surface;
+      slotEl.hidden = true;
+      if (surface === "agent") {
+        const aside = host.querySelector<HTMLElement>(".hm-agent__aside");
+        if (!aside) return;
+        const beforeTarget = aside.querySelector<HTMLElement>("[data-hm-activity], [data-hm-remove]");
+        if (beforeTarget) aside.insertBefore(slotEl, beforeTarget);
+        else aside.append(slotEl);
+      } else {
+        const beforeTarget = host.querySelector<HTMLElement>(
+          ".pd-technical, .pd-danger-zone, [data-connection-end-date]",
+        );
+        if (beforeTarget) host.insertBefore(slotEl, beforeTarget);
+        else host.append(slotEl);
+      }
+      syncSeatAdminSlots();
+      const lowerAgentId = agent.principalId.toLowerCase();
+      const currentUserId = session.user.id.toLowerCase();
+      const currentWorkspaceId = activeWorkspaceId.toLowerCase();
+      const hasUnknownAttempt =
+        seatAdminUnresolvedAttempts.get(
+          seatAdminAttemptKey(currentUserId, currentWorkspaceId, lowerAgentId, "workspace"),
+        )?.phase === "unknown" ||
+        seatAdminUnresolvedAttempts.get(
+          seatAdminAttemptKey(currentUserId, currentWorkspaceId, lowerAgentId, "organization"),
+        )?.phase === "unknown";
+      if (seatAdminStatusState.phase === "idle" || seatAdminUserId !== currentUserId) {
+        void refreshSeatAdminState(false);
+      } else if (hasUnknownAttempt) {
+        void refreshSeatAdminState(true);
+      } else if (seatAdminStatusState.phase === "loaded" && seatAdminStatusState.status.enabled && seatAdminGrantsState.phase === "loaded") {
+        maybeResumeSeatAdminReauth();
+      }
+    };
+
+    window.addEventListener("commonswarm:seat-admin-changed", () => {
+      if (session && !sampleMode && seatAdminStatusState.phase === "loaded" && seatAdminStatusState.status.enabled) {
+        void refreshSeatAdminState(true);
+      }
+    });
+
     const peopleDialogState: PeopleDialogState = { selected: null, collapsed: new Set(), showAllAttention: false, query: "" };
     const peopleDialogReceipts = new Map<string, string>();
     const peopleDialogModel = (): PeopleDialogModel => {
@@ -5826,6 +6749,25 @@ import "../../styles/kylon-command-palette.css";
       const detail = peopleDetailHost();
       const endDateFocus = connectionDateFocus(detail);
       const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
+      if (peopleDialogState.selected === null && session && !sampleMode) {
+        const reauth = readSeatAdminReauthIntent(session.user.id);
+        if (
+          reauth &&
+          reauth.routeView === "people" &&
+          reauth.workspaceId === activeWorkspaceId.toLowerCase() &&
+          model.agents.some(agent => agent.id.toLowerCase() === reauth.principalId)
+        ) {
+          const match = model.agents.find(agent => agent.id.toLowerCase() === reauth.principalId);
+          if (match) peopleDialogState.selected = { type: "agent", id: match.id };
+        }
+      }
+      if (
+        activeSeatAdminDialog &&
+        (peopleDialogState.selected?.type !== "agent" ||
+          peopleDialogState.selected.id.toLowerCase() !== activeSeatAdminDialog.principalId)
+      ) {
+        disposeSeatAdminDialog();
+      }
       layout.peopleContext(null);
       list.hidden = false;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
@@ -5910,7 +6852,10 @@ import "../../styles/kylon-command-palette.css";
           finally { add.disabled=false; }
         });
       }
-      if (peopleDialogState.selected?.type === "agent") mountRenewalEndDate(detail, peopleDialogState.selected.id);
+      if (peopleDialogState.selected?.type === "agent") {
+        mountRenewalEndDate(detail, peopleDialogState.selected.id);
+        mountSeatAdminPanel(detail, peopleDialogState.selected.id, "people");
+      }
       restoreConnectionDateFocus(detail, endDateFocus);
       // Keep the members panel in the main pane beside the workspace rail.
       layout.peopleContext(null);
@@ -7833,6 +8778,7 @@ import "../../styles/kylon-command-palette.css";
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
       disposeCleanup();
+      resetSeatAdminState();
       listsAllowLanding = null;
       syncStandalonePage(true);
       catchUpGeneration += 1;
@@ -8620,7 +9566,10 @@ import "../../styles/kylon-command-palette.css";
       settledUnknownAgents.clear();
       const keepShell = app.dataset.state === "channel";
       stopPendingPoll();
-      if (activeWorkspaceId !== selected.id) disposeCleanup();
+      if (activeWorkspaceId !== selected.id) {
+        disposeCleanup();
+        disposeSeatAdminDialog();
+      }
       activeWorkspaceId = selected.id;
       resetHomeWorkspace();
       homeWorkClaims = [];
@@ -10818,9 +11767,17 @@ import "../../styles/kylon-command-palette.css";
           resetWorkspaceSessionState();
           showAuthView("choices");
           showPanel("signed-out");
-          authLinkError(returnedAuthError);
-          returnedAuthError = null;
+          if (pendingSeatAdminReauthNotice && !returnedAuthError) {
+            authError("Sign in again to confirm agent admin access.");
+          } else {
+            authLinkError(returnedAuthError);
+            returnedAuthError = null;
+          }
           return;
+        }
+        pendingSeatAdminReauthNotice = false;
+        if (!readSeatAdminReauthIntent(session.user.id)) {
+          clearSeatAdminReauthIntent();
         }
         const who = accountName(session);
         for (const target of all<HTMLElement>("[data-account-name], [data-rail-account]")) {
@@ -10847,7 +11804,7 @@ import "../../styles/kylon-command-palette.css";
            reader's own memberships, so a stale or foreign id opens the default one rather
            than an error: the address bar is a convenience, never an authorization. */
         activeWorkspaceId = "";
-        await navigateHome(resolveHomeRoute(window.location.search, workspaces), "replace");
+        await navigateHome(resolveHomeRoute(reauthSearchForBoot(session.user.id), workspaces), "replace");
       } catch (error) {
         if (version !== requestVersion) return;
         if (error instanceof AuthRecoveryRequired) {
@@ -11021,6 +11978,8 @@ import "../../styles/kylon-command-palette.css";
       button.addEventListener("click", async () => {
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
+        pendingSeatAdminReauthNotice = false;
+        clearSeatAdminReauthIntent();
         if (session) clearCreateIntent(session.user.id);
         requestVersion += 1;
         householdDashboard?.clear();

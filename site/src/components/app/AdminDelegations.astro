@@ -30,6 +30,12 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       <h3 id="admin-grants-title">Your grants</h3><div data-admin-grants></div>
       <button type="button" data-admin-more-grants hidden>More grants</button>
     </section>
+    <section aria-labelledby="admin-seat-grants-title" data-admin-seat-section hidden>
+      <h3 id="admin-seat-grants-title">Agent admin grants</h3>
+      <p role="status" aria-live="polite" data-admin-seat-status hidden></p>
+      <div data-admin-seat-grants></div>
+      <button type="button" data-admin-seat-retry hidden>Retry</button>
+    </section>
     <section aria-labelledby="admin-dependencies-title">
       <h3 id="admin-dependencies-title">Workspace coverage and workers</h3>
       <div data-admin-dependencies></div>
@@ -45,8 +51,9 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
 
 <script>
   import type { Session } from "@supabase/supabase-js";
-  import { client, currentSession, uuid, CommandOutcomeUnknown } from "../../lib/commonswarm";
+  import { client, currentSession, uuid, CommandOutcomeUnknown, myOrganizations, myWorkspaces } from "../../lib/commonswarm";
   import { loadAdminRecovery, revokeAdminGrant, changeAdminClientApproval, readAdminIssuanceGate, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView, type AdminClientView, type AdminWorkerView, type AdminCoverageView } from "../../lib/admin-delegations";
+  import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList } from "../../lib/seat-admin";
 
   import { adminGateNotice, adminApprovalLines, adminClientAction, adminGrantLines, adminRenewalDiff, ADMIN_SITE_RENEWAL_GUIDANCE, type AdminSitePolicy } from "../../lib/admin-delegations-view";
   const root = document.querySelector<HTMLElement>("admin-delegations");
@@ -62,15 +69,25 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     let clientsBefore: string | null = null, workersBefore: string | null = null, coverageBefore: string | null = null;
     let grantsBefore: string | null = null, actionsBefore: string | null = null;
     let busy = false;
+    let seatBusy = false;
     let indicatorView: "account" | "workspace" = "account";
     const requestIds = new Map<string, string>();
+    const seatEndRequestIds = new Map<string, string>();
     const status = (message: string): void => { one<HTMLElement>("[data-admin-status]").textContent = message; };
+    const seatStatus = (message: string): void => {
+      const el = one<HTMLElement>("[data-admin-seat-status]");
+      el.textContent = message;
+      el.hidden = !message;
+    };
     const clear = (): void => {
       ++generation; grants = []; actions = []; clients = []; workers = []; coverage = [];
-      grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null; busy = false;
-      for (const selector of ["[data-admin-grants]", "[data-admin-actions]", "[data-admin-clients]", "[data-admin-dependencies]"]) one(selector).replaceChildren();
+      grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null; busy = false; seatBusy = false;
+      for (const selector of ["[data-admin-grants]", "[data-admin-actions]", "[data-admin-clients]", "[data-admin-dependencies]", "[data-admin-seat-grants]"]) one(selector).replaceChildren();
       for (const selector of ["[data-admin-more-clients]", "[data-admin-more-workers]", "[data-admin-more-coverage]"]) one<HTMLElement>(selector).hidden = true;
       one<HTMLElement>("[data-admin-more-grants]").hidden = true; one<HTMLElement>("[data-admin-more-actions]").hidden = true;
+      one<HTMLElement>("[data-admin-seat-section]").hidden = true;
+      one<HTMLElement>("[data-admin-seat-retry]").hidden = true;
+      seatStatus("");
       one<HTMLElement>("[data-admin-gate]").textContent = "Checking admin connection availability…";
       status("");
     };
@@ -261,16 +278,93 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         busy = false; render(); status(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
       }
     };
+    const loadSeatAdmin = async (): Promise<void> => {
+      if (!session) return;
+      const ownSession = session, at = generation, selected = scope === "workspace" ? workspaceId : null;
+      const section = one<HTMLElement>("[data-admin-seat-section]");
+      const retry = one<HTMLElement>("[data-admin-seat-retry]");
+      const container = one<HTMLElement>("[data-admin-seat-grants]");
+      const statusResult = await readSeatAdminStatus(ownSession);
+      if (generation !== at || session?.user.id !== ownSession.user.id) return;
+      if (!statusResult.ok || !statusResult.status.enabled) {
+        section.hidden = true;
+        retry.hidden = true;
+        container.replaceChildren();
+        return;
+      }
+      section.hidden = false;
+      const agentsByPrincipalId = new Map(statusResult.status.agents.map(a => [a.principalId, a.name]));
+      const [grantsResult, orgs, workspaces] = await Promise.all([
+        readMySeatAdminGrants(ownSession),
+        myOrganizations().catch(() => []),
+        myWorkspaces().catch(() => []),
+      ]);
+      if (generation !== at || session?.user.id !== ownSession.user.id) return;
+      if (!grantsResult.ok) {
+        container.replaceChildren(text("p", grantsResult.message));
+        retry.hidden = false;
+        return;
+      }
+      retry.hidden = true;
+      const organizationsById = new Map<string, string>();
+      for (const org of orgs) {
+        if (org.id && org.name?.trim()) organizationsById.set(org.id.toLowerCase(), org.name.trim());
+      }
+      const workspacesById = new Map<string, string>();
+      for (const ws of workspaces) {
+        if (ws.id && ws.name?.trim()) workspacesById.set(ws.id.toLowerCase(), ws.name.trim());
+        if (ws.orgId && ws.orgName?.trim()) organizationsById.set(ws.orgId.toLowerCase(), ws.orgName.trim());
+      }
+      const filtered = selected
+        ? grantsResult.grants.filter(g => g.workspaceIds.includes(selected.toLowerCase()) || g.level === "organization")
+        : grantsResult.grants;
+      renderSeatAdminHistoryList(container, filtered, {
+        agentsByPrincipalId,
+        workspacesById,
+        organizationsById,
+        busy: seatBusy,
+        onRemove: async (g, button) => {
+          if (!session || seatBusy) return;
+          const activeSession = session, callGen = generation;
+          const requestId = seatEndRequestIds.get(g.grantId) ?? uuid();
+          seatEndRequestIds.set(g.grantId, requestId);
+          seatBusy = true;
+          for (const btn of container.querySelectorAll<HTMLButtonElement>("[data-admin-seat-remove]")) {
+            btn.disabled = true;
+          }
+          seatStatus("Removing agent admin access…");
+          const outcome = await endSeatAdmin(activeSession, requestId, g.grantId);
+          if (generation !== callGen || session?.user.id !== activeSession.user.id) return;
+          seatBusy = false;
+          if (outcome.kind === "accepted") {
+            seatEndRequestIds.delete(g.grantId);
+            seatStatus("Agent admin access removed.");
+            window.dispatchEvent(new CustomEvent("commonswarm:seat-admin-changed"));
+            await loadSeatAdmin();
+            return;
+          }
+          if (outcome.kind === "refused") {
+            seatEndRequestIds.delete(g.grantId);
+          }
+          for (const btn of container.querySelectorAll<HTMLButtonElement>("[data-admin-seat-remove]")) {
+            btn.disabled = false;
+          }
+          button.disabled = false;
+          seatStatus(outcome.message);
+        },
+      });
+    };
     const open = (view: "account" | "workspace" = "account"): void => {
       if (!session) return;
       scope = view === "workspace" && workspaceId ? "workspace" : "account";
       clear();
       for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-view]")) button.setAttribute("aria-pressed", String(button.dataset.adminView === scope));
-      if (!dialog.open) dialog.showModal(); void load();
+      if (!dialog.open) dialog.showModal(); void load(); void loadSeatAdmin();
     };
     one("[data-admin-indicator]").addEventListener("click", () => open(indicatorView));
     one("[data-admin-close]").addEventListener("click", () => dialog.close());
-    one("[data-admin-refresh]").addEventListener("click", () => { void load(); void indicator(); });
+    one("[data-admin-refresh]").addEventListener("click", () => { void load(); void loadSeatAdmin(); void indicator(); });
+    one("[data-admin-seat-retry]").addEventListener("click", () => { void loadSeatAdmin(); });
     one("[data-admin-more-grants]").addEventListener("click", () => { void load("grants"); });
     one("[data-admin-more-actions]").addEventListener("click", () => { void load("actions"); });
     for (const collection of ["clients", "workers", "coverage"] as const) one(`[data-admin-more-${collection}]`).addEventListener("click", () => { void load(collection); });
@@ -283,6 +377,10 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         open(button.dataset.adminAccessScope === "workspace" ? "workspace" : "account");
       }
     });
+    window.addEventListener("commonswarm:admin-access-open", event => {
+      const detail = (event as CustomEvent<{ scope?: "account" | "workspace" } | undefined>).detail;
+      open(detail?.scope === "workspace" ? "workspace" : "account");
+    });
     window.addEventListener("commonswarm:workspace-selected", event => {
       const detail = (event as CustomEvent<{ workspaceId: string | null; sample?: boolean }>).detail;
       workspaceId = detail.sample ? null : detail.workspaceId;
@@ -293,13 +391,19 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     auth?.auth.onAuthStateChange((_event, next) => {
       const changed = session?.user.id !== next?.user.id;
       session = next; root.hidden = !session;
-      if (changed) { clear(); requestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
+      if (changed) { clear(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
       if (session) window.setTimeout(() => { void indicator(); }, 0);
     });
     const initialGeneration = generation;
     void currentSession().then(next => {
       if (generation !== initialGeneration) return;
-      session = next; root.hidden = !next; if (next) void indicator();
+      session = next; root.hidden = !next;
+      if (next) {
+        void indicator();
+        try {
+          if (new URLSearchParams(window.location.search).get("admin") === "history") open("account");
+        } catch { /* ignore */ }
+      }
     }).catch(() => { if (generation === initialGeneration) root.hidden = true; });
     // Human-facing status refresh, independent of the delegated runtime being online.
     window.setInterval(() => { if (!document.hidden) void indicator(); }, 30_000);

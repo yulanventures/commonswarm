@@ -45,6 +45,13 @@ const MESSAGE_STATUS_STUBS = {
   refreshChoices: async () => undefined,
   appendChoices: () => undefined,
   resetChoices: () => undefined,
+  mountSeatAdminPanel: () => undefined,
+  resetSeatAdminState: () => undefined,
+  disposeSeatAdminDialog: () => undefined,
+  readSeatAdminReauthIntent: () => null,
+  clearSeatAdminReauthIntent: () => undefined,
+  pendingSeatAdminReauthNotice: false,
+  activeSeatAdminDialog: null,
 };
 
 async function dashboardFunctions(names: string[], optionalDependencies: string[] = []): Promise<string> {
