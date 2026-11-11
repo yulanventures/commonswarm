@@ -141,6 +141,16 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     keys: [{ key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] > [data-ahp-back]' }],
     activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-host="claude"]' } },
   }],
+  "app.add-agent.existing": [{
+    name: "existing-back",
+    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-title]' },
+    keys: [
+      { key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) > [data-ahp-existing-back]' },
+      { key: "Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-list] .pd-agent-choice:first-child .pd-choice-add' },
+      { key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) > [data-ahp-existing-back]' },
+    ],
+    activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing]' } },
+  }],
   "route.terms": [{
     name: "skip-link",
     start: "document",
@@ -194,6 +204,8 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // The provider detail's Back control is visually hidden until focused; focusing it must not move the detail.
   "menu.provider": [{ name: "provider-back", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"]', max: 1,
     focus: true, focusTarget: ":scope > [data-ahp-back]", require: ['[data-ahp-detail="claude"]'] }],
+  "app.add-agent.existing": [{ name: "existing-agents", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-list] .pd-agent-choice', max: 6,
+    focus: true, focusTarget: ".pd-choice-add", require: ['[data-ahp-existing-list] .pd-agent-choice'] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
