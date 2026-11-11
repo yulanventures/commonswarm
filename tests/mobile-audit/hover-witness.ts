@@ -244,7 +244,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
           const rows = (fetches.__auditTrace ?? []).filter(t => t.ids.includes(id)).slice(-8)
             .map(t => `${t.what}#${t.n}@-${Math.round(performance.now()) - t.start}ms${t.end === undefined ? " pending" : ` ${t.http} ${t.answer ?? "?"} in ${t.end - t.start}ms`}`);
           const row = document.querySelector(`[data-signal-id="${id}"]`);
-          return `${id.slice(0, 8)} [scope=${row?.getAttribute("data-human-seen-scope") ? "reported" : "none"}; ${rows.join("; ") || "no seen report or receipt read"}]`;
+          return `${id.slice(0, 8)} [seen-scope=${row?.getAttribute("data-human-seen-scope") ? "reportable" : "none"}; ${rows.join("; ") || "no seen report or receipt read"}]`;
         };
         const at = Math.round(performance.now());
         const inflight = Array.from(fetches.__auditInflight?.values() ?? []).slice(0, 8).join(", ");

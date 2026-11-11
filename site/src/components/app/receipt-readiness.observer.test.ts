@@ -78,7 +78,7 @@ function installReceiptFixture() {
     if (url.pathname === "/rest/v1/signals") {
       f.log.push("signals");
       if (scenario === "pre-ack") return Response.json([row(signal, owner, null, agent, "agent", "A note for you.")]);
-      const rows = [row(signal, null, agent, owner, "human", "A note for the assistant.")];
+      const rows = [row(signal, null, agent, owner, "user", "A note for the assistant.")];
       if (f.withLater) rows.unshift({ ...row(later, owner, null, agent, "agent", "A note for you."), created_at: new Date().toISOString() });
       return Response.json(rows);
     }
