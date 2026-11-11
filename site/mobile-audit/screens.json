@@ -662,14 +662,25 @@
   {
     "id": "app.todo-offer",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={offerWorkspace}",
+    "setup": [
+      {
+        "waitFor": "[data-panel=\"channel\"]:not([hidden]) [data-feed-list] [data-offer-card=\"{todo.offer}\"]"
+      },
+      {
+        "scroll": "[data-feed-list] [data-offer-card=\"{todo.offer}\"]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-panel=\"channel\"]:not([hidden]) [data-feed-list] [data-offer-card=\"{todo.offer}\"] [data-offer-answer=\"decline\"]:not([disabled])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "An offer to the owner renders atop every owner feed in its workspace; needs its own workspace and the offering member Lists consent."
+    "requiresSeed": [
+      "seed_todo_offer"
+    ]
   },
   {
     "id": "app.lists-approval",
@@ -1258,13 +1269,28 @@
     "id": "menu.context",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-rail-agent=\"{agent}\"]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "contextmenu": "[data-rail-agent=\"{agent}\"]"
+      }
+    ],
+    "ready": ".cs-context-menu[role=\"menu\"] > [role=\"menuitem\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "app.definitions.proposed",
@@ -1479,13 +1505,49 @@
     "id": "app.agent.queue",
     "kind": "view",
     "path": "/app?w={workspace}&agent={agent}",
-    "setup": [],
-    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] .hm-agent__queue li",
+    "setup": [
+      {
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-up-next] .hm-agent__queue li"
+      },
+      {
+        "scroll": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-up-next]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has([data-hm-up-next] .hm-agent__queue li:nth-child(3)) [data-hm-not-yet] .hm-agent__gated:nth-child(2) .hm-agent__queue li",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Selected agent queue visibility and density are not guaranteed; confirm in the first artifact."
+    "requiresSeed": [
+      "create_workspace",
+      "seed_agent_queue"
+    ]
+  },
+  {
+    "id": "app.agent.queue.not-yet",
+    "kind": "view",
+    "path": "/app?w={workspace}&agent={agent}",
+    "setup": [
+      {
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-not-yet] .hm-agent__queue li"
+      },
+      {
+        "scroll": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"] [data-hm-not-yet]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-home-route-pane]:not([hidden]) [data-hm-agent=\"{agent}\"]:has([data-hm-up-next] .hm-agent__queue li:nth-child(3)) [data-hm-not-yet] .hm-agent__gated:nth-child(2) .hm-agent__queue li",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_agent_queue"
+    ]
   },
   {
     "id": "app.todos.empty",

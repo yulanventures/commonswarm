@@ -54,16 +54,17 @@ type Route = { request(): { postData(): string | null; resourceType(): string };
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, hover, click, type (with text), select (with option), press,
- *  scroll, wait, settle.
+/** One setup step; fields run in this order: media, waitFor, hover, click, contextmenu, type (with text), select (with option),
+ *  press, scroll, wait, settle.
+ *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; hover?: string; click?: string; type?: string; text?: string; select?: string; option?: string;
-  press?: string; wait?: number; scroll?: string; settle?: true };
+type Step = { media?: string; waitFor?: string; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+  option?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[];
@@ -100,6 +101,8 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "menu.account": ["[data-user-menu]:not([hidden])"],
   // The update notice is a fixed <aside> card floating over the feed and composer.
   "app.update-toast": ["[data-update-notice]:not([hidden])"],
+  // The right-click menu (lib/context-menu.ts) is created on open and removed on close, never hidden.
+  "menu.context": ['.cs-context-menu[role="menu"]'],
   // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
   // use a native dialog, and from 1400px it is an ordinary column beside the main one.
   "dialog.details-sheet": [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 52rem) and (width <= 1399px)" }],
@@ -140,6 +143,17 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "Shift+Tab", expect: 'dialog[data-role-confirm="{owner}"][open] [data-role-confirm-back="{owner}"]' },
     ],
     activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-people-detail] select[data-role-select="{owner}"]' } },
+  }],
+  // The right-click menu focuses its first item; arrows move between items, and Escape returns focus to the row it opened
+  // from (finish(true) in lib/context-menu.ts). Nothing is run.
+  "menu.context": [{
+    name: "context-menu-escape-returns-to-row",
+    start: { active: '.cs-context-menu[role="menu"] > .cs-context-menu__item:first-of-type' },
+    keys: [
+      { key: "ArrowDown", expect: '.cs-context-menu[role="menu"] > .cs-context-menu__item:nth-of-type(2)' },
+      { key: "ArrowUp", expect: '.cs-context-menu[role="menu"] > .cs-context-menu__item:first-of-type' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-rail-agent="{agent}"]', inView: '[data-rail-agent="{agent}"]' } },
   }],
   "dialog.people-admin-access": [{
     name: "people-admin-escape-keeps-roster",
@@ -501,6 +515,7 @@ async function main(): Promise<void> {
               }
             }
           }
+          if (step.contextmenu) await page.click(fill(step.contextmenu, seed.ids), { button: "right", timeout: 8_000 });
           if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
           if (step.select) await page.selectOption(fill(step.select, seed.ids), step.option ?? "", { timeout: 8_000 });
           if (step.press) await page.keyboard.press(step.press);
