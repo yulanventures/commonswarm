@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
+import { HOSTED_LISTS_NOTE } from "./hosted-lists-note.ts";
 import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogAccessLabel, peopleDialogCanAct, peopleConfirmationCopy,
   peopleDialogRoleOptions, peopleRoleSelfConfirmCopy, peopleRoleReceipt, peopleRoleRefusal, peopleRoleErrorCode, peopleDialogApplyFocus,
   peopleRoleBeginSave, peopleRoleFinishSave, peopleFirstName, PEOPLE_ROLE_REFUSAL_CODES } from "./people-dialog-view.ts";
@@ -47,8 +48,8 @@ test("Lists & docs facts require ownership and a successful connections read", (
   assert.equal(peopleDialogCanAct({ ...model(), agents: [{ ...value, access: null }] }, "allow", value.id), true);
   assert.equal(peopleDialogCanAct({ ...model(), agents: [value] }, "withdraw", value.id), true);
 });
-test("a hosted agent's approval is shown as withdrawable but not usable; a local agent's is unchanged", () => {
-  const note = "Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.";
+test("a hosted agent's approval carries the hosted scope note; a local agent's is unchanged", () => {
+  const note = HOSTED_LISTS_NOTE;
   const local = agent("Muse", "mei", { own: true, access: { until: null } });
   const hosted = { ...local, hosted: true };
   assert.equal(peopleDialogAccessLabel(local), ", Can use Lists & docs");

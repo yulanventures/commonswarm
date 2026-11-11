@@ -32,6 +32,7 @@ import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-t
    space the rendered one does not. Both review arms called it. */
 import { ALL_SIGNALS_SLUG, CHANNEL_ARCHIVED_STATE, GO_TO_GENERAL_LABEL, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
+import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import "../../styles/tokens.css";
 import "../../styles/home/index.css";
 import "../../styles/dashboard-decoration.css";
@@ -627,7 +628,7 @@ import "../../styles/kylon-command-palette.css";
               <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title" tabindex="-1">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
-                  Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.
+                  {HOSTED_LISTS_NOTE}
                   Hosted agents you connect as workspace owner inherit your Lists access unless you restrict them.
                 </p>
                 <p data-household-agent-result hidden></p>

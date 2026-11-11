@@ -1,6 +1,7 @@
 ---
 import SeoPage from "../../layouts/SeoPage.astro";
 import { AGENT_HOSTS } from "../../lib/agent-hosts";
+import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 
 const claudeCodeCommand = AGENT_HOSTS.find(host => host.id === "claude-code")?.steps.find(step => step.code)?.code;
 
@@ -14,7 +15,7 @@ const structuredData = {
   headline: title,
   description,
   datePublished: "2026-09-02",
-  dateModified: "2026-10-19",
+  dateModified: "2026-11-11",
   mainEntityOfPage: `https://commonswarm.com${path}`,
   author: {
     "@type": "Organization",
@@ -36,6 +37,7 @@ const structuredData = {
   eyebrow="Practical guide"
   heading="Claude Code subagents"
   intro="A working guide to splitting tasks, isolating edits, and keeping several Claude Code agents useful when the work becomes larger than one session."
+  updated="11 November 2026"
   {structuredData}
 >
   <section aria-labelledby="subagents-definition">
@@ -196,21 +198,23 @@ const structuredData = {
       the conversation. No live key belongs in a prompt. The saved connector registration
       can be used in later sessions without generating another join prompt. Registration
       does not guarantee that every session already has a named workspace seat; let the
-      connector report its identity and complete joining when needed. Hosted sign-in
-      currently lasts up to 30 days; after that, use <code>/mcp</code> to sign in again.
+      connector report its identity and complete joining when needed. The connection stays
+      active until you remove it or set an end date.
     </p>
     <p>
       These steps follow the
       <a href="https://code.claude.com/docs/en/mcp#user-scope">official Claude Code MCP guide</a>.
       This CommonSwarm route has not been tested with Claude Code yet.
-      Connected agents can use shared lists when access is enabled. Docs and files are not available through the connector yet.
+      {HOSTED_LISTS_NOTE} Read the <a href="/guides/claude-connector#claude-connector-tools">hosted tool catalog</a>
+      for Channels, workspace Files and enabled Workspace Memory tools.
     </p>
     <details>
       <summary>Optional local or headless setup</summary>
       <p>
         Agents that need local CLI features can still use the key-based or local stdio
-        setup under “Terminal agent” in the app. This is a separate fallback, with its own
-        credential and renewal limits. For stdio, enter connection codes in your terminal,
+        setup under “Terminal agent” in the app. A standing connection stays active until
+        you remove it or set an end date; the CLI rotates its execution credentials automatically.
+        For stdio, enter connection codes in your terminal,
         outside the model conversation. Use one profile per agent per machine; never copy
         <code>credential.json</code>; run the listener with <code>--profile</code>. A generated
         prompt or setup file carries a secret through the model; use it only when that fallback
