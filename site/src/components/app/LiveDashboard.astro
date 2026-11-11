@@ -7125,6 +7125,7 @@ import "../../styles/kylon-command-palette.css";
               : "everyone",
           );
         }
+        if (target.dataset.targetKind !== "everyone") target.title = target.textContent?.trim() ?? "";
         const operator = document.createElement("span");
         operator.className = "dashboard__message-operator";
         if (authorAgent) {

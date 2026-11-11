@@ -69,8 +69,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboa
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .hm-day + .dashboard__message {
   margin-block-start: 0;
 }
-/* Addressing is available in the message tools. Keep the explicit selected
- * thread root highlight, but remove resting address bands and animation tints. */
+/* The persistent header carries addressing. Keep the selected thread root
+ * highlight without adding full-width address bands or animation tints. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--direct-to-viewer:not([data-thread-reply-root]) {
   --message-row-background: transparent;
   background: transparent;
@@ -89,11 +89,45 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
   gap: 2px 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author {
-  flex-basis: 100%;
-  align-items: baseline;
-  gap: 2px 8px;
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  align-items: center;
+  gap: 2px 6px;
   font-size: 13px;
   line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name > .dashboard__message-author {
+  display: block;
+  max-inline-size: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(.hm-author__agent, .hm-author__when) {
+  flex: none;
+  white-space: nowrap;
+}
+/* Leave room for the recipient, including in grouped messages. Only names
+   truncate; the badge and clock keep their complete boxes. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:has(.dashboard__message-target:not([data-target-kind="everyone"])) .hm-author {
+  position: static;
+  inline-size: auto;
+  block-size: auto;
+  max-inline-size: calc(100% - 6rem - 8px);
+  overflow: visible;
+  clip-path: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:has(.dashboard__message-target:not([data-target-kind="everyone"])) .hm-message-time {
+  display: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__name,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta strong {
@@ -111,14 +145,50 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(
   font-variant-numeric: tabular-nums;
 }
 
-/* Metadata keeps the renderer/Home visibility contract. Agent identity,
- * ownership and model details remain available through the current accessible
- * labels/profile controls. A renderer metadata redesign is a separate slice.
- * Do not revive SR-only labels or introduce new hidden actions here. */
+/* Sender, badge, clock and recipient share one persistent header line. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta {
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  align-self: center;
+  min-inline-size: min(6rem, 100%);
+  max-inline-size: 100%;
+  gap: 2px 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta :is(.dashboard__message-handoff, .dashboard__message-target) {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta .dashboard__message-handoff-arrow {
+  flex: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta .dashboard__message-target > .dashboard__message-entity {
   flex: 1 1 auto;
   min-inline-size: 0;
-  gap: 2px 8px;
+  max-inline-size: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta > .dashboard__message-channel {
+  flex: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta:has(> .dashboard__message-channel) {
+  min-inline-size: min(8rem, 100%);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:has(.dashboard__message-meta > .dashboard__message-channel) .hm-author {
+  max-inline-size: calc(100% - 8rem - 8px);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame :is(.hm-author__name .dashboard__message-author, .dashboard__message-target .dashboard__message-entity):focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+  box-shadow: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-mentions {

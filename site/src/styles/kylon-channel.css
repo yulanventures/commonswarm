@@ -61,16 +61,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-handoff-word,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-operator,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-meta:not(:has(> :not(.dashboard__message-identity-badge, .dashboard__message-operator, .dashboard__message-kind--note, .dashboard__message-kind--ask, .dashboard__message-target[data-target-kind="everyone"]))) { display: none; }
-/* Recipient/channel metadata keeps the same header slot in every state. Tab
-   can reach its controls while opacity hides the secondary text at rest. */
-@media (hover: hover) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta {
-    opacity: 0; pointer-events: none;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-meta * {
-    opacity: 0; pointer-events: none;
-  }
-}
+/* Recipient metadata is always visible on the sender line. Its layout is
+   owned by kylon-messages.css and never changes on hover or focus. */
 /* Separate speaker turns without adding space to replies or activity rows.
  * The renderer remains the sole owner of ten-minute author grouping. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped], .dashboard__message--reply, .dashboard__message--activity) {
