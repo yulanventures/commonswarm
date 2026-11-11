@@ -714,14 +714,29 @@
   {
     "id": "app.lists-approval",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={approvalWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{approvalAgent}",
+        "click": "#pd-agent-{approvalAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{approvalAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{approvalAgent}\"]"
+      },
+      {
+        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "settle": true
+      }
+    ],
+    "ready": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "No route opens the approvals (only the roster allow action or host-picker approve), and seeded agent principals have no household_connections."
+    "requiresSeed": [
+      "seed_lists_approval"
+    ]
   },
   {
     "id": "dialog.public-menu",

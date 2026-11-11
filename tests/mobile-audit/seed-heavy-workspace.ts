@@ -536,6 +536,31 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         } else if (value?.todo_id) note("todo_create offer", `no pending offer to the viewer: ${JSON.stringify(value).slice(0, 200)}`);
       }
     } catch (error) { note("seed_todo_offer", error); }
+    // The Lists & docs agent approval (app.lists-approval), in a workspace of its own so no other capture changes: one own local
+    // agent with a live connection (device, run, renewal grant and token rows, as the p1-server household fixtures build) and
+    // no Lists approval yet, so the People dialog offers Allow and the approvals list shows its card.
+    try {
+      const approvalWorkspace = randomUUID();
+      const ready = ok("create_workspace approval", await command(owner.token, { kind: "create_workspace", workspace_id: approvalWorkspace, name: "Garden projects", org_id: workspace }, null))
+        && ok("create_agent_principal approval", await command(owner.token, { kind: "create_agent_principal", name: "Sprout", model: "claude-opus-5-5" }, approvalWorkspace))
+        && ok("household_permissions approval", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, approvalWorkspace));
+      const [agent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Sprout' AND transport = 'local'` : [];
+      if (agent) {
+        const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'Audit laptop')`;
+          await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${agent.principal_id}::uuid, ${device}::uuid)`;
+          await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, created_by, horizon_expires_at, max_successors)
+            VALUES (${family}::uuid, ${approvalWorkspace}::uuid, ${agent.principal_id}::uuid, ${run}::uuid, ${owner.id}::uuid, clock_timestamp() + interval '30 days', 800)`;
+          await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id, renewal_grant_id)
+            VALUES (${token}::uuid, ${agent.principal_id}::uuid, ${run}::uuid, '["post_signal"]', ${createHash("sha256").update(randomBytes(32)).digest()},
+              clock_timestamp() + interval '1 day', ${randomUUID()}::uuid, ${family}::uuid)`;
+        });
+        Object.assign(ids, { approvalWorkspace, approvalAgent: agent.principal_id });
+        steps.push("seed_lists_approval");
+      } else if (ready) note("seed_lists_approval", "the Sprout agent principal was not found as a local agent");
+    } catch (error) { note("seed_lists_approval", error); }
     return { owner: { email: owner.email, password: owner.password }, ids, notes, steps };
   } finally {
     await sql.end({ timeout: 5 });

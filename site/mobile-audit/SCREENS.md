@@ -301,7 +301,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
 | V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
 | V25 | `app.todo-offer` — candidate; `{offerWorkspace}` (its own workspace, so the card floats over no other capture) with one owner agent, a member's pending offer to the owner, both with Lists consent, and two notes so the feed shows; `[data-offer-card="{todo.offer}"]` with its answer buttons; Accept and Decline never pressed |
-| V26 | `app.lists-approval` — pending; no route opens the approvals (only the roster allow action or host-picker approve) and seeded principals have no `household_connections` |
+| V26 | `app.lists-approval` — candidate: in `{approvalWorkspace}` (its own workspace), the owner's local agent `{approvalAgent}` has a live connection and no Lists approval; the People dialog's Allow lands on Lists with the approval card scrolled into frame. The approval is never submitted |
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |
