@@ -253,9 +253,9 @@ These exact declarations supplement stable IDs above; use them to match harness 
 
 ## Manifest crosswalk and current capture limits
 
-`screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry identifies a capture candidate; the CI evidence union below records which candidates were captured. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Other empty, error and loading captures need per-surface fixture support (`state.empty`, `state.error`, `state.loading` are pending). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
+`screens.json` is a bare-array coverage map for the Engineer runner. A runnable entry identifies a capture candidate; the CI evidence union below records which candidates were captured. `pending` entries are skipped and reported with their reasons. State labels are runner context labels and do not create seed data. For populated views, readiness must establish visible content; the generic dense label on sign-in, dialogs and static captures does not claim dense simulated content. Other empty, error and loading captures need per-surface fixture support; the generic `state.empty`, `state.error` and `state.loading` placeholders were retired (see Manifest closure below). The single listed entry for a family does not cover every state, interaction or permission in the inventory above.
 
-The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Definitions detail captures use bound seed identities and selected-state readiness; Wiki detail and editor remain pending. Public and diagnostic route candidates have source-backed readiness; the tokenless invitation candidate uses a signed-out context. The /start handoff redirects immediately and remains pending. Invitation variants and native-platform behavior need their own support. The runner checks readiness after setup. The CI evidence union below records capture success and its limits.
+The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is pending until the phone drawer and rail identity are confirmed. Definitions index is separate from proposed, certified, proposal-pending and diff captures; Wiki index is separate from topic and editor captures. Definitions detail captures use bound seed identities and selected-state readiness; Wiki detail and editor remain pending. Public and diagnostic route candidates have source-backed readiness; the tokenless invitation candidate uses a signed-out context. The /start handoff redirects immediately with JavaScript on, so `route.start` captures it with JavaScript off (its `<noscript>` note and manual link). Invitation variants and native-platform behavior need their own support. The runner checks readiness after setup. The CI evidence union below records capture success and its limits.
 
 | Inventory unit | Manifest disposition |
 | --- | --- |
@@ -273,7 +273,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | R12 | `route.oauth.c1-smoke.callback` — candidate; other states pending |
 | R13 | `route.orchestration` — candidate; other states pending |
 | R14 | `route.privacy` — candidate; other states pending |
-| R15 | `route.start` — pending |
+| R15 | `route.start` — JavaScript-off candidate: `/start?next=audit` in a signed-out context with scripts disabled, ready on the manual link and its `<noscript>` note; the automatic redirect with JavaScript on is not captured |
 | R16 | `route.support` — candidate; other states pending |
 | R17 | `route.terms` — candidate; other states pending |
 | V01 | `app.signin` — candidate; other states pending |
@@ -328,7 +328,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M09 | `menu.provider` — pending |
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
-| M12 | `menu.resizers` — pending |
+| M12 | `menu.resizers` — retired as a standalone entry; see Manifest closure below |
 | M13 | `menu.context` — candidate; right-click on the `{agent}` Direct messages row (`[data-rail-agent]`, inside the navigation drawer at <=52rem) opens `.cs-context-menu`; nothing is run; passes at all six sizes since #413 (the menu no longer closes on a late scroll event after the row is brought into view at 844x390); Shift+F10 and touch long-press pending |
 | M14 | `menu.workspace` — covers mobile drawer and desktop header anchors (`menu.workspace-dock` superseded duplicate removed) |
 | M15 | `app.entity-detail`, `dialog.details-sheet` — cover entity panel, phone details sheet and desktop details pane (`menu.profile-inspector` superseded duplicate removed) |
@@ -364,3 +364,10 @@ The account trigger is inside the phone drawer and remains separate at the deskt
 V08 is now a native `dialog[data-roster-dialog]`, opened with `showModal()` through existing doors. The compact roster, filter, row menus, persistent detail column, spoken receipt, Add your agents and admin controls live inside it. Desktop uses a bounded modal; <=52rem uses a bottom sheet with a pushed detail view. The app route remains behind it. A cold `?v=people` opens over workspace chat; close clears the overlay URL and returns focus. Esc closes the outer modal, while native nested confirmation cancel closes only that confirmation.
 
 `app.people` now waits for the native modal and seeded agent. `dialog.people-detail` selects that agent. `dialog.people-confirm` and `menu.member-actions` remain within the outer modal. `dialog.people-admin-access` opens admin confirmation above the selected agent without submitting. Native foreground detection already handles stacked dialogs; raw measurement arrays are unchanged. Keyboard and mounted browser proof cover native containment, closing, return focus, preserved detail, spoken receipt after refresh and direct links. No coverage is claimed until CI artifacts land.
+
+## Manifest closure
+
+With Batch 5, `screens.json` has no pending entries: every entry is a runnable capture candidate. That closes the manifest, not the inventory above. It does not claim every state, permission or interaction of a family.
+
+- `state.empty`, `state.error` and `state.loading` were generic placeholders, not screens. Per-surface empty captures (`app.todos.empty`, `app.lists.empty`, `app.wiki.empty`, `app.definitions.empty`) are runnable; other empty, error and loading states stay unbound and still need their own per-surface fixtures before any coverage is claimed.
+- `menu.resizers` (M12) was retired as a standalone six-size entry. The `.cs-resizer` separators are hidden at 52rem and below (four of the six audit sizes) and already appear in the wider workspace, Lists and Wiki captures. Dragging, keyboard resizing and reset stay in the interaction inventory, unclaimed.

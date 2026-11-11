@@ -409,14 +409,14 @@
   {
     "id": "route.start",
     "kind": "route",
-    "path": "/start",
+    "path": "/start?next=audit",
     "setup": [],
-    "ready": "body",
+    "ready": ".handoff [data-open-app] ~ .handoff__note",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "JavaScript immediately redirects to /app; capture of the handoff or redirect behavior needs a dedicated runner mode."
+    "signedOut": true,
+    "noJs": true
   },
   {
     "id": "route.support",
@@ -1254,18 +1254,6 @@
     "requiresSeed": []
   },
   {
-    "id": "menu.resizers",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
-  },
-  {
     "id": "menu.context",
     "kind": "view",
     "path": "/app?w={workspace}",
@@ -1444,42 +1432,6 @@
       "create_workspace",
       "seed_wiki overview"
     ]
-  },
-  {
-    "id": "state.empty",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "empty"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
-  },
-  {
-    "id": "state.error",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "error"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
-  },
-  {
-    "id": "state.loading",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "loading"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
   },
   {
     "id": "app.files.empty",

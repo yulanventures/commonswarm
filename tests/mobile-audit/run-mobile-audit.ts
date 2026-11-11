@@ -66,6 +66,8 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
 type Step = { media?: string; waitFor?: string; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
+  /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
+  noJs?: true;
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[];
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
@@ -382,6 +384,8 @@ async function main(): Promise<void> {
       const openContexts = async (viewport: { width: number; height: number }, theme: string, hasTouch = true, freeze = false) => {
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1 });
+        // Init scripts never run with JavaScript off; the capture gives CHECKS its __name shim itself.
+        const noScript = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, javaScriptEnabled: false });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
         // Diagnostic control only. The app reads receipts through the swarm_read RPC
         // (site/src/lib/commonswarm.ts browserDeliveryReceipts -> /rest/v1/rpc/signal_delivery_receipts). Each distinct
@@ -414,7 +418,7 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        return { context, signedIn, freezeStats };
+        return { context, signedIn, noScript, freezeStats };
       };
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
@@ -571,7 +575,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, noScript, freezeStats } = await openContexts(viewport, theme, true, freeze);
         const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -579,9 +583,12 @@ async function main(): Promise<void> {
           if (screen.status === "pending") return { ...entry, error: "pending", reason: screen.reason ?? null };
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
-          const page = await (screen.signedOut ? context : signedIn).newPage();
+          const page = await (screen.noJs ? noScript : screen.signedOut ? context : signedIn).newPage();
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
+            // The page's own scripts are off, not the audit's: give CHECKS and the witness their __name shim (a string, so
+            // tsx cannot wrap it in __name itself).
+            if (screen.noJs) await page.evaluate("globalThis.__name = globalThis.__name || ((f) => f)");
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}.png`;
             await page.screenshot({ path: join(OUT, shot) });
@@ -631,14 +638,14 @@ async function main(): Promise<void> {
         report.push(...batch);
         if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats });
         console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close();
       }
       // Desktop hover pass: only the screens with hover witnesses, at desktop widths, mouse only.
       const hoverScreens = screens().filter(s => HOVER_WITNESSES[s.id] && s.status !== "pending" && !(s.requiresSeed ?? []).some(step => !seed.steps.includes(step)));
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, false, freeze);
+        const { context, signedIn, noScript, freezeStats } = await openContexts(viewport, theme, false, freeze);
         const batch = await runPool(hoverScreens.filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
@@ -654,14 +661,14 @@ async function main(): Promise<void> {
         });
         hoverDesktop.push(...batch);
         if (freeze) freezeCounts.push({ pass: "desktop", viewport: size, theme, ...freezeStats });
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close();
       }
       // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
       const general = screens().find(s => s.id === "app.chat.general");
       for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
-        const { context, signedIn } = await openContexts(viewport, theme, !desktop);
+        const { context, signedIn, noScript } = await openContexts(viewport, theme, !desktop);
         const result = await runPictureChecks(async (setup) => {
           const page = await signedIn.newPage();
           await setup(page);
@@ -673,7 +680,7 @@ async function main(): Promise<void> {
           hoverShots.push(shot);
         }, { click: desktop });
         pictures.push({ viewport: size, theme, ...result });
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close();
       }
     } finally { await browser.close(); }
   } finally {
