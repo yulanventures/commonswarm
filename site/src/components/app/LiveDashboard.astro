@@ -8517,6 +8517,8 @@ import "../../styles/kylon-command-palette.css";
         }
       }
       focusComposerOnEntry();
+      // A rebuild can bring rows into view that were never read (an opened thread, a permalink, a reply target).
+      requestVisibleReceipts();
     };
 
     const syncConnectWorkspace = (workspace: Workspace): void => {

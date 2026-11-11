@@ -557,6 +557,8 @@ test('a signal page settling after a same-workspace view change retains data wit
       let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
       const postedSinceReset=new Map(), POSTED_ROW_GRACE_MS=30000, previousSignalIds=new Set();
       const deliveryReceiptCache=new Map([['retained-receipt',{result:null,checkedAt:123}]]); let deliveryReceiptRefreshOwner='', deliveryReceiptRefreshAgain=false;
+      // renderFeed asks for first receipt reads of rows it brought into view; this case is about the pane, not receipts.
+      const requestVisibleReceipts=()=>{};
       const humanSeenReporter={resetVisible(){}}, humanSeenObserver=null, activeChannel=()=>null;
       const currentHomePeople=()=>({groups:[],other:[]}), atBottom=()=>true, feedScroller=()=>null;
       // Unrelated chrome/focus/decoration boundaries; no substitute for the guarded renderer or view switch.
