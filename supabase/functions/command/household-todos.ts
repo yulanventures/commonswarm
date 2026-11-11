@@ -255,9 +255,12 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     now = new Date(clock!.now as string).getTime();
     const [agent] = await tx`SELECT p.*,coalesce(p.revoked_at,am.revoked_at) AS revoked_at,${workspaceId}::uuid AS workspace_id,
       EXISTS (SELECT 1 FROM swarm.memberships m WHERE m.workspace_id=${workspaceId}::uuid AND m.user_id=p.owner_user_id AND m.revoked_at IS NULL) AS member_live,
-      EXISTS (SELECT 1 FROM swarm.hosted_mcp_seats s JOIN swarm.hosted_mcp_grants g USING(grant_id)
-        WHERE s.workspace_id=${workspaceId}::uuid AND s.principal_id=p.principal_id AND s.revoked_at IS NULL AND g.state='active' AND g.revoked_at IS NULL AND g.connection_expired_at IS NULL
-          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>${new Date(now)}) AND swarm.hosted_binding_eligible(s.grant_id,s.workspace_id,s.principal_id)) AS hosted_live,
+      -- The same hosted connection home_overview reads (swarm.hosted_connection_policy), including an agent a
+      -- person added here that has not claimed its seat yet; the liveness rule is unchanged.
+      EXISTS (SELECT 1 FROM swarm.hosted_connection_policy(${workspaceId}::uuid,p.principal_id,p.owner_user_id) hp
+        WHERE hp.seat_revoked_at IS NULL AND hp.binding_revoked_at IS NULL AND hp.state='active' AND hp.revoked_at IS NULL
+          AND hp.connection_expired_at IS NULL
+          AND (hp.connection_expires_at IS NULL OR hp.connection_expires_at>${new Date(now)})) AS hosted_live,
       EXISTS (SELECT 1 FROM swarm.agent_tokens t
         JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
         JOIN swarm.devices d ON d.device_id=r.device_id

@@ -273,14 +273,33 @@ test("a hosted agent added to another workspace is live there before its first c
     VALUES (${claimed}::uuid, ${grant}::uuid, ${other}::uuid, ${owner}::uuid, ${hosted}::uuid, 'Hosted', statement_timestamp())`;
   assert.equal(await both(other), "live");
 
-  // Removed from the workspace: the add receipt and the seat end, and it reads off.
+  // Removed from the workspace (as change_hosted_agent_membership does): the add receipt and the seat end and the
+  // seat is tombstoned; it reads off.
   await sql`UPDATE swarm.hosted_mcp_agent_workspace_adds SET revoked_at = statement_timestamp() WHERE receipt_id = ${added}::uuid`;
   await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp() WHERE seat_id = ${claimed}::uuid`;
+  await sql`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by) VALUES ('hosted_seat', ${claimed}::uuid, ${owner}::uuid)`;
   assert.equal(await kind(other), "connection_off");
 
   // Added again: live before the next claim, although the old seat stays revoked.
   await sql`INSERT INTO swarm.hosted_mcp_agent_workspace_adds (grant_id, principal_id, workspace_id, owner_user_id, added_by)
     VALUES (${grant}::uuid, ${hosted}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  assert.equal(await both(other), "live");
+
+  // seat_release in the home workspace (consented, no add receipt): the seat ends and is tombstoned, and the agent
+  // reads off there until a person adds it again; consent alone does not bring it back before a claim.
+  const [homeSeat] = await sql<{ seat_id: string }[]>`SELECT seat_id FROM swarm.hosted_mcp_seats
+    WHERE workspace_id = ${home}::uuid AND principal_id = ${hosted}::uuid AND revoked_at IS NULL`;
+  await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp() WHERE seat_id = ${homeSeat!.seat_id}::uuid`;
+  await sql`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by) VALUES ('hosted_seat', ${homeSeat!.seat_id}::uuid, ${owner}::uuid)`;
+  assert.equal(await both(home), "connection_off", "a released seat stays off");
+  assert.equal(await both(other), "live", "a release elsewhere does not end this workspace");
+
+  // Reconnect onto a new grant, then the old refresh family is retired while its grant row stays active: off before
+  // any claim. The new grant has no binding here, so nothing else reads live.
+  const [{ provider }] = await sql<{ provider: string }[]>`SELECT provider_grant_id AS provider FROM swarm.hosted_mcp_grants WHERE grant_id = ${grant}::uuid`;
+  await sql`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at) VALUES (${provider}, statement_timestamp())`;
+  assert.equal(await both(other), "connection_off", "a retired refresh family is off before a claim");
+  await sql`DELETE FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = ${provider}`;
   assert.equal(await both(other), "live");
 
   // The grant ends: off everywhere, seat or no seat.

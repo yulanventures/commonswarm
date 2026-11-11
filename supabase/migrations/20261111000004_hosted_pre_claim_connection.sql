@@ -10,7 +10,9 @@
 -- The connection is then live by the unchanged rule: no revoked seat, still eligible, grant active and
 -- unrevoked, not expired. Eligibility, consent, reconnect and claim_seat are unchanged; removing the agent,
 -- revoking its add receipt, binding or grant, or the grant expiring still reads as connection off.
--- Used by swarm_read.home_overview and swarm_read.agent_connection_kind, so the two cannot disagree.
+-- Used by swarm_read.home_overview, swarm_read.agent_connection_kind and the command edge's to-do queue
+-- (EXECUTE for swarm_command only), so none of them can disagree. A deliberately ended seat (seat_release or
+-- removal, which tombstones it) and a retired refresh family stay off before any claim.
 CREATE FUNCTION swarm.hosted_connection_policy(p_workspace uuid, p_principal uuid, p_owner uuid)
 RETURNS TABLE(grant_id uuid, state text, revoked_at timestamptz, connection_expires_at timestamptz,
   connection_expired_at timestamptz, seat_revoked_at timestamptz, binding_revoked_at timestamptz)
@@ -27,13 +29,27 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
   JOIN swarm.hosted_mcp_grants g ON g.grant_id = seat.grant_id AND g.owner_user_id = seat.owner_user_id
   WHERE seat.workspace_id = p_workspace AND seat.principal_id = p_principal AND seat.owner_user_id = p_owner
   UNION ALL
-  SELECT g.grant_id, g.state, g.revoked_at, g.connection_expires_at, g.connection_expired_at,
+  -- A retired refresh family (reconnect, then revoke) ends the grant here even while the grant row
+  -- itself stays active.
+  SELECT g.grant_id, g.state, coalesce(g.revoked_at, family.revoked_at), g.connection_expires_at, g.connection_expired_at,
    NULL::timestamptz, NULL::timestamptz,
-   CASE WHEN g.state = 'active' AND g.revoked_at IS NULL THEN 1 ELSE 2 END, g.created_at, g.grant_id
+   CASE WHEN g.state = 'active' AND g.revoked_at IS NULL AND family.revoked_at IS NULL THEN 1 ELSE 2 END, g.created_at, g.grant_id
   FROM swarm.hosted_mcp_grant_agents ga
   JOIN swarm.hosted_mcp_grants g ON g.grant_id = ga.grant_id AND g.owner_user_id = ga.owner_user_id
+  LEFT JOIN commonswarm_oauth.refresh_family_tombstones family ON family.grant_id = g.provider_grant_id
   WHERE ga.principal_id = p_principal AND ga.owner_user_id = p_owner AND ga.revoked_at IS NULL
    AND swarm.hosted_binding_eligible(g.grant_id, p_workspace, p_principal)
+   -- A seat ended deliberately here (seat_release, or removal) is final until a person adds the agent
+   -- again: only a live add receipt newer than that seat's end restores the pre-claim reading.
+   AND NOT EXISTS (
+    SELECT 1 FROM swarm.hosted_mcp_seats prior
+    JOIN swarm.revocation_tombstones ended ON ended.kind = 'hosted_seat' AND ended.target_id = prior.seat_id
+    WHERE prior.workspace_id = p_workspace AND prior.principal_id = p_principal AND prior.owner_user_id = p_owner
+     AND prior.revoked_at IS NOT NULL
+     AND NOT EXISTS (
+      SELECT 1 FROM swarm.hosted_mcp_agent_workspace_adds again
+      WHERE again.grant_id = g.grant_id AND again.workspace_id = p_workspace AND again.principal_id = p_principal
+       AND again.owner_user_id = p_owner AND again.revoked_at IS NULL AND again.added_at > prior.revoked_at))
  ) c
  ORDER BY c.rank, c.at DESC, c.tie
  LIMIT 1
@@ -41,6 +57,8 @@ $$;
 ALTER FUNCTION swarm.hosted_connection_policy(uuid, uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.hosted_connection_policy(uuid, uuid, uuid)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+-- The to-do queue (command edge) reads the same connection, so it never contradicts home_overview.
+GRANT EXECUTE ON FUNCTION swarm.hosted_connection_policy(uuid, uuid, uuid) TO swarm_command;
 
 -- Unchanged except the hosted lateral (20261104000001).
 CREATE OR REPLACE FUNCTION swarm_read.agent_connection_kind(

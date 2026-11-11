@@ -13,7 +13,8 @@ import {offlineHostedData,offlineHostedDatabase,runOfflineHostedCommands} from '
 const root='deploy/release-proofs/agents/20261028000003';
 const migration='supabase/migrations/20261028000003_hosted_agent_workspaces.sql';
 // Later migrations change objects this catalog pins: undo them first, inside the same rolled-back drill.
-const later=()=>repoSql('deploy/release-proofs/seat-admin-member-removal/20261110000002-rollback.sql');
+const later=()=>repoSql('deploy/release-proofs/hosted-pre-claim/20261111000004-rollback.sql')
+ +repoSql('deploy/release-proofs/seat-admin-member-removal/20261110000002-rollback.sql');
 const catalog=(rollback=false)=>dbAssert(releaseCatalogQuery(repoSql(`${root}-${rollback?'rollback-catalog':'catalog'}.sql`),rollback?'rollback_ok':'catalog_ok').trim().replace(/;$/,''),'hosted agents catalog');
 const legacy=()=>repoSql('tests/fixtures/hosted-agent-workspaces-before.sql')+repoSql('supabase/migrations/20261025000001_permanence_grandfather.sql');
 async function schemaSql(sql:string) {
