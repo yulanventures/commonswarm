@@ -130,14 +130,14 @@ const receiptList = (open: boolean, onHover: string) => {
 /** Keyed rows inside a feed view, each with its own receipt. `flipAfterMs`: when the first receipt read "arrives" (marker
  *  set to true and the summary text grows), or null for never. `hidden`: the feed view is not shown at all, and a
  *  separate measured list sits outside it. */
-const receiptFeed = (flipAfterMs: number | null, hidden = false) => {
+const receiptFeed = (flipAfterMs: number | null, hidden = false, neverQuiet = false) => {
   const receipt = '<details class="dashboard__message-receipt" data-receipt-loaded="false"><summary>✓ Sent</summary></details>';
   const rows = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="margin:0;padding:6px 0">Row ${i} <a href="#s${i}">open</a>${receipt}</li>`).join("");
   const outside = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="o${i}" style="margin:0;padding:6px 0">Other ${i} <a href="#o${i}">open</a></li>`).join("");
   return page(`<div class="dashboard__feed-view" style="width:300px;height:320px;overflow:auto${hidden ? ";display:none" : ""}">
     <ul id="${hidden ? "hidden-feed" : "feed"}" style="list-style:none;margin:0;padding:0">${rows}</ul></div>
     ${hidden ? `<ul id="feed" style="list-style:none;margin:0;padding:0;width:300px">${outside}</ul>` : ""}
-    <script>${flipAfterMs === null ? "" : `setTimeout(() => { for (const d of document.querySelectorAll(".dashboard__message-receipt")) {
+    <script>${neverQuiet ? "globalThis.__auditPendingFetches = 1;" : ""}${flipAfterMs === null ? "" : `setTimeout(() => { for (const d of document.querySelectorAll(".dashboard__message-receipt")) {
       d.setAttribute("data-receipt-loaded", "true"); d.querySelector("summary").textContent = "✓✓ Seen by everyone in this conversation, including the agents"; } }, ${flipAfterMs});`}</script>`);
 };
 const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
@@ -409,6 +409,11 @@ const ROWS: Row[] = [
     html: receiptFeed(null), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.rows[0]!.reason ?? "", /did not load within 20 s/, show(h));
+  } },
+  { name: "receipts loaded but a read that never finishes is a failed measurement, never a pass or a skip",
+    html: receiptFeed(0, false, true), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /did not go quiet within 20 s/, show(h));
   } },
   { name: "unloaded receipts in a hidden feed do not hold up a list measured elsewhere",
     html: receiptFeed(null, true), hover: { ...keyedSpec, prefer: '[data-signal-id="o3"]', require: ['[data-signal-id="o3"]'] }, check: ({ hover: h }) => {

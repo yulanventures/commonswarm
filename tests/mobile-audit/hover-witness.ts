@@ -180,8 +180,13 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     // every 100 ms until it holds, else a failed measurement (never a skip): every laid-out row with a positive area inside
     // a visible, positive-area feed has its OWN receipt marked loaded (a receipt with no marker is not loaded), AND no read
     // is in flight, AND reads have been quiet for 400 ms.
+    // "quiet" when a read is in flight or one ended under 400 ms ago; "receipts" when a real receipt is still waiting;
+    // null when settled. A view with no receipts at all is settled, not waiting.
+    let unsettled: "quiet" | "receipts" | null = null;
     const receiptsSettled = () => {
+      unsettled = "quiet";
       if ((w.__auditPendingFetches ?? 0) > 0 || performance.now() - (w.__auditLastFetchDoneAt ?? 0) < 400) return false;
+      unsettled = "receipts";
       for (const view of Array.from(document.querySelectorAll(".dashboard__feed-view"))) {
         const v = view.getBoundingClientRect();
         if (v.width <= 0 || v.height <= 0) continue; // A hidden feed holds nothing on screen.
@@ -194,10 +199,13 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
           if (own.some(d => d.getAttribute("data-receipt-loaded") !== "true")) return false;
         }
       }
+      unsettled = null;
       return true;
     };
     for (const started = performance.now(); !receiptsSettled();) {
-      if (performance.now() - started > 20_000) return { error: "receipts for the rows on screen did not load within 20 s" };
+      if (performance.now() - started > 20_000) {
+        return { error: unsettled === "quiet" ? "reads on the page did not go quiet within 20 s" : "receipts for the rows on screen did not load within 20 s" };
+      }
       await new Promise(done => setTimeout(done, 100));
     }
     // Only now, with reads settled, find the row: by its marker, or by its key when the list was rebuilt meanwhile.
