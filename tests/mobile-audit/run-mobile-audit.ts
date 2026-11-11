@@ -66,7 +66,10 @@ const INDENT = (ids: string[]) => ids.map((id) => {
   const inline = { authorMid: line(author), targetMid: line(target), badgeMid: line(badge), timeMid: line(time),
     sameLine: !!author && !!target && Math.abs((line(author) ?? 0) - (line(target) ?? 0)) < 4,
     badgePainted: painted(badge), badgeClipped: clipped(badge), timePainted: painted(time), timeClipped: clipped(time),
-    targetTruncated: clipped(target), targetTitle: target?.getAttribute("title") ?? target?.querySelector("[title]")?.getAttribute("title") ?? null,
+    // The ellipsis can belong to the recipient's own entity button, nested in the target.
+    targetTruncated: clipped(target) || Array.from(target?.querySelectorAll("*") ?? []).some(clipped),
+    targetNameStyle: style(target?.querySelector("button, a, [title]") ?? null, ["white-space", "overflow", "text-overflow", "min-width", "max-width"]),
+    targetTitle: target?.getAttribute("title") ?? target?.querySelector("[title]")?.getAttribute("title") ?? null,
     targetLabel: target?.getAttribute("aria-label") ?? target?.querySelector("[aria-label]")?.getAttribute("aria-label") ?? null,
     targetStyle: style(target, ["white-space", "overflow", "text-overflow", "min-width", "flex"]), metaLines: meta ? Math.round(meta.getBoundingClientRect().height) : null };
   return { id, found: true, targetVisible: painted(target), targetText: target?.textContent?.trim() ?? null, inline,
