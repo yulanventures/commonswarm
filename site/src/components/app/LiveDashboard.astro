@@ -7521,6 +7521,10 @@ import "../../styles/kylon-command-palette.css";
       const details = document.createElement("details");
       details.className = "dashboard__message-receipt";
       details.dataset.receiptState = indicator.state;
+      // True only once a receipt read for this row has COMPLETED with a result: not for a request just issued, a failed read
+      // (cached with a null result) or a fallback indicator. Receipts load only for rows on screen, a few per tick, so a
+      // row's first read can land after it scrolls into view; the hover audit waits for this before taking rest.
+      details.dataset.receiptLoaded = String(cached?.result !== undefined && cached.result !== null);
       if (indicator.outcome !== null) details.dataset.receiptOutcome = indicator.outcome;
       /* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a receipt shows on the row only while it is a
          problem or still moving: pending, stuck, failed, expired, or a mix that may hide a failure.
