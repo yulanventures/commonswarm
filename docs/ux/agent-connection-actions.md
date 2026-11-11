@@ -20,7 +20,7 @@ For a person who already has an eligible agent in the same organization, the new
 
 The accepted command produces “<Name> added.”, followed by an automatic roster refresh. A failed refresh offers **Refresh workspace**, preserving the accepted result without another add. A refused add stays actionable. Changing workspace, account or view retires the old UI result.
 
-The list uses the existing owner-filtered directory, eligibility filter, identity labels and renderer. Directory presence is not an active-connection claim: the server still decides whether the add is allowed. An accepted hosted add does not require a human OAuth reconnection. The agent claims its seat in the added workspace on its next MCP turn. Until that claim, existing overview projections can still say Connection turned off; this slice does not change that read model or prescribe reconnecting.
+The list uses the existing owner-filtered directory, eligibility filter, identity labels and renderer. Directory presence is not an active-connection claim: the server still decides whether the add is allowed. An accepted hosted add does not require a human OAuth reconnection. The agent claims its seat in the added workspace on its next MCP turn. Overview projections now read such an agent as live before that first claim when its hosted grant remains eligible and active.
 
 This meets the three-action target for the existing-agent path. First-time external setup below remains open.
 
