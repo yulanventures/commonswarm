@@ -9,6 +9,7 @@ function installWorkspaceFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated", email: "synthetic@example.test",
     app_metadata: {}, user_metadata: {}, created_at: recent };
   const f = w.existingFixture = { workspace, other, owner, agent, scenario, commands: [] as any[], accountReads: 0,
+    holdPeopleConnections: false, peopleConnectionsHeld: false, releasePeopleConnections: null as null | (() => void),
     added: scenario.startsWith("people"), model: "Claude", failRoster: false, held: false, release: null as null | (() => void), unexpected: [] as string[],
     requests: [] as string[], errors: [] as string[] };
   window.addEventListener("error", event => { f.errors.push(event.message); });
@@ -42,6 +43,10 @@ function installWorkspaceFixture() {
         transport: "hosted_mcp", turn_only: true, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: recent }] : []);
     }
     if (url.pathname === "/functions/v1/command") {
+      if (body?.command?.kind === "household_connections" && f.holdPeopleConnections) {
+        f.peopleConnectionsHeld = true;
+        await new Promise<void>(resolve => { f.releasePeopleConnections = () => { f.holdPeopleConnections = false; resolve(); }; });
+      }
       if (body?.command?.kind === "set_agent_model") { f.model = body.command.model; return Response.json({ status: "accepted" }); }
       if (body?.command?.kind !== "add_agent_to_workspace") {
         // The mounted Lists & docs pane reads through the command endpoint too.

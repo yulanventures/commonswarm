@@ -6995,13 +6995,15 @@ import "../../styles/kylon-command-palette.css";
       if (!sampleMode) void loadHouseholdConnections();
     };
     const focusPeoplePage = (): void => {
-      window.requestAnimationFrame(() => {
+      const focus = () => {
         const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
         const activeModal = document.activeElement?.closest("dialog[open]");
         if (!dialog?.open || dialog.querySelector("dialog[open]") || (activeModal && activeModal !== dialog)) return;
         const visible = (node: HTMLElement | null): node is HTMLElement => !!node?.getClientRects().length && !node.closest("[hidden],[inert]");
         [peopleDialogFocus ? one<HTMLElement>("#pd-detail-title") : null, one<HTMLElement>("#dashboard-roster-title")].find(visible)?.focus({ preventScroll: true });
-      });
+      };
+      focus();
+      window.requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) focus(); });
     };
     const closeRosterDialog = (restoreFocus = false): void => {
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
