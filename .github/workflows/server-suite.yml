@@ -203,7 +203,27 @@ jobs:
           SUPABASE_DB_SEED_ENABLED: "false"
         run: |
           set -euo pipefail
-          supabase start --ignore-health-check >/dev/null
+          # The database binds host port 54322. A holder left on the runner (a host PostgreSQL service or
+          # a container publishing it) made "supabase start" fail with "address already in use" (run
+          # 43067424493, attempt 1). Free the port first; on a bind failure, stop the stack and retry once.
+          free_db_port() {
+            for _ in $(seq 1 30); do
+              if ! sudo ss -Hltn 'sport = :54322' | grep -q .; then return 0; fi
+              echo "port 54322 is in use:"; sudo ss -Hltnp 'sport = :54322' || true
+              sudo systemctl stop postgresql 2>/dev/null || true
+              docker ps -q --filter publish=54322 | xargs -r docker rm -f >/dev/null || true
+              sleep 1
+            done
+            echo "port 54322 stayed in use"; return 1
+          }
+          free_db_port
+          if ! supabase start --ignore-health-check >"$RUNNER_TEMP/supabase-start.log" 2>&1; then
+            cat "$RUNNER_TEMP/supabase-start.log"
+            grep -q "address already in use" "$RUNNER_TEMP/supabase-start.log" || exit 1
+            supabase stop --no-backup >/dev/null 2>&1 || true
+            free_db_port
+            supabase start --ignore-health-check >/dev/null
+          fi
       - name: Apply migrations as the box superuser
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         run: |
