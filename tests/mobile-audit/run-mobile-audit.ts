@@ -32,10 +32,30 @@ const DIST = join(ROOT, "site/dist");
 const OUT = resolve(process.env.MOBILE_AUDIT_OUT ?? join(ROOT, "site/mobile-audit/out"));
 const SITE_PORT = 4329;
 
-export const VIEWPORTS = [
-  { width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 },
-  { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
-] as const;
+// Indentation evidence run (never merge): a phone and a desktop width only, the general channel only.
+export const VIEWPORTS = [{ width: 390, height: 844 }, { width: 1440, height: 900 }] as const;
+/** Left edges and the styles that decide them, for each addressed row with its recipient visible. */
+const INDENT = (ids: string[]) => ids.map((id) => {
+  const row = document.querySelector(`[data-signal-id="${id}"]`);
+  if (!row) return { id, found: false };
+  const box = (el: Element | null) => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left * 100) / 100, y: Math.round(r.top * 100) / 100, w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 }; };
+  const body = row.querySelector(".dashboard__message-body"), meta = row.querySelector(".dashboard__message-meta");
+  const author = row.querySelector(".dashboard__message-author") ?? meta?.firstElementChild ?? null;
+  const target = row.querySelector(".dashboard__message-target"), markdown = row.querySelector(".dashboard__message-markdown");
+  let firstLine = null;
+  if (markdown) {
+    const walker = document.createTreeWalker(markdown, NodeFilter.SHOW_TEXT, { acceptNode: n => n.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+    const text = walker.nextNode();
+    if (text) { const range = document.createRange(); range.selectNodeContents(text); const lines = Array.from(range.getClientRects()); firstLine = { x: Math.round(lines[0]!.left * 100) / 100, lines: lines.length, lefts: lines.slice(0, 4).map(l => Math.round(l.left * 100) / 100) }; }
+  }
+  const style = (el: Element | null, keys: string[]) => el ? Object.fromEntries(keys.map(k => [k, getComputedStyle(el).getPropertyValue(k)])) : null;
+  const b = box(body)?.x ?? 0;
+  return { id, found: true, targetVisible: !!target && target.getBoundingClientRect().width > 0, targetText: target?.textContent?.trim() ?? null,
+    row: box(row), body: box(body), meta: box(meta), author: box(author), target: box(target), markdown: box(markdown), firstLine,
+    relative: { author: (box(author)?.x ?? 0) - b, target: (box(target)?.x ?? 0) - b, markdown: (box(markdown)?.x ?? 0) - b, firstLine: (firstLine?.x ?? 0) - b },
+    styles: { meta: style(meta, ["display", "flex-wrap", "min-width"]), markdown: style(markdown, ["display", "max-width", "flex", "width", "margin-left", "padding-left", "text-indent"]),
+      body: style(body, ["display", "min-width", "grid-template-columns"]) } };
+});
 export const THEMES = ["light", "dark"] as const;
 
 /** One setup step; fields run in this order: media, waitFor, click, type (with text), press, scroll, wait, settle.
@@ -214,7 +234,7 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        const batch = await runPool(screens(), 3, async (screen) => {
+        const batch = await runPool(screens().filter(s => s.id === "app.chat.general"), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null };
@@ -330,6 +350,15 @@ async function main(): Promise<void> {
             const shot = `shots/${screen.id}--${state}--${size}--${theme}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
+            const indentIds = [seed.ids["message.toViewer"]!, seed.ids["message.fromViewer"]!];
+            for (const id of indentIds) await page.locator(`[data-signal-id="${id}"]`).first().scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+            entry.indent = await page.evaluate(INDENT, indentIds);
+            const rowShots: string[] = [];
+            for (const [i, id] of indentIds.entries()) {
+              const rowShot = `shots/indent--${i === 0 ? "to-viewer" : "from-viewer"}--${size}--${theme}.png`;
+              await page.locator(`[data-signal-id="${id}"]`).first().screenshot({ path: join(OUT, rowShot) }).then(() => rowShots.push(rowShot), () => {});
+            }
+            entry.indentShots = rowShots;
             // Witnesses: read-only geometry first, then native-key keyboard witnesses, which change state.
             try { entry.witness = await page.evaluate(GEOMETRY_WITNESS, DECLARED_OVERLAYS[screen.id] ?? []); }
             catch (error) { entry.witness = { error: String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300) }; }
