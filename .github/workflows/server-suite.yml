@@ -405,6 +405,13 @@ jobs:
           npm --prefix site run build
           unset CHROME_BIN
           MOBILE_AUDIT_OUT="$RUNNER_TEMP/mobile-audit" npx tsx tests/mobile-audit/run-mobile-audit.ts 2>&1 | tee mobile-audit.log
+      - name: Upload built CSS for the update-notice review
+        if: ${{ !cancelled() && matrix.suite == 'mobile-audit' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-notice-built-css
+          path: site/dist/_astro/*.css
+          if-no-files-found: error
       - name: Upload the mobile audit report
         if: ${{ !cancelled() && matrix.suite == 'mobile-audit' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
