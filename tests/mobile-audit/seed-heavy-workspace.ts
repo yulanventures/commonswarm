@@ -88,6 +88,37 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
   };
 }
 
+/**
+ * Save one more revision of a doc as the owner, behind an open page's back, so the page's next save of its draft meets a
+ * newer revision (app.list-conflict). It signs in afresh on every call: a token from seeding has expired by the time a late
+ * capture runs.
+ */
+export async function advanceHouseholdDoc(env: SeedEnvironment, owner: SeedResult["owner"], workspaceId: string, objectId: string): Promise<void> {
+  assert.ok(loopback(env.apiUrl), "local stack only");
+  const client = createClient(env.apiUrl, env.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const signedIn = await client.auth.signInWithPassword(owner);
+  if (signedIn.error || !signedIn.data.session) throw new Error(`advance sign-in: ${signedIn.error?.message}`);
+  const token = signedIn.data.session.access_token;
+  const tool = async (name: string, args: Record<string, unknown>, write: boolean) => {
+    const commandId = `audit_${randomBytes(9).toString("base64url")}`;
+    const response = await fetch(`${env.apiUrl}/functions/v1/command`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, apikey: env.anonKey, "content-type": "application/json" },
+      body: JSON.stringify({ command_id: commandId, client_version: "0.1.0", workspace_id: workspaceId, stream: { kind: "workspace" },
+        command: { kind: "household_tool", tool: name, arguments: { seat: LOCAL_SEAT, ...(write ? { request_id: commandId } : {}), ...args } } }),
+    });
+    return { status: response.status, body: await response.json().catch(() => ({})) as Record<string, any> };
+  };
+  const read = await tool("object_read", { object_id: objectId }, false);
+  const markdown = read.body.content?.markdown, base = read.body.revision?.revision;
+  if (read.status !== 200 || read.body.status !== "ok" || typeof markdown !== "string" || !base) {
+    throw new Error(`advance read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
+  }
+  const after = `${markdown}\n\nThe engineer moved the visit to 9am.`;
+  const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before: markdown, after }] } }, true);
+  if (saved.status !== 200 || saved.body.status !== "committed") throw new Error(`advance save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
+}
+
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
   for (const url of [env.apiUrl, env.dbUrl]) assert.ok(loopback(url), `seed refuses non-local target ${new URL(url).hostname}`);
   const notes: string[] = [];
@@ -410,6 +441,10 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     const items = Array.from({ length: 36 }, (_, n) => ({ item_id: `item-${n}`, text: n % 9 === 4 ? `Order replacement filter ${UNBROKEN.slice(0, 40)}` : `Grocery item ${n + 1}: ${["oat milk", "sourdough", "eggs", "basil", "limes", "rice"][n % 6]}`, order: n, checked: n % 4 === 0 }));
     ok("object_create list", await tool("object_create", { object_id: "groceries", title: "Weekly groceries", content: { kind: "list", items } }));
     ok("object_create doc", await tool("object_create", { object_id: "house-notes", title: "House notes", content: { kind: "doc", markdown: "# House notes\n\n" + BODIES.join("\n\n") } }));
+    // A doc of its own for the save-conflict capture (app.list-conflict), which saves a revision behind the page's back on
+    // every capture; house-notes stays as app.lists shows it.
+    if (ok("seed_conflict_doc", await tool("object_create", { object_id: "boiler-visit", title: "Boiler visit", content: { kind: "doc",
+      markdown: "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear and leave the meter cupboard open." } }))) ids.conflictDoc = "boiler-visit";
     const definition = async (object_id: string, term: string, meaning: string, source: string) =>
       ok(`definition_create ${term}`, await tool("definition_create", { object_id, term, meaning, source }));
     await definition("def-monthly-spend", "Monthly spend", "Sum of card and cash spending in a calendar month.", "Card statements plus the cash log in Lists.");

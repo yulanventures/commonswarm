@@ -288,7 +288,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — candidate; `todo_create 0` required |
 | V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
-| V13 | `app.list-conflict` — pending |
+| V13 | `app.list-conflict` — candidate: the owner edits the seeded `{conflictDoc}` doc in `{workspace}` (never `house-notes`), the runner saves one more revision from outside the page, and the page's save meets it; Recover my draft opens the three-way comparison, scrolled into frame. Save reviewed changes is never clicked. Each capture leaves one retained draft and one revision on that doc |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
 | V16 | `app.wiki.editor` — candidate (`app.wiki-editor` superseded duplicate removed) |

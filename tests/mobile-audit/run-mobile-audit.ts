@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { postRefreshNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { advanceHouseholdDoc, postRefreshNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -54,8 +54,10 @@ type Route = { request(): { postData(): string | null; resourceType(): string };
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, hover, click, contextmenu, type (with text), select (with option),
- *  press, scroll, wait, settle.
+/** One setup step; fields run in this order: media, waitFor, advance, hover, click, contextmenu, type (with text), select (with
+ *  option), press, scroll, wait, settle.
+ *  advance: the owner saves one more revision of this Lists doc (in this workspace) from outside the page, so the page's own
+ *  next save meets a newer revision.
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -63,7 +65,7 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+type Step = { media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
@@ -455,6 +457,7 @@ async function main(): Promise<void> {
         for (const step of screen.setup ?? []) {
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
           if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
+          if (step.advance) await advanceHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids));
           if (step.hover) await page.hover(fill(step.hover, seed.ids), { timeout: 8_000 });
           if (step.click) {
             const target = fill(step.click, seed.ids);

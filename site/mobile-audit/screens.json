@@ -511,14 +511,43 @@
   {
     "id": "app.list-conflict",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [
+      {
+        "waitFor": "[data-household-objects] [data-hh-action=\"select\"][data-hh-value=\"{conflictDoc}\"]",
+        "click": "[data-household-objects] [data-hh-action=\"select\"][data-hh-value=\"{conflictDoc}\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] textarea[data-hh-document]",
+        "type": "[data-household-objects] textarea[data-hh-document]",
+        "text": "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear, leave the meter cupboard open, and put the dog in the garden."
+      },
+      {
+        "advance": {
+          "workspace": "{workspace}",
+          "object": "{conflictDoc}"
+        },
+        "click": "[data-household-objects] button[data-hh-action=\"save\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] .hh-conflict button[data-hh-action=\"recover\"]",
+        "click": "[data-household-objects] .hh-conflict button[data-hh-action=\"recover\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] .hh-conflict .hh-comparison",
+        "scroll": "[data-household-objects] .hh-conflict",
+        "settle": true
+      }
+    ],
+    "ready": "[data-household-objects] .hh-conflict[aria-label=\"Save conflict\"]:has(.hh-comparison) button[data-hh-action=\"reviewed-save\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "seed_conflict_doc"
+    ]
   },
   {
     "id": "app.agent-chooser",
