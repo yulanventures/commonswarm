@@ -69,6 +69,9 @@ VALUES('${legacy.owner}','delegated_admin:${legacy.identity}','${cached.command_
       assert.ok(!signed.error && signed.data.session, 'local human sign-in failed');
       const owner = created.data.user.id, workspace = randomUUID();
       await sql`INSERT INTO auth.users(id, aud, role, email) VALUES(${owner}::uuid, 'authenticated', 'authenticated', ${email})`;
+      // CS-E04: human commands admit the token's GoTrue session, so the isolated database needs it too.
+      const sessionId = JSON.parse(Buffer.from(signed.data.session.access_token.split('.')[1]!, 'base64url').toString()).session_id as string;
+      await sql`INSERT INTO auth.sessions(id, user_id, created_at, updated_at) VALUES(${sessionId}::uuid, ${owner}::uuid, now(), now())`;
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${owner}::uuid, 'Lane B owner')`;
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane B', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
