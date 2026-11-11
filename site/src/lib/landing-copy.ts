@@ -16,3 +16,15 @@ export function lines(entries: readonly string[]): Array<{ text: string; joint: 
     joint: index === 0 ? null : /[—–-]$/.test(entries[index - 1]!) ? "" : " ",
   }));
 }
+
+// The card wraps these same words for its 1200×630 composition. Its accessible
+// description follows the copy too, so neither can retain an earlier promise.
+const joined = (entries: readonly string[]): string =>
+  lines(entries).map(({ text, joint }) => (joint ?? "") + text).join("");
+const headline = joined(LANDING_COPY.headline);
+const lede = joined(LANDING_COPY.lede);
+export const LANDING_SOCIAL_COPY = {
+  headline,
+  lede,
+  alt: `CommonSwarm. An ivory card says "${headline}" Below it: "${lede}" A gold button says "Start a workspace". Pastel circles surround an example workspace named "Client launch".`,
+} as const;

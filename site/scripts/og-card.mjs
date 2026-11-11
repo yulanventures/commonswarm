@@ -1,7 +1,7 @@
 /*
  * Generate public/og.png from reviewable SVG source.
  *
- * The card is a product surface: its promise, palette, and free-tier claim must track the
+ * The card is a product surface: its promise and palette must track the
  * homepage. Rendering through sharp keeps the result deterministic and removes the old
  * browser-window recipe, whose screenshot could tile when the real window was too narrow.
  *
@@ -33,6 +33,23 @@ import { extname, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import sharp from "sharp";
+import { createHash } from "node:crypto";
+import { tsImport } from "tsx/esm/api";
+
+const { LANDING_COPY, LANDING_SOCIAL_COPY } = await tsImport("../src/lib/landing-copy.ts", import.meta.url);
+const xml = (value) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+const wrap = (text, limit) => {
+  const result = [];
+  for (const word of text.split(/\s+/u)) {
+    const last = result.length - 1;
+    if (last >= 0 && result[last].length + 1 + word.length <= limit) result[last] += " " + word;
+    else result.push(word);
+  }
+  return result;
+};
+const textLines = (text, limit, height) => wrap(text, limit)
+  .map((line, index) => `<tspan x="72" dy="${index === 0 ? 0 : height}">${xml(line)}</tspan>`).join("\n    ");
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fonts = join(root, "public", "fonts");
@@ -51,8 +68,8 @@ const orb = (id, light, mid, hue, edge) => `
 /* The headline is the homepage h1, word for word. */
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <title>CommonSwarm</title>
-  <desc>Put your agents on the same page. Share messages, files and notes about home and work.</desc>
+  <title>${xml(LANDING_COPY.title)}</title>
+  <desc>${xml(LANDING_SOCIAL_COPY.alt)}</desc>
   <defs>
     <style>
       @font-face {
@@ -100,21 +117,17 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
 
   <text class="display" x="72" y="206" font-size="56" font-weight="600"
     letter-spacing="-2" fill="#2c2c42">
-    <tspan x="72" dy="0">Put your agents</tspan>
-    <tspan x="72" dy="64">on the same page.</tspan>
+    ${textLines(LANDING_SOCIAL_COPY.headline, 22, 64)}
   </text>
 
-  <text class="body" x="72" y="402" font-size="23" font-weight="400" fill="#636275">
-    <tspan x="72" dy="0">Share messages, files and notes</tspan>
-    <tspan x="72" dy="32">about home and work.</tspan>
+  <text class="body" x="72" y="354" font-size="23" font-weight="400" fill="#636275">
+    ${textLines(LANDING_SOCIAL_COPY.lede, 42, 32)}
   </text>
 
   <g transform="translate(72 506)">
     <rect width="272" height="52" rx="26" fill="#ffd84d" stroke="#2c2c42"/>
     <text class="body" x="136" y="33" text-anchor="middle" font-size="19" font-weight="500"
       fill="#2c2c42">Start a workspace</text>
-    <text class="body" x="300" y="33" font-size="17" font-weight="500"
-      fill="#636275">Free · 10 workspaces · no card</text>
   </g>
 
   <g transform="translate(700 70)">
@@ -155,6 +168,9 @@ if (extname(output).toLowerCase() === ".svg") {
   console.log(`wrote ${output} (${Buffer.byteLength(svg)} bytes)`);
 } else {
   await sharp(Buffer.from(svg))
+    // Bind the shipped pixels to this editable source. The test can catch a
+    // forgotten regeneration without comparing platform-dependent font pixels.
+    .withXmp(`<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:cs="https://commonswarm.com/ns/social-card/1.0/" cs:sourceSha256="${createHash("sha256").update(svg).digest("hex")}"/></rdf:RDF></x:xmpmeta>`)
     .png({ compressionLevel: 9 })
     .toFile(output);
   const metadata = await sharp(output).metadata();
