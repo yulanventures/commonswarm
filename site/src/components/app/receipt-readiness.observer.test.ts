@@ -29,7 +29,7 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, scenario, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
+  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", scenario, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
@@ -154,6 +154,10 @@ async function observeReceiptReadiness() {
       check(late === 0, name + ": " + late + " of " + ids.length + " rows waited for a feed poll");
     };
     if (f.scenario === "scroll-into-view" || f.scenario === "thread-expand") {
+      // This page renders the app without its full-height shell, so the feed view would grow to fit every row. Hold it to
+      // a fixed height, as the app's own layout does, so the scroll case starts with rows that are genuinely off screen.
+      if (f.scenario === "scroll-into-view") { const view = feedView(); check(view, "feed view rendered");
+        view!.style.height = "320px"; view!.style.maxHeight = "320px"; view!.style.overflowY = "auto"; }
       await wait(() => document.querySelectorAll("[data-signal-id]").length >= (f.scenario === "thread-expand" ? 1 : 24), "rows rendered");
       // Let the reads of the rows on screen at load finish.
       let stable = 0, size = -1;
@@ -162,14 +166,17 @@ async function observeReceiptReadiness() {
       const from = f.log.length - 1;
       if (f.scenario === "scroll-into-view") feedView()!.scrollTop = 0;
       else {
-        const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${root}"]`);
+        const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`);
         check(toggle, "thread toggle rendered"); toggle!.click();
         for (let i = 0; i < 3; i++) await tick();
-        document.getElementById(`dashboard-thread-${root}`)?.scrollIntoView({ block: "start" });
+        document.getElementById(`dashboard-thread-${f.root}`)?.scrollIntoView({ block: "start" });
       }
       for (let i = 0; i < 3; i++) await tick();
       const fresh = onScreen().filter(id => !before.has(id));
-      check(fresh.length >= (f.scenario === "thread-expand" ? 9 : 1), "rows newly on screen and never read: " + fresh.length);
+      const view = feedView()!;
+      check(fresh.length >= (f.scenario === "thread-expand" ? 9 : 1), "rows newly on screen and never read: " + fresh.length +
+        " (feed view " + view.clientHeight + "/" + view.scrollHeight + " px, scrollTop " + view.scrollTop + ", rows " +
+        document.querySelectorAll("[data-signal-id]").length + ", read before " + before.size + ", on screen " + onScreen().length + ")");
       await readBeforePoll(fresh, from, f.scenario === "thread-expand" ? "replies opened into view" : "rows scrolled into view");
       document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
