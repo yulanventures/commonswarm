@@ -16210,7 +16210,9 @@ let verifiedHuman: VerifiedHuman | null = null;
     if (verifiedHuman === null || adminSessionBinding === null) return json(403, { error: "credential_kind_forbidden" });
     const identity = verifiedHuman;
     if ((SEAT_ADMIN_COMMAND_KINDS as readonly string[]).includes(String(record(body.command)?.kind))) {
-      if (!seatAdminEnabled) {
+      // With the switch off nothing new can be granted, but a person can always end a grant they hold: turning the
+      // switch off pauses agents' authority and must never trap a live grant. Every other end check still applies.
+      if (!seatAdminEnabled && record(body.command)?.kind !== "end_seat_admin") {
         return json(404, { error: "seat_admin_unavailable", message: "Agent admin access isn't turned on here." });
       }
       const result = await runSeatAdminCommand(body, {
