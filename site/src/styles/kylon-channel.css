@@ -93,8 +93,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
 }
 @media (hover: hover) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])),
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) * {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) > .dashboard__message-receipt[data-receipt-quiet],
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) > .dashboard__message-actions {
     opacity: 0; pointer-events: none;
   }
 }
