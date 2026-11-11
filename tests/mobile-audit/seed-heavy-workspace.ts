@@ -114,6 +114,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       people.push({ id, name, email, password, token: signedIn.data.session.access_token });
     }
     const [owner, adminPerson] = people as [typeof people[number], typeof people[number]];
+    // The signed-in viewer's own person row (#pd-person-{owner}), for the own-role lowering confirmation.
+    ids.owner = owner.id;
     ids.person = people[2]!.id;
     ids["person.long"] = people[4]!.id;
 

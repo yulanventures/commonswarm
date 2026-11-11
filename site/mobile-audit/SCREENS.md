@@ -296,12 +296,12 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V18 | `app.agent-connect` — pending |
 | V19 | `app.invite-person` — pending |
 | V20 | `app.entity-detail` — pending |
-| V21 | `app.invitation-inbox` — pending |
-| V22 | `app.update-toast` — pending |
+| V21 | `app.invitation-inbox` — pending; needs a second signed-in viewer and a delegated admin invitation fixture (`admin_grants` plus the inviter's `admin_accounts` projection); one seeded for the owner would float over every capture |
+| V22 | `app.update-toast` — candidate; `[data-update-notice]` over `#general`, raised by the app's own boot poll answered with the served page plus one extra `/_astro/` asset (`newBuild`); Update and Not now never pressed; Toast pending |
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
 | V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
-| V25 | `app.todo-offer` — pending |
-| V26 | `app.lists-approval` — pending |
+| V25 | `app.todo-offer` — pending; an offer to the owner renders atop every owner feed in its workspace, so it needs its own workspace and the offering member's Lists consent |
+| V26 | `app.lists-approval` — pending; no route opens the approvals (only the roster allow action or host-picker approve) and seeded principals have no `household_connections` |
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |
@@ -312,10 +312,10 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — candidate; native `dialog.sa-confirm[data-seat-admin-confirm="workspace"]` opened from seeded Atlas `[data-seat-admin-toggle="workspace"]` (confirm phase only, grant never submitted); `AdminDelegations` history/recovery states pending |
-| D11 | `dialog.invitation-review` — pending |
+| D11 | `dialog.invitation-review` — pending; same fixture as V21 |
 | D12 | `dialog.navigation-drawer` — pending |
 | D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
-| D14 | `dialog.role-confirm` — pending |
+| D14 | `dialog.role-confirm` — candidate; seeded owner's own row `#pd-person-{owner}` in the People & agents modal, role select set to Member, Save opens `dialog[data-role-confirm]` (confirm phase only, never submitted) |
 | D15 | `dialog.password` — candidate with responsive drawer setup |
 | M01 | `menu.account` — candidate with responsive drawer setup |
 | M02 | `menu.workspace` — candidate with responsive drawer setup |
