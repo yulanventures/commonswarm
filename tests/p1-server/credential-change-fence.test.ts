@@ -210,7 +210,7 @@ test("PostgREST lets anon and service_role through and refuses a human token wit
   const check = async (claims: Record<string, unknown>, role: string) => await sql.begin(async (tx) => {
     await tx.unsafe(`SET LOCAL ROLE ${role}`);
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
-    await tx`SELECT swarm.require_live_human_session()`;
+    await tx`SELECT swarm_session.require_live_human_session()`;
   });
   const who = await person();
   const live = await signIn(who.email, who.password);
@@ -237,7 +237,7 @@ test("command and OAuth admission hold the fence: a change waits for an admitted
   const live = await signIn(who.email, who.password);
   const sessionId = JSON.parse(Buffer.from(live.access_token.split(".")[1]!, "base64url").toString()).session_id as string;
   const admit = (tx: postgres.TransactionSql, session = sessionId) =>
-    tx`SELECT swarm.admit_human_session(${who.id}::uuid, ${session}::uuid) AS ok`.then((rows) => (rows[0] as { ok: boolean }).ok);
+    tx`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${session}::uuid) AS ok`.then((rows) => (rows[0] as { ok: boolean }).ok);
 
   let release!: () => void;
   const held = new Promise<void>((r) => { release = r; });
@@ -260,6 +260,39 @@ test("command and OAuth admission hold the fence: a change waits for an admitted
   for (const role of ["anon", "authenticated", "swarm_read"]) {
     await assert.rejects(() => sql.begin(async (tx) => { await tx.unsafe(`SET LOCAL ROLE ${role}`); await admit(tx); }), /permission denied/);
   }
+});
+
+test("each real caller role reaches only its own wrapper, and never the swarm schema", async () => {
+  // As PostgREST runs it: the impersonated role, a live human session, through the wrapper's schema.
+  const who = await person();
+  const live = await signIn(who.email, who.password);
+  const sessionId = JSON.parse(Buffer.from(live.access_token.split(".")[1]!, "base64url").toString()).session_id as string;
+  const asRole = <T>(role: string, claims: Record<string, unknown>, run: (tx: postgres.TransactionSql) => Promise<T>) =>
+    sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL ROLE ${role}`);
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+      return await run(tx);
+    }) as Promise<T>;
+  const human = { role: "authenticated", sub: who.id, session_id: sessionId };
+  await asRole("authenticated", human, (tx) => tx`SELECT swarm_session.require_live_human_session()`);
+  await asRole("anon", { role: "anon" }, (tx) => tx`SELECT swarm_session.require_live_human_session()`);
+  await asRole("service_role", { role: "service_role" }, (tx) => tx`SELECT swarm_session.require_live_human_session()`);
+  const [own] = await asRole("authenticated", human, (tx) => tx<{ live: boolean }[]>`SELECT swarm_session.current_human_session_live() AS live`);
+  assert.equal(own?.live, true);
+  for (const role of ["swarm_command", "commonswarm_oauth_runtime"]) {
+    const [row] = await asRole(role, {}, (tx) => tx<{ ok: boolean }[]>`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${sessionId}::uuid) AS ok`);
+    assert.equal(row?.ok, true, role);
+  }
+  // Nothing broader: no client role reaches the inner checker, the record or the admission.
+  for (const role of ["anon", "authenticated"]) {
+    await assert.rejects(() => asRole(role, human, (tx) => tx`SELECT swarm.human_session_live(${JSON.stringify(human)}::jsonb)`), /permission denied/);
+    await assert.rejects(() => asRole(role, human, (tx) => tx`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${sessionId}::uuid)`), /permission denied/);
+  }
+  await assert.rejects(() => asRole("commonswarm_oauth_runtime", {}, (tx) => tx`SELECT 1 FROM swarm.human_credential_changes`), /permission denied/);
+  const [schemas] = await sql<{ anon: boolean; authn: boolean; runtime: boolean }[]>`SELECT
+    has_schema_privilege('anon', 'swarm', 'USAGE') AS anon, has_schema_privilege('authenticated', 'swarm', 'USAGE') AS authn,
+    has_schema_privilege('commonswarm_oauth_runtime', 'swarm', 'USAGE') AS runtime`;
+  assert.deepEqual(schemas, { anon: false, authn: false, runtime: false });
 });
 
 test("the fence's privileges are exactly the narrow ones, and the member Realtime topics need a live session", async () => {

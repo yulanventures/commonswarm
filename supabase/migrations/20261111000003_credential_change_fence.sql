@@ -39,6 +39,11 @@ END
 $role$;
 GRANT commonswarm_credential_fence TO swarm_admin WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
 
+-- The callable boundary: three wrappers and nothing else, in a schema PostgREST does not expose.
+-- Callers get USAGE here, never on swarm, which the base schema keeps from anon, authenticated and
+-- the OAuth runtime.
+CREATE SCHEMA swarm_session AUTHORIZATION commonswarm_credential_fence;
+
 -- Grants on GoTrue's and swarm's objects, issued as each owner.
 DO $owner_grants$
 DECLARE
@@ -169,7 +174,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 $$;
 
 -- The current request's own human session (Realtime policies). Reports only the caller's own state.
-CREATE FUNCTION swarm.current_human_session_live() RETURNS boolean
+CREATE FUNCTION swarm_session.current_human_session_live() RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
  SELECT swarm.human_session_live(nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb)
 $$;
@@ -177,7 +182,7 @@ $$;
 -- PostgREST db-pre-request, run after it switches to the request's role. anon and service_role
 -- pass; every authenticated request needs a live human session, with no agent exemption (agents
 -- never reach PostgREST: their reads go through the edge's private database roles).
-CREATE FUNCTION swarm.require_live_human_session() RETURNS void
+CREATE FUNCTION swarm_session.require_live_human_session() RETURNS void
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
  claims jsonb := nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb;
@@ -193,7 +198,7 @@ $$;
 
 -- Command and OAuth transactions: the shared fence lock, held to commit, then a fresh liveness
 -- read. A credential change either waits for this transaction or has already revoked the session.
-CREATE FUNCTION swarm.admit_human_session(p_user uuid, p_session uuid) RETURNS boolean
+CREATE FUNCTION swarm_session.admit_human_session(p_user uuid, p_session uuid) RETURNS boolean
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
  IF p_user IS NULL OR p_session IS NULL THEN RETURN false; END IF;
@@ -207,9 +212,9 @@ ALTER FUNCTION swarm.credential_change_revoke_for(uuid) OWNER TO commonswarm_cre
 ALTER FUNCTION swarm.credential_change_revoke() OWNER TO commonswarm_credential_fence;
 ALTER FUNCTION swarm.credential_change_sweep() OWNER TO commonswarm_credential_fence;
 ALTER FUNCTION swarm.human_session_live(jsonb) OWNER TO commonswarm_credential_fence;
-ALTER FUNCTION swarm.current_human_session_live() OWNER TO commonswarm_credential_fence;
-ALTER FUNCTION swarm.require_live_human_session() OWNER TO commonswarm_credential_fence;
-ALTER FUNCTION swarm.admit_human_session(uuid, uuid) OWNER TO commonswarm_credential_fence;
+ALTER FUNCTION swarm_session.current_human_session_live() OWNER TO commonswarm_credential_fence;
+ALTER FUNCTION swarm_session.require_live_human_session() OWNER TO commonswarm_credential_fence;
+ALTER FUNCTION swarm_session.admit_human_session(uuid, uuid) OWNER TO commonswarm_credential_fence;
 
 -- EXECUTE: nothing for PUBLIC; the wrappers only for the roles that run them.
 DO $function_grants$
@@ -227,17 +232,24 @@ BEGIN
     'swarm.credential_change_revoke()'::regprocedure,
     'swarm.credential_change_sweep()'::regprocedure,
     'swarm.human_session_live(jsonb)'::regprocedure,
-    'swarm.current_human_session_live()'::regprocedure,
-    'swarm.require_live_human_session()'::regprocedure,
-    'swarm.admit_human_session(uuid,uuid)'::regprocedure)
+    'swarm_session.current_human_session_live()'::regprocedure,
+    'swarm_session.require_live_human_session()'::regprocedure,
+    'swarm_session.admit_human_session(uuid,uuid)'::regprocedure)
   UNION ALL
   SELECT pg_get_userbyid(p.proowner), format('GRANT EXECUTE ON FUNCTION %s TO %s', p.oid::regprocedure, grantees.roles)
    FROM (VALUES
-    ('swarm.require_live_human_session()', 'anon, authenticated, service_role'),
-    ('swarm.current_human_session_live()', 'authenticated'),
-    ('swarm.admit_human_session(uuid,uuid)', 'swarm_command, commonswarm_oauth_runtime')
+    ('swarm_session.require_live_human_session()', 'anon, authenticated, service_role'),
+    ('swarm_session.current_human_session_live()', 'authenticated'),
+    ('swarm_session.admit_human_session(uuid,uuid)', 'swarm_command, commonswarm_oauth_runtime')
    ) AS grantees(signature, roles)
    JOIN pg_catalog.pg_proc p ON p.oid = grantees.signature::regprocedure
+  UNION ALL
+  SELECT pg_get_userbyid(n.nspowner), 'REVOKE ALL ON SCHEMA swarm_session FROM PUBLIC'
+   FROM pg_catalog.pg_namespace n WHERE n.nspname = 'swarm_session'
+  UNION ALL
+  SELECT pg_get_userbyid(n.nspowner),
+   'GRANT USAGE ON SCHEMA swarm_session TO anon, authenticated, service_role, swarm_command, commonswarm_oauth_runtime'
+   FROM pg_catalog.pg_namespace n WHERE n.nspname = 'swarm_session'
   UNION ALL
   SELECT pg_get_userbyid(n.nspowner), 'REVOKE CREATE ON SCHEMA swarm FROM commonswarm_credential_fence'
    FROM pg_catalog.pg_namespace n WHERE n.nspname = 'swarm'
@@ -290,7 +302,7 @@ USING (
     )::uuid,
     (SELECT auth.uid())
   )
-  AND (SELECT swarm.current_human_session_live())
+  AND (SELECT swarm_session.current_human_session_live())
 );
 DROP POLICY "workspace members receive signals" ON realtime.messages;
 CREATE POLICY "workspace members receive signals"
@@ -306,12 +318,12 @@ USING (
     )::uuid,
     (SELECT auth.uid())
   )
-  AND (SELECT swarm.current_human_session_live())
+  AND (SELECT swarm_session.current_human_session_live())
 );
 
 -- PostgREST reads its db-pre-request from the authenticator role (in-database configuration).
 -- Rollback: ALTER ROLE authenticator RESET pgrst.db_pre_request; it reopens the window.
-ALTER ROLE authenticator SET pgrst.db_pre_request TO 'swarm.require_live_human_session';
+ALTER ROLE authenticator SET pgrst.db_pre_request TO 'swarm_session.require_live_human_session';
 NOTIFY pgrst, 'reload config';
 
 DO $role$
@@ -359,7 +371,8 @@ BEGIN
  FOR item IN SELECT * FROM (VALUES
   ('swarm.credential_change_clear_tokens()'), ('swarm.credential_change_revoke_for(uuid)'),
   ('swarm.credential_change_revoke()'), ('swarm.credential_change_sweep()'), ('swarm.human_session_live(jsonb)'),
-  ('swarm.current_human_session_live()'), ('swarm.require_live_human_session()'), ('swarm.admit_human_session(uuid,uuid)')
+  ('swarm_session.current_human_session_live()'), ('swarm_session.require_live_human_session()'),
+  ('swarm_session.admit_human_session(uuid,uuid)')
  ) AS guarded(function_name) LOOP
   IF has_function_privilege('public', item.function_name, 'EXECUTE') THEN
    RAISE EXCEPTION 'credential fence function exposed to PUBLIC: %', item.function_name USING ERRCODE = '42501';
@@ -370,9 +383,31 @@ BEGIN
    RAISE EXCEPTION 'the inner liveness checker is exposed to %', item.role_name USING ERRCODE = '42501';
   END IF;
  END LOOP;
+ -- Each caller can reach its wrapper (schema USAGE and EXECUTE), and nothing broader.
+ FOR item IN SELECT * FROM (VALUES
+  ('anon', 'swarm_session.require_live_human_session()'),
+  ('authenticated', 'swarm_session.require_live_human_session()'),
+  ('service_role', 'swarm_session.require_live_human_session()'),
+  ('authenticated', 'swarm_session.current_human_session_live()'),
+  ('swarm_command', 'swarm_session.admit_human_session(uuid,uuid)'),
+  ('commonswarm_oauth_runtime', 'swarm_session.admit_human_session(uuid,uuid)')
+ ) AS caller(role_name, function_name) LOOP
+  IF has_schema_privilege(item.role_name, 'swarm_session', 'USAGE') IS DISTINCT FROM true
+    OR has_function_privilege(item.role_name, item.function_name, 'EXECUTE') IS DISTINCT FROM true THEN
+   RAISE EXCEPTION '% cannot reach %', item.role_name, item.function_name USING ERRCODE = '42501';
+  END IF;
+ END LOOP;
+ FOR item IN SELECT * FROM (VALUES ('anon'), ('authenticated'), ('commonswarm_oauth_runtime')) AS client(role_name) LOOP
+  IF has_schema_privilege(item.role_name, 'swarm', 'USAGE') THEN
+   RAISE EXCEPTION '% gained USAGE on swarm', item.role_name USING ERRCODE = '42501';
+  END IF;
+ END LOOP;
+ IF has_schema_privilege('authenticated', 'swarm_session', 'CREATE') OR has_schema_privilege('anon', 'swarm_session', 'CREATE') THEN
+  RAISE EXCEPTION 'a client role can create in swarm_session' USING ERRCODE = '42501';
+ END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_roles r ON r.oid = s.setrole
    WHERE r.rolname = 'authenticator' AND s.setdatabase = 0
-    AND 'pgrst.db_pre_request=swarm.require_live_human_session' = ANY (s.setconfig)) THEN
+    AND 'pgrst.db_pre_request=swarm_session.require_live_human_session' = ANY (s.setconfig)) THEN
   RAISE EXCEPTION 'PostgREST db-pre-request is not set on authenticator' USING ERRCODE = '42501';
  END IF;
 END
