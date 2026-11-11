@@ -1,5 +1,15 @@
 [
   {
+    "id": "app.chat.general",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [],
+    "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "states": [
+      "dense"
+    ]
+  },
+  {
     "id": "app.people",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
