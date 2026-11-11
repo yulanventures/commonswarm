@@ -19,18 +19,21 @@ live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close] 
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close]:hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__body { flex: 1; min-block-size: 0; overflow: hidden; }
-live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] { block-size: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] { box-sizing: border-box; inline-size: 100%; max-inline-size: none; block-size: 100%; min-block-size: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; padding: 0;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page].has-detail { grid-template-columns: minmax(280px, 1fr) minmax(0, 1.2fr); }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-context] {
   min-block-size: 0; padding: 16px 20px 24px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding: 8px;
 }
-live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .pd-page-title-row { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-context] .pd-page-title-row { display: none; }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .pd-page-side { display: none; min-block-size: 0; max-inline-size: none; margin: 0; }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .has-detail > .pd-page-side {
   display: block; padding: 16px 20px 24px; border-inline-start: 1px solid var(--k-shell-line);
   overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding: 8px;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] .pd-detail { padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .pd-detail .pd-fact-sheet { background: transparent; }
 live-dashboard.dashboard[data-kylon-shell] .cs-people-modal :is(button,a,input,select,summary):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; }
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal,
