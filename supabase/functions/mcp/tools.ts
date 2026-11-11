@@ -132,7 +132,7 @@ export const CORE_TOOL_TABLE = [
   {
     name: "channel_ls", effect: "read", title: "List channels",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "The live channels in the selected seat's workspace, general (unfiled messages) first.",
+    description: "The live channels in the selected seat's workspace, general (unfiled messages) first. unread is true when channel_read has messages there you haven't read, and null until you first read a channel.",
     annotations: { title: "List channels", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
   },

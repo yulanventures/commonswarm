@@ -1698,9 +1698,10 @@ test("an agent credential can list channels, with the same tenancy every resourc
    * query. */
   assert.deepEqual(
     Object.keys(found).sort(),
-    [...CHANNEL_READ_COLUMNS].sort(),
-    "the agent path returns exactly the columns CHANNEL_READ_COLUMNS names",
+    [...CHANNEL_READ_COLUMNS, "unread"].sort(),
+    "the agent path returns exactly the columns CHANNEL_READ_COLUMNS names, plus the agent's own unread",
   );
+  assert.ok("general_unread" in listed.body, "general's unread rides beside the rows");
 
   /* TENANCY: another workspace is an empty envelope, not a 403 and not another
    * tenant's rows. That is the shape every resource in this function uses. */
@@ -2025,6 +2026,52 @@ test("an agent reads a channel's whole-workspace messages, never addressed ones"
   assert.equal((await read({ channel: "all-signals" })).status, 400, "a reserved non-channel name is refused");
   assert.equal((await read({ channel: slug, after_id: randomUUID() })).status, 400, "an unknown cursor is refused");
   assert.equal((await read({ channel: slug, extra: true })).status, 400);
+});
+
+/* -------------------------------------------------------------------------
+ * Channels C1b for agents: channel_read moves the agent's read position to the
+ * last message it returned, and channel_ls reports unread from it.
+ * ------------------------------------------------------------------------- */
+
+test("an agent's channel_ls unread clears only once channel_read has returned every newer message", async () => {
+  const read = (extra: Record<string, unknown>) => readResource(f.agentToken, { resource: "channel_messages", workspace_id: f.workspace, ...extra });
+  const unreadOf = async (slug: string) => {
+    const listed = await readResource(f.agentToken, { resource: "channels", workspace_id: f.workspace });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    return (listed.body.channels as Array<Record<string, unknown>>).find((row) => row.slug === slug)?.unread;
+  };
+  // Any read gives the agent a read position in this workspace; the channel below is newer than it.
+  assert.equal((await read({ channel: "general" })).status, 200);
+  const slug = `unread-${randomBytes(4).toString("hex")}`;
+  assert.equal((await send(f.ownerJwt, { kind: "channel_create", slug })).status, 200);
+  const posted: string[] = [];
+  for (let i = 0; i < 2; i += 1) {
+    const post = await send(f.ownerJwt, installedPost({ channel: slug, body: `unread ${i} ${"x".repeat(800)}` }));
+    assert.equal(post.status, 200, JSON.stringify(post.body));
+    posted.push(String(signalOf(post.body).id));
+  }
+  assert.equal(await unreadOf(slug), true);
+
+  // A page the caller bounds to one message moves the position to that message only.
+  const first = await read({ channel: slug, max_bytes: 1024 });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.deepEqual((first.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id), [posted[0]]);
+  assert.deepEqual(first.body.next, { after_id: posted[0] });
+  assert.equal(await unreadOf(slug), true, "the message the page left out is still unread");
+  const rest = await read({ channel: slug, after_id: posted[0] });
+  assert.deepEqual((rest.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id), [posted[1]]);
+  assert.equal(await unreadOf(slug), false);
+  // Reading from the start again never moves it back.
+  assert.equal((await read({ channel: slug, max_bytes: 1024 })).status, 200);
+  assert.equal(await unreadOf(slug), false);
+
+  const newer = await send(f.ownerJwt, installedPost({ channel: slug }));
+  assert.equal(newer.status, 200, JSON.stringify(newer.body));
+  assert.equal(await unreadOf(slug), true, "a newer message is unread again");
+
+  for (const max_bytes of [1023, 64 * 1024 + 1, 2048.5, "2048"]) {
+    assert.equal((await read({ channel: slug, max_bytes })).status, 400, `max_bytes ${max_bytes}`);
+  }
 });
 
 test("Brain M3: with workspace memory off, an admitted agent's memory reads are refused", async () => {

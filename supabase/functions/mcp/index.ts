@@ -350,6 +350,7 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       channel: String(args.channel).toLowerCase(),
       after_id: typeof args.after_id === "string" ? args.after_id.toLowerCase() : null,
       limit: typeof args.limit === "number" ? args.limit : 50,
+      fit_bytes: limits.maxResponseBytes,
     }, capability));
     const page = fitChannelPage({ context: output.context, workspace_id: output.workspace_id, channel: output.channel,
       archived: output.archived, messages: Array.isArray(output.messages) ? output.messages as Array<Record<string, unknown>> : [],

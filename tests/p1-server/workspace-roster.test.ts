@@ -438,3 +438,156 @@ test("channel_unread is the person's own: never for an agent's claims, a non-mem
     await assert.rejects(() => unread(ws, owner, {}, role), /permission denied/);
   }
 });
+
+/* -------------------------------------------------------------------------
+ * Channels C1b for agents: swarm_read.agent_channel_unread, from the read
+ * position swarm.agent_channel_read_advance keeps. Both called the way the read
+ * function calls them: swarm_read, the owner's claims plus the agent.
+ * ------------------------------------------------------------------------- */
+
+async function asAgent<T>(ws: string, owner: string, agentId: string | null, run: (tx: postgres.TransactionSql) => Promise<T>,
+  role = "swarm_read"): Promise<T> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL ROLE ${role}`);
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated",
+      ...(agentId === null ? {} : { agent_principal_id: agentId }) })}, true)`;
+    return await run(tx);
+  }) as T;
+}
+
+async function agentUnread(ws: string, owner: string, agentId: string | null, role = "swarm_read"): Promise<Record<string, boolean | null> | null> {
+  return await asAgent(ws, owner, agentId, async (tx) => {
+    const [row] = await tx<{ unread: Array<{ slug: string; unread: boolean | null }> | null }[]>`
+      SELECT swarm_read.agent_channel_unread(${ws}::uuid) AS unread`;
+    return row!.unread === null ? null : Object.fromEntries(row!.unread.map((c) => [c.slug, c.unread]));
+  }, role);
+}
+
+async function advance(ws: string, owner: string, agentId: string, channel: string, through: string, role = "swarm_read"): Promise<void> {
+  await asAgent(ws, owner, agentId, async (tx) => {
+    await tx`SELECT swarm.agent_channel_read_advance(${ws}::uuid, ${channel}, ${through}::uuid)`;
+  }, role);
+}
+
+async function readPosition(ws: string, agentId: string, channelId: string | null): Promise<string | null> {
+  const [row] = await sql<{ read_through_id: string }[]>`SELECT read_through_id FROM swarm.agent_channel_reads
+    WHERE workspace_id = ${ws}::uuid AND principal_id = ${agentId}::uuid AND channel_id IS NOT DISTINCT FROM ${channelId}::uuid`;
+  return row?.read_through_id ?? null;
+}
+
+test("agent_channel_unread: unknown before any read, then unread only for newer whole-workspace messages from others", async () => {
+  const owner = await person("Owner");
+  const helper = await person("Helper");
+  const ws = await workspace(owner, "Agent unread");
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${ws}::uuid, ${helper}::uuid, 'member')`;
+  const reader = await agent(ws, owner, "Reader");
+  const writer = await agent(ws, helper, "Writer");
+  const [design] = await sql<{ channel_id: string }[]>`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
+    VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'design', ${owner}::uuid, 'user', statement_timestamp()) RETURNING channel_id`;
+  const channelId = design!.channel_id;
+
+  const older = await filed(ws, writer, "OLDER", { channel: channelId, ago: "10 minutes" });
+  const newest = await filed(ws, writer, "NEWEST", { channel: channelId, ago: "9 minutes" });
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: null, design: null }, "no read position yet");
+
+  // Reading the older message leaves the newer one unread; reading through the newest clears it.
+  await advance(ws, owner, reader, "design", older);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true },
+    "general has nothing newer than the agent's first read");
+  await advance(ws, owner, reader, "design", newest);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: false });
+  // Only forward: an older message never moves the position back.
+  await advance(ws, owner, reader, "design", older);
+  assert.equal(await readPosition(ws, reader, channelId), newest);
+
+  // Messages channel_read never returns, and the agent's own, never make a channel unread.
+  await filed(ws, writer, "DIRECT", { channel: channelId, toUser: helper });
+  await filed(ws, writer, "TO-RECIPIENTS", { channel: channelId, recipients: [helper] });
+  const privateRoot = await filed(ws, writer, "PRIVATE-ROOT", { channel: channelId, toUser: owner });
+  await filed(ws, writer, "UNDER-PRIVATE-ROOT", { channel: channelId, thread: privateRoot });
+  await filed(ws, reader, "OWN", { channel: channelId });
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: false });
+
+  // A thread reply channel_read returns does; so does an unfiled message, for general.
+  const reply = await filed(ws, writer, "REPLY", { channel: channelId, thread: newest, ago: "0 seconds" });
+  const unfiled = await filed(ws, writer, "UNFILED", { ago: "0 seconds" });
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: true, design: true });
+  assert.deepEqual((await channelPage(ws, owner, reader, "design", { after_id: newest }))?.messages.map((m) => m.signal_id), [reply],
+    "unread names exactly what channel_read would return next");
+  await advance(ws, owner, reader, "general", unfiled);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true }, "positions are per channel");
+
+  // Each agent has its own position.
+  assert.deepEqual(await agentUnread(ws, helper, writer), { general: null, design: null });
+});
+
+test("an empty channel_read starts the agent's unread; a later message makes that channel unread", async () => {
+  const owner = await person("Owner");
+  const ws = await workspace(owner, "Agent empty read");
+  const reader = await agent(ws, owner, "Reader");
+  const writer = await agent(ws, owner, "Writer");
+  await filed(ws, writer, "BEFORE-FIRST-READ", { ago: "5 minutes" });
+  await asAgent(ws, owner, reader, (tx) => tx`SELECT swarm.agent_channel_read_advance(${ws}::uuid, 'general', NULL)`);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false }, "messages before the first read never count");
+  assert.equal(await readPosition(ws, reader, null), null, "no message read yet");
+  const later = await filed(ws, writer, "LATER", { ago: "0 seconds" });
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: true });
+  await advance(ws, owner, reader, "general", later);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false });
+  // An empty read never clears a position already held.
+  await asAgent(ws, owner, reader, (tx) => tx`SELECT swarm.agent_channel_read_advance(${ws}::uuid, 'general', NULL)`);
+  assert.equal(await readPosition(ws, reader, null), later);
+});
+
+test("agent_channel_read_advance moves only to a message channel_read could return in that channel", async () => {
+  const owner = await person("Owner");
+  const ws = await workspace(owner, "Agent advance");
+  const reader = await agent(ws, owner, "Reader");
+  const [design] = await sql<{ channel_id: string }[]>`INSERT INTO swarm.channels (channel_id, workspace_id, slug, created_by_principal, created_by_kind, created_at)
+    VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'design', ${owner}::uuid, 'user', statement_timestamp()) RETURNING channel_id`;
+  const channelId = design!.channel_id;
+  const elsewhere = await workspace(owner, "Other workspace");
+  const foreign = await filed(elsewhere, await agent(elsewhere, owner, "Foreign"), "FOREIGN", {});
+  const privateOne = await filed(ws, reader, "PRIVATE", { channel: channelId, toUser: owner });
+  const unfiled = await filed(ws, reader, "UNFILED", {});
+  const expired = await filed(ws, reader, "EXPIRED", { channel: channelId });
+  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second' WHERE id = ${expired}::uuid`;
+
+  for (const [channel, through] of [["design", privateOne], ["design", unfiled], ["design", foreign], ["design", expired],
+    ["design", randomUUID()], ["general", privateOne], ["missing", unfiled]] as const) {
+    await advance(ws, owner, reader, channel, through);
+  }
+  const [{ rows }] = await sql<{ rows: number }[]>`SELECT count(*)::int AS rows FROM swarm.agent_channel_reads WHERE principal_id = ${reader}::uuid`;
+  assert.equal(rows, 0, "no refused id sets a read position");
+  assert.equal(await agentUnread(ws, owner, reader).then((u) => u?.design), null);
+});
+
+test("agent read positions are the agent's own: no person, other agent, removed agent or read role reaches them", async () => {
+  const owner = await person("Owner");
+  const ws = await workspace(owner, "Agent unread gate");
+  const reader = await agent(ws, owner, "Reader");
+  const message = await filed(ws, reader, "GENERAL", {});
+  const elsewhere = await workspace(owner, "Other workspace");
+  const outsider = await agent(elsewhere, owner, "Outsider");
+
+  assert.equal(await agentUnread(ws, owner, null), null, "a person's claims have no agent read position");
+  assert.equal(await agentUnread(ws, owner, outsider), null, "an agent of another workspace");
+  await advance(ws, owner, outsider, "general", message);
+  await advance(ws, randomUUID(), reader, "general", message);
+  const [{ rows }] = await sql<{ rows: number }[]>`SELECT count(*)::int AS rows FROM swarm.agent_channel_reads WHERE workspace_id = ${ws}::uuid`;
+  assert.equal(rows, 0, "neither a foreign agent nor a non-member owner claim writes a position");
+
+  // The read role reaches the table only through the two definers.
+  for (const role of ["swarm_read", "swarm_command", "authenticated"]) {
+    await assert.rejects(() => asAgent(ws, owner, reader, (tx) => tx`SELECT 1 FROM swarm.agent_channel_reads`, role), /permission denied/);
+  }
+  for (const role of ["swarm_command", "authenticated"]) {
+    await assert.rejects(() => agentUnread(ws, owner, reader, role), /permission denied/);
+    await assert.rejects(() => advance(ws, owner, reader, "general", message, role), /permission denied/);
+  }
+
+  await advance(ws, owner, reader, "general", message);
+  assert.deepEqual(await agentUnread(ws, owner, reader), { general: false });
+  await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${reader}::uuid`;
+  assert.equal(await agentUnread(ws, owner, reader), null, "a removed agent reads nothing");
+});
