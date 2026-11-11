@@ -196,13 +196,20 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     // is in flight, AND reads have been quiet for 400 ms.
     // "quiet" when a read is in flight or one ended under 400 ms ago; "receipts" when a real receipt is still waiting;
     // null when settled. A view with no receipts at all is settled, not waiting.
-    let unsettled: "quiet" | "receipts" | null = null;
+    // Both conditions are evaluated on every check, so a timeout names every blocker, not just the first one failing at
+    // the deadline (a poll ending just before it would otherwise label a marker wait "not quiet").
     let waitingOn: string[] = [];
+    let checks = 0, notQuietChecks = 0, markerChecks = 0;
     const receiptsSettled = () => {
-      unsettled = "quiet";
+      checks += 1;
       waitingOn = [];
-      if ((w.__auditPendingFetches ?? 0) > 0 || performance.now() - (w.__auditLastFetchDoneAt ?? 0) < 400) return false;
-      unsettled = "receipts";
+      const quiet = (w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400;
+      if (!quiet) notQuietChecks += 1;
+      const loaded = markersLoaded();
+      if (!loaded) markerChecks += 1;
+      return quiet && loaded;
+    };
+    const markersLoaded = () => {
       for (const view of Array.from(document.querySelectorAll(".dashboard__feed-view"))) {
         const v = view.getBoundingClientRect();
         if (v.width <= 0 || v.height <= 0) continue; // A hidden feed holds nothing on screen.
@@ -225,7 +232,6 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
           }
         }
       }
-      unsettled = null;
       return true;
     };
     for (const started = performance.now(); !receiptsSettled();) {
@@ -243,8 +249,10 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
         const at = Math.round(performance.now());
         const inflight = Array.from(fetches.__auditInflight?.values() ?? []).slice(0, 8).join(", ");
         const recent = (fetches.__auditRecentFetches ?? []).map(([path, done]) => `${path} -${at - done}ms`).join(", ");
-        return { error: unsettled === "quiet" ? `reads on the page did not go quiet within 20 s (in flight: ${inflight || "none"}; recent: ${recent || "none"})`
-          : `receipts for the rows on screen did not load within 20 s (waiting: ${waitingOn.slice(0, 12).join(", ")}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""}; trace: ${waitingOn.slice(0, 3).map(traceOf).join(" | ")})` };
+        const counts = `markers waiting in ${markerChecks} and reads not quiet in ${notQuietChecks} of ${checks} checks`;
+        return { error: markerChecks > 0
+          ? `receipts for the rows on screen did not load within 20 s (${counts}; waiting at the deadline: ${waitingOn.slice(0, 12).join(", ") || "none"}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""}; trace: ${waitingOn.slice(0, 3).map(traceOf).join(" | ") || "none"}; in flight: ${inflight || "none"})`
+          : `reads on the page did not go quiet within 20 s (${counts}; in flight: ${inflight || "none"}; recent: ${recent || "none"})` };
       }
       await new Promise(done => setTimeout(done, 100));
     }
