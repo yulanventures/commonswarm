@@ -6981,6 +6981,7 @@ import "../../styles/kylon-command-palette.css";
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       if (!dialog || activeWorkspaceId !== workspaceId) return;
       if (!dialog.open) {
+        layout.closeNavigation(false);
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
         rosterFilter = "";
         peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
@@ -7017,7 +7018,7 @@ import "../../styles/kylon-command-palette.css";
       parkPeopleHosts();
       if (restoreFocus && returned) {
         const target = returned.opener?.isConnected && returned.opener.getClientRects().length && !returned.opener.closest("[hidden],[inert]") ? returned.opener
-          : [...all<HTMLElement>("[data-roster-open]"), ...all<HTMLElement>("[data-home-workspace-shell] h1")].find(node => !!node.getClientRects().length && !node.closest("[hidden],[inert]"));
+          : [...all<HTMLElement>("[data-roster-open]"), ...all<HTMLElement>('button[aria-label="Open navigation"]'), ...all<HTMLElement>("[data-home-workspace-shell] h1")].find(node => !!node.getClientRects().length && !node.closest("[hidden],[inert]"));
         target?.focus({ preventScroll: true });
       }
     };
