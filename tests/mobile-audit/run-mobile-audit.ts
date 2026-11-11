@@ -60,7 +60,8 @@ const INDENT = (ids: string[]) => ids.map((id) => {
     return true;
   };
   // The inline recipient: on the author's line, never clipping the badge or time, truncated with its full name kept.
-  const badge = row.querySelector(".dashboard__message-identity-badge"), time = meta?.querySelector("time") ?? null;
+  // The header's visible badge and clock (the identity badge in the meta is hidden by design).
+  const badge = row.querySelector(".hm-author__agent"), time = row.querySelector(".hm-author__when");
   const clipped = (el: Element | null) => !!el && (el as HTMLElement).scrollWidth > (el as HTMLElement).clientWidth + 1;
   const line = (el: Element | null) => { if (!el) return null; const r = el.getBoundingClientRect(); return Math.round((r.top + r.height / 2) * 100) / 100; };
   const inline = { authorMid: line(author), targetMid: line(target), badgeMid: line(badge), timeMid: line(time),
@@ -69,6 +70,17 @@ const INDENT = (ids: string[]) => ids.map((id) => {
     // The ellipsis can belong to the recipient's own entity button, nested in the target.
     targetTruncated: clipped(target) || Array.from(target?.querySelectorAll("*") ?? []).some(clipped),
     targetNameStyle: style(target?.querySelector("button, a, [title]") ?? null, ["white-space", "overflow", "text-overflow", "min-width", "max-width"]),
+    // Arrow-to-name adjacency: the gap between the arrow glyph's right edge and the first glyph of the recipient's name.
+    arrowToName: (() => {
+      if (!target) return null;
+      const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, { acceptNode: n => n.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+      const arrow = walker.nextNode(), name = walker.nextNode();
+      if (!arrow || !name) return null;
+      const r = document.createRange(); r.selectNodeContents(arrow); const a = r.getBoundingClientRect();
+      r.selectNodeContents(name); const n = r.getClientRects()[0] ?? r.getBoundingClientRect();
+      return { gap: Math.round((n.left - a.right) * 100) / 100, arrowText: arrow.textContent?.trim() ?? "", nameStart: Math.round(n.left * 100) / 100 };
+    })(),
+    targetControls: Array.from(target?.querySelectorAll("button, a[href], [tabindex]:not([tabindex='-1'])") ?? []).map(c => ({ tag: c.tagName.toLowerCase(), ...box(c) })),
     targetTitle: target?.getAttribute("title") ?? target?.querySelector("[title]")?.getAttribute("title") ?? null,
     targetLabel: target?.getAttribute("aria-label") ?? target?.querySelector("[aria-label]")?.getAttribute("aria-label") ?? null,
     targetStyle: style(target, ["white-space", "overflow", "text-overflow", "min-width", "flex"]), metaLines: meta ? Math.round(meta.getBoundingClientRect().height) : null };
