@@ -16,7 +16,13 @@ async function observePeopleModal() {
   let stage = "boot";
   const wait = async (name: string, predicate: () => unknown) => {
     stage = name;
-    const now = async () => (await (await fetch("/__observer-tick")).json()).now;
+    const now = async () => {
+      // Keep a real transport pending and allow a rendering frame: a continuous fetch loop can
+      // otherwise starve the app's requestAnimationFrame focus under --virtual-time-budget.
+      const clock = fetch("/__observer-tick").then(response => response.json());
+      const [time] = await Promise.all([clock, new Promise<void>(done => requestAnimationFrame(() => done()))]);
+      return time.now;
+    };
     const until = await now() + 10_000;
     while (!predicate()) { if (await now() >= until) throw new Error("timed out at " + name); }
   };
