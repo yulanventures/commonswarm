@@ -63,6 +63,8 @@ const notesOf = (host: AgentHost): string[] => [
   ...host.notes,
   MENU_LABELS_NOTE,
 ];
+/* Claude setup opens separately so this page can keep watching for the join.
+   Cursor's native install link and the Grok Bot guide retain their navigation. */
 const linkOf = (host: AgentHost) => host.steps.find((step) => step.link)?.link ?? null;
 /* The panel's pill: the app's own web address, else the step link (Cursor's install link). */
 const actionOf = (host: AgentHost) => host.open ?? linkOf(host);
@@ -164,7 +166,13 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
                   </div>
                 )}
                 {step.link && (
-                  <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
+                  <a
+                    class="hm-ahp__button"
+                    href={step.link.href}
+                    target={host.id === "claude" ? "_blank" : undefined}
+                    rel="nofollow noopener noreferrer"
+                    aria-label={host.id === "claude" ? `${step.link.label} (opens in a new tab)` : undefined}
+                  >{step.link.label}</a>
                 )}
               </li>
             ))}
@@ -209,7 +217,13 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       <div class="hm-ahp__connect">
         <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
         {linkOf(host) && (
-          <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+          <a
+            class="hm-ahp__connect-action"
+            href={linkOf(host)!.href}
+            target={host.id === "claude" ? "_blank" : undefined}
+            rel="nofollow noopener noreferrer"
+            aria-label={host.id === "claude" ? `${linkOf(host)!.label} (opens in a new tab)` : undefined}
+          >{linkOf(host)!.label}</a>
         )}
         {host.open && (
           <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
