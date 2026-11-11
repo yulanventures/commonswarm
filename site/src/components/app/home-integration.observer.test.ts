@@ -1174,7 +1174,7 @@ test('each navigation focuses the visible H1 for that view', async () => {
   const context = createContext({ ...MESSAGE_STATUS_STUBS, homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
     document:{title:''}, one:(selector:string)=>selector==='#pd-detail-title'?selectedTitle:null,
     all:(selector:string)=>selector.split(',').flatMap(part => headings.get(part.trim()) ?? [])});
-  runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, workspaces=[{id:'W',name:'Home'}];",context);
+  runInContext("let listsAllowLanding=null, homeRoute, peopleDialogFocus, existingAgentChoiceIsCurrent, workspaces=[{id:'W',name:'Home'}];",context);
   runInContext(await dashboardFunctions(['focusHomeView']),context);
   for (const [view,scope] of Object.entries(scopes)) {
     focused.length = 0;
@@ -1203,6 +1203,13 @@ test('each navigation focuses the visible H1 for that view', async () => {
   selectedTitle.inert = false;
   runInContext('focusHomeView()',context); frames.shift()!();
   assert.equal(focused.at(-1), selectedTitle, 'a visible requested profile retains its detail heading target');
+  // A late workspace read reapplies the same route after the person chose an identity.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  headings.get('[data-channel-view=agent-choice] h1')!.visible = true;
+  runInContext("homeRoute={view:'add-agent',workspaceId:'W'}; existingAgentChoiceIsCurrent=()=>true; focusHomeView();",context);
+  frames.shift()!();
+  assert.equal(focused.length, 0, 'a late navigation frame must not take focus from the active identity picker');
 });
 
 
@@ -1341,6 +1348,7 @@ test('Add agent receives the viewer first name and Home and Done leave that scre
     const session = { user: { id: 'tom', email: 'tom@example.test', user_metadata: { user_name: 'Tom Langridge' } } };
     const accountName = () => accountLabel;
     const picker = { reset() {}, setContext(value) { seen.push(value); } };
+    const existingAgentChoiceIsCurrent = undefined;
     const one = selector => selector === 'agent-host-picker' ? picker : null;
     const navigated = [], stopped = [];
     const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
