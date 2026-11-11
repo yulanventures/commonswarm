@@ -27,7 +27,9 @@ type Row = { name: string; html: string; setup?: (page: Page) => Promise<void>; 
   served?: boolean;
   activation?: ActivationSpec[];
   hover?: HoverSpec;
-  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[]; hover?: HoverResult }) => void };
+  hoverPair?: [HoverSpec, HoverSpec];
+  hoverRefresh?: (page: Page) => Promise<void>;
+  check: (result: { geometry: Geometry; keyboard?: Keyboard; activation?: Activation[]; hover?: HoverResult; hoverPair?: [HoverResult, HoverResult] }) => void };
 
 const page = (body: string, style = "") =>
   `<!doctype html><html><head><style>body{margin:0;font:16px/1.4 sans-serif} button{width:80px;height:44px}${style}</style></head><body>${body}</body></html>`;
@@ -94,7 +96,7 @@ const keyedList = (onHover: string, options: { onLoad?: string; onFocus?: string
   <div id="scroller" style="${options.inPage ? "" : "height:200px;overflow:auto;"}width:300px">
   <ul id="feed" style="list-style:none;margin:0;padding:0">${rows}</ul></div>${options.inPage ? '<div style="height:1200px"></div>' : ""}
   <script>const feed = document.getElementById("feed"); const scroller = document.getElementById("scroller");
-  const fresh = () => { feed.innerHTML = ${JSON.stringify(rows)}; };
+  const fresh = () => { feed.innerHTML = ${JSON.stringify(rows)}; }; globalThis.__auditFresh = fresh;
   ${options.onLoad ?? ""}
   let fired = false; scroller.addEventListener("mouseover", (event) => {
     const row = event.target.closest && event.target.closest('.msg[data-signal-id="s5"]');
@@ -455,6 +457,28 @@ const ROWS: Row[] = [
       assert.equal(h?.outcome, "error", show(h));
       assert.match(h!.rows.find(r => r.mode === "focus")?.reason ?? "", /focus was lost/u, show(h));
   } },
+  { name: "a late rebuild after 20 s fails the former 20 s deadline and passes the default FEED_RECONCILE_MS + 10 s deadline",
+    html: keyedList(""),
+    hoverPair: [
+      { ...keyedSpec, focus: true, focusTarget: "a", focusAcrossRebuild: true, rebuildTimeoutMs: 20_000 },
+      { ...keyedSpec, focus: true, focusTarget: "a", focusAcrossRebuild: true },
+    ],
+    hoverRefresh: async p => {
+      await p.evaluate(() => {
+        setTimeout(() => {
+          (globalThis as unknown as { __auditFresh?: () => void }).__auditFresh?.();
+          requestAnimationFrame(() => document.querySelector<HTMLElement>('.msg[data-signal-id="s5"] a')?.focus({ preventScroll: true }));
+        }, 21_000);
+      }, null);
+    }, check: ({ hoverPair: pair }) => {
+      const [former, current] = pair!;
+      assert.equal(former.outcome, "error", show(former));
+      assert.match(former.rows.find(r => r.mode === "focus")?.reason ?? "", /did not rebuild the focused row within 20 s/u, show(former));
+      assert.equal(current.outcome, "stable", show(current));
+      const focusRow = current.rows.find(r => r.mode === "focus");
+      assert.equal(focusRow?.outcome, "stable", show(current));
+      assert.equal(focusRow?.late?.focusWithin, true, show(focusRow));
+  } },
   { name: "the page itself scrolling during hover is counted once and recorded, not a shift",
     html: keyedList("window.scrollBy(0, -10);", { inPage: true }), hover: keyedSpec, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "stable", show(h));
@@ -526,8 +550,15 @@ browserTest("audit witnesses: fixture regression matrix", { timeout: 5 * 60_000 
           const keyboard = row.keyboard ? await runKeyboardWitness(p, row.keyboard) : undefined;
           const activation: Activation[] = [];
           for (const spec of row.activation ?? []) activation.push(await runActivationWitness(p, spec));
-          const hover = row.hover ? await runHoverWitness(p, row.hover) : undefined;
-          row.check({ geometry, keyboard, activation, hover });
+          const hover = row.hover ? await runHoverWitness(p, row.hover, undefined, row.hoverRefresh ? () => row.hoverRefresh!(p) : undefined) : undefined;
+          const hoverPair = row.hoverPair ? await Promise.all(row.hoverPair.map(async spec => {
+            const hp = await context.newPage() as Page;
+            try {
+              await hp.setContent(row.html);
+              return await runHoverWitness(hp, spec, undefined, row.hoverRefresh ? () => row.hoverRefresh!(hp) : undefined);
+            } finally { await hp.close(); }
+          })) as [HoverResult, HoverResult] : undefined;
+          row.check({ geometry, keyboard, activation, hover, hoverPair });
         } finally { await p.close(); }
       }
     }

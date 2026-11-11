@@ -67,7 +67,7 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
     await sql.begin(async (tx) => {
       await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
         VALUES (${id}::uuid, ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
-          statement_timestamp() + interval '60 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+          statement_timestamp() + interval '120 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
       await tx`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
         SELECT ${ids.workspace!}::uuid, ${id}::uuid, m.user_id FROM swarm.memberships m
         WHERE m.workspace_id = ${ids.workspace!}::uuid AND m.role = 'owner' AND m.revoked_at IS NULL ON CONFLICT DO NOTHING`;
