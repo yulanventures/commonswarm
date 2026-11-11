@@ -7017,7 +7017,7 @@ import "../../styles/kylon-command-palette.css";
       parkPeopleHosts();
       if (restoreFocus && returned) {
         const target = returned.opener?.isConnected && returned.opener.getClientRects().length && !returned.opener.closest("[hidden],[inert]") ? returned.opener
-          : all<HTMLElement>("[data-roster-open], [data-home-workspace-shell] h1").find(node => !!node.getClientRects().length && !node.closest("[hidden],[inert]"));
+          : [...all<HTMLElement>("[data-roster-open]"), ...all<HTMLElement>("[data-home-workspace-shell] h1")].find(node => !!node.getClientRects().length && !node.closest("[hidden],[inert]"));
         target?.focus({ preventScroll: true });
       }
     };
