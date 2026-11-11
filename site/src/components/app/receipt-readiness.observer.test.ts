@@ -29,12 +29,17 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, scenario, seen: false, ackedAt: 0, clock: 0, withLater: false,
+  const f = w.receiptFixture = { owner, workspace, signal, later, scenario, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
   // dropped-refresh: the held read is for the owner's note to an agent (never reported seen); a note to the viewer arrives
   // and is acknowledged while that read holds the slot, so the refresh it asks for is dropped and must run after.
+  // beyond-eight: ten notes from the owner to the assistant are on screen and never read; a pass reads at most eight, and
+  // the remaining two must be read without waiting for the feed's next poll. Reads answer at once.
+  // awaiting-beyond-eight: ten notes to the viewer are read, reported seen together and acknowledged; all ten owe a re-read,
+  // and all ten must be re-read without waiting for the feed's next poll. Reads answer at once.
+  const many = Array.from({ length: 10 }, (_, i) => `7777777${i}-7777-4777-8777-77777777777${i}`);
   const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
     to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
     thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
@@ -51,10 +56,21 @@ function installReceiptFixture() {
       const id = String(body?.p_signal_id ?? "");
       const read = { at: ++f.clock, id, seen: f.seen, release: () => {}, released: false };
       f.log.push("read:" + id.slice(0, 2));
+      if (scenario === "beyond-eight") { f.log.push("read-id:" + id); return Response.json(null); }
+      if (scenario === "awaiting-beyond-eight") {
+        f.log.push("read-id:" + id);
+        return Response.json({ addressed: true, receipts: [{ recipient_user_id: owner, display_name: "Synthetic owner",
+          seen_at: f.seenIds.has(id) ? new Date().toISOString() : null }] });
+      }
       await new Promise<void>(resolve => { read.release = () => { read.released = true; resolve(); }; f.reads.push(read); });
       if (scenario === "dropped-refresh" && id === signal) return Response.json(null);
       return Response.json({ addressed: true, receipts: [{ recipient_user_id: owner, display_name: "Synthetic owner",
         seen_at: read.seen ? new Date().toISOString() : null }] });
+    }
+    if (url.pathname === "/functions/v1/command" && body?.command?.kind === "signals_seen" && scenario === "awaiting-beyond-eight") {
+      for (const id of body.command.signal_ids ?? []) f.seenIds.add(String(id));
+      f.ackedAt = ++f.clock; f.log.push("ack:" + (body.command.signal_ids ?? []).join(","));
+      return Response.json({ status: "accepted" });
     }
     if (url.pathname === "/functions/v1/command" && body?.command?.kind === "signals_seen") {
       const target = scenario === "dropped-refresh" ? later : signal;
@@ -78,6 +94,8 @@ function installReceiptFixture() {
     if (url.pathname === "/rest/v1/signals") {
       f.log.push("signals");
       if (scenario === "pre-ack") return Response.json([row(signal, owner, null, agent, "agent", "A note for you.")]);
+      if (scenario === "beyond-eight") return Response.json(many.map((id, i) => row(id, null, agent, owner, "user", "Note " + i + " for the assistant.")));
+      if (scenario === "awaiting-beyond-eight") return Response.json(many.map((id, i) => row(id, owner, null, agent, "agent", "Note " + i + " for you.")));
       const rows = [row(signal, null, agent, owner, "user", "A note for the assistant.")];
       if (f.withLater) rows.unshift({ ...row(later, owner, null, agent, "agent", "A note for you."), created_at: new Date().toISOString() });
       return Response.json(rows);
@@ -106,6 +124,37 @@ async function observeReceiptReadiness() {
   };
   const check = (value: unknown, message: string) => { if (!value) throw new Error(message + "; receipt " + state() + "; steps " + steps.join(" | ")); };
   try {
+    if (f.scenario === "beyond-eight") {
+      const ids: string[] = Array.from(document.querySelectorAll<HTMLElement>("[data-signal-id]")).map(row => row.dataset.signalId ?? "");
+      await wait(() => document.querySelectorAll(".dashboard__message-receipt").length >= 10, "ten rows rendered");
+      // The first pass reads eight; the ninth and tenth must follow it, not the feed's next poll.
+      const firstReadOf = () => { const seen = new Set<string>(); const at: number[] = [];
+        f.log.forEach((e: string, i: number) => { if (e.startsWith("read-id:") && !seen.has(e)) { seen.add(e); at.push(i); } }); return at; };
+      await wait(() => firstReadOf().length >= 10, "all ten rows read");
+      const at = firstReadOf();
+      const polls = f.log.slice(at[7]! + 1, at[9]!).filter((e: string) => e === "signals").length;
+      check(polls === 0, "rows beyond the first eight waited for a feed poll: " + polls + " poll(s) between the eighth and tenth first reads; rows " + ids.length);
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario === "awaiting-beyond-eight") {
+      await wait(() => document.querySelectorAll(".dashboard__message-receipt").length >= 10, "ten rows rendered");
+      await wait(() => f.seenIds.size >= 10 && f.unreadAfterAck > 0, "all ten reported seen and acknowledged");
+      // Each row must be re-read after the acknowledgement that covered it and before the feed's next poll after it.
+      const verdict = () => Array.from(f.seenIds as Set<string>).map((id: string) => {
+        const ack = f.log.findIndex((e: string) => e.startsWith("ack:") && e.slice(4).split(",").includes(id));
+        const read = f.log.findIndex((e: string, i: number) => i > ack && e === "read-id:" + id);
+        const poll = f.log.findIndex((e: string, i: number) => i > ack && e === "signals");
+        return read !== -1 && (poll === -1 || read < poll) ? "ok" : read === -1 && poll === -1 ? "pending" : "late";
+      });
+      await wait(() => !verdict().includes("pending"), "every acknowledged row re-read or a poll passed");
+      const late = verdict().filter(v => v === "late").length;
+      check(late === 0, "rows owing a re-read beyond the first eight waited for the next feed poll: " + late + " of " + f.seenIds.size);
+      await wait(() => Array.from(document.querySelectorAll<HTMLElement>(".dashboard__message-receipt"))
+        .every(d => d.dataset.receiptState === "seen" && d.dataset.receiptLoaded === "true"), "all ten Seen and loaded");
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario === "dropped-refresh") {
       const laterReceipt = () => document.querySelector<HTMLElement>(`[data-signal-id="${f.later}"] .dashboard__message-receipt`);
       // 1. The owner's note to the assistant renders and its receipt read is held: it holds the read slot.
@@ -160,7 +209,7 @@ async function observeReceiptReadiness() {
   }
 }
 
-test("a read begun before the seen acknowledgement never marks the row loaded, and a refresh dropped during a read runs after it", { timeout: 180_000 }, async () => {
+test("receipt reads: a pre-acknowledgement read never marks a row loaded; a dropped refresh runs after the read; rows beyond eight are read without waiting for a poll", { timeout: 180_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
@@ -206,7 +255,7 @@ test("a read begun before the seen acknowledgement never marks the row loaded, a
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
     const address = server.address(); assert.ok(address && typeof address === "object");
     const chrome = await findChrome();
-    for (const scenario of ["pre-ack", "dropped-refresh"]) {
+    for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight"]) {
       const { stdout } = await launchChrome(chrome, ["--window-size=1280,900", "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];

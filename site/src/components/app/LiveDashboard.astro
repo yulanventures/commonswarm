@@ -8601,6 +8601,14 @@ import "../../styles/kylon-command-palette.css";
         const rereadable = new Set(browserDeliveryReceiptCandidates(signals.filter(row => seenAwaitingRead.has(row.id)),
           deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER).map(signal => signal.id));
         for (const id of [...seenAwaitingRead.keys()]) if (!rereadable.has(id)) seenAwaitingRead.delete(id);
+        /* At most BROWSER_RECEIPT_REQUESTS_PER_TICK rows are read per pass, and with push connected the next pass may be a
+           30 s reconcile away. Keep going while a row on screen has never been read or a row still owes a re-read: each
+           such row leaves that set after one read (a failed read is cached too), so this always ends. Rows that are only
+           due again by cadence wait for the next pass as before. */
+        const onScreen = visibleReceiptSignalIds();
+        if (rereadable.size > 0 || signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+          deliveryReceiptRefreshAgain = true;
+        }
         if (changed && !addAgentViewOpen()) renderFeed();
       } finally {
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
