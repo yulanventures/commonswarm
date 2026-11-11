@@ -68,6 +68,15 @@ try {
   root.append(confirmation.dialog); confirmation.open(workspace);
   const dialog = confirmation.dialog;
   check('opening does not grant and initial focus is Cancel', confirmationCalls.length === 0 && document.activeElement.textContent === 'Cancel');
+  const permissionSection = (dialog, heading) => [...dialog.querySelectorAll('.sa-confirm__permissions')].find(section => section.querySelector('h3').textContent === heading);
+  const available = permissionSection(dialog, 'Available now');
+  const deferred = permissionSection(dialog, 'Included, not available yet');
+  check('confirmation separates live actions from deferred grant powers',
+    available?.textContent.includes('Cancel member invitations you created') &&
+    available?.textContent.includes('their agents and Lists & docs access') &&
+    !available?.textContent.includes('Invite people') && !available?.textContent.includes('agent seats') &&
+    deferred?.textContent.includes('Invite people as members') && deferred?.textContent.includes('Change member roles'));
+  check('agent permissions do not promise access to the owner history', !available?.textContent.includes('history'));
   check('exact permission exclusions are shown', dialog.textContent.includes('Billing, sign-in and passwords') && dialog.textContent.includes('Giving anyone admin access'));
   check('No end date is the default with the approved line', dialog.querySelector('[data-seat-admin-duration]').value === 'none' && dialog.textContent.includes('Admin access stays on until you remove it or retire this agent.'));
   check('names stay text, never HTML', dialog.querySelector('img') === null && dialog.textContent.includes(agentName));
@@ -100,6 +109,10 @@ try {
     confirm:draft=>orgCalls.push(draft),signIn:()=>{},refresh:()=>{},
   });
   root.append(org.dialog); org.open(organization);
+  check('organization confirmation retains workspace limits and deferred powers',
+    permissionSection(org.dialog, 'Available now')?.textContent.includes("workspaces you own and this agent belongs to") &&
+    permissionSection(org.dialog, 'Available now')?.textContent.includes("organization's display name") &&
+    permissionSection(org.dialog, 'Included, not available yet')?.textContent.includes('Stop agent seats or revoke their credentials'));
   const choose = org.dialog.querySelector('[data-seat-admin-scope]');
   const orgGrant = org.dialog.querySelector('[data-seat-admin-grant]');
   check('organization is not selected by sort order', choose.value === '' && orgGrant.disabled);

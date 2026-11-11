@@ -170,7 +170,7 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   scopeLabel.append(scope);
   body.append(scopeLabel);
   const copy = SEAT_ADMIN_ROLE_COPY[options.level === "workspace" ? "role:workspace_admin" : "role:organization_admin"];
-  for (const [heading, lines] of [["Included", copy.included], ["Not included", copy.excluded]] as const) {
+  for (const [heading, lines] of [["Available now", copy.included], ["Included, not available yet", copy.deferred], ["Not allowed", copy.excluded]] as const) {
     const section = element(doc, "section", "sa-confirm__permissions");
     const list = element(doc, "ul", "");
     for (const line of lines) list.append(element(doc, "li", "", line));
