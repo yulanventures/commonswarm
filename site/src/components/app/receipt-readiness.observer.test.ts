@@ -163,7 +163,12 @@ async function observeReceiptReadiness() {
         // A pass also reads rows off screen (eight at a time), and so does every feed poll, so the collapsed replies are
         // read in the background. Open the thread right after the first pass, before a poll, so most replies are unread.
         await wait(() => readIds().size >= 8, "the first pass read");
-        for (let i = 0; i < 3; i++) await tick();
+        // Open only once that pass has ended (its rebuild marks the root loaded): opened mid-pass, the pass's own drain
+        // reads the replies, and the case would not show that opening the thread asks for them.
+        const rootReceipt = () => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${f.root}"] .dashboard__message-receipt`))
+          .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === f.root);
+        await wait(() => rootReceipt()?.dataset.receiptLoaded === "true", "the first pass ended");
+        for (let i = 0; i < 10; i++) await tick();
       } else {
         // Let the reads of the rows on screen at load finish.
         let stable = 0, size = -1;
