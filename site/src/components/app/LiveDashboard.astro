@@ -1294,6 +1294,7 @@ import "../../styles/kylon-command-palette.css";
     signInWithPassword,
     signInWithProvider,
     signOut,
+    signOutEverywhere,
     signOutOtherDevices,
     setPassword,
     sendPasswordCode,
@@ -5812,6 +5813,9 @@ import "../../styles/kylon-command-palette.css";
       | { phase: "loaded"; grants: SeatAdminGrantRow[] } = { phase: "idle" };
     let seatAdminOrganizations: Organization[] = [];
     let pendingSeatAdminReauthNotice = false;
+    // Set when a password change signed this device out; the signed-out view asks for a fresh sign-in.
+    let pendingPasswordChangedNotice = false;
+    const PASSWORD_CHANGED_NOTICE = "Password changed. Sign in again.";
     const seatAdminRemovingLevels = new Map<string, Set<SeatAdminRoleLevel>>();
     const seatAdminReceipts = new Map<string, string>();
     const seatAdminErrors = new Map<string, string>();
@@ -11926,6 +11930,8 @@ import "../../styles/kylon-command-palette.css";
           showPanel("signed-out");
           if (pendingSeatAdminReauthNotice && !returnedAuthError) {
             authError("Sign in again to confirm agent admin access.");
+          } else if (pendingPasswordChangedNotice && !returnedAuthError) {
+            authError(PASSWORD_CHANGED_NOTICE);
           } else {
             authLinkError(returnedAuthError);
             returnedAuthError = null;
@@ -11933,6 +11939,7 @@ import "../../styles/kylon-command-palette.css";
           return;
         }
         pendingSeatAdminReauthNotice = false;
+        pendingPasswordChangedNotice = false;
         if (!readSeatAdminReauthIntent(session.user.id)) {
           clearSeatAdminReauthIntent();
         }
@@ -12136,6 +12143,7 @@ import "../../styles/kylon-command-palette.css";
         if (keepConnectCredentialVisible()) return;
         button.disabled = true;
         pendingSeatAdminReauthNotice = false;
+        pendingPasswordChangedNotice = false;
         clearSeatAdminReauthIntent();
         if (session) clearCreateIntent(session.user.id);
         requestVersion += 1;
@@ -12431,6 +12439,28 @@ import "../../styles/kylon-command-palette.css";
         }
       };
       closePasswordDialog = () => { passwordGuard.reset(); clear(); if (dialog?.open) dialog.close(); };
+      const signInAgainAfterPasswordChange = async (email: string): Promise<void> => {
+        closePasswordDialog();
+        pendingPasswordChangedNotice = true;
+        if (session) clearCreateIntent(session.user.id);
+        requestVersion += 1;
+        householdDashboard?.clear();
+        renderedAuthUserId = "";
+        resetWorkspaceSessionState();
+        await client()?.auth.signOut({ scope: "local" });
+        session = null;
+        showAuthView("choices");
+        showPanel("signed-out");
+        const emailInput = one<HTMLInputElement>("#dashboard-email");
+        if (emailInput && email) emailInput.value = email;
+        authError(PASSWORD_CHANGED_NOTICE);
+        window.requestAnimationFrame(() => {
+          const focusField = emailInput && emailInput.value.trim()
+            ? one<HTMLInputElement>("#dashboard-password") ?? emailInput
+            : emailInput;
+          focusField?.focus({ preventScroll: true });
+        });
+      };
       one<HTMLButtonElement>("[data-password-open]")?.addEventListener("click", () => {
         if (!dialog || !form || !fresh || !codeRow || !code || !save || !cancel || !status || !session || sampleMode) return;
         passwordGuard.open(session.user.id);
@@ -12459,14 +12489,14 @@ import "../../styles/kylon-command-palette.css";
         try {
           await setPassword(ownSession(ticket), fresh.value, codeRow.hidden ? undefined : code.value);
           if (!passwordGuard.live(ticket, session?.user.id)) return;
-          fresh.value = ""; code.value = ""; fresh.disabled = true; codeRow.hidden = true;
-          save.hidden = true; cancel.textContent = "Done";
-          let others = true;
-          try { await signOutOtherDevices(ownSession(ticket)); } catch { others = false; }
+          fresh.value = ""; code.value = "";
+          // A changed password signs every device out, this one included (CS-E04), then asks for a
+          // fresh sign-in. The password is not kept and nothing is replayed.
+          const email = ownSession(ticket)?.user.email ?? "";
+          try { await signOutEverywhere(ownSession(ticket)); } catch { /* the local sign-out below still ends this device */ }
           if (!passwordGuard.live(ticket, session?.user.id)) return;
-          status.textContent = others ? "Password saved. Other devices are signed out."
-            : "Password saved. Other devices could not be signed out; use Sign out other devices.";
-          cancel.focus();
+          await signInAgainAfterPasswordChange(email);
+          return;
         } catch (error) {
           if (!passwordGuard.live(ticket, session?.user.id)) return;
           if (error instanceof PasswordCodeRequired) await sendCode(ticket);

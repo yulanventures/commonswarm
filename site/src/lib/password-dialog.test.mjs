@@ -43,7 +43,9 @@ test("the dashboard closes the dialog on auth events and sends every call with t
   assert.match(source, /onAuthStateChange\(\(event, nextSession\) => \{\s*\/\/[^\n]*\n\s*if \(passwordGuard\.observeAuth\(event, nextSession\?\.user\.id\)\) closePasswordDialog\(\);/);
   assert.match(source, /setPassword\(ownSession\(ticket\), fresh\.value/);
   assert.match(source, /sendPasswordCode\(ownSession\(ticket\)\)/);
-  assert.match(source, /signOutOtherDevices\(ownSession\(ticket\)\)/);
+  // A changed password ends every session, this one too, with the opening account's token (CS-E04).
+  assert.match(source, /signOutEverywhere\(ownSession\(ticket\)\)/);
+  assert.match(source, /await signInAgainAfterPasswordChange\(email\);/);
   assert.doesNotMatch(source, /setPassword\(fresh\.value|sendPasswordCode\(\)/, "no call may use the SDK's current session");
   // After each awaited call the dialog re-checks its ticket before touching the page.
   assert.ok((source.match(/if \(!passwordGuard\.live\(ticket, session\?\.user\.id\)\) return;/g) ?? []).length >= 4);
