@@ -8485,6 +8485,7 @@ import "../../styles/kylon-command-palette.css";
           replies.hidden = !next;
           if (next) expandedThreadIds.add(group.root.id);
           else expandedThreadIds.delete(group.root.id);
+          if (next) requestVisibleReceipts();
         });
         thread.append(toggle, replies);
         list.append(thread);
@@ -8545,6 +8546,20 @@ import "../../styles/kylon-command-palette.css";
       );
     };
 
+    /* Rows that came into view without a feed change (scrolled to, or a thread opened) have never been read: ask once the
+       scroll settles. Reads only when such a row is on screen; the pass itself drains past the per-pass cap. */
+    let visibleReceiptTimer: number | undefined;
+    const requestVisibleReceipts = (): void => {
+      if (visibleReceiptTimer !== undefined) return;
+      visibleReceiptTimer = window.setTimeout(() => {
+        visibleReceiptTimer = undefined;
+        if (!activeWorkspaceId || sampleMode) return;
+        const onScreen = visibleReceiptSignalIds();
+        if (signals.some(row => onScreen.has(row.id) && !deliveryReceiptCache.has(row.id))) {
+          void refreshDeliveryReceipts(activeWorkspaceId, requestVersion);
+        }
+      }, 150);
+    };
     const refreshDeliveryReceipts = async (
       workspaceId: string,
       version: number,
@@ -13920,6 +13935,9 @@ import "../../styles/kylon-command-palette.css";
       }, { passive: true });
     };
     wireFeedAutoLoad();
+    // Rows scrolled into view (by the reader, a permalink or an opened thread) need their first receipt read now; with
+    // push connected nothing else may ask for 30 s.
+    feedScroller()?.addEventListener("scroll", () => requestVisibleReceipts(), { passive: true });
 
     one<HTMLButtonElement>("[data-load-older]")?.addEventListener("click", async (event) => {
       if (!activeWorkspaceId || !signalHasMore) return;
