@@ -5904,9 +5904,9 @@ var SEAT_ADMIN_ROLE_COPY = Object.freeze({
     deferred: DEFERRED_ACTIONS,
     excluded: Object.freeze([
       "Changes to owners or admins",
-      "Other people's agents",
+      "Choosing other people's agents as lead, or adding or removing them directly",
       "Changing itself or another agent with admin access",
-      "Removing members who own an agent with admin access",
+      "Removing members whose agents in that workspace have admin access",
       "Creating, archiving or moving workspaces",
       "Giving anyone admin access",
       "Billing, sign-in and passwords"
@@ -5921,9 +5921,9 @@ var SEAT_ADMIN_ROLE_COPY = Object.freeze({
     excluded: Object.freeze([
       "Organization members and roles",
       "Changes to owners or admins",
-      "Other people's agents",
+      "Choosing other people's agents as lead, or adding or removing them directly",
       "Changing itself or another agent with admin access",
-      "Removing members who own an agent with admin access",
+      "Removing members whose agents in that workspace have admin access",
       "Creating, archiving or moving workspaces",
       "Giving anyone admin access",
       "Billing, sign-in and passwords"
