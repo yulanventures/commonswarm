@@ -201,7 +201,8 @@ test("only a confirmed account's password or email change revokes; other updates
 test("PostgREST lets anon and service_role through and refuses a human token with no live session", async () => {
   const anon = await fetch(`${local.API_URL}/rest/v1/channels?select=channel_id&limit=1`, {
     headers: { apikey: local.ANON_KEY, authorization: `Bearer ${local.ANON_KEY}`, "accept-profile": "swarm_read" } });
-  assert.notEqual(anon.status, 401, "anon is not refused by the session check");
+  // anon may be refused by the view's own grants, but never by the session check.
+  assert.notEqual((await anon.json() as { code?: string }).code, "session_not_found", "anon is not refused by the session check");
   const service = await fetch(`${local.API_URL}/rest/v1/channels?select=channel_id&limit=1`, {
     headers: { apikey: local.SERVICE_ROLE_KEY, authorization: `Bearer ${local.SERVICE_ROLE_KEY}`, "accept-profile": "swarm_read" } });
   assert.notEqual((await service.json() as { code?: string }).code, "session_not_found");
@@ -279,16 +280,20 @@ test("each real caller role reaches only its own wrapper, and never the swarm sc
   await asRole("service_role", { role: "service_role" }, (tx) => tx`SELECT swarm_session.require_live_human_session()`);
   const [own] = await asRole("authenticated", human, (tx) => tx<{ live: boolean }[]>`SELECT swarm_session.current_human_session_live() AS live`);
   assert.equal(own?.live, true);
-  for (const role of ["swarm_command", "commonswarm_oauth_runtime"]) {
-    const [row] = await asRole(role, {}, (tx) => tx<{ ok: boolean }[]>`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${sessionId}::uuid) AS ok`);
-    assert.equal(row?.ok, true, role);
-  }
+  const [admitted] = await asRole("swarm_command", {}, (tx) => tx<{ ok: boolean }[]>`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${sessionId}::uuid) AS ok`);
+  assert.equal(admitted?.ok, true, "swarm_command");
+  // The test connection can't SET ROLE to the OAuth runtime; its reach is checked by privilege.
+  const [runtime] = await sql<{ usage: boolean; admit: boolean; inner: boolean; record: boolean }[]>`SELECT
+    has_schema_privilege('commonswarm_oauth_runtime', 'swarm_session', 'USAGE') AS usage,
+    has_function_privilege('commonswarm_oauth_runtime', 'swarm_session.admit_human_session(uuid,uuid)', 'EXECUTE') AS admit,
+    has_function_privilege('commonswarm_oauth_runtime', 'swarm.human_session_live(jsonb)', 'EXECUTE') AS inner,
+    has_table_privilege('commonswarm_oauth_runtime', 'swarm.human_credential_changes', 'SELECT') AS record`;
+  assert.deepEqual(runtime, { usage: true, admit: true, inner: false, record: false });
   // Nothing broader: no client role reaches the inner checker, the record or the admission.
   for (const role of ["anon", "authenticated"]) {
     await assert.rejects(() => asRole(role, human, (tx) => tx`SELECT swarm.human_session_live(${JSON.stringify(human)}::jsonb)`), /permission denied/);
     await assert.rejects(() => asRole(role, human, (tx) => tx`SELECT swarm_session.admit_human_session(${who.id}::uuid, ${sessionId}::uuid)`), /permission denied/);
   }
-  await assert.rejects(() => asRole("commonswarm_oauth_runtime", {}, (tx) => tx`SELECT 1 FROM swarm.human_credential_changes`), /permission denied/);
   const [schemas] = await sql<{ anon: boolean; authn: boolean; runtime: boolean }[]>`SELECT
     has_schema_privilege('anon', 'swarm', 'USAGE') AS anon, has_schema_privilege('authenticated', 'swarm', 'USAGE') AS authn,
     has_schema_privilege('commonswarm_oauth_runtime', 'swarm', 'USAGE') AS runtime`;

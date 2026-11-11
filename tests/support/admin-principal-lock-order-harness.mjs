@@ -511,7 +511,8 @@ export function classifyMinClientVersion(row) {
 /** The stage error for a refused read: the code, and the observed value only when it may be echoed. */
 export const minClientVersionDiagnostic = (check) => (check.observed === undefined ? check.code : `${check.code}:observed=${check.observed}`);
 
-const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
+// swarm_session holds the credential-fence wrappers that the Realtime policies and PostgREST hook name (CS-E04).
+const DUMP_SCHEMAS = ['auth', 'swarm', 'swarm_read', 'swarm_session', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
 const HISTORICAL_SCHEMAS = [...DUMP_SCHEMAS, 'public', 'extensions'];
 /** Pinned pre-fix source for an unsupported diagnostic comparison on ACTIVE.
  * Live read/renewal controls must succeed before its expiry refusal counts.
