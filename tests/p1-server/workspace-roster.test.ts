@@ -296,10 +296,15 @@ test("a hosted agent added to another workspace is live there before its first c
 
   // Reconnect onto a new grant, then the old refresh family is retired while its grant row stays active: off before
   // any claim. The new grant has no binding here, so nothing else reads live.
+  // Family tombstones are append-only, so this runs in a transaction that rolls back.
   const [{ provider }] = await sql<{ provider: string }[]>`SELECT provider_grant_id AS provider FROM swarm.hosted_mcp_grants WHERE grant_id = ${grant}::uuid`;
-  await sql`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at) VALUES (${provider}, statement_timestamp())`;
-  assert.equal(await both(other), "connection_off", "a retired refresh family is off before a claim");
-  await sql`DELETE FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = ${provider}`;
+  const rolledBack = new Error("roll back the family tombstone");
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at) VALUES (${provider}, statement_timestamp())`;
+    const [retired] = await tx<{ kind: string }[]>`SELECT swarm_read.agent_connection_kind(${other}::uuid, ${hosted}::uuid) AS kind`;
+    assert.equal(retired?.kind, "connection_off", "a retired refresh family is off before a claim");
+    throw rolledBack;
+  }).catch((error) => { if (error !== rolledBack) throw error; });
   assert.equal(await both(other), "live");
 
   // The grant ends: off everywhere, seat or no seat.
