@@ -31,6 +31,15 @@ async function observePeopleModal() {
     }
     entry.click(); return entry;
   };
+  const selectAgent = async () => {
+    const row = () => one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!;
+    if (!visible(row())) {
+      const back = one<HTMLButtonElement>("[data-people-profile-back]");
+      check(visible(back), "selected phone profile has no visible Back to People"); back!.click();
+    }
+    await wait("agent row visible", () => visible(row())); row().click();
+    await wait("selected agent", () => visible(one("#pd-detail-title")));
+  };
   const modal = () => one<HTMLDialogElement>("[data-roster-dialog]")!;
   const deepLink = new URL(location.href).searchParams.get("deep") === "1";
   try {
@@ -43,15 +52,14 @@ async function observePeopleModal() {
     check(new URL(location.href).searchParams.get("v") === "people", "open modal URL is missing");
     check(!background.contains(one("[data-people-context]")), "People replaced the background route");
     const detail = one<HTMLElement>("[data-people-detail]")!;
-    opener.focus();
+    door().focus();
     check(modal().contains(document.activeElement), "background control took modal focus");
     const rect = modal().getBoundingClientRect();
     check(rect.width <= innerWidth && rect.height <= innerHeight && rect.left >= 0 && rect.top >= 0, "dialog exceeds viewport");
     const close = one<HTMLElement>("[data-roster-close]")!.getBoundingClientRect();
     check(close.width >= 44 && close.height >= 44, "Close target is below 44px");
     if (innerWidth <= 832) check(Math.abs(rect.bottom - innerHeight) <= 1, "phone modal is not a bottom sheet");
-    one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
-    await wait("selected agent", () => visible(one("#pd-detail-title")));
+    await selectAgent();
     check(modal().contains(detail), "detail escaped the modal");
     one<HTMLButtonElement>("[data-edit-model]")!.click();
     const input = one<HTMLInputElement>("[data-model-editor] input")!;
@@ -76,8 +84,7 @@ async function observePeopleModal() {
     await openPeople();
     await wait("reopen", () => modal().open && (visible(one("[data-people-context]")) || visible(one("#pd-detail-title"))));
     check(one("[data-people-detail]") === detail, "reopen lost the persistent detail host");
-    one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
-    await wait("reopened agent detail", () => visible(one("#pd-detail-title")));
+    await selectAgent();
     await document.fonts.ready;
     check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
     check(f.unexpected.length === 0, "unexpected HTTP: " + f.unexpected.join(","));
