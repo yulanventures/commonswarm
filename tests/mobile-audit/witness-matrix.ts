@@ -127,6 +127,19 @@ const receiptList = (open: boolean, onHover: string) => {
     ${onHover}
   });</script>`, RECEIPT_CSS);
 };
+/** Keyed rows inside a feed view, each with its own receipt. `flipAfterMs`: when the first receipt read "arrives" (marker
+ *  set to true and the summary text grows), or null for never. `hidden`: the feed view is not shown at all, and a
+ *  separate measured list sits outside it. */
+const receiptFeed = (flipAfterMs: number | null, hidden = false) => {
+  const receipt = '<details class="dashboard__message-receipt" data-receipt-loaded="false"><summary>✓ Sent</summary></details>';
+  const rows = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="s${i}" style="margin:0;padding:6px 0">Row ${i} <a href="#s${i}">open</a>${receipt}</li>`).join("");
+  const outside = Array.from({ length: 8 }, (_, i) => `<li class="msg" data-signal-id="o${i}" style="margin:0;padding:6px 0">Other ${i} <a href="#o${i}">open</a></li>`).join("");
+  return page(`<div class="dashboard__feed-view" style="width:300px;height:320px;overflow:auto${hidden ? ";display:none" : ""}">
+    <ul id="${hidden ? "hidden-feed" : "feed"}" style="list-style:none;margin:0;padding:0">${rows}</ul></div>
+    ${hidden ? `<ul id="feed" style="list-style:none;margin:0;padding:0;width:300px">${outside}</ul>` : ""}
+    <script>${flipAfterMs === null ? "" : `setTimeout(() => { for (const d of document.querySelectorAll(".dashboard__message-receipt")) {
+      d.setAttribute("data-receipt-loaded", "true"); d.querySelector("summary").textContent = "✓✓ Seen by everyone in this conversation, including the agents"; } }, ${flipAfterMs});`}</script>`);
+};
 const keyedSpec: HoverSpec = { name: "keyed", rows: "#feed > .msg", prefer: '[data-signal-id="s5"]', require: ['[data-signal-id="s5"]'], max: 1 };
 const feedSpec: HoverSpec = { name: "feed", rows: "#feed > .msg", prefer: '.msg:has([data-target-kind="agent"])', require: ['.msg[data-i="1"]'], focus: true };
 const rowOf = (h: HoverResult | undefined, mode: "hover" | "focus") => h?.rows.find(r => r.preferred && r.mode === mode);
@@ -385,6 +398,21 @@ const ROWS: Row[] = [
   { name: "a closed receipt's summary that changes during hover is still a shift",
     html: receiptList(false, "details.querySelector('summary').lastChild.textContent = ' Seen by everyone';"), hover: keyedSpec, check: ({ hover: h }) => {
       assert.equal(h?.outcome, "shifted", show(h));
+  } },
+  // First receipts: rest waits until every row on screen has its own receipt loaded, so a first read is never measured as a
+  // hover shift; a read that never lands is a failed measurement; a hidden feed never holds up another list.
+  { name: "a first receipt read that lands after the row scrolls into view is waited for, not measured as a shift",
+    html: receiptFeed(1_500), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
+  } },
+  { name: "a first receipt read that never lands is a failed measurement, never a pass or a skip",
+    html: receiptFeed(null), hover: { ...keyedSpec, prefer: '[data-signal-id="s3"]', require: ['[data-signal-id="s3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "error", show(h));
+      assert.match(h!.rows[0]!.reason ?? "", /did not load within 20 s/, show(h));
+  } },
+  { name: "unloaded receipts in a hidden feed do not hold up a list measured elsewhere",
+    html: receiptFeed(null, true), hover: { ...keyedSpec, prefer: '[data-signal-id="o3"]', require: ['[data-signal-id="o3"]'] }, check: ({ hover: h }) => {
+      assert.equal(h?.outcome, "stable", show(h));
   } },
   { name: "a same-key rebuild with identical layout during hover is stable, and the rebuild is recorded",
     html: keyedList("feed.innerHTML = feed.innerHTML;"), hover: keyedSpec, check: ({ hover: h }) => {

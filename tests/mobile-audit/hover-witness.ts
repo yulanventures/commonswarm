@@ -176,27 +176,29 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
       await new Promise(done => setTimeout(done, 50));
     }
     // Receipts load only for rows on screen, a few per tick: a row scrolled into view gets its first receipt after rest
-    // otherwise, and that first read resizes its receipt line (a load, not hover). Wait until no row inside the feed's
-    // viewport is still waiting for its first read (up to 20 s; never skipped: a timeout is a failed measurement), then
-    // for the reads it caused to settle.
-    const feedView = document.querySelector(".dashboard__feed-view");
-    if (feedView && document.querySelector('[data-receipt-loaded]')) {
-      const waiting = () => {
-        const v = feedView.getBoundingClientRect();
-        return Array.from(document.querySelectorAll('[data-signal-id]')).some(row => {
+    // otherwise, and that first read resizes its receipt line (a load, not hover). One bounded wait, re-evaluated in full
+    // every 100 ms until it holds, else a failed measurement (never a skip): every laid-out row with a positive area inside
+    // a visible, positive-area feed has its OWN receipt marked loaded (a receipt with no marker is not loaded), AND no read
+    // is in flight, AND reads have been quiet for 400 ms.
+    const receiptsSettled = () => {
+      if ((w.__auditPendingFetches ?? 0) > 0 || performance.now() - (w.__auditLastFetchDoneAt ?? 0) < 400) return false;
+      for (const view of Array.from(document.querySelectorAll(".dashboard__feed-view"))) {
+        const v = view.getBoundingClientRect();
+        if (v.width <= 0 || v.height <= 0) continue; // A hidden feed holds nothing on screen.
+        for (const row of Array.from(view.querySelectorAll("[data-signal-id]"))) {
           const r = row.getBoundingClientRect();
-          return r.bottom >= v.top && r.top <= v.bottom && !!row.querySelector(':scope > .dashboard__message-body [data-receipt-loaded="false"], :scope [data-receipt-loaded="false"]');
-        });
-      };
-      const started = performance.now();
-      while (waiting()) {
-        if (performance.now() - started > 20_000) return { error: "receipts for the rows on screen did not load within 20 s" };
-        await new Promise(done => setTimeout(done, 100));
+          const overlap = Math.min(r.bottom, v.bottom) - Math.max(r.top, v.top);
+          const across = Math.min(r.right, v.right) - Math.max(r.left, v.left);
+          if (r.width <= 0 || r.height <= 0 || overlap <= 0 || across <= 0) continue;
+          const own = Array.from(row.querySelectorAll(".dashboard__message-receipt")).filter(d => d.closest("[data-signal-id]") === row);
+          if (own.some(d => d.getAttribute("data-receipt-loaded") !== "true")) return false;
+        }
       }
-      for (const quiet = performance.now(); performance.now() - quiet < 5_000;) {
-        if ((w.__auditPendingFetches ?? 0) === 0 && performance.now() - (w.__auditLastFetchDoneAt ?? 0) >= 400) break;
-        await new Promise(done => setTimeout(done, 50));
-      }
+      return true;
+    };
+    for (const started = performance.now(); !receiptsSettled();) {
+      if (performance.now() - started > 20_000) return { error: "receipts for the rows on screen did not load within 20 s" };
+      await new Promise(done => setTimeout(done, 100));
     }
     // Only now, with reads settled, find the row: by its marker, or by its key when the list was rebuilt meanwhile.
     let row = document.querySelector(`[data-audit-hover-row="${arg.index}"]`);
