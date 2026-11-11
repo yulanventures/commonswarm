@@ -59,7 +59,17 @@ const INDENT = (ids: string[]) => ids.map((id) => {
     }
     return true;
   };
-  return { id, found: true, targetVisible: painted(target), targetText: target?.textContent?.trim() ?? null,
+  // The inline recipient: on the author's line, never clipping the badge or time, truncated with its full name kept.
+  const badge = row.querySelector(".dashboard__message-identity-badge"), time = meta?.querySelector("time") ?? null;
+  const clipped = (el: Element | null) => !!el && (el as HTMLElement).scrollWidth > (el as HTMLElement).clientWidth + 1;
+  const line = (el: Element | null) => { if (!el) return null; const r = el.getBoundingClientRect(); return Math.round((r.top + r.height / 2) * 100) / 100; };
+  const inline = { authorMid: line(author), targetMid: line(target), badgeMid: line(badge), timeMid: line(time),
+    sameLine: !!author && !!target && Math.abs((line(author) ?? 0) - (line(target) ?? 0)) < 4,
+    badgePainted: painted(badge), badgeClipped: clipped(badge), timePainted: painted(time), timeClipped: clipped(time),
+    targetTruncated: clipped(target), targetTitle: target?.getAttribute("title") ?? target?.querySelector("[title]")?.getAttribute("title") ?? null,
+    targetLabel: target?.getAttribute("aria-label") ?? target?.querySelector("[aria-label]")?.getAttribute("aria-label") ?? null,
+    targetStyle: style(target, ["white-space", "overflow", "text-overflow", "min-width", "flex"]), metaLines: meta ? Math.round(meta.getBoundingClientRect().height) : null };
+  return { id, found: true, targetVisible: painted(target), targetText: target?.textContent?.trim() ?? null, inline,
     hovered: row.matches(":hover"), hoverMedia: matchMedia("(hover: hover)").matches,
     row: box(row), body: box(body), meta: box(meta), author: box(author), target: box(target), markdown: box(markdown), firstLine,
     relative: { author: (box(author)?.x ?? 0) - b, target: (box(target)?.x ?? 0) - b, markdown: (box(markdown)?.x ?? 0) - b, firstLine: (firstLine?.x ?? 0) - b },
