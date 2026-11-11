@@ -20,28 +20,46 @@ async function observePeopleModal() {
     const until = await now() + 10_000;
     while (!predicate()) { if (await now() >= until) throw new Error("timed out at " + name); }
   };
-  const door = () => [...document.querySelectorAll<HTMLButtonElement>("[data-roster-open]")].find(visible)!;
+  const door = () => [...document.querySelectorAll<HTMLButtonElement>('[data-roster-open], button[aria-label="Open navigation"]')].find(visible)!;
+  const openPeople = async () => {
+    const entry = door(); entry.focus();
+    if (entry.matches('[aria-label="Open navigation"]')) {
+      entry.click();
+      await wait("drawer person", () => visible(one(`[data-rail-person="${f.owner}"]`)));
+      const person = one<HTMLElement>(`[data-rail-person="${f.owner}"]`)!;
+      person.focus(); person.click(); return person;
+    }
+    entry.click(); return entry;
+  };
+  const selectAgent = async () => {
+    const row = () => one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!;
+    if (!visible(row())) {
+      const back = one<HTMLButtonElement>("[data-people-profile-back]");
+      check(visible(back), "selected phone profile has no visible Back to People"); back!.click();
+    }
+    await wait("agent row visible", () => visible(row())); row().click();
+    await wait("selected agent", () => visible(one("#pd-detail-title")));
+  };
   const modal = () => one<HTMLDialogElement>("[data-roster-dialog]")!;
   const deepLink = new URL(location.href).searchParams.get("deep") === "1";
   try {
     await wait("workspace door", () => visible(door()));
-    const opener = door(), background = one<HTMLElement>("[data-home-route-pane]")!;
+    let opener: HTMLElement = door(); const background = one<HTMLElement>("[data-home-route-pane]")!;
     let before = location.pathname + location.search;
-    if (!deepLink) { opener.focus(); opener.click(); }
-    await wait("People content", () => visible(one("[data-people-context]")));
+    if (!deepLink) opener = await openPeople();
+    await wait("People content", () => visible(one("[data-people-context]")) || visible(one("#pd-detail-title")));
     check(modal()?.matches(":modal"), "People & agents must be a native modal, not a page");
     check(new URL(location.href).searchParams.get("v") === "people", "open modal URL is missing");
     check(!background.contains(one("[data-people-context]")), "People replaced the background route");
     const detail = one<HTMLElement>("[data-people-detail]")!;
-    opener.focus();
+    door().focus();
     check(modal().contains(document.activeElement), "background control took modal focus");
     const rect = modal().getBoundingClientRect();
     check(rect.width <= innerWidth && rect.height <= innerHeight && rect.left >= 0 && rect.top >= 0, "dialog exceeds viewport");
     const close = one<HTMLElement>("[data-roster-close]")!.getBoundingClientRect();
     check(close.width >= 44 && close.height >= 44, "Close target is below 44px");
     if (innerWidth <= 832) check(Math.abs(rect.bottom - innerHeight) <= 1, "phone modal is not a bottom sheet");
-    one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
-    await wait("selected agent", () => visible(one("#pd-detail-title")));
+    await selectAgent();
     check(modal().contains(detail), "detail escaped the modal");
     one<HTMLButtonElement>("[data-edit-model]")!.click();
     const input = one<HTMLInputElement>("[data-model-editor] input")!;
@@ -62,10 +80,11 @@ async function observePeopleModal() {
     one<HTMLButtonElement>("[data-roster-close]")!.click();
     check(!modal().open && !new URL(location.href).searchParams.has("v"), "Close left People in the URL");
     if (!deepLink) check(location.pathname + location.search === before, "Close changed the underlying route");
-    check(document.activeElement === opener || document.activeElement?.matches("[data-roster-open]"), "Close did not return focus to a workspace door");
-    door().click();
-    await wait("reopen", () => modal().open && visible(one("[data-people-context]")));
+    check(document.activeElement === opener || document.activeElement?.matches('[data-roster-open], button[aria-label="Open navigation"]'), "Close did not return focus to a workspace door");
+    await openPeople();
+    await wait("reopen", () => modal().open && (visible(one("[data-people-context]")) || visible(one("#pd-detail-title"))));
     check(one("[data-people-detail]") === detail, "reopen lost the persistent detail host");
+    await selectAgent();
     await document.fonts.ready;
     check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
     check(f.unexpected.length === 0, "unexpected HTTP: " + f.unexpected.join(","));
@@ -96,7 +115,7 @@ test("People & agents is a native modal with persistent details, safe nested con
     const address = server.address(); assert.ok(address && typeof address === "object");
     const evidence = join(process.cwd(), "../site-observer-evidence/people-modal"); await mkdir(evidence, { recursive: true });
     const chrome = await findChrome(), outcomes: Record<string, unknown> = {};
-    for (const [width, height, theme, deep] of [[390,844,"light",false],[390,844,"dark",false],[1440,900,"light",false],[1440,900,"dark",false],[390,844,"dark",true]] as const) {
+    for (const [width, height, theme, deep] of [[390,844,"light",false],[390,844,"dark",false],[1440,900,"light",false],[1440,900,"dark",false],[390,844,"dark",true],[1440,900,"dark",true]] as const) {
       const name = `${width}-${theme}${deep ? "-deep-link" : ""}`;
       const { stdout } = await launchChrome(chrome, [`--window-size=${width},${height}`, ...(width > 832 ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []), "--virtual-time-budget=120000", "--dump-dom", `--screenshot=${join(evidence,name+".png")}`,
         `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=people&theme=${theme}${deep ? "&v=people&deep=1" : ""}`], { timeout: 60000, maxBuffer: 12*1024*1024 });
