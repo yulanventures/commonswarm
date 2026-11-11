@@ -132,7 +132,7 @@ async function observeExistingAgent() {
         one<HTMLButtonElement>("[data-ahp-existing-list] .workspace-agent-picker__retry")!.click();
       }
       await wait("eligible identity", () => visible(add()));
-      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await fetch("/__observer-tick");
       check(one("[data-ahp-existing-view]")?.contains(document.activeElement), "a background render stole the picker focus");
       check(f.commands.length === 0, "opening the list submitted a command");
       const rect = add().getBoundingClientRect();

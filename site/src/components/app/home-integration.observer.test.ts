@@ -1203,6 +1203,13 @@ test('each navigation focuses the visible H1 for that view', async () => {
   selectedTitle.inert = false;
   runInContext('focusHomeView()',context); frames.shift()!();
   assert.equal(focused.at(-1), selectedTitle, 'a visible requested profile retains its detail heading target');
+  // A late workspace read reapplies the same route after the person chose an identity.
+  focused.length = 0;
+  for (const node of headings.values()) node.visible = false;
+  headings.get('[data-channel-view=agent-choice] h1')!.visible = true;
+  runInContext("homeRoute={view:'add-agent',workspaceId:'W'}; existingAgentChoiceIsCurrent=()=>true; focusHomeView();",context);
+  frames.shift()!();
+  assert.equal(focused.length, 0, 'a late navigation frame must not take focus from the active identity picker');
 });
 
 
