@@ -66,6 +66,8 @@ async function observePeopleModal() {
     door().click();
     await wait("reopen", () => modal().open && visible(one("[data-people-context]")));
     check(one("[data-people-detail]") === detail, "reopen lost the persistent detail host");
+    one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
+    await wait("reopened agent detail", () => visible(one("#pd-detail-title")));
     await document.fonts.ready;
     check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
     check(f.unexpected.length === 0, "unexpected HTTP: " + f.unexpected.join(","));
@@ -96,7 +98,7 @@ test("People & agents is a native modal with persistent details, safe nested con
     const address = server.address(); assert.ok(address && typeof address === "object");
     const evidence = join(process.cwd(), "../site-observer-evidence/people-modal"); await mkdir(evidence, { recursive: true });
     const chrome = await findChrome(), outcomes: Record<string, unknown> = {};
-    for (const [width, height, theme, deep] of [[390,844,"light",false],[390,844,"dark",false],[1440,900,"light",false],[1440,900,"dark",false],[390,844,"dark",true]] as const) {
+    for (const [width, height, theme, deep] of [[390,844,"light",false],[390,844,"dark",false],[1440,900,"light",false],[1440,900,"dark",false],[390,844,"dark",true],[1440,900,"dark",true]] as const) {
       const name = `${width}-${theme}${deep ? "-deep-link" : ""}`;
       const { stdout } = await launchChrome(chrome, [`--window-size=${width},${height}`, ...(width > 832 ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []), "--virtual-time-budget=120000", "--dump-dom", `--screenshot=${join(evidence,name+".png")}`,
         `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=people&theme=${theme}${deep ? "&v=people&deep=1" : ""}`], { timeout: 60000, maxBuffer: 12*1024*1024 });
