@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { postExpiringNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { postRefreshNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -134,8 +134,8 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     { name: "grouped", rows: FEED_ROWS, prefer: "[data-stream-grouped]", require: ['[data-signal-id="{message.groupedOwn}"][data-stream-grouped]'], max: 1,
       focus: true, focusTarget: ".hm-author .dashboard__message-author" },
     { name: "rail", rows: ":is([data-rail-channel], [data-rail-agent], [data-rail-person])", max: 6, focus: true },
-    // A focused Show more survives a real feed rebuild: the control is created a frame after its row. Last, because it
-    // posts a short-lived note; the page then waits for the note to expire before it closes (see runHovers).
+    // A focused Show more survives a real feed rebuild: the control is created a frame after its row. Last, because the
+    // note it posts rebuilds this page's feed; runHovers expires the note as soon as the spec finishes.
     { name: "show-more", rows: FEED_ROWS, prefer: '[data-signal-id="{message.long}"]', require: ['[data-signal-id="{message.long}"]'], max: 1,
       focus: true, focusTarget: ".dashboard__message-toggle", focusAcrossRebuild: true },
   ],
@@ -410,7 +410,7 @@ async function main(): Promise<void> {
       // The frozen diagnostic control writes its own images; the normal names never change.
       const runHovers = async (page: any, id: string, state: string, size: string, theme: string, specs: HoverSpec[], variant = "") => {
         const results: HoverResult[] = [];
-        let noteAt = 0;
+        let expireNote: (() => Promise<void>) | null = null;
         // Keep the app's own focus for the keyboard witnesses that start from it afterwards.
         await page.evaluate(() => document.activeElement?.setAttribute("data-audit-hover-restore", ""));
         for (const spec of specs) {
@@ -420,7 +420,10 @@ async function main(): Promise<void> {
             const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
-          } : undefined, spec.focusAcrossRebuild ? async () => { await postExpiringNote(env, seed.ids); noteAt = Date.now(); } : undefined));
+          } : undefined, spec.focusAcrossRebuild ? async () => { expireNote = await postRefreshNote(env, seed.ids); } : undefined));
+          // The note this spec posted ends as soon as the spec does, before any later page can open with it showing.
+          const expire = expireNote as (() => Promise<void>) | null; // assigned inside the callback above
+          if (expire) { await expire(); expireNote = null; }
         }
         await page.mouse.move(1, 1);
         await page.evaluate(() => {
@@ -428,9 +431,6 @@ async function main(): Promise<void> {
           el?.removeAttribute("data-audit-hover-restore");
           if (el && el !== document.body) el.focus({ preventScroll: true });
         });
-        // A note this page posted expires 4 s after it was written; outlive it here, so no later page opens with it showing
-        // and then rebuilds when it expires mid-measurement.
-        if (noteAt) await delay(Math.max(0, noteAt + 5_500 - Date.now()));
         return results;
       };
 

@@ -326,8 +326,10 @@ const NEUTRAL_POINT = (rows: string) => {
 };
 /** How many rows of the list the browser currently reports as hovered. */
 const HOVERED_ROWS = (rows: string) => Array.from(document.querySelectorAll(rows)).filter(row => row.matches(":hover")).length;
-/** Resolves once no row of the list has been added or removed for five consecutive frames, or after 3 s. */
+/** Resolves once no row of the list has been added or removed for five consecutive frames and the page has no read in
+ *  flight (a receipt read for new data can rebuild once more), or after 3 s. */
 const QUIET_LIST = (rows: string) => new Promise<void>(done => {
+  const w = globalThis as unknown as { __auditPendingFetches?: number };
   const list = document.querySelector(rows)?.parentElement;
   if (!list) { done(); return; }
   let quiet = 0;
@@ -335,7 +337,7 @@ const QUIET_LIST = (rows: string) => new Promise<void>(done => {
   observer.observe(list, { childList: true });
   const started = performance.now();
   const tick = () => {
-    quiet += 1;
+    quiet = (w.__auditPendingFetches ?? 0) > 0 ? 0 : quiet + 1;
     if (quiet >= 5 || performance.now() - started > 3_000) { observer.disconnect(); done(); return; }
     requestAnimationFrame(tick);
   };

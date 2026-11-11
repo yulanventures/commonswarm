@@ -55,17 +55,29 @@ const BODIES = [
 ];
 
 /**
- * A real refresh for a witness: a short note in #general that expires after a few seconds. The app's own polling
- * shows it and its expiry timer removes it, rebuilding the feed each time; later pages never see it.
+ * A real refresh for a witness: a note in #general, already seen by the viewer (so its receipt never changes), that the
+ * app's own polling shows, rebuilding the feed. It lives long enough for any poll interval; the returned function
+ * expires it at once, so no later page ever opens with it showing.
  */
-export async function postExpiringNote(env: SeedEnvironment, ids: Record<string, string>): Promise<void> {
+export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, string>): Promise<() => Promise<void>> {
   assert.ok(loopback(env.dbUrl), "local stack only");
   const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
+  const id = randomUUID();
   try {
-    await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
-      VALUES (gen_random_uuid(), ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
-        statement_timestamp() + interval '4 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+    await sql.begin(async (tx) => {
+      await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
+        VALUES (${id}::uuid, ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
+          statement_timestamp() + interval '60 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+      await tx`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
+        SELECT ${ids.workspace!}::uuid, ${id}::uuid, m.user_id FROM swarm.memberships m
+        WHERE m.workspace_id = ${ids.workspace!}::uuid AND m.role = 'owner' AND m.revoked_at IS NULL ON CONFLICT DO NOTHING`;
+    });
   } finally { await sql.end({ timeout: 5 }); }
+  return async () => {
+    const done = postgres(env.dbUrl, { prepare: false, max: 1 });
+    try { await done`UPDATE swarm.signals SET until = statement_timestamp() WHERE id = ${id}::uuid`; }
+    finally { await done.end({ timeout: 5 }); }
+  };
 }
 
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
