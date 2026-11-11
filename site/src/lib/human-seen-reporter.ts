@@ -102,11 +102,13 @@ export class HumanSeenReporter {
 
   /** Send pending attestations grouped by authenticated user/workspace scope. */
   async flush(): Promise<void> {
-    if (this.#flushing !== null) return await this.#flushing;
+    // Clear the timer first, even while a send is in flight: a timer that fired during a send would otherwise stay set,
+    // and with it set nothing ever schedules the rows queued meanwhile (the send's own reschedule checks for no timer).
     if (this.#timer !== null) {
       this.#cancel(this.#timer);
       this.#timer = null;
     }
+    if (this.#flushing !== null) return await this.#flushing;
     if (this.#pending.size === 0) return;
 
     const pending = [...this.#pending.values()];
