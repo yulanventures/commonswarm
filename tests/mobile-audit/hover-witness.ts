@@ -230,7 +230,11 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     };
     for (const started = performance.now(); !receiptsSettled();) {
       if (performance.now() - started > 20_000) {
-        return { error: unsettled === "quiet" ? "reads on the page did not go quiet within 20 s"
+        const fetches = w as unknown as { __auditInflight?: Map<number, string>; __auditRecentFetches?: Array<[string, number]> };
+        const at = Math.round(performance.now());
+        const inflight = Array.from(fetches.__auditInflight?.values() ?? []).slice(0, 8).join(", ");
+        const recent = (fetches.__auditRecentFetches ?? []).map(([path, done]) => `${path} -${at - done}ms`).join(", ");
+        return { error: unsettled === "quiet" ? `reads on the page did not go quiet within 20 s (in flight: ${inflight || "none"}; recent: ${recent || "none"})`
           : `receipts for the rows on screen did not load within 20 s (waiting: ${waitingOn.slice(0, 12).join(", ")}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""})` };
       }
       await new Promise(done => setTimeout(done, 100));
