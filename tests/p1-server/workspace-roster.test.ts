@@ -554,8 +554,11 @@ test("agent_channel_read_advance moves only to a message channel_read could retu
   const foreign = await filed(elsewhere, await agent(elsewhere, owner, "Foreign"), "FOREIGN", {});
   const privateOne = await filed(ws, reader, "PRIVATE", { channel: channelId, toUser: owner });
   const unfiled = await filed(ws, reader, "UNFILED", {});
-  const expired = await filed(ws, reader, "EXPIRED", { channel: channelId });
-  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second' WHERE id = ${expired}::uuid`;
+  // Signals are append-only, so the expired one is written already expired.
+  const expired = randomUUID();
+  await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id)
+    VALUES (${expired}::uuid, ${ws}::uuid, ${reader}::uuid, 'agent', 'note', 'EXPIRED',
+      statement_timestamp() - interval '1 minute', statement_timestamp() - interval '2 minutes', ${channelId}::uuid)`;
 
   for (const [channel, through] of [["design", privateOne], ["design", unfiled], ["design", foreign], ["design", expired],
     ["design", randomUUID()], ["general", privateOne], ["missing", unfiled]] as const) {
