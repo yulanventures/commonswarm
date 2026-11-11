@@ -642,19 +642,22 @@
       "dense"
     ],
     "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "reason": "Needs a second signed-in viewer and a delegated admin invitation (admin_grants plus the inviter admin_accounts projection); one seeded for the owner would float over every capture."
   },
   {
     "id": "app.update-toast",
     "kind": "view",
-    "path": "/app?w={workspace}",
+    "path": "/app?w={workspace}&c={channel.general}",
     "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "ready": "aside[data-update-notice]:not([hidden]):has([data-update-text]:not(:empty)) [data-update-reload]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "newBuild": true,
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ]
   },
   {
     "id": "app.todo-offer",
@@ -666,7 +669,7 @@
       "dense"
     ],
     "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "reason": "An offer to the owner renders atop every owner feed in its workspace; needs its own workspace and the offering member Lists consent."
   },
   {
     "id": "app.lists-approval",
@@ -678,7 +681,7 @@
       "dense"
     ],
     "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "reason": "No route opens the approvals (only the roster allow action or host-picker approve), and seeded agent principals have no household_connections."
   },
   {
     "id": "dialog.public-menu",
@@ -893,7 +896,7 @@
       "dense"
     ],
     "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "reason": "Same fixture as app.invitation-inbox: a second signed-in viewer with a delegated admin invitation whose preview passes."
   },
   {
     "id": "dialog.navigation-drawer",
@@ -954,14 +957,34 @@
   {
     "id": "dialog.role-confirm",
     "kind": "dialog",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-person-{owner}",
+        "click": "#pd-person-{owner}"
+      },
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) select[data-role-select=\"{owner}\"]:not([disabled])"
+      },
+      {
+        "settle": true
+      },
+      {
+        "select": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) select[data-role-select=\"{owner}\"]",
+        "option": "member"
+      },
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) [data-change-role=\"{owner}\"]:not([disabled])",
+        "click": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) [data-change-role=\"{owner}\"]"
+      }
+    ],
+    "ready": "dialog[data-role-confirm=\"{owner}\"][open]:has([data-confirm-role=\"{owner}\"]:not([disabled])) [data-role-confirm-back=\"{owner}\"]:not([disabled])",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Dialog trigger, permission and disposable fixture need confirmation; the shell is not dialog readiness."
+    "requiresSeed": [
+      "create_workspace"
+    ]
   },
   {
     "id": "menu.workspace",

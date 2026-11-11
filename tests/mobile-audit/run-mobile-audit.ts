@@ -50,20 +50,26 @@ const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
-type Route = { request(): { postData(): string | null }; continue(): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
+type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, hover, click, type (with text), press, scroll, wait, settle.
+/** One setup step; fields run in this order: media, waitFor, hover, click, type (with text), select (with option), press,
+ *  scroll, wait, settle.
+ *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
  *  media: a CSS media query, evaluated by the page's own matchMedia; the step runs only where it
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; hover?: string; click?: string; type?: string; text?: string; press?: string; wait?: number; scroll?: string; settle?: true };
+type Step = { media?: string; waitFor?: string; hover?: string; click?: string; type?: string; text?: string; select?: string; option?: string;
+  press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
-  requiresSeed?: string[] }
+  requiresSeed?: string[];
+  /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
+   *  as after a deploy; the page's navigation itself is served unchanged. */
+  newBuild?: true }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
 const STARTER: Screen[] = [
@@ -92,6 +98,8 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
+  // The update notice is a fixed <aside> card floating over the feed and composer.
+  "app.update-toast": ["[data-update-notice]:not([hidden])"],
   // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
   // use a native dialog, and from 1400px it is an ordinary column beside the main one.
   "dialog.details-sheet": [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 52rem) and (width <= 1399px)" }],
@@ -122,6 +130,16 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "Shift+Tab", expect: 'dialog[data-people-confirm][open] .pd-confirm-actions > button:first-child' },
     ],
     activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-pd-focus="row-remove-agent-{agent}"]' } },
+  }],
+  // Lowering your own role: the app focuses Go back; Escape goes back to the role select, nothing is saved.
+  "dialog.role-confirm": [{
+    name: "role-confirm-escape-keeps-role",
+    start: { active: 'dialog[data-role-confirm="{owner}"][open] [data-role-confirm-back="{owner}"]' },
+    keys: [
+      { key: "Tab", expect: 'dialog[data-role-confirm="{owner}"][open] [data-confirm-role="{owner}"]' },
+      { key: "Shift+Tab", expect: 'dialog[data-role-confirm="{owner}"][open] [data-role-confirm-back="{owner}"]' },
+    ],
+    activate: { key: "Escape", expect: { active: 'dialog[data-roster-dialog][open] [data-people-detail] select[data-role-select="{owner}"]' } },
   }],
   "dialog.people-admin-access": [{
     name: "people-admin-escape-keeps-roster",
@@ -388,6 +406,17 @@ async function main(): Promise<void> {
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
        *  Returns whether reads settled. Shared by the main captures and the desktop hover pass. */
       const openScreen = async (page: any, screen: Screen): Promise<boolean> => {
+        if (screen.newBuild) {
+          const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
+          await page.route((url: URL) => url.pathname === appPath, async (route: Route) => {
+            if (route.request().resourceType() !== "fetch") return route.continue();
+            const served = await route.fetch();
+            const html = (await served.body()).toString("utf8");
+            const asset = '<script type="module" src="/_astro/audit-next-build.js"></script>';
+            const body = html.includes("</head>") ? html.replace("</head>", `${asset}</head>`) : `${asset}${html}`;
+            return route.fulfill({ status: served.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(body, "utf8") });
+          });
+        }
         await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
         await page.waitForFunction(() => {
           const app = document.querySelector("live-dashboard");
@@ -473,6 +502,7 @@ async function main(): Promise<void> {
             }
           }
           if (step.type) await page.fill(fill(step.type, seed.ids), step.text ?? "");
+          if (step.select) await page.selectOption(fill(step.select, seed.ids), step.option ?? "", { timeout: 8_000 });
           if (step.press) await page.keyboard.press(step.press);
           if (step.scroll) {
             const scrollTarget = fill(step.scroll, seed.ids);
