@@ -509,15 +509,16 @@ test("agent_channel_unread: unknown before any read, then unread only for newer 
   await filed(ws, writer, "TO-RECIPIENTS", { channel: channelId, recipients: [helper] });
   const privateRoot = await filed(ws, writer, "PRIVATE-ROOT", { channel: channelId, toUser: owner });
   await filed(ws, writer, "UNDER-PRIVATE-ROOT", { channel: channelId, thread: privateRoot });
-  await filed(ws, reader, "OWN", { channel: channelId });
+  const own = await filed(ws, reader, "OWN", { channel: channelId });
   assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: false });
 
   // A thread reply channel_read returns does; so does an unfiled message, for general.
   const reply = await filed(ws, writer, "REPLY", { channel: channelId, thread: newest, ago: "0 seconds" });
   const unfiled = await filed(ws, writer, "UNFILED", { ago: "0 seconds" });
   assert.deepEqual(await agentUnread(ws, owner, reader), { general: true, design: true });
-  assert.deepEqual((await channelPage(ws, owner, reader, "design", { after_id: newest }))?.messages.map((m) => m.signal_id), [reply],
-    "unread names exactly what channel_read would return next");
+  // channel_read returns the agent's own message too; unread skips it, as the person's unread does.
+  assert.deepEqual((await channelPage(ws, owner, reader, "design", { after_id: newest }))?.messages.map((m) => m.signal_id), [own, reply],
+    "unread counts exactly what channel_read returns next, less the agent's own message");
   await advance(ws, owner, reader, "general", unfiled);
   assert.deepEqual(await agentUnread(ws, owner, reader), { general: false, design: true }, "positions are per channel");
 
