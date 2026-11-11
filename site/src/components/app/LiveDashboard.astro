@@ -46,6 +46,7 @@ import "../../styles/kylon-wiki.css";
 import "../../styles/kylon-wiki-context.css";
 import "../../styles/kylon-account-dialogs.css";
 import "../../styles/account-agents.css";
+import "../../styles/workspace-agent-picker.css";
 import "../../styles/dashboard-welcome.css";
 import "../../styles/kylon-todos.css";
 import "../../styles/kylon-seat-admin.css";
@@ -1177,7 +1178,8 @@ import "../../styles/kylon-command-palette.css";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { buildAccountAgents, addableAccountAgents, buildWorkspaceAgentChoice } from "../../lib/account-agents";
+  import { buildAccountAgents } from "../../lib/account-agents";
+  import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -1299,7 +1301,6 @@ import "../../styles/kylon-command-palette.css";
     PASSWORD_MIN_LENGTH,
     removeWorkspaceMember,
     revokeAgentPrincipal,
-    addAgentToWorkspace,
     setAgentModel,
     subscribeAgentActivity,
     subscribeWorkspaceSignals,
@@ -6877,23 +6878,16 @@ import "../../styles/kylon-command-palette.css";
           if(!picker.hidden) { picker.hidden=true; add.setAttribute('aria-expanded','false'); return; }
           const value=session,workspaceId=activeWorkspaceId;
           add.disabled=true; picker.hidden=false; add.setAttribute('aria-expanded','true'); status.textContent='Loading…';
-          try {
-            const choices=addableAccountAgents(await myAccountAgents(),workspaceId,workspace.orgId);
-            if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id || !picker.isConnected) return;
-            status.textContent=choices.length?'':'No agents to add.';
-            picker.replaceChildren(status);
-            for(const agent of choices) {
-              const {row,button}=buildWorkspaceAgentChoice(document,agent,async()=>{
-                if(activeWorkspaceId!==workspaceId || session?.user.id!==value.user.id) return;
-                button.disabled=true; status.textContent='';
-                try {
-                  await addAgentToWorkspace(value,uuid(),workspaceId,agent.id);
-                  if(activeWorkspaceId===workspaceId && session?.user.id===value.user.id) await reloadPeopleDialog(workspaceId,agent.id,`${agent.name} added.`);
-                } catch(error) { status.textContent=readableError(error); button.disabled=false; }
-              }); picker.append(row);
-            }
-          } catch(error) { status.textContent=readableError(error); }
-          finally { add.disabled=false; }
+          mountWorkspaceAgentPicker(picker, {
+            session: value, workspaceId, orgId: workspace.orgId,
+            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && !picker.hidden && homeRoute.view === "people",
+            added: async agent => {
+              if (activeWorkspaceId === workspaceId && session?.user.id === value.user.id && homeRoute.view === "people") {
+                await reloadPeopleDialog(workspaceId, agent.id, `${agent.name} added.`);
+              }
+            },
+          });
+          add.disabled=false;
         });
       }
       if (peopleDialogState.selected?.type === "agent") {
@@ -13669,7 +13663,28 @@ import "../../styles/kylon-command-palette.css";
       if (!agentId || !activeWorkspaceId) return;
       void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId }, "push");
     };
+    const openExistingAgentChoice = (): void => {
+      stopHostJoinWatch();
+      const picker = one<HTMLElement & { hostId?: string }>("agent-host-picker");
+      const host = picker?.querySelector<HTMLElement>("[data-ahp-existing-list]");
+      const workspace = workspaces.find(item => item.id === activeWorkspaceId);
+      if (!session || !host || !workspace || sampleMode) return;
+      const value = session, workspaceId = workspace.id, version = requestVersion;
+      const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
+        version === requestVersion && homeRoute.view === "add-agent" && picker?.hostId === "existing";
+      mountWorkspaceAgentPicker(host, {
+        session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
+        added: async agent => {
+          const next = await roster(workspaceId);
+          if (!current()) return;
+          if (!next.some(item => item.principalId === agent.id)) throw new Error("Added agent not yet in the roster");
+          agents = next;
+          renderRoster();
+        },
+      });
+    };
     const hostPicker = one<HTMLElement>("agent-host-picker");
+    hostPicker?.addEventListener("agent-host-existing", openExistingAgentChoice);
     hostPicker?.addEventListener("agent-host-selected", () => startHostJoinWatch());
     hostPicker?.addEventListener("agent-host-back", () => stopHostJoinWatch());
     hostPicker?.addEventListener("agent-host-home", () => {

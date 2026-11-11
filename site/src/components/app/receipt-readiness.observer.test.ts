@@ -1,13 +1,7 @@
 /** Real site DOM/transport proof with synthetic HTTP: the receipt-loaded marker across a seen acknowledgement. */
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { build, type Plugin } from "esbuild";
-import ts from "typescript";
-import { transform } from "@astrojs/compiler-rs";
-import { experimental_AstroContainer as AstroContainer } from "astro/container";
 import { createServer } from "node:http";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
@@ -397,47 +391,8 @@ async function observeReceiptReadiness() {
 }
 
 test("receipt reads: a pre-acknowledgement read never marks a row loaded; dropped refreshes, rows past the pass cap and rows brought into view are read without waiting for a poll", { timeout: 180_000 }, async () => {
-  const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
-  const scripts = new Map<string, string[]>(), styles: string[] = [];
-  // The page shell's global stylesheet comes from Base.astro, not this component.
-  styles.push((await build({ entryPoints: [fileURLToPath(new URL("../../styles/global.css", import.meta.url))], bundle: true, write: false,
-    external: ["/fonts/*"] })).outputFiles[0]!.text);
-  const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
-    builder.onLoad({ filter: /\.astro$/ }, async args => {
-      const compiled = transform(await readFile(args.path, "utf8"), { filename: args.path,
-        internalURL: "astro/compiler-runtime", resultScopedSlot: true, resolvePath: specifier => specifier });
-      assert.deepEqual(compiled.diagnostics.filter(d => d.severity === "error"), []);
-      scripts.set(args.path, compiled.scripts.map(s => s.code).filter((code): code is string => typeof code === "string"));
-      styles.push(...compiled.css);
-      return { contents: compiled.code.replace(/import "[^"\n]+\?astro&type=style[^"\n]+";\n/gu, ""), loader: "ts", resolveDir: dirname(args.path) };
-    });
-    // Bundle each stylesheet so its @imports (receipts, channel, workspace) are inlined: pasted raw, they would be fetched
-    // from this test server and never load. Fonts stay external and are answered empty below.
-    builder.onLoad({ filter: /\.css$/ }, async args => {
-      styles.push((await build({ entryPoints: [args.path], bundle: true, write: false, external: ["/fonts/*"] })).outputFiles[0]!.text);
-      return { contents: "", loader: "js" };
-    });
-  } };
-  const rendered = await build({ entryPoints: [component], bundle: true, write: false, format: "esm", platform: "node",
-    plugins: [compiler], external: ["astro/compiler-runtime"], define: { "import.meta.env": "{}" } });
-  const code = rendered.outputFiles[0]!.text.replaceAll('"astro/compiler-runtime"',
-    JSON.stringify(new URL("../../../node_modules/astro/dist/runtime/compiler/index.js", import.meta.url).href));
-  const module = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"));
-  const container = await AstroContainer.create({ resolve: async () => "/app.js" });
-  const markup = await container.renderToString(module.default);
-  const bundled: string[] = [];
-  for (const [path, contents] of scripts) for (const content of contents) {
-    bundled.push((await build({ stdin: { contents: content, loader: "ts", resolveDir: dirname(path) }, bundle: true, write: false,
-      format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_H0_LINK_JOIN: "0" }) } })).outputFiles[0]!.text);
-  }
-  const testSource = await readFile(new URL(import.meta.url), "utf8");
-  const ast = ts.createSourceFile("fixture.ts", testSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const compileFixture = async (name: string) => {
-    const found = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
-    assert.ok(found, "test fixture function " + name);
-    return (await build({ stdin: { contents: found.getText(ast) + "\nvoid " + name + "();", loader: "ts", resolveDir: dirname(component) },
-      bundle: true, write: false, platform: "browser", format: "iife" })).outputFiles[0]!.text;
-  };
+  const { markup, styles, bundled } = await renderAstroFixture(new URL("./LiveDashboard.astro", import.meta.url));
+  const compileFixture = (name: string) => compileFixtureFunction(new URL(import.meta.url), name);
   const app = "<!doctype html><html><head><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" +
     styles.join("\n") + "</style><script>" + await compileFixture("installReceiptFixture") + "</script></head><body>" + markup +
     "<script>" + await compileFixture("observeReceiptReadiness") + "</script></body></html>";

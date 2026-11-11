@@ -10,6 +10,20 @@ Open those two Claude setup links in a separate tab with `noopener noreferrer`, 
 
 Cursor's native install link and the Grok Bot guide retain their navigation. This slice changes no permission, sign-in, consent, return URL or token behavior. It removes a lost-context detour; it does not complete Goal 3.
 
+## Existing-agent path
+
+For a person who already has an eligible agent in the same organization, the new entry reuses People's membership flow:
+
+1. **Add an agent** in the selected workspace.
+2. **Use one of your agents**.
+3. **Add** on the chosen identity's row.
+
+The accepted command produces “<Name> added.”, followed by an automatic roster refresh. A failed refresh offers **Refresh workspace**, preserving the accepted result without another add. A refused add stays actionable. Changing workspace, account or view retires the old UI result.
+
+The list uses the existing owner-filtered directory, eligibility filter, identity labels and renderer. Directory presence is not an active-connection claim: the server still decides whether the add is allowed. An accepted hosted add does not require a human OAuth reconnection. The agent claims its seat in the added workspace on its next MCP turn. Until that claim, existing overview projections can still say Connection turned off; this slice does not change that read model or prescribe reconnecting.
+
+This meets the three-action target for the existing-agent path. First-time external setup below remains open.
+
 ## Current cold connection
 
 Even with a valid CommonSwarm browser session, the existing path has this conservative lower bound:

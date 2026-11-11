@@ -82,6 +82,11 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         Add one of your agents to <span data-ahp-slot="workspace-plain">this workspace</span>
       </h1>
       <p class="hm-ahp__lead" data-ahp-ownership-line></p>
+      {audience === "setter" && (
+        <button class="hm-ahp__button hm-ahp__button--quiet hm-ahp__existing" type="button" data-ahp-existing aria-expanded="false" aria-controls={`ahp-${audience}-existing`}>
+          Use one of your agents
+        </button>
+      )}
     </header>
 
     <section class="hm-ahp__section" aria-labelledby={`hm-ahp-${audience}-which`}>
@@ -260,6 +265,14 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
     </section>
   ))}
 
+  {audience === "setter" && (
+    <section class="hm-ahp__view hm-ahp__section" id={`ahp-${audience}-existing`} data-ahp-existing-view aria-labelledby={`ahp-${audience}-existing-title`} hidden>
+      <button class="hm-ahp__back" type="button" data-ahp-existing-back>← Choose an app</button>
+      <h2 class="hm-ahp__step-title" id={`ahp-${audience}-existing-title`} tabindex="-1" data-ahp-existing-title>Your agents</h2>
+      <div data-ahp-existing-list></div>
+    </section>
+  )}
+
   <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
     <h2 class="hm-ahp__joined-title visually-hidden" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h2>
     <div class="hm-ahp__actions">
@@ -313,6 +326,22 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
           this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
         });
       }
+      this.querySelector<HTMLButtonElement>("[data-ahp-existing]")?.addEventListener("click", () => {
+        this.reset();
+        this.#hostId = "existing";
+        this.#show("existing");
+        this.querySelector<HTMLElement>("[data-ahp-existing-title]")?.focus({ preventScroll: true });
+        const view = this.querySelector<HTMLElement>("[data-ahp-existing-view]");
+        if (view) this.#scrollToTop(view);
+        this.dispatchEvent(new CustomEvent("agent-host-existing", { bubbles: true }));
+      });
+      this.querySelector<HTMLButtonElement>("[data-ahp-existing-back]")?.addEventListener("click", () => {
+        this.reset();
+        const button = this.querySelector<HTMLElement>("[data-ahp-existing]");
+        button?.focus({ preventScroll: true });
+        if (button) this.#scrollToTop(button);
+        this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
+      });
       this.querySelector<HTMLButtonElement>("[data-ahp-home-back]")?.addEventListener("click", () => {
         this.dispatchEvent(new CustomEvent("agent-host-home", { bubbles: true }));
       });
@@ -455,6 +484,9 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       }
       const joined = this.querySelector<HTMLElement>("[data-ahp-joined]");
       if (joined) joined.hidden = view !== "joined";
+      const existing = this.querySelector<HTMLElement>("[data-ahp-existing-view]");
+      if (existing) existing.hidden = view !== "existing";
+      this.querySelector<HTMLElement>("[data-ahp-existing]")?.setAttribute("aria-expanded", String(view === "existing"));
     }
 
     #hostName(id: string): string {
