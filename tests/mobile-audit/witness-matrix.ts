@@ -242,7 +242,7 @@ const ROWS: Row[] = [
     declared: [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 200px) and (width <= 600px)" }],
     check: ({ geometry: g }) => {
       assert.equal(g.overlay.front, "aside#cs-channel-details.hm-frame__side", show(g.overlay));
-      assert.deepEqual(selectors(g.coverage.byForeground), ["button#main-btn"]);
+      assert.deepEqual(selectors(g.coverage.byForeground), ["button#main-btn", "a#main-link"]);
       assert.deepEqual(g.unexpectedObscured, []);
       assert.deepEqual(g.foregroundObscured, []);
       assert.ok(!g.links.some(l => l.selector === "a#main-link"), `the covered link must not be a blocked finding: ${show(g.links)}`);
