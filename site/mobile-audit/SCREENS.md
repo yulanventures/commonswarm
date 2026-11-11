@@ -290,15 +290,15 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V13 | `app.list-conflict` — pending |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
-| V16 | `app.wiki-editor` — superseded pending alias; covered by `app.wiki.editor` |
-| V17 | `app.agent-chooser` — pending |
+| V16 | `app.wiki.editor` — candidate (`app.wiki-editor` superseded duplicate removed) |
+| V17 | `app.agent-chooser` — candidate; `app.add-agent.existing` existing-agent picker candidate on `{emptyWorkspace}` |
 | V18 | `app.agent-connect` — pending |
 | V19 | `app.invite-person` — pending |
 | V20 | `app.entity-detail` — pending |
 | V21 | `app.invitation-inbox` — pending |
 | V22 | `app.update-toast` — pending |
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
-| V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate; `app.definitions-diff` remains a superseded pending alias |
+| V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
 | V25 | `app.todo-offer` — pending |
 | V26 | `app.lists-approval` — pending |
 | D01 | `dialog.public-menu` — pending |
@@ -329,12 +329,12 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — pending |
 | M13 | `menu.context` — pending |
-| M14 | `menu.workspace-dock` — superseded pending alias; covered by `menu.workspace` |
-| M15 | `menu.profile-inspector` — superseded pending alias; covered by `app.entity-detail` and `dialog.details-sheet` |
+| M14 | `menu.workspace` — covers mobile drawer and desktop header anchors (`menu.workspace-dock` superseded duplicate removed) |
+| M15 | `app.entity-detail`, `dialog.details-sheet` — cover entity panel, phone details sheet and desktop details pane (`menu.profile-inspector` superseded duplicate removed) |
 
 The four empty candidates use `{emptyWorkspace}` and wait for their actual empty text or marker. To-dos and Lists additionally require the positive `household_permissions empty` seed step; the runner must reject a missing or failed step before navigation. Lists and Definitions candidates depend on the editor grant and seed steps succeeding; inspect seed notes and treat missing content as a failed capture. `app.agent` selects a profile with name and model; `app.agent.queue` remains pending until its queue density is confirmed.
 
-Additional pending detail captures: `app.wiki.topic`, `app.wiki.editor`. `app.chat.dm` separately tracks V05; `app.definitions-diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
+Additional detail captures: `app.wiki.topic`, `app.wiki.editor`, `app.add-agent.existing`. `app.chat.dm` separately tracks V05; `app.definitions.diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
 Main-branch addendum: PR #271 added password sign-in after the stated source baseline. PR #282 subsequently added the separate Password dialog; the initial open-only candidate is D15 below, while password challenge and submission flows remain outside this audit.
 

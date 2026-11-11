@@ -521,18 +521,6 @@
     "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
   },
   {
-    "id": "app.wiki-editor",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Covered by app.wiki.editor; kept pending to avoid duplicate execution."
-  },
-  {
     "id": "app.agent-chooser",
     "kind": "view",
     "path": "/app?w={workspace}&v=add-agent",
@@ -543,6 +531,34 @@
     ],
     "requiresSeed": [
       "create_workspace"
+    ]
+  },
+  {
+    "id": "app.add-agent.existing",
+    "kind": "view",
+    "path": "/app?w={emptyWorkspace}&v=add-agent",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) agent-host-picker [data-ahp-existing]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) agent-host-picker [data-ahp-existing]"
+      },
+      {
+        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add"
+      }
+    ],
+    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_workspace empty",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
     ]
   },
   {
@@ -639,18 +655,6 @@
     ],
     "status": "pending",
     "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
-  },
-  {
-    "id": "app.definitions-diff",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Covered by app.definitions.diff; kept pending to avoid duplicate execution."
   },
   {
     "id": "app.todo-offer",
@@ -1238,30 +1242,6 @@
     ],
     "status": "pending",
     "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
-  },
-  {
-    "id": "menu.workspace-dock",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Covered by menu.workspace across mobile and desktop anchors; kept pending to avoid duplicate execution."
-  },
-  {
-    "id": "menu.profile-inspector",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Covered by app.entity-detail and dialog.details-sheet; kept pending to avoid duplicate execution."
   },
   {
     "id": "app.definitions.proposed",

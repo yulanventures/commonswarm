@@ -73,6 +73,12 @@ const menuPage = (blocker: "absolute" | "fixed") => page(`<div style="position:r
   <div id="blocker" style="position:${blocker};left:240px;top:0;width:120px;height:80px"></div></div>`);
 const listPage = page(`<div style="position:relative"><button id="trigger" style="position:absolute;left:10px;top:10px">Open</button>
   <div id="list" style="position:absolute;left:0;top:0;width:200px;height:150px;background:#fff"><button id="opt" style="margin:80px 0 0 20px">Option</button></div></div>`);
+const sideSheetPage = page(`<div class="hm-frame" style="position:relative;width:400px;height:300px">
+  <button id="main-btn" style="position:absolute;right:20px;top:20px">Send</button>
+  <p style="position:absolute;right:20px;top:90px;margin:0;font:14px/20px sans-serif"><a id="main-link" href="/people">Harbor</a></p>
+  <aside id="cs-channel-details" class="hm-frame__side" style="position:absolute;right:0;top:0;width:220px;height:300px;background:#fff;z-index:20">
+    <button id="close-side" style="margin:20px">Close</button>
+  </aside></div>`);
 const ORIGIN = "http://fixture.test";
 const legalNote = page(`<p style="width:380px;font:14px/20px sans-serif;margin:40px 8px">Agree to the <a id="terms" href="/terms">Terms</a> and the <a id="privacy" href="/privacy">Privacy</a> notes.</p>`);
 const legalSpecs: ActivationSpec[] = [
@@ -231,6 +237,19 @@ const ROWS: Row[] = [
     assert.deepEqual(g.unexpectedObscured, []);
     assert.deepEqual(g.foregroundObscured, []);
   } },
+  { name: "a declared root whose media query matches is the front overlay for controls and links under it",
+    html: sideSheetPage,
+    declared: [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 200px) and (width <= 600px)" }],
+    check: ({ geometry: g }) => {
+      assert.equal(g.overlay.front, "aside#cs-channel-details.hm-frame__side", show(g.overlay));
+      assert.deepEqual(selectors(g.coverage.byForeground), ["button#main-btn"]);
+      assert.deepEqual(g.unexpectedObscured, []);
+      assert.deepEqual(g.foregroundObscured, []);
+      assert.ok(!g.links.some(l => l.selector === "a#main-link"), `the covered link must not be a blocked finding: ${show(g.links)}`);
+      const covered = g.linksCoveredByFront.find(l => l.selector === "a#main-link");
+      assert.ok(covered && covered.fragments.length > 0 && covered.fragments.every(f => f.coveredByFront), show(g.linksCoveredByFront));
+      assert.equal(witnessSummary([{ screenshot: "s.png", witness: g }]).withLinksAllBlocked, 0);
+    } },
   { name: "a declared root whose media query does not match is not an overlay", html: listPage, declared: [{ selector: "#list", media: "(width > 9999px)" }],
     check: ({ geometry: g }) => {
       assert.equal(g.overlay.front, null, show(g.overlay));

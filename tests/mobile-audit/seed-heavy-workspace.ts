@@ -136,11 +136,11 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       return accepted;
     };
 
-    // Workspaces: one dense, one empty.
+    // Workspaces: one dense, one empty (in the same org so existing-agent onboarding lists the owner's agents).
     const workspace = randomUUID();
     const emptyWorkspace = randomUUID();
     ok("create_workspace", await command(owner.token, { kind: "create_workspace", workspace_id: workspace, name: "Rivera household & studio — shared with everyone, including the agents" }, null));
-    ok("create_workspace empty", await command(owner.token, { kind: "create_workspace", workspace_id: emptyWorkspace, name: "Empty" }, null));
+    ok("create_workspace empty", await command(owner.token, { kind: "create_workspace", workspace_id: emptyWorkspace, name: "Empty", org_id: workspace }, null));
     ids.workspace = workspace;
     ids.emptyWorkspace = emptyWorkspace;
 
