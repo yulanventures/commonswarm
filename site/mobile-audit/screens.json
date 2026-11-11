@@ -153,7 +153,7 @@
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
     "setup": [],
-    "ready": "[data-home-route-pane]:not([hidden]) [data-agent-row=\"{agent}\"]",
+    "ready": "dialog[data-roster-dialog][open] [data-agent-row=\"{agent}\"]",
     "states": [
       "dense"
     ]
@@ -1675,6 +1675,48 @@
       }
     ],
     "ready": "[data-user-menu-trigger]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "dialog.people-detail",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
+        "click": "#pd-agent-{agent}"
+      }
+    ],
+    "ready": "dialog[data-roster-dialog][open] [data-people-detail]:not([hidden]) #pd-detail-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "dialog.people-admin-access",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{agent}",
+        "click": "#pd-agent-{agent}"
+      },
+      {
+        "waitFor": "[data-people-detail] [data-seat-admin-toggle=\"workspace\"]:not([disabled])",
+        "click": "[data-people-detail] [data-seat-admin-toggle=\"workspace\"]"
+      }
+    ],
+    "ready": "dialog.sa-confirm[data-seat-admin-confirm=\"workspace\"][open] [data-seat-admin-grant]",
     "states": [
       "dense"
     ],

@@ -1,0 +1,50 @@
+/* The shared compact roster lives inside a native modal, never in the workspace columns. */
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal {
+  box-sizing: border-box; inline-size: min(1080px, calc(100vw - 48px));
+  block-size: min(800px, calc(100dvh - 48px)); max-inline-size: none; max-block-size: none;
+  padding: 0; margin: auto; border: 1px solid var(--k-shell-line); border-radius: 14px;
+  background: var(--k-shell-surface); color: var(--k-shell-ink); overflow: hidden;
+  font: 400 14px/1.5 var(--k-shell-font); box-shadow: var(--k-shell-shadow);
+}
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal[open] { display: flex; flex-direction: column; }
+live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal::backdrop { background: rgb(0 0 0 / .48); backdrop-filter: blur(3px); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex: none; padding: 12px 20px; border-block-end: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__head h2 { margin: 0; font: 600 20px/1.4 var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close] {
+  flex: none; display: grid; place-items: center; inline-size: 44px; min-block-size: 44px;
+  padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--k-shell-ink); font-size: 24px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-roster-close]:hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__body { flex: 1; min-block-size: 0; overflow: hidden; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] { block-size: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page].has-detail { grid-template-columns: minmax(280px, 1fr) minmax(0, 1.2fr); }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-context] {
+  min-block-size: 0; padding: 16px 20px 24px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .pd-page-title-row { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .pd-page-side { display: none; min-block-size: 0; max-inline-size: none; margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .has-detail > .pd-page-side {
+  display: block; padding: 16px 20px 24px; border-inline-start: 1px solid var(--k-shell-line);
+  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page] .pd-detail { padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-people-modal :is(button,a,input,select,summary):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; }
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal,
+  live-dashboard.dashboard[data-kylon-shell] dialog.cs-people-modal.has-detail {
+    inline-size: 100%; block-size: min(92dvh, 860px); max-block-size: calc(100dvh - 16px);
+    margin: auto 0 0; border-radius: 16px 16px 0 0; border-block-end: 0;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal__head { padding: 8px 12px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-context] { padding: 12px 16px 24px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page].has-detail { grid-template-columns: minmax(0, 1fr); }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .has-detail > [data-people-context] { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal .has-detail > .pd-page-side { border: 0; padding: 12px 16px 24px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal [data-people-page].has-detail .pd-detail { position: static; inline-size: auto; block-size: auto; visibility: visible; }
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-people-modal :is(button,a,input,select,summary):focus-visible { outline: 3px solid Highlight; }
+}

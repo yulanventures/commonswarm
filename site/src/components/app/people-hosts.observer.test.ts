@@ -1,102 +1,108 @@
-/** Reached by `npm --prefix site test` and `test:ci` through the recursive component-observer glob. Pure: runs the
- * production People-page host functions from LiveDashboard.astro in a vm against a small fake DOM. */
+/** Mounted native-modal behavior; synthetic HTTP only. Replaces the retired borrowed-page-host fixture. */
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { test } from "node:test";
-import { createContext, runInContext } from "node:vm";
-import ts from "typescript";
+import { mkdir, readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
 
-/*
- * The People page borrows a persistent host from <live-dashboard>: the detail column. It must be parked hidden
- * under other routes, survive the pane being replaced, and stay on the page through an in-page reload. These run
- * the real functions; only the DOM and the page renderer are stand-ins.
- */
-async function dashboardFunctions(names: string[]): Promise<string> {
-  const raw = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
-  const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
-  const ast = ts.createSourceFile("dashboard.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const found = new Map<string, string>();
-  const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && names.includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
-    ts.forEachChild(node, visit);
+async function observePeopleModal() {
+  const f = (window as any).existingFixture;
+  const visible = (el: Element | null): el is HTMLElement => !!el && !el.closest("[hidden]") && el.getClientRects().length > 0;
+  const one = <T extends Element>(selector: string) => document.querySelector<T>(selector);
+  const check = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
+  let stage = "boot";
+  const wait = async (name: string, predicate: () => unknown) => {
+    stage = name;
+    const now = async () => (await (await fetch("/__observer-tick")).json()).now;
+    const until = await now() + 10_000;
+    while (!predicate()) { if (await now() >= until) throw new Error("timed out at " + name); }
   };
-  visit(ast);
-  for (const name of names) assert.ok(found.has(name), `production declaration ${name}`);
-  return ts.transpileModule(names.map((name) => found.get(name)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-}
-
-/* The fake DOM: tree moves, `hidden`, and focus that is lost when the focused node is removed or moved (a browser
-   blurs it), leaves the document, or sits under a hidden ancestor (the browser's focus fixup). Selectors: `[data-x]` and `.class` only. */
-const fakeDom = `
-  class HTMLElement {
-    constructor(tag, init = {}) { this.tagName = tag.toUpperCase(); this.children = []; this.parentElement = null; this.hidden = false; this.dataset = {}; this.className = ''; this.id = ''; this.attributes = {}; Object.assign(this, init); }
-    setAttribute(name, value) { this.attributes[name] = String(value); }
-    get isConnected() { let node = this; while (node.parentElement) node = node.parentElement; return node === documentRoot; }
-    remove() { const parent = this.parentElement; if (!parent) return; if (focused && this.contains(focused)) focused = null; parent.children = parent.children.filter((child) => child !== this); this.parentElement = null; }
-    append(...nodes) { for (const node of nodes) { node.remove(); node.parentElement = this; this.children.push(node); } }
-    replaceChildren(...nodes) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
-    contains(node) { for (let at = node; at; at = at.parentElement) if (at === this) return true; return false; }
-    closest(selector) { for (let at = this; at; at = at.parentElement) if (at.matches(selector)) return at; return null; }
-    matches(selector) {
-      if (selector === '[hidden]') return this.hidden;
-      const data = selector.match(/^\\[data-([\\w-]+)\\]$/); if (data) return Object.keys(this.dataset).some((key) => key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()) === data[1]);
-      if (selector.startsWith('.')) return this.className.split(' ').includes(selector.slice(1));
-      throw new Error('fake DOM selector ' + selector);
-    }
-    querySelector(selector) { for (const child of this.children) { if (child.matches(selector)) return child; const deeper = child.querySelector(selector); if (deeper) return deeper; } return null; }
-    focus() { focused = this; }
+  const door = () => [...document.querySelectorAll<HTMLButtonElement>("[data-roster-open]")].find(visible)!;
+  const modal = () => one<HTMLDialogElement>("[data-roster-dialog]")!;
+  const deepLink = new URL(location.href).searchParams.get("deep") === "1";
+  try {
+    await wait("workspace door", () => visible(door()));
+    const opener = door(), background = one<HTMLElement>("[data-home-route-pane]")!;
+    let before = location.pathname + location.search;
+    if (!deepLink) { opener.focus(); opener.click(); }
+    await wait("People content", () => visible(one("[data-people-context]")));
+    check(modal()?.matches(":modal"), "People & agents must be a native modal, not a page");
+    check(new URL(location.href).searchParams.get("v") === "people", "open modal URL is missing");
+    check(!background.contains(one("[data-people-context]")), "People replaced the background route");
+    const detail = one<HTMLElement>("[data-people-detail]")!;
+    opener.focus();
+    check(modal().contains(document.activeElement), "background control took modal focus");
+    const rect = modal().getBoundingClientRect();
+    check(rect.width <= innerWidth && rect.height <= innerHeight && rect.left >= 0 && rect.top >= 0, "dialog exceeds viewport");
+    const close = one<HTMLElement>("[data-roster-close]")!.getBoundingClientRect();
+    check(close.width >= 44 && close.height >= 44, "Close target is below 44px");
+    if (innerWidth <= 832) check(Math.abs(rect.bottom - innerHeight) <= 1, "phone modal is not a bottom sheet");
+    one<HTMLButtonElement>(`#pd-agent-${f.agent}`)!.click();
+    await wait("selected agent", () => visible(one("#pd-detail-title")));
+    check(modal().contains(detail), "detail escaped the modal");
+    one<HTMLButtonElement>("[data-edit-model]")!.click();
+    const input = one<HTMLInputElement>("[data-model-editor] input")!;
+    input.value = "Claude — confirmed model";
+    one<HTMLFormElement>("[data-model-editor]")!.requestSubmit();
+    await wait("spoken receipt after refresh", () => one("[data-people-receipt]")?.textContent?.includes("Model changed"));
+    check(modal().open && detail.isConnected && modal().contains(detail), "refresh closed the modal or lost its detail");
+    const remove = one<HTMLButtonElement>('[data-people-detail] [data-pd-focus^="remove-agent-"]')
+      ?? [...document.querySelectorAll<HTMLButtonElement>("[data-people-detail] button")].find(b => /Remove/.test(b.textContent ?? ""));
+    check(!!remove, "selected agent lost its removal action");
+    remove!.click();
+    await wait("nested confirmation", () => one<HTMLDialogElement>("[data-people-confirm]")?.open);
+    const confirmation = one<HTMLDialogElement>("[data-people-confirm]")!;
+    check(confirmation.matches(":modal") && modal().open, "confirmation is not stacked above People");
+    confirmation.requestClose();
+    await wait("inner cancel", () => !confirmation.open);
+    check(modal().open && modal().contains(document.activeElement), "inner cancel closed the outer dialog or lost focus");
+    one<HTMLButtonElement>("[data-roster-close]")!.click();
+    check(!modal().open && !new URL(location.href).searchParams.has("v"), "Close left People in the URL");
+    if (!deepLink) check(location.pathname + location.search === before, "Close changed the underlying route");
+    check(document.activeElement === opener || document.activeElement?.matches("[data-roster-open]"), "Close did not return focus to a workspace door");
+    door().click();
+    await wait("reopen", () => modal().open && visible(one("[data-people-context]")));
+    check(one("[data-people-detail]") === detail, "reopen lost the persistent detail host");
+    await document.fonts.ready;
+    check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
+    check(f.unexpected.length === 0, "unexpected HTTP: " + f.unexpected.join(","));
+    document.documentElement.dataset.peopleObservation = JSON.stringify({ ok: true, width: innerWidth, deepLink });
+  } catch (error) {
+    document.documentElement.dataset.peopleObservation = JSON.stringify({ error: String(error), stage,
+      state: one("live-dashboard")?.getAttribute("data-state"), open: modal()?.open, requests: f.requests.slice(-10), errors: f.errors });
   }
-  class HTMLInputElement extends HTMLElement { setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; } }
-  class HTMLTextAreaElement extends HTMLInputElement {}
-  const el = (tag, data, className = '') => { const node = new HTMLElement(tag, { className }); for (const key of [].concat(data || [])) node.dataset[key] = ''; return node; };
-  let focused = null;
-  const documentRoot = new HTMLElement('html'); const body = new HTMLElement('body'); documentRoot.append(body);
-  const document = {
-    get activeElement() { return focused && focused.isConnected && !focused.closest('[hidden]') ? focused : body; },
-    createElement: (tag) => new HTMLElement(tag),
-  };
-  const app = el('live-dashboard'); body.append(app);
-  const one = (selector) => app.querySelector(selector);
-  const pane = el('section', 'homeRoutePane', 'hm-route-pane'); app.append(pane);
-  const detailHost = el('section', 'peopleDetail', 'pd-detail'); detailHost.hidden = true; app.append(detailHost);
-  /* Stand-in for renderPeopleDialog in page layout: it replaces the page (header and side column), puts the detail
-     column in the side column, and takes focus only for its own controls. */
-  let renders = 0; let pageTitle = null;
-  const renderPeopleDialog = (list, detail) => { renders += 1; const head = el('div', [], 'pd-page-head'); pageTitle = el('h1'); head.append(pageTitle); const side = el('aside'); side.append(detail); list.replaceChildren(head, side); };
-  const connectionDateFocus = () => null, restoreConnectionDateFocus = () => {}, mountRenewalEndDate = () => {}, mountSeatAdminPanel = () => {}, disposeSeatAdminDialog = () => {}, readSeatAdminReauthIntent = () => null;
-  const syncPeopleDialogLayout = () => {}, peopleDialogModel = () => ({ agents: [], people: [] }), routeHref = () => '/app', confirmPeopleDialogAction = () => {};
-  // Context relocation has its actual-browser owner; keep that unrelated paint boundary inert here.
-  const layout = { peopleContext() {} };
-  const peopleDialogState = { query: '', selected: null, rolePending: new Map() };
-  let rosterFilter = '', peopleDialogFocus, activeWorkspaceId = 'W', workspaces = [{ id: 'W', name: 'Home' }], homeRoute = { view: 'people', workspaceId: 'W' }, session = null, sampleMode = false, activeSeatAdminDialog = null;
-  const head = () => pane.querySelector('.pd-page-head');
-`;
-
-async function fixture() {
-  const context = createContext({});
-  runInContext(fakeDom, context);
-  runInContext(await dashboardFunctions(["parkPeopleHosts", "peopleDetailHost", "renderDialogRoster", "closeRosterDialog"]), context);
-  return (code: string): unknown => runInContext(code, context);
 }
 
-test("leaving People parks and hides the detail column, and it survives the pane being replaced", async () => {
-  const run = await fixture();
-  run("renderDialogRoster();");
-  assert.equal(run("renders"), 1, "positive control: the page rendered");
-  /* Another route: applyHomePane and navigateHome park the hosts (parkPeopleHosts / closeRosterDialog). */
-  run("homeRoute = { view: 'agent', workspaceId: 'W', agentId: 'A' }; closeRosterDialog();");
-  assert.equal(run("detailHost.parentElement === app && detailHost.hidden"), true, "parked and hidden");
-  /* The pane is replaced by the agent page; the host is outside it, so it survives. */
-  run("pane.replaceChildren(el('article'));");
-  assert.equal(run("detailHost.isConnected"), true);
-  run("homeRoute = { view: 'people', workspaceId: 'W' }; renderDialogRoster();");
-  assert.equal(run("renders"), 2, "People renders again with the same host");
-  assert.equal(run("pane.contains(detailHost)"), true);
-});
-
-test("an in-page reload (closeRosterDialog while People is current) leaves the detail column on the page", async () => {
-  const run = await fixture();
-  run("renderDialogRoster();");
-  run("closeRosterDialog();");
-  assert.equal(run("pane.contains(detailHost)"), true);
+test("People & agents is a native modal with persistent details, safe nested confirmation, receipts and focus return", { timeout: 180_000 }, async () => {
+  const { markup, styles, bundled } = await renderAstroFixture(new URL("./LiveDashboard.astro", import.meta.url));
+  const install = await compileFixtureFunction(new URL("../../../tests/workspace-fixture.ts", import.meta.url), "installWorkspaceFixture");
+  const observe = await compileFixtureFunction(new URL(import.meta.url), "observePeopleModal");
+  const html = "<!doctype html><html><head><meta charset='utf-8'><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" + styles.join("\n") +
+    "</style><script>" + install + "</script></head><body>" + markup + "<script type='module'>" + observe + "</script></body></html>";
+  const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
+  const server = createServer((request, response) => {
+    if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
+    if (request.url?.startsWith("/fonts/") && request.url.endsWith(".woff2")) {
+      void readFile(join(fonts, basename(request.url))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return;
+    }
+    response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
+    response.end(request.url === "/app.js" ? bundled.join("\n") : html);
+  });
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); assert.ok(address && typeof address === "object");
+    const evidence = join(process.cwd(), "../site-observer-evidence/people-modal"); await mkdir(evidence, { recursive: true });
+    const chrome = await findChrome(), outcomes: Record<string, unknown> = {};
+    for (const [width, height, theme, deep] of [[390,844,"light",false],[390,844,"dark",false],[1440,900,"light",false],[1440,900,"dark",false],[390,844,"dark",true]] as const) {
+      const name = `${width}-${theme}${deep ? "-deep-link" : ""}`;
+      const { stdout } = await launchChrome(chrome, [`--window-size=${width},${height}`, ...(width > 832 ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []), "--virtual-time-budget=120000", "--dump-dom", `--screenshot=${join(evidence,name+".png")}`,
+        `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=people&theme=${theme}${deep ? "&v=people&deep=1" : ""}`], { timeout: 60000, maxBuffer: 12*1024*1024 });
+      const raw = stdout.match(/data-people-observation="([^"]*)"/)?.[1];
+      outcomes[name] = raw ? JSON.parse(raw.replaceAll("&quot;",'"').replaceAll("&amp;","&").replaceAll("&lt;","<").replaceAll("&gt;",">")) : { error: "observer did not finish" };
+    }
+    assert.deepEqual(Object.entries(outcomes).filter(([,v]: [string,any]) => !v.ok), [], JSON.stringify(outcomes));
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
