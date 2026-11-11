@@ -81,6 +81,7 @@ interface HumanIdentity {
   displayName: string;
   identityVerified: true;
   interactiveAuthAtSeconds: number | null;
+  sessionId: string | null;
 }
 
 interface Runtime {
@@ -410,6 +411,9 @@ async function verifiedHuman(path: string): Promise<{ identity: HumanIdentity; t
       displayName: typeof display === "string" ? display.trim().slice(0, 120) : "CommonSwarm user",
       identityVerified: true,
       interactiveAuthAtSeconds: newestInteractiveAmrSeconds(claims),
+      // The token's GoTrue session, admitted by the command transaction (CS-E04 credential fence).
+      sessionId: typeof claims.session_id === "string" && UUID_RE.test(claims.session_id)
+        ? claims.session_id.toLowerCase() : null,
     },
     token: input.access_token,
   };

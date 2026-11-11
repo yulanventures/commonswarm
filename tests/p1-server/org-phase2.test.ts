@@ -87,11 +87,12 @@ import assert from 'node:assert/strict';
 const getEnv=Deno.env.get;
 Deno.env.get=(key)=>key==='SWARM_SELF_SERVE'?'1':getEnv.call(Deno.env,key);
 const {db,handleHostedManagementCommand}=await import(${JSON.stringify(new URL('../../supabase/functions/command/index.ts',import.meta.url).href)});
-const user=crypto.randomUUID(),workspace=crypto.randomUUID();
-const human={userId:user,email:null,displayName:'Retry owner',identityVerified:true,interactiveAuthAtSeconds:Math.floor(Date.now()/1000)};
+const user=crypto.randomUUID(),workspace=crypto.randomUUID(),session=crypto.randomUUID();
+const human={userId:user,email:null,displayName:'Retry owner',identityVerified:true,interactiveAuthAtSeconds:Math.floor(Date.now()/1000),sessionId:session};
 try {
   await db.unsafe("INSERT INTO swarm.config(key,value) VALUES('min_client_version','\\\"0.1.0\\\"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value");
   await db\x60INSERT INTO auth.users(id,email) VALUES(\x24{user}::uuid,\x24{user+'@example.test'})\x60;
+  await db\x60INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES(\x24{session}::uuid,\x24{user}::uuid,now(),now())\x60;
   const input={command_id:crypto.randomUUID(),client_version:'0.1.83',command:{kind:'create_workspace',workspace_id:workspace,name:'Legacy workspace'}};
   const first=await handleHostedManagementCommand(input,human);
   assert.equal(first.status,200,JSON.stringify(first.body));

@@ -1460,6 +1460,13 @@ interface VerifiedHuman {
   displayName: string;
   identityVerified: boolean;
   interactiveAuthAtSeconds: number | null;
+  /** The GoTrue session the verified token names (its session_id claim), when it is a UUID. */
+  sessionId: string | null;
+}
+
+/** The person's session ended (a credential change revoked it) after the request's entry check. */
+class HumanSessionEnded extends Error {
+  constructor() { super("human session ended"); this.name = "HumanSessionEnded"; }
 }
 
 interface PreparedWorkspace {
@@ -3371,6 +3378,13 @@ async function authenticateHuman(
   tx: Sql,
   verified: VerifiedHuman,
 ): Promise<AuthContext | null> {
+  // CS-E04 final fence, before anything else this transaction writes: the shared credential fence
+  // lock, held to commit, then a fresh liveness read. A credential change either waits for this
+  // transaction (and then revokes the session) or has already revoked it.
+  const [admitted] = await tx<{ ok: boolean }[]>`
+    SELECT swarm_session.admit_human_session(${verified.userId}::uuid, ${verified.sessionId}::uuid) AS ok
+  `;
+  if (admitted?.ok !== true) throw new HumanSessionEnded();
   const rows = await tx<{ user_id: string; email: string | null }[]>`
     INSERT INTO swarm.users (user_id, display_name, email)
     VALUES (
@@ -11581,6 +11595,9 @@ export interface HostedHumanManagementIdentity {
   displayName: string;
   identityVerified: boolean;
   interactiveAuthAtSeconds: number | null;
+  /** The GoTrue session the authorization service's browser session is bound to. The command
+   * transaction admits it under the credential fence (CS-E04); a missing one is refused. */
+  sessionId: string | null;
 }
 
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
@@ -13236,7 +13253,10 @@ async function handleTransaction(
       : agentTokenHash !== null
       ? localState.localPlan ? await authenticateAgent(tx, agentTokenHash, localState.localPlan, kind===RENEW_AGENT_TOKEN_KIND) : null
       : verifiedHuman !== null
-      ? await authenticateHuman(tx, verifiedHuman)
+      ? await authenticateHuman(tx, verifiedHuman).catch((error) => {
+        if (error instanceof HumanSessionEnded) return null;
+        throw error;
+      })
       : null;
     if (!auth) {
       logCommandFailure(
@@ -16189,6 +16209,8 @@ let verifiedHuman: VerifiedHuman | null = null;
       identityVerified: data.user.email_confirmed_at !== undefined &&
         data.user.email_confirmed_at !== null,
       interactiveAuthAtSeconds: newestInteractiveAmrSeconds(claimsData.claims),
+      sessionId: typeof claimsData.claims.session_id === "string" && UUID_RE.test(claimsData.claims.session_id)
+        ? claimsData.claims.session_id.toLowerCase() : null,
     };
     if (typeof claimsData.claims.session_id === "string") {
       adminSessionBinding = await adminDigest({ user_id: data.user.id, session_id: claimsData.claims.session_id });
@@ -16339,6 +16361,7 @@ async function runSeatAdminCommand(input: RequestBody, human: SeatAdminHuman, ve
       return await seatAdminTransaction(tx, input, human);
     }));
   } catch (error) {
+    if (error instanceof HumanSessionEnded) return { status: 401, body: { error: "unauthenticated" } };
     console.error("seat_admin_command_failed", safeAdminError(error));
     return { status: 500, body: { error: "seat_admin_command_failed" } };
   }
@@ -16357,6 +16380,7 @@ async function runAdminAccountCommand(
     }));
     return outcome.result;
   } catch (error) {
+    if (error instanceof HumanSessionEnded) return { status: 401, body: { error: "unauthenticated" } };
     console.error("admin_command_failed", safeAdminError(error));
     // Account failure auditing follows in a fresh transaction after rollback.
     try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }

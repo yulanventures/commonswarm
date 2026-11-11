@@ -101,6 +101,9 @@ export function identity(session, oidcSession, lastLogin) {
     interactiveAuthAtSeconds: session.authenticated_at === null
       ? null
       : Math.floor(new Date(session.authenticated_at).getTime() / 1000),
+    // The GoTrue session this browser session is bound to; the command transaction admits it under
+    // the credential fence (CS-E04) before any grant or workspace change.
+    sessionId: typeof session.gotrue_session_id === "string" ? session.gotrue_session_id : null,
   };
 }
 
