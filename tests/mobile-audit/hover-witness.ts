@@ -254,7 +254,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     }
     for (const other of Array.from(document.querySelectorAll(arg.rows)).slice(0, 80)) {
       if (other !== row && !row.contains(other) && !other.contains(row)) {
-        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: other.getAttribute("data-signal-id"), path: [], state: rowState(other) });
+        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: other.getAttribute("data-signal-id"), path: [] });
       }
     }
     await new Promise(done => setTimeout(done, 300));
@@ -262,6 +262,8 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     const first = tracked.map(t => rectsOf(t.node));
     await frame();
     const second = tracked.map(t => rectsOf(t.node));
+    // Each row's state is read in the same frame as the rest rectangles it is compared against.
+    for (const t of tracked) if (t.who === "other-row") t.state = rowState(t.node);
     const drift = first.filter((r, i) => r.length > 0 && delta(r, second[i]!) > arg.tolerance).length;
     // Diagnostics only (they gate nothing): what surrounds the row, so a movement of the whole row can be traced to its
     // cause. The rows before it (and whether their text or children changed), its ancestors, the feed controls and
