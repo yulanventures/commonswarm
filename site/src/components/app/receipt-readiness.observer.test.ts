@@ -121,9 +121,10 @@ function installReceiptFixture() {
       needs_you: { asks: [], assigned: [], waiting: [] } }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json([{ workspace_id: workspace, org_id: workspace, name: "Home", archived_at: null }]);
     if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
-    // The first-receipt cases use a realistic, longer agent name: its receipt label must stay on one line at phone width.
+    // The first-receipt cases use a long agent name: unbounded, its receipt label wraps past two lines at phone width
+    // (taller than the 44 px touch footer); the receipt CSS must keep it on one line.
     if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent,
-      name: scenario.startsWith("first-receipt-") ? "Household Operations Coordinator" : "Synthetic assistant", model: null,
+      name: scenario.startsWith("first-receipt-") ? "Household Operations, School Runs and Family Logistics Coordinator" : "Synthetic assistant", model: null,
       transport: "local", turn_only: false, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: before }]);
     // A note directed to this viewer: the audience whose receipt is one human row that goes Sent to Seen.
     if (url.pathname === "/rest/v1/signals") {
@@ -201,12 +202,21 @@ async function observeReceiptReadiness() {
       const feedRows = () => Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"));
       // Five real rows, the held read in flight, and the other four responses returned to the app: the pass is waiting only
       // on the held read. Until it ends, no row's marker can be loaded (the pass caches its reads together).
+      // The desktop cases run with a mouse (hover and a fine pointer), so the at-rest hiding of quiet tools applies.
+      if (f.scenario.endsWith("-desktop")) check(matchMedia("(hover: hover)").matches && matchMedia("(pointer: fine)").matches,
+        "the desktop case has hover and a fine pointer: hover " + matchMedia("(hover: hover)").matches + ", fine " + matchMedia("(pointer: fine)").matches);
+      // Recorded on every run, so a pass or a failure shows its cause: the held receipt's summary height and label lines.
+      const summaryShape = () => { const r = ownReceipt(f.held); const sum = r?.querySelector<HTMLElement>("summary");
+        const label = Array.from(sum?.querySelectorAll<HTMLElement>("span") ?? []).find(el => !el.classList.contains("dashboard__message-receipt-glyph"));
+        const lh = label ? parseFloat(getComputedStyle(label).lineHeight) || 1 : 1;
+        return `${r?.dataset.receiptState}: summary ${Math.round(sum?.getBoundingClientRect().height ?? 0)} px, label ${label ? Math.round(label.getBoundingClientRect().height / lh) : 0} line(s), tools opacity ${r?.parentElement ? getComputedStyle(r.parentElement).opacity : "?"}`; };
       await wait(() => feedRows().length === 5 && ownReceipt(f.held) && f.releaseHeld &&
         (f.reads as Array<{ id: string; released: boolean }>).filter(r => r.id !== f.held && r.released).length >= 4, "the other four responses returned, the held one in flight");
       for (let i = 0; i < 5; i++) await tick();
       check(ownReceipt(f.held)?.dataset.receiptLoaded === "false", "the held row has no receipt before the release");
       const before = geometry();
       const stateBefore = ownReceipt(f.held)!.dataset.receiptState;
+      const shapeBefore = summaryShape();
       f.releaseHeld();
       await wait(() => feedRows().every(row => ownReceipt(row.dataset.signalId!)?.dataset.receiptLoaded === "true"), "every row's first receipt loaded");
       for (let i = 0; i < 5; i++) await tick();
@@ -230,7 +240,8 @@ async function observeReceiptReadiness() {
           "the failed receipt is a visible problem: outcome " + receipt.dataset.receiptOutcome + ", quiet " + (receipt.dataset.receiptQuiet !== undefined) +
           (hidden.length ? ", hidden by " + hidden.join("; ") : ""));
       }
-      steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held));
+      steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held) +
+        "; " + shapeBefore + " -> " + summaryShape() + "; media hover " + matchMedia("(hover: hover)").matches + ", fine " + matchMedia("(pointer: fine)").matches);
       const moved = (a: number, b: number) => Math.abs(a - b) > 0.5;
       const changes: string[] = [];
       for (const key of ["top", "height", "bodyTop", "bodyHeight"] as const) {
@@ -447,7 +458,10 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
       const height = ["beyond-eight", "awaiting-beyond-eight", "thread-expand"].includes(scenario) ? 2400 : 900;
       const phone = scenario.startsWith("first-receipt-") && scenario.endsWith("-phone");
       const width = phone ? 390 : 1280;
-      const { stdout } = await launchChrome(chrome, [`--window-size=${width},${phone ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
+      // Headless Chrome reports no hover; the desktop first-receipt cases run as a mouse user (hover, fine pointer).
+      const mouse = scenario.startsWith("first-receipt-") && scenario.endsWith("-desktop")
+        ? ["--blink-settings=availableHoverTypes=2,primaryHoverType=2,availablePointerTypes=4,primaryPointerType=4"] : [];
+      const { stdout } = await launchChrome(chrome, [...mouse, `--window-size=${width},${phone ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
       outcomes[scenario] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"))
