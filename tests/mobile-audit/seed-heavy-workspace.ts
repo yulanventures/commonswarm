@@ -57,7 +57,7 @@ const BODIES = [
 /**
  * A real refresh for a witness: a note in #general, already seen by the viewer (so its receipt never changes), that the
  * app's own polling shows, rebuilding the feed. It lives long enough for any poll interval; the returned function
- * expires it at once, so no later page ever opens with it showing.
+ * removes it at once, so no later page ever opens with it showing.
  */
 export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, string>): Promise<() => Promise<void>> {
   assert.ok(loopback(env.dbUrl), "local stack only");
@@ -74,9 +74,17 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
     });
   } finally { await sql.end({ timeout: 5 }); }
   return async () => {
+    // Signals are append-only (prevent_append_only_mutation), so the CI-only note is removed with triggers bypassed for
+    // this one transaction on the local test stack: its receipt rows, then the note itself.
     const done = postgres(env.dbUrl, { prepare: false, max: 1 });
-    try { await done`UPDATE swarm.signals SET until = statement_timestamp() WHERE id = ${id}::uuid`; }
-    finally { await done.end({ timeout: 5 }); }
+    try {
+      await done.begin(async (tx) => {
+        await tx`SET LOCAL session_replication_role = replica`;
+        await tx`DELETE FROM swarm.signal_human_receipts WHERE signal_id = ${id}::uuid`;
+        const removed = await tx`DELETE FROM swarm.signals WHERE id = ${id}::uuid`;
+        if (removed.count !== 1) throw new Error(`refresh note ${id} was not removed`);
+      });
+    } finally { await done.end({ timeout: 5 }); }
   };
 }
 
