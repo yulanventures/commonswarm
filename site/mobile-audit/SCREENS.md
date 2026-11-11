@@ -288,7 +288,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — candidate; `todo_create 0` required |
 | V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
-| V13 | `app.list-conflict` — candidate: the owner edits the seeded `{conflictDoc}` doc in `{workspace}` (never `house-notes`), the runner saves one more revision from outside the page, and the page's save meets it; Recover my draft opens the three-way comparison, scrolled into frame. Save reviewed changes is never clicked. Each capture leaves one retained draft and one revision on that doc |
+| V13 | `app.list-conflict` — candidate: the owner edits the seeded `{conflictDoc}` doc in `{workspace}` (never `house-notes`), the runner saves one more revision from outside the page, and the page's save meets it; Recover my draft opens the three-way comparison, scrolled into frame. Save reviewed changes is never clicked. Before each capture opens it the doc is reset to a fixed base text, and the outside save writes a fixed current text, so the comparison is the same at every size and theme; each capture leaves one retained draft |
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
 | V16 | `app.wiki.editor` — candidate (`app.wiki-editor` superseded duplicate removed) |
@@ -301,7 +301,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
 | V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
 | V25 | `app.todo-offer` — candidate; `{offerWorkspace}` (its own workspace, so the card floats over no other capture) with one owner agent, a member's pending offer to the owner, both with Lists consent, and two notes so the feed shows; `[data-offer-card="{todo.offer}"]` with its answer buttons; Accept and Decline never pressed |
-| V26 | `app.lists-approval` — candidate: in `{approvalWorkspace}` (its own workspace), the owner's local agent `{approvalAgent}` has a live connection and no Lists approval; the People dialog's Allow lands on Lists with the approval card scrolled into frame. The approval is never submitted |
+| V26 | `app.lists-approval` — candidate: in `{approvalWorkspace}` (its own workspace), the owner's local agent `{approvalAgent}` has a live connection and no Lists approval; the People dialog's Allow lands on Lists; after its reads settle the approval card is scrolled into view and must be wholly in the viewport at capture (`frame`). The approval is never submitted |
 | D01 | `dialog.public-menu` — pending |
 | D02 | `dialog.workspace-settings` — pending |
 | D03 | `dialog.channels` — pending |

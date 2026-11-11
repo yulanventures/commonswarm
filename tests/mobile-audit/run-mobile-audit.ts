@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { advanceHouseholdDoc, postRefreshNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { CONFLICT_DOC, postRefreshNote, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -56,8 +56,8 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
 
 /** One setup step; fields run in this order: media, waitFor, advance, hover, click, contextmenu, type (with text), select (with
  *  option), press, scroll, wait, settle.
- *  advance: the owner saves one more revision of this Lists doc (in this workspace) from outside the page, so the page's own
- *  next save meets a newer revision.
+ *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
+ *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -72,6 +72,8 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   noJs?: true;
   /** Captured signed in as the seeded second viewer (seed.invitee) instead of the owner. */
   viewer?: "invitee";
+  /** Selectors that must be wholly inside the viewport at capture, after settling (one more scroll is allowed). */
+  frame?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[];
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
@@ -460,6 +462,10 @@ async function main(): Promise<void> {
             return route.fulfill({ status: served.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(body, "utf8") });
           });
         }
+        // The save-conflict doc opens at its fixed base text in every capture.
+        for (const step of screen.setup ?? []) {
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.base);
+        }
         await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
         await page.waitForFunction(() => {
           const app = document.querySelector("live-dashboard");
@@ -480,7 +486,7 @@ async function main(): Promise<void> {
         for (const step of screen.setup ?? []) {
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
           if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
-          if (step.advance) await advanceHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids));
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.current);
           if (step.hover) await page.hover(fill(step.hover, seed.ids), { timeout: 8_000 });
           if (step.click) {
             const target = fill(step.click, seed.ids);
@@ -566,6 +572,24 @@ async function main(): Promise<void> {
         // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
         if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
           throw new Error(`ready state lost after settling: ${screen.ready}`);
+        }
+        // What the capture is for must actually be in the picture: scroll the first part that is not into view once, settle, and
+        // check again.
+        if (screen.frame?.length) {
+          const parts = screen.frame.map(selector => fill(selector, seed.ids));
+          const outside = () => page.evaluate((list: string[]) => list.filter(selector => {
+            const el = document.querySelector(selector);
+            if (!el) return true;
+            const r = el.getBoundingClientRect();
+            return r.width === 0 || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth;
+          }), parts) as Promise<string[]>;
+          let missing = await outside();
+          if (missing.length) {
+            await page.locator(missing[0]!).first().evaluate((el: Element) => el.scrollIntoView({ block: "nearest", inline: "nearest" }));
+            await settle(page);
+            missing = await outside();
+          }
+          if (missing.length) throw new Error(`not in frame after settling: ${missing.join(" | ")}`);
         }
         return settled;
       };

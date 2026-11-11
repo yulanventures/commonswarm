@@ -535,6 +535,9 @@
       },
       {
         "waitFor": "[data-household-objects] .hh-conflict .hh-comparison",
+        "settle": true
+      },
+      {
         "scroll": "[data-household-objects] .hh-conflict",
         "settle": true
       }
@@ -733,6 +736,9 @@
       },
       {
         "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "settle": true
+      },
+      {
         "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
         "settle": true
       }
@@ -743,6 +749,9 @@
     ],
     "requiresSeed": [
       "seed_lists_approval"
+    ],
+    "frame": [
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval"
     ]
   },
   {

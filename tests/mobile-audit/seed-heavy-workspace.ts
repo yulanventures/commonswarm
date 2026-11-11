@@ -92,16 +92,24 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
   };
 }
 
+/** The save-conflict doc's two fixed texts: every capture opens it at the base and meets the current one, so the comparison is
+ *  the same at every size and theme. */
+export const CONFLICT_DOC = {
+  base: "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear and leave the meter cupboard open.",
+  current: "# Boiler visit\n\nThe engineer comes on Friday at 9am. Keep the hallway clear and leave the meter cupboard open.",
+} as const;
+
 /**
- * Save one more revision of a doc as the owner, behind an open page's back, so the page's next save of its draft meets a
- * newer revision (app.list-conflict). It signs in afresh on every call: a token from seeding has expired by the time a late
+ * Save a doc's content as the owner from outside any page (app.list-conflict): back to the base before a capture opens it,
+ * then to the current text behind the open page's back, so the page's next save meets a newer revision. Nothing is saved when
+ * the doc already holds that text. It signs in afresh on every call: a token from seeding has expired by the time a late
  * capture runs.
  */
-export async function advanceHouseholdDoc(env: SeedEnvironment, owner: SeedResult["owner"], workspaceId: string, objectId: string): Promise<void> {
+export async function setHouseholdDoc(env: SeedEnvironment, owner: SeedResult["owner"], workspaceId: string, objectId: string, markdown: string): Promise<void> {
   assert.ok(loopback(env.apiUrl), "local stack only");
   const client = createClient(env.apiUrl, env.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const signedIn = await client.auth.signInWithPassword(owner);
-  if (signedIn.error || !signedIn.data.session) throw new Error(`advance sign-in: ${signedIn.error?.message}`);
+  if (signedIn.error || !signedIn.data.session) throw new Error(`doc sign-in: ${signedIn.error?.message}`);
   const token = signedIn.data.session.access_token;
   const tool = async (name: string, args: Record<string, unknown>, write: boolean) => {
     const commandId = `audit_${randomBytes(9).toString("base64url")}`;
@@ -114,13 +122,13 @@ export async function advanceHouseholdDoc(env: SeedEnvironment, owner: SeedResul
     return { status: response.status, body: await response.json().catch(() => ({})) as Record<string, any> };
   };
   const read = await tool("object_read", { object_id: objectId }, false);
-  const markdown = read.body.content?.markdown, base = read.body.revision?.revision;
-  if (read.status !== 200 || read.body.status !== "ok" || typeof markdown !== "string" || !base) {
-    throw new Error(`advance read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
+  const before = read.body.content?.markdown, base = read.body.revision?.revision;
+  if (read.status !== 200 || read.body.status !== "ok" || typeof before !== "string" || !base) {
+    throw new Error(`doc read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
   }
-  const after = `${markdown}\n\nThe engineer moved the visit to 9am.`;
-  const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before: markdown, after }] } }, true);
-  if (saved.status !== 200 || saved.body.status !== "committed") throw new Error(`advance save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
+  if (before === markdown) return;
+  const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before, after: markdown }] } }, true);
+  if (saved.status !== 200 || saved.body.status !== "committed") throw new Error(`doc save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
 }
 
 /**
@@ -508,7 +516,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     // A doc of its own for the save-conflict capture (app.list-conflict), which saves a revision behind the page's back on
     // every capture; house-notes stays as app.lists shows it.
     if (ok("seed_conflict_doc", await tool("object_create", { object_id: "boiler-visit", title: "Boiler visit", content: { kind: "doc",
-      markdown: "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear and leave the meter cupboard open." } }))) ids.conflictDoc = "boiler-visit";
+      markdown: CONFLICT_DOC.base } }))) ids.conflictDoc = "boiler-visit";
     const definition = async (object_id: string, term: string, meaning: string, source: string) =>
       ok(`definition_create ${term}`, await tool("definition_create", { object_id, term, meaning, source }));
     await definition("def-monthly-spend", "Monthly spend", "Sum of card and cash spending in a calendar month.", "Card statements plus the cash log in Lists.");
