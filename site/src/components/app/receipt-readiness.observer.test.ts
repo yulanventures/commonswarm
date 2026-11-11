@@ -47,8 +47,8 @@ function installReceiptFixture() {
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
   // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Behavior coverage of
   // opening a thread from a warm start (see the observer); not a scheduling regression proof.
-  // first-receipt-*: five notes from the owner to the assistant; the middle one's first receipt read is held while the
-  // others answer at once, and releasing it with a settled receipt must not move or resize any row (#385).
+  // first-receipt-*: five notes from the owner to the assistant, all read in one pass; that pass is held on the middle
+  // note's read (so no row has a receipt yet), and releasing it with settled receipts must not move or resize any row (#385).
   const firstReceiptRows = Array.from({ length: 5 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
   const held = firstReceiptRows[2]!;
   const settledAgentReceipt = () => ({ addressed: true, receipts: [{ recipient_agent_principal_id: agent, enqueued_at: recent,
@@ -76,7 +76,11 @@ function installReceiptFixture() {
       f.log.push("read:" + id.slice(0, 2));
       if (scenario.startsWith("first-receipt-")) {
         f.log.push("read-id:" + id);
-        if (id === held) await new Promise<void>(resolve => { f.releaseHeld = resolve; });
+        // Recorded in f.reads too, so a timeout's read list shows these reads; `released` means the response was returned.
+        const read = { at: ++f.clock, id, seen: false, release: () => {}, released: false };
+        f.reads.push(read);
+        if (id === held) await new Promise<void>(resolve => { f.releaseHeld = resolve; read.release = resolve; });
+        read.released = true;
         return Response.json(settledAgentReceipt());
       }
       if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) {
@@ -188,14 +192,18 @@ async function observeReceiptReadiness() {
           rows: rows.map(row => ({ id: row.dataset.signalId!.slice(-4), top: Math.round((row.getBoundingClientRect().top - list.top) * 100) / 100,
             height: Math.round(row.getBoundingClientRect().height * 100) / 100 })) };
       };
-      await wait(() => ownReceipt(f.held) && f.releaseHeld, "the row rendered with its first read held");
-      await wait(() => Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"))
-        .filter(row => row.dataset.signalId !== f.held).every(row => ownReceipt(row.dataset.signalId!)?.dataset.receiptLoaded === "true"), "the other rows loaded");
+      // All five are read in one pass, which ends only when the held read does: until then no row has a receipt.
+      const feedRows = () => Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"));
+      // Five real rows, the held read in flight, and the other four responses returned to the app: the pass is waiting only
+      // on the held read. Until it ends, no row's marker can be loaded (the pass caches its reads together).
+      await wait(() => feedRows().length === 5 && ownReceipt(f.held) && f.releaseHeld &&
+        (f.reads as Array<{ id: string; released: boolean }>).filter(r => r.id !== f.held && r.released).length >= 4, "the other four responses returned, the held one in flight");
       for (let i = 0; i < 5; i++) await tick();
+      check(ownReceipt(f.held)?.dataset.receiptLoaded === "false", "the held row has no receipt before the release");
       const before = geometry();
       const stateBefore = ownReceipt(f.held)!.dataset.receiptState;
       f.releaseHeld();
-      await wait(() => ownReceipt(f.held)?.dataset.receiptLoaded === "true", "the held row's first receipt loaded");
+      await wait(() => feedRows().every(row => ownReceipt(row.dataset.signalId!)?.dataset.receiptLoaded === "true"), "every row's first receipt loaded");
       for (let i = 0; i < 5; i++) await tick();
       const after = geometry();
       const stateAfter = ownReceipt(f.held)!.dataset.receiptState;
