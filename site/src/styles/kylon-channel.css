@@ -72,14 +72,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:first-c
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .hm-day + .dashboard__message { margin-block-start: 0; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] { padding-block: 2px 4px; margin-block-start: 0; }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] > .dashboard__message-avatar { visibility: hidden; }
-live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author {
+/* A grouped author is a focus-revealed label only when the message has no recipient. An addressed message keeps
+   its sender, badge, clock and recipient on one persistent header line (kylon-messages.css), grouped or not. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped]:not(:has(.dashboard__message-target:not([data-target-kind="everyone"]))) .hm-author {
   position: absolute; inset: auto auto 100% 0; z-index: 4;
   inline-size: max-content; max-inline-size: 100%; padding: 2px 8px;
   border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px;
   background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
   opacity: 0; pointer-events: none;
 }
-live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author:not(:focus-within) * {
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped]:not(:has(.dashboard__message-target:not([data-target-kind="everyone"]))) .hm-author:not(:focus-within) * {
   opacity: 0; pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
@@ -134,7 +136,7 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
 }
 
 /* A grouped author remains reachable with a visible identity control on keyboard focus. */
-live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped] .hm-author:focus-within {
+live-dashboard.dashboard[data-kylon-shell] .dashboard__message[data-stream-grouped]:not(:has(.dashboard__message-target:not([data-target-kind="everyone"]))) .hm-author:focus-within {
   opacity: 1; pointer-events: auto;
 }
 
