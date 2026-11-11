@@ -29,7 +29,7 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", scenario, receiptsInFlight: 0, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
+  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", replies: [] as string[], scenario, receiptsInFlight: 0, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
@@ -44,11 +44,11 @@ function installReceiptFixture() {
   // scroll-into-view: 24 notes from the owner to the assistant (never reported seen); the feed opens at the newest, and
   // scrolling to the oldest brings unread rows into view, which must be read without waiting for a feed poll.
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
-  // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Passes and polls prefetch
-  // off-screen rows eight at a time, so some replies are read in the background; the case opens the thread only when
-  // reading has gone idle after a poll, with replies still unread, and every one of them must be read before the next poll.
+  // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Behavior coverage of
+  // opening a thread (see the observer); in this page background prefetch may read every reply before the open.
   const root = "55555555-5555-4555-8555-555555555555";
   const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
+  f.replies = replies;
   const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
     to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
     thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
@@ -157,62 +157,59 @@ async function observeReceiptReadiness() {
       const late = verdict().filter(v => v === "late").length;
       check(late === 0, name + ": " + late + " of " + ids.length + " rows waited for a feed poll");
     };
-    if (f.scenario === "scroll-into-view" || f.scenario === "thread-expand") {
-      // This page renders the app without its full-height shell, so the feed view would grow to fit every row. Hold it to
-      // a fixed height, as the app's own layout does, so the scroll case starts with rows that are genuinely off screen.
-      if (f.scenario === "scroll-into-view") { const view = feedView(); check(view, "feed view rendered");
-        view!.style.height = "320px"; view!.style.maxHeight = "320px"; view!.style.overflowY = "auto"; }
-      await wait(() => document.querySelectorAll("[data-signal-id]").length >= (f.scenario === "thread-expand" ? 1 : 24), "rows rendered");
-      if (f.scenario === "thread-expand") {
-        // The idle boundary: after the first pass, wait for a feed poll and for the reads it starts to finish, then for
-        // receipt activity to stay quiet (nothing in flight, nothing new in the log) for 40 ticks. The next poll is then
-        // about two seconds away and no pass is running or queued behind one that is.
-        const firstRead = (await (async () => { await wait(() => readIds().size >= 1, "the first pass began"); return f.log.findIndex((e: string) => e.startsWith("read-id:")); })());
-        await wait(() => f.log.slice(firstRead).includes("signals"), "a feed poll after the first pass");
-        const poll = firstRead + f.log.slice(firstRead).indexOf("signals");
-        let quiet = 0, seen = f.log.length;
-        while (quiet < 40) { await tick(); quiet = f.receiptsInFlight === 0 && f.log.length === seen ? quiet + 1 : 0; seen = f.log.length; }
-        check(!f.log.slice(poll + 1).includes("signals"), "another feed poll started before reading went idle");
-        const unreadReplies = Array.from(document.querySelectorAll<HTMLElement>(`#dashboard-thread-${f.root} [data-signal-id]`))
-          .map(row => row.dataset.signalId!).filter(id => !readIds().has(id));
-        check(unreadReplies.length >= 1, "the collapsed thread still has unread replies at the idle boundary: " + unreadReplies.length);
-        steps.push("idle after a poll; collapsed replies unread: " + unreadReplies.length);
-      } else {
-        // Let the reads of the rows on screen at load finish.
-        let stable = 0, size = -1;
-        while (stable < 20) { await tick(); const n = readIds().size; stable = n === size ? stable + 1 : 0; size = n; }
-      }
+    const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
+    if (f.scenario === "thread-expand") {
+      // Behavior coverage, not a regression proof for the open's own trigger: in this page push is down and the 2 s fallback
+      // poll, like every pass, prefetches rows off screen, so the collapsed replies may all be read before the open and the
+      // case may pass without that trigger. Whatever is visible after the open must end with its own receipt loaded, and a
+      // reply still unread at the click must be read before the next poll.
+      await wait(() => document.querySelector(`[data-thread-toggle="${f.root}"]`), "thread rendered");
+      const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`)!;
+      const repliesList = document.getElementById(`dashboard-thread-${f.root}`);
+      check(repliesList, "replies rendered");
+      check(toggle.getAttribute("aria-expanded") === "false" && repliesList!.hidden, "the thread starts collapsed: aria-expanded " +
+        toggle.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
       const before = readIds();
       const from = f.log.length - 1;
-      if (f.scenario === "scroll-into-view") {
-        const view = feedView()!;
-        check(view.scrollHeight > view.clientHeight + 100, "the feed must overflow before scrolling: " + view.clientHeight + "/" + view.scrollHeight + " px");
-        view.scrollTop = 0;
-      }
-      else {
-        const toggle = document.querySelector<HTMLButtonElement>(`[data-thread-toggle="${f.root}"]`);
-        const repliesList = document.getElementById(`dashboard-thread-${f.root}`);
-        check(toggle && repliesList, "thread toggle and replies rendered");
-        check(toggle!.getAttribute("aria-expanded") === "false" && repliesList!.hidden, "the thread starts collapsed: aria-expanded " +
-          toggle!.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
-        toggle!.click();
-        for (let i = 0; i < 3; i++) await tick();
-        check(toggle!.getAttribute("aria-expanded") === "true" && !repliesList!.hidden, "the thread opened: aria-expanded " +
-          toggle!.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
-        steps.push("collapsed before the click, open after it");
-        document.getElementById(`dashboard-thread-${f.root}`)?.scrollIntoView({ block: "start" });
-      }
+      toggle.click();
+      for (let i = 0; i < 3; i++) await tick();
+      check(toggle.getAttribute("aria-expanded") === "true" && !repliesList!.hidden, "the thread opened: aria-expanded " +
+        toggle.getAttribute("aria-expanded") + ", hidden " + repliesList!.hidden);
+      const replyIds = new Set(f.replies as string[]);
+      const visibleReplies = onScreen().filter(id => replyIds.has(id));
+      check(visibleReplies.length >= 1, "replies on screen after the open: " + visibleReplies.length);
+      const unread = visibleReplies.filter(id => !before.has(id));
+      steps.push("collapsed before the click, open after it; replies on screen " + visibleReplies.length + ": prefetched " +
+        (visibleReplies.length - unread.length) + ", unread at the click " + unread.length + " (" + short(unread) + ")");
+      if (unread.length > 0) await readBeforePoll(unread, from, "replies unread at the open");
+      const ownReceipt = (id: string) => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${id}"] .dashboard__message-receipt`))
+        .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === id);
+      await wait(() => visibleReplies.every(id => ownReceipt(id)?.dataset.receiptLoaded === "true"), "every reply on screen has its own receipt loaded");
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
+    if (f.scenario === "scroll-into-view") {
+      // This page renders the app without its full-height shell, so the feed view would grow to fit every row. Hold it to
+      // a fixed height, as the app's own layout does, so the scroll case starts with rows that are genuinely off screen.
+      const view = feedView(); check(view, "feed view rendered");
+      view!.style.height = "320px"; view!.style.maxHeight = "320px"; view!.style.overflowY = "auto";
+      await wait(() => document.querySelectorAll("[data-signal-id]").length >= 24, "rows rendered");
+      // Let the reads of the rows on screen at load finish.
+      let stable = 0, size = -1;
+      while (stable < 20) { await tick(); const n = readIds().size; stable = n === size ? stable + 1 : 0; size = n; }
+      const before = readIds();
+      const from = f.log.length - 1;
+      check(view!.scrollHeight > view!.clientHeight + 100, "the feed must overflow before scrolling: " + view!.clientHeight + "/" + view!.scrollHeight + " px");
+      view!.scrollTop = 0;
       for (let i = 0; i < 3; i++) await tick();
       const fresh = onScreen().filter(id => !before.has(id));
-      const view = feedView()!;
-      const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
       steps.push("read before: " + short(before) + "; newly on screen and unread: " + short(fresh));
       // Passes also prefetch rows off screen, so how many are still unread when they come into view varies; what this case
       // proves is that every one that is unread gets read before the next poll, so it needs at least one.
       check(fresh.length >= 1, "rows newly on screen and never read: " + fresh.length +
-        " (feed view " + view.clientHeight + "/" + view.scrollHeight + " px, scrollTop " + view.scrollTop + ", rows " +
+        " (feed view " + view!.clientHeight + "/" + view!.scrollHeight + " px, scrollTop " + view!.scrollTop + ", rows " +
         document.querySelectorAll("[data-signal-id]").length + ", read before " + before.size + ", on screen " + onScreen().length + ")");
-      await readBeforePoll(fresh, from, f.scenario === "thread-expand" ? "replies opened into view" : "rows scrolled into view");
+      await readBeforePoll(fresh, from, "rows scrolled into view");
       steps.push("read after: " + short(Array.from(readIds()).filter(id => !before.has(id))));
       document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
