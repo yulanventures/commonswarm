@@ -76,4 +76,3 @@ function installWorkspaceFixture() {
   localStorage.setItem("sb-api-auth-token", JSON.stringify({ access_token: "synthetic-human", refresh_token: "synthetic-refresh", token_type: "bearer",
     expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user }));
 }
-
