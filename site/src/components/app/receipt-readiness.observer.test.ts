@@ -159,9 +159,16 @@ async function observeReceiptReadiness() {
       if (f.scenario === "scroll-into-view") { const view = feedView(); check(view, "feed view rendered");
         view!.style.height = "320px"; view!.style.maxHeight = "320px"; view!.style.overflowY = "auto"; }
       await wait(() => document.querySelectorAll("[data-signal-id]").length >= (f.scenario === "thread-expand" ? 1 : 24), "rows rendered");
-      // Let the reads of the rows on screen at load finish.
-      let stable = 0, size = -1;
-      while (stable < 20) { await tick(); const n = readIds().size; stable = n === size ? stable + 1 : 0; size = n; }
+      if (f.scenario === "thread-expand") {
+        // A pass also reads rows off screen (eight at a time), and so does every feed poll, so the collapsed replies are
+        // read in the background. Open the thread right after the first pass, before a poll, so most replies are unread.
+        await wait(() => readIds().size >= 8, "the first pass read");
+        for (let i = 0; i < 3; i++) await tick();
+      } else {
+        // Let the reads of the rows on screen at load finish.
+        let stable = 0, size = -1;
+        while (stable < 20) { await tick(); const n = readIds().size; stable = n === size ? stable + 1 : 0; size = n; }
+      }
       const before = readIds();
       const from = f.log.length - 1;
       if (f.scenario === "scroll-into-view") {
@@ -186,7 +193,6 @@ async function observeReceiptReadiness() {
       return;
     }
     if (f.scenario === "beyond-eight") {
-      const ids: string[] = Array.from(document.querySelectorAll<HTMLElement>("[data-signal-id]")).map(row => row.dataset.signalId ?? "");
       await wait(() => document.querySelectorAll(".dashboard__message-receipt").length >= 17, "seventeen rows rendered");
       const visible = onScreen();
       check(visible.length >= 17, "all seventeen rows on screen: " + visible.length);
@@ -196,7 +202,8 @@ async function observeReceiptReadiness() {
       await wait(() => firstReadOf().length >= 17, "all seventeen rows read");
       const at = firstReadOf();
       const polls = f.log.slice(at[7]! + 1, at[16]!).filter((e: string) => e === "signals").length;
-      check(polls === 0, "rows beyond the first eight waited for a feed poll: " + polls + " poll(s) between the eighth and seventeenth first reads; rows " + ids.length);
+      check(polls === 0, "rows beyond the first eight waited for a feed poll: " + polls + " poll(s) between the eighth and seventeenth first reads; rows " +
+        document.querySelectorAll("[data-signal-id]").length);
       document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
       return;
     }
