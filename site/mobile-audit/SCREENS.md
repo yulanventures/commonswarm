@@ -284,7 +284,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V06 | `app.thread` — pending |
 | V07 | `app.composer` — pending |
 | V08 | `app.people` — candidate; other states pending |
-| V09 | `app.agent` — candidate; `app.agent.queue` candidate: seeded `{agent}` with four Up next and two Not yet to-dos (`seed_agent_queue`: a hold with a note and one after another to-do); other states pending |
+| V09 | `app.agent` — candidate; `app.agent.queue` and `app.agent.queue.not-yet` candidates (Up next and Not yet each scrolled into frame): seeded `{agent}` with four Up next and two Not yet to-dos (`seed_agent_queue`: a hold with a note and one after another to-do); other states pending |
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — candidate; `todo_create 0` required |
 | V12 | `app.lists` — dense candidate; `app.lists.empty` candidate with required seed grant |
@@ -329,7 +329,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — pending |
-| M13 | `menu.context` — candidate; right-click on the `{agent}` Direct messages row (`[data-rail-agent]`, inside the navigation drawer at <=52rem) opens `.cs-context-menu`; nothing is run; Shift+F10 and touch long-press pending |
+| M13 | `menu.context` — candidate; right-click on the `{agent}` Direct messages row (`[data-rail-agent]`, inside the navigation drawer at <=52rem) opens `.cs-context-menu`; nothing is run; passes at all six sizes since #413 (the menu no longer closes on a late scroll event after the row is brought into view at 844x390); Shift+F10 and touch long-press pending |
 | M14 | `menu.workspace` — covers mobile drawer and desktop header anchors (`menu.workspace-dock` superseded duplicate removed) |
 | M15 | `app.entity-detail`, `dialog.details-sheet` — cover entity panel, phone details sheet and desktop details pane (`menu.profile-inspector` superseded duplicate removed) |
 
