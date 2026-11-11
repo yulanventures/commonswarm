@@ -6876,11 +6876,11 @@ import "../../styles/kylon-command-palette.css";
         add.addEventListener('click',async()=>{
           if(!session || !activeWorkspaceId) return;
           if(!picker.hidden) { picker.hidden=true; add.setAttribute('aria-expanded','false'); return; }
-          const value=session,workspaceId=activeWorkspaceId;
+          const value=session,workspaceId=activeWorkspaceId,navigation=homeNavigation;
           add.disabled=true; picker.hidden=false; add.setAttribute('aria-expanded','true'); status.textContent='Loading…';
           mountWorkspaceAgentPicker(picker, {
             session: value, workspaceId, orgId: workspace.orgId,
-            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && !picker.hidden && homeRoute.view === "people",
+            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && navigation === homeNavigation && !picker.hidden && homeRoute.view === "people",
             added: async agent => {
               if (activeWorkspaceId === workspaceId && session?.user.id === value.user.id && homeRoute.view === "people") {
                 await reloadPeopleDialog(workspaceId, agent.id, `${agent.name} added.`);
@@ -9928,6 +9928,7 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    let existingAgentChoiceIsCurrent: (() => boolean) | undefined;
     const openAgentChoice = (): void => {
       if (sampleMode) return;
       if (homeRoute.view !== "add-agent" && activeWorkspaceId) {
@@ -9941,7 +9942,10 @@ import "../../styles/kylon-command-palette.css";
       const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
       const rosterName = members.find((member) => member.userId === session?.user.id)?.name ?? "";
       const account = session ? accountName(session) : "";
-      picker?.reset?.();
+      // Finishing a workspace read may apply this pane again after the person has
+      // already chosen an identity. Keep that live choice; a new navigation retires it.
+      const keepExistingChoice = existingAgentChoiceIsCurrent?.() === true;
+      if (!keepExistingChoice) picker?.reset?.();
       picker?.setContext?.({
         workspaceName: selected?.name ?? "",
         accountEmail: session?.user.email ?? account,
@@ -9949,7 +9953,7 @@ import "../../styles/kylon-command-palette.css";
       });
       stopHostJoinWatch();
       showChannelView("agent-choice");
-      window.requestAnimationFrame(() => {
+      if (!keepExistingChoice) window.requestAnimationFrame(() => {
         one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
       });
     };
@@ -13669,9 +13673,10 @@ import "../../styles/kylon-command-palette.css";
       const host = picker?.querySelector<HTMLElement>("[data-ahp-existing-list]");
       const workspace = workspaces.find(item => item.id === activeWorkspaceId);
       if (!session || !host || !workspace || sampleMode) return;
-      const value = session, workspaceId = workspace.id, version = requestVersion;
+      const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
       const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
-        version === requestVersion && homeRoute.view === "add-agent" && picker?.hostId === "existing";
+        version === requestVersion && navigation === homeNavigation && homeRoute.view === "add-agent" && picker?.hostId === "existing";
+      existingAgentChoiceIsCurrent = current;
       mountWorkspaceAgentPicker(host, {
         session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
         added: async agent => {

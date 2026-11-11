@@ -47,8 +47,13 @@ function installExistingAgentFixture() {
         transport: "hosted_mcp", turn_only: true, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: recent }] : []);
     }
     if (url.pathname === "/functions/v1/command") {
+      if (body?.command?.kind !== "add_agent_to_workspace") {
+        // The mounted Lists & docs pane reads through the command endpoint too.
+        if (!["household_access", "household_tool", "household_connections"].includes(body?.command?.kind))
+          f.unexpected.push("command:" + body?.command?.kind);
+        return Response.json({ error: "synthetic_access_unavailable" }, { status: 403 });
+      }
       f.commands.push(body);
-      if (body?.command?.kind !== "add_agent_to_workspace") return Response.json({ error: "unexpected_command" }, { status: 403 });
       if (scenario === "refused") return Response.json({ error: "forbidden" }, { status: 403 });
       if (scenario === "stale-write") { f.held = true; await new Promise<void>(resolve => { f.release = resolve; }); }
       f.added = true;
@@ -90,9 +95,13 @@ async function observeExistingAgent() {
     one<HTMLElement>("[data-workspace-picker] summary")!.click();
     await wait("workspace choice", () => visible(one(`.cs-workspace-picker__item[value="${f.other}"]`)));
     one<HTMLButtonElement>(`.cs-workspace-picker__item[value="${f.other}"]`)!.click();
-    await wait("new workspace", () => document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") === f.other);
+    await wait("new workspace", () => document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") === f.other
+      && !visible(one("[data-ahp-existing-view]")));
   };
   try {
+    const desktop = Number(new URL(location.href).searchParams.get("width")) > 1000;
+    check(innerWidth === (desktop ? 1440 : 390), "wrong viewport: " + innerWidth);
+    check(matchMedia("(hover: hover) and (pointer: fine)").matches === desktop, "wrong mouse/touch media");
     await wait("Add an agent entry", () => visible(one("[data-add-agent]")));
     one<HTMLButtonElement>("[data-add-agent]")!.click(); // action 1, existing route navigation
     await wait("host picker", () => visible(one("[data-ahp-existing]")));
@@ -112,6 +121,9 @@ async function observeExistingAgent() {
       check(f.commands.length === 0, "opening the list submitted a command");
       const rect = add().getBoundingClientRect();
       check(rect.width >= 44 && rect.height >= 44, "Add target is under 44px");
+      add().scrollIntoView({ block: "center" });
+      const box = add().getBoundingClientRect();
+      check(add().contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)), "Add target is obscured");
       add().focus(); check(document.activeElement === add(), "Add is not keyboard focusable");
       add().click(); // action 3: the explicit human membership command
       if (f.scenario === "stale-write") {
@@ -142,7 +154,9 @@ async function observeExistingAgent() {
     document.documentElement.dataset.existingObservation = JSON.stringify({ ok: true, scenario: f.scenario, commands: f.commands.length });
   } catch (error) {
     document.documentElement.dataset.existingObservation = JSON.stringify({ error: String(error), stage,
-      notice: notice()?.textContent, view: document.querySelector("live-dashboard")?.getAttribute("data-channel-view"), commands: f.commands });
+      notice: notice()?.textContent, view: document.querySelector("live-dashboard")?.getAttribute("data-channel-view"),
+      accountReads: f.accountReads, pickerHost: (one("agent-host-picker") as any)?.hostId,
+      commands: f.commands.map((c: any) => ({ kind: c.command?.kind, principal: c.command?.principal_id, workspace: c.workspace_id })) });
   }
 }
 
@@ -170,9 +184,11 @@ test("existing agents: three real clicks add the selected identity; reads, refus
       "read-error-390-dark", "refused-390-dark", "refresh-error-390-dark", "stale-read-1440-dark", "stale-write-1440-dark"];
     for (const entry of cases) {
       const [, scenario, size, theme] = entry.match(/^(.*)-(390|1440)-(light|dark)$/)!;
-      const { stdout } = await launchChrome(chrome, [`--window-size=${size},${size === "390" ? 844 : 900}`, "--virtual-time-budget=60000", "--dump-dom",
+      const { stdout } = await launchChrome(chrome, [`--window-size=${size},${size === "390" ? 844 : 900}`,
+        ...(size === "1440" ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []),
+        "--virtual-time-budget=60000", "--dump-dom",
         `--screenshot=${join(evidence, entry + ".png")}`,
-        `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=${scenario}&theme=${theme}`],
+        `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&case=${scenario}&theme=${theme}&width=${size}`],
         { timeout: 60000, maxBuffer: 12 * 1024 * 1024 });
       const raw = stdout.match(/data-existing-observation="([^"]*)"/)?.[1];
       outcomes[entry] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")) : { error: "observer did not finish" };
