@@ -1,18 +1,27 @@
-/* Native details retains its DOM/semantics and open behavior. Its generated
- * layout boxes participate in the same grid as Reply: summary/actions stay
- * on row1; the native disclosure body spans row2 without displacing Reply.
- * No event, state, receipt provenance or accessibility attribute is changed.
- */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body > .dashboard__message-tools {
-  flex: 1 1 208px;
+/* All receipt states share a reserved footer. First-read status changes never
+ * change its closed footprint. Opening native details is an explicit action. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
+  --k-receipt-block: 24px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt) {
+  position: static;
+  inset: auto;
+  flex: 1 0 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  justify-content: start;
   gap: 2px 4px;
-  inline-size: max-content;
-  min-inline-size: min(13rem, calc(100% - 32px));
-  max-inline-size: min(28rem, calc(100% - 32px));
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  min-block-size: var(--k-receipt-block);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
   display: block;
@@ -20,6 +29,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools >
   grid-row: 1;
   min-inline-size: 0;
   max-inline-size: 100%;
+  margin: 0;
   overflow-wrap: anywhere;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-actions {
@@ -30,20 +40,46 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools >
   margin: 0;
   min-inline-size: 0;
   max-inline-size: 100%;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary {
-  grid-column: 1;
-  grid-row: 1;
-  margin: 0;
-  padding-inline: 2px;
-  min-block-size: 44px;
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt > summary {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  inline-size: 100%;
+  min-inline-size: 44px;
   max-inline-size: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  min-block-size: var(--k-receipt-block);
+  margin: 0;
+  padding: 0 2px;
+  line-height: 1.5;
 }
-/* Settled delivery is supporting information. Keep pending, failed, expired
- * and mixed receipts on their existing semantic colors and visible path. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([open]) > summary {
+  block-size: var(--k-receipt-block);
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > .dashboard__message-receipt-glyph {
+  flex: 0 0 1.5rem;
+  inline-size: 1.5rem;
+  min-inline-size: 1.5rem;
+  text-align: center;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > span:not(.dashboard__message-receipt-glyph) {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+/* Clip only the label: preserve the native focus ring and disclosure arrow.
+ * Full status remains in aria-label and the open disclosure. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([open]) > summary > span:not(.dashboard__message-receipt-glyph) {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary::after {
+  flex: none;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt[data-receipt-quiet] {
   color: var(--k-shell-secondary);
 }
@@ -53,50 +89,25 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt
   border-color: transparent;
   font-size: 12px;
   font-weight: 400;
-  line-height: 1.5;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > span:not(.dashboard__message-receipt-glyph) {
-  min-inline-size: 0;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-reply {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-reply {
   min-inline-size: 44px;
-  min-block-size: 44px;
+  min-block-size: var(--k-receipt-block);
   max-inline-size: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt::details-content {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  min-inline-size: 0;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > :not(summary) {
-  grid-column: 1 / -1;
-  margin-block-start: 4px;
+  white-space: nowrap;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt summary:hover {
   color: inherit;
   background: var(--k-shell-hover);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt :is(p, .dashboard__message-receipt-section) {
+  max-inline-size: 100%;
   background: var(--k-shell-subtle);
   border-radius: 6px;
 }
-
-/* Touch widths: the receipt rendered one character per line ("Seen by ..." as a vertical
-   strip, 2026-11-03 audit). Its column was minmax(0, 1fr) and its text could break anywhere,
-   so a narrow toolbar collapsed it to a sliver. Give the toolbar the full message width, the
-   receipt column a real minimum, and break only between words. */
-@media (width <= 64rem) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools {
-    flex: 1 1 100%;
-    inline-size: 100%;
-    max-inline-size: 100%;
-    grid-template-columns: minmax(min(12rem, 100%), 1fr) fit-content(50%);
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt > summary {
-    min-inline-size: min(12rem, 100%);
-    overflow-wrap: break-word;
+/* Narrow mouse windows and wide touch devices keep the same 44px target. */
+@media (width <= 64rem), (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
+    --k-receipt-block: 44px;
   }
 }

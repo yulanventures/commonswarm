@@ -29,7 +29,8 @@ function installReceiptFixture() {
   const user = { id: owner, aud: "authenticated", role: "authenticated",
     email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: before };
   // Every receipt read is held until the observer releases it, and answers with the seen state AT REQUEST TIME.
-  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", replies: [] as string[], scenario, receiptsInFlight: 0, seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
+  const f = w.receiptFixture = { owner, workspace, signal, later, root: "55555555-5555-4555-8555-555555555555", replies: [] as string[], scenario, receiptsInFlight: 0,
+    held: "", releaseHeld: null as null | (() => void), seen: false, ackedAt: 0, clock: 0, withLater: false, seenIds: new Set<string>(),
     reads: [] as Array<{ at: number; id: string; seen: boolean; release: () => void; released: boolean }>,
     log: [] as string[], unreadAfterAck: 0, unexpected: [] as string[] };
   // pre-ack: one note to the viewer, whose own read is in flight at the acknowledgement.
@@ -46,9 +47,19 @@ function installReceiptFixture() {
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
   // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Behavior coverage of
   // opening a thread from a warm start (see the observer); not a scheduling regression proof.
+  // first-receipt-*: five notes from the owner to the assistant, all read in one pass; that pass is held on the middle
+  // note's read (so no row has a receipt yet), and releasing it with settled receipts must not move or resize any row (#385).
+  const firstReceiptRows = Array.from({ length: 5 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
+  const held = firstReceiptRows[2]!;
+  // first-receipt-growth-*: the same rows, but the held row's first read answers a real problem (a terminal failure),
+  // which must stay visible and still not move or resize any row.
+  const settledAgentReceipt = (outcome = "observed") => ({ addressed: true, receipts: [{ recipient_agent_principal_id: agent, enqueued_at: recent,
+    delivered_at: recent, leased_until: null, acked_at: recent, ack_outcome: outcome, attempt_count: 1, lease_expiry_count: 0,
+    last_error_code: outcome === "failed_terminal" ? "delivery_failed" : null }] });
   const root = "55555555-5555-4555-8555-555555555555";
   const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
   f.replies = replies;
+  f.held = held;
   const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
     to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
     thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
@@ -65,6 +76,16 @@ function installReceiptFixture() {
       const id = String(body?.p_signal_id ?? "");
       const read = { at: ++f.clock, id, seen: f.seen, release: () => {}, released: false };
       f.log.push("read:" + id.slice(0, 2));
+      if (scenario.startsWith("first-receipt-")) {
+        f.log.push("read-id:" + id);
+        // Recorded in f.reads too, so a timeout's read list shows these reads; `released` means the response was returned.
+        const read = { at: ++f.clock, id, seen: false, release: () => {}, released: false };
+        f.reads.push(read);
+        if (id === held) await new Promise<void>(resolve => { f.releaseHeld = resolve; read.release = resolve; });
+        read.released = true;
+        if (id === held && scenario.startsWith("first-receipt-growth-")) return Response.json(settledAgentReceipt("failed_terminal"));
+        return Response.json(settledAgentReceipt());
+      }
       if (["beyond-eight", "scroll-into-view", "thread-expand"].includes(scenario)) {
         f.log.push("read-id:" + id); f.receiptsInFlight++;
         try { await Promise.resolve(); return Response.json(null); } finally { f.receiptsInFlight--; }
@@ -100,13 +121,18 @@ function installReceiptFixture() {
       needs_you: { asks: [], assigned: [], waiting: [] } }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json([{ workspace_id: workspace, org_id: workspace, name: "Home", archived_at: null }]);
     if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
-    if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent, name: "Synthetic assistant", model: null,
+    // The first-receipt cases use a long agent name: unbounded, its receipt label wraps past two lines at phone width
+    // (taller than the 44 px touch footer); the receipt CSS must keep it on one line.
+    if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent,
+      name: scenario.startsWith("first-receipt-") ? "Household Operations, School Runs and Family Logistics Coordinator" : "Synthetic assistant", model: null,
       transport: "local", turn_only: false, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: before }]);
     // A note directed to this viewer: the audience whose receipt is one human row that goes Sent to Seen.
     if (url.pathname === "/rest/v1/signals") {
       f.log.push("signals");
       if (scenario === "pre-ack") return Response.json([row(signal, owner, null, agent, "agent", "A note for you.")]);
       if (scenario === "beyond-eight") return Response.json(many.map((id, i) => row(id, null, agent, owner, "user", "Note " + i + " for the assistant.")));
+      if (scenario.startsWith("first-receipt-")) return Response.json(firstReceiptRows.map((id, i) => ({ ...row(id, null, agent, owner, "user",
+        "Note " + i + " for the assistant."), created_at: new Date(Date.now() - 60000 + i * 1000).toISOString() })));
       if (scenario === "awaiting-beyond-eight") return Response.json(many.map((id, i) => row(id, owner, null, agent, "agent", "Note " + i + " for you.")));
       if (scenario === "scroll-into-view") return Response.json(scrolled.map((id, i) => ({ ...row(id, null, agent, owner, "user", "Older note " + i + " for the assistant."),
         created_at: new Date(Date.now() - 60000 - i * 60000).toISOString() })));
@@ -158,6 +184,75 @@ async function observeReceiptReadiness() {
       check(late === 0, name + ": " + late + " of " + ids.length + " rows waited for a feed poll");
     };
     const short = (ids: Iterable<string>) => Array.from(ids).map(id => id.slice(-4)).join(",");
+    if (f.scenario.startsWith("first-receipt-")) {
+      // #385: the row's first receipt arrives after the row has rendered. Nothing may move or resize when it does.
+      const ownReceipt = (id: string) => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${id}"] .dashboard__message-receipt`))
+        .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === id);
+      const geometry = () => {
+        const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"));
+        const list = document.querySelector<HTMLElement>("[data-feed-list]")!.getBoundingClientRect();
+        const heldRow = document.querySelector<HTMLElement>(`[data-signal-id="${f.held}"]`)!;
+        const body = heldRow.querySelector<HTMLElement>(".dashboard__message-body")!.getBoundingClientRect();
+        const r = heldRow.getBoundingClientRect();
+        return { held: { top: r.top - list.top, height: r.height, bodyTop: body.top - r.top, bodyHeight: body.height },
+          rows: rows.map(row => ({ id: row.dataset.signalId!.slice(-4), top: Math.round((row.getBoundingClientRect().top - list.top) * 100) / 100,
+            height: Math.round(row.getBoundingClientRect().height * 100) / 100 })) };
+      };
+      // All five are read in one pass, which ends only when the held read does: until then no row has a receipt.
+      const feedRows = () => Array.from(document.querySelectorAll<HTMLElement>("[data-feed-list] > [data-signal-id]"));
+      // Five real rows, the held read in flight, and the other four responses returned to the app: the pass is waiting only
+      // on the held read. Until it ends, no row's marker can be loaded (the pass caches its reads together).
+      // The desktop cases run with a mouse (hover and a fine pointer), so the at-rest hiding of quiet tools applies.
+      if (f.scenario.endsWith("-desktop")) check(matchMedia("(hover: hover)").matches && matchMedia("(pointer: fine)").matches,
+        "the desktop case has hover and a fine pointer: hover " + matchMedia("(hover: hover)").matches + ", fine " + matchMedia("(pointer: fine)").matches);
+      // Recorded on every run, so a pass or a failure shows its cause: the held receipt's summary height and label lines.
+      const summaryShape = () => { const r = ownReceipt(f.held); const sum = r?.querySelector<HTMLElement>("summary");
+        const label = Array.from(sum?.querySelectorAll<HTMLElement>("span") ?? []).find(el => !el.classList.contains("dashboard__message-receipt-glyph"));
+        const lh = label ? parseFloat(getComputedStyle(label).lineHeight) || 1 : 1;
+        return `${r?.dataset.receiptState}: summary ${Math.round(sum?.getBoundingClientRect().height ?? 0)} px, label ${label ? Math.round(label.getBoundingClientRect().height / lh) : 0} line(s), tools opacity ${r?.parentElement ? getComputedStyle(r.parentElement).opacity : "?"}`; };
+      await wait(() => feedRows().length === 5 && ownReceipt(f.held) && f.releaseHeld &&
+        (f.reads as Array<{ id: string; released: boolean }>).filter(r => r.id !== f.held && r.released).length >= 4, "the other four responses returned, the held one in flight");
+      for (let i = 0; i < 5; i++) await tick();
+      check(ownReceipt(f.held)?.dataset.receiptLoaded === "false", "the held row has no receipt before the release");
+      const before = geometry();
+      const stateBefore = ownReceipt(f.held)!.dataset.receiptState;
+      const shapeBefore = summaryShape();
+      f.releaseHeld();
+      await wait(() => feedRows().every(row => ownReceipt(row.dataset.signalId!)?.dataset.receiptLoaded === "true"), "every row's first receipt loaded");
+      for (let i = 0; i < 5; i++) await tick();
+      const after = geometry();
+      const stateAfter = ownReceipt(f.held)!.dataset.receiptState;
+      // The receipt stylesheet must actually apply here (a receipt in the tools footer sits in grid column 1); without it
+      // these measurements say nothing about the product.
+      const styled = feedRows().map(row => ownReceipt(row.dataset.signalId!)).find(d => d?.parentElement?.classList.contains("dashboard__message-tools"));
+      check(styled && getComputedStyle(styled).gridColumnStart === "1", "the receipt stylesheet is applied: grid-column-start " +
+        (styled ? getComputedStyle(styled).gridColumnStart : "no receipt in the tools"));
+      if (f.scenario.startsWith("first-receipt-growth-")) {
+        // A real problem must be shown on the row, not hidden in the quiet tools.
+        const receipt = ownReceipt(f.held)!;
+        // Painted and reachable at rest: opacity 0 keeps client rects, so check every box from the receipt up to its row.
+        const hidden: string[] = [];
+        for (let el: HTMLElement | null = receipt; el && el.dataset.signalId === undefined; el = el.parentElement) {
+          const style = getComputedStyle(el);
+          if (Number(style.opacity) <= 0 || style.pointerEvents === "none" || style.visibility === "hidden") hidden.push(el.className + " opacity " + style.opacity + " pointer-events " + style.pointerEvents);
+        }
+        check(receipt.dataset.receiptOutcome === "failed_terminal" && receipt.dataset.receiptQuiet === undefined && receipt.getClientRects().length > 0 && hidden.length === 0,
+          "the failed receipt is a visible problem: outcome " + receipt.dataset.receiptOutcome + ", quiet " + (receipt.dataset.receiptQuiet !== undefined) +
+          (hidden.length ? ", hidden by " + hidden.join("; ") : ""));
+      }
+      steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held) +
+        "; " + shapeBefore + " -> " + summaryShape() + "; media hover " + matchMedia("(hover: hover)").matches + ", fine " + matchMedia("(pointer: fine)").matches);
+      const moved = (a: number, b: number) => Math.abs(a - b) > 0.5;
+      const changes: string[] = [];
+      for (const key of ["top", "height", "bodyTop", "bodyHeight"] as const) {
+        if (moved(before.held[key], after.held[key])) changes.push(`held ${key} ${before.held[key]} -> ${after.held[key]}`);
+      }
+      before.rows.forEach((row, i) => { const next = after.rows[i];
+        if (!next || next.id !== row.id || moved(row.top, next.top) || moved(row.height, next.height)) changes.push(`row ${row.id} ${JSON.stringify(row)} -> ${JSON.stringify(next)}`); });
+      check(changes.length === 0, "the first receipt moved or resized rows: " + changes.join("; "));
+      document.documentElement.dataset.receiptObservation = JSON.stringify({ ok: true, scenario: f.scenario, steps, unexpected: f.unexpected });
+      return;
+    }
     if (f.scenario === "thread-expand") {
       // Behavior coverage of opening a thread, from a warm start: not a regression proof for the open's own trigger (the
       // cold scroll case proves that path). Receipts prefetched while collapsed are valid, and the control may pass.
@@ -304,6 +399,9 @@ async function observeReceiptReadiness() {
 test("receipt reads: a pre-acknowledgement read never marks a row loaded; dropped refreshes, rows past the pass cap and rows brought into view are read without waiting for a poll", { timeout: 180_000 }, async () => {
   const component = fileURLToPath(new URL("./LiveDashboard.astro", import.meta.url));
   const scripts = new Map<string, string[]>(), styles: string[] = [];
+  // The page shell's global stylesheet comes from Base.astro, not this component.
+  styles.push((await build({ entryPoints: [fileURLToPath(new URL("../../styles/global.css", import.meta.url))], bundle: true, write: false,
+    external: ["/fonts/*"] })).outputFiles[0]!.text);
   const compiler: Plugin = { name: "existing-astro-container", setup(builder) {
     builder.onLoad({ filter: /\.astro$/ }, async args => {
       const compiled = transform(await readFile(args.path, "utf8"), { filename: args.path,
@@ -313,7 +411,12 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
       styles.push(...compiled.css);
       return { contents: compiled.code.replace(/import "[^"\n]+\?astro&type=style[^"\n]+";\n/gu, ""), loader: "ts", resolveDir: dirname(args.path) };
     });
-    builder.onLoad({ filter: /\.css$/ }, async args => { styles.push(await readFile(args.path, "utf8")); return { contents: "", loader: "js" }; });
+    // Bundle each stylesheet so its @imports (receipts, channel, workspace) are inlined: pasted raw, they would be fetched
+    // from this test server and never load. Fonts stay external and are answered empty below.
+    builder.onLoad({ filter: /\.css$/ }, async args => {
+      styles.push((await build({ entryPoints: [args.path], bundle: true, write: false, external: ["/fonts/*"] })).outputFiles[0]!.text);
+      return { contents: "", loader: "js" };
+    });
   } };
   const rendered = await build({ entryPoints: [component], bundle: true, write: false, format: "esm", platform: "node",
     plugins: [compiler], external: ["astro/compiler-runtime"], define: { "import.meta.env": "{}" } });
@@ -340,6 +443,7 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
     "<script>" + await compileFixture("observeReceiptReadiness") + "</script></body></html>";
   const server = createServer((request, response) => {
     if (request.url === "/__observer-tick") { setTimeout(() => { response.writeHead(204); response.end(); }, 2); return; }
+    if (request.url?.startsWith("/fonts/")) { response.writeHead(204); response.end(); return; }
     response.writeHead(200, { "Content-Type": request.url === "/app.js" ? "text/javascript" : "text/html" });
     response.end(request.url === "/app.js" ? bundled.join("\n") : app);
   });
@@ -348,10 +452,16 @@ test("receipt reads: a pre-acknowledgement read never marks a row loaded; droppe
     const address = server.address(); assert.ok(address && typeof address === "object");
     const chrome = await findChrome();
     const outcomes: Record<string, unknown> = {};
-    for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight", "scroll-into-view", "thread-expand"]) {
-      // The seventeen-row cases need every row on screen at once.
+    for (const scenario of ["pre-ack", "dropped-refresh", "beyond-eight", "awaiting-beyond-eight", "scroll-into-view", "thread-expand",
+      "first-receipt-phone", "first-receipt-desktop", "first-receipt-growth-phone", "first-receipt-growth-desktop"]) {
+      // The seventeen-row cases need every row on screen at once; the first-receipt cases run at a phone and a desktop width.
       const height = ["beyond-eight", "awaiting-beyond-eight", "thread-expand"].includes(scenario) ? 2400 : 900;
-      const { stdout } = await launchChrome(chrome, [`--window-size=1280,${height}`, "--virtual-time-budget=120000", "--dump-dom",
+      const phone = scenario.startsWith("first-receipt-") && scenario.endsWith("-phone");
+      const width = phone ? 390 : 1280;
+      // Headless Chrome reports no hover; the desktop first-receipt cases run as a mouse user (hover, fine pointer).
+      const mouse = scenario.startsWith("first-receipt-") && scenario.endsWith("-desktop")
+        ? ["--blink-settings=availableHoverTypes=2,primaryHoverType=2,availablePointerTypes=4,primaryPointerType=4"] : [];
+      const { stdout } = await launchChrome(chrome, [...mouse, `--window-size=${width},${phone ? 844 : height}`, "--virtual-time-budget=120000", "--dump-dom",
         "http://127.0.0.1:" + address.port + "/app?w=11111111-1111-4111-8111-111111111111&case=" + scenario], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
       const raw = stdout.match(/data-receipt-observation="([^"]*)"/)?.[1];
       outcomes[scenario] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"))
