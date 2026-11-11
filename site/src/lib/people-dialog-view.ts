@@ -262,6 +262,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const page = options.layout === "page"; state.layout = page ? "page" : "dialog";
   const tintOf = (agent: PeopleDialogAgent) => { if (!options.tintFor) return model.agents.indexOf(agent) % 4; const tint = options.tintFor(agent.id); return validTint(tint) ? tint : null; };
   const active = doc.activeElement as HTMLElement | null;
+  const hadFocus = !!active && (root.contains(active) || detail.contains(active));
   const refocusPrincipal = active?.closest<HTMLElement>("[data-agent-row]")?.dataset.agentRow;
   const focusKey = active && (root.contains(active) || detail.contains(active)) ? active.dataset.pdFocus : undefined;
   const focusWithinDetail = !!active && detail.contains(active);
@@ -679,6 +680,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (focusKey && !(page ? root : detail).querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
     (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? (page ? pageHeading(doc) : null))?.focus({ preventScroll: true });
     if (page && doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); } }
+  // A refresh replaces headings too. Restore focus only when this render dropped it to body;
+  // another control or a nested/sibling dialog owns any focus it acquired meanwhile.
+  if (hadFocus && (!doc.activeElement || doc.activeElement === doc.body) && !doc.querySelector("dialog[open]:not([data-roster-dialog])")) {
+    const fallback = (focusWithinDetail ? detail.querySelector<HTMLElement>("#pd-detail-title") : null)
+      ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? (page ? pageHeading(doc) : null);
+    if (fallback?.getClientRects().length && !fallback.closest("[hidden],[inert]")) fallback.focus({ preventScroll: true });
+  }
 }
 
 /** Native nested confirm, with its own Escape and a safe initial focus. */

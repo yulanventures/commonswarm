@@ -16,13 +16,7 @@ async function observePeopleModal() {
   let stage = "boot";
   const wait = async (name: string, predicate: () => unknown) => {
     stage = name;
-    const now = async () => {
-      // Keep a real transport pending and allow a rendering frame: a continuous fetch loop can
-      // otherwise starve the app's requestAnimationFrame focus under --virtual-time-budget.
-      const clock = fetch("/__observer-tick").then(response => response.json());
-      const [time] = await Promise.all([clock, new Promise<void>(done => requestAnimationFrame(() => done()))]);
-      return time.now;
-    };
+    const now = async () => (await (await fetch("/__observer-tick")).json()).now;
     const until = await now() + 10_000;
     while (!predicate()) { if (await now() >= until) throw new Error("timed out at " + name); }
   };
@@ -52,6 +46,8 @@ async function observePeopleModal() {
     await wait("workspace door", () => visible(door()));
     let opener: HTMLElement = door(); const background = one<HTMLElement>("[data-home-route-pane]")!;
     let before = location.pathname + location.search;
+    const delayedRefresh = !deepLink && innerWidth <= 832;
+    f.holdPeopleConnections = delayedRefresh;
     if (!deepLink) opener = await openPeople();
     await wait("People content", () => visible(one("[data-people-context]")) || visible(one("#pd-detail-title")));
     check(modal()?.matches(":modal"), "People & agents must be a native modal, not a page");
@@ -59,6 +55,14 @@ async function observePeopleModal() {
     check(!background.contains(one("[data-people-context]")), "People replaced the background route");
     const detail = one<HTMLElement>("[data-people-detail]")!;
     await wait("modal entry focus", () => modal().contains(document.activeElement));
+    if (delayedRefresh) {
+      await wait("background connections held", () => f.peopleConnectionsHeld);
+      const heading = one("#pd-detail-title");
+      check(document.activeElement === heading, "selected profile did not receive entry focus");
+      f.releasePeopleConnections();
+      await wait("profile refreshed after held read", () => !!one("#pd-detail-title") && one("#pd-detail-title") !== heading);
+      check(document.activeElement === one("#pd-detail-title"), "background refresh dropped profile heading focus");
+    }
     door().focus();
     check(modal().contains(document.activeElement), "background control took modal focus");
     const rect = modal().getBoundingClientRect();
@@ -99,7 +103,7 @@ async function observePeopleModal() {
   } catch (error) {
     document.documentElement.dataset.peopleObservation = JSON.stringify({ error: String(error), stage,
       state: one("live-dashboard")?.getAttribute("data-state"), open: modal()?.open, active: document.activeElement?.outerHTML.slice(0,300), openDialogs: [...document.querySelectorAll("dialog[open]")].map(d => d.className), requests: f.requests.slice(-10), errors: f.errors });
-  }
+  } finally { f.releasePeopleConnections?.(); }
 }
 
 test("People & agents is a native modal with persistent details, safe nested confirmation, receipts and focus return", { timeout: 180_000 }, async () => {
