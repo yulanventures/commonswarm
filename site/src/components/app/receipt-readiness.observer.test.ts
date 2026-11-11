@@ -171,11 +171,12 @@ async function observeReceiptReadiness() {
         const rootReceipt = () => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${f.root}"] .dashboard__message-receipt`))
           .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === f.root);
         await wait(() => rootReceipt()?.dataset.receiptLoaded === "true", "the first pass ended");
-        // A refresh asked for during that pass queues one more pass, whose own drain would read rows the open brings into
-        // view. Open only when no receipt read is in flight and none has started for 20 ticks: no pass is running.
-        let idle = 0, seen = f.log.length;
-        while (idle < 20) { await tick(); idle = f.receiptsInFlight === 0 && f.log.length === seen ? idle + 1 : 0; seen = f.log.length; }
-        steps.push("no pass running before the open");
+        // Open at once: the 2 s fallback poll also prefetches rows off screen, and one that starts before the open would
+        // read the replies itself. If one did, or a read is still in flight, this run cannot show the open's own ask.
+        const firstRead = f.log.findIndex((e: string) => e.startsWith("read-id:"));
+        check(f.receiptsInFlight === 0 && !f.log.slice(firstRead).includes("signals"),
+          "a receipt read or a feed poll was running at the open (in flight " + f.receiptsInFlight + ")");
+        steps.push("opened after the first pass, before any poll");
       } else {
         // Let the reads of the rows on screen at load finish.
         let stable = 0, size = -1;
