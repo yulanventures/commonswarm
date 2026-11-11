@@ -152,6 +152,7 @@ interface RenewalGrantReadRequest {
 
 interface HumanInvitationsReadRequest { resource: "human_invitations"; }
 interface SeatAdminStatusReadRequest { resource: "seat_admin_status"; }
+interface SeatAdminSelfReadRequest { resource: "seat_admin_self"; workspace_id: string; }
 
 interface PendingAccessReadRequest {
   resource: "pending_access";
@@ -381,13 +382,15 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | {resource:"workspaces";workspace_id:string} |
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
   {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
   if (body.resource === "workspaces" && exactKeys(body,["resource","workspace_id"]) && typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) return {resource:"workspaces",workspace_id:body.workspace_id.toLowerCase()};
   if (body.resource === "human_invitations" && exactKeys(body, ["resource"])) return { resource: "human_invitations" };
   if (body.resource === "seat_admin_status" && exactKeys(body, ["resource"])) return { resource: "seat_admin_status" };
+  if (body.resource === "seat_admin_self" && exactKeys(body, ["resource", "workspace_id"]) && typeof body.workspace_id === "string"
+    && UUID_RE.test(body.workspace_id)) return { resource: "seat_admin_self", workspace_id: body.workspace_id.toLowerCase() };
   if (isAdminReadResource(body.resource)) return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
       exactKeys(body, ["resource", "workspace_id"]) &&
@@ -787,6 +790,16 @@ async function handle(
     }
     if (transport !== "local") {
       return json(403, { error: "transport_unavailable" });
+    }
+    // An agent's own admin access (seat admin PR 4), after the ordinary admission above and under the final credential
+    // fence: off, {enabled:false}; on, only this credential's own active, unexpired grants. The workspace only admits the
+    // read; the grants are the principal's wherever they apply, and commands re-decide coverage.
+    if (body.resource === "seat_admin_self") {
+      if (agent.is_revoked) return json(403, { error: "forbidden" });
+      if (!seatAdminEnabled) return json(200, { enabled: false });
+      // The workspace this read already admitted: the helper takes no lock beyond the admission's own.
+      const [row] = await tx<{ grants: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants`;
+      return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [] });
     }
     if (isMemoryRead(body) && !brainMemoryEnabled) {
       return json(404, { error: "memory_unavailable", message: "Workspace memory isn't turned on here." });

@@ -10572,6 +10572,18 @@ async function runProfileLs(args: Arguments): Promise<void> {
 export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 export const ADMIN_READ_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "limit", "before", "json"] as const;
 export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "request-id", "json"] as const;
+export const ADMIN_STATUS_ACCEPTED_FLAGS = ["profile", "host-session-id", "workspace-id", "json"] as const;
+export const ADMIN_AGENT_ACCEPTED_FLAGS = [...ADMIN_STATUS_ACCEPTED_FLAGS, "request-id"] as const;
+export const ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "confirm"] as const;
+const SEAT_ADMIN_HELP: Readonly<Record<string, readonly [string, string]>> = {
+  "rename-workspace": ["<name>", "Rename the workspace."],
+  "set-lead": ["<agent-principal-id|none>", "Set or clear the workspace lead."],
+  "add-agent": ["<agent-principal-id>", "Add an agent to the workspace."],
+  "remove-agent": ["<agent-principal-id>", "Remove an agent from the workspace."],
+  "remove-member": ["<user-id> --confirm <same-user-id>", "Remove a member from the workspace."],
+  "revoke-invitation": ["<invitation-id>", "Revoke an invitation."],
+  "rename-organization": ["<display-name>", "Rename the workspace's organization."],
+};
 export const HOUSEHOLD_INPUT_ACCEPTED_FLAGS = [...agentFlags, "input-file"] as const;
 
 async function runHouseholdObject(args: Arguments): Promise<void> {
@@ -10601,8 +10613,11 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     grants: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "List your admin grants.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin grants [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
     history: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "See your account actions or workspace admin history.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin history [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
     revoke: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRevoke, description: "Revoke an admin grant without a workspace.", mutates: true, flags: ADMIN_REVOKE_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin revoke --grant-id <uuid> [--request-id <uuid>] [--json]"] }),
+    status: commandEntry({ ...noTool("stdio MCP lists admin_status itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminStatus), description: "Show this agent's admin access.", mutates: false, flags: ADMIN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin status --profile <absolute-path> [--workspace-id <uuid>] [--json]"] }),
+    ...Object.fromEntries(Object.entries(SEAT_ADMIN_HELP).map(([verb, [operand, description]]) => [verb, commandEntry({ ...noTool("stdio MCP lists the admin tools itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminCommand), description, mutates: true, flags: verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm admin ${verb} ${operand} --profile <absolute-path> [--workspace-id <uuid>] [--request-id <id>] [--json]`] })])),
   }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm admin takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: ADMIN_READ_ACCEPTED_FLAGS, ...REFUSE_PROFILE },
+    profileListOrder: 19,
   }),
   profile: group({
     ls: commandEntry({ ...noTool("local profile inventory; no network or credential read"), handler: runProfileLs,
@@ -10826,6 +10841,8 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,
+  "admin.status": ADMIN_STATUS_ACCEPTED_FLAGS,
+  ...Object.fromEntries(Object.keys(SEAT_ADMIN_HELP).map(verb => [`admin.${verb}`, verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS])),
   "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
   "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
   "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
@@ -11293,4 +11310,55 @@ async function runAdminRecovery(args: Arguments): Promise<void> {
     if (page.actions.length === 0) process.stdout.write("No admin actions are visible in this view.\n");
   }
   if (page.next_before) process.stdout.write(`More rows are available. Use --before '${page.next_before}' to continue this view.\n`);
+}
+
+/** An agent's own admin access (seat admin): its profile credential only, never a person's session. */
+async function runSeatAdminStatus(args: Arguments): Promise<void> {
+  args.assertAcceptedFlags(ADMIN_STATUS_ACCEPTED_FLAGS);
+  const { openSeatAdminProfile, readSeatAdminSelf, seatAdminStatusLines } = await import("./cloud/seat-admin.js");
+  const session = await openSeatAdminProfile(args.required("profile"), args.optional("host-session-id"), args.optional("workspace-id"));
+  args.assertShape(ADMIN_STATUS_ACCEPTED_FLAGS, 2);
+  const { target: cloud, token, fetcher } = await session.open();
+  const self = await readSeatAdminSelf(cloud, token, session.profile.workspace_id, fetcher);
+  if (args.has("json")) printJson({ workspace_id: session.profile.workspace_id, ...self });
+  else process.stdout.write(`${seatAdminStatusLines(self).join("\n")}\n`);
+}
+
+async function runSeatAdminCommand(args: Arguments): Promise<void> {
+  const verb = args.positionals[1] as import("./cloud/seat-admin.js").SeatAdminVerb;
+  const flags = verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS;
+  args.assertAcceptedFlags(flags);
+  const seatAdmin = await import("./cloud/seat-admin.js");
+  const session = await seatAdmin.openSeatAdminProfile(args.required("profile"), args.optional("host-session-id"), args.optional("workspace-id"));
+  args.assertShape(flags, 3);
+  const value = args.positionals[2]!;
+  if (verb === "remove-member" && args.required("confirm") !== value) throw new Error("--confirm must exactly repeat the user ID; no request was sent");
+  const command = seatAdmin.seatAdminCommand(verb, value);
+  const requestId = seatAdmin.seatAdminRequestId(args.optional("request-id"));
+  const workspace = session.profile.workspace_id;
+  const { target: cloud, token, fetcher } = await session.open();
+  try {
+    const response = await seatAdmin.sendSeatAdminCommand({ target: cloud, token, fetcher, workspaceId: workspace, command, commandId: requestId });
+    if (args.has("json")) printJson({ status: response.status, workspace_id: workspace, request_id: requestId, command, event_ids: response.event_ids });
+    else process.stdout.write(`${seatAdmin.seatAdminConfirmation(command)}\n`);
+  } catch (error) {
+    const refusal = seatAdminRefusal(error, seatAdmin);
+    if (refusal === null) throw error;
+    if (!args.has("json")) throw new Error(refusal.message);
+    printJson(refusal);
+    process.exitCode = 1;
+  }
+}
+
+/** The server's message when it sent one, else its code; an unknown outcome names the request id to repeat. */
+export function seatAdminRefusal(error: unknown, seatAdmin: typeof import("./cloud/seat-admin.js")): { error: string; message: string; request_id?: string } | null {
+  if (error instanceof seatAdmin.SeatAdminOutcomeUnknown) {
+    return { error: "outcome_unknown", message: `The outcome is unknown. Run the same command again with --request-id ${error.commandId}.`, request_id: error.commandId };
+  }
+  if (error instanceof seatAdmin.SeatAdminRejected) return { error: error.code, message: error.code };
+  if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500) {
+    const code = error.code ?? `http_${error.status}`;
+    return { error: code, message: error.code !== undefined && error.message.startsWith("command failed") ? code : error.message };
+  }
+  return null;
 }

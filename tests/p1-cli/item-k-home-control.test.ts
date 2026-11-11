@@ -12,7 +12,7 @@ const expectedProfileTestFiles = [
   "agent-channel-default.test.ts", "agent-channel-grok-bot.test.ts", "agent-channel.test.ts", "agent-connection-token.test.ts",
   "agent-onboarding.test.ts",
   "item-i-profile-binding.test.ts",
-  "mcp-connect.test.ts", "mcp-stdio.test.ts", "profile-ls.test.ts",
+  "mcp-connect.test.ts", "mcp-stdio.test.ts", "profile-ls.test.ts", "seat-admin-cli.test.ts",
 ];
 
 test("every profile-writing test call has a fixture HOME", { timeout: 10_000 }, async () => {

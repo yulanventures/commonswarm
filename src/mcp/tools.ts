@@ -22,17 +22,17 @@ import { messageReadProvenance, provenanceForms, withReadProvenance, type ReadPr
 export const MCP_ARGUMENT_NAME_ECHO_MAX = 64;
 /** MCP's model-visible contract. Do not derive it from CLI flags. */
 export const MCP_RESULT_MAX_BYTES = 32 * 1024;
-const string = (maxLength?: number, minLength?: number, pattern?: string) => ({
+export const string = (maxLength?: number, minLength?: number, pattern?: string) => ({
   type: "string" as const, ...(maxLength === undefined ? {} : { maxLength }),
   ...(minLength === undefined ? {} : { minLength }), ...(pattern === undefined ? {} : { pattern }),
 });
 const body = string(SIGNAL_BODY_MAX, 1);
-const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
+export const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
 const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
-const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
+export const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
 const absolutePath = { ...string(4096, 1), description: "Absolute path on this host." };
 const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
-const schema = (properties: Record<string, object>, required: string[] = []) => ({
+export const schema = (properties: Record<string, object>, required: string[] = []) => ({
   type: "object" as const, properties, required, additionalProperties: false as const,
 });
 /** The only tool table: schemas and output projections live beside each other. */

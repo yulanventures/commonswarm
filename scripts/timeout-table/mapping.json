@@ -2465,6 +2465,25 @@
             "reason": "Use of SIGNAL_REQUEST_TIMEOUT_MS. Signals are immutable."
           }
         },
+        "src/cloud/command-client.ts:setTimeout#7": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/command-client.ts:1506",
+          "detail": "Seat-admin workspace command an agent sends under its own admin grant (rename, lead, agents, member, invitation, organization).",
+          "operation": {
+            "name": "seat-admin-command",
+            "class": "not-run",
+            "writes": [
+              "workspace name, lead, agent membership, member removal, invitation revocation or organization name"
+            ],
+            "removes": [],
+            "reason": "Admin changes are visible and are not cleanly reversible.",
+            "proxy": "No fair read-only command proxy exists."
+          }
+        },
         "src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS": {
           "class": "network-api",
           "scope": "whole-operation",
@@ -3724,6 +3743,24 @@
             ],
             "removes": [],
             "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
+          }
+        },
+        "src/cloud/seat-admin.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/seat-admin.ts:54",
+          "detail": "An agent's own admin access read (seat_admin_self), including the response body; also gates the local MCP admin tool list.",
+          "operation": {
+            "name": "seat-admin-self",
+            "class": "not-run",
+            "proxy_operation": "signal-read",
+            "writes": [],
+            "removes": [],
+            "reason": "Admin access is off in production and the read needs an agent with a grant.",
+            "proxy": "signal-read reaches the same authenticated read function with one resource query; like renewal-grants, it posts no receipts."
           }
         },
         "src/cloud/human-invitation-transport.ts:setTimeout": {
