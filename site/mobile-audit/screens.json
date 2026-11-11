@@ -665,13 +665,20 @@
     "id": "app.invitation-inbox",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
+        "settle": true
+      }
+    ],
+    "ready": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Needs a second signed-in viewer and a delegated admin invitation (admin_grants plus the inviter admin_accounts projection); one seeded for the owner would float over every capture."
+    "requiresSeed": [
+      "seed_delegated_invitation"
+    ]
   },
   {
     "id": "app.update-toast",
@@ -945,13 +952,24 @@
     "id": "dialog.invitation-review",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
+        "click": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]"
+      },
+      {
+        "waitFor": "dialog.human-invitations__dialog[data-review-dialog][open] [data-accept]",
+        "settle": true
+      }
+    ],
+    "ready": "dialog.human-invitations__dialog[data-review-dialog][open] [data-accept]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Same fixture as app.invitation-inbox: a second signed-in viewer with a delegated admin invitation whose preview passes."
+    "requiresSeed": [
+      "seed_delegated_invitation"
+    ]
   },
   {
     "id": "dialog.navigation-drawer",

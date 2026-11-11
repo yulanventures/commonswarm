@@ -296,7 +296,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V18 | `app.agent-connect` — pending |
 | V19 | `app.invite-person` — pending |
 | V20 | `app.entity-detail` — pending |
-| V21 | `app.invitation-inbox` — pending; needs a second signed-in viewer and a delegated admin invitation fixture (`admin_grants` plus the inviter's `admin_accounts` projection); one seeded for the owner would float over every capture |
+| V21 | `app.invitation-inbox` — candidate, as a second viewer: a member of `{workspace}` who holds one delegated invitation to `{inviteWorkspace}` (issued by the admin person through the real admin routine), so the inbox is the corner card above the composer (`data-placement="corner"`), not the create-screen placement. Many cards, failure/retry and joined states stay pending |
 | V22 | `app.update-toast` — candidate; `[data-update-notice]` over `#general`, raised by the app's own boot poll answered with the served page plus one extra `/_astro/` asset (`newBuild`); Update and Not now never pressed; Toast pending |
 | V23 | `app.definitions` — scrolled index candidate; proposed, certified and proposal-pending candidates have separate guarded captures |
 | V24 | `app.definitions.diff` — guarded scrolled proposal comparison candidate (`app.definitions-diff` superseded duplicate removed) |
@@ -312,7 +312,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — candidate; native `dialog.sa-confirm[data-seat-admin-confirm="workspace"]` opened from seeded Atlas `[data-seat-admin-toggle="workspace"]` (confirm phase only, grant never submitted); `AdminDelegations` history/recovery states pending |
-| D11 | `dialog.invitation-review` — pending; same fixture as V21 |
+| D11 | `dialog.invitation-review` — candidate: the same second viewer opens Review; the preview loads and Join is never clicked, so the invitation stays unconsumed. Keyboard witness: Tab stays in the dialog, and Escape closes it and returns focus to Review |
 | D12 | `dialog.navigation-drawer` — pending |
 | D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
 | D14 | `dialog.role-confirm` — candidate; seeded owner's own row `#pd-person-{owner}` in the People & agents modal, role select set to Member, Save opens `dialog[data-role-confirm]` (confirm phase only, never submitted) |
