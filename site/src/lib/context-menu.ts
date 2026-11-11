@@ -38,7 +38,7 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
     closeOpen = null;
     menu.remove();
     doc.removeEventListener("pointerdown", onOutside, true);
-    doc.removeEventListener("scroll", onDismiss, true);
+    doc.removeEventListener("scroll", onScroll, true);
     doc.defaultView?.removeEventListener("resize", onDismiss);
     doc.defaultView?.removeEventListener("blur", onDismiss);
     anchor.removeAttribute("data-context-open");
@@ -47,6 +47,13 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
   const close = (): void => finish(false);
   const onOutside = (pointer: Event): void => { if (!menu.contains(pointer.target as Node)) finish(false); };
   const onDismiss = (): void => finish(false);
+  // Close on a scroll only when the anchor itself moved: the page, or a pane that contains it. Another pane
+  // scrolling (a feed updating behind the menu) or the menu's own list leaves it open where it belongs.
+  const onScroll = (scroll: Event): void => {
+    const target = scroll.target;
+    if (target === doc || target === doc.documentElement || target === doc.body ||
+      (target instanceof Node && target !== menu && target.contains(anchor))) finish(false);
+  };
   let lastWasSeparator = true;
   for (const entry of entries) {
     if (entry === null) {
@@ -105,7 +112,7 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
   doc.addEventListener("pointerdown", onOutside, true);
-  doc.addEventListener("scroll", onDismiss, true);
+  doc.addEventListener("scroll", onScroll, true);
   view?.addEventListener("resize", onDismiss);
   view?.addEventListener("blur", onDismiss);
   menu.addEventListener("focusout", focus => {
