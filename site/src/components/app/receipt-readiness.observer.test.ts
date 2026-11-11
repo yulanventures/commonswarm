@@ -44,10 +44,11 @@ function installReceiptFixture() {
   // scroll-into-view: 24 notes from the owner to the assistant (never reported seen); the feed opens at the newest, and
   // scrolling to the oldest brings unread rows into view, which must be read without waiting for a feed poll.
   const scrolled = Array.from({ length: 24 }, (_, i) => `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`);
-  // thread-expand: the owner's note to the assistant with 17 replies to the assistant, collapsed; opening the thread
-  // brings them into view, and every reply on screen must be read without waiting for a feed poll.
+  // thread-expand: the owner's note to the assistant with 23 replies to the assistant, collapsed. Passes and polls prefetch
+  // off-screen rows eight at a time, so some replies are read in the background; the case opens the thread only when
+  // reading has gone idle after a poll, with replies still unread, and every one of them must be read before the next poll.
   const root = "55555555-5555-4555-8555-555555555555";
-  const replies = Array.from({ length: 17 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
+  const replies = Array.from({ length: 23 }, (_, i) => `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`);
   const row = (id: string, to: string | null, toAgent: string | null, from: string, fromKind: string, body: string) => ({ id, from, from_kind: fromKind,
     to, to_agent: toAgent, kind: "note", body, about: null, until: null, created_at: recent, attachments: [], channel_id: null,
     thread_root_id: null, broadcast_to_channel: false, in_reply_to: null });
@@ -163,20 +164,19 @@ async function observeReceiptReadiness() {
         view!.style.height = "320px"; view!.style.maxHeight = "320px"; view!.style.overflowY = "auto"; }
       await wait(() => document.querySelectorAll("[data-signal-id]").length >= (f.scenario === "thread-expand" ? 1 : 24), "rows rendered");
       if (f.scenario === "thread-expand") {
-        // A pass also reads rows off screen (eight at a time), and so does every feed poll, so the collapsed replies are
-        // read in the background. Open the thread right after the first pass, before a poll, so most replies are unread.
-        await wait(() => readIds().size >= 8, "the first pass read");
-        // Open only once that pass has ended (its rebuild marks the root loaded): opened mid-pass, the pass's own drain
-        // reads the replies, and the case would not show that opening the thread asks for them.
-        const rootReceipt = () => Array.from(document.querySelectorAll<HTMLElement>(`[data-signal-id="${f.root}"] .dashboard__message-receipt`))
-          .find(d => d.closest("[data-signal-id]")?.getAttribute("data-signal-id") === f.root);
-        await wait(() => rootReceipt()?.dataset.receiptLoaded === "true", "the first pass ended");
-        // Open at once: the 2 s fallback poll also prefetches rows off screen, and one that starts before the open would
-        // read the replies itself. If one did, or a read is still in flight, this run cannot show the open's own ask.
-        const firstRead = f.log.findIndex((e: string) => e.startsWith("read-id:"));
-        check(f.receiptsInFlight === 0 && !f.log.slice(firstRead).includes("signals"),
-          "a receipt read or a feed poll was running at the open (in flight " + f.receiptsInFlight + ")");
-        steps.push("opened after the first pass, before any poll");
+        // The idle boundary: after the first pass, wait for a feed poll and for the reads it starts to finish, then for
+        // receipt activity to stay quiet (nothing in flight, nothing new in the log) for 40 ticks. The next poll is then
+        // about two seconds away and no pass is running or queued behind one that is.
+        const firstRead = (await (async () => { await wait(() => readIds().size >= 1, "the first pass began"); return f.log.findIndex((e: string) => e.startsWith("read-id:")); })());
+        await wait(() => f.log.slice(firstRead).includes("signals"), "a feed poll after the first pass");
+        const poll = firstRead + f.log.slice(firstRead).indexOf("signals");
+        let quiet = 0, seen = f.log.length;
+        while (quiet < 40) { await tick(); quiet = f.receiptsInFlight === 0 && f.log.length === seen ? quiet + 1 : 0; seen = f.log.length; }
+        check(!f.log.slice(poll + 1).includes("signals"), "another feed poll started before reading went idle");
+        const unreadReplies = Array.from(document.querySelectorAll<HTMLElement>(`#dashboard-thread-${f.root} [data-signal-id]`))
+          .map(row => row.dataset.signalId!).filter(id => !readIds().has(id));
+        check(unreadReplies.length >= 1, "the collapsed thread still has unread replies at the idle boundary: " + unreadReplies.length);
+        steps.push("idle after a poll; collapsed replies unread: " + unreadReplies.length);
       } else {
         // Let the reads of the rows on screen at load finish.
         let stable = 0, size = -1;
