@@ -2028,9 +2028,37 @@ import "../../styles/kylon-command-palette.css";
       messageStatusExpiryTimer = undefined;
     };
     let humanSeenObserver: IntersectionObserver | null = null;
+    /* Rows whose seen report the server acknowledged and whose receipt the app will read again: their shown receipt is
+       out of date until that read completes. */
+    const seenAwaitingRead = new Set<string>();
+    /* A row's receipt is loaded once a read completed with a result (not a request just issued, a failed read or a
+       fallback), and no seen report of this viewer's for it is still queued, in flight, or not yet read back. Receipts
+       load only for rows on screen, and a row on screen is reported seen, so a row's receipt can change shortly after it
+       scrolls into view; the hover audit waits on data-receipt-loaded before taking rest. */
+    /** The scope a row is reported seen under, or null for rows this viewer never reports (agent-addressed or someone
+     *  else's direct message). */
+    const humanSeenScopeFor = (signal: Signal): string | null =>
+      !sampleMode && session && activeWorkspaceId && signal.toAgent === null &&
+        (signal.to === null || signal.to === session.user.id)
+        ? `${session.user.id}:${activeWorkspaceId}`
+        : null;
+    const receiptLoaded = (signal: Signal): boolean => {
+      const result = deliveryReceiptCache.get(signal.id)?.result;
+      if (result === undefined || result === null || seenAwaitingRead.has(signal.id)) return false;
+      const scope = humanSeenScopeFor(signal);
+      return scope === null || !humanSeenReporter.owes(scope, signal.id);
+    };
+    const syncReceiptMarkers = (): void => {
+      const byId = new Map(signals.map(signal => [signal.id, signal]));
+      for (const details of document.querySelectorAll<HTMLElement>(".dashboard__message-receipt[data-receipt-loaded]")) {
+        const signal = byId.get(details.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? "");
+        if (signal) details.dataset.receiptLoaded = String(receiptLoaded(signal));
+      }
+    };
 
     const humanSeenReporter = new HumanSeenReporter({
       hasFocus: () => document.hasFocus(),
+      changed: () => syncReceiptMarkers(),
       send: async (scope, signalIds) => {
         const separator = scope.indexOf(":");
         const userId = separator < 0 ? "" : scope.slice(0, separator);
@@ -2050,6 +2078,12 @@ import "../../styles/kylon-command-palette.css";
           const cached = deliveryReceiptCache.get(signalId);
           if (cached) deliveryReceiptCache.set(signalId, { ...cached, checkedAt: 0 });
         }
+        // Only rows the app will actually read again wait for that read; a settled receipt is never re-read.
+        const owed = new Set(signalIds);
+        for (const signal of browserDeliveryReceiptCandidates(signals.filter(row => owed.has(row.id)), deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER)) {
+          seenAwaitingRead.add(signal.id);
+        }
+        syncReceiptMarkers();
         void refreshDeliveryReceipts(workspaceId, requestVersion);
       },
     });
@@ -7521,10 +7555,7 @@ import "../../styles/kylon-command-palette.css";
       const details = document.createElement("details");
       details.className = "dashboard__message-receipt";
       details.dataset.receiptState = indicator.state;
-      // True only once a receipt read for this row has COMPLETED with a result: not for a request just issued, a failed read
-      // (cached with a null result) or a fallback indicator. Receipts load only for rows on screen, a few per tick, so a
-      // row's first read can land after it scrolls into view; the hover audit waits for this before taking rest.
-      details.dataset.receiptLoaded = String(cached?.result !== undefined && cached.result !== null);
+      details.dataset.receiptLoaded = String(receiptLoaded(signal));
       if (indicator.outcome !== null) details.dataset.receiptOutcome = indicator.outcome;
       /* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a receipt shows on the row only while it is a
          problem or still moving: pending, stuck, failed, expired, or a mix that may hide a failure.
@@ -8054,12 +8085,9 @@ import "../../styles/kylon-command-palette.css";
         /* Working-on posts are status, not conversation: a compact activity line. */
         if (signal.kind === "working-on") row.classList.add("dashboard__message--activity");
         markThreadReplyRoot(row);
-        if (
-          !sampleMode && session && activeWorkspaceId &&
-          signal.toAgent === null &&
-          (signal.to === null || signal.to === session.user.id)
-        ) {
-          row.dataset.humanSeenScope = `${session.user.id}:${activeWorkspaceId}`;
+        const seenScope = humanSeenScopeFor(signal);
+        if (seenScope !== null) {
+          row.dataset.humanSeenScope = seenScope;
           row.dataset.humanSeenSignalId = signal.id;
         }
         if ((feedWasEmpty || previousSignalIds.size > 0) && !previousSignalIds.has(signal.id)) {
@@ -8553,10 +8581,12 @@ import "../../styles/kylon-command-palette.css";
             JSON.stringify(previous) !== JSON.stringify(read.result)
           ) changed = true;
           deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
+          if (read.result !== null) seenAwaitingRead.delete(read.signalId);
         }
         if (changed && !addAgentViewOpen()) renderFeed();
       } finally {
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
+        syncReceiptMarkers();
       }
     };
 

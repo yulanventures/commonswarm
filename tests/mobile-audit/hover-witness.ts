@@ -183,8 +183,10 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     // "quiet" when a read is in flight or one ended under 400 ms ago; "receipts" when a real receipt is still waiting;
     // null when settled. A view with no receipts at all is settled, not waiting.
     let unsettled: "quiet" | "receipts" | null = null;
+    let waitingOn: string[] = [];
     const receiptsSettled = () => {
       unsettled = "quiet";
+      waitingOn = [];
       if ((w.__auditPendingFetches ?? 0) > 0 || performance.now() - (w.__auditLastFetchDoneAt ?? 0) < 400) return false;
       unsettled = "receipts";
       for (const view of Array.from(document.querySelectorAll(".dashboard__feed-view"))) {
@@ -196,7 +198,17 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
           const across = Math.min(r.right, v.right) - Math.max(r.left, v.left);
           if (r.width <= 0 || r.height <= 0 || overlap <= 0 || across <= 0) continue;
           const own = Array.from(row.querySelectorAll(".dashboard__message-receipt")).filter(d => d.closest("[data-signal-id]") === row);
-          if (own.some(d => d.getAttribute("data-receipt-loaded") !== "true")) return false;
+          const waiting = own.filter(d => d.getAttribute("data-receipt-loaded") !== "true");
+          if (waiting.length) {
+            waitingOn = Array.from(view.querySelectorAll("[data-signal-id]")).flatMap(other => {
+              const o = other.getBoundingClientRect();
+              if (o.width <= 0 || o.height <= 0 || Math.min(o.bottom, v.bottom) <= Math.max(o.top, v.top)) return [];
+              return Array.from(other.querySelectorAll(".dashboard__message-receipt"))
+                .filter(d => d.closest("[data-signal-id]") === other && d.getAttribute("data-receipt-loaded") !== "true")
+                .map(d => `${other.getAttribute("data-signal-id")}:${d.getAttribute("data-receipt-state") ?? "?"}:${d.getAttribute("data-receipt-loaded") ?? "unmarked"}`);
+            });
+            return false;
+          }
         }
       }
       unsettled = null;
@@ -204,7 +216,8 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     };
     for (const started = performance.now(); !receiptsSettled();) {
       if (performance.now() - started > 20_000) {
-        return { error: unsettled === "quiet" ? "reads on the page did not go quiet within 20 s" : "receipts for the rows on screen did not load within 20 s" };
+        return { error: unsettled === "quiet" ? "reads on the page did not go quiet within 20 s"
+          : `receipts for the rows on screen did not load within 20 s (waiting: ${waitingOn.slice(0, 12).join(", ")}${waitingOn.length > 12 ? ` and ${waitingOn.length - 12} more` : ""})` };
       }
       await new Promise(done => setTimeout(done, 100));
     }

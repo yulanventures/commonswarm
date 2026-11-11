@@ -15,6 +15,8 @@ export interface HumanSeenReporterOptions {
   schedule?(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
   cancel?(timer: ReturnType<typeof setTimeout>): void;
   flushMs?: number;
+  /** Called whenever the set of rows this reporter still owes a report for changes. */
+  changed?(): void;
 }
 
 /** Deduplicate ids and keep every command inside the edge's 50-id wire cap. */
@@ -45,6 +47,8 @@ export class HumanSeenReporter {
   readonly #visible = new Map<string, HumanSeenIntersection>();
   readonly #pending = new Map<string, HumanSeenIntersection>();
   readonly #reported = new Set<string>();
+  readonly #inFlight = new Set<string>();
+  readonly #changed: () => void;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #flushing: Promise<void> | null = null;
 
@@ -55,6 +59,13 @@ export class HumanSeenReporter {
       setTimeout(callback, delayMs));
     this.#cancel = options.cancel ?? ((timer) => clearTimeout(timer));
     this.#flushMs = options.flushMs ?? HUMAN_SEEN_FLUSH_MS;
+    this.#changed = options.changed ?? (() => {});
+  }
+
+  /** True while this row's seen report is queued or being sent (until the server acknowledges it or it is re-queued). */
+  owes(scope: string, signalId: string): boolean {
+    const key = this.#key({ scope, signalId });
+    return this.#pending.has(key) || this.#inFlight.has(key);
   }
 
   #key(entry: Pick<HumanSeenIntersection, "scope" | "signalId">): string {
@@ -64,8 +75,9 @@ export class HumanSeenReporter {
   #queue(entry: HumanSeenIntersection): void {
     if (!this.#hasFocus()) return;
     const key = this.#key(entry);
-    if (this.#reported.has(key)) return;
+    if (this.#reported.has(key) || this.#pending.has(key) || this.#inFlight.has(key)) return;
     this.#pending.set(key, entry);
+    this.#changed();
     if (this.#timer === null) {
       this.#timer = this.#schedule(() => void this.flush(), this.#flushMs);
     }
@@ -113,6 +125,7 @@ export class HumanSeenReporter {
 
     const pending = [...this.#pending.values()];
     this.#pending.clear();
+    for (const entry of pending) this.#inFlight.add(this.#key(entry));
     this.#flushing = (async () => {
       const byScope = new Map<string, string[]>();
       for (const entry of pending) {
@@ -132,6 +145,9 @@ export class HumanSeenReporter {
               const entry = { scope, signalId, isIntersecting: true };
               this.#pending.set(this.#key(entry), entry);
             }
+          } finally {
+            for (const signalId of batch) this.#inFlight.delete(this.#key({ scope, signalId }));
+            this.#changed();
           }
         }
       }
