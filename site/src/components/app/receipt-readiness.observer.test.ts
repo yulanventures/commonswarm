@@ -121,7 +121,9 @@ function installReceiptFixture() {
       needs_you: { asks: [], assigned: [], waiting: [] } }] });
     if (url.pathname === "/rest/v1/workspaces") return Response.json([{ workspace_id: workspace, org_id: workspace, name: "Home", archived_at: null }]);
     if (url.pathname === "/rest/v1/member_profiles") return Response.json([{ user_id: owner, display_name: "Synthetic owner", role: "owner" }]);
-    if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent, name: "Synthetic assistant", model: null,
+    // The first-receipt cases use a realistic, longer agent name: its receipt label must stay on one line at phone width.
+    if (url.pathname === "/rest/v1/agent_principals") return Response.json([{ principal_id: agent,
+      name: scenario.startsWith("first-receipt-") ? "Household Operations Coordinator" : "Synthetic assistant", model: null,
       transport: "local", turn_only: false, owner_user_id: owner, revoked_at: null, workspace_id: workspace, created_at: before }]);
     // A note directed to this viewer: the audience whose receipt is one human row that goes Sent to Seen.
     if (url.pathname === "/rest/v1/signals") {
@@ -218,8 +220,15 @@ async function observeReceiptReadiness() {
       if (f.scenario.startsWith("first-receipt-growth-")) {
         // A real problem must be shown on the row, not hidden in the quiet tools.
         const receipt = ownReceipt(f.held)!;
-        check(receipt.dataset.receiptOutcome === "failed_terminal" && receipt.dataset.receiptQuiet === undefined && receipt.getClientRects().length > 0,
-          "the failed receipt is a visible problem: outcome " + receipt.dataset.receiptOutcome + ", quiet " + (receipt.dataset.receiptQuiet !== undefined));
+        // Painted and reachable at rest: opacity 0 keeps client rects, so check every box from the receipt up to its row.
+        const hidden: string[] = [];
+        for (let el: HTMLElement | null = receipt; el && el.dataset.signalId === undefined; el = el.parentElement) {
+          const style = getComputedStyle(el);
+          if (Number(style.opacity) <= 0 || style.pointerEvents === "none" || style.visibility === "hidden") hidden.push(el.className + " opacity " + style.opacity + " pointer-events " + style.pointerEvents);
+        }
+        check(receipt.dataset.receiptOutcome === "failed_terminal" && receipt.dataset.receiptQuiet === undefined && receipt.getClientRects().length > 0 && hidden.length === 0,
+          "the failed receipt is a visible problem: outcome " + receipt.dataset.receiptOutcome + ", quiet " + (receipt.dataset.receiptQuiet !== undefined) +
+          (hidden.length ? ", hidden by " + hidden.join("; ") : ""));
       }
       steps.push("receipt " + stateBefore + " -> " + stateAfter + "; held row " + JSON.stringify(before.held) + " -> " + JSON.stringify(after.held));
       const moved = (a: number, b: number) => Math.abs(a - b) > 0.5;
