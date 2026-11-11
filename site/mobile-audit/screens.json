@@ -411,7 +411,7 @@
     "kind": "route",
     "path": "/start?next=audit",
     "setup": [],
-    "ready": ".handoff [data-open-app] ~ .handoff__note",
+    "ready": ".handoff [data-open-app] ~ noscript .handoff__note",
     "states": [
       "dense"
     ],
