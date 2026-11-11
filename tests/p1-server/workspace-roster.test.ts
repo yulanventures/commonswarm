@@ -220,6 +220,107 @@ test("connection state matches home_overview's for the same agents", async () =>
   }
 });
 
+/* -------------------------------------------------------------------------
+ * Goal 3 follow-up: a hosted agent a person added to another workspace reads as live there
+ * before its first claim_seat turn, by the same eligibility claim_seat uses.
+ * ------------------------------------------------------------------------- */
+
+test("a hosted agent added to another workspace is live there before its first claim_seat, and off once removed", async () => {
+  const owner = await person("Owner");
+  const home = await workspace(owner, "Hosted home");
+  const other = await workspace(owner, "Added workspace");
+  const hosted = await agent(home, owner, "Hosted", true);
+  const grant = randomUUID();
+  const digest = Buffer.alloc(32, 7);
+  await sql`INSERT INTO swarm.hosted_mcp_grants (grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
+      selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at)
+    VALUES (${grant}::uuid, ${`provider-${grant}`}, ${owner}::uuid, ${home}::uuid, 'pre-claim-client', 'https://mcp.commonswarm.com/mcp',
+      ${[home]}::uuid[], ${digest}, 'pre-claim', 'active', statement_timestamp(), statement_timestamp())`;
+  await sql`INSERT INTO swarm.hosted_mcp_grant_workspaces (grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at)
+    VALUES (${grant}::uuid, ${home}::uuid, ${owner}::uuid, ${digest}, ${randomUUID()}::uuid, statement_timestamp())`;
+  await sql`INSERT INTO swarm.hosted_mcp_grant_agents (grant_id, principal_id, owner_user_id) VALUES (${grant}::uuid, ${hosted}::uuid, ${owner}::uuid)`;
+  await sql`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+    VALUES (${randomUUID()}::uuid, ${grant}::uuid, ${home}::uuid, ${owner}::uuid, ${hosted}::uuid, 'Hosted', statement_timestamp())`;
+  // add_agent_to_workspace: a membership in the other workspace and a human add receipt, and no seat there yet.
+  await sql`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${hosted}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  const added = randomUUID();
+  await sql`INSERT INTO swarm.hosted_mcp_agent_workspace_adds (receipt_id, grant_id, principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${added}::uuid, ${grant}::uuid, ${hosted}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+
+  const kind = async (ws: string) =>
+    (await sql<{ kind: string | null }[]>`SELECT swarm_read.agent_connection_kind(${ws}::uuid, ${hosted}::uuid) AS kind`)[0]!.kind;
+  const homeConnection = async (ws: string) => await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ overview: { workspaces: Array<{ workspace_id: string; people: Array<{ agents: Array<{ principal_id: string; status: { facts: { connection: string } } }> }> }> } }[]>`
+      SELECT swarm_read.home_overview() AS overview`;
+    return row!.overview.workspaces.find((entry) => entry.workspace_id === ws)?.people.flatMap((person) => person.agents)
+      .find((entry) => entry.principal_id === hosted)?.status.facts.connection;
+  });
+  const both = async (ws: string) => {
+    const roster = await kind(ws);
+    assert.equal(await homeConnection(ws), roster, "home_overview and the roster agree");
+    return roster;
+  };
+
+  assert.equal(await both(home), "live");
+  assert.equal(await both(other), "live", "added and not yet claimed: live, not connection off");
+
+  // The agent claims its seat there: still live.
+  const claimed = randomUUID();
+  await sql`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+    VALUES (${claimed}::uuid, ${grant}::uuid, ${other}::uuid, ${owner}::uuid, ${hosted}::uuid, 'Hosted', statement_timestamp())`;
+  assert.equal(await both(other), "live");
+
+  // Removed from the workspace (as change_hosted_agent_membership does): the add receipt and the seat end and the
+  // seat is tombstoned; it reads off.
+  await sql`UPDATE swarm.hosted_mcp_agent_workspace_adds SET revoked_at = statement_timestamp() WHERE receipt_id = ${added}::uuid`;
+  await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp() WHERE seat_id = ${claimed}::uuid`;
+  await sql`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by) VALUES ('hosted_seat', ${claimed}::uuid, ${owner}::uuid)`;
+  assert.equal(await kind(other), "connection_off");
+
+  // Added again: live before the next claim, although the old seat stays revoked.
+  await sql`INSERT INTO swarm.hosted_mcp_agent_workspace_adds (grant_id, principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${grant}::uuid, ${hosted}::uuid, ${other}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  assert.equal(await both(other), "live");
+
+  // seat_release in the home workspace (consented, no add receipt): the seat ends and is tombstoned, and the agent
+  // reads off there until a person adds it again; consent alone does not bring it back before a claim.
+  const [homeSeat] = await sql<{ seat_id: string }[]>`SELECT seat_id FROM swarm.hosted_mcp_seats
+    WHERE workspace_id = ${home}::uuid AND principal_id = ${hosted}::uuid AND revoked_at IS NULL`;
+  await sql`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp() WHERE seat_id = ${homeSeat!.seat_id}::uuid`;
+  await sql`INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by) VALUES ('hosted_seat', ${homeSeat!.seat_id}::uuid, ${owner}::uuid)`;
+  assert.equal(await both(home), "connection_off", "a released seat stays off");
+  assert.equal(await both(other), "live", "a release elsewhere does not end this workspace");
+
+  // Reconnect onto a new grant, then the old refresh family is retired while its grant row stays active: off before
+  // any claim. The new grant has no binding here, so nothing else reads live.
+  // Family tombstones are append-only, so this runs in a transaction that rolls back.
+  const [{ provider }] = await sql<{ provider: string }[]>`SELECT provider_grant_id AS provider FROM swarm.hosted_mcp_grants WHERE grant_id = ${grant}::uuid`;
+  const rolledBack = new Error("roll back the family tombstone");
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO commonswarm_oauth.refresh_family_tombstones (grant_id, revoked_at) VALUES (${provider}, statement_timestamp())`;
+    const [retired] = await tx<{ kind: string }[]>`SELECT swarm_read.agent_connection_kind(${other}::uuid, ${hosted}::uuid) AS kind`;
+    assert.equal(retired?.kind, "connection_off", "a retired refresh family is off before a claim");
+    throw rolledBack;
+  }).catch((error) => { if (error !== rolledBack) throw error; });
+  assert.equal(await both(other), "live");
+
+  // The grant ends: off everywhere, seat or no seat.
+  await sql`UPDATE swarm.hosted_mcp_grants SET state = 'revoked', revoked_at = statement_timestamp() WHERE grant_id = ${grant}::uuid`;
+  assert.equal(await both(home), "connection_off");
+  assert.equal(await both(other), "connection_off");
+
+  // Membership without consent or a live add receipt is never live.
+  const third = await workspace(owner, "Never added");
+  const otherAgent = await agent(home, owner, "Other hosted", true);
+  await sql`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+    VALUES (${otherAgent}::uuid, ${third}::uuid, ${owner}::uuid, ${owner}::uuid)`;
+  const [never] = await sql<{ kind: string }[]>`SELECT swarm_read.agent_connection_kind(${third}::uuid, ${otherAgent}::uuid) AS kind`;
+  assert.equal(never?.kind, "connection_off");
+});
+
 /** Roster R1b: the person's own queue, read the way the web app reads it (PostgREST role
  * authenticated with that person's claims). */
 async function queue(ws: string, viewer: string, extraClaims: Record<string, unknown> = {}, role = "authenticated"): Promise<{
