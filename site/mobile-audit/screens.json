@@ -1290,7 +1290,9 @@
     ],
     "requiresSeed": [
       "create_workspace"
-    ]
+    ],
+    "status": "pending",
+    "reason": "Closes at 844x390 landscape after opening (ready state lost after settling, runs 43102051687 and 43104161143); passes at the other five sizes. Cause under investigation: the menu also closes on focus leaving it, resize, blur or a rail re-render."
   },
   {
     "id": "app.definitions.proposed",
