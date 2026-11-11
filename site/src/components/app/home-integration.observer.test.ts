@@ -524,8 +524,10 @@ class RowNode {
     ? node.className.split(' ').includes(selector.slice(1)) : node.tag === selector); }
 }
 test('a signal page settling after a same-workspace view change retains data without taking the pane', async () => {
-  const code = await dashboardFunctions(['syncListsChrome', 'addAgentViewOpen', 'showChannelView', 'renderFeed', 'loadSignals',
-    'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds', 'refreshDeliveryReceipts']);
+  // renderFeed keeps keyboard focus across its rebuild: include that real helper and its own dependencies.
+  const code = await dashboardFunctions(['FEED_FOCUSABLE', 'controlIdentity', 'feedIdentity', 'keepFeedFocus', 'syncListsChrome', 'addAgentViewOpen',
+    'showChannelView', 'renderFeed', 'loadSignals', 'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds',
+    'refreshDeliveryReceipts']);
   for (const [route, workspaceView, channelView] of [
     ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
     ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
@@ -544,10 +546,12 @@ test('a signal page settling after a same-workspace view change retains data wit
       one: (selector: string) => nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? sections : [],
       queueMicrotask: () => {}, window: { clearTimeout() {} },
+      // Nothing is focused in this fixture, so keepFeedFocus records nothing and schedules no restore.
+      document: { activeElement: null }, HTMLElement: class {},
     });
     runInContext(`
       const app={dataset:{channelView:'feed'}}, activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
-      let listsAllowLanding=null;
+      let listsAllowLanding=null, feedFocus=null, feedRenderGeneration=0;
       let homeRoute={view:'chat',workspaceId:'W'}, activeWorkspaceView='signals', signalExpiryTimer;
       let activeChannelId=null, unknownChannelId=null, signalCursor={createdAt:'old',id:'old'}, signalCutoff='', signalHasMore=true;
       let signals=[{id:'previous-page'}], feedWasEmpty=false; const agents=[], workspaces=[{id:'W',name:'Home'}];
