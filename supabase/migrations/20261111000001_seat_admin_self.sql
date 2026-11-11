@@ -1,13 +1,16 @@
 -- Seat admin PR 4: an agent reads its own admin access (replaces the routine engine's admin_read_metadata for seat
 -- grants). Only the presenting credential's own active, unexpired grants: nothing about the grantor's other agents,
--- no history, nothing about other people. The credential is authenticated exactly as agent_reachable_workspaces does.
-CREATE FUNCTION swarm.agent_seat_admin_self(p_hash bytea) RETURNS jsonb
+-- no history, nothing about other people. The credential is authenticated for the workspace the read already admitted,
+-- never with a NULL workspace: that would enlist every sibling workspace's locks after the read holds the principal,
+-- family and token locks (workspace-before-principal order). Reading this principal's own grant rows needs no
+-- workspace lock, so grants for other workspaces are still returned.
+CREATE FUNCTION swarm.agent_seat_admin_self(p_hash bytea, p_workspace uuid) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
  ctx record;
  result jsonb;
 BEGIN
- SELECT * INTO ctx FROM swarm.agent_delivery_read_context(p_hash, NULL);
+ SELECT * INTO ctx FROM swarm.agent_delivery_read_context(p_hash, p_workspace);
  IF NOT FOUND OR ctx.is_revoked THEN
   RAISE EXCEPTION 'LOCAL_CREDENTIAL_DENIED' USING ERRCODE = '42501', DETAIL = 'LOCAL_CREDENTIAL_DENIED';
  END IF;
@@ -22,6 +25,6 @@ BEGIN
  RETURN result;
 END;
 $$;
-ALTER FUNCTION swarm.agent_seat_admin_self(bytea) OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION swarm.agent_seat_admin_self(bytea) FROM PUBLIC, anon, authenticated, swarm_command;
-GRANT EXECUTE ON FUNCTION swarm.agent_seat_admin_self(bytea) TO swarm_read;
+ALTER FUNCTION swarm.agent_seat_admin_self(bytea, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.agent_seat_admin_self(bytea, uuid) FROM PUBLIC, anon, authenticated, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.agent_seat_admin_self(bytea, uuid) TO swarm_read;

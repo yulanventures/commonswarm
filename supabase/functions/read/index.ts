@@ -797,7 +797,8 @@ async function handle(
     if (body.resource === "seat_admin_self") {
       if (agent.is_revoked) return json(403, { error: "forbidden" });
       if (!seatAdminEnabled) return json(200, { enabled: false });
-      const [row] = await tx<{ grants: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}) AS grants`;
+      // The workspace this read already admitted: the helper takes no lock beyond the admission's own.
+      const [row] = await tx<{ grants: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants`;
       return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [] });
     }
     if (isMemoryRead(body) && !brainMemoryEnabled) {

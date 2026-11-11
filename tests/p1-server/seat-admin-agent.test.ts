@@ -504,3 +504,29 @@ test("revoke an invitation: only one the grantor created, under a grant that car
   const accepted = (await agentHistory()).filter((h) => h.seat_admin_grant_id === grantId && h.outcome === "accepted");
   assert.deepEqual(accepted.map((h) => [h.action, h.target_kind, h.target_id]), [["revoke_invitation", "invitation", mine!.invitation_id]]);
 });
+
+test("seat_admin_self locks only the admitted workspace, and still lists the agent's grants elsewhere", async () => {
+  // A sibling workspace the owner owns and the agent belongs to, with its own grant.
+  const sibling = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${sibling}::uuid, 'Sibling', ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${sibling}::uuid, ${owner.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${sibling}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${agent}::uuid, ${sibling}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)`;
+  });
+  const here = await grant(), there = await grant({ workspace_ids: [sibling] });
+  const self = () => fetch(`${local.API_URL}/functions/v1/read`, { method: "POST", signal: AbortSignal.timeout(4_000),
+    headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "seat_admin_self", workspace_id: workspace }) });
+  let body: { enabled?: boolean; grants?: Array<{ grant_id: string }> } = {};
+  await sql.begin(async (tx) => {
+    // A removal in the sibling holds its workspace row; a read admitted elsewhere must not wait on it.
+    await tx`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${sibling}::uuid FOR UPDATE`;
+    const response = await self();
+    assert.equal(response.status, 200, functionLogs.slice(-1500));
+    body = await response.json() as typeof body;
+  });
+  assert.equal(body.enabled, true);
+  assert.deepEqual(body.grants!.map((g) => g.grant_id).sort(), [here, there].sort(), "both of the agent's own grants");
+});

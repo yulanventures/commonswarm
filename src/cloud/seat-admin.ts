@@ -2,7 +2,7 @@
 import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { openProfileCredential, profileTarget, profileWorkspaceSession, readAgentProfile, selectAgentWorkspace } from "./agent-profile.js";
-import { assertWorkspaceName, CommandTransportError, newCommandId, ThinCommandClient, type CommandHttpResponse, type SeatAdminCommand } from "./command-client.js";
+import { assertWorkspaceName, CommandHttpError, CommandTransportError, newCommandId, ThinCommandClient, type CommandHttpResponse, type SeatAdminCommand } from "./command-client.js";
 import type { CloudTarget } from "./config.js";
 import { H0_REQUEST_ID_RE } from "../h0/verbs.js";
 
@@ -121,7 +121,10 @@ export async function sendSeatAdminCommand(input: { target: CloudTarget; token: 
       if (response.status !== "accepted") throw new SeatAdminRejected(response.reason ?? "rejected");
       return response;
     } catch (error) {
-      if (!(error instanceof CommandTransportError)) throw error;
+      // A refusal the server decided (4xx, or a rejected receipt) is final. Anything else (no response, a 5xx, an
+      // unreadable success) may have committed: retry once with the same id and payload, then report the id.
+      if (error instanceof SeatAdminRejected) throw error;
+      if (error instanceof CommandHttpError && error.status < 500) throw error;
       if (attempt === 2 || input.signal?.aborted) throw new SeatAdminOutcomeUnknown(input.commandId);
     }
   }

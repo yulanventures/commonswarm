@@ -1525,18 +1525,22 @@ export class ThinCommandClient {
         signal: controller.signal,
       });
     } catch (error) {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onCallerAbort);
       if (error instanceof HumanSessionError) throw error;
       if ((error as Error).name === "AbortError") throw new CommandTransportError("command request timed out");
       throw new CommandTransportError("command request failed before a response");
-    } finally {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onCallerAbort);
     }
+    // The deadline covers reading the body too: a stalled body is a timeout, not an indefinite wait.
     let raw: unknown = null;
     try {
       raw = await parsedJson(response);
     } catch (error) {
+      if ((error as Error).name === "AbortError") throw new CommandTransportError("command response timed out");
       if (response.ok || error instanceof CommandTransportError) throw error;
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onCallerAbort);
     }
     if (!response.ok) {
       const fields = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
