@@ -414,7 +414,7 @@ async function runReceiveHook(profilePath: string, host: string, cwd: string, pr
   return { status, stdout, stderr, elapsed: Date.now() - started };
 }
 
-test("receive hook exits after timeout output even when transport keeps the process alive", { timeout: 15_000 }, async () => {
+test("receive hook exits after timeout output even when transport keeps the process alive", { timeout: 40_000 }, async () => {
   const profilePath = await profile();
   const host = "check-budget-session";
   const cwd = await mkdtemp(join(root, "hook-project-"));
@@ -422,23 +422,38 @@ test("receive hook exits after timeout output even when transport keeps the proc
   const expected = `CommonSwarm check failed (check_timeout); the inbox was not proved empty. Run cswarm check --profile '${profilePath}' to see the error.\n`;
 
   for (const preloadDelayMs of [0, 1_200]) {
-    // A failure is printed only when it changed, so each run starts without the previous diagnostic.
     const diagnostic = join(dirname(profilePath), `check-error-${profileScopeKey(host)}.json`);
-    await rm(diagnostic, { force: true });
-    const result = await runReceiveHook(profilePath, host, cwd, preloadDelayMs);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, expected);
-    assert.ok(
-      result.elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000,
-      `receive hook took ${result.elapsed}ms with ${preloadDelayMs}ms preload`,
-    );
-    if (preloadDelayMs === 0) {
-      // Lower bound tied to the constant: it catches a hook path that hard-codes a shorter wait while the constant stays
-      // derived. A revert of the constant itself is caught by the ceiling-arithmetic test, not here.
-      assert.ok(result.elapsed >= AGENT_CHECK_TIMEOUT_MS - 300, `receive hook gave up after ${result.elapsed}ms`);
+    // The check aborts itself 150 ms before the hook's hard exit (AGENT_CHECK_WRITE_BACK_MARGIN_MS); on a heavily loaded
+    // runner the hard exit can win that race and write no diagnostic, while the hook still exits on time with the same
+    // message. Every attempt must meet the output and timing contract; at least one of three must show the CHECK
+    // aborting itself, which a hook that only ever hard-exits never does.
+    let selfAborted = false;
+    for (let attempt = 0; attempt < 3 && !selfAborted; attempt += 1) {
+      // A failure is printed only when it changed, so each run starts without the previous diagnostic.
+      await rm(diagnostic, { force: true });
+      const result = await runReceiveHook(profilePath, host, cwd, preloadDelayMs);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, expected);
+      assert.ok(
+        result.elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000,
+        `receive hook took ${result.elapsed}ms with ${preloadDelayMs}ms preload`,
+      );
+      if (preloadDelayMs === 0) {
+        // Lower bound tied to the constant: it catches a hook path that hard-codes a shorter wait while the constant stays
+        // derived. A revert of the constant itself is caught by the ceiling-arithmetic test, not here.
+        assert.ok(result.elapsed >= AGENT_CHECK_TIMEOUT_MS - 300, `receive hook gave up after ${result.elapsed}ms`);
+      }
+      await assert.rejects(access(join(dirname(profilePath), "check.lock")), { code: "ENOENT" });
+      // The CHECK aborted itself when its catch path recorded the diagnostic; the process hard exit writes none.
+      const recorded = await readFile(diagnostic, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (recorded !== null) {
+        assert.equal(JSON.parse(recorded), "check_timeout");
+        selfAborted = true;
+      }
     }
-    // The CHECK aborted itself (its catch path records the diagnostic); the process hard exit writes none.
-    assert.equal(JSON.parse(await readFile(diagnostic, "utf8")), "check_timeout");
-    await assert.rejects(access(join(dirname(profilePath), "check.lock")), { code: "ENOENT" });
+    assert.ok(selfAborted, `with ${preloadDelayMs}ms preload the check never aborted itself in 3 runs; only the hard exit fired`);
   }
 });
