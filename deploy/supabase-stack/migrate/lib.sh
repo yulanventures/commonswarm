@@ -306,3 +306,20 @@ selected_schema_csv() {
   local IFS=,
   printf '%s' "${SELECTED_SCHEMAS[*]}"
 }
+
+# The one conditional schema. swarm_session holds the credential fence wrappers that the PostgREST
+# pre-request and two realtime.messages policies call. It exists once migration 20261111000003 is in
+# supabase_migrations.schema_migrations; older databases and their backups legitimately lack it.
+# dump-source.sh adds it to the dumped set when the ledger has that version, and fails if the
+# version is there but the schema is not. It holds functions only, no tables, so verify-counts.sh and
+# source-read-only.sh keep the base set.
+CREDENTIAL_FENCE_SCHEMA=swarm_session
+CREDENTIAL_FENCE_MIGRATION=20261111000003
+
+# A manifest schemas= value is accepted only as the base set or the base set plus swarm_session,
+# in the order dump-source.sh writes them.
+manifest_schema_set_supported() {
+  local value="$1" base
+  base="$(selected_schema_csv)"
+  [[ "$value" == "$base" || "$value" == "$base,$CREDENTIAL_FENCE_SCHEMA" ]]
+}

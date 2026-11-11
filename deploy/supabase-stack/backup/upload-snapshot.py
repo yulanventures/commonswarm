@@ -20,6 +20,10 @@ REQUIRED_DATABASE_SCHEMAS = frozenset({
     'auth', 'public', 'realtime', 'storage', 'supabase_migrations', 'swarm',
     'swarm_read', 'commonswarm_oauth', 'commonswarm_ops',
 })
+# Present once migration 20261111000003 (credential fence) is in the ledger; see migrate/lib.sh.
+CREDENTIAL_FENCE_SCHEMA = 'swarm_session'
+ACCEPTED_DATABASE_SCHEMA_SETS = (REQUIRED_DATABASE_SCHEMAS,
+                                 REQUIRED_DATABASE_SCHEMAS | {CREDENTIAL_FENCE_SCHEMA})
 
 
 def validate_manifest(text):
@@ -33,8 +37,9 @@ def validate_manifest(text):
         entries[key] = value
     schemas = entries.get('schemas', '').split(',')
     if (entries.get('format') != 'commonswarm-n-db-v2' or
-            len(schemas) != len(set(schemas)) or set(schemas) != REQUIRED_DATABASE_SCHEMAS):
+            len(schemas) != len(set(schemas)) or set(schemas) not in ACCEPTED_DATABASE_SCHEMA_SETS):
         raise ValueError('unsupported database artifact format or schema set')
+    return frozenset(schemas)
 
 
 def physical_keys(rows):

@@ -20,12 +20,26 @@ esac
 start_log "dump-$origin"
 assert_dump_origin "$origin"
 
+fence_ledger_query="SELECT EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations WHERE version = '$CREDENTIAL_FENCE_MIGRATION')"
+fence_applied="$({ database_psql "$origin" --tuples-only --no-align --command "$fence_ledger_query"; } 2>>"$LOG_FILE")"
 schemas=("${SELECTED_SCHEMAS[@]}")
+case "$fence_applied" in
+  t)
+    schemas+=("$CREDENTIAL_FENCE_SCHEMA")
+    log "migration $CREDENTIAL_FENCE_MIGRATION is applied; $CREDENTIAL_FENCE_SCHEMA is required"
+    ;;
+  f) log "migration $CREDENTIAL_FENCE_MIGRATION is not applied; base schema set only" ;;
+  *)
+    log "migration ledger check returned no answer"
+    exit 1
+    ;;
+esac
+dump_schema_csv="$(IFS=,; printf '%s' "${schemas[*]}")"
 schema_args=()
 for schema in "${schemas[@]}"; do schema_args+=(--schema "$schema"); done
 
 present="$({ database_psql "$origin" --tuples-only --no-align --command \
-  "SELECT nspname FROM pg_namespace WHERE nspname = ANY (string_to_array('$(selected_schema_csv)', ',')) ORDER BY nspname"; } 2>>"$LOG_FILE")"
+  "SELECT nspname FROM pg_namespace WHERE nspname = ANY (string_to_array('$dump_schema_csv', ',')) ORDER BY nspname"; } 2>>"$LOG_FILE")"
 expected="$(printf '%s\n' "${schemas[@]}" | LC_ALL=C sort)"
 if [[ "$present" != "$expected" ]]; then
   log "required schema set is incomplete"
@@ -38,6 +52,7 @@ counts_query="$(make_temp_sql)"
 objects_query="$(make_temp_sql)"
 cron_query="$(make_temp_sql)"
 holder_query="$(make_temp_sql)"
+fence_query="$(make_temp_sql)"
 snapshot_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-snapshot.XXXXXX")"
 snapshot_ready="$(mktemp "${TMPDIR:-/tmp}/commonswarm-snapshot-ready.XXXXXX")"
 snapshot_release="$(mktemp "${TMPDIR:-/tmp}/commonswarm-snapshot-release.XXXXXX")"
@@ -46,7 +61,7 @@ holder_pid=""
 cleanup() {
   touch "$snapshot_release" 2>/dev/null || true
   if [[ -n "$holder_pid" ]]; then wait "$holder_pid" 2>/dev/null || true; fi
-  rm -f "$roles_query" "$counts_query" "$objects_query" "$cron_query" "$holder_query" \
+  rm -f "$roles_query" "$counts_query" "$objects_query" "$cron_query" "$holder_query" "$fence_query" \
     "$snapshot_file" "$snapshot_ready" "$snapshot_release"
 }
 trap cleanup EXIT
@@ -117,6 +132,22 @@ if [[ ! "$snapshot" =~ ^[0-9A-F]+-[0-9A-F]+-[0-9]+$ ]]; then
   exit 1
 fi
 
+# The ledger decision above ran before the snapshot. Repeat it inside the snapshot, so a migration
+# applied in between cannot leave the dumped ledger and the dumped schema list disagreeing.
+cat >"$fence_query" <<SQL
+\getenv snapshot_id COMMONSWARM_EXPORTED_SNAPSHOT
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET TRANSACTION SNAPSHOT :'snapshot_id';
+$fence_ledger_query;
+COMMIT;
+SQL
+fence_in_snapshot="$(COMMONSWARM_EXPORTED_SNAPSHOT="$snapshot" database_psql "$origin" \
+  --quiet --tuples-only --no-align --file "$fence_query" 2>>"$LOG_FILE")"
+if [[ "$fence_in_snapshot" != "$fence_applied" ]]; then
+  log "migration ledger changed before the snapshot; dump again"
+  exit 1
+fi
+
 dump_file="$MIGRATION_ARTIFACT_DIR/database.dump"
 PGSERVICE="$origin" pg_dump \
   --dbname "service=$origin" \
@@ -141,7 +172,7 @@ SET TRANSACTION SNAPSHOT :'snapshot_id';
 SELECT format('SELECT %L, count(*)::bigint FROM %I.%I;',
   schemaname || '.' || tablename, schemaname, tablename)
 FROM pg_tables
-WHERE schemaname = ANY (string_to_array('$(selected_schema_csv)', ','))
+WHERE schemaname = ANY (string_to_array('$dump_schema_csv', ','))
   AND NOT (schemaname = 'realtime' AND (tablename = 'messages' OR tablename LIKE 'messages_%'))
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_probe')
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_state')
@@ -211,7 +242,7 @@ cat >"$MIGRATION_ARTIFACT_DIR/manifest.txt" <<EOF
 format=commonswarm-n-db-v2
 origin=$origin
 postgres_major=17
-schemas=$(selected_schema_csv)
+schemas=$dump_schema_csv
 snapshot_consistency=pg_export_snapshot
 excluded_schema_data=realtime.messages,realtime.messages_*
 excluded_image_owned_schemas=_realtime,extensions,graphql_public,net,pgbouncer,supabase_functions,vault
