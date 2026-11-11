@@ -101,7 +101,9 @@ const ROW_MATCHES = (arg: { index: number; key: string | null; rows: string; sel
  */
 type ProbeError = { error: string };
 type ProbeRest = { tracked: number; measured: number; drift: number };
-type Shift = { who: string; label: string; dx: number; dy: number; dw: number; dh: number; gone: boolean; lines?: [number, number] };
+type Shift = { who: string; label: string; dx: number; dy: number; dw: number; dh: number; gone: boolean; lines?: [number, number];
+  /** For a whole row that moved or resized (diagnostic only): its key and its state at rest and now. */
+  key?: string; state?: [string, string] };
 type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; focusWithin: boolean; focusVisible: boolean;
   /** Lifecycle facts, kept whatever the outcome: boxes found again after the app rebuilt them, and how far the
    *  row's lists scrolled. Neither is discounted: positions are compared in scroll-content coordinates. */
@@ -120,7 +122,19 @@ type ProbeCompared = { shifted: number; shifts: Shift[]; hoverMatched: boolean; 
  */
 const PROBE = async (arg: { index: number; key?: string | null; rows: string; phase: "rest" | "early" | "late"; tolerance: number }): Promise<ProbeError | ProbeRest | ProbeCompared> => {
   type Rect = { x: number; y: number; w: number; h: number };
-  type Tracked = { node: Element | Text; who: "row" | "inside" | "text" | "other-row"; label: string; rowKey: string | null; path: number[] };
+  type Tracked = { node: Element | Text; who: "row" | "inside" | "text" | "other-row"; label: string; rowKey: string | null; path: number[]; state?: string };
+  /** A row's own receipt state and quiet flag, grouping, parent and line count of its body: names what changed when a
+   *  row resizes. Diagnostics only. */
+  const rowState = (el: Element | Text | null): string => {
+    if (!(el instanceof Element)) return "gone";
+    const receipt = Array.from(el.querySelectorAll(".dashboard__message-receipt")).find(d => d.closest("[data-signal-id]") === el);
+    const parent = el.parentElement;
+    return [`receipt=${receipt ? `${receipt.getAttribute("data-receipt-state") ?? "?"}${receipt.hasAttribute("data-receipt-quiet") ? "/quiet" : ""}` : "none"}`,
+      `grouped=${el.hasAttribute("data-stream-grouped") ? "y" : "n"}`,
+      `parent=${parent ? `${parent.tagName.toLowerCase()}${parent.className ? `.${String(parent.className).split(" ")[0]}` : ""}` : "none"}`,
+      `class=${String(el.className).split(" ").filter(c => c.startsWith("dashboard__message--")).join("+") || "-"}`,
+      `h=${Math.round(el.getBoundingClientRect().height)}`].join(" ");
+  };
   type Context = { label: string; node: Element; rect: Rect; text: number; children: number };
   const w = globalThis as unknown as { __auditHoverRest?: { tracked: Tracked[]; rects: Rect[][]; scroll: { x: number; y: number }; context: Context[] };
     __auditPendingFetches?: number; __auditLastFetchDoneAt?: number };
@@ -240,7 +254,7 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     }
     for (const other of Array.from(document.querySelectorAll(arg.rows)).slice(0, 80)) {
       if (other !== row && !row.contains(other) && !other.contains(row)) {
-        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: other.getAttribute("data-signal-id"), path: [] });
+        tracked.push({ node: other, who: "other-row", label: describe(other), rowKey: other.getAttribute("data-signal-id"), path: [], state: rowState(other) });
       }
     }
     await new Promise(done => setTimeout(done, 300));
@@ -289,7 +303,8 @@ const PROBE = async (arg: { index: number; key?: string | null; rows: string; ph
     const pairs = before.map((r, k) => [r, after[Math.min(k, after.length - 1)]!] as const);
     const [b, n] = pairs.reduce((worst, pair) => delta([pair[0]], [pair[1]]) > delta([worst[0]], [worst[1]]) ? pair : worst, pairs[0]!);
     shifts.push({ who: t.who, label: t.label, dx: round(n.x - b.x), dy: round(n.y - b.y), dw: round(n.w - b.w), dh: round(n.h - b.h), gone: false,
-      ...(before.length !== after.length ? { lines: [before.length, after.length] as [number, number] } : {}) });
+      ...(before.length !== after.length ? { lines: [before.length, after.length] as [number, number] } : {}),
+      ...(t.state !== undefined && round(n.h - b.h) !== 0 ? { key: t.rowKey ?? "", state: [t.state, rowState(live.node)] as [string, string] } : {}) });
   });
   const row = liveRow instanceof Element ? liveRow : null;
   const active = document.activeElement;

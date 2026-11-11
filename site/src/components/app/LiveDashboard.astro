@@ -2028,9 +2028,11 @@ import "../../styles/kylon-command-palette.css";
       messageStatusExpiryTimer = undefined;
     };
     let humanSeenObserver: IntersectionObserver | null = null;
-    /* Rows whose seen report the server acknowledged and whose receipt the app will read again: their shown receipt is
-       out of date until that read completes. */
-    const seenAwaitingRead = new Set<string>();
+    /* Rows whose seen report the server acknowledged and whose receipt the app will read again, each with the
+       acknowledgement's epoch: the shown receipt is out of date until a read that STARTED after it completes. A read
+       already in flight at the acknowledgement carries pre-acknowledgement data and settles nothing. */
+    const seenAwaitingRead = new Map<string, number>();
+    let seenAckEpoch = 0;
     /* A row's receipt is loaded once a read completed with a result (not a request just issued, a failed read or a
        fallback), and no seen report of this viewer's for it is still queued, in flight, or not yet read back. Receipts
        load only for rows on screen, and a row on screen is reported seen, so a row's receipt can change shortly after it
@@ -2080,8 +2082,9 @@ import "../../styles/kylon-command-palette.css";
         }
         // Only rows the app will actually read again wait for that read; a settled receipt is never re-read.
         const owed = new Set(signalIds);
+        const epoch = ++seenAckEpoch;
         for (const signal of browserDeliveryReceiptCandidates(signals.filter(row => owed.has(row.id)), deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER)) {
-          seenAwaitingRead.add(signal.id);
+          seenAwaitingRead.set(signal.id, epoch);
         }
         syncReceiptMarkers();
         void refreshDeliveryReceipts(workspaceId, requestVersion);
@@ -8559,6 +8562,8 @@ import "../../styles/kylon-command-palette.css";
       );
       if (candidates.length === 0) return;
       deliveryReceiptRefreshOwner = owner;
+      const startedEpoch = seenAckEpoch;
+      let rereadOwed = false;
       try {
         const reads = await Promise.all(candidates.map(async (signal) => {
           try {
@@ -8580,13 +8585,28 @@ import "../../styles/kylon-command-palette.css";
             cached?.phase !== undefined ||
             JSON.stringify(previous) !== JSON.stringify(read.result)
           ) changed = true;
-          deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
-          if (read.result !== null) seenAwaitingRead.delete(read.signalId);
+          const ackedAt = seenAwaitingRead.get(read.signalId);
+          if (ackedAt !== undefined && ackedAt > startedEpoch) {
+            // Acknowledged while this read was in flight: keep the re-read the acknowledgement asked for.
+            deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt: 0 });
+            rereadOwed = true;
+          } else {
+            deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
+            if (read.result !== null) seenAwaitingRead.delete(read.signalId);
+          }
         }
+        // A row the app will no longer re-read (its receipt settled meanwhile) waits for nothing.
+        const rereadable = new Set(browserDeliveryReceiptCandidates(signals.filter(row => seenAwaitingRead.has(row.id)),
+          deliveryReceiptCache, new Set(), Date.now(), Number.MAX_SAFE_INTEGER).map(signal => signal.id));
+        for (const id of [...seenAwaitingRead.keys()]) if (!rereadable.has(id)) seenAwaitingRead.delete(id);
         if (changed && !addAgentViewOpen()) renderFeed();
       } finally {
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
         syncReceiptMarkers();
+      }
+      // The acknowledgement's own refresh was dropped while this read held the slot; run it now.
+      if (rereadOwed && version === requestVersion && workspaceId === activeWorkspaceId) {
+        void refreshDeliveryReceipts(workspaceId, version);
       }
     };
 
