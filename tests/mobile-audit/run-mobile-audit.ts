@@ -351,6 +351,7 @@ async function main(): Promise<void> {
   const hoverDesktop: Record<string, unknown>[] = [];
   /** Diagnostic mode only: per frozen pass, how many receipt RPC calls the control intercepted, fetched and replayed. */
   const freezeCounts: Array<{ pass: string; viewport: string; theme: string; intercepted: number; fetched: number; replayed: number }> = [];
+  const inviteeFreezeCounts: typeof freezeCounts = [];
   const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
   let pictureFailures = -1;
   const hoverShots: string[] = [];
@@ -413,22 +414,25 @@ async function main(): Promise<void> {
         // request body is fetched once; every later call, including one already in flight, gets that first response.
         // Counts prove the control was exercised: intercepted = every receipt call seen, fetched = first responses,
         // replayed = calls answered from the first response.
-        const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
-        if (freeze) {
+        // Each signed-in viewer gets its own cache and its own counts: a response is never replayed to another identity.
+        const freezeReceipts = async (viewer: typeof signedIn, stats: { intercepted: number; fetched: number; replayed: number }) => {
           const frozen = new Map<string, Promise<FrozenResponse>>();
-          await signedIn.route("**/rest/v1/rpc/signal_delivery_receipts*", async (route: Route) => {
-            freezeStats.intercepted += 1;
+          await viewer.route("**/rest/v1/rpc/signal_delivery_receipts*", async (route: Route) => {
+            stats.intercepted += 1;
             const key = route.request().postData() ?? "";
             let first = frozen.get(key);
-            if (first) freezeStats.replayed += 1;
+            if (first) stats.replayed += 1;
             else {
-              freezeStats.fetched += 1;
+              stats.fetched += 1;
               first = route.fetch().then(async response => ({ status: response.status(), headers: response.headers(), body: await response.body() }));
               frozen.set(key, first);
             }
             return route.fulfill(await first);
           });
-        }
+        };
+        const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
+        const inviteeFreezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
+        if (freeze) { await freezeReceipts(signedIn, freezeStats); await freezeReceipts(invitee, inviteeFreezeStats); }
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -439,7 +443,7 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn, invitee]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        return { context, signedIn, noScript, invitee, freezeStats };
+        return { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats };
       };
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
@@ -597,7 +601,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, noScript, invitee, freezeStats } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats } = await openContexts(viewport, theme, true, freeze);
         const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -659,6 +663,9 @@ async function main(): Promise<void> {
         });
         report.push(...batch);
         if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats });
+        // The second viewer's frozen captures are recorded apart and are not part of the exercised-control assertion: they count
+        // as controlled only where this entry shows receipt calls intercepted and replayed.
+        if (freeze && batch.some(r => screens().find(s => s.id === r.id)?.viewer === "invitee")) inviteeFreezeCounts.push({ pass: "mobile", viewport: size, theme, ...inviteeFreezeStats });
         console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
@@ -724,7 +731,7 @@ async function main(): Promise<void> {
       pictures: { runs: pictures.length, checks: pictures.reduce((n, r) => n + r.checks.length, 0),
         failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length } };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures,
-      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts } } : {}) }, null, 2));
+      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
