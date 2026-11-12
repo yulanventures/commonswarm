@@ -335,6 +335,30 @@ const ROWS: Row[] = [
       assert.ok(landing && "clippedBy" in landing && landing.clippedBy === null, show(landing));
       assert.equal(k.activation?.ok, true);
     } },
+  // A native modal inside a small scroller (the invitation inbox's review dialog in its corner card): the modal is in the top
+  // layer, so the scroller's box does not clip it. Its own controls are in front and reached, and Tab and Escape work.
+  { name: "a modal opened inside a small scroller is judged in the top layer, not clipped by the scroller",
+    html: page(`<button id="opener">Open</button><div id="host" style="position:fixed;right:0;bottom:0;width:40px;height:30px;overflow-y:auto">
+      <dialog id="d" style="width:280px"><h2 id="t" tabindex="-1">Review</h2><button id="ok">Join</button><button id="no">Not now</button></dialog></div>`),
+    setup: async p => { await p.focus("#opener"); await p.evaluate(() => { (document.getElementById("d") as HTMLDialogElement).showModal(); document.getElementById("t")!.focus(); }, undefined); },
+    keyboard: { name: "top-layer", start: { active: "#t" }, keys: [{ key: "Tab", expect: "#ok" }], activate: { key: "Escape", expect: { active: "#opener" } } },
+    check: ({ geometry: g, keyboard: k }) => {
+      assert.equal(g.overlay.front, "dialog#d", show(g.overlay));
+      assert.ok(g.overlay.frontControls.inView >= 2 && g.overlay.frontControls.reached === g.overlay.frontControls.inView, show(g.overlay.frontControls));
+      assert.equal(k?.outcome, "pass", show(k));
+      const landing = k.landings[0];
+      assert.ok(landing && "sampled" in landing && landing.sampled > 0 && landing.reached > 0 && landing.clippedBy === null, show(landing));
+    } },
+  // The same small box clips ordinary content: a control outside an overflow:clip box (which cannot scroll it into view)
+  // stays blocked as clipped when Tab lands on it.
+  { name: "a control outside a small clipping box is still blocked as clipped",
+    html: page(`<button id="a">A</button><div style="width:40px;height:30px;overflow:clip"><div style="height:200px"></div><button id="b">B</button></div>`),
+    setup: p => p.focus("#a"),
+    keyboard: { name: "ordinary-clip", start: { active: "#a" }, keys: [{ key: "Tab", expect: "#b" }] },
+    check: ({ keyboard: k }) => {
+      assert.equal(k?.outcome, "blocked", show(k));
+      assert.match(k.reason ?? "", /not revealed: .*(clipped by|no hit point)/u);
+    } },
   { name: "a reveal broken by CSS is blocked as clipped", html: revealPage(".sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}"),
     setup: p => p.focus("#anchor"), keyboard: backSpec, check: ({ keyboard: k }) => {
       assert.equal(k?.outcome, "blocked", show(k));

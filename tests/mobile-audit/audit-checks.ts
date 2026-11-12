@@ -22,8 +22,12 @@ export const CHECKS = () => {
     if (closed && !closed.querySelector(":scope > summary")?.contains(el)) return false;
     return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05 && !el.closest("[hidden],[inert]");
   };
+  // A top-layer element (an open modal dialog or popover) is painted above the page, outside its DOM ancestors' overflow
+  // boxes and opacity, so a walk up from inside one stops at it: its own box still clips, nothing above it does.
+  const topLayer = (n: Element) => { try { return n.matches(":modal") || n.matches(":popover-open"); } catch { return false; } };
+  const up = (n: Element) => (topLayer(n) ? null : n.parentElement);
   const inScroller = (el: Element) => {
-    for (let node = el.parentElement; node; node = node.parentElement) {
+    for (let node = up(el); node; node = up(node)) {
       const overflowX = getComputedStyle(node).overflowX;
       if (overflowX === "auto" || overflowX === "scroll") return true;
     }
@@ -70,7 +74,7 @@ export const CHECKS = () => {
   // passing under a fixed or sticky bar. Both are skipped; anything else covering a target counts.
   const pinned = (el: Element | null) => { for (let n = el; n; n = n.parentElement) { const p = getComputedStyle(n).position; if (p === "fixed" || p === "sticky") return true; } return false; };
   const clipped = (el: Element, x: number, y: number) => {
-    for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+    for (let n = up(el); n && n !== document.body; n = up(n)) {
       const st = getComputedStyle(n);
       if (/(auto|scroll|hidden|clip)/u.test(st.overflowX + st.overflowY)) {
         const r = n.getBoundingClientRect();
@@ -177,17 +181,21 @@ export const GEOMETRY_WITNESS = (declared: DeclaredOverlay[]) => {
   const centreOf = (r: Box) => [(r.left + r.right) / 2, (r.top + r.bottom) / 2] as const;
   const boxOf = (r: Box) => ({ x: round(r.left), y: round(r.top), w: round(r.right - r.left), h: round(r.bottom - r.top) });
 
-  /** Product of the element's and its ancestors' opacity: what is actually painted. */
+  // A top-layer element (an open modal dialog or popover) is painted above the page, outside its DOM ancestors' overflow
+  // boxes and opacity, so a walk up from inside one stops at it: its own box still clips, nothing above it does.
+  const topLayer = (n: Element) => { try { return n.matches(":modal") || n.matches(":popover-open"); } catch { return false; } };
+  const up = (n: Element) => (topLayer(n) ? null : n.parentElement);
+  /** Product of the element's and its ancestors' opacity, up to its top-layer root: what is actually painted. */
   const opacityChain = (el: Element) => {
     let o = 1;
-    for (let n: Element | null = el; n; n = n.parentElement) o *= Number(getComputedStyle(n).opacity);
+    for (let n: Element | null = el; n; n = up(n)) o *= Number(getComputedStyle(n).opacity);
     return Math.round(o * 100) / 100;
   };
   /** The nearest box that hides the element: a 50% inset clip-path, a <=2px overflow-hidden box, or an
    *  overflow-hidden ancestor that excludes its centre. Scrollers (auto/scroll) scroll; they do not hide. */
   const clippedBy = (el: Element) => {
     const [cx, cy] = centreOf(el.getBoundingClientRect());
-    for (let n: Element | null = el; n && n !== document.body; n = n.parentElement) {
+    for (let n: Element | null = el; n && n !== document.body; n = up(n)) {
       const st = getComputedStyle(n);
       if (/inset\(\s*50%/u.test(st.clipPath)) return describe(n);
       if (!/(hidden|clip)/u.test(st.overflowX + st.overflowY)) continue;
@@ -197,12 +205,12 @@ export const GEOMETRY_WITNESS = (declared: DeclaredOverlay[]) => {
     }
     return null;
   };
-  /** Viewport ∩ every non-visible-overflow ancestor's client area (scrollbars excluded). */
+  /** Viewport ∩ every non-visible-overflow ancestor's client area (scrollbars excluded), up to its top-layer root. */
   const shownPart = (r: Box, owners: Element[]): Box => {
     let { left, top, right, bottom } = r;
     left = Math.max(left, 0); top = Math.max(top, 0); right = Math.min(right, width); bottom = Math.min(bottom, height);
     for (const owner of owners) {
-      for (let n = owner.parentElement; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      for (let n = up(owner); n && n !== document.body && n !== document.documentElement; n = up(n)) {
         const st = getComputedStyle(n);
         if (st.overflowX === "visible" && st.overflowY === "visible") continue;
         const nr = n.getBoundingClientRect();

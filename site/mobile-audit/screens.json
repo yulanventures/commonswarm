@@ -409,14 +409,14 @@
   {
     "id": "route.start",
     "kind": "route",
-    "path": "/start",
+    "path": "/start?next=audit",
     "setup": [],
-    "ready": "body",
+    "ready": ".handoff [data-open-app] ~ noscript .handoff__note",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "JavaScript immediately redirects to /app; capture of the handoff or redirect behavior needs a dedicated runner mode."
+    "signedOut": true,
+    "noJs": true
   },
   {
     "id": "route.support",
@@ -511,14 +511,46 @@
   {
     "id": "app.list-conflict",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={workspace}&v=lists",
+    "setup": [
+      {
+        "waitFor": "[data-household-objects] [data-hh-action=\"select\"][data-hh-value=\"{conflictDoc}\"]",
+        "click": "[data-household-objects] [data-hh-action=\"select\"][data-hh-value=\"{conflictDoc}\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] textarea[data-hh-document]",
+        "type": "[data-household-objects] textarea[data-hh-document]",
+        "text": "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear, leave the meter cupboard open, and put the dog in the garden."
+      },
+      {
+        "advance": {
+          "workspace": "{workspace}",
+          "object": "{conflictDoc}"
+        },
+        "click": "[data-household-objects] button[data-hh-action=\"save\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] .hh-conflict button[data-hh-action=\"recover\"]",
+        "click": "[data-household-objects] .hh-conflict button[data-hh-action=\"recover\"]"
+      },
+      {
+        "waitFor": "[data-household-objects] .hh-conflict .hh-comparison",
+        "settle": true
+      },
+      {
+        "scroll": "[data-household-objects] .hh-conflict",
+        "settle": true
+      }
+    ],
+    "ready": "[data-household-objects] .hh-conflict[aria-label=\"Save conflict\"]:has(.hh-comparison) button[data-hh-action=\"reviewed-save\"]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "This state, identity or trigger needs a disposable fixture and a specific visible readiness selector before capture."
+    "requiresSeed": [
+      "create_workspace",
+      "household_permissions",
+      "seed_conflict_doc"
+    ]
   },
   {
     "id": "app.agent-chooser",
@@ -636,13 +668,20 @@
     "id": "app.invitation-inbox",
     "kind": "view",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
+        "settle": true
+      }
+    ],
+    "ready": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Needs a second signed-in viewer and a delegated admin invitation (admin_grants plus the inviter admin_accounts projection); one seeded for the owner would float over every capture."
+    "requiresSeed": [
+      "seed_delegated_invitation"
+    ]
   },
   {
     "id": "app.update-toast",
@@ -685,14 +724,35 @@
   {
     "id": "app.lists-approval",
     "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "path": "/app?w={approvalWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] #pd-agent-{approvalAgent}",
+        "click": "#pd-agent-{approvalAgent}"
+      },
+      {
+        "waitFor": "[data-people-detail] button[data-pd-focus=\"allow-{approvalAgent}\"]",
+        "click": "[data-people-detail] button[data-pd-focus=\"allow-{approvalAgent}\"]"
+      },
+      {
+        "waitFor": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "settle": true
+      },
+      {
+        "scroll": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+        "settle": true
+      }
+    ],
+    "ready": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "No route opens the approvals (only the roster allow action or host-picker approve), and seeded agent principals have no household_connections."
+    "requiresSeed": [
+      "seed_lists_approval"
+    ],
+    "frame": [
+      "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval"
+    ]
   },
   {
     "id": "dialog.public-menu",
@@ -901,13 +961,24 @@
     "id": "dialog.invitation-review",
     "kind": "dialog",
     "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]",
+        "click": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-review]"
+      },
+      {
+        "waitFor": "dialog.human-invitations__dialog[data-review-dialog][open] [data-accept]",
+        "settle": true
+      }
+    ],
+    "ready": "dialog.human-invitations__dialog[data-review-dialog][open] [data-accept]",
     "states": [
       "dense"
     ],
-    "status": "pending",
-    "reason": "Same fixture as app.invitation-inbox: a second signed-in viewer with a delegated admin invitation whose preview passes."
+    "requiresSeed": [
+      "seed_delegated_invitation"
+    ]
   },
   {
     "id": "dialog.navigation-drawer",
@@ -1254,18 +1325,6 @@
     "requiresSeed": []
   },
   {
-    "id": "menu.resizers",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "status": "pending",
-    "reason": "Mobile trigger, target identity and visible readiness require a dedicated fixture; this placeholder is not runnable."
-  },
-  {
     "id": "menu.context",
     "kind": "view",
     "path": "/app?w={workspace}",
@@ -1444,42 +1503,6 @@
       "create_workspace",
       "seed_wiki overview"
     ]
-  },
-  {
-    "id": "state.empty",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "empty"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
-  },
-  {
-    "id": "state.error",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "error"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
-  },
-  {
-    "id": "state.loading",
-    "kind": "view",
-    "path": "/app?w={workspace}",
-    "setup": [],
-    "ready": "[data-panel=\"channel\"]:not([hidden])",
-    "states": [
-      "loading"
-    ],
-    "status": "pending",
-    "reason": "The runner does not yet materialize and bind this state per surface; one generic capture cannot establish coverage."
   },
   {
     "id": "app.files.empty",

@@ -13,10 +13,14 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { auditPng } from "./picture-check.js";
+import * as core from "../../supabase/functions/_shared/protocol.js";
+import { applyAdminRoutine, prepareAdminRoutine } from "../../supabase/functions/command/admin-routine.js";
 
 export interface SeedEnvironment { apiUrl: string; anonKey: string; serviceRoleKey: string; dbUrl: string }
 export interface SeedResult {
   owner: { email: string; password: string };
+  /** A second viewer, a member of {workspace} holding one delegated invitation to {inviteWorkspace}. */
+  invitee: { email: string; password: string } | null;
   ids: Record<string, string>;
   notes: string[];
   steps: string[];
@@ -86,6 +90,105 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
       });
     } finally { await done.end({ timeout: 5 }); }
   };
+}
+
+/** The save-conflict doc's two fixed texts: every capture opens it at the base and meets the current one, so the comparison is
+ *  the same at every size and theme. */
+export const CONFLICT_DOC = {
+  base: "# Boiler visit\n\nThe engineer comes on Friday morning. Keep the hallway clear and leave the meter cupboard open.",
+  current: "# Boiler visit\n\nThe engineer comes on Friday at 9am. Keep the hallway clear and leave the meter cupboard open.",
+} as const;
+
+/**
+ * Save a doc's content as the owner from outside any page (app.list-conflict): back to the base before a capture opens it,
+ * then to the current text behind the open page's back, so the page's next save meets a newer revision. Nothing is saved when
+ * the doc already holds that text. It signs in afresh on every call: a token from seeding has expired by the time a late
+ * capture runs.
+ */
+export async function setHouseholdDoc(env: SeedEnvironment, owner: SeedResult["owner"], workspaceId: string, objectId: string, markdown: string): Promise<void> {
+  assert.ok(loopback(env.apiUrl), "local stack only");
+  const client = createClient(env.apiUrl, env.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const signedIn = await client.auth.signInWithPassword(owner);
+  if (signedIn.error || !signedIn.data.session) throw new Error(`doc sign-in: ${signedIn.error?.message}`);
+  const token = signedIn.data.session.access_token;
+  const tool = async (name: string, args: Record<string, unknown>, write: boolean) => {
+    const commandId = `audit_${randomBytes(9).toString("base64url")}`;
+    const response = await fetch(`${env.apiUrl}/functions/v1/command`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, apikey: env.anonKey, "content-type": "application/json" },
+      body: JSON.stringify({ command_id: commandId, client_version: "0.1.0", workspace_id: workspaceId, stream: { kind: "workspace" },
+        command: { kind: "household_tool", tool: name, arguments: { seat: LOCAL_SEAT, ...(write ? { request_id: commandId } : {}), ...args } } }),
+    });
+    return { status: response.status, body: await response.json().catch(() => ({})) as Record<string, any> };
+  };
+  const read = await tool("object_read", { object_id: objectId }, false);
+  const before = read.body.content?.markdown, base = read.body.revision?.revision;
+  if (read.status !== 200 || read.body.status !== "ok" || typeof before !== "string" || !base) {
+    throw new Error(`doc read: HTTP ${read.status} ${JSON.stringify(read.body).slice(0, 200)}`);
+  }
+  if (before === markdown) return;
+  const saved = await tool("object_update", { object_id: objectId, base, patch: { kind: "doc", splices: [{ start: 0, before, after: markdown }] } }, true);
+  if (saved.status !== 200 || saved.body.status !== "committed") throw new Error(`doc save: HTTP ${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
+}
+
+/**
+ * One delegated member invitation from `inviter` (owner of `workspaceId`) to `recipient`, made as the Deno fixture
+ * tests/support/household-human-invites-server.mjs makes it: the protocol core decides the inviter's admin consent and grant,
+ * and the real routine decision and adapter issue the invitation, so its preview passes like a real one.
+ */
+async function issueDelegatedInvitation(sql: postgres.Sql, inviter: string, workspaceId: string, recipient: string): Promise<void> {
+  const c = core as any;
+  const now = Date.now() - 60_000, session = "audit-inviter-session", grantId = randomUUID(), receipt = randomUUID();
+  let state = c.emptyAdminAccount(), accountSeq = 0;
+  const manifest = { admin_identity_id: randomUUID(), connection_id: randomUUID(), client_id: "https://audit-client.example.test", resource: c.ADMIN_RESOURCE,
+    mode: "granular", registry_version: c.ADMIN_REGISTRY_VERSION, scope_names: ["admin:read", "invites:create"],
+    capability_names: c.adminAvailableCapabilities(["admin:read", "invites:create"]), availability_digest: c.adminAvailabilityDigest(c.ADMIN_REGISTRY_VERSION),
+    workspace_selector: "selected", workspace_ids: [workspaceId], created_workspace_policy: { scope_names: [] },
+    target_rules: { seat_ids: [], own_seats: false, grant_created_seats: false, recipient_user_ids: [recipient], recipient_connection_ids: [], transports: [] },
+    worker_scope_ceiling: [], role_ceiling: "member", renewal_limits: { ...c.ADMIN_RENEWAL_CEILINGS, grant_kinds: [], principal_ids: [] },
+    issuance_limits: { ...c.ADMIN_ISSUANCE_CEILINGS }, expires_at: now + 86_400_000, refresh_deadline: now + 86_400_000 };
+  const digest = createHash("sha256").update(c.canonicalAdminJson(manifest)).digest("hex");
+  const ctx = { now, owner_user_id: inviter, actor: { kind: "human", user_id: inviter, session_binding: session }, command_id: randomUUID(), stream_id: randomUUID(),
+    request_digest: "a".repeat(64), nextSeq: () => ++accountSeq, nextEventId: randomUUID, current_workspace_rights: true, withdrawing_workspace_owner: false,
+    target_workspace_owned_by_grantor: false, presenting_refresh_generation: null, presenting_refresh_lineage_id: null };
+  const runCore = (command: unknown) => {
+    ctx.command_id = randomUUID();
+    const decision = c.decideAdminAuthority(command, state, ctx);
+    if (!decision.ok) throw new Error(`admin authority refused: ${JSON.stringify(decision).slice(0, 200)}`);
+    state = decision.events.reduce(c.reduceAdminAuthority, state);
+    for (const consent of Object.values(state.consents) as { session_binding: string }[]) consent.session_binding = session;
+    return decision.events as { seq: number; event_id: string; command_id: string }[];
+  };
+  const granted = [...runCore({ kind: "prepare_admin_consent", consent: { consent_receipt_id: receipt, owner_user_id: inviter, session_binding: session, manifest,
+    manifest_digest: digest, full_account_selected: false, expires_at: now + 300_000, consumed_at: null } }),
+    ...runCore({ kind: "grant_admin_delegation", grant_id: grantId, consent_receipt_id: receipt, replaces_grant_id: null })];
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.admin_accounts (owner_user_id, stream_id, seq, projection) VALUES (${inviter}::uuid, ${ctx.stream_id}::uuid, ${accountSeq}, ${tx.json(state)})`;
+    for (const e of granted) await tx`INSERT INTO swarm.admin_events (owner_user_id, seq, event_id, command_id, event) VALUES (${inviter}::uuid, ${e.seq}, ${e.event_id}::uuid, ${e.command_id}, ${tx.json(e as any)})`;
+    const g = state.grants[grantId];
+    await tx`INSERT INTO swarm.admin_grants (grant_id, owner_user_id, admin_identity_id, connection_id, client_id, resource, mode, registry_version, scope_names, workspace_selector,
+        workspace_ids, created_workspace_policy, target_rules, worker_scope_ceiling, role_ceiling, renewal_limits, issuance_limits, expires_at, refresh_deadline, state,
+        consent_receipt_id, manifest_digest, created_at)
+      VALUES (${grantId}::uuid, ${inviter}::uuid, ${g.admin_identity_id}::uuid, ${g.connection_id}::uuid, ${g.client_id}, ${g.resource}, ${g.mode}, ${g.registry_version},
+        ${g.scope_names}, ${g.workspace_selector}, ${g.workspace_ids}::uuid[], ${tx.json(g.created_workspace_policy)}, ${tx.json(g.target_rules)}, ${g.worker_scope_ceiling},
+        ${g.role_ceiling}, ${tx.json(g.renewal_limits)}, ${tx.json(g.issuance_limits)}, ${new Date(g.expires_at)}, ${new Date(g.refresh_deadline)}, 'active', ${receipt}::uuid,
+        ${g.manifest_digest}, ${new Date(g.created_at)})`;
+  });
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_command`;
+    const [account] = await tx<{ projection: any; seq: number | string }[]>`SELECT projection, seq FROM swarm.admin_accounts WHERE owner_user_id = ${inviter}::uuid FOR UPDATE`;
+    let seq = Number(account!.seq);
+    const routineCtx = { ...ctx, command_id: randomUUID(), actor: { kind: "delegated_admin", grant_id: grantId, admin_identity_id: manifest.admin_identity_id,
+      connection_id: manifest.connection_id, resource: c.ADMIN_RESOURCE, scope_names: manifest.scope_names, access_expires_at: Date.now() + 300_000 }, nextSeq: () => ++seq };
+    const invite = { kind: "admin_invite_member", grant_id: grantId, workspace_id: workspaceId, recipient_user_id: recipient, role: "member", ttl_seconds: 86_400 };
+    const facts = await prepareAdminRoutine(tx as any, invite as any, account!.projection, routineCtx as any, null);
+    const decision = c.decideAdminRoutine(invite, account!.projection, facts);
+    if (!decision.ok) throw new Error(`admin routine refused: ${JSON.stringify(decision).slice(0, 200)}`);
+    await applyAdminRoutine(tx as any, invite as any, facts, decision);
+    const next = decision.events.reduce(c.reduceAdminAuthority, account!.projection);
+    for (const e of decision.events) await tx`INSERT INTO swarm.admin_events (owner_user_id, seq, event_id, command_id, event) VALUES (${inviter}::uuid, ${e.seq}, ${e.event_id}::uuid, ${e.command_id}, ${tx.json(e)})`;
+    await tx`UPDATE swarm.admin_accounts SET seq = ${seq}, projection = ${tx.json(next)} WHERE owner_user_id = ${inviter}::uuid`;
+  });
 }
 
 export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResult> {
@@ -410,6 +513,10 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     const items = Array.from({ length: 36 }, (_, n) => ({ item_id: `item-${n}`, text: n % 9 === 4 ? `Order replacement filter ${UNBROKEN.slice(0, 40)}` : `Grocery item ${n + 1}: ${["oat milk", "sourdough", "eggs", "basil", "limes", "rice"][n % 6]}`, order: n, checked: n % 4 === 0 }));
     ok("object_create list", await tool("object_create", { object_id: "groceries", title: "Weekly groceries", content: { kind: "list", items } }));
     ok("object_create doc", await tool("object_create", { object_id: "house-notes", title: "House notes", content: { kind: "doc", markdown: "# House notes\n\n" + BODIES.join("\n\n") } }));
+    // A doc of its own for the save-conflict capture (app.list-conflict), which saves a revision behind the page's back on
+    // every capture; house-notes stays as app.lists shows it.
+    if (ok("seed_conflict_doc", await tool("object_create", { object_id: "boiler-visit", title: "Boiler visit", content: { kind: "doc",
+      markdown: CONFLICT_DOC.base } }))) ids.conflictDoc = "boiler-visit";
     const definition = async (object_id: string, term: string, meaning: string, source: string) =>
       ok(`definition_create ${term}`, await tool("definition_create", { object_id, term, meaning, source }));
     await definition("def-monthly-spend", "Monthly spend", "Sum of card and cash spending in a calendar month.", "Card statements plus the cash log in Lists.");
@@ -501,7 +608,51 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         } else if (value?.todo_id) note("todo_create offer", `no pending offer to the viewer: ${JSON.stringify(value).slice(0, 200)}`);
       }
     } catch (error) { note("seed_todo_offer", error); }
-    return { owner: { email: owner.email, password: owner.password }, ids, notes, steps };
+    // The Lists & docs agent approval (app.lists-approval), in a workspace of its own so no other capture changes: one own local
+    // agent with a live connection (device, run, renewal grant and token rows, as the p1-server household fixtures build) and
+    // no Lists approval yet, so the People dialog offers Allow and the approvals list shows its card.
+    try {
+      const approvalWorkspace = randomUUID();
+      const ready = ok("create_workspace approval", await command(owner.token, { kind: "create_workspace", workspace_id: approvalWorkspace, name: "Garden projects", org_id: workspace }, null))
+        && ok("create_agent_principal approval", await command(owner.token, { kind: "create_agent_principal", name: "Sprout", model: "claude-opus-5-5" }, approvalWorkspace))
+        && ok("household_permissions approval", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, approvalWorkspace));
+      const [agent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Sprout' AND transport = 'local'` : [];
+      if (agent) {
+        const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'Audit laptop')`;
+          await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${agent.principal_id}::uuid, ${device}::uuid)`;
+          await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id, workspace_id, principal_id, run_id, created_by, horizon_expires_at, max_successors)
+            VALUES (${family}::uuid, ${approvalWorkspace}::uuid, ${agent.principal_id}::uuid, ${run}::uuid, ${owner.id}::uuid, clock_timestamp() + interval '30 days', 800)`;
+          await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id, renewal_grant_id)
+            VALUES (${token}::uuid, ${agent.principal_id}::uuid, ${run}::uuid, '["post_signal"]', ${createHash("sha256").update(randomBytes(32)).digest()},
+              clock_timestamp() + interval '1 day', ${randomUUID()}::uuid, ${family}::uuid)`;
+        });
+        Object.assign(ids, { approvalWorkspace, approvalAgent: agent.principal_id });
+        steps.push("seed_lists_approval");
+      } else if (ready) note("seed_lists_approval", "the Sprout agent principal was not found as a local agent");
+    } catch (error) { note("seed_lists_approval", error); }
+    // A second viewer with a delegated invitation (app.invitation-inbox, dialog.invitation-review). The invitee already belongs
+    // to {workspace}, so the inbox shows as the corner card above the composer rather than atop the create-workspace screen.
+    // The admin person invites them to a workspace the admin owns, so nothing appears in the owner's captures.
+    let invitee: SeedResult["invitee"] = null;
+    try {
+      const inviter = adminPerson, recipient = people[2]!, inviteWorkspace = randomUUID();
+      const ready = ok("create_workspace invite", await command(inviter.token, { kind: "create_workspace", workspace_id: inviteWorkspace, name: "Allotment group" }, null))
+        && ok("household_permissions invite", await command(inviter.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, inviteWorkspace));
+      if (ready) {
+        await issueDelegatedInvitation(sql, inviter.id, inviteWorkspace, recipient.id);
+        const [listed] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.admin_routine_invitations
+          WHERE workspace_id = ${inviteWorkspace}::uuid AND recipient_user_id = ${recipient.id}::uuid AND accepted_at IS NULL AND revoked_at IS NULL`;
+        if (listed?.n === 1) {
+          ids.inviteWorkspace = inviteWorkspace;
+          invitee = { email: recipient.email, password: recipient.password };
+          steps.push("seed_delegated_invitation");
+        } else note("seed_delegated_invitation", `expected one pending invitation, found ${listed?.n}`);
+      }
+    } catch (error) { note("seed_delegated_invitation", error); }
+    return { owner: { email: owner.email, password: owner.password }, invitee, ids, notes, steps };
   } finally {
     await sql.end({ timeout: 5 });
   }

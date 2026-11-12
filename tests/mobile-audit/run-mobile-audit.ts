@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { postRefreshNote, seedHeavyWorkspace } from "./seed-heavy-workspace.js";
+import { CONFLICT_DOC, postRefreshNote, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -54,8 +54,10 @@ type Route = { request(): { postData(): string | null; resourceType(): string };
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, hover, click, contextmenu, type (with text), select (with option),
- *  press, scroll, wait, settle.
+/** One setup step; fields run in this order: media, waitFor, advance, hover, click, contextmenu, type (with text), select (with
+ *  option), press, scroll, wait, settle.
+ *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
+ *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -63,9 +65,15 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+type Step = { media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
+  /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
+  noJs?: true;
+  /** Captured signed in as the seeded second viewer (seed.invitee) instead of the owner. */
+  viewer?: "invitee";
+  /** Selectors that must be wholly inside the viewport at capture, after settling (one more scroll is allowed). */
+  frame?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[];
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
@@ -99,6 +107,8 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "nav.workspace-picker": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "nav.workspace-switch": ["[data-workspace-picker][open] .cs-workspace-picker__list"],
   "menu.account": ["[data-user-menu]:not([hidden])"],
+  // The invitation inbox is a fixed corner card above the composer when the viewer already has a workspace.
+  "app.invitation-inbox": ['human-invitation-inbox[data-placement="corner"]:not([hidden])'],
   // The update notice is a fixed <aside> card floating over the feed and composer.
   "app.update-toast": ["[data-update-notice]:not([hidden])"],
   // The right-click menu (lib/context-menu.ts) is created on open and removed on close, never hidden.
@@ -154,6 +164,14 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "ArrowUp", expect: '.cs-context-menu[role="menu"] > .cs-context-menu__item:first-of-type' },
     ],
     activate: { key: "Escape", expect: { active: '[data-rail-agent="{agent}"]', inView: '[data-rail-agent="{agent}"]' } },
+  }],
+  // The review dialog opens on its heading; Tab stays inside the modal, and Escape (like Not now) closes it without joining. The
+  // inbox then checks again and returns focus to the invitation's Review button.
+  "dialog.invitation-review": [{
+    name: "invitation-review-escape-returns-to-review",
+    start: { active: "dialog.human-invitations__dialog[data-review-dialog][open] [data-review-heading]" },
+    keys: [{ key: "Tab", expect: "dialog.human-invitations__dialog[data-review-dialog][open] .human-invitations__choice:first-child input[data-role]" }],
+    activate: { key: "Escape", expect: { active: 'human-invitation-inbox[data-placement="corner"]:not([hidden]) [data-row-review]', inView: 'human-invitation-inbox [data-row-review]' } },
   }],
   "dialog.people-admin-access": [{
     name: "people-admin-escape-keeps-roster",
@@ -335,6 +353,7 @@ async function main(): Promise<void> {
   const hoverDesktop: Record<string, unknown>[] = [];
   /** Diagnostic mode only: per frozen pass, how many receipt RPC calls the control intercepted, fetched and replayed. */
   const freezeCounts: Array<{ pass: string; viewport: string; theme: string; intercepted: number; fetched: number; replayed: number }> = [];
+  const inviteeFreezeCounts: typeof freezeCounts = [];
   const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
   let pictureFailures = -1;
   const hoverShots: string[] = [];
@@ -365,56 +384,68 @@ async function main(): Promise<void> {
     const { chromium } = await import(playwrightModule) as { chromium: Parameters<typeof launchPlaywrightChromium<any>>[0] };
     const browser = await launchPlaywrightChromium<any>(chromium);
     try {
-      // Sign in once through the real form (password sign-in, #271); reuse its storage everywhere.
-      const signInContext = await browser.newContext();
-      const signInPage = await signInContext.newPage();
-      await signInPage.goto(`http://127.0.0.1:${SITE_PORT}/app`);
-      await signInPage.waitForSelector("[data-signin-form]", { timeout: 30_000 });
-      await signInPage.fill("#dashboard-email", seed.owner.email);
-      await signInPage.fill("#dashboard-password", seed.owner.password);
-      await signInPage.click("[data-password-signin]");
-      await signInPage.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "signed-out"
-        && document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
-      const storage = await signInContext.storageState();
-      await signInContext.close();
+      // Sign in once per viewer through the real form (password sign-in, #271); reuse its storage everywhere.
+      const signIn = async (who: { email: string; password: string }) => {
+        const signInContext = await browser.newContext();
+        const signInPage = await signInContext.newPage();
+        await signInPage.goto(`http://127.0.0.1:${SITE_PORT}/app`);
+        await signInPage.waitForSelector("[data-signin-form]", { timeout: 30_000 });
+        await signInPage.fill("#dashboard-email", who.email);
+        await signInPage.fill("#dashboard-password", who.password);
+        await signInPage.click("[data-password-signin]");
+        await signInPage.waitForFunction(() => document.querySelector("live-dashboard")?.getAttribute("data-state") !== "signed-out"
+          && document.querySelector("live-dashboard")?.getAttribute("data-state") !== "loading", undefined, { timeout: 30_000 });
+        const state = await signInContext.storageState();
+        await signInContext.close();
+        return state;
+      };
+      const storage = await signIn(seed.owner);
+      // The second viewer exists only when its invitation seed step was accepted; its screens require that step.
+      const inviteeStorage = seed.invitee ? await signIn(seed.invitee) : null;
 
       /** One unsigned and one signed-in context, with the audit's page hooks and an explicit stored theme. */
       const openContexts = async (viewport: { width: number; height: number }, theme: string, hasTouch = true, freeze = false) => {
         const phone = viewport.width < 768 || viewport.height < 500;
         const context = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1 });
+        // Init scripts never run with JavaScript off; the capture gives CHECKS its __name shim itself.
+        const noScript = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, javaScriptEnabled: false });
         const signedIn = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, storageState: storage });
+        const invitee = await browser.newContext({ viewport, colorScheme: theme, hasTouch, isMobile: phone, deviceScaleFactor: 1, ...(inviteeStorage ? { storageState: inviteeStorage } : {}) });
         // Diagnostic control only. The app reads receipts through the swarm_read RPC
         // (site/src/lib/commonswarm.ts browserDeliveryReceipts -> /rest/v1/rpc/signal_delivery_receipts). Each distinct
         // request body is fetched once; every later call, including one already in flight, gets that first response.
         // Counts prove the control was exercised: intercepted = every receipt call seen, fetched = first responses,
         // replayed = calls answered from the first response.
-        const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
-        if (freeze) {
+        // Each signed-in viewer gets its own cache and its own counts: a response is never replayed to another identity.
+        const freezeReceipts = async (viewer: typeof signedIn, stats: { intercepted: number; fetched: number; replayed: number }) => {
           const frozen = new Map<string, Promise<FrozenResponse>>();
-          await signedIn.route("**/rest/v1/rpc/signal_delivery_receipts*", async (route: Route) => {
-            freezeStats.intercepted += 1;
+          await viewer.route("**/rest/v1/rpc/signal_delivery_receipts*", async (route: Route) => {
+            stats.intercepted += 1;
             const key = route.request().postData() ?? "";
             let first = frozen.get(key);
-            if (first) freezeStats.replayed += 1;
+            if (first) stats.replayed += 1;
             else {
-              freezeStats.fetched += 1;
+              stats.fetched += 1;
               first = route.fetch().then(async response => ({ status: response.status(), headers: response.headers(), body: await response.body() }));
               frozen.set(key, first);
             }
             return route.fulfill(await first);
           });
-        }
+        };
+        const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
+        const inviteeFreezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
+        if (freeze) { await freezeReceipts(signedIn, freezeStats); await freezeReceipts(invitee, inviteeFreezeStats); }
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
-        for (const c of [context, signedIn]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); window.addEventListener('storage', (e) => { if (e.key && e.key.includes('auth-token')) e.stopImmediatePropagation(); }, true); if (typeof globalThis.BroadcastChannel === 'function') { const OrigBC = globalThis.BroadcastChannel; globalThis.BroadcastChannel = class extends OrigBC { addEventListener(type, listener, opts) { if (type === 'message') return; return super.addEventListener(type, listener, opts); } set onmessage(_fn) {} }; } if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; const path = String(args[0] && args[0].url ? args[0].url : args[0]).replace(/^[a-z]+:\\/\\/[^/]+/i, '').split('?')[0].slice(0, 80); const id = (globalThis.__auditFetchId = (globalThis.__auditFetchId || 0) + 1); (globalThis.__auditInflight = globalThis.__auditInflight || new Map()).set(id, path); let traced = null; try { const sent = args[1] && typeof args[1].body === 'string' ? JSON.parse(args[1].body) : null; if (path.endsWith('/rpc/signal_delivery_receipts') && sent) traced = { what: 'receipt-read', ids: [String(sent.p_signal_id || '')] }; else if (path.endsWith('/functions/v1/command') && sent && sent.command && sent.command.kind === 'signals_seen') traced = { what: 'seen-report', ids: (sent.command.signal_ids || []).map(String) }; } catch (e) {} const trace = (globalThis.__auditTrace = globalThis.__auditTrace || []); if (traced) { traced.n = id; traced.start = Math.round(performance.now()); trace.push(traced); if (trace.length > 300) trace.shift(); } const started = orig(...args); if (traced) started.then(async (response) => { traced.end = Math.round(performance.now()); traced.http = response.status; try { const answer = await response.clone().json(); traced.answer = traced.what === 'seen-report' ? String(answer && answer.status) : (answer === null ? 'null' : Array.isArray(answer && answer.receipts) ? 'receipts:' + answer.receipts.map((row) => row && row.seen_at ? 'seen' : 'unseen').join('+') : 'other'); } catch (e) { traced.answer = 'unreadable'; } }, (error) => { traced.end = Math.round(performance.now()); traced.answer = 'network-error'; }); return started.finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); globalThis.__auditInflight.delete(id); const recent = (globalThis.__auditRecentFetches = globalThis.__auditRecentFetches || []); recent.push([path, Math.round(performance.now())]); if (recent.length > 12) recent.shift(); }); }; }" });
+        for (const c of [context, signedIn, invitee]) await c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f); window.addEventListener('storage', (e) => { if (e.key && e.key.includes('auth-token')) e.stopImmediatePropagation(); }, true); if (typeof globalThis.BroadcastChannel === 'function') { const OrigBC = globalThis.BroadcastChannel; globalThis.BroadcastChannel = class extends OrigBC { addEventListener(type, listener, opts) { if (type === 'message') return; return super.addEventListener(type, listener, opts); } set onmessage(_fn) {} }; } if (!globalThis.__auditFetchWrapped && typeof globalThis.fetch === 'function') { globalThis.__auditFetchWrapped = true; globalThis.__auditPendingFetches = 0; globalThis.__auditLastFetchDoneAt = 0; const orig = globalThis.fetch.bind(globalThis); globalThis.fetch = (...args) => { globalThis.__auditPendingFetches += 1; const path = String(args[0] && args[0].url ? args[0].url : args[0]).replace(/^[a-z]+:\\/\\/[^/]+/i, '').split('?')[0].slice(0, 80); const id = (globalThis.__auditFetchId = (globalThis.__auditFetchId || 0) + 1); (globalThis.__auditInflight = globalThis.__auditInflight || new Map()).set(id, path); let traced = null; try { const sent = args[1] && typeof args[1].body === 'string' ? JSON.parse(args[1].body) : null; if (path.endsWith('/rpc/signal_delivery_receipts') && sent) traced = { what: 'receipt-read', ids: [String(sent.p_signal_id || '')] }; else if (path.endsWith('/functions/v1/command') && sent && sent.command && sent.command.kind === 'signals_seen') traced = { what: 'seen-report', ids: (sent.command.signal_ids || []).map(String) }; } catch (e) {} const trace = (globalThis.__auditTrace = globalThis.__auditTrace || []); if (traced) { traced.n = id; traced.start = Math.round(performance.now()); trace.push(traced); if (trace.length > 300) trace.shift(); } const started = orig(...args); if (traced) started.then(async (response) => { traced.end = Math.round(performance.now()); traced.http = response.status; try { const answer = await response.clone().json(); traced.answer = traced.what === 'seen-report' ? String(answer && answer.status) : (answer === null ? 'null' : Array.isArray(answer && answer.receipts) ? 'receipts:' + answer.receipts.map((row) => row && row.seen_at ? 'seen' : 'unseen').join('+') : 'other'); } catch (e) { traced.answer = 'unreadable'; } }, (error) => { traced.end = Math.round(performance.now()); traced.answer = 'network-error'; }); return started.finally(() => { globalThis.__auditPendingFetches = Math.max(0, globalThis.__auditPendingFetches - 1); globalThis.__auditLastFetchDoneAt = performance.now(); globalThis.__auditInflight.delete(id); const recent = (globalThis.__auditRecentFetches = globalThis.__auditRecentFetches || []); recent.push([path, Math.round(performance.now())]); if (recent.length > 12) recent.shift(); }); }; }" });
         // The app is dark-first: with no stored preference it opens dark whatever the OS says
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
-        for (const c of [context, signedIn]) {
+        for (const c of [context, signedIn, invitee]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
         }
-        return { context, signedIn, freezeStats };
+        return { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats };
       };
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
@@ -430,6 +461,10 @@ async function main(): Promise<void> {
             const body = html.includes("</head>") ? html.replace("</head>", `${asset}</head>`) : `${asset}${html}`;
             return route.fulfill({ status: served.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(body, "utf8") });
           });
+        }
+        // The save-conflict doc opens at its fixed base text in every capture.
+        for (const step of screen.setup ?? []) {
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.base);
         }
         await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
         await page.waitForFunction(() => {
@@ -451,6 +486,7 @@ async function main(): Promise<void> {
         for (const step of screen.setup ?? []) {
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
           if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
+          if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.current);
           if (step.hover) await page.hover(fill(step.hover, seed.ids), { timeout: 8_000 });
           if (step.click) {
             const target = fill(step.click, seed.ids);
@@ -537,6 +573,24 @@ async function main(): Promise<void> {
         if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
           throw new Error(`ready state lost after settling: ${screen.ready}`);
         }
+        // What the capture is for must actually be in the picture: scroll the first part that is not into view once, settle, and
+        // check again.
+        if (screen.frame?.length) {
+          const parts = screen.frame.map(selector => fill(selector, seed.ids));
+          const outside = () => page.evaluate((list: string[]) => list.filter(selector => {
+            const el = document.querySelector(selector);
+            if (!el) return true;
+            const r = el.getBoundingClientRect();
+            return r.width === 0 || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth;
+          }), parts) as Promise<string[]>;
+          let missing = await outside();
+          if (missing.length) {
+            await page.locator(missing[0]!).first().evaluate((el: Element) => el.scrollIntoView({ block: "nearest", inline: "nearest" }));
+            await settle(page);
+            missing = await outside();
+          }
+          if (missing.length) throw new Error(`not in frame after settling: ${missing.join(" | ")}`);
+        }
         return settled;
       };
 
@@ -571,7 +625,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats } = await openContexts(viewport, theme, true, freeze);
         const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -579,9 +633,12 @@ async function main(): Promise<void> {
           if (screen.status === "pending") return { ...entry, error: "pending", reason: screen.reason ?? null };
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
-          const page = await (screen.signedOut ? context : signedIn).newPage();
+          const page = await (screen.noJs ? noScript : screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
+            // The page's own scripts are off, not the audit's: give CHECKS and the witness their __name shim (a string, so
+            // tsx cannot wrap it in __name itself).
+            if (screen.noJs) await page.evaluate("globalThis.__name = globalThis.__name || ((f) => f)");
             Object.assign(entry, await page.evaluate(CHECKS));
             const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}.png`;
             await page.screenshot({ path: join(OUT, shot) });
@@ -630,19 +687,22 @@ async function main(): Promise<void> {
         });
         report.push(...batch);
         if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats });
+        // The second viewer's frozen captures are recorded apart and are not part of the exercised-control assertion: they count
+        // as controlled only where this entry shows receipt calls intercepted and replayed.
+        if (freeze && batch.some(r => screens().find(s => s.id === r.id)?.viewer === "invitee")) inviteeFreezeCounts.push({ pass: "mobile", viewport: size, theme, ...inviteeFreezeStats });
         console.log(JSON.stringify({ phase: "viewport-done", viewport: size, theme, errors: batch.filter(r => r.error && r.error !== "pending").length }));
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
       // Desktop hover pass: only the screens with hover witnesses, at desktop widths, mouse only.
       const hoverScreens = screens().filter(s => HOVER_WITNESSES[s.id] && s.status !== "pending" && !(s.requiresSeed ?? []).some(step => !seed.steps.includes(step)));
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, freezeStats } = await openContexts(viewport, theme, false, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats } = await openContexts(viewport, theme, false, freeze);
         const batch = await runPool(hoverScreens.filter(s => diagnosed(s.id, size)), 3, async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
-          const page = await (screen.signedOut ? context : signedIn).newPage();
+          const page = await (screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
             entry.hover = await runHovers(page, screen.id, state, size, theme, HOVER_WITNESSES[screen.id]!, freeze ? "--frozen" : "");
@@ -654,14 +714,14 @@ async function main(): Promise<void> {
         });
         hoverDesktop.push(...batch);
         if (freeze) freezeCounts.push({ pass: "desktop", viewport: size, theme, ...freezeStats });
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
       // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
       const general = screens().find(s => s.id === "app.chat.general");
       for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
-        const { context, signedIn } = await openContexts(viewport, theme, !desktop);
+        const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
         const result = await runPictureChecks(async (setup) => {
           const page = await signedIn.newPage();
           await setup(page);
@@ -673,7 +733,7 @@ async function main(): Promise<void> {
           hoverShots.push(shot);
         }, { click: desktop });
         pictures.push({ viewport: size, theme, ...result });
-        await context.close(); await signedIn.close();
+        await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
     } finally { await browser.close(); }
   } finally {
@@ -695,7 +755,7 @@ async function main(): Promise<void> {
       pictures: { runs: pictures.length, checks: pictures.reduce((n, r) => n + r.checks.length, 0),
         failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length } };
     writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures,
-      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts } } : {}) }, null, 2));
+      ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
