@@ -92,11 +92,10 @@ import "../../styles/kylon-invitation-inbox.css";
       <p class="human-invitations__hint" data-hint role="alert" hidden></p>
       <p class="human-invitations__result" data-review-result role="status" aria-live="polite"></p>
       <p class="human-invitations__fineprint" data-expiry></p>
-
-      <div class="human-invitations__actions">
-        <button class="human-invitations__button" type="button" data-accept><span class="human-invitations__label">Join <span data-join-name></span></span></button>
-        <button class="human-invitations__button human-invitations__button--quiet" type="button" data-cancel>Not now</button>
-      </div>
+    </div>
+    <div class="human-invitations__actions">
+      <button class="human-invitations__button" type="button" data-accept><span class="human-invitations__label">Join <span data-join-name></span></span></button>
+      <button class="human-invitations__button human-invitations__button--quiet" type="button" data-cancel>Not now</button>
     </div>
   </dialog>
 
@@ -222,7 +221,7 @@ import "../../styles/kylon-invitation-inbox.css";
     max-block-size: min(90svh, 46rem);
     margin: auto;
     padding: var(--s-6) var(--s-6) 0;
-    overflow-y: auto;
+    overflow: hidden;
     overscroll-behavior: contain;
     color: var(--text-muted);
     background: var(--surface);
@@ -231,6 +230,27 @@ import "../../styles/kylon-invitation-inbox.css";
     box-shadow: var(--shadow-lg);
     font-size: var(--t-base);
     line-height: var(--lh-base);
+  }
+
+  /* The content scrolls above the actions, so focused controls cannot sit behind them. */
+  .human-invitations__dialog[open] {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .human-invitations__dialog > .human-invitations__review {
+    flex: 1 1 auto;
+    min-block-size: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* Keep the existing four-pixel focus outline inside the scrollport. */
+    padding: 4px;
+    margin: -4px -4px 0;
+  }
+
+  .human-invitations__dialog > .human-invitations__actions {
+    flex: 0 0 auto;
+    position: static;
   }
 
   .human-invitations__dialog::backdrop {
