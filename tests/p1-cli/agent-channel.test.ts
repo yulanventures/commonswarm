@@ -221,6 +221,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       properties: {
         signal_id: { type: "string" }, body: { type: "string" },
         status: { type: "string", enum: ["answered", "failed", "declined"] },
+        private: { type: "boolean" },
       },
       required: ["signal_id", "body"],
     });
