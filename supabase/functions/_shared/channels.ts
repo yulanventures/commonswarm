@@ -65,6 +65,38 @@ export const CHANNEL_UPDATE_OPTIONAL_FIELDS = ["slug", "purpose"] as const;
 export const CHANNEL_UPDATE_EMPTY_TEXT =
   `channel_update needs ${CHANNEL_UPDATE_OPTIONAL_FIELDS.join(" or ")}, or both.`;
 
+/** Per-person channel involvement levels (`swarm.channel_preferences.involvement`). */
+export const CHANNEL_INVOLVEMENT_LEVELS = [
+  "everything",
+  "mentions",
+  "muted",
+] as const;
+export type ChannelInvolvement = typeof CHANNEL_INVOLVEMENT_LEVELS[number];
+
+/** Optional fields `channel_preference_set` accepts; at least one must be provided. */
+export const CHANNEL_PREFERENCE_OPTIONAL_FIELDS = [
+  "starred",
+  "involvement",
+] as const;
+export const CHANNEL_PREFERENCE_EMPTY_TEXT =
+  `channel_preference_set needs ${
+    CHANNEL_PREFERENCE_OPTIONAL_FIELDS.join(" or ")
+  }, or both.`;
+export const CHANNEL_PREFERENCE_TARGET_RULE_TEXT =
+  "channel_id must be a UUID, or null for general.";
+export const CHANNEL_STARRED_RULE_TEXT = "starred is true or false.";
+
+/** Workspace channel-creation policy (`swarm.workspaces.channel_creation_policy`). */
+export const CHANNEL_CREATION_POLICIES = ["members", "admins"] as const;
+export type ChannelCreationPolicy = typeof CHANNEL_CREATION_POLICIES[number];
+
+/** Maximum channel targets in one `channel_reorder` or `channel_star_reorder` call. */
+export const CHANNEL_REORDER_MAX = 200;
+export const CHANNEL_REORDER_RULE_TEXT =
+  `channel_ids is a non-empty list of channel UUIDs, at most ${CHANNEL_REORDER_MAX}, without duplicates.`;
+export const CHANNEL_STAR_REORDER_RULE_TEXT =
+  `channel_ids is a non-empty list of starred channel UUIDs (or null for general), at most ${CHANNEL_REORDER_MAX}, without duplicates.`;
+
 /**
  * Lowercase letters, digits and hyphens; first and last character alphanumeric.
  * The identical pattern is the CHECK on swarm.channels.slug.
@@ -169,6 +201,52 @@ export const CHANNEL_SLUG_RULE_TEXT = `A channel name uses ${
 export const RESERVED_CHANNEL_SLUG_TEXT = `Reserved names: ${
   RESERVED_CHANNEL_SLUGS.join(", ")
 }.`;
+
+/** Generated refusal sentences for involvement and workspace channel-creation policy. */
+export const CHANNEL_INVOLVEMENT_RULE_TEXT = `involvement is ${
+  classList(CHANNEL_INVOLVEMENT_LEVELS.map((level) => ({ words: level })), "or")
+}.`;
+export const CHANNEL_CREATION_POLICY_RULE_TEXT = `channel_creation_policy is ${
+  classList(CHANNEL_CREATION_POLICIES.map((policy) => ({ words: policy })), "or")
+}.`;
+
+/** Validates `channel_reorder.channel_ids` (1..CHANNEL_REORDER_MAX distinct UUIDs). */
+export function channelReorderListProblem(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > CHANNEL_REORDER_MAX) {
+    return CHANNEL_REORDER_RULE_TEXT;
+  }
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string" || !CHAT_UUID_RE.test(entry)) {
+      return CHANNEL_REORDER_RULE_TEXT;
+    }
+    const normalized = entry.toLowerCase();
+    if (seen.has(normalized)) {
+      return "channel_ids names the same channel twice.";
+    }
+    seen.add(normalized);
+  }
+  return null;
+}
+
+/** Validates `channel_star_reorder.channel_ids` (1..CHANNEL_REORDER_MAX distinct UUIDs or null for general). */
+export function channelStarReorderListProblem(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > CHANNEL_REORDER_MAX) {
+    return CHANNEL_STAR_REORDER_RULE_TEXT;
+  }
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (entry !== null && (typeof entry !== "string" || !CHAT_UUID_RE.test(entry))) {
+      return CHANNEL_STAR_REORDER_RULE_TEXT;
+    }
+    const key = entry === null ? "general" : entry.toLowerCase();
+    if (seen.has(key)) {
+      return "channel_ids names the same channel twice.";
+    }
+    seen.add(key);
+  }
+  return null;
+}
 
 /** Trim and lowercase. Slugs compare case-insensitively in the unique index. */
 export function normalizeChannelSlug(value: string): string {

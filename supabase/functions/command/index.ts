@@ -48,12 +48,24 @@ import {
   SIGNAL_UNSAFE_GLOBAL_RE,
 } from "../_shared/signal-text.ts";
 import {
+  CHANNEL_CREATION_POLICIES,
+  CHANNEL_CREATION_POLICY_RULE_TEXT,
+  type ChannelCreationPolicy,
+  CHANNEL_INVOLVEMENT_LEVELS,
+  CHANNEL_INVOLVEMENT_RULE_TEXT,
+  type ChannelInvolvement,
+  CHANNEL_PREFERENCE_EMPTY_TEXT,
+  CHANNEL_PREFERENCE_OPTIONAL_FIELDS,
+  CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_PURPOSE_MAX_TEXT,
   CHANNEL_PURPOSE_TYPE_TEXT,
+  CHANNEL_STARRED_RULE_TEXT,
   CHANNEL_UPDATE_EMPTY_TEXT,
   CHANNEL_UPDATE_OPTIONAL_FIELDS,
+  channelReorderListProblem,
   channelSlugProblem,
+  channelStarReorderListProblem,
   chatSignalKeys,
   chatSignalShapeProblem,
   commandFieldsMessage,
@@ -396,7 +408,19 @@ type ChannelCommand =
     purpose?: string | null;
   }
   | { kind: "channel_archive"; channel_id: string }
-  | { kind: "channel_unarchive"; channel_id: string };
+  | { kind: "channel_unarchive"; channel_id: string }
+  | {
+    kind: "channel_preference_set";
+    channel_id: string | null;
+    starred?: boolean;
+    involvement?: ChannelInvolvement;
+  }
+  | { kind: "channel_star_reorder"; channel_ids: Array<string | null> }
+  | { kind: "channel_reorder"; channel_ids: string[] }
+  | {
+    kind: "workspace_channel_policy_set";
+    channel_creation_policy: ChannelCreationPolicy;
+  };
 
 interface ChannelRecord {
   channel_id: string;
@@ -407,6 +431,16 @@ interface ChannelRecord {
   created_by_kind: CredentialKind;
   created_at: string;
   archived_at: string | null;
+}
+
+interface ChannelPreferenceRecord {
+  workspace_id: string;
+  channel_id: string | null;
+  target_key: string;
+  starred: boolean;
+  star_rank: number | null;
+  involvement: ChannelInvolvement;
+  updated_at: string;
 }
 
 interface SignalAttachment extends SignalAttachmentRef {
@@ -706,6 +740,10 @@ interface StoredResponse {
   signal?: SignalRecord;
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
+  preference?: ChannelPreferenceRecord;
+  preferences?: ChannelPreferenceRecord[];
+  ordered_channel_ids?: string[];
+  channel_creation_policy?: ChannelCreationPolicy;
   memory?: MemoryRecord | MemoryGone;
   memory_outcome?: "created" | "updated" | "duplicate" | "forgotten";
   previous_statement?: string;
@@ -1143,6 +1181,10 @@ const CHANNEL_COMMAND_KINDS = [
   "channel_update",
   "channel_archive",
   "channel_unarchive",
+  "channel_preference_set",
+  "channel_star_reorder",
+  "channel_reorder",
+  "workspace_channel_policy_set",
 ] as const;
 const TOUCH_PRESENCE_KIND = "touch_presence";
 
@@ -2211,6 +2253,138 @@ function validateCommand(
       command: {
         kind,
         channel_id: (cmd.channel_id as string).toLowerCase(),
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_preference_set") {
+    const required = ["channel_id"];
+    const optional = [...CHANNEL_PREFERENCE_OPTIONAL_FIELDS];
+    const presentOptional = optional.filter((key) => Object.hasOwn(cmd, key));
+    const keysOk = exactKeys(cmd, ["kind", ...required, ...presentOptional]);
+    const idOk = cmd.channel_id === null ||
+      (typeof cmd.channel_id === "string" && UUID_RE.test(cmd.channel_id));
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: !keysOk
+          ? commandFieldsMessage("channel_preference_set", required, optional)
+          : CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
+      };
+    }
+    const hasStarred = Object.hasOwn(cmd, "starred") && cmd.starred !== undefined;
+    const hasInvolvement = Object.hasOwn(cmd, "involvement") &&
+      cmd.involvement !== undefined;
+    if (!hasStarred && !hasInvolvement) {
+      return { ok: false, status: 400, reason: CHANNEL_PREFERENCE_EMPTY_TEXT };
+    }
+    if (hasStarred && typeof cmd.starred !== "boolean") {
+      return { ok: false, status: 400, reason: CHANNEL_STARRED_RULE_TEXT };
+    }
+    if (
+      hasInvolvement &&
+      !(
+        typeof cmd.involvement === "string" &&
+        (CHANNEL_INVOLVEMENT_LEVELS as readonly string[]).includes(
+          cmd.involvement,
+        )
+      )
+    ) {
+      return { ok: false, status: 400, reason: CHANNEL_INVOLVEMENT_RULE_TEXT };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_preference_set",
+        channel_id: cmd.channel_id === null
+          ? null
+          : (cmd.channel_id as string).toLowerCase(),
+        ...(hasStarred ? { starred: cmd.starred as boolean } : {}),
+        ...(hasInvolvement
+          ? { involvement: cmd.involvement as ChannelInvolvement }
+          : {}),
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_star_reorder") {
+    const required = ["channel_ids"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    if (!keysOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: commandFieldsMessage("channel_star_reorder", required),
+      };
+    }
+    const listProblem = channelStarReorderListProblem(cmd.channel_ids);
+    if (listProblem !== null) {
+      return { ok: false, status: 400, reason: listProblem };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_star_reorder",
+        channel_ids: (cmd.channel_ids as Array<string | null>).map((entry) =>
+          entry === null ? null : entry.toLowerCase()
+        ),
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_reorder") {
+    const required = ["channel_ids"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    if (!keysOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: commandFieldsMessage("channel_reorder", required),
+      };
+    }
+    const listProblem = channelReorderListProblem(cmd.channel_ids);
+    if (listProblem !== null) {
+      return { ok: false, status: 400, reason: listProblem };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_reorder",
+        channel_ids: (cmd.channel_ids as string[]).map((entry) =>
+          entry.toLowerCase()
+        ),
+      },
+    };
+  }
+
+  if (cmd.kind === "workspace_channel_policy_set") {
+    const required = ["channel_creation_policy"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    if (!keysOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: commandFieldsMessage("workspace_channel_policy_set", required),
+      };
+    }
+    if (
+      typeof cmd.channel_creation_policy !== "string" ||
+      !(CHANNEL_CREATION_POLICIES as readonly string[]).includes(
+        cmd.channel_creation_policy,
+      )
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        reason: CHANNEL_CREATION_POLICY_RULE_TEXT,
+      };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "workspace_channel_policy_set",
+        channel_creation_policy: cmd.channel_creation_policy as ChannelCreationPolicy,
       },
     };
   }
@@ -3365,6 +3539,27 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.reraise) === null
       ? {}
       : { reraise: response.reraise as unknown as ReraiseRecord }),
+    ...(record(response.channel) === null
+      ? {}
+      : { channel: response.channel as unknown as ChannelRecord }),
+    ...(record(response.preference) === null
+      ? {}
+      : { preference: response.preference as unknown as ChannelPreferenceRecord }),
+    ...(Array.isArray(response.preferences)
+      ? { preferences: response.preferences as unknown as ChannelPreferenceRecord[] }
+      : {}),
+    ...(Array.isArray(response.ordered_channel_ids)
+      ? { ordered_channel_ids: response.ordered_channel_ids.map(String) }
+      : {}),
+    ...(typeof response.channel_creation_policy === "string" &&
+        (CHANNEL_CREATION_POLICIES as readonly string[]).includes(
+          response.channel_creation_policy,
+        )
+      ? {
+        channel_creation_policy:
+          response.channel_creation_policy as ChannelCreationPolicy,
+      }
+      : {}),
     ...(record(response.memory) === null
       ? {}
       : { memory: response.memory as unknown as MemoryRecord | MemoryGone }),
@@ -9731,7 +9926,14 @@ async function enforceFreeTierBudget(
 }
 
 type ChannelOutcome =
-  | { ok: true; channel: ChannelRecord }
+  | {
+    ok: true;
+    channel?: ChannelRecord;
+    preference?: ChannelPreferenceRecord;
+    preferences?: ChannelPreferenceRecord[];
+    ordered_channel_ids?: string[];
+    channel_creation_policy?: ChannelCreationPolicy;
+  }
   | {
     ok: false;
     status: number;
@@ -9751,6 +9953,16 @@ interface ChannelRow {
   archived_at: Date | null;
 }
 
+interface ChannelPreferenceRow {
+  workspace_id: string;
+  channel_id: string | null;
+  target_key: string;
+  starred: boolean;
+  star_rank: number | null;
+  involvement: ChannelInvolvement;
+  updated_at: Date;
+}
+
 function channelRecord(row: ChannelRow): ChannelRecord {
   return {
     channel_id: row.channel_id,
@@ -9764,6 +9976,36 @@ function channelRecord(row: ChannelRow): ChannelRecord {
       ? null
       : row.archived_at.toISOString(),
   };
+}
+
+function channelPreferenceRecord(
+  row: ChannelPreferenceRow,
+): ChannelPreferenceRecord {
+  return {
+    workspace_id: row.workspace_id,
+    channel_id: row.channel_id,
+    target_key: row.target_key,
+    starred: row.starred,
+    star_rank: row.star_rank,
+    involvement: row.involvement,
+    updated_at: row.updated_at.toISOString(),
+  };
+}
+
+async function isHumanWorkspaceAdmin(
+  tx: Sql,
+  workspaceId: string,
+  auth: AuthContext,
+): Promise<boolean> {
+  if (auth.credentialKind !== "user" || auth.actor.user === null) return false;
+  const [membership] = await tx<{ role: string }[]>`
+    SELECT role FROM swarm.memberships
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND user_id = ${auth.actor.user}::uuid
+      AND revoked_at IS NULL
+    LIMIT 1
+  `;
+  return membership?.role === "owner" || membership?.role === "admin";
 }
 
 /** Live slugs in the route's workspace, for a refusal message we generate. */
@@ -9789,6 +10031,213 @@ async function applyChannelCommand(
   auth: AuthContext,
   command: ChannelCommand,
 ): Promise<ChannelOutcome> {
+  if (command.kind === "channel_preference_set") {
+    if (auth.credentialKind !== "user" || auth.actor.user === null) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_forbidden",
+        message:
+          "Channel stars and notification settings belong to a signed-in person.",
+        reason: "channel_preference_requires_user",
+      };
+    }
+    const userId = auth.actor.user;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-prefs:${route.workspaceId}:${userId}`}, 0))`;
+    if (command.channel_id !== null) {
+      const [found] = await tx<{ channel_id: string }[]>`
+        SELECT channel_id FROM swarm.channels
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND channel_id = ${command.channel_id}::uuid
+        LIMIT 1
+      `;
+      if (found === undefined) {
+        return {
+          ok: false,
+          status: 404,
+          error: "channel_not_found",
+          message: "There is no channel with that id in this workspace.",
+          reason: "channel_not_found",
+        };
+      }
+    }
+    const targetKey = command.channel_id ?? "general";
+    const [existing] = await tx<ChannelPreferenceRow[]>`
+      SELECT workspace_id, channel_id, target_key, starred, star_rank, involvement, updated_at
+      FROM swarm.channel_preferences
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND user_id = ${userId}::uuid
+        AND target_key = ${targetKey}
+      LIMIT 1
+    `;
+    const nextStarred = command.starred !== undefined
+      ? command.starred
+      : (existing?.starred ?? false);
+    const nextInvolvement = command.involvement !== undefined
+      ? command.involvement
+      : (existing?.involvement ?? "everything");
+    let nextStarRank: number | null = null;
+    if (nextStarred) {
+      if (existing?.starred && existing.star_rank !== null) {
+        nextStarRank = existing.star_rank;
+      } else {
+        const [rankRow] = await tx<{ next_rank: number }[]>`
+          SELECT (COALESCE(MAX(star_rank), -1) + 1)::integer AS next_rank
+          FROM swarm.channel_preferences
+          WHERE workspace_id = ${route.workspaceId}::uuid
+            AND user_id = ${userId}::uuid
+            AND starred = true
+        `;
+        nextStarRank = rankRow?.next_rank ?? 0;
+      }
+    }
+    const saved = await tx<ChannelPreferenceRow[]>`
+      INSERT INTO swarm.channel_preferences (
+        workspace_id, user_id, channel_id, starred, star_rank, involvement, updated_at
+      ) VALUES (
+        ${route.workspaceId}::uuid,
+        ${userId}::uuid,
+        ${command.channel_id}::uuid,
+        ${nextStarred}::boolean,
+        ${nextStarRank}::integer,
+        ${nextInvolvement},
+        statement_timestamp()
+      )
+      ON CONFLICT (workspace_id, user_id, target_key) DO UPDATE
+      SET starred = EXCLUDED.starred,
+          star_rank = EXCLUDED.star_rank,
+          involvement = EXCLUDED.involvement,
+          updated_at = statement_timestamp()
+      RETURNING workspace_id, channel_id, target_key, starred, star_rank, involvement, updated_at
+    `;
+    return { ok: true, preference: channelPreferenceRecord(saved[0]!) };
+  }
+
+  if (command.kind === "channel_star_reorder") {
+    if (auth.credentialKind !== "user" || auth.actor.user === null) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_forbidden",
+        message:
+          "Channel stars and notification settings belong to a signed-in person.",
+        reason: "channel_preference_requires_user",
+      };
+    }
+    const userId = auth.actor.user;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-prefs:${route.workspaceId}:${userId}`}, 0))`;
+    const starredRows = await tx<ChannelPreferenceRow[]>`
+      SELECT workspace_id, channel_id, target_key, starred, star_rank, involvement, updated_at
+      FROM swarm.channel_preferences
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND user_id = ${userId}::uuid
+        AND starred = true
+      ORDER BY star_rank ASC, target_key ASC
+    `;
+    const starredSet = new Set(starredRows.map((row) => row.target_key));
+    const requestedKeys = command.channel_ids.map((id) =>
+      id === null ? "general" : id
+    );
+    for (const key of requestedKeys) {
+      if (!starredSet.has(key)) {
+        return {
+          ok: false,
+          status: 409,
+          error: "channel_star_mismatch",
+          message: "Every channel in channel_ids must already be starred.",
+          reason: "channel_not_starred",
+        };
+      }
+    }
+    const requestedSet = new Set(requestedKeys);
+    const fullKeys = [
+      ...requestedKeys,
+      ...starredRows
+        .map((row) => row.target_key)
+        .filter((key) => !requestedSet.has(key)),
+    ];
+    const updatedRows = await tx<ChannelPreferenceRow[]>`
+      UPDATE swarm.channel_preferences AS p
+      SET star_rank = (ord.pos - 1)::integer,
+          updated_at = statement_timestamp()
+      FROM unnest(${fullKeys}::text[]) WITH ORDINALITY AS ord(target_key, pos)
+      WHERE p.workspace_id = ${route.workspaceId}::uuid
+        AND p.user_id = ${userId}::uuid
+        AND p.target_key = ord.target_key
+      RETURNING p.workspace_id, p.channel_id, p.target_key, p.starred, p.star_rank, p.involvement, p.updated_at
+    `;
+    updatedRows.sort((a, b) => (a.star_rank ?? 0) - (b.star_rank ?? 0));
+    return { ok: true, preferences: updatedRows.map(channelPreferenceRecord) };
+  }
+
+  if (command.kind === "channel_reorder") {
+    if (!(await isHumanWorkspaceAdmin(tx, route.workspaceId, auth))) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_forbidden",
+        message: "Only a workspace owner or admin can reorder channels.",
+        reason: "channel_reorder_requires_admin",
+      };
+    }
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-order:${route.workspaceId}`}, 0))`;
+    const allChannels = await tx<{ channel_id: string }[]>`
+      SELECT channel_id FROM swarm.channels
+      WHERE workspace_id = ${route.workspaceId}::uuid
+      ORDER BY CASE WHEN sort_rank > 0 THEN 0 ELSE 1 END, sort_rank ASC, slug ASC, channel_id ASC
+    `;
+    const existingSet = new Set(allChannels.map((row) => row.channel_id));
+    for (const id of command.channel_ids) {
+      if (!existingSet.has(id)) {
+        return {
+          ok: false,
+          status: 404,
+          error: "channel_not_found",
+          message: "There is no channel with that id in this workspace.",
+          reason: "channel_not_found",
+        };
+      }
+    }
+    const requestedSet = new Set(command.channel_ids);
+    const fullIds = [
+      ...command.channel_ids,
+      ...allChannels
+        .map((row) => row.channel_id)
+        .filter((id) => !requestedSet.has(id)),
+    ];
+    await tx`
+      UPDATE swarm.channels AS c
+      SET sort_rank = ord.pos::integer
+      FROM unnest(${fullIds}::uuid[]) WITH ORDINALITY AS ord(channel_id, pos)
+      WHERE c.workspace_id = ${route.workspaceId}::uuid
+        AND c.channel_id = ord.channel_id
+    `;
+    return { ok: true, ordered_channel_ids: fullIds };
+  }
+
+  if (command.kind === "workspace_channel_policy_set") {
+    if (!(await isHumanWorkspaceAdmin(tx, route.workspaceId, auth))) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_forbidden",
+        message:
+          "Only a workspace owner or admin can change who may create channels.",
+        reason: "channel_policy_requires_admin",
+      };
+    }
+    await tx`
+      UPDATE swarm.workspaces
+      SET channel_creation_policy = ${command.channel_creation_policy}
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND archived_at IS NULL
+    `;
+    return {
+      ok: true,
+      channel_creation_policy: command.channel_creation_policy,
+    };
+  }
+
   // Create, rename, and slug-changing updates check a name, then write it. Two at once in one
   // workspace would both pass the check and the second write would hit the unique index as a
   // server error, so they take this workspace's channel-name lock first.
@@ -9800,6 +10249,24 @@ async function applyChannelCommand(
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-names:${route.workspaceId}`}, 0))`;
   }
   if (command.kind === "channel_create") {
+    const [wsPolicy] = await tx<{ channel_creation_policy: ChannelCreationPolicy }[]>`
+      SELECT channel_creation_policy FROM swarm.workspaces
+      WHERE workspace_id = ${route.workspaceId}::uuid
+      LIMIT 1
+    `;
+    if (
+      wsPolicy?.channel_creation_policy === "admins" &&
+      !(await isHumanWorkspaceAdmin(tx, route.workspaceId, auth))
+    ) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_forbidden",
+        message:
+          "Only a workspace owner or admin can create channels in this workspace.",
+        reason: "channel_creation_requires_admin",
+      };
+    }
     const existing = await tx<ChannelRow[]>`
       SELECT channel_id, workspace_id, slug, purpose,
              created_by_principal, created_by_kind, created_at, archived_at
@@ -9821,15 +10288,26 @@ async function applyChannelCommand(
         reason: "channel_slug_taken",
       };
     }
+    // Lock order: channel-names:<ws> before channel-order:<ws>.
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-order:${route.workspaceId}`}, 0))`;
+    const [rankRow] = await tx<{ next_rank: number }[]>`
+      SELECT CASE
+        WHEN COALESCE(MAX(sort_rank), 0) > 0 THEN MAX(sort_rank) + 1
+        ELSE 0
+      END::integer AS next_rank
+      FROM swarm.channels
+      WHERE workspace_id = ${route.workspaceId}::uuid
+    `;
     const rows = await tx<ChannelRow[]>`
       INSERT INTO swarm.channels (
-        channel_id, workspace_id, slug, purpose,
+        channel_id, workspace_id, slug, purpose, sort_rank,
         created_by_principal, created_by_kind, created_at
       ) VALUES (
         ${crypto.randomUUID()}::uuid,
         ${route.workspaceId}::uuid,
         ${command.slug},
         ${command.purpose},
+        ${rankRow?.next_rank ?? 0}::integer,
         ${canonicalPrincipal(auth.actor)}::uuid,
         ${auth.credentialKind},
         statement_timestamp()
@@ -14448,7 +14926,19 @@ async function handleTransaction(
       const channelResponse: StoredResponse = {
         ok: true,
         event_ids: [],
-        channel: outcome.channel,
+        ...(outcome.channel !== undefined ? { channel: outcome.channel } : {}),
+        ...(outcome.preference !== undefined
+          ? { preference: outcome.preference }
+          : {}),
+        ...(outcome.preferences !== undefined
+          ? { preferences: outcome.preferences }
+          : {}),
+        ...(outcome.ordered_channel_ids !== undefined
+          ? { ordered_channel_ids: outcome.ordered_channel_ids }
+          : {}),
+        ...(outcome.channel_creation_policy !== undefined
+          ? { channel_creation_policy: outcome.channel_creation_policy }
+          : {}),
       };
       const inserted = await tx<{ command_id: string }[]>`
         INSERT INTO swarm.idempotency_keys (

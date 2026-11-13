@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  CHANNEL_CREATION_POLICIES,
+  CHANNEL_CREATION_POLICY_RULE_TEXT,
+  CHANNEL_INVOLVEMENT_LEVELS,
+  CHANNEL_INVOLVEMENT_RULE_TEXT,
+  CHANNEL_PREFERENCE_EMPTY_TEXT,
+  CHANNEL_PREFERENCE_OPTIONAL_FIELDS,
+  CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_PURPOSE_MAX_TEXT,
   CHANNEL_PURPOSE_TYPE_TEXT,
+  CHANNEL_REORDER_MAX,
+  CHANNEL_REORDER_RULE_TEXT,
+  CHANNEL_STAR_REORDER_RULE_TEXT,
+  CHANNEL_STARRED_RULE_TEXT,
   CHANNEL_UPDATE_EMPTY_TEXT,
   CHANNEL_UPDATE_OPTIONAL_FIELDS,
+  channelReorderListProblem,
+  channelStarReorderListProblem,
   commandFieldsMessage,
   parseSignalRecipients,
   SIGNAL_RECIPIENT_KINDS,
@@ -164,6 +178,87 @@ test("channel_update and channel_unarchive generated field and purpose sentences
   assert.ok(
     new RegExp(`(?<!\\d)${CHANNEL_PURPOSE_MAX}(?!\\d)`).test(CHANNEL_PURPOSE_MAX_TEXT),
     "the purpose bound sentence carries CHANNEL_PURPOSE_MAX",
+  );
+});
+
+test("CM-2a channel preferences, ordering and creation-policy constants match SQL CHECKs and generate their sentences", () => {
+  const migration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261113000002_channel_preferences_and_order.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (const level of CHANNEL_INVOLVEMENT_LEVELS) {
+    assert.ok(
+      CHANNEL_INVOLVEMENT_RULE_TEXT.includes(level),
+      `involvement rule text names ${level}`,
+    );
+    assert.ok(
+      migration.includes(`'${level}'`),
+      `migration CHECK names involvement '${level}'`,
+    );
+  }
+  for (const policy of CHANNEL_CREATION_POLICIES) {
+    assert.ok(
+      CHANNEL_CREATION_POLICY_RULE_TEXT.includes(policy),
+      `creation policy rule text names ${policy}`,
+    );
+    assert.ok(
+      migration.includes(`'${policy}'`),
+      `migration CHECK names policy '${policy}'`,
+    );
+  }
+  assert.equal(
+    commandFieldsMessage(
+      "channel_preference_set",
+      ["channel_id"],
+      CHANNEL_PREFERENCE_OPTIONAL_FIELDS,
+    ),
+    "channel_preference_set takes channel_id, and optionally starred and involvement, and nothing else.",
+  );
+  assert.equal(
+    CHANNEL_PREFERENCE_EMPTY_TEXT,
+    "channel_preference_set needs starred or involvement, or both.",
+  );
+  assert.equal(
+    CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
+    "channel_id must be a UUID, or null for general.",
+  );
+  assert.equal(CHANNEL_STARRED_RULE_TEXT, "starred is true or false.");
+  assert.ok(
+    new RegExp(`(?<!\\d)${CHANNEL_REORDER_MAX}(?!\\d)`).test(
+      CHANNEL_REORDER_RULE_TEXT,
+    ),
+  );
+  assert.ok(
+    new RegExp(`(?<!\\d)${CHANNEL_REORDER_MAX}(?!\\d)`).test(
+      CHANNEL_STAR_REORDER_RULE_TEXT,
+    ),
+  );
+
+  const u1 = "22222222-2222-4222-8222-222222222222";
+  const u2 = "33333333-3333-4333-8333-333333333333";
+  assert.equal(channelReorderListProblem([u1, u2]), null);
+  assert.equal(channelReorderListProblem([]), CHANNEL_REORDER_RULE_TEXT);
+  assert.equal(channelReorderListProblem([null]), CHANNEL_REORDER_RULE_TEXT);
+  assert.match(
+    String(channelReorderListProblem([u1, u1.toUpperCase()])),
+    /same channel twice/,
+  );
+
+  assert.equal(channelStarReorderListProblem([null, u1, u2]), null);
+  assert.equal(
+    channelStarReorderListProblem([]),
+    CHANNEL_STAR_REORDER_RULE_TEXT,
+  );
+  assert.match(
+    String(channelStarReorderListProblem([null, null])),
+    /same channel twice/,
+  );
+  assert.match(
+    String(channelStarReorderListProblem([u1, u1.toUpperCase()])),
+    /same channel twice/,
   );
 });
 
