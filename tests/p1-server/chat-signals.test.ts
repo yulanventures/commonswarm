@@ -2387,3 +2387,45 @@ test("an agent added from another workspace is woken here, mentioned or addresse
     WHERE principal_id = ${visitor}::uuid AND workspace_id = ${f.workspace}::uuid`;
   assert.equal((await send(f.otherJwt, installedPost({ mentions: [{ kind: "agent", id: visitor }] }))).status, 403);
 });
+
+test("a delivery says who can read its message, and an agent added from another workspace claims its deliveries here", async () => {
+  // A token-holding agent whose principal row names another workspace; only its membership names this one.
+  const home = randomUUID();
+  const visitor = randomUUID();
+  const token = `swm_agt_${randomBytes(32).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    const device = randomUUID();
+    const run = randomUUID();
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${home}::uuid, 'ClaimHome', ${f.ownerId}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${home}::uuid, ${f.ownerId}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${f.ownerId}::uuid, 'claim-tests')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${visitor}::uuid, ${home}::uuid, ${f.ownerId}::uuid, ${`claimer-${visitor.slice(0, 6)}`})`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${visitor}::uuid, ${f.workspace}::uuid, ${f.ownerId}::uuid, ${f.ownerId}::uuid)`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${visitor}::uuid, ${device}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
+      VALUES (${randomUUID()}::uuid, ${visitor}::uuid, ${run}::uuid, ${tx.json(["post_signal"])}::jsonb,
+        ${createHash("sha256").update(token).digest()}, statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)`;
+  });
+  const mentioned = await send(f.otherJwt, installedPost({ body: "public, for the visitor", mentions: [{ kind: "agent", id: visitor }] }));
+  const addressed = await send(f.otherJwt, installedPost({ body: "private, for the visitor", to_agent_principal_id: visitor }));
+  assert.equal(mentioned.status, 200, JSON.stringify(mentioned.body));
+  assert.equal(addressed.status, 200, JSON.stringify(addressed.body));
+  // The claim is made in THIS workspace, with the visitor's own token.
+  const claim = await send(token, { kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 10 });
+  assert.equal(claim.status, 200, JSON.stringify(claim.body) + functionLogs.slice(-3000));
+  const rows = claim.body.deliveries as Array<{ signal: { id: string; to_agent: string; audience: string } }>;
+  assert.deepEqual(
+    rows.map((row) => [row.signal.id, row.signal.audience, row.signal.to_agent]),
+    [
+      [String(signalOf(mentioned.body).id), "workspace", visitor],
+      [String(signalOf(addressed.body).id), "private", visitor],
+    ],
+  );
+  // Removed from this workspace: the claim is refused again.
+  await sql`UPDATE swarm.agent_workspace_memberships SET revoked_at = statement_timestamp()
+    WHERE principal_id = ${visitor}::uuid AND workspace_id = ${f.workspace}::uuid`;
+  const after = await send(token, { kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 10 });
+  assert.notEqual(after.status, 200, JSON.stringify(after.body));
+});
