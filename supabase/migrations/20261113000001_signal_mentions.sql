@@ -10,8 +10,9 @@
 -- (hydrateDeliveryRefs, the delivery acks, the hosted check) admits it to a message the whole
 -- workspace can already read.
 --
--- Additive only: no existing table, view or trigger changes. The one replaced function is
--- swarm.hosted_mcp_check_visible_signals, which gains one arm. swarm_read.signals is not recreated.
+-- No existing table, view or trigger changes. Three functions are replaced in place: the hosted
+-- check's visibility function and its batch guard each gain the mention arm, and the shared wake
+-- predicate now follows workspace membership (see below). swarm_read.signals is not recreated.
 
 CREATE TABLE swarm.signal_mentions (
   signal_id    uuid NOT NULL,
@@ -34,8 +35,10 @@ CREATE TABLE swarm.signal_mentions (
     REFERENCES swarm.signals (id, workspace_id),
   FOREIGN KEY (workspace_id, mentioned_user_id)
     REFERENCES swarm.memberships (workspace_id, user_id),
+  -- The agent's membership of THIS workspace, as on swarm.signal_recipients since 20261028000002:
+  -- swarm.agent_principals.workspace_id is only the workspace an agent started in.
   FOREIGN KEY (mentioned_agent_principal_id, workspace_id)
-    REFERENCES swarm.agent_principals (principal_id, workspace_id)
+    REFERENCES swarm.agent_workspace_memberships (principal_id, workspace_id)
 );
 
 CREATE INDEX signal_mentions_agent
@@ -116,6 +119,37 @@ CREATE CONSTRAINT TRIGGER signal_mentions_public_at_commit
   AFTER INSERT ON swarm.signal_mentions
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION swarm.require_public_new_signal_for_mention();
+
+-- The shared wake predicate asked whether the agent's ORIGIN workspace is the signal's, so an agent
+-- added to a second workspace (20261028000002) was never woken there, whether addressed or
+-- mentioned. It now asks for a live principal with a live membership of the signal's workspace.
+-- Same signature, owner and grants; both recipient triggers and the mention trigger read it.
+CREATE OR REPLACE FUNCTION swarm.agent_delivery_is_wakeable(
+  p_signal_id uuid,
+  p_workspace_id uuid,
+  p_agent_principal_id uuid
+) RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM swarm.signals AS s
+    JOIN swarm.agent_principals AS recipient
+      ON recipient.principal_id = p_agent_principal_id
+    JOIN swarm.agent_workspace_memberships AS seat
+      ON seat.principal_id = recipient.principal_id
+     AND seat.workspace_id = s.workspace_id
+    WHERE s.id = p_signal_id
+      AND s.workspace_id = p_workspace_id
+      AND s.kind IN ('ask', 'note')
+      AND s.until > statement_timestamp()
+      AND recipient.revoked_at IS NULL
+      AND seat.revoked_at IS NULL
+  );
+$$;
 
 -- The wake. The same shared predicate as the two recipient triggers (20260905000020), so a dead
 -- signal, a working-on signal and a revoked agent write no row here either. One difference: an
@@ -257,4 +291,76 @@ AS $fn$
       )
     )
     AND (p_signal_ids IS NULL OR s.id = ANY(p_signal_ids))
+$fn$;
+
+-- The batch a hosted check records is re-validated on insert. Same body as 20260928000004 with the
+-- mention arm, so it accepts exactly what swarm.hosted_mcp_check_visible_signals selects.
+CREATE OR REPLACE FUNCTION swarm.hosted_mcp_check_batches_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $fn$
+DECLARE
+  v_ordered_ids uuid[];
+  v_terminal_created_at timestamptz;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'SWARM_HOSTED_CHECK_BATCH_IMMUTABLE' USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.acknowledged_at IS NOT NULL THEN
+      RAISE EXCEPTION 'SWARM_HOSTED_CHECK_BATCH_INVALID' USING ERRCODE = '23514';
+    END IF;
+    SELECT array_agg(s.id ORDER BY date_trunc('milliseconds', s.created_at), s.id),
+           max(date_trunc('milliseconds', s.created_at)) FILTER (
+             WHERE s.id = NEW.terminal_signal_id
+           )
+    INTO v_ordered_ids, v_terminal_created_at
+    FROM unnest(NEW.signal_ids) AS requested(signal_id)
+    JOIN swarm.signals AS s ON s.id = requested.signal_id
+    WHERE s.workspace_id = NEW.workspace_id
+      AND (
+        s.to_agent_principal_id = NEW.principal_id
+        OR EXISTS (
+          SELECT 1
+          FROM swarm.signal_recipients AS recipient
+          WHERE recipient.workspace_id = s.workspace_id
+            AND recipient.signal_id = s.id
+            AND recipient.recipient_agent_principal_id = NEW.principal_id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM swarm.signal_mentions AS mention
+          WHERE mention.workspace_id = s.workspace_id
+            AND mention.signal_id = s.id
+            AND mention.mentioned_agent_principal_id = NEW.principal_id
+        )
+      );
+    IF v_ordered_ids IS DISTINCT FROM NEW.signal_ids
+       OR cardinality(v_ordered_ids) <> cardinality(NEW.signal_ids)
+       OR (SELECT count(DISTINCT signal_id)
+           FROM unnest(NEW.signal_ids) AS distinct_ids(signal_id)) <>
+          cardinality(NEW.signal_ids)
+       OR v_terminal_created_at IS DISTINCT FROM NEW.terminal_created_at
+    THEN
+      RAISE EXCEPTION 'SWARM_HOSTED_CHECK_BATCH_INVALID' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.batch_id IS DISTINCT FROM OLD.batch_id
+     OR NEW.seat_id IS DISTINCT FROM OLD.seat_id
+     OR NEW.grant_id IS DISTINCT FROM OLD.grant_id
+     OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+     OR NEW.principal_id IS DISTINCT FROM OLD.principal_id
+     OR NEW.signal_ids IS DISTINCT FROM OLD.signal_ids
+     OR NEW.terminal_created_at IS DISTINCT FROM OLD.terminal_created_at
+     OR NEW.terminal_signal_id IS DISTINCT FROM OLD.terminal_signal_id
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR OLD.acknowledged_at IS NOT NULL
+     OR NEW.acknowledged_at IS NULL
+  THEN
+    RAISE EXCEPTION 'SWARM_HOSTED_CHECK_BATCH_IMMUTABLE' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END
 $fn$;

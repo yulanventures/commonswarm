@@ -150,10 +150,11 @@ if (input.operation === "single") {
       signal_kind: "note",
       body: "HM hosted check " + crypto.randomUUID(),
       to_user_id: null,
-      to_agent_principal_id: input.recipientPrincipal,
+      to_agent_principal_id: input.mention ? null : input.recipientPrincipal,
       in_reply_to: null,
       about: null,
       until_ms: input.untilMs,
+      ...(input.mention ? { mentions: [{ kind: "agent", id: input.recipientPrincipal }] } : {}),
     }));
   }
 } else {
@@ -315,6 +316,8 @@ function runHarness<T>(fixture: Fixture, input: Record<string, unknown>, rollbac
       SWARM_ENV: "test", SWARM_DATABASE_URL: local.DB_URL,
       SUPABASE_DB_URL: local.DB_URL, SUPABASE_URL: local.API_URL,
       SUPABASE_ANON_KEY: local.ANON_KEY,
+      // Mentions on: no fixture here has a workspace lead, so only posts that send mentions change.
+      SWARM_CHAT_MENTIONS: "1",
       ...(rollback ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: "15" } : {}),
     },
     timeout: 90_000,
@@ -539,6 +542,24 @@ test("ACK accepts upper-case UUID spelling and advances the batch", async () => 
     WHERE batch_id = ${opened.body.batch_id as string}::uuid
   `;
   assert.ok(stored?.acknowledged_at instanceof Date);
+});
+
+test("a public message that mentions the seat's agent arrives in its check, and one that mentions another agent does not", async () => {
+  const fixture = await seedFixture();
+  const post = (recipientPrincipal: string) => runHarness<HarnessResult[]>(fixture, {
+    operation: "post-signals", ownerJwt: fixture.ownerJwt, count: 1, recipientPrincipal,
+    untilMs: 10 * 60 * 1000, mention: true,
+  })[0]!;
+  const mine = post(fixture.principalA);
+  const theirs = post(fixture.principalB);
+  assert.equal(mine.status, 200, JSON.stringify(mine.body));
+  assert.equal(theirs.status, 200, JSON.stringify(theirs.body));
+  const mineId = (mine.body.signal as { id: string; to_agent: string | null }).id;
+  assert.equal((mine.body.signal as { to_agent: string | null }).to_agent, null, "the mention is not an address");
+  // The check opens a batch, which the batch guard has to accept for a mention-only signal.
+  const opened = runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  assert.deepEqual((opened.body.signals as Array<{ id: string }>).map((signal) => signal.id), [mineId]);
 });
 
 test("batch guard rejects signals not addressed to the seat principal", async () => {

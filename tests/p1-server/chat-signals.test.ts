@@ -2363,3 +2363,27 @@ test("a hosted seat's check admits a message that mentions its agent, and still 
   });
   assert.deepEqual(visible, [[ids[0]], [ids[0]]]);
 });
+
+test("an agent added from another workspace is woken here, mentioned or addressed", async () => {
+  // Its principal row names the workspace it started in; only its membership names this one.
+  const home = randomUUID();
+  const visitor = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${home}::uuid, 'VisitorHome', ${f.ownerId}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${home}::uuid, ${f.ownerId}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${visitor}::uuid, ${home}::uuid, ${f.ownerId}::uuid, ${`visitor-${visitor.slice(0, 6)}`})`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${visitor}::uuid, ${f.workspace}::uuid, ${f.ownerId}::uuid, ${f.ownerId}::uuid)`;
+  });
+  const mentioned = await send(f.otherJwt, installedPost({ mentions: [{ kind: "agent", id: visitor }] }));
+  assert.equal(mentioned.status, 200, JSON.stringify(mentioned.body) + functionLogs.slice(-3000));
+  assert.deepEqual(await deliveriesOf(String(signalOf(mentioned.body).id)), [visitor]);
+  const addressed = await send(f.otherJwt, installedPost({ to_agent_principal_id: visitor }));
+  assert.equal(addressed.status, 200, JSON.stringify(addressed.body));
+  assert.deepEqual(await deliveriesOf(String(signalOf(addressed.body).id)), [visitor]);
+  // Removed from this workspace again: a new mention is refused, as a dead recipient is.
+  await sql`UPDATE swarm.agent_workspace_memberships SET revoked_at = statement_timestamp()
+    WHERE principal_id = ${visitor}::uuid AND workspace_id = ${f.workspace}::uuid`;
+  assert.equal((await send(f.otherJwt, installedPost({ mentions: [{ kind: "agent", id: visitor }] }))).status, 403);
+});
