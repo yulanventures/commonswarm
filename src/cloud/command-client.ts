@@ -358,6 +358,12 @@ export interface SignalRecord {
    * way a client can see that it is named further down the list.
    */
   recipients?: SignalRecipientRef[];
+  /**
+   * Who can read the message a DELIVERY is for: "workspace" when it has no recipient (the agent was
+   * woken by a mention), "private" when it was addressed. Only a hydrated delivery carries it; a
+   * feed read and an edge that predates it leave it absent, and absent is answered privately.
+   */
+  audience?: "workspace" | "private";
 }
 
 export interface SignalRecipientRef {

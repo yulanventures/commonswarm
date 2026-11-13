@@ -480,6 +480,17 @@ export function signalAddressesAgent(
   );
 }
 
+/**
+ * Where an answer to this delivery belongs. A message the whole workspace can read is answered in
+ * the open, in its thread (the thread it is in, or one started on it); this returns that thread's
+ * root. Anything else is answered privately to its author, and this returns null.
+ */
+export function publicReplyThreadRoot(
+  signal: Pick<SignalRecord, "id" | "audience" | "thread_root_id">,
+): string | null {
+  return signal.audience === "workspace" ? signal.thread_root_id ?? signal.id : null;
+}
+
 export function parseSignalRecord(
   value: unknown,
   options: { attachmentsEnabled?: boolean } = {},
@@ -568,6 +579,8 @@ export function parseSignalRecord(
           "thread_root_id",
         ),
       }),
+    // A value this client does not know is dropped, not refused: it then answers privately.
+    ...(row.audience === "workspace" || row.audience === "private" ? { audience: row.audience } : {}),
     ...(row.broadcast_to_channel === undefined ? {} : {
       broadcast_to_channel: checkedBoolean(
         row.broadcast_to_channel,

@@ -5,6 +5,7 @@ import {
   writeSecureJsonFile,
 } from "../cloud/storage.js";
 import type { SignalRecord } from "../cloud/command-client.js";
+import { publicReplyThreadRoot } from "../cloud/signals.js";
 import type { ListenerSenderProvenance } from "./types.js";
 
 const UUID_RE =
@@ -26,6 +27,7 @@ const ENTRY_KEYS = new Set([
   "createdAt",
   "queuedAt",
   "observationPending",
+  "replyThreadRootId",
 ]);
 
 export const LISTENER_MAIN_QUEUE_MAX = 200;
@@ -186,6 +188,8 @@ export interface PendingMainEntry {
   createdAt: string;
   queuedAt: string;
   observationPending?: true;
+  /** Set when the whole workspace can read the message: the thread an answer is posted in. Absent: answer privately. */
+  replyThreadRootId?: string;
 }
 
 interface PendingMainFile {
@@ -221,7 +225,9 @@ function parseEntry(value: unknown, rejectUnknownKeys: boolean): PendingMainEntr
         Number.isSafeInteger(row.attachmentCount) &&
         row.attachmentCount >= 1 && row.attachmentCount <= 8)) ||
     !checkedTimestamp(row.createdAt) || !checkedTimestamp(row.queuedAt) ||
-    !(row.observationPending === undefined || row.observationPending === true)
+    !(row.observationPending === undefined || row.observationPending === true) ||
+    !(row.replyThreadRootId === undefined ||
+      (typeof row.replyThreadRootId === "string" && UUID_RE.test(row.replyThreadRootId)))
   ) {
     throw new Error("stored pending-for-main entry is malformed");
   }
@@ -240,6 +246,7 @@ function parseEntry(value: unknown, rejectUnknownKeys: boolean): PendingMainEntr
     createdAt: row.createdAt,
     queuedAt: row.queuedAt,
     ...(row.observationPending === true ? { observationPending: true as const } : {}),
+    ...(typeof row.replyThreadRootId === "string" ? { replyThreadRootId: row.replyThreadRootId.toLowerCase() } : {}),
   };
 }
 
@@ -381,5 +388,6 @@ export function pendingMainEntry(
     createdAt: signal.created_at,
     queuedAt: new Date(now).toISOString(),
     ...(options.observationPending ? { observationPending: true } : {}),
+    ...(publicReplyThreadRoot(signal) === null ? {} : { replyThreadRootId: publicReplyThreadRoot(signal)! }),
   }, true);
 }
