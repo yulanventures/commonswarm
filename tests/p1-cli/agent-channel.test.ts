@@ -10,7 +10,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { saveAgentProfile, parseAgentConnection } from "../../src/cloud/agent-profile.js";
 import { configureAgentReceive, readReceiveBinding, receiveHookEvent, receiveStatus, requestReceiveCanary, type ReceiveBinding } from "../../src/cloud/agent-receive.js";
-import { CHANNEL_ASK_TOOL, CHANNEL_FILE_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
+import { CHANNEL_ASK_TOOL, CHANNEL_FILE_TOOL, CHANNEL_PUBLIC_REPLY_SENTENCE, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
 import { SIGNAL_BODY_MAX } from "../../src/cloud/signal-limits.js";
 import { handledAskIds } from "../../src/cloud/ask-chain-context.js";
 
@@ -24,6 +24,8 @@ const STALE_WAKE = "77777777-7777-4777-8777-777777777777";
 const QUEUED_ASK = "66666666-6666-4666-8666-666666666666";
 const SELF_ADDRESSED = "55555555-5555-4555-8555-555555555555";
 const REPLY = "99999999-9999-4999-8999-999999999999";
+const PUBLIC_MENTION = "44444444-4444-4444-8444-444444444444";
+const THREAD_ROOT = "33333333-3333-4333-8333-333333333333";
 const TOKEN = `swm_agt_${"C".repeat(43)}`;
 async function eventually(check: () => boolean | Promise<boolean>, timeout = 10_000) {
   // Name the waiting line on failure: callers rewrap errors, which hides the stack.
@@ -99,6 +101,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
   let signal: Record<string, unknown> | null = null;
   const posts: unknown[] = [], acks: unknown[] = [];
   const queuedSignals: Array<Record<string, unknown>> = [];
+  const threadReplies: Array<Record<string, unknown>> = [];
   const replyRequests: Array<Record<string, unknown>> = [];
   const askRequests: Array<Record<string, unknown>> = [];
   const replyRequestIds: string[] = [];
@@ -158,6 +161,13 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
           in_reply_to: body.command.in_reply_to, about: null, kind: "note", body: body.command.body,
           created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
         } };
+      } else if (body.command.kind === "post_signal" && typeof body.command.thread_root_id === "string") {
+        threadReplies.push(body.command);
+        result = { ok: true, status: "accepted", event_ids: [], events: [], signal: {
+          id: REPLY, workspace_id: WS, from: AGENT, from_kind: "agent", to: null, to_agent: null,
+          in_reply_to: null, about: null, kind: "note", body: body.command.body,
+          created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
+        } };
       } else if (body.command.kind === "post_signal") {
         posts.push(body.command);
         acked = false;
@@ -211,6 +221,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       properties: {
         signal_id: { type: "string" }, body: { type: "string" },
         status: { type: "string", enum: ["answered", "failed", "declined"] },
+        private: { type: "boolean" },
       },
       required: ["signal_id", "body"],
     });
@@ -370,9 +381,12 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     assert.equal(queuedAskMeta.signal_id, QUEUED_ASK);
     assert.match(queuedAskNotification.params!.content as string, /<teammate-message>\nPlease continue &lt;now> &amp; report\.\n<\/teammate-message>/);
 
+    // A message that mentioned this agent in the open, inside a thread: the notice says the answer is
+    // public before the message, and the reply tool posts in that thread instead of privately.
     queuedSignals.push({
-      id: SELF_ADDRESSED, workspace_id: WS, from: AGENT, from_kind: "agent", to: null, to_agent: AGENT,
-      in_reply_to: null, about: null, kind: "note", body: "Deploy finished: sha <123> & green",
+      id: PUBLIC_MENTION, workspace_id: WS, from: OWNER, from_kind: "user", to: null, to_agent: AGENT,
+      in_reply_to: null, about: null, kind: "ask", body: "Has anyone seen the build?",
+      channel_id: null, thread_root_id: THREAD_ROOT, audience: "workspace",
       created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
     });
     const queuedReceived = await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
@@ -380,7 +394,44 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     } });
     assert.equal(queuedReceived.isError, undefined, JSON.stringify(queuedReceived.content));
     await eventually(() => notifications.filter(n => n.method === "notifications/claude/channel").length === 6);
-    const selfNotification = notifications.filter(n => n.method === "notifications/claude/channel")[5]!;
+    const publicNotification = notifications.filter(n => n.method === "notifications/claude/channel")[5]!;
+    const publicMeta = publicNotification.params!.meta as Record<string, string>;
+    const publicContent = publicNotification.params!.content as string;
+    assert.equal(publicMeta.signal_id, PUBLIC_MENTION);
+    assert.ok(publicContent.includes(CHANNEL_PUBLIC_REPLY_SENTENCE));
+    assert.ok(publicContent.indexOf(CHANNEL_PUBLIC_REPLY_SENTENCE) < publicContent.indexOf("<teammate-message>"));
+    assert.equal(queuedAskNotification.params!.content!.toString().includes(CHANNEL_PUBLIC_REPLY_SENTENCE), false, "a private message is not called public");
+    const privateRepliesBefore = replyRequests.length;
+    const publicReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "Green since noon.", status: "answered" } });
+    assert.equal(publicReply.isError, undefined, JSON.stringify(publicReply.content));
+    assert.match(JSON.stringify(publicReply.content), /posted in the thread, where everyone in the workspace can read it/);
+    assert.deepEqual(threadReplies, [{
+      kind: "post_signal", signal_kind: "note", body: "Green since noon.", to_user_id: null,
+      to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: THREAD_ROOT,
+    }]);
+    assert.equal(replyRequests.length, privateRepliesBefore, "no private reply was sent for the public message");
+    // The private way is named in the notice and still works for a public message: private: true answers only its author.
+    assert.match(publicContent, /To answer only its author, pass private: true\./);
+    const privateReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "For you only.", private: true } });
+    assert.equal(privateReply.isError, undefined, JSON.stringify(privateReply.content));
+    assert.equal(replyRequests.length, privateRepliesBefore + 1);
+    assert.equal(replyRequests.at(-1)!.in_reply_to, PUBLIC_MENTION);
+    assert.equal(replyRequests.at(-1)!.thread_root_id, undefined);
+    assert.equal(threadReplies.length, 1, "the private answer was not also posted in the thread");
+    const badPrivate = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "x", private: "yes" } });
+    assert.equal(badPrivate.isError, true);
+
+    queuedSignals.push({
+      id: SELF_ADDRESSED, workspace_id: WS, from: AGENT, from_kind: "agent", to: null, to_agent: AGENT,
+      in_reply_to: null, about: null, kind: "note", body: "Deploy finished: sha <123> & green",
+      created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
+    });
+    const publicReceived = await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
+      signal_id: publicMeta.signal_id, receipt: publicMeta.receipt, host_session_id: "host-session",
+    } });
+    assert.equal(publicReceived.isError, undefined, JSON.stringify(publicReceived.content));
+    await eventually(() => notifications.filter(n => n.method === "notifications/claude/channel").length === 7);
+    const selfNotification = notifications.filter(n => n.method === "notifications/claude/channel")[6]!;
     const selfMeta = selfNotification.params!.meta as Record<string, string>;
     const selfContent = selfNotification.params!.content as string;
     assert.equal(selfMeta.signal_id, SELF_ADDRESSED);
@@ -392,7 +443,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
       signal_id: selfMeta.signal_id, receipt: selfMeta.receipt, host_session_id: "host-session",
     } });
-    await eventually(() => acks.length === 6);
+    await eventually(() => acks.length === 7);
     await client.close();
     await transport.close();
     await eventually(async () => !receiveStatus(await readReceiveBinding(profile, "host-session")).channel_running);

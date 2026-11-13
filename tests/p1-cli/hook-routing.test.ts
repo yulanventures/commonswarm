@@ -42,7 +42,7 @@ import {
   newSessionBinding,
   writeSessionContext,
 } from "../../src/cloud/session-context.js";
-import { NO_LISTENER_STATUS_SENTENCE } from "../../src/listener/main-routing.js";
+import { NO_LISTENER_STATUS_SENTENCE, pendingMainEntry } from "../../src/listener/main-routing.js";
 
 // In-process checks open the successor-credential lock in the default state directory; keep it off the real home.
 const previousAgentStateDir = process.env.SWARM_AGENT_STATE_DIR;
@@ -2117,6 +2117,33 @@ test("hook output labels asks, notes, and legacy messages with the right reply a
     `"Legacy queue entry."`,
     `reply: cswarm reply ${SIGNAL_ID} "<answer>" --workspace-id ${WORKSPACE_ID}`,
   ].join("\n"));
+});
+
+test("a message everyone can read is answered in its thread, and the hook says so; an addressed one stays private", () => {
+  const signal = {
+    id: SIGNAL_ID, workspace_id: WORKSPACE_ID, from: PRINCIPAL_ID, from_kind: "agent" as const, to: null,
+    to_agent: PRINCIPAL_ID, in_reply_to: null, about: null, kind: "ask" as const, body: "Seen the build?",
+    until: "2099-01-01T00:00:00.000Z", created_at: "2026-11-13T00:00:00.000Z",
+  };
+  const provenance = { senderName: "Wren", operatorId: null, operatorName: null };
+  type Delivered = Parameters<typeof pendingMainEntry>[0];
+  const root = "12121212-1212-4212-8212-121212121212";
+  // In a thread: the answer goes to that thread. Top level: a thread starts on the message itself.
+  const inThread = pendingMainEntry({ ...signal, audience: "workspace", thread_root_id: root } as Delivered, PRINCIPAL_ID, provenance, 0);
+  const topLevel = pendingMainEntry({ ...signal, audience: "workspace", thread_root_id: null } as Delivered, PRINCIPAL_ID, provenance, 0);
+  assert.equal(inThread.replyThreadRootId, root);
+  assert.equal(topLevel.replyThreadRootId, SIGNAL_ID);
+  assert.equal(renderHookSignal(inThread), [
+    `[CommonSwarm] agent "Wren" mentioned you in a message everyone in the workspace can read:`,
+    `"Seen the build?"`,
+    `reply in the thread, where everyone in the workspace can read it: cswarm reply ${root} "<answer>" --thread --workspace-id ${WORKSPACE_ID} (to answer only the author: cswarm reply ${SIGNAL_ID} "<answer>" --workspace-id ${WORKSPACE_ID})`,
+  ].join("\n"));
+  // Addressed, or from an edge that does not say: private, exactly as before.
+  for (const privateSignal of [{ ...signal, audience: "private" as const }, signal]) {
+    const entry = pendingMainEntry(privateSignal as Delivered, PRINCIPAL_ID, provenance, 0);
+    assert.equal(entry.replyThreadRootId, undefined);
+    assert.equal(renderHookSignal(entry).split("\n").at(-1), `reply: cswarm reply ${SIGNAL_ID} "<answer>" --workspace-id ${WORKSPACE_ID}`);
+  }
 });
 
 test("hook output keeps hostile sender names and bodies inside JSON string quotes", () => {
