@@ -312,7 +312,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | D08 | `dialog.workspace-skills` — candidate; other states pending |
 | D09 | `dialog.people-confirm` — pending |
 | D10 | `dialog.admin-access` — candidate; native `dialog.sa-confirm[data-seat-admin-confirm="workspace"]` opened from seeded Atlas `[data-seat-admin-toggle="workspace"]` (confirm phase only, grant never submitted); `AdminDelegations` history/recovery states pending |
-| D11 | `dialog.invitation-review` — candidate: the same second viewer opens Review; the preview loads and Join is never clicked, so the invitation stays unconsumed. Keyboard witness: Tab stays in the dialog, and Escape closes it and returns focus to Review |
+| D11 | `dialog.invitation-review` — candidate: the same second viewer opens Review; the preview loads and Join is never clicked, so the invitation stays unconsumed. Keyboard witness: Tab reaches the first role and then the join-as-self checkbox, which must be shown above the Join bar; Escape closes the dialog and returns focus to Review |
 | D12 | `dialog.navigation-drawer` — pending |
 | D13 | `dialog.details-sheet` — candidate: phone sheet and desktop details pane |
 | D14 | `dialog.role-confirm` — candidate; seeded owner's own row `#pd-person-{owner}` in the People & agents modal, role select set to Member, Save opens `dialog[data-role-confirm]` (confirm phase only, never submitted) |
