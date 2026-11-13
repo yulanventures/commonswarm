@@ -51,6 +51,8 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm_session.admit_human_session(uuid,uuid)', 'EXECUTE', false],
   // Roster R1b: re-raise reads the shared answer rule and writes its per-ask cap ledger.
   ['swarm_command', 'FUNCTION', 'swarm.ask_answered(uuid,uuid)', 'EXECUTE', false],
+  ['swarm_command', 'TABLE', 'swarm.signal_mentions', 'INSERT', false],
+  ['swarm_command', 'TABLE', 'swarm.signal_mentions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.ask_reraises', 'UPDATE', false],

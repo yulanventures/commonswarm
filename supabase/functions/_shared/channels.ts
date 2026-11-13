@@ -371,6 +371,50 @@ export function parseSignalRecipients(
 }
 
 /**
+ * Mentions: who a public message asks for. A mention wakes a mentioned agent and
+ * never changes who can read the message, which is what separates it from `to`.
+ * The bound is the position CHECK on swarm.signal_mentions (0..7), the same way
+ * SIGNAL_RECIPIENT_MAX is the CHECK on swarm.signal_recipients.
+ */
+export const SIGNAL_MENTION_MAX = 8;
+
+/** What a `mentions` entry is, built from the kind list and the cap. */
+export const SIGNAL_MENTION_RULE_TEXT = `mentions is a list of the people and agents a public message names. Each one is {kind, id}, kind is ${
+  classList(
+    SIGNAL_RECIPIENT_KINDS.map((kind) => ({ words: kind })),
+    "or",
+  )
+}, and id is a UUID. A message mentions at most ${SIGNAL_MENTION_MAX}.`;
+
+/**
+ * The refusal for a malformed `mentions`, or null when the list is usable.
+ * Absent, null and an empty list all mean "mentions nobody": unlike `to`, an
+ * empty list changes nothing about the message, so it is not an error.
+ */
+export function signalMentionListProblem(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) return SIGNAL_MENTION_RULE_TEXT;
+  if (value.length > SIGNAL_MENTION_MAX) {
+    return `A message mentions at most ${SIGNAL_MENTION_MAX}. This one mentions ${value.length}.`;
+  }
+  for (const entry of value) {
+    if (!isRecipientEntry(entry)) return SIGNAL_MENTION_RULE_TEXT;
+  }
+  const seen = new Set<string>();
+  for (const entry of value as SignalRecipient[]) {
+    const key = `${entry.kind}:${entry.id.toLowerCase()}`;
+    if (seen.has(key)) return "mentions names the same person or agent twice.";
+    seen.add(key);
+  }
+  return null;
+}
+
+/** The mention list, lower-cased, after signalMentionListProblem returned null. */
+export function parseSignalMentions(value: unknown): SignalRecipient[] {
+  return parseSignalRecipients(value) ?? [];
+}
+
+/**
  * The optional chat keys a post_signal body may carry. Each is INDEPENDENT: a
  * body may send any subset, including none. Never merge these into a group that
  * demands its siblings.
@@ -380,6 +424,7 @@ export const CHAT_SIGNAL_OPTIONAL_KEYS: readonly string[] = [
   "thread_root_id",
   "broadcast_to_channel",
   "to",
+  "mentions",
 ];
 
 /**
@@ -413,6 +458,8 @@ export interface ChatSignalFields {
   broadcast_to_channel?: unknown;
   /** The multi-recipient list. `undefined` means the key was absent. */
   to?: unknown;
+  /** The mention list. `undefined` means the key was absent. */
+  mentions?: unknown;
 }
 
 /**
@@ -481,6 +528,32 @@ export function chatSignalShapeProblem(
       } names a recipient and so does to. Put every recipient in to, and leave ${
         bothWays.length === 1 ? "it" : "them"
       } null.`;
+    }
+  }
+  /* A mention is attention on a message everyone can read. Any private audience
+   * (`to`, a scalar recipient, or the private reply `in_reply_to` makes) would
+   * leave the mentioned agent woken for a message it may not be able to read,
+   * so the two never share a body. swarm.signal_mentions refuses the same
+   * shape in the database. */
+  const mentionProblem = signalMentionListProblem(fields.mentions);
+  if (mentionProblem !== null) return mentionProblem;
+  if (Array.isArray(fields.mentions) && fields.mentions.length > 0) {
+    if (!THREAD_REPLY_KINDS.includes(fields.signal_kind as never)) {
+      return `Only ${
+        THREAD_REPLY_KINDS
+          .map((kind) => `${indefiniteArticle(kind)} ${kind}`)
+          .join(" or ")
+      } can mention someone.`;
+    }
+    const scalarAddressed = SCALAR_RECIPIENT_FIELDS.some((field) => {
+      const value = (fields as unknown as Record<string, unknown>)[field];
+      return value !== null && value !== undefined;
+    });
+    if (
+      scalarAddressed || recipientCount > 0 ||
+      (fields.in_reply_to !== null && fields.in_reply_to !== undefined)
+    ) {
+      return "A mention goes on a message the whole workspace can read, so it cannot be combined with a recipient or a private reply. Use to for a private message, or mentions for a public one.";
     }
   }
   /* Now that the field IS an id, the rule that makes the request impossible

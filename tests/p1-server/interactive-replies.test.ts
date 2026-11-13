@@ -416,3 +416,11 @@ test("a click whose asker is gone says so: reply_refused names why", async () =>
     assert.deepEqual((await actions(askId)).map((a) => [a.state, a.error_code]), [["failed", "reply_refused"]], name);
   }
 });
+
+test("with mentions off, a post that sends mentions is refused and nothing else about posting changes", async () => {
+  const base = { kind: "post_signal", signal_kind: "note", body: "mentions are off here", to_user_id: null, about: null, to_agent_principal_id: null, in_reply_to: null };
+  const refused = await postCommand(f.ownerJwt, f.workspaceA, { ...base, mentions: [{ kind: "agent", id: f.principal }] });
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  assert.match(String(refused.body.message), /mentions are not enabled/);
+  assert.equal((await postCommand(f.ownerJwt, f.workspaceA, base)).status, 200);
+});

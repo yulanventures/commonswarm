@@ -298,6 +298,7 @@ const COMMAND_ENV = [
   "SWARM_BRAIN_MEMORY",
   "SWARM_INTERACTIVE_REPLIES",
   "SWARM_SEAT_ADMIN",
+  "SWARM_CHAT_MENTIONS",
   "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
   "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
 ] as const;
@@ -331,6 +332,8 @@ export const MCP_ENV_NAMES = [
   // The command and read code that hosted seats run checks these memory switches.
   "SWARM_BRAIN_MEMORY",
   "SWARM_BRAIN_MEMORY_HOSTED",
+  // Hosted seats post through command's handler in this worker.
+  "SWARM_CHAT_MENTIONS",
   // Shared only by main and mcp: it authenticates mcp to main's internal PDF text path.
   "SWARM_FILE_TEXT_TOKEN",
 ] as const;
