@@ -401,7 +401,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     assert.ok(publicContent.indexOf(CHANNEL_PUBLIC_REPLY_SENTENCE) < publicContent.indexOf("<teammate-message>"));
     assert.equal(queuedAskNotification.params!.content!.toString().includes(CHANNEL_PUBLIC_REPLY_SENTENCE), false, "a private message is not called public");
     const privateRepliesBefore = replyRequests.length;
-    const publicReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "Green since noon.", status: "done" } });
+    const publicReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "Green since noon.", status: "answered" } });
     assert.equal(publicReply.isError, undefined, JSON.stringify(publicReply.content));
     assert.match(JSON.stringify(publicReply.content), /posted in the thread, where everyone in the workspace can read it/);
     assert.deepEqual(threadReplies, [{
