@@ -561,21 +561,6 @@ export async function claimAgentInbox(
 }
 
 /**
- * The third way a delivery row is this agent's: the signal `s` mentions it. A mention sits only on a
- * message the whole workspace can read (swarm.signal_mentions refuses anything else), so this arm
- * admits the agent to nothing it could not already read. Used beside the scalar and recipient-set
- * arms wherever a delivery is hydrated or acknowledged.
- */
-function mentionsAgent(tx: Sql, principalId: string) {
-  return tx`EXISTS (
-    SELECT 1 FROM swarm.signal_mentions AS mention
-    WHERE mention.signal_id = s.id
-      AND mention.workspace_id = s.workspace_id
-      AND mention.mentioned_agent_principal_id = ${principalId}::uuid
-  )`;
-}
-
-/**
  * Hydrate body-free claim refs from immutable signals after recipient-set auth.
  * Missing or mismatched rows are integrity failures (caller maps to
  * delivery_unavailable without enumerating).
@@ -752,7 +737,15 @@ export async function hydrateDeliveryRefs(
             AND addressed.workspace_id = s.workspace_id
             AND addressed.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
         )
-        OR ${mentionsAgent(tx, args.recipientPrincipalId)}
+        OR EXISTS (
+            /* Or the signal mentions this agent. A mention sits only on a message the whole
+             * workspace can read (swarm.signal_mentions refuses anything else), so this admits
+             * the agent to nothing it could not already read. */
+            SELECT 1 FROM swarm.signal_mentions AS mention
+            WHERE mention.signal_id = s.id
+              AND mention.workspace_id = s.workspace_id
+              AND mention.mentioned_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          )
       )
   `;
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -919,7 +912,15 @@ export async function ackAgentDelivery(
               WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
                 AND r.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
             )
-            OR ${mentionsAgent(tx, args.recipientPrincipalId)})
+            OR EXISTS (
+            /* Or the signal mentions this agent. A mention sits only on a message the whole
+             * workspace can read (swarm.signal_mentions refuses anything else), so this admits
+             * the agent to nothing it could not already read. */
+            SELECT 1 FROM swarm.signal_mentions AS mention
+            WHERE mention.signal_id = s.id
+              AND mention.workspace_id = s.workspace_id
+              AND mention.mentioned_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          ))
       ) AS allowed
     `;
     if (!directed[0]?.allowed) return { status: "unavailable" };
@@ -1049,7 +1050,15 @@ export async function ackAgentDelivery(
               AND addressed.workspace_id = s.workspace_id
               AND addressed.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
           )
-          OR ${mentionsAgent(tx, args.recipientPrincipalId)}
+          OR EXISTS (
+            /* Or the signal mentions this agent. A mention sits only on a message the whole
+             * workspace can read (swarm.signal_mentions refuses anything else), so this admits
+             * the agent to nothing it could not already read. */
+            SELECT 1 FROM swarm.signal_mentions AS mention
+            WHERE mention.signal_id = s.id
+              AND mention.workspace_id = s.workspace_id
+              AND mention.mentioned_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          )
         )
       LIMIT 1
     `;

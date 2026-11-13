@@ -14679,19 +14679,17 @@ async function handleTransaction(
         threadResolution.threadRootId !== null && auth.credentialKind !== "user" &&
         signalMentions.some((m) => m.kind === "agent")
       ) {
-        const [recent] = await tx<{ capped: boolean }[]>`
-          SELECT count(*) >= ${MENTION_AGENT_HOP_MAX}
-             AND count(*) FILTER (WHERE t.from_kind = 'agent') = count(*) AS capped
-          FROM (
-            SELECT s.from_kind FROM swarm.signals AS s
-            WHERE s.workspace_id = ${route.workspaceId}::uuid
-              AND (s.id = ${threadResolution.threadRootId}::uuid
-                OR s.thread_root_id = ${threadResolution.threadRootId}::uuid)
-            ORDER BY s.created_at DESC, s.id DESC
-            LIMIT ${MENTION_AGENT_HOP_MAX}
-          ) AS t
+        const recent = await tx<{ from_kind: string }[]>`
+          SELECT s.from_kind::text AS from_kind
+          FROM swarm.signals AS s
+          WHERE s.workspace_id = ${route.workspaceId}::uuid
+            AND (s.id = ${threadResolution.threadRootId}::uuid
+              OR s.thread_root_id = ${threadResolution.threadRootId}::uuid)
+          ORDER BY s.created_at DESC, s.id DESC
+          LIMIT ${MENTION_AGENT_HOP_MAX}
         `;
-        if (recent?.capped) {
+        const capped = recent.length >= MENTION_AGENT_HOP_MAX && recent.every((row) => row.from_kind === "agent");
+        if (capped) {
           await insertAudit(tx, {
             auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
             outcome: "domain", reason: "agent mention hop limit reached in this thread", hash,

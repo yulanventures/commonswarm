@@ -2249,7 +2249,7 @@ test("a person's reply in a thread reaches the agents already in it, and a menti
   const selfMention = await send(first.token, installedPost({
     thread_root_id: rootId, body: "note to self", mentions: [{ kind: "agent", id: first.principal }, { kind: "agent", id: second.principal }],
   }));
-  assert.equal(selfMention.status, 200, JSON.stringify(selfMention.body));
+  assert.equal(selfMention.status, 200, JSON.stringify(selfMention.body) + functionLogs.slice(-3000));
   assert.deepEqual(await deliveriesOf(String(signalOf(selfMention.body).id)), [second.principal], "an agent is not woken by its own mention");
 });
 
@@ -2263,7 +2263,7 @@ test("agents cannot keep waking each other in a thread: after six agent messages
     const from = i % 2 === 0 ? two : one;
     const to = i % 2 === 0 ? one : two;
     const reply = await send(from.token, installedPost({ thread_root_id: rootId, body: `hop ${i}`, mentions: [{ kind: "agent", id: to.principal }] }));
-    assert.equal(reply.status, 200, `hop ${i}: ${JSON.stringify(reply.body)}`);
+    assert.equal(reply.status, 200, `hop ${i}: ${JSON.stringify(reply.body)}${functionLogs.slice(-3000)}`);
   }
   const capped = await send(one.token, installedPost({ thread_root_id: rootId, body: "hop 6", mentions: [{ kind: "agent", id: two.principal }] }));
   assert.equal(capped.status, 409, JSON.stringify(capped.body));
