@@ -1,0 +1,115 @@
+/* Channel management follows the shell's compact neutral controls. */
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-settings {
+  display: inline-grid; place-items: center; flex: none;
+  inline-size: 44px; min-inline-size: 44px; block-size: 44px; min-block-size: 44px;
+  padding: 0; border: 0; border-radius: 6px; box-shadow: none;
+  color: var(--k-shell-secondary); background: transparent; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-settings svg {
+  inline-size: 19px; block-size: 19px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-settings:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-description {
+  display: block; min-inline-size: 0; max-inline-size: 100%; flex: 1 1 100%;
+  margin: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 0; border-radius: 4px; box-shadow: none; background: transparent;
+  color: var(--k-shell-secondary); font: 400 13px/20px var(--k-shell-font); text-align: start;
+}
+live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description { min-block-size: 44px; cursor: pointer; }
+live-dashboard.dashboard[data-kylon-shell] button.hm-channel-description:hover { color: var(--k-shell-ink); text-decoration: underline; text-underline-offset: 3px; }
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-dialog-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none;
+}
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-close {
+  display: inline-grid; place-items: center; flex: none; min-inline-size: 44px; min-block-size: 44px;
+  margin: -8px -8px -8px 0; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--k-shell-secondary); font: 400 24px/1 var(--k-shell-font); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) .cm-close:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form textarea {
+  inline-size: 100%; min-inline-size: 0; min-block-size: 88px; max-block-size: 35dvh; resize: vertical;
+  padding: 10px 12px; border: 1px solid var(--k-shell-control); border-radius: var(--k-shell-radius);
+  color: var(--k-shell-ink); background: var(--k-shell-surface); font: 400 14px/22px var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(input, textarea)[readonly] {
+  border-color: var(--k-shell-line); background: var(--k-shell-subtle);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form-actions { flex-wrap: wrap; align-items: center; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-action-spacer { flex: 1; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form .dashboard__button:disabled:not([aria-busy="true"]) {
+  border-style: solid; cursor: not-allowed; opacity: .5;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-channel-state {
+  margin: 0 0 4px; color: var(--k-shell-secondary); font: 500 13px/20px var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-archived] { min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-unarchive-error] { flex-basis: 100%; margin: 0; }
+
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] {
+  inline-size: min(42rem, calc(100vw - 32px)); max-inline-size: none;
+  max-block-size: min(44rem, calc(100dvh - 32px)); margin: auto; padding: 24px;
+  border: 1px solid var(--k-shell-line); border-radius: var(--k-shell-dialog-radius, 16px);
+  background: var(--k-shell-surface); color: var(--k-shell-ink); color-scheme: var(--k-shell-scheme);
+  box-shadow: var(--k-shell-shadow); font: 400 14px/22px var(--k-shell-font); overflow: hidden;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory][open] { display: flex; flex-direction: column; gap: 16px; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory]::backdrop { background: rgb(0 0 0 / 32%); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] h2 { margin: 0; font: 600 20px/28px var(--k-shell-font); letter-spacing: -.4px; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-search {
+  inline-size: 100%; min-inline-size: 0; min-block-size: 44px; flex: none; margin: 0; padding: 10px 12px;
+  border: 1px solid var(--k-shell-control); border-radius: var(--k-shell-radius);
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: inherit;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-status { margin: 0; flex: none; color: var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-status:empty { display: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-results {
+  min-block-size: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  margin-inline: -8px; padding-inline: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-group + .cm-directory-group { margin-block-start: 24px; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-group-title { margin: 0 0 4px; color: var(--k-shell-secondary); font: 500 12px/20px var(--k-shell-font); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-rows { list-style: none; margin: 0; padding: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 16px;
+  padding: 12px 0; border-block-end: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-copy { min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-name { font-weight: 600; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-description {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  margin: 2px 0 0; color: var(--k-shell-secondary); font-size: 13px; line-height: 20px; overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-unread {
+  display: inline-block; inline-size: 6px; block-size: 6px; margin-inline-start: 8px; border-radius: 50%; background: var(--k-shell-accent); vertical-align: middle;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-actions { display: flex; align-items: center; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-open, .cm-directory-unarchive, .cm-directory-retry, .dashboard__button) {
+  display: inline-flex; align-items: center; justify-content: center; min-inline-size: 44px; min-block-size: 44px;
+  padding: 8px 12px; border: 1px solid var(--k-shell-line); border-radius: var(--k-shell-radius);
+  color: var(--k-shell-ink); background: transparent; font: 500 13px/20px var(--k-shell-font);
+  text-decoration: none; white-space: normal; overflow-wrap: anywhere; box-shadow: none; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-open, .cm-directory-unarchive, .cm-directory-retry):hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-unarchive:disabled { cursor: wait; opacity: .7; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-error { grid-column: 1 / -1; margin: 0; color: var(--danger, var(--k-shell-ink)); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer { display: flex; justify-content: flex-end; flex: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .dashboard__button--primary {
+  color: var(--k-shell-accent-ink); background: var(--k-shell-accent); border-color: var(--k-shell-accent);
+}
+live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-channel-directory]) [hidden] { display: none; }
+@media not (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] :is(.hm-channel-settings, button.hm-channel-description, [data-channel-directory] :is(a, button, input), [data-channel-dialog] textarea):focus-visible {
+    outline: 2px solid var(--k-shell-focus); outline-offset: 2px;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-phone-title .hm-channel-description { margin-block-start: 2px; font-size: 12px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] { inline-size: 100%; max-block-size: 90dvh; margin: auto 0 0; padding: 16px; border-end-start-radius: 0; border-end-end-radius: 0; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-actions { justify-content: flex-end; }
+  live-dashboard.dashboard[data-kylon-shell] :is([data-channel-directory] .cm-search, [data-channel-dialog] textarea) { font-size: 16px; line-height: 24px; }
+}
+@media (pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] :is([data-channel-directory] .cm-search, [data-channel-dialog] textarea) { font-size: 16px; line-height: 24px; }
+}

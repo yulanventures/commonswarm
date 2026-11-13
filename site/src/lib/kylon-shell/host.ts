@@ -25,6 +25,8 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
   let phoneMenu: { node: HTMLElement; parent: HTMLElement } | null = null;
   let phoneHeading: { node: HTMLElement; parent: HTMLElement } | null = null;
   let phoneDetails: { node: HTMLElement; parent: HTMLElement } | null = null;
+  let phoneSettings: { node: HTMLElement; parent: HTMLElement } | null = null;
+  let phoneDescription: { node: HTMLElement; parent: HTMLElement } | null = null;
   let menuDock: HTMLElement | null = null;
   const icons = new Map<string, SVGSVGElement>();
   const channelDetails = createChannelDetails(app);
@@ -48,6 +50,8 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     }
   };
   const restoreMenu = () => {
+    if (phoneSettings) { phoneSettings.parent.prepend(phoneSettings.node); phoneSettings = null; }
+    if (phoneDescription) { phoneDescription.parent.append(phoneDescription.node); phoneDescription = null; }
     if (phoneDetails) { phoneDetails.parent.prepend(phoneDetails.node); phoneDetails = null; }
     if (phoneMenu) { phoneMenu.parent.append(phoneMenu.node); phoneMenu = null; }
     if (phoneHeading) { phoneHeading.parent.append(phoneHeading.node); phoneHeading = null; }
@@ -90,9 +94,12 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     resizers.sync();
     if (!active) { restoreMenu(); shell!.setTitle(title); return; }
     const node = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-menu") ?? phoneMenu?.node;
-    const heading = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-phone-bar__title") ?? phoneHeading?.node;
+    const newHeading = app.querySelector<HTMLElement>(".hm-phone-bar > .hm-phone-bar__title");
+    const heading = newHeading ?? phoneHeading?.node;
+    const description = newHeading ? app.querySelector<HTMLElement>(".hm-phone-bar > [data-channel-header-description]") : phoneDescription?.node;
     const headingDock = shell!.slots.phoneHeader.querySelector(".cs-org-phone-title")!;
-    if ((!node || node.parentElement === menuDock) && (!heading || heading.parentElement === headingDock) && (!phoneDetails || phoneDetails.node.isConnected)) return;
+    if ((!node || node.parentElement === menuDock) && (!heading || heading.parentElement === headingDock) && (!phoneDetails || phoneDetails.node.isConnected)
+      && (!phoneSettings || phoneSettings.node.isConnected) && (!phoneDescription || phoneDescription.node.isConnected)) return;
     const oldPanel = phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__list");
     if (oldPanel) oldPanel.hidden = true;
     phoneMenu?.node.querySelector(".hm-menu__trigger")?.setAttribute("aria-expanded", "false");
@@ -101,9 +108,12 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
       phoneMenu = { node, parent: node.parentElement! }; menuDock.append(node);
       const details = node.querySelector<HTMLElement>("[data-channel-details-toggle]");
       if (details) { phoneDetails = { node: details, parent: details.parentElement! }; shell!.slots.phoneHeader.append(details); }
+      const settings = node.querySelector<HTMLElement>("[data-channel-settings-open]");
+      if (settings) { phoneSettings = { node: settings, parent: settings.parentElement! }; shell!.slots.phoneHeader.append(settings); }
     }
     channelDetails.sync();
     if (heading) { phoneHeading = { node: heading, parent: heading.parentElement! }; headingDock.replaceChildren(heading); }
+    if (description) { phoneDescription = { node: description, parent: description.parentElement! }; headingDock.append(description); }
   };
 
   return {
@@ -170,10 +180,12 @@ export function createKylonHost(app: HTMLElement, navigate: (href: string) => vo
     },
     replaceHeader(replace: () => void) {
       const active = doc.activeElement;
-      const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneDetails?.node ? "details" : active === phoneHeading?.node ? "heading" : null;
+      const owned = phoneMenu?.node.contains(active) ? "menu" : active === phoneDetails?.node ? "details"
+        : active === phoneSettings?.node ? "settings" : active === phoneDescription?.node ? "description" : active === phoneHeading?.node ? "heading" : null;
       todoContext.refresh(() => wikiContext.refresh(replace)); syncMenu(); channelDetails.sync();
       if (!owned || (doc.activeElement !== doc.body && doc.activeElement !== active)) return;
-      const target = owned === "menu" ? phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__trigger") : owned === "details" ? phoneDetails?.node : phoneHeading?.node;
+      const target = owned === "menu" ? phoneMenu?.node.querySelector<HTMLElement>(".hm-menu__trigger") : owned === "details" ? phoneDetails?.node
+        : owned === "settings" ? phoneSettings?.node : owned === "description" ? phoneDescription?.node : phoneHeading?.node;
       if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });
     },
     suspend() { if (shell) restore(); },

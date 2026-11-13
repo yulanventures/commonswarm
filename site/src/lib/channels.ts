@@ -213,16 +213,15 @@ export function railSlice<T>(
 export type WorkspaceRole = "owner" | "admin" | "member";
 
 /**
- * May this viewer rename or archive this channel? The server's rule, mirrored to decide which
+ * May this viewer change, archive or unarchive this channel? The server's rule, mirrored to decide which
  * actions to SHOW (`applyChannelCommand` answers 403 channel_forbidden otherwise): the person
  * who created it, or a workspace owner or admin. Owning the agent that created it does not
- * count. An archived channel has no actions (archive is one-way).
+ * count. Archived channels keep the same management rights.
  */
 export const mayManageChannel = (
   channel: Pick<WorkspaceChannel, "createdByKind" | "createdByPrincipal" | "archivedAt">,
   viewer: { userId: string | null; role: WorkspaceRole | null },
 ): boolean => {
-  if (channel.archivedAt !== null) return false;
   if (viewer.role === "owner" || viewer.role === "admin") return true;
   return channel.createdByKind === "user" && viewer.userId !== null && viewer.userId !== "" &&
     channel.createdByPrincipal === viewer.userId;
@@ -269,6 +268,9 @@ export const channelRowName = (slug: string, unread: boolean | null): string =>
 export const CHANNELS_TITLE = "Channels";
 export const NEW_CHANNEL_LABEL = "New channel";
 export const RENAME_CHANNEL_LABEL = "Rename channel";
+export const CHANNEL_SETTINGS_LABEL = "Channel settings";
+export const UNARCHIVE_CHANNEL_LABEL = "Unarchive channel";
+export const ALL_CHANNELS_LABEL = "All channels";
 export const ARCHIVE_CHANNEL_LABEL = "Archive channel";
 export const ARCHIVED_CHANNELS_LABEL = "Archived channels";
 export const CHANNEL_UNAVAILABLE_TITLE = "Channel unavailable";

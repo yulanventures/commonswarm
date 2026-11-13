@@ -3225,6 +3225,30 @@ export async function archiveChannel(
   );
 }
 
+/** Send only fields the viewer changed, preserving independent edits by other members. */
+export async function updateChannel(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  changes: { slug?: string; purpose?: string | null },
+): Promise<WorkspaceChannel> {
+  return channelCommand(session, commandId, workspaceId,
+    { kind: "channel_update", channel_id: channelId, ...changes },
+    "CommonSwarm did not save the channel");
+}
+
+export async function unarchiveChannel(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+): Promise<WorkspaceChannel> {
+  return channelCommand(session, commandId, workspaceId,
+    { kind: "channel_unarchive", channel_id: channelId },
+    "CommonSwarm did not unarchive the channel");
+}
+
 /** Reads receipts for any signal visible to the signed-in workspace member. */
 export async function browserDeliveryReceipts(
   workspaceId: string,
