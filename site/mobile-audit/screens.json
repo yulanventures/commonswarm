@@ -68,7 +68,7 @@
         "click": "[data-entity-panel-close]"
       }
     ],
-    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]) [data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
+    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]):not(:has([data-channel-view=\"feed\"] .dashboard__message-target)):not(:has([data-channel-lead-pill])) [data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
     "states": [
       "dense"
     ],
