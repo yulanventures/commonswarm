@@ -552,10 +552,6 @@ import "../../styles/kylon-command-palette.css";
 
             <section class="dashboard__feed-view" data-channel-view="feed" hidden>
               <div class="dashboard__feed-toolbar">
-                <div class="dashboard__dm-bar" data-dm-bar hidden>
-                  <span class="dashboard__dm-bar-title" data-dm-bar-title></span>
-                  <button class="dashboard__dm-bar-close" type="button" data-dm-close>Close</button>
-                </div>
                 <div class="dashboard__feed-filters" role="group" aria-label="Filter messages">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
@@ -5233,17 +5229,6 @@ import "../../styles/kylon-command-palette.css";
       const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
       if (anchor) openEntityPanel(entity, anchor);
     };
-    const closeDirectMessage = (): void => {
-      if (!activeDm) return;
-      activeDm = null;
-      renderHomeShell();
-      syncComposerAddress([]);
-      closeEntityPanel(false);
-      renderFeed();
-      syncComposerPlacement();
-      renderHomeRail();
-      one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
-    };
     /* For other modules (the Cmd+K palette): open a DM by principal or user id. */
     (app as HTMLElement & { openDirectMessage?: (id: string) => void }).openDirectMessage = (id: string): void => {
       const kind = agents.some(agent => agent.principalId === id) ? "agent" : members.some(member => member.userId === id) ? "person" : null;
@@ -5253,7 +5238,8 @@ import "../../styles/kylon-command-palette.css";
     const syncChannelLeadPill = (): void => {
       const copy = one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__copy");
       copy?.querySelector("[data-channel-lead-pill]")?.remove();
-      if (!copy || homeRoute.view !== "chat" || sampleMode) return;
+      // The lead belongs to the channels. A direct message is between two parties and shows only who it is with.
+      if (!copy || homeRoute.view !== "chat" || sampleMode || (typeof activeDm !== "undefined" && activeDm)) return;
       const lead = activeWorkspaceLeadAgent();
       if (!lead && !viewerMaySetWorkspaceLead()) return;
       const pill = document.createElement("button");
@@ -5291,8 +5277,10 @@ import "../../styles/kylon-command-palette.css";
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
         channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
-        /* Chat's heading is the channel being read; the workspace stays in the picker. */
-        channelTitle: (typeof activeDm !== "undefined" && activeDm) || !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
+        /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
+           agent it is with. The workspace stays in the picker. */
+        channelTitle: typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
+          : !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
       const composerLabel = one<HTMLElement>("[data-composer-label]");
       if (composerLabel) composerLabel.textContent = composerName;
@@ -8136,12 +8124,6 @@ import "../../styles/kylon-command-palette.css";
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
       const dm = typeof activeDm === "undefined" ? null : activeDm;
       const visibleSignals = dm ? signals.filter(signal => signalIsDirectBetween(signal, viewerId, dm)) : filterSignals(signals, signalFilter, viewerId);
-      const dmBar = one<HTMLElement>("[data-dm-bar]");
-      if (dmBar) {
-        dmBar.hidden = !dm;
-        const dmTitle = one<HTMLElement>("[data-dm-bar-title]");
-        if (dmTitle) dmTitle.textContent = dm ? entityName(dm) : "";
-      }
       const filterRow = one<HTMLElement>(".dashboard__feed-filters");
       if (filterRow) filterRow.hidden = !!dm;
       const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
@@ -8303,6 +8285,9 @@ import "../../styles/kylon-command-palette.css";
           const arrowPath = document.createElementNS(svgNs, "path"); arrowPath.setAttribute("d", "M2 8h11M9 4l4 4-4 4"); arrow.append(arrowPath);
           addressed.append(word, " ", arrow, target);
         }
+        /* In a direct message every row is between the same two parties, and the header names the other one.
+           Printing "→ them" on each row would only repeat it, and would stop consecutive messages grouping. */
+        const recipient = typeof activeDm !== "undefined" && activeDm ? [] : [addressed];
         const badge = document.createElement("span");
         badge.className = `dashboard__message-kind dashboard__message-kind--${signal.kind}`;
         badge.textContent = kindLabel(signal.kind);
@@ -8321,7 +8306,8 @@ import "../../styles/kylon-command-palette.css";
            from the other. Inside a channel every row is in that channel and the name would
            be repeated on every line, so it is not shown there. An unfiled message shows
            nothing rather than a word for "no channel": it is the ordinary case. */
-        const rowChannel = activeChannelId === null && signal.channelId !== null
+        /* Nor in a direct message: it is one conversation with one party, wherever each message was filed. */
+        const rowChannel = activeChannelId === null && signal.channelId !== null && !(typeof activeDm !== "undefined" && activeDm)
           ? channelById(channels, signal.channelId)
           : null;
         if (rowChannel !== null) {
@@ -8331,9 +8317,9 @@ import "../../styles/kylon-command-palette.css";
           place.textContent = channelLabel(rowChannel.slug);
           place.title = `Open ${channelLabel(rowChannel.slug)}`;
           place.addEventListener("click", () => selectChannel(rowChannel.channelId));
-          meta.append(author, identityBadge, addressed, operator, badge, place, time);
+          meta.append(author, identityBadge, ...recipient, operator, badge, place, time);
         } else {
-          meta.append(author, identityBadge, addressed, operator, badge, time);
+          meta.append(author, identityBadge, ...recipient, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: clockTime,
           author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
@@ -14095,7 +14081,6 @@ import "../../styles/kylon-command-palette.css";
     for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
       button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
     }
-    one<HTMLButtonElement>("[data-dm-close]")?.addEventListener("click", () => closeDirectMessage());
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;
