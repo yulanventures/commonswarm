@@ -100,6 +100,14 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])):not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) {
   opacity: 0; pointer-events: none;
 }
+/* The controls inside say so themselves too: a control that is not shown is not a tap target, and a check that
+   reads only the control's own style must not take it for one. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])):not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) :is(summary, button) {
+  opacity: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions button {
+  opacity: 0;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
   opacity: 0; pointer-events: none;
 }
