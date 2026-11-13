@@ -10226,15 +10226,27 @@ async function applyChannelCommand(
         reason: "channel_policy_requires_admin",
       };
     }
-    await tx`
+    const [updatedWs] = await tx<
+      { channel_creation_policy: ChannelCreationPolicy }[]
+    >`
       UPDATE swarm.workspaces
       SET channel_creation_policy = ${command.channel_creation_policy}
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND archived_at IS NULL
+      RETURNING channel_creation_policy
     `;
+    if (updatedWs === undefined) {
+      return {
+        ok: false,
+        status: 404,
+        error: "workspace_not_found",
+        message: "Workspace not found.",
+        reason: "workspace_not_found",
+      };
+    }
     return {
       ok: true,
-      channel_creation_policy: command.channel_creation_policy,
+      channel_creation_policy: updatedWs.channel_creation_policy,
     };
   }
 

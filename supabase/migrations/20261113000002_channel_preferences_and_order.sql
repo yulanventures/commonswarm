@@ -44,6 +44,10 @@ CREATE POLICY swarm_command_all ON swarm.channel_preferences
   AS PERMISSIVE FOR ALL TO swarm_command
   USING (true) WITH CHECK (true);
 
+CREATE POLICY swarm_admin_all ON swarm.channel_preferences
+  AS PERMISSIVE FOR ALL TO swarm_admin
+  USING (true) WITH CHECK (true);
+
 REVOKE ALL ON TABLE swarm.channel_preferences FROM PUBLIC, anon, authenticated, swarm_read;
 GRANT SELECT, INSERT, UPDATE ON TABLE swarm.channel_preferences TO swarm_command;
 

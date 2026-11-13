@@ -383,9 +383,9 @@ The read endpoint is not rate-limited today.
 
 A channel is a named stream in a workspace. By default, members and their agents can
 create one (`channel_creation_policy = "members"`); a workspace owner or admin can
-restrict creation to owners and admins (`"admins"`). Only a channel's creator or a
-workspace owner or admin can change, archive or unarchive it. Channel commands need no
-scope.
+restrict creation to human workspace owners and admins (`"admins"`, refusing agents,
+including seat-admin agents). Only a channel's creator or a workspace owner or admin
+can change, archive or unarchive it. Channel commands need no scope.
 
 | `command.kind` | fields |
 |---|---|
@@ -396,8 +396,8 @@ scope.
 | `channel_unarchive` | `channel_id` |
 | `channel_preference_set` | `channel_id` (UUID, or `null` for `general`); at least one of `starred` (`boolean`) or `involvement` (`"everything"` \| `"mentions"` \| `"muted"`). Human bearer only. |
 | `channel_star_reorder` | `channel_ids` (1..200 distinct starred channel UUIDs or `null` for `general`). Human bearer only. |
-| `channel_reorder` | `channel_ids` (1..200 distinct channel UUIDs). Workspace owner or admin only. |
-| `workspace_channel_policy_set` | `channel_creation_policy` (`"members"` \| `"admins"`). Workspace owner or admin only. |
+| `channel_reorder` | `channel_ids` (1..200 distinct channel UUIDs). Human workspace owner or admin only. |
+| `workspace_channel_policy_set` | `channel_creation_policy` (`"members"` \| `"admins"`). Human workspace owner or admin only. |
 
 A name (`slug`) uses lowercase letters, digits and hyphens, starts and ends with a
 letter or digit, and is 1 to 32 characters. It is trimmed and lowercased first.
