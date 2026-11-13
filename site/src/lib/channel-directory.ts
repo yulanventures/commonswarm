@@ -25,7 +25,7 @@ export function renderChannelDirectory(
   };
   const focused = host.contains(doc.activeElement) ? (doc.activeElement as HTMLElement).dataset.channelDirectoryAction : undefined;
   const term = query.trim().toLocaleLowerCase();
-  const matches = rows.filter(row => !term || `${row.slug}\n${row.description ?? ""}`.toLocaleLowerCase().includes(term));
+  const matches = rows.filter(row => !term || `#${row.slug}\n${row.description ?? ""}`.toLocaleLowerCase().includes(term));
   const content = doc.createDocumentFragment();
   for (const archived of [false, true]) {
     const group = matches.filter(row => row.archived === archived);

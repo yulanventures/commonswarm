@@ -102,7 +102,7 @@ async function observeChannelManagement() {
     check(document.activeElement === one("[data-channel-edit-description]"), "Tab did not reach Description");
     await key("Tab", true); check(document.activeElement === nameField, "Shift+Tab did not return to Name");
     await key("Escape"); await wait("settings escape", () => !settings().open);
-    check(document.activeElement === opener, "Escape lost the settings opener");
+    check(document.activeElement === shown("[data-channel-settings-open]"), "Escape lost the current settings opener");
     await openSettings();
     const reader = new URL(location.href).searchParams.get("reader") === "1";
     if (reader) {
@@ -139,6 +139,8 @@ async function observeChannelManagement() {
       check(document.activeElement === one("[data-channel-directory-search]"), "directory did not focus Search");
       check(directory().querySelectorAll("[data-channel-directory-row]").length === 10, "directory omitted rail overflow or archived channels");
       check(!!directory().querySelector('[aria-label="Unread"]'), "reported unread state is missing");
+      input("[data-channel-directory-search]", "#design-refresh");
+      check(directory().querySelectorAll("[data-channel-directory-row]").length === 1, "search did not match the displayed channel name");
       input("[data-channel-directory-search]", "old notes");
       check(directory().querySelectorAll("[data-channel-directory-row]").length === 1, "search did not match description");
       input("[data-channel-directory-search]", "no matching channel"); check(one("[data-channel-directory-status]")?.textContent === "No channels found", "empty search is not explicit");
