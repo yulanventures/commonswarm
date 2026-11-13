@@ -2586,13 +2586,14 @@ test("CM-2a channel preferences: per-person stars, star reorder, isolation, repl
   );
 
   // swarm_read.channel_preferences isolates rows to the signed-in person.
-  const otherPrefs = await viewRowAs(f.otherId, async (tx) =>
-    await tx<{ target_key: string; star_rank: number | null; involvement: string }[]>`
+  const otherPrefs = await viewRowAs(f.otherId, async (tx) => {
+    const rows = await tx<{ target_key: string; star_rank: number | null; involvement: string }[]>`
       SELECT target_key, star_rank, involvement
       FROM swarm_read.channel_preferences
       WHERE workspace_id = ${f.workspace}::uuid
-      ORDER BY star_rank NULLS LAST, target_key`
-  );
+      ORDER BY star_rank NULLS LAST, target_key`;
+    return rows.map((row) => ({ ...row }));
+  });
   assert.deepEqual(otherPrefs, [
     { target_key: betaId, star_rank: 0, involvement: "mentions" },
     { target_key: "general", star_rank: 1, involvement: "everything" },
@@ -2605,12 +2606,10 @@ test("CM-2a channel preferences: per-person stars, star reorder, isolation, repl
 
   // Baseline receipt for f.otherId so channel_unread evaluates live unread rules.
   const seedPost = await send(f.ownerJwt, installedPost({ body: "baseline seed" }));
+  assert.equal(seedPost.status, 200, JSON.stringify(seedPost.body));
   const seedId = String(signalOf(seedPost.body).id);
-  await sql`
-    INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id, first_seen_at)
-    VALUES (${f.workspace}::uuid, ${seedId}::uuid, ${f.otherId}::uuid, statement_timestamp() - interval '1 minute')
-    ON CONFLICT DO NOTHING
-  `;
+  const seenBaseline = await send(f.otherJwt, { kind: "signals_seen", signal_ids: [seedId] });
+  assert.equal(seenBaseline.status, 200, JSON.stringify(seenBaseline.body));
 
   // Plain unmentioned posts in muted (alpha), mentions-only (beta), and everything (gamma).
   assert.equal((await send(f.ownerJwt, installedPost({ channel: `pref-a-${tag}`, body: "muted noise" }))).status, 200);
