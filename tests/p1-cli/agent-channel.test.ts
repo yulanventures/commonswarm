@@ -409,6 +409,16 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: THREAD_ROOT,
     }]);
     assert.equal(replyRequests.length, privateRepliesBefore, "no private reply was sent for the public message");
+    // The private way is named in the notice and still works for a public message: private: true answers only its author.
+    assert.match(publicContent, /To answer only its author, pass private: true\./);
+    const privateReply = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "For you only.", private: true } });
+    assert.equal(privateReply.isError, undefined, JSON.stringify(privateReply.content));
+    assert.equal(replyRequests.length, privateRepliesBefore + 1);
+    assert.equal(replyRequests.at(-1)!.in_reply_to, PUBLIC_MENTION);
+    assert.equal(replyRequests.at(-1)!.thread_root_id, undefined);
+    assert.equal(threadReplies.length, 1, "the private answer was not also posted in the thread");
+    const badPrivate = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: PUBLIC_MENTION, body: "x", private: "yes" } });
+    assert.equal(badPrivate.isError, true);
 
     queuedSignals.push({
       id: SELF_ADDRESSED, workspace_id: WS, from: AGENT, from_kind: "agent", to: null, to_agent: AGENT,

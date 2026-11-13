@@ -32,9 +32,10 @@ import { FileCommandRefused, FileTransportError } from "./files.js";
 export const CHANNEL_RECEIPT_TOOL = "cswarm_received";
 export const CHANNEL_RECEIPT_FIELDS = ["signal_id", "receipt", "host_session_id"] as const;
 export const CHANNEL_REPLY_TOOL = "cswarm_reply";
-export const CHANNEL_PUBLIC_REPLY_SENTENCE = "This message is public: your answer is posted in its thread, where everyone in the workspace can read it.";
+/** Said before a public message: where the answer goes, who reads it, and how to answer only the author instead. */
+export const CHANNEL_PUBLIC_REPLY_SENTENCE = "This message is public: your answer is posted in its thread, where everyone in the workspace can read it. To answer only its author, pass private: true.";
 export const CHANNEL_REPLY_FIELDS = ["signal_id", "body"] as const;
-const CHANNEL_REPLY_OPTIONAL_FIELDS = ["status"] as const;
+const CHANNEL_REPLY_OPTIONAL_FIELDS = ["status", "private"] as const;
 export const CHANNEL_ASK_TOOL = "cswarm_ask";
 export const CHANNEL_ASK_FIELDS = ["to", "body"] as const;
 export const CHANNEL_FILE_TOOL = "cswarm_file_get";
@@ -261,10 +262,11 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
     },
     {
       name: CHANNEL_REPLY_TOOL,
-      description: "Answer a CommonSwarm message. A message that mentioned you in the open is answered in its thread, where everyone in the workspace can read the answer; its notification says so. Any other message is answered privately to its author.",
+      description: "Answer a CommonSwarm message. A message that mentioned you in the open is answered in its thread, where everyone in the workspace can read the answer; its notification says so. Any other message is answered privately to its author. Pass private: true to answer only the author of a public message.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         signal_id: { type: "string" }, body: { type: "string" },
         status: { type: "string", enum: [...REPLY_STATUSES] },
+        private: { type: "boolean" },
       }, required: [...CHANNEL_REPLY_FIELDS] },
     },
     {
@@ -322,8 +324,9 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   const sendReply = async (request: { params: { arguments?: Record<string, unknown> } }) => {
     const args = request.params.arguments ?? {};
     const allowed = new Set<string>([...CHANNEL_REPLY_FIELDS, ...CHANNEL_REPLY_OPTIONAL_FIELDS]);
-    if (CHANNEL_REPLY_FIELDS.some(key => typeof args[key] !== "string") || Object.keys(args).some(key => !allowed.has(key)) || (args.status !== undefined && !isReplyStatus(args.status))) {
-      return { isError: true, content: [{ type: "text" as const, text: `Reply needs ${CHANNEL_REPLY_FIELDS.join(", ")}; optional status is ${REPLY_STATUSES.join("|")}.` }] };
+    if (CHANNEL_REPLY_FIELDS.some(key => typeof args[key] !== "string") || Object.keys(args).some(key => !allowed.has(key)) || (args.status !== undefined && !isReplyStatus(args.status)) ||
+        (args.private !== undefined && typeof args.private !== "boolean")) {
+      return { isError: true, content: [{ type: "text" as const, text: `Reply needs ${CHANNEL_REPLY_FIELDS.join(", ")}; optional status is ${REPLY_STATUSES.join("|")}; optional private is true or false.` }] };
     }
     const signalId = args.signal_id as string;
     const body = args.body as string;
@@ -344,7 +347,8 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
     /* A message the whole workspace can read is answered in its thread. The thread is known only
      * for a delivery this process surfaced; anything else keeps the private reply. A thread reply
      * carries no reply_status (the edge refuses the pair), so a status given for one is dropped. */
-    const threadRoot = publicReplyThreads.get(normalizedSignalId) ?? null;
+    /* private: true keeps the answer between the agent and the author, whatever the message's audience. */
+    const threadRoot = args.private === true ? null : publicReplyThreads.get(normalizedSignalId) ?? null;
     const command: PostSignalCommand = threadRoot === null
       ? {
         kind: "post_signal", signal_kind: "note", body,

@@ -2136,7 +2136,7 @@ test("a message everyone can read is answered in its thread, and the hook says s
   assert.equal(renderHookSignal(inThread), [
     `[CommonSwarm] agent "Wren" mentioned you in a message everyone in the workspace can read:`,
     `"Seen the build?"`,
-    `reply in the thread, where everyone in the workspace can read it: cswarm reply ${root} "<answer>" --thread --workspace-id ${WORKSPACE_ID}`,
+    `reply in the thread, where everyone in the workspace can read it: cswarm reply ${root} "<answer>" --thread --workspace-id ${WORKSPACE_ID} (to answer only the author: cswarm reply ${SIGNAL_ID} "<answer>" --workspace-id ${WORKSPACE_ID})`,
   ].join("\n"));
   // Addressed, or from an edge that does not say: private, exactly as before.
   for (const privateSignal of [{ ...signal, audience: "private" as const }, signal]) {
