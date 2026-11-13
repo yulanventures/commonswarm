@@ -107,6 +107,8 @@ async function observeChannelManagement() {
       check(one<HTMLInputElement>("[data-channel-rename-slug]")!.readOnly && one<HTMLTextAreaElement>("[data-channel-edit-description]")!.readOnly, "reader can edit fields");
       check(!visible(one("[data-channel-rename-submit]")) && !visible(one("[data-channel-settings-archive]")), "reader sees write actions");
     } else if (new URL(location.href).searchParams.get("capture") !== "settings") {
+      const unchangedSave = one<HTMLButtonElement>("[data-channel-rename-submit]")!;
+      check(unchangedSave.disabled && !unchangedSave.hasAttribute("aria-busy") && getComputedStyle(unchangedSave).cursor !== "wait", "unchanged Save looks like a pending request");
       input("[data-channel-rename-slug]", "design-refresh"); input("[data-channel-edit-description]", "Updated decisions and references");
       f.channelFailure = "This channel name is already used.";
       one<HTMLFormElement>("[data-channel-rename-form]")!.requestSubmit();
@@ -153,6 +155,7 @@ async function observeChannelManagement() {
       create.click(); await wait("new again", () => settings().open);
       input("[data-channel-new-slug]", "late-refusal"); f.channelFailure = "Late refusal for the old draft"; f.holdChannel = true;
       one<HTMLFormElement>("[data-channel-create-form]")!.requestSubmit(); await wait("held create", () => f.channelHeld);
+      check(one<HTMLButtonElement>("[data-channel-create-submit]")!.disabled && one("[data-channel-create-submit]")!.getAttribute("aria-busy") === "true", "pending write lost its busy state");
       await key("Escape"); await wait("directory while write held", () => directory().open);
       create.click(); await wait("newer dialog", () => settings().open); input("[data-channel-new-slug]", "fresh-draft");
       f.releaseChannel(); await wait("old write settled", () => f.channelSettled);

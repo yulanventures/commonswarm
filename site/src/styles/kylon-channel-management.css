@@ -37,6 +37,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(input, text
 }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form-actions { flex-wrap: wrap; align-items: center; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-action-spacer { flex: 1; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form .dashboard__button:disabled:not([aria-busy="true"]) {
+  border-style: solid; cursor: not-allowed; opacity: .5;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-channel-state {
   margin: 0 0 4px; color: var(--k-shell-secondary); font: 500 13px/20px var(--k-shell-font);
 }
