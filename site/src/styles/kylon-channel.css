@@ -95,15 +95,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   transition: opacity var(--k-shell-motion) var(--k-shell-ease);
 }
 /* Hidden at rest on every device, by opacity only so nothing moves: shown when the row is hovered, holds
-   keyboard focus, or was tapped (a tap focuses the row). A bar that carries a problem receipt is never hidden. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) {
+   keyboard focus, or was tapped (a tap focuses the row), and kept while its receipt is open. A problem
+   receipt is never hidden (it is a badge, kylon-receipts.css); only that row's reply control waits. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])):not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) {
   opacity: 0; pointer-events: none;
 }
-/* Under a problem receipt the reply control still waits for the pointer where there is one. */
-@media (hover: hover) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) > .dashboard__message-actions {
-    opacity: 0; pointer-events: none;
-  }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
+  opacity: 0; pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { transition: none; }
