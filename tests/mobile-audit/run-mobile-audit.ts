@@ -165,12 +165,16 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Escape", expect: { active: '[data-rail-agent="{agent}"]', inView: '[data-rail-agent="{agent}"]' } },
   }],
-  // The review dialog opens on its heading; Tab stays inside the modal, and Escape (like Not now) closes it without joining. The
-  // inbox then checks again and returns focus to the invitation's Review button.
+  // The review dialog opens on its heading; Tab reaches the first role, then leaves the radio group for the consent checkbox,
+  // which must be revealed (not under the Join and Not now bar). Escape (like Not now) closes it without joining; the inbox then
+  // checks again and returns focus to the invitation's Review button.
   "dialog.invitation-review": [{
     name: "invitation-review-escape-returns-to-review",
     start: { active: "dialog.human-invitations__dialog[data-review-dialog][open] [data-review-heading]" },
-    keys: [{ key: "Tab", expect: "dialog.human-invitations__dialog[data-review-dialog][open] .human-invitations__choice:first-child input[data-role]" }],
+    keys: [
+      { key: "Tab", expect: "dialog.human-invitations__dialog[data-review-dialog][open] .human-invitations__choice:first-child input[data-role]" },
+      { key: "Tab", expect: "dialog.human-invitations__dialog[data-review-dialog][open] input[data-consent]" },
+    ],
     activate: { key: "Escape", expect: { active: 'human-invitation-inbox[data-placement="corner"]:not([hidden]) [data-row-review]', inView: 'human-invitation-inbox [data-row-review]' } },
   }],
   "dialog.people-admin-access": [{
