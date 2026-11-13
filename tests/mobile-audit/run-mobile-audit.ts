@@ -382,6 +382,18 @@ async function main(): Promise<void> {
       }));
       return results;
     };
+    /* A hover spec that makes the app refresh (focusAcrossRebuild) posts a note to the general feed and removes it when
+       the spec ends. Every other open page showing that feed picks the note up, and loses it again, in the middle of its
+       own measurement: the list scrolls under a held pointer or the rows around a measured one move. So a screen with
+       such a spec is captured by itself, after the pooled ones. Results keep the order the screens were given in. */
+    const postsRefreshNote = (id: string) => (HOVER_WITNESSES[id] ?? []).some(spec => spec.focusAcrossRebuild);
+    const runScreens = async <T extends { id: string }, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> => {
+      const done = new Map<T, R>();
+      const pooled = items.filter(item => !postsRefreshNote(item.id));
+      (await runPool(pooled, 3, worker)).forEach((result, index) => done.set(pooled[index]!, result));
+      for (const item of items) if (postsRefreshNote(item.id)) done.set(item, await worker(item));
+      return items.map(item => done.get(item)!);
+    };
 
     // Installed only in the CI job (npm install --no-save), so it stays out of the lockfile and typecheck.
     const playwrightModule = "playwright";
@@ -630,7 +642,7 @@ async function main(): Promise<void> {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
         const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats } = await openContexts(viewport, theme, true, freeze);
-        const batch = await runPool(screens().filter(s => diagnosed(s.id, size)), 3, async (screen) => {
+        const batch = await runScreens(screens().filter(s => diagnosed(s.id, size)), async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, screenshot: null, error: null, ...(freeze ? { freeze } : {}) };
@@ -703,7 +715,7 @@ async function main(): Promise<void> {
         const size = `${viewport.width}x${viewport.height}`;
         if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
         const { context, signedIn, noScript, invitee, freezeStats } = await openContexts(viewport, theme, false, freeze);
-        const batch = await runPool(hoverScreens.filter(s => diagnosed(s.id, size)), 3, async (screen) => {
+        const batch = await runScreens(hoverScreens.filter(s => diagnosed(s.id, size)), async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
           const page = await (screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
