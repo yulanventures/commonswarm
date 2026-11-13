@@ -283,7 +283,13 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     { name: "show-more", rows: FEED_ROWS, prefer: '[data-signal-id="{message.long}"]', require: ['[data-signal-id="{message.long}"]'], max: 1,
       focus: true, focusTarget: ".dashboard__message-toggle", focusAcrossRebuild: true },
   ],
-  "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
+  "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true },
+    // A problem receipt is a badge beside its message (on the avatar, or in the gutter of a grouped one): hovering the
+    // row or focusing the badge must not move anything.
+    { name: "problem-receipt", rows: FEED_ROWS, prefer: '[data-signal-id="{message.failedOwn}"]', max: 2, focus: true,
+      focusTarget: ".dashboard__message-receipt:not([data-receipt-quiet]) > summary",
+      require: ['[data-signal-id="{message.failedOwn}"]:has(.dashboard__message-receipt:not([data-receipt-quiet]))',
+        '[data-signal-id="{message.failedGrouped}"][data-stream-grouped]:has(.dashboard__message-receipt:not([data-receipt-quiet]))'] }],
   "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],

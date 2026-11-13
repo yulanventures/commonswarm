@@ -380,6 +380,36 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         Object.assign(ids, { "message.addressedAgent": addressedAgent, "message.addressedOwn": addressedOwn, "message.groupedOwn": groupedOwn });
         steps.push("seed_addressed");
       } catch (error) { note("seed_addressed", error); }
+      // Two of the viewer's messages to the agent whose delivery ended in a terminal failure, seconds apart in the group
+      // channel: a problem receipt is never quiet, so each row carries its status badge (the second one grouped, with
+      // no avatar). They also show in the direct message with the agent.
+      try {
+        const failedOwn = randomUUID(), failedGrouped = randomUUID();
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.signals (
+              id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+              about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+            ) VALUES (
+              ${failedOwn}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+              NULL, 'note', 'Can you check whether the engineer confirmed Friday?',
+              statement_timestamp() + interval '25 days', statement_timestamp() - interval '8 seconds',
+              ${channels.group}::uuid, NULL, false
+            ), (
+              ${failedGrouped}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+              NULL, 'note', 'No rush if not.',
+              statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 seconds',
+              ${channels.group}::uuid, NULL, false
+            )`;
+          const failed = await tx`UPDATE swarm.signal_deliveries
+            SET delivered_at = statement_timestamp(), acked_at = statement_timestamp(), ack_outcome = 'failed_terminal',
+                last_error_code = 'delivery_attempts_exhausted', updated_at = statement_timestamp()
+            WHERE signal_id IN (${failedOwn}::uuid, ${failedGrouped}::uuid)
+            RETURNING signal_id`;
+          if (failed.length !== 2) throw new Error(`expected 2 delivery rows to fail, updated ${failed.length}`);
+        });
+        Object.assign(ids, { "message.failedOwn": failedOwn, "message.failedGrouped": failedGrouped });
+        steps.push("seed_failed_delivery");
+      } catch (error) { note("seed_failed_delivery", error); }
       // Two of the viewer's messages to everyone, seconds apart: the second groups under the first with no recipient, so
       // its author is the focus-revealed label (an addressed message keeps its header).
       try {
