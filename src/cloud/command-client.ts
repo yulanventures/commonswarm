@@ -179,7 +179,10 @@ export interface CapabilityCommandResult {
 export type ChannelCommand =
   | { kind: "channel_create"; slug: string; purpose?: string }
   | { kind: "channel_rename"; channel_id: string; slug: string }
-  | { kind: "channel_archive"; channel_id: string };
+  /** At least one of slug and purpose. purpose null clears it. Works on an archived channel too. */
+  | { kind: "channel_update"; channel_id: string; slug?: string; purpose?: string | null }
+  | { kind: "channel_archive"; channel_id: string }
+  | { kind: "channel_unarchive"; channel_id: string };
 
 export interface ChannelCommandRequest {
   workspaceId: string;

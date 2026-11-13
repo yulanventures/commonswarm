@@ -676,7 +676,7 @@ export const KNOWN_FLAGS = new Set([
   ...ONBOARDING_BOOLEAN_FLAGS, ...ONBOARDING_VALUE_FLAGS,
   ...BODY_FLAGS,
   "about", "agent-token-file", "agent-token-stdin", "all-devices", "allow-unattended", "anon-key", "attach", "branch", "capability-id",
-  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
+  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "clear-purpose", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel", "before", "grant-id",
   "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
@@ -695,7 +695,7 @@ export const BOOLEAN_FLAGS = new Set([
   "all-devices",
   "allow-unattended",
   "broadcast-to-channel",
-  "confirm-standing", "clear-pending",
+  "confirm-standing", "clear-pending", "clear-purpose",
   "force-file-store",
   "follow",
   "force",
@@ -9649,7 +9649,7 @@ async function runChannelCreate(args: Arguments): Promise<void> {
     `Channel ${channel.slug} created. Everyone in this workspace can read it and post to it; a channel is where a message is filed, not who may see it.\n` +
       `Post to it with cswarm note "<text>" --channel ${channel.slug}\n` +
       `Read it with cswarm feed --channel ${channel.slug}\n` +
-      `Its id, which rename and archive take: ${channel.channel_id}\n`,
+      `Its id, which update, archive and unarchive take: ${channel.channel_id}\n`,
   );
 }
 
@@ -9880,6 +9880,63 @@ async function runChannelRename(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_CHANNEL_UPDATE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "name", "purpose", "clear-purpose"] as const;
+
+/** Change a channel's name, its purpose, or both in one command. An archived channel can be changed too. */
+async function runChannelUpdate(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  if (selector === undefined) {
+    throw new UsageError("cswarm channel update needs the channel");
+  }
+  args.assertShape(RUN_CHANNEL_UPDATE_1_ACCEPTED_FLAGS, 3);
+  const nextName = args.optional("name");
+  const purposeInput = args.optional("purpose");
+  const clearPurpose = args.has("clear-purpose");
+  if (purposeInput !== undefined && clearPurpose) {
+    throw new UsageError("cswarm channel update takes --purpose or --clear-purpose, not both");
+  }
+  if (nextName === undefined && purposeInput === undefined && !clearPurpose) {
+    throw new UsageError("cswarm channel update needs --name, --purpose or --clear-purpose");
+  }
+  const selectorKind = channelSelectorKind(selector);
+  if (nextName !== undefined) {
+    const problem = channelSlugProblem(nextName);
+    if (problem !== null) throw new Error(problem);
+  }
+  /* Measured after trimming, as create does: the server stores the trimmed text. A purpose that is
+   * blank after trimming would clear it, which is what --clear-purpose is for, so it is refused here
+   * rather than doing something the caller did not type. */
+  const purpose = purposeInput === undefined ? undefined : purposeInput.trim();
+  if (purpose !== undefined && purpose.length === 0) {
+    throw new UsageError("--purpose needs some text. To remove the purpose, use --clear-purpose");
+  }
+  if (purpose !== undefined && purpose.length > CHANNEL_PURPOSE_MAX) {
+    throw new Error(`A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`);
+  }
+  const context = await fileContext(args, RUN_CHANNEL_UPDATE_1_ACCEPTED_FLAGS, 3);
+  const channelId = await resolveChannelSelector(context, selector, selectorKind);
+  const channel = await sendChannelCommand(context, {
+    kind: "channel_update",
+    channel_id: channelId,
+    ...(nextName === undefined ? {} : { slug: normalizeChannelSlug(nextName) }),
+    ...(clearPurpose ? { purpose: null } : purpose === undefined ? {} : { purpose }),
+  });
+  if (args.has("json")) {
+    printJson({ workspace_id: channel.workspace_id, channel });
+    return;
+  }
+  const changed = [
+    ...(nextName === undefined ? [] : [`named ${channel.slug}`]),
+    ...(clearPurpose ? ["without a purpose"] : purpose === undefined ? [] : ["with its new purpose"]),
+  ].join(" and ");
+  process.stdout.write(
+    `Channel ${channel.slug} is now ${changed}. Every message already filed in it is unchanged and its id has not moved.\n` +
+      (channel.purpose === null ? "" : `Purpose: ${sanitizeForTerminal(channel.purpose)}\n`) +
+      (channel.archived_at === null ? "" : `It is still archived. Bring it back with cswarm channel unarchive ${channel.slug}\n`) +
+      `Its id: ${channel.channel_id}\n`,
+  );
+}
+
 export const RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
 
 async function runChannelArchive(args: Arguments): Promise<void> {
@@ -9902,7 +9959,34 @@ async function runChannelArchive(args: Arguments): Promise<void> {
   process.stdout.write(
     `Channel ${channel.slug} is archived. It keeps its messages and its links, and it takes no new ones. Archiving it again changes nothing.\n` +
       `See it with cswarm channel ls --include-archived\n` +
-      `Read what is in it with cswarm feed --channel ${channel.slug}\n`,
+      `Read what is in it with cswarm feed --channel ${channel.slug}\n` +
+      `Bring it back with cswarm channel unarchive ${channel.slug}\n`,
+  );
+}
+
+export const RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
+/** Bring an archived channel back. Doing it to a live channel changes nothing. */
+async function runChannelUnarchive(args: Arguments): Promise<void> {
+  const selector = args.positionals[2];
+  if (selector === undefined) {
+    throw new UsageError("cswarm channel unarchive needs the channel");
+  }
+  args.assertShape(RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS, 3);
+  const selectorKind = channelSelectorKind(selector);
+  const context = await fileContext(args, RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS, 3);
+  const channelId = await resolveChannelSelector(context, selector, selectorKind);
+  const channel = await sendChannelCommand(context, {
+    kind: "channel_unarchive",
+    channel_id: channelId,
+  });
+  if (args.has("json")) {
+    printJson({ workspace_id: channel.workspace_id, channel });
+    return;
+  }
+  process.stdout.write(
+    `Channel ${channel.slug} is live again. It kept its messages and its name, and it takes new messages. Unarchiving a live channel changes nothing.\n` +
+      `Post to it with cswarm note "<text>" --channel ${channel.slug}\n`,
   );
 }
 
@@ -10769,7 +10853,9 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     read: commandEntry({ tool: "channel_read", mcp: true, handler: traced("runChannel", runChannelRead), description: "Read a channel's whole-workspace messages.", mutates: false, flags: [...agentFlags, "after", "limit"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel read <channel|general> [--after <message-id>] [--limit <1-50>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     ls: commandEntry({ tool: "channel_ls", mcp: true, handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    update: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUpdate), description: "Change a channel's name or purpose.", mutates: true, flags: [...agentFlags, "name", "purpose", "clear-purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel update <name|channel-id> [--name <new-name>] [--purpose <text> | --clear-purpose] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    unarchive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUnarchive), description: "Bring an archived channel back.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel unarchive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 15,
@@ -10906,7 +10992,9 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "memory.get": RUN_MEMORY_ID_1_ACCEPTED_FLAGS,
   "memory.forget": RUN_MEMORY_ID_1_ACCEPTED_FLAGS,
   "channel.rename": RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
+  "channel.update": RUN_CHANNEL_UPDATE_1_ACCEPTED_FLAGS,
   "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
+  "channel.unarchive": RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS,
   "file.put": FILE_PUT_ACCEPTED_FLAGS,
   "file.ls": FILE_LS_ACCEPTED_FLAGS,
   "file.get": FILE_GET_ACCEPTED_FLAGS,
