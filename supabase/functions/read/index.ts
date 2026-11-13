@@ -1564,6 +1564,15 @@ export async function handleHostedRead(
           OR s.recipients @> jsonb_build_array(
             jsonb_build_object('kind', 'agent', 'id', ${seat.principal_id}::uuid)
           )
+          /* Or it mentions this seat's agent. The mention view is membership-gated like the
+           * signals view, and a mention sits only on a message the whole workspace reads. */
+          OR EXISTS (
+            SELECT 1 FROM swarm_read.signal_mentions AS mention
+            WHERE mention.signal_id = s.id
+              AND mention.workspace_id = s.workspace_id
+              AND mention.kind = 'agent'
+              AND mention.id = ${seat.principal_id}::uuid
+          )
         )
         AND s.until > statement_timestamp()
         AND (

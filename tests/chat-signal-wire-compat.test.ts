@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  chatSignalKeys,
   chatSignalShapeProblem,
   SCALAR_RECIPIENT_FIELDS,
+  SIGNAL_MENTION_MAX,
   SIGNAL_RECIPIENT_MAX,
 } from "../supabase/functions/_shared/channels.js";
 
@@ -273,4 +275,36 @@ test("a malformed `to` is answered before the rules that read the list", () => {
   });
   assert.ok(capped !== null);
   assert.match(capped, new RegExp(`at most ${SIGNAL_RECIPIENT_MAX} recipients`));
+});
+
+test("mentions go on public messages only, and a body without the key is unchanged", () => {
+  const base = { signal_kind: "note", to_user_id: null, to_agent_principal_id: null, in_reply_to: null };
+  const id = "11111111-1111-4111-8111-111111111111";
+  const mentions = [{ kind: "agent", id }];
+  assert.deepEqual(chatSignalKeys({ ...base }), [], "an installed body gains no key");
+  assert.deepEqual(chatSignalKeys({ ...base, mentions }), ["mentions"]);
+  assert.equal(chatSignalShapeProblem({ ...base, mentions }), null);
+  assert.equal(chatSignalShapeProblem({ ...base, mentions: [] }), null, "an empty list mentions nobody");
+  assert.equal(
+    chatSignalShapeProblem({ ...base, signal_kind: "ask", thread_root_id: "22222222-2222-4222-8222-222222222222", mentions }),
+    null,
+    "a thread reply can mention, which it could never address",
+  );
+  for (const privateShape of [
+    { to_user_id: id },
+    { to_agent_principal_id: id },
+    { in_reply_to: id },
+    { to: [{ kind: "user", id }] },
+  ]) {
+    assert.match(
+      String(chatSignalShapeProblem({ ...base, ...privateShape, mentions })),
+      /cannot be combined with a recipient or a private reply/,
+      JSON.stringify(privateShape),
+    );
+  }
+  assert.match(String(chatSignalShapeProblem({ ...base, signal_kind: "working-on", mentions })), /can mention someone/);
+  assert.match(String(chatSignalShapeProblem({ ...base, mentions: [{ kind: "agent", id }, { kind: "agent", id }] })), /twice/);
+  assert.match(String(chatSignalShapeProblem({ ...base, mentions: [{ kind: "team", id }] })), /mentions is a list/);
+  const over = Array.from({ length: SIGNAL_MENTION_MAX + 1 }, (_unused, i) => ({ kind: "user", id: `${String(i).padStart(8, "0")}-1111-4111-8111-111111111111` }));
+  assert.match(String(chatSignalShapeProblem({ ...base, mentions: over })), new RegExp(`at most ${SIGNAL_MENTION_MAX}`));
 });

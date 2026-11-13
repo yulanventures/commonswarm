@@ -197,6 +197,9 @@ export interface HydratedDelivery {
     }>;
     until: string;
     created_at: string;
+    /** Where the message sits, so the agent can answer in the same place. Null for an unfiled or top-level message. */
+    channel_id: string | null;
+    thread_root_id: string | null;
   };
   lease_id: string;
   leased_until: string;
@@ -558,6 +561,21 @@ export async function claimAgentInbox(
 }
 
 /**
+ * The third way a delivery row is this agent's: the signal `s` mentions it. A mention sits only on a
+ * message the whole workspace can read (swarm.signal_mentions refuses anything else), so this arm
+ * admits the agent to nothing it could not already read. Used beside the scalar and recipient-set
+ * arms wherever a delivery is hydrated or acknowledged.
+ */
+function mentionsAgent(tx: Sql, principalId: string) {
+  return tx`EXISTS (
+    SELECT 1 FROM swarm.signal_mentions AS mention
+    WHERE mention.signal_id = s.id
+      AND mention.workspace_id = s.workspace_id
+      AND mention.mentioned_agent_principal_id = ${principalId}::uuid
+  )`;
+}
+
+/**
  * Hydrate body-free claim refs from immutable signals after recipient-set auth.
  * Missing or mismatched rows are integrity failures (caller maps to
  * delivery_unavailable without enumerating).
@@ -610,6 +628,8 @@ export async function hydrateDeliveryRefs(
     }>;
     until: Date;
     created_at: Date;
+    channel_id: string | null;
+    thread_root_id: string | null;
     sender_owner_relation: SenderOwnerRelation;
     recipient_position: number;
     recipient_count: number;
@@ -665,6 +685,8 @@ export async function hydrateDeliveryRefs(
       ) AS attachments,
       s.until,
       s.created_at,
+      s.channel_id,
+      s.thread_root_id,
       /* This claimer's own slot. A signal with no recipient rows is the scalar
        * shape: one recipient, at position 0. The UNIQUE (signal_id,
        * recipient_agent_principal_id) on swarm.signal_recipients is what makes
@@ -730,6 +752,7 @@ export async function hydrateDeliveryRefs(
             AND addressed.workspace_id = s.workspace_id
             AND addressed.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
         )
+        OR ${mentionsAgent(tx, args.recipientPrincipalId)}
       )
   `;
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -761,6 +784,8 @@ export async function hydrateDeliveryRefs(
         attachments: signal.attachments,
         until: asIso(signal.until),
         created_at: asIso(signal.created_at),
+        channel_id: signal.channel_id,
+        thread_root_id: signal.thread_root_id,
       },
       lease_id: ref.lease_id,
       leased_until: ref.leased_until,
@@ -893,7 +918,8 @@ export async function ackAgentDelivery(
               SELECT 1 FROM swarm.signal_recipients AS r
               WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
                 AND r.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
-            ))
+            )
+            OR ${mentionsAgent(tx, args.recipientPrincipalId)})
       ) AS allowed
     `;
     if (!directed[0]?.allowed) return { status: "unavailable" };
@@ -1023,6 +1049,7 @@ export async function ackAgentDelivery(
               AND addressed.workspace_id = s.workspace_id
               AND addressed.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
           )
+          OR ${mentionsAgent(tx, args.recipientPrincipalId)}
         )
       LIMIT 1
     `;

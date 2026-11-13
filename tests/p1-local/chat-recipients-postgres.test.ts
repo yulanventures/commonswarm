@@ -802,8 +802,8 @@ test("the delivery ledger is written by two triggers and by nothing else", async
     `;
     assert.deepEqual(
       callers.map((row) => row.proname),
-      ["enqueue_recipient_delivery", "enqueue_signal_delivery"],
-      "exactly the two enqueue triggers read the shared predicate",
+      ["enqueue_mention_delivery", "enqueue_recipient_delivery", "enqueue_signal_delivery"],
+      "exactly the enqueue triggers read the shared predicate: the two recipient ones and the mention one (20261113000001)",
     );
   } finally {
     await sql.end({ timeout: 5 });

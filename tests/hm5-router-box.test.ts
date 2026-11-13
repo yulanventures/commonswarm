@@ -120,7 +120,7 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
   const hooks = ["SWARM_CMD_TEST_SLEEP_AFTER_STEP", "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP"];
   const command = [...database, "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY",
     "SWARM_ENV", "SWARM_COMMAND_ALLOWED_ORIGINS", "SWARM_CAPABILITY_URLS", "SWARM_SELF_SERVE",
-    "SWARM_BRAIN_MEMORY", "SWARM_INTERACTIVE_REPLIES", "SWARM_SEAT_ADMIN", ...hooks];
+    "SWARM_BRAIN_MEMORY", "SWARM_INTERACTIVE_REPLIES", "SWARM_SEAT_ADMIN", "SWARM_CHAT_MENTIONS", ...hooks];
   const expected = [
     "SWARM_DATABASE_URL",
     "SUPABASE_DB_URL",
@@ -143,6 +143,7 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
     "SWARM_MCP_TODOS_LISTS_ENABLED",
     "SWARM_BRAIN_MEMORY",
     "SWARM_BRAIN_MEMORY_HOSTED",
+    "SWARM_CHAT_MENTIONS",
     "SWARM_FILE_TEXT_TOKEN",
   ];
   const allowlists = {

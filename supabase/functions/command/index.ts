@@ -60,7 +60,9 @@ import {
   normalizeChannelSlug,
   SIGNAL_KINDS,
   type SignalKind,
+  parseSignalMentions,
   parseSignalRecipients,
+  SIGNAL_MENTION_MAX,
   type SignalRecipient,
   unknownChannelMessage,
   uuidFieldRuleText,
@@ -319,6 +321,9 @@ interface SignalCommand {
    * is well formed: the validator refuses anything else, and entry 0 becomes
    * the row's scalar to_user_id / to_agent_principal_id. */
   to?: SignalRecipient[];
+  /* Who a public message names. Present only when non-empty; never beside a
+   * recipient or in_reply_to (chatSignalShapeProblem). */
+  mentions?: SignalRecipient[];
 }
 
 /** Roster R1b: the ask's own sender re-raises an open ask. Everything else is server-derived. */
@@ -915,6 +920,13 @@ const brainMemoryHostedEnabled = brainMemoryEnabled && Deno.env.get("SWARM_BRAIN
 const interactiveRepliesEnabled = Deno.env.get("SWARM_INTERACTIVE_REPLIES") === "1";
 /** Seat admin: owners give their own agents admin powers on the seat they hold. Off when unset. */
 const seatAdminEnabled = Deno.env.get("SWARM_SEAT_ADMIN") === "1";
+/* Public mentions. Off: a body that sends `mentions` is refused and the workspace lead is still
+ * reached by re-addressing the post to it. On: `mentions` is accepted and the lead is mentioned. */
+const chatMentionsEnabled = Deno.env.get("SWARM_CHAT_MENTIONS") === "1";
+/** Agents may exchange this many messages in a row in one thread through mentions; then a person has to post. */
+const MENTION_AGENT_HOP_MAX = 6;
+type MentionSource = "author" | "lead" | "thread";
+type SignalMentionRow = SignalRecipient & { source: MentionSource };
 const SEAT_ADMIN_AGENT_KIND_SET = new Set<string>(SEAT_ADMIN_AGENT_KINDS);
 const SEAT_ADMIN_EXECUTED_KIND_SET = new Set<string>(SEAT_ADMIN_EXECUTED_KINDS);
 
@@ -2245,6 +2257,9 @@ function validateCommand(
         reason: "client-supplied from is forbidden",
       };
     }
+    if (Object.hasOwn(cmd, "mentions") && !chatMentionsEnabled) {
+      return { ok: false, status: 400, reason: "mentions are not enabled on this deployment" };
+    }
     const modernShape =
       Object.hasOwn(cmd, "to_agent_principal_id") ||
       Object.hasOwn(cmd, "in_reply_to");
@@ -2272,6 +2287,8 @@ function validateCommand(
      * installed client always sends it. */
     const toList = Object.hasOwn(cmd, "to") ? cmd.to : undefined;
     const recipients = parseSignalRecipients(toList);
+    const mentionList = Object.hasOwn(cmd, "mentions") ? cmd.mentions : undefined;
+    const mentions = parseSignalMentions(mentionList);
     /* An EMPTY list addresses nobody, so it must not make the rules below read
      * as "addressed". It is refused by chatSignalShapeProblem with a sentence
      * that says so; letting it fail baseValid instead would answer it with the
@@ -2342,6 +2359,7 @@ function validateCommand(
         ? {}
         : { broadcast_to_channel: broadcastToChannel }),
       ...(toList === undefined ? {} : { to: toList }),
+      ...(mentionList === undefined ? {} : { mentions: mentionList }),
     });
     const keysOk = exactKeys(cmd, [
       "kind",
@@ -2418,6 +2436,8 @@ function validateCommand(
         (cmd.signal_kind === "ask" &&
           threadRoot === null &&
           typeof parentSignalId === "string" && UUID_RE.test(parentSignalId))) &&
+      // An ask chain is a private exchange between agents, so it carries no mention.
+      (!hasParentSignalId || mentions.length === 0) &&
       /* thread_root_id's uuid shape is checked INSIDE chatSignalShapeProblem,
        * not here. Keeping a copy on the edge meant a bad uuid was refused with
        * the generic reason before the chat sentence could run, which is exactly
@@ -2469,6 +2489,7 @@ function validateCommand(
             ? {}
             : { broadcast_to_channel: broadcastToChannel as boolean }),
           ...(addressedByList ? { to: recipients! } : {}),
+          ...(mentions.length > 0 ? { mentions } : {}),
         },
       }
       : {
@@ -10228,11 +10249,19 @@ async function resolveSignalWriteTarget(
   /* The scalar columns carry recipient 0. Recipients 1..N live only in
    * swarm.signal_recipients, so asking the columns alone left a signal a
    * caller can READ and cannot reply to. The second arm asks the set. */
+  /* A mentioned agent was woken for this message and can already read it (a
+   * mention sits only on a public message), so it may answer its author. */
   const addressedToCaller = addressedByScalar ||
     await signalNamesRecipient(tx, route, inReplyTo, {
       agentPrincipalId: auth.agent !== null ? auth.agent.principal_id : null,
       userId: auth.agent !== null ? null : callerUserId,
-    });
+    }) ||
+    (auth.agent !== null && (await tx<{ hit: number }[]>`
+      SELECT 1 AS hit FROM swarm.signal_mentions AS m
+      WHERE m.signal_id = ${inReplyTo}::uuid
+        AND m.workspace_id = ${route.workspaceId}::uuid
+        AND m.mentioned_agent_principal_id = ${auth.agent.principal_id}::uuid
+    `).length > 0);
   if (!addressedToCaller) return null;
 
   if (reference.from_kind === "user") {
@@ -10374,6 +10403,8 @@ export async function resolveSignalAttachments(
 
 /** Where the signal is filed, and how long it may live once clamped. */
 interface SignalPlacement {
+  /** Mention rows to write with the signal, in order. At most SIGNAL_MENTION_MAX. */
+  mentions?: readonly SignalMentionRow[];
   channelId: string | null;
   threadRootId: string | null;
   broadcastToChannel: boolean;
@@ -10767,6 +10798,23 @@ async function postSignal(
         ${recipient.kind === "user" ? recipient.id : null}::uuid,
         ${recipient.kind === "agent" ? recipient.id : null}::uuid,
         ${position}
+      )
+    `;
+  }
+  /* After the recipient rows, which a mentioned signal never has. Each agent row
+   * wakes its agent through the trigger on swarm.signal_mentions. */
+  for (const [position, mention] of (placement.mentions ?? []).entries()) {
+    await tx`
+      INSERT INTO swarm.signal_mentions (
+        signal_id, workspace_id, mentioned_user_id,
+        mentioned_agent_principal_id, position, source
+      ) VALUES (
+        ${signal.id}::uuid,
+        ${route.workspaceId}::uuid,
+        ${mention.kind === "user" ? mention.id : null}::uuid,
+        ${mention.kind === "agent" ? mention.id : null}::uuid,
+        ${position},
+        ${mention.source}
       )
     `;
   }
@@ -14401,6 +14449,7 @@ async function handleTransaction(
        * and status kinds are untouched, so agents never route to each other this way. A lead
        * that is no longer live leaves the post an ordinary broadcast instead of refusing it. */
       let signalTarget = namedTarget;
+      let leadMention: string | null = null;
       if (
         namedTarget !== null && auth.credentialKind === "user" &&
         (command.signal_kind === "note" || command.signal_kind === "ask") &&
@@ -14411,8 +14460,24 @@ async function handleTransaction(
         const [lead] = await tx<{ principal_id: string | null }[]>`
           SELECT swarm.workspace_live_lead(${route.workspaceId}::uuid) AS principal_id`;
         if (lead?.principal_id && await signalAgentTargetIsLive(tx, route, lead.principal_id)) {
-          signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
+          /* With mentions on, the post stays public and the lead is mentioned,
+           * unless the person named someone themselves. */
+          if (!chatMentionsEnabled) signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
+          else if (command.mentions === undefined) leadMention = lead.principal_id;
         }
+      }
+      /* Every named mention has to be reachable, as every recipient does: a
+       * dead one refuses the post with the same bare 403. */
+      const signalMentions: SignalMentionRow[] = [];
+      if (signalTarget !== null) {
+        for (const mention of command.mentions ?? []) {
+          const live = mention.kind === "user"
+            ? await signalUserTargetIsLive(tx, route, mention.id)
+            : await signalAgentTargetIsLive(tx, route, mention.id);
+          if (!live) { signalTarget = null; break; }
+          signalMentions.push({ ...mention, source: "author" });
+        }
+        if (leadMention !== null) signalMentions.push({ kind: "agent", id: leadMention, source: "lead" });
       }
       if (signalTarget === null) {
         await insertAudit(tx, {
@@ -14585,6 +14650,58 @@ async function handleTransaction(
        * REFUSED by the validator (chatSignalShapeProblem), not silently
        * ignored here, so this line only ever chooses between an inherited
        * value and a top-level post's own channel. */
+      if (chatMentionsEnabled && threadResolution.threadRootId !== null && auth.credentialKind === "user") {
+        /* A person's reply in a thread also reaches the agents already in it:
+         * the root's author when that is an agent, and the agents the root
+         * mentioned. Ones that are gone are skipped, not refused. */
+        const inThread = await tx<{ principal_id: string }[]>`
+          SELECT t.principal_id FROM (
+            SELECT s.from_principal AS principal_id, -1 AS ord
+            FROM swarm.signals AS s
+            WHERE s.id = ${threadResolution.threadRootId}::uuid
+              AND s.workspace_id = ${route.workspaceId}::uuid AND s.from_kind = 'agent'
+            UNION ALL
+            SELECT m.mentioned_agent_principal_id, m.position
+            FROM swarm.signal_mentions AS m
+            WHERE m.signal_id = ${threadResolution.threadRootId}::uuid
+              AND m.workspace_id = ${route.workspaceId}::uuid
+              AND m.mentioned_agent_principal_id IS NOT NULL
+          ) AS t ORDER BY t.ord
+        `;
+        for (const row of inThread) {
+          if (signalMentions.length >= SIGNAL_MENTION_MAX) break;
+          if (signalMentions.some((m) => m.kind === "agent" && m.id === row.principal_id)) continue;
+          if (!await signalAgentTargetIsLive(tx, route, row.principal_id)) continue;
+          signalMentions.push({ kind: "agent", id: row.principal_id, source: "thread" });
+        }
+      }
+      if (
+        threadResolution.threadRootId !== null && auth.credentialKind !== "user" &&
+        signalMentions.some((m) => m.kind === "agent")
+      ) {
+        const [recent] = await tx<{ capped: boolean }[]>`
+          SELECT count(*) >= ${MENTION_AGENT_HOP_MAX}
+             AND count(*) FILTER (WHERE t.from_kind = 'agent') = count(*) AS capped
+          FROM (
+            SELECT s.from_kind FROM swarm.signals AS s
+            WHERE s.workspace_id = ${route.workspaceId}::uuid
+              AND (s.id = ${threadResolution.threadRootId}::uuid
+                OR s.thread_root_id = ${threadResolution.threadRootId}::uuid)
+            ORDER BY s.created_at DESC, s.id DESC
+            LIMIT ${MENTION_AGENT_HOP_MAX}
+          ) AS t
+        `;
+        if (recent?.capped) {
+          await insertAudit(tx, {
+            auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+            outcome: "domain", reason: "agent mention hop limit reached in this thread", hash,
+          });
+          return decided({ status: 409, body: {
+            error: "mention_hop_limit",
+            message: `Agents have exchanged ${MENTION_AGENT_HOP_MAX} messages in a row in this thread. Reply without a mention, or wait for a person to post.`,
+          } });
+        }
+      }
       const placementChannelId = threadResolution.threadRootId !== null
         ? threadResolution.rootChannelId
         : channelResolution.channelId;
@@ -14596,6 +14713,7 @@ async function handleTransaction(
         signalTarget,
         attachmentResolution.attachments,
         {
+          ...(signalMentions.length === 0 ? {} : { mentions: signalMentions }),
           channelId: placementChannelId,
           threadRootId: threadResolution.threadRootId,
           broadcastToChannel: command.broadcast_to_channel ?? false,

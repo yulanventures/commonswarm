@@ -28,9 +28,12 @@ import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readin
 import {
   CHANNEL_READ_COLUMNS,
   MODEL_RULE_TEXT,
+  SIGNAL_MENTION_MAX,
   SIGNAL_RECIPIENT_MAX,
   uuidFieldRuleText,
 } from "../../supabase/functions/_shared/channels.js";
+import { cloudTarget } from "../../src/cloud/config.js";
+import { DeliveryCommandClient } from "../../src/cloud/delivery.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -238,7 +241,8 @@ before(async () => {
   });
   envDir = mkdtempSync(join(tmpdir(), "cswarm-chat-env-"));
   const envFile = join(envDir, "test.env");
-  writeFileSync(envFile, "SWARM_ENV=test\n");
+  // Mentions are on for this file. No workspace here has a lead, so nothing else changes.
+  writeFileSync(envFile, "SWARM_ENV=test\nSWARM_CHAT_MENTIONS=1\n");
   functionProcess = spawn(
     "supabase",
     ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
@@ -2121,4 +2125,241 @@ test("Brain M3: with workspace memory off, an admitted agent's memory reads are 
     assert.equal(response.status, 404, body.resource);
     assert.equal(((await response.json()) as { error?: string }).error, "memory_unavailable");
   }
+});
+
+
+// ---- Public mentions (20261113000001, SWARM_CHAT_MENTIONS on) ----
+
+/** A fresh agent in the fixture workspace with its own token, so a claim sees only this test's deliveries. */
+async function mentionAgent(ownerId: string, name: string): Promise<{ principal: string; token: string }> {
+  const principal = randomUUID();
+  const token = `swm_agt_${randomBytes(32).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    const device = randomUUID();
+    const run = randomUUID();
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${ownerId}::uuid, 'mention-tests')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${principal}::uuid, ${f.workspace}::uuid, ${ownerId}::uuid, ${`${name}-${principal.slice(0, 6)}`})`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
+      VALUES (${randomUUID()}::uuid, ${principal}::uuid, ${run}::uuid, ${tx.json(["post_signal"])}::jsonb,
+        ${createHash("sha256").update(token).digest()}, statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)`;
+  });
+  return { principal, token };
+}
+
+async function deliveriesOf(signalId: string): Promise<string[]> {
+  const rows = await sql<{ p: string }[]>`
+    SELECT recipient_agent_principal_id::text AS p FROM swarm.signal_deliveries
+    WHERE signal_id = ${signalId}::uuid ORDER BY 1`;
+  return rows.map((row) => row.p);
+}
+
+async function mentionsOf(signalId: string): Promise<Array<{ position: number; kind: string; id: string; source: string }>> {
+  return await viewRowAs(f.otherId, async (tx) => {
+    const rows = await tx<{ position: number; kind: string; id: string; source: string }[]>`
+      SELECT position, kind, id::text AS id, source FROM swarm_read.signal_mentions
+      WHERE signal_id = ${signalId}::uuid ORDER BY position`;
+    return rows.map((row) => ({ ...row }));
+  });
+}
+
+test("a mention wakes the agent and leaves the message public; the shipped listener client accepts the delivery", async () => {
+  const agent = await mentionAgent(f.ownerId, "mentioned");
+  const slug = `mention-${randomBytes(4).toString("hex")}`;
+  assert.equal((await send(f.ownerJwt, { kind: "channel_create", slug })).status, 200);
+  const posted = await send(f.ownerJwt, installedPost({
+    channel: slug,
+    mentions: [{ kind: "agent", id: agent.principal }, { kind: "user", id: f.otherId }],
+  }));
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const signal = signalOf(posted.body);
+  const signalId = String(signal.id);
+  // The stored and accepted row is unaddressed: nothing private about it.
+  assert.equal(signal.to, null);
+  assert.equal(signal.to_agent, null);
+  const stored = await sql<{ to_user_id: string | null; to_agent_principal_id: string | null; recipients: string }[]>`
+    SELECT s.to_user_id, s.to_agent_principal_id,
+      (SELECT count(*)::text FROM swarm.signal_recipients r WHERE r.signal_id = s.id) AS recipients
+    FROM swarm.signals s WHERE s.id = ${signalId}::uuid`;
+  assert.deepEqual({ ...stored[0] }, { to_user_id: null, to_agent_principal_id: null, recipients: "0" });
+  // A member who is neither the author nor the agent's owner reads it, as a whole-workspace message in its channel.
+  const seen = await viewRowAs(f.otherId, async (tx) => {
+    const rows = await tx<{ recipients: unknown; channel_id: string | null }[]>`
+      SELECT recipients, channel_id FROM swarm_read.signals WHERE id = ${signalId}::uuid`;
+    return rows.map((row) => ({ ...row }));
+  });
+  assert.deepEqual(seen, [{ recipients: [], channel_id: signal.channel_id }], "the mentioned message is public");
+  // Readback is typed ids in order.
+  assert.deepEqual(await mentionsOf(signalId), [
+    { position: 0, kind: "agent", id: agent.principal, source: "author" },
+    { position: 1, kind: "user", id: f.otherId, source: "author" },
+  ]);
+  assert.deepEqual(await deliveriesOf(signalId), [agent.principal], "only the mentioned agent is woken");
+
+  // The real client the listener ships with: it refuses any delivery whose to_agent is not its own principal.
+  const client = new DeliveryCommandClient(cloudTarget(local.API_URL, local.ANON_KEY));
+  const listener = randomUUID();
+  const claim = await client.claimAgentInbox({
+    workspaceId: f.workspace, credential: agent.token, commandId: randomUUID(),
+    listenerInstanceId: listener, expectedPrincipalId: agent.principal,
+  });
+  assert.equal(claim.deliveries.length, 1);
+  const row = claim.deliveries[0]!;
+  assert.equal(row.signal.id, signalId);
+  assert.equal(row.signal.to_agent, agent.principal, "the delivery names its own recipient");
+  assert.equal(row.signal.channel_id, signal.channel_id, "the delivery says where the message is");
+  assert.equal(row.signal.thread_root_id, null);
+  // A 0.1.x reply: private, to the author. The mentioned agent may send it.
+  const reply = await send(agent.token, installedPost({ in_reply_to: signalId, body: "on it" }));
+  assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  assert.equal(signalOf(reply.body).to, f.ownerId);
+  const ack = await client.ackAgentDelivery({
+    workspaceId: f.workspace, credential: agent.token, commandId: randomUUID(), signalId,
+    leaseId: row.leaseId, listenerInstanceId: listener, outcome: "replied", lastErrorCode: null,
+  });
+  assert.equal(ack.outcome, "replied");
+  // An agent that was not mentioned may not reply privately to a message that is not addressed to it.
+  const stranger = await send(f.agentTokenTwo, installedPost({ in_reply_to: signalId, body: "me too" }));
+  assert.equal(stranger.status, 403);
+});
+
+test("a person's reply in a thread reaches the agents already in it, and a mention there reaches one more", async () => {
+  const first = await mentionAgent(f.ownerId, "thread-first");
+  const second = await mentionAgent(f.ownerId, "thread-second");
+  const root = await send(f.ownerJwt, installedPost({ mentions: [{ kind: "agent", id: first.principal }] }));
+  assert.equal(root.status, 200, JSON.stringify(root.body));
+  const rootId = String(signalOf(root.body).id);
+  const followUp = await send(f.otherJwt, installedPost({ thread_root_id: rootId, body: "any news?" }));
+  assert.equal(followUp.status, 200, JSON.stringify(followUp.body));
+  const followUpId = String(signalOf(followUp.body).id);
+  assert.deepEqual(await deliveriesOf(followUpId), [first.principal]);
+  assert.deepEqual(await mentionsOf(followUpId), [{ position: 0, kind: "agent", id: first.principal, source: "thread" }]);
+  const named = await send(f.otherJwt, installedPost({
+    thread_root_id: rootId, body: "and you?", mentions: [{ kind: "agent", id: second.principal }],
+  }));
+  assert.equal(named.status, 200, JSON.stringify(named.body));
+  const namedId = String(signalOf(named.body).id);
+  assert.deepEqual(await deliveriesOf(namedId), [first.principal, second.principal].sort());
+  assert.deepEqual((await mentionsOf(namedId)).map((m) => [m.id, m.source]), [[second.principal, "author"], [first.principal, "thread"]]);
+  // An agent's own reply in the thread wakes nobody unless it mentions someone, and never itself.
+  const agentReply = await send(first.token, installedPost({ thread_root_id: rootId, body: "done" }));
+  assert.equal(agentReply.status, 200, JSON.stringify(agentReply.body));
+  assert.deepEqual(await deliveriesOf(String(signalOf(agentReply.body).id)), []);
+  const selfMention = await send(first.token, installedPost({
+    thread_root_id: rootId, body: "note to self", mentions: [{ kind: "agent", id: first.principal }, { kind: "agent", id: second.principal }],
+  }));
+  assert.equal(selfMention.status, 200, JSON.stringify(selfMention.body));
+  assert.deepEqual(await deliveriesOf(String(signalOf(selfMention.body).id)), [second.principal], "an agent is not woken by its own mention");
+});
+
+test("agents cannot keep waking each other in a thread: after six agent messages in a row a mention is refused", async () => {
+  const one = await mentionAgent(f.ownerId, "hop-one");
+  const two = await mentionAgent(f.ownerId, "hop-two");
+  const root = await send(one.token, installedPost({ body: "agent root" }));
+  assert.equal(root.status, 200, JSON.stringify(root.body));
+  const rootId = String(signalOf(root.body).id);
+  for (let i = 0; i < 5; i += 1) {
+    const from = i % 2 === 0 ? two : one;
+    const to = i % 2 === 0 ? one : two;
+    const reply = await send(from.token, installedPost({ thread_root_id: rootId, body: `hop ${i}`, mentions: [{ kind: "agent", id: to.principal }] }));
+    assert.equal(reply.status, 200, `hop ${i}: ${JSON.stringify(reply.body)}`);
+  }
+  const capped = await send(one.token, installedPost({ thread_root_id: rootId, body: "hop 6", mentions: [{ kind: "agent", id: two.principal }] }));
+  assert.equal(capped.status, 409, JSON.stringify(capped.body));
+  assert.equal(capped.body.error, "mention_hop_limit");
+  // Without a mention the agent can still post, and a person's post lifts the limit.
+  assert.equal((await send(one.token, installedPost({ thread_root_id: rootId, body: "plain" }))).status, 200);
+  assert.equal((await send(f.ownerJwt, installedPost({ thread_root_id: rootId, body: "carry on" }))).status, 200);
+  const resumed = await send(one.token, installedPost({ thread_root_id: rootId, body: "resumed", mentions: [{ kind: "agent", id: two.principal }] }));
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+});
+
+test("a mention never rides on a private message, in the validator or in the database", async () => {
+  const agent = await mentionAgent(f.ownerId, "private");
+  const mention = [{ kind: "agent", id: agent.principal }];
+  for (const extra of [
+    { to: [{ kind: "user", id: f.otherId }] },
+    { to_user_id: f.otherId },
+    { to_agent_principal_id: f.principal },
+  ]) {
+    const refused = await send(f.ownerJwt, installedPost({ ...extra, mentions: mention }));
+    assert.equal(refused.status, 400, JSON.stringify(extra));
+    assert.match(String(refused.body.message), /cannot be combined with a recipient or a private reply/);
+  }
+  const workingOn = await send(f.ownerJwt, installedPost({ signal_kind: "working-on", mentions: mention }));
+  assert.equal(workingOn.status, 400);
+  const tooMany = await send(f.ownerJwt, installedPost({
+    mentions: Array.from({ length: SIGNAL_MENTION_MAX + 1 }, () => ({ kind: "user", id: randomUUID() })),
+  }));
+  assert.equal(tooMany.status, 400);
+  assert.match(String(tooMany.body.message), new RegExp(`at most ${SIGNAL_MENTION_MAX}`));
+  // Someone who is not in the workspace: the same bare refusal a dead recipient gets, and nothing is written.
+  const gone = await send(f.ownerJwt, installedPost({ mentions: [{ kind: "agent", id: randomUUID() }] }));
+  assert.equal(gone.status, 403);
+
+  // The database refuses the shapes the validator refuses, whoever writes them.
+  const directed = randomUUID();
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, to_agent_principal_id, until)
+      VALUES (${directed}::uuid, ${f.workspace}::uuid, ${f.ownerId}::uuid, 'user', 'note', 'private', ${f.principal}::uuid, statement_timestamp() + interval '1 hour')`;
+    await tx`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_agent_principal_id, position)
+      VALUES (${directed}::uuid, ${f.workspace}::uuid, ${agent.principal}::uuid, 0)`;
+  }), /only a public note or ask can carry a mention/);
+  const later = randomUUID();
+  await assert.rejects(sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, to_user_id, until)
+      VALUES (${later}::uuid, ${f.workspace}::uuid, ${f.ownerId}::uuid, 'user', 'note', 'recipient after mention', NULL, statement_timestamp() + interval '1 hour')`;
+    await tx`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_agent_principal_id, position)
+      VALUES (${later}::uuid, ${f.workspace}::uuid, ${agent.principal}::uuid, 0)`;
+    await tx`INSERT INTO swarm.signal_recipients (signal_id, workspace_id, recipient_user_id, position)
+      VALUES (${later}::uuid, ${f.workspace}::uuid, ${f.otherId}::uuid, 0)`;
+  }), "a recipient written after the mention is refused by commit");
+  const existing = await send(f.ownerJwt, installedPost());
+  await assert.rejects(sql`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_agent_principal_id, position)
+    VALUES (${String(signalOf(existing.body).id)}::uuid, ${f.workspace}::uuid, ${agent.principal}::uuid, 0)`,
+    /only with a new signal/);
+});
+
+test("with a lead set, an untagged post from a person stays public and mentions the lead", async () => {
+  const lead = await mentionAgent(f.ownerId, "lead");
+  await sql`UPDATE swarm.workspaces SET lead_agent_principal_id = ${lead.principal}::uuid WHERE workspace_id = ${f.workspace}::uuid`;
+  try {
+    const posted = await send(f.otherJwt, installedPost({ body: "who can look at the build?" }));
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    const signal = signalOf(posted.body);
+    assert.equal(signal.to_agent, null, "not re-addressed to the lead");
+    assert.deepEqual(await mentionsOf(String(signal.id)), [{ position: 0, kind: "agent", id: lead.principal, source: "lead" }]);
+    assert.deepEqual(await deliveriesOf(String(signal.id)), [lead.principal]);
+    // Anyone can thread on it, which a lead-addressed post refused.
+    const reply = await send(f.ownerJwt, installedPost({ thread_root_id: String(signal.id), body: "I can" }));
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    // Naming someone yourself leaves the lead out.
+    const named = await send(f.otherJwt, installedPost({ mentions: [{ kind: "user", id: f.ownerId }] }));
+    assert.equal(named.status, 200, JSON.stringify(named.body));
+    assert.deepEqual(await deliveriesOf(String(signalOf(named.body).id)), []);
+  } finally {
+    await sql`UPDATE swarm.workspaces SET lead_agent_principal_id = NULL WHERE workspace_id = ${f.workspace}::uuid`;
+  }
+});
+
+test("a hosted seat's check admits a message that mentions its agent, and still no other public message", async () => {
+  const agent = await mentionAgent(f.ownerId, "hosted");
+  const mentioned = await send(f.otherJwt, installedPost({ mentions: [{ kind: "agent", id: agent.principal }] }));
+  const plain = await send(f.otherJwt, installedPost());
+  assert.equal(mentioned.status, 200, JSON.stringify(mentioned.body));
+  const ids = [String(signalOf(mentioned.body).id), String(signalOf(plain.body).id)];
+  const visible = await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: f.ownerId, role: "authenticated", agent_principal_id: agent.principal })}, true)`;
+    await tx.unsafe("SET LOCAL ROLE swarm_read");
+    const rows = await tx<{ id: string }[]>`
+      SELECT id::text AS id FROM swarm.hosted_mcp_check_visible_signals(${f.workspace}::uuid, ${agent.principal}::uuid, ${ids}::uuid[])`;
+    const direct = await tx<{ id: string }[]>`
+      SELECT s.id::text AS id FROM swarm_read.signals s WHERE s.id = ANY(${ids}::uuid[]) AND EXISTS (
+        SELECT 1 FROM swarm_read.signal_mentions m WHERE m.signal_id = s.id AND m.workspace_id = s.workspace_id
+          AND m.kind = 'agent' AND m.id = ${agent.principal}::uuid)`;
+    await tx.unsafe("RESET ROLE");
+    return [rows.map((row) => row.id), direct.map((row) => row.id)];
+  });
+  assert.deepEqual(visible, [[ids[0]], [ids[0]]]);
 });
