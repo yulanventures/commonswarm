@@ -111,6 +111,9 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.invitation-inbox": ['human-invitation-inbox[data-placement="corner"]:not([hidden])'],
   // The update notice is a fixed <aside> card floating over the feed and composer.
   "app.update-toast": ["[data-update-notice]:not([hidden])"],
+  // A settled receipt opens as a card in the row's floating tool bar, over the message. (A problem receipt opens in
+  // the flow under its message and is not an overlay.)
+  "menu.receipt": [".dashboard__message-tools:has(> .dashboard__message-receipt[data-receipt-quiet][open])"],
   // The right-click menu (lib/context-menu.ts) is created on open and removed on close, never hidden.
   "menu.context": ['.cs-context-menu[role="menu"]'],
   // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
