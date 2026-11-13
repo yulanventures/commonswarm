@@ -1,9 +1,34 @@
-/* All receipt states share a reserved footer. First-read status changes never
- * change its closed footprint. Opening native details is an explicit action. */
+/* Row tools: the delivery receipt and "Reply in thread".
+ *
+ * A settled (quiet) receipt and the reply control share one bar that floats over the row's
+ * top-right corner. kylon-channel.css places it and shows it on hover, keyboard focus or a tap;
+ * no row reserves space for it, so messages sit at their natural spacing on every screen.
+ *
+ * A receipt that is a problem or still moving (no data-receipt-quiet) is never hidden: its bar
+ * stays in the flow under the message, as a footer of fixed closed height. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
-  --k-receipt-block: 24px;
+  --k-receipt-block: 28px;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt) {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  box-sizing: border-box;
+  max-inline-size: min(30rem, calc(100% - 8px));
+}
+/* Opened, the bar becomes a small card: the detail drops under the summary and the reply
+ * control keeps its corner. It leaves with the bar when the pointer or focus leaves the row. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt[open]) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 2px 4px;
+  inline-size: min(24rem, calc(100% - 8px));
+  max-block-size: min(60vh, 28rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) {
   position: static;
   inset: auto;
   flex: 1 0 100%;
@@ -14,7 +39,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   inline-size: 100%;
   min-inline-size: 0;
   max-inline-size: 100%;
+  max-block-size: none;
   min-block-size: var(--k-receipt-block);
+  overflow: visible;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -59,6 +86,15 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .
   block-size: var(--k-receipt-block);
   white-space: nowrap;
   overflow-wrap: normal;
+}
+/* In the floating bar a closed receipt is a compact control; its full sentence is its title,
+ * its accessible name and its opened detail. The footer of a problem receipt keeps the full width. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
+  max-inline-size: 16rem;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt > summary {
+  padding-inline: 6px;
+  border-radius: 4px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt > summary > .dashboard__message-receipt-glyph {
   flex: 0 0 1.5rem;
@@ -109,5 +145,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt
 @media (width <= 64rem), (hover: none) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
     --k-receipt-block: 44px;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
+    max-inline-size: 11rem;
   }
 }
