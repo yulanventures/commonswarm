@@ -4,7 +4,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { launchPlaywrightChromium } from "../../../tests/chrome.js";
+import { chromium, type Page } from "playwright-core";
 import { compileFixtureFunction, renderAstroFixture } from "../../../tests/astro-fixture";
 
 function installChannelFixture() {
@@ -179,25 +181,14 @@ test("channel settings and directory preserve drafts, rights, native focus, arch
   const install = await compileFixtureFunction(new URL("../../../tests/workspace-fixture.ts", import.meta.url), "installWorkspaceFixture");
   const channelFixture = await compileFixtureFunction(new URL(import.meta.url), "installChannelFixture");
   const observe = await compileFixtureFunction(new URL(import.meta.url), "observeChannelManagement");
-  const html = "<!doctype html><html><head><meta charset='utf-8'><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" + styles.join("\n") +
+  const html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><meta name='commonswarm:url' content='https://api.test.invalid'><meta name='commonswarm:anon-key' content='synthetic-public'><style>" + styles.join("\n") +
     "</style><script>" + install + channelFixture + "</script></head><body>" + markup + "<script type='module'>" + observe + "</script></body></html>";
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
-  let debugPort = 0;
+  let activePage: Page | null = null;
   const keyboard = async (key: string, shift: boolean) => {
     assert.ok(key === "Tab" || key === "Escape");
-    const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json() as { type: string; webSocketDebuggerUrl: string }[];
-    const page = targets.find(target => target.type === "page"); assert.ok(page);
-    const ws = new WebSocket(page.webSocketDebuggerUrl);
-    await new Promise<void>((resolve, reject) => { ws.addEventListener("open", () => resolve(), { once: true }); ws.addEventListener("error", reject, { once: true }); });
-    try {
-      let id = 0;
-      for (const type of ["keyDown", "keyUp"]) await new Promise<void>((resolve, reject) => {
-        const seq = ++id, timer = setTimeout(() => reject(new Error("keyboard CDP timeout")), 5_000);
-        const receive = (event: MessageEvent) => { const reply = JSON.parse(String(event.data)); if (reply.id !== seq) return; clearTimeout(timer); ws.removeEventListener("message", receive); reply.error ? reject(new Error(JSON.stringify(reply.error))) : resolve(); };
-        ws.addEventListener("message", receive);
-        ws.send(JSON.stringify({ id: seq, method: "Input.dispatchKeyEvent", params: { type, key, code: key, windowsVirtualKeyCode: key === "Tab" ? 9 : 27, modifiers: shift ? 8 : 0 } }));
-      });
-    } finally { ws.close(); }
+    assert.ok(activePage);
+    await activePage.keyboard.press(shift ? `Shift+${key}` : key);
   };
   const server = createServer((request, response) => {
     const url = new URL(request.url!, "http://127.0.0.1");
@@ -207,24 +198,29 @@ test("channel settings and directory preserve drafts, rights, native focus, arch
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(url.pathname === "/app.js" ? bundled.join("\n") : html);
   });
+  const browser = await launchPlaywrightChromium(chromium);
   try {
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address(); assert.ok(address && typeof address === "object");
     const evidence = join(process.cwd(), "../site-observer-evidence/channel-management"); await mkdir(evidence, { recursive: true });
-    const outcomes: Record<string, any> = {}, chrome = await findChrome();
+    const outcomes: Record<string, any> = {};
     const cases = [390, 1024, 1440].flatMap(width => ["light", "dark"].flatMap(theme => ["settings", "directory"].map(capture => ({ width, theme, capture, reader: false }))));
     cases.push({ width: 390, theme: "dark", capture: "settings", reader: true });
     for (const { width, theme, capture, reader } of cases) {
-      const reservation = createServer(); await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
-      const reserved = reservation.address(); assert.ok(reserved && typeof reserved === "object"); debugPort = reserved.port;
-      await new Promise<void>(resolve => reservation.close(() => resolve()));
       const name = `${width}-${theme}-${capture}${reader ? "-reader" : ""}`;
-      const { stdout } = await launchChrome(chrome, [`--remote-debugging-port=${debugPort}`, "--remote-allow-origins=*", `--window-size=${width},${width === 390 ? 844 : 900}`, ...(width > 832 ? ["--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] : []), "--virtual-time-budget=120000", "--dump-dom", `--screenshot=${join(evidence, name + ".png")}`,
-        `http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&c=66666666-6666-4666-8666-666666666666&case=channels&theme=${theme}&capture=${capture}${reader ? "&reader=1" : ""}`], { timeout: 60_000, maxBuffer: 12 * 1024 * 1024 });
-      const raw = stdout.match(/data-channel-observation="([^"]*)"/)?.[1];
-      outcomes[name] = raw ? JSON.parse(raw.replaceAll("&quot;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")) : { error: "observer did not finish" };
+      const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 }, hasTouch: width === 390 });
+      activePage = await context.newPage();
+      try {
+        await activePage.goto(`http://127.0.0.1:${address.port}/app?w=11111111-1111-4111-8111-111111111111&c=66666666-6666-4666-8666-666666666666&case=channels&theme=${theme}&capture=${capture}${reader ? "&reader=1" : ""}`);
+        await activePage.waitForFunction(() => !!document.documentElement.dataset.channelObservation, null, { timeout: 30_000 });
+        outcomes[name] = await activePage.evaluate(() => JSON.parse(document.documentElement.dataset.channelObservation!));
+        await activePage.screenshot({ path: join(evidence, name + ".png"), fullPage: true });
+      } catch (error) {
+        outcomes[name] = { error: String(error) };
+        await activePage.screenshot({ path: join(evidence, name + ".png"), fullPage: true }).catch(() => {});
+      } finally { await context.close(); activePage = null; }
     }
     await writeFile(join(evidence, "results.json"), JSON.stringify(outcomes, null, 2));
     assert.deepEqual(Object.entries(outcomes).filter(([, outcome]) => !outcome.ok), [], JSON.stringify(outcomes));
-  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  } finally { await browser.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
