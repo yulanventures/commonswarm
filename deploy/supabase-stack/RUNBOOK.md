@@ -518,3 +518,15 @@ Rollback changes only the selected service and its matching password verifier
 using the retained guarded inverse. Do not restore all globals or data for a
 service password rollback. Keep before-copies and escrow until retention permits
 removal. A return to the old shared password restores the earlier exposure.
+
+The gate registry schema is version 1 and must contain all four service entries,
+even when checking one named service. Each entry has the canonical container
+and private env path, nonempty unique file/effective name inventories, a strict
+`current_image` sha256 ID and nonempty `approved_image_refs` including that ID.
+Approved refs are copied from verified image/launch inventory, never from an
+untrusted rendered model. A controlled gate update must back up and validate
+this registry metadata before installation; the earlier production registry
+needs this explicit metadata addition. This source change alone installs no
+production gate or registry update. Run the focused CLI security regressions
+with `python3 tests/scoped-env-check.test.py`; fixtures contain synthetic values
+and do not access Docker or private host files.
