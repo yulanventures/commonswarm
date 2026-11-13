@@ -97,8 +97,10 @@ async function observeChannelManagement() {
     check(one<HTMLInputElement>("[data-channel-rename-slug]")?.value === "design", "settings show the wrong channel");
     check(one<HTMLTextAreaElement>("[data-channel-edit-description]")?.maxLength === 500, "description bound drifted");
     opener.focus(); check(settings().contains(document.activeElement), "background stole modal focus");
-    const close = one<HTMLButtonElement>("[data-channel-dialog-cancel]")!;
-    close.focus(); await key("Tab", true); check(settings().contains(document.activeElement), "Shift+Tab escaped settings");
+    const nameField = one<HTMLInputElement>("[data-channel-rename-slug]")!;
+    nameField.focus(); await key("Tab");
+    check(document.activeElement === one("[data-channel-edit-description]"), "Tab did not reach Description");
+    await key("Tab", true); check(document.activeElement === nameField, "Shift+Tab did not return to Name");
     await key("Escape"); await wait("settings escape", () => !settings().open);
     check(document.activeElement === opener, "Escape lost the settings opener");
     await openSettings();
