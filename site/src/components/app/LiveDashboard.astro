@@ -11485,7 +11485,7 @@ import "../../styles/kylon-command-palette.css";
       const archive = one<HTMLButtonElement>("[data-channel-settings-archive]");
       if (archive) { archive.hidden = !manageable; archive.textContent = channel?.archivedAt ? UNARCHIVE_CHANNEL_LABEL : ARCHIVE_CHANNEL_LABEL; }
       const consequence = one<HTMLElement>("[data-channel-archive-consequence]"); if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
-      for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit], [data-channel-settings-archive]")) {
+      for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) {
         submit.disabled = channelDialogPending;
         if (channelDialogPending) submit.setAttribute("aria-busy", "true"); else submit.removeAttribute("aria-busy");
       }
