@@ -200,6 +200,14 @@ export interface HydratedDelivery {
     /** Where the message sits, so the agent can answer in the same place. Null for an unfiled or top-level message. */
     channel_id: string | null;
     thread_root_id: string | null;
+    /**
+     * Who can read the message this delivery is for. "workspace": it has no recipient and is not a
+     * private reply, so the agent was woken by a mention and an answer belongs in the open, in the
+     * message's thread. "private": it was addressed, and an answer goes back to its author alone.
+     * A client that predates this field ignores it and answers privately, as before. It is part
+     * of the delivery, like to_agent above: a feed read of the same signal does not carry it.
+     */
+    audience: "workspace" | "private";
   };
   lease_id: string;
   leased_until: string;
@@ -270,12 +278,21 @@ export async function claimAgentInbox(
   const sessionGeneration = args.session?.generation ?? null;
   // 1. Serialize claims on this principal without blocking signal writers'
   //    foreign-key KEY SHARE locks. Poll holds the same lock before the seat row.
+  /* The claimer has to be a live member of THIS workspace. swarm.agent_principals.workspace_id is
+   * only the workspace an agent started in, so selecting on it refused every claim an agent made
+   * in a second workspace it was added to (20261028000002), and its deliveries there were never
+   * taken. The lock stays on the principal row alone. */
   const principalRows = await tx<{ principal_id: string; revoked_at: Date | null }[]>`
-    SELECT principal_id, revoked_at
-    FROM swarm.agent_principals
-    WHERE workspace_id = ${args.workspaceId}::uuid
-      AND principal_id = ${args.recipientPrincipalId}::uuid
-    FOR NO KEY UPDATE
+    SELECT p.principal_id, p.revoked_at
+    FROM swarm.agent_principals AS p
+    WHERE p.principal_id = ${args.recipientPrincipalId}::uuid
+      AND EXISTS (
+        SELECT 1 FROM swarm.agent_workspace_memberships AS seat
+        WHERE seat.principal_id = p.principal_id
+          AND seat.workspace_id = ${args.workspaceId}::uuid
+          AND seat.revoked_at IS NULL
+      )
+    FOR NO KEY UPDATE OF p
   `;
   const principalRow = principalRows[0];
   if (!principalRow || principalRow.revoked_at !== null) {
@@ -618,6 +635,7 @@ export async function hydrateDeliveryRefs(
     sender_owner_relation: SenderOwnerRelation;
     recipient_position: number;
     recipient_count: number;
+    whole_workspace: boolean;
     sender_live: boolean;
     sender_canceled: boolean;
   }[]>`
@@ -672,6 +690,13 @@ export async function hydrateDeliveryRefs(
       s.created_at,
       s.channel_id,
       s.thread_root_id,
+      (
+        s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.in_reply_to IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM swarm.signal_recipients AS anyone
+          WHERE anyone.signal_id = s.id AND anyone.workspace_id = s.workspace_id
+        )
+      ) AS whole_workspace,
       /* This claimer's own slot. A signal with no recipient rows is the scalar
        * shape: one recipient, at position 0. The UNIQUE (signal_id,
        * recipient_agent_principal_id) on swarm.signal_recipients is what makes
@@ -779,6 +804,7 @@ export async function hydrateDeliveryRefs(
         created_at: asIso(signal.created_at),
         channel_id: signal.channel_id,
         thread_root_id: signal.thread_root_id,
+        audience: signal.whole_workspace ? "workspace" : "private",
       },
       lease_id: ref.lease_id,
       leased_until: ref.leased_until,
