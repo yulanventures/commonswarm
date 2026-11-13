@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CHANNEL_PURPOSE_MAX,
+  CHANNEL_PURPOSE_MAX_TEXT,
+  CHANNEL_PURPOSE_TYPE_TEXT,
+  CHANNEL_UPDATE_EMPTY_TEXT,
+  CHANNEL_UPDATE_OPTIONAL_FIELDS,
+  commandFieldsMessage,
   parseSignalRecipients,
   SIGNAL_RECIPIENT_KINDS,
   SIGNAL_RECIPIENT_MAX,
@@ -142,6 +148,23 @@ test("parseSignalRecipients lower-cases ids and refuses what the rules refuse", 
   assert.equal(parseSignalRecipients("nope"), null);
   assert.equal(parseSignalRecipients([{ kind: "user", id: "nope" }]), null);
   assert.deepEqual(parseSignalRecipients([]), []);
+});
+
+test("channel_update and channel_unarchive generated field and purpose sentences stay pinned to their constants", () => {
+  assert.equal(
+    commandFieldsMessage("channel_update", ["channel_id"], CHANNEL_UPDATE_OPTIONAL_FIELDS),
+    "channel_update takes channel_id, and optionally slug and purpose, and nothing else.",
+  );
+  assert.equal(
+    commandFieldsMessage("channel_unarchive", ["channel_id"]),
+    "channel_unarchive takes channel_id, and nothing else.",
+  );
+  assert.equal(CHANNEL_UPDATE_EMPTY_TEXT, "channel_update needs slug or purpose, or both.");
+  assert.equal(CHANNEL_PURPOSE_TYPE_TEXT, "A channel purpose is text.");
+  assert.ok(
+    new RegExp(`(?<!\\d)${CHANNEL_PURPOSE_MAX}(?!\\d)`).test(CHANNEL_PURPOSE_MAX_TEXT),
+    "the purpose bound sentence carries CHANNEL_PURPOSE_MAX",
+  );
 });
 
 /* ---------------------------------------------------------------------------
