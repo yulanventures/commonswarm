@@ -11460,7 +11460,8 @@ import "../../styles/kylon-command-palette.css";
     };
     const keepChannelDialogFocus = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
-      if (dialog?.open && !dialog.contains(document.activeElement)) {
+      const active = document.activeElement;
+      if (dialog?.open && (!dialog.contains(active) || active?.matches(":disabled"))) {
         dialog.querySelector<HTMLButtonElement>("[data-channel-dialog-cancel]")?.focus({ preventScroll: true });
       }
     };
