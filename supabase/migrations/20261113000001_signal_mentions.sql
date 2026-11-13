@@ -71,8 +71,11 @@ BEGIN
     FROM swarm.signals AS signal
     WHERE signal.id = NEW.signal_id
       AND signal.workspace_id = NEW.workspace_id
-      AND signal.xmin::text::bigint =
-        (pg_current_xact_id()::text::bigint & 4294967295)
+      -- The server stamp the recipient and attachment guards read (20261022000992). It holds
+      -- inside a savepoint, where the row's xmin is the subtransaction's and would not match.
+      AND signal.creation_xact_id = pg_current_xact_id()
+      AND signal.creation_system_identifier =
+        (SELECT system_identifier FROM pg_catalog.pg_control_system())
   ) THEN
     RAISE EXCEPTION 'signal mentions can be inserted only with a new signal'
       USING ERRCODE = '55000';
