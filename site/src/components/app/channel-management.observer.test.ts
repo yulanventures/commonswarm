@@ -16,6 +16,7 @@ function installChannelFixture() {
   f.activeChannel = "66666666-6666-4666-8666-666666666666";
   f.archivedChannel = "77777777-7777-4777-8777-777777777777";
   const reader = new URL(location.href).searchParams.get("reader") === "1";
+  f.reader = reader; f.capture = new URL(location.href).searchParams.get("capture");
   const make = (id: string, slug: string, description: string | null, archived = false) => ({
     channel_id: id, workspace_id: f.workspace, slug, purpose: description,
     created_by_principal: reader ? "88888888-8888-4888-8888-888888888888" : f.owner, created_by_kind: "user",
@@ -72,13 +73,17 @@ async function observeChannelManagement() {
     const response = await fetch(`/__key?key=${value}&shift=${shift ? 1 : 0}`);
     check(response.ok, "keyboard command failed: " + await response.text());
   };
+  const click = async (selector: string) => {
+    const response = await fetch(`/__click?selector=${encodeURIComponent(selector)}`);
+    check(response.ok, "click failed: " + await response.text());
+  };
   const input = (selector: string, value: string) => {
     const el = one<HTMLInputElement | HTMLTextAreaElement>(selector)!;
     el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); return el;
   };
   const settings = () => one<HTMLDialogElement>("[data-channel-dialog]")!;
   const directory = () => one<HTMLDialogElement>("[data-channel-directory]")!;
-  const openSettings = async () => { shown<HTMLButtonElement>("[data-channel-settings-open]").click(); await wait("settings open", () => settings().open); };
+  const openSettings = async () => { await click("[data-channel-settings-open]:visible"); await wait("settings open", () => settings().open); };
   const target44 = (el: HTMLElement) => { const r = el.getBoundingClientRect(); check(r.width >= 44 && r.height >= 44, `small target: ${el.outerHTML.slice(0, 150)}`); };
   const fits = (dialog: HTMLDialogElement) => {
     const r = dialog.getBoundingClientRect();
@@ -91,7 +96,7 @@ async function observeChannelManagement() {
     const opener = shown<HTMLButtonElement>("[data-channel-settings-open]");
     target44(opener);
     check(one(".hm-frame")?.hasAttribute("data-feed-quiet"), "header test did not reach the quiet channel view");
-    opener.focus(); opener.click();
+    opener.focus(); await click("[data-channel-settings-open]:visible");
     await wait("settings modal", () => settings().matches(":modal"));
     fits(settings()); target44(one<HTMLElement>("[data-channel-dialog-cancel]")!);
     check(one<HTMLInputElement>("[data-channel-rename-slug]")?.value === "design", "settings show the wrong channel");
@@ -104,11 +109,11 @@ async function observeChannelManagement() {
     await key("Escape"); await wait("settings escape", () => !settings().open);
     check(document.activeElement === shown("[data-channel-settings-open]"), "Escape lost the current settings opener");
     await openSettings();
-    const reader = new URL(location.href).searchParams.get("reader") === "1";
+    const reader = f.reader;
     if (reader) {
       check(one<HTMLInputElement>("[data-channel-rename-slug]")!.readOnly && one<HTMLTextAreaElement>("[data-channel-edit-description]")!.readOnly, "reader can edit fields");
       check(!visible(one("[data-channel-rename-submit]")) && !visible(one("[data-channel-settings-archive]")), "reader sees write actions");
-    } else if (new URL(location.href).searchParams.get("capture") !== "settings") {
+    } else if (f.capture !== "settings") {
       const unchangedSave = one<HTMLButtonElement>("[data-channel-rename-submit]")!;
       check(unchangedSave.disabled && !unchangedSave.hasAttribute("aria-busy") && getComputedStyle(unchangedSave).cursor !== "wait", "unchanged Save looks like a pending request");
       input("[data-channel-rename-slug]", "design-refresh"); input("[data-channel-edit-description]", "Updated decisions and references");
@@ -132,9 +137,9 @@ async function observeChannelManagement() {
       check(!!one(`[data-rail-channel-menu="${f.activeChannel}"]`), "archived row lost its management door");
       shown<HTMLButtonElement>("[data-channel-unarchive]").click();
       await wait("unarchived in place", () => !visible(one("[data-channel-archived]")) && visible(one("[data-composer]")));
-      if (!visible(shown("[data-home-all-channels]"))) shown<HTMLButtonElement>('button[aria-label="Open navigation"]').click();
+      if (!visible(shown("[data-home-all-channels]"))) await click('button[aria-label="Open navigation"]:visible');
       await wait("All channels door", () => visible(shown("[data-home-all-channels]")));
-      const browse = shown<HTMLButtonElement>("[data-home-all-channels]"); browse.focus(); browse.click();
+      const browse = shown<HTMLButtonElement>("[data-home-all-channels]"); browse.focus(); await click("[data-home-all-channels]:visible");
       await wait("directory", () => directory().matches(":modal")); fits(directory());
       check(document.activeElement === one("[data-channel-directory-search]"), "directory did not focus Search");
       check(directory().querySelectorAll("[data-channel-directory-row]").length === 10, "directory omitted rail overflow or archived channels");
@@ -152,24 +157,25 @@ async function observeChannelManagement() {
       f.channelFailure = null; archivedAction().click();
       await wait("directory restored row", () => !archivedAction());
       check(document.activeElement?.getAttribute("data-channel-directory-action") === `open:${f.archivedChannel}`, "Unarchive lost row focus");
-      const create = one<HTMLButtonElement>("[data-channel-directory-new]")!; create.click();
+      const create = one<HTMLButtonElement>("[data-channel-directory-new]")!; await click("[data-channel-directory-new]");
       await wait("new from directory", () => settings().open && !directory().open);
       await key("Escape"); await wait("return to directory", () => directory().open);
       check(document.activeElement === create && one<HTMLInputElement>("[data-channel-directory-search]")!.value === "old notes", "new-channel cancellation lost directory focus or search");
-      create.click(); await wait("new again", () => settings().open);
+      await click("[data-channel-directory-new]"); await wait("new again", () => settings().open);
       input("[data-channel-new-slug]", "late-refusal"); f.channelFailure = "Late refusal for the old draft"; f.holdChannel = true;
       one<HTMLFormElement>("[data-channel-create-form]")!.requestSubmit(); await wait("held create", () => f.channelHeld);
       check(one<HTMLButtonElement>("[data-channel-create-submit]")!.disabled && one("[data-channel-create-submit]")!.getAttribute("aria-busy") === "true", "pending write lost its busy state");
+      check(settings().contains(document.activeElement), "disabling inputs dropped modal focus");
       await key("Escape"); await wait("directory while write held", () => directory().open);
-      create.click(); await wait("newer dialog", () => settings().open); input("[data-channel-new-slug]", "fresh-draft");
+      await click("[data-channel-directory-new]"); await wait("newer dialog", () => settings().open); input("[data-channel-new-slug]", "fresh-draft");
       f.releaseChannel(); await wait("old write settled", () => f.channelSettled);
       await (await fetch("/__observer-tick")).json();
       check(settings().open && one<HTMLInputElement>("[data-channel-new-slug]")!.value === "fresh-draft" && !visible(settings().querySelector('[role="alert"]')), "old refusal changed a newer dialog");
       await key("Escape"); await wait("directory restored", () => directory().open);
       await key("Escape"); await wait("directory escape", () => !directory().open);
       check(visible(document.activeElement) && (document.activeElement === browse || document.activeElement?.hasAttribute("data-home-all-channels")), "directory Escape lost its opener");
-      if (!visible(shown("[data-home-all-channels]"))) shown<HTMLButtonElement>('button[aria-label="Open navigation"]').click();
-      shown<HTMLButtonElement>("[data-home-all-channels]").click(); await wait("capture directory", () => directory().open);
+      if (!visible(shown("[data-home-all-channels]"))) await click('button[aria-label="Open navigation"]:visible');
+      await click("[data-home-all-channels]:visible"); await wait("capture directory", () => directory().open);
       input("[data-channel-directory-search]", ""); fits(directory());
       for (const el of directory().querySelectorAll<HTMLElement>("button, a, input")) if (visible(el)) target44(el);
     }
@@ -177,7 +183,7 @@ async function observeChannelManagement() {
     check(document.documentElement.scrollWidth <= innerWidth, "page overflow");
     check(f.errors.length === 0, "app errors: " + f.errors.join(","));
     check(f.unexpected.length === 0, "unexpected HTTP: " + f.unexpected.join(","));
-    document.documentElement.dataset.channelObservation = JSON.stringify({ ok: true, width: innerWidth, reader, capture: new URL(location.href).searchParams.get("capture") });
+    document.documentElement.dataset.channelObservation = JSON.stringify({ ok: true, width: innerWidth, reader, capture: f.capture });
   } catch (error) {
     document.documentElement.dataset.channelObservation = JSON.stringify({ error: String(error), stage, active: document.activeElement?.outerHTML.slice(0, 300), app: one("live-dashboard")?.getAttribute("data-state"), errors: f.errors, requests: f.requests.slice(-10) });
   } finally { f.releaseChannel?.(); }
@@ -201,6 +207,7 @@ test("channel settings and directory preserve drafts, rights, native focus, arch
     const url = new URL(request.url!, "http://127.0.0.1");
     if (url.pathname === "/__observer-tick") { setTimeout(() => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ now: Date.now() })); }, 2); return; }
     if (url.pathname === "/__key") { void keyboard(url.searchParams.get("key")!, url.searchParams.get("shift") === "1").then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
+    if (url.pathname === "/__click") { void activePage!.locator(url.searchParams.get("selector")!).click().then(() => response.end("ok"), error => { response.writeHead(500); response.end(String(error)); }); return; }
     if (url.pathname.startsWith("/fonts/") && url.pathname.endsWith(".woff2")) { void readFile(join(fonts, basename(url.pathname))).then(data => { response.writeHead(200, { "Content-Type": "font/woff2" }); response.end(data); }, () => { response.writeHead(404); response.end(); }); return; }
     response.writeHead(200, { "Content-Type": url.pathname === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" });
     response.end(url.pathname === "/app.js" ? bundled.join("\n") : html);

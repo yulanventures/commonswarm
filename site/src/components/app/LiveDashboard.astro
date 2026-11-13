@@ -11458,6 +11458,12 @@ import "../../styles/kylon-command-palette.css";
       const save = one<HTMLButtonElement>("[data-channel-rename-submit]");
       if (save) save.disabled = channelDialogPending || !channel || !viewerMayManageChannel(channel) || Object.keys(channelSettingsChanges()).length === 0;
     };
+    const keepChannelDialogFocus = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
+      if (dialog?.open && !dialog.contains(document.activeElement)) {
+        dialog.querySelector<HTMLButtonElement>("[data-channel-dialog-cancel]")?.focus({ preventScroll: true });
+      }
+    };
     const renderChannelDialog = (initialize = true): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (!dialog) return;
@@ -11490,6 +11496,7 @@ import "../../styles/kylon-command-palette.css";
         if (channelDialogPending) submit.setAttribute("aria-busy", "true"); else submit.removeAttribute("aria-busy");
       }
       syncChannelSettingsSubmit();
+      keepChannelDialogFocus();
     };
 
     const closeChannelDirectory = (restore = true): void => {
@@ -13939,6 +13946,7 @@ import "../../styles/kylon-command-palette.css";
       for (const button of all<HTMLButtonElement>("[data-channel-dialog] button[type=submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) holdChannelSubmit(button, pending);
       for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = pending;
       if (!pending) syncChannelSettingsSubmit();
+      keepChannelDialogFocus();
     };
     const channelDialogOwns = (epoch: number): boolean => epoch === channelDialogEpoch && one<HTMLDialogElement>("[data-channel-dialog]")?.open === true;
     /** Paint the accepted row even if the follow-up read fails. A later read may supersede it. */
