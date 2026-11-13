@@ -156,6 +156,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
           test "$CI" = true
+          if [[ -f tests/scoped-env-check.test.py ]]; then python3 tests/scoped-env-check.test.py; fi
           sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
             /bin/bash tests/box-dry-run/guard.sh
           for user in commonswarm caddy ops; do
