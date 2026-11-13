@@ -246,15 +246,18 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
  * delivery is tracked is at least that tall from its first paint, so two badges never overlap
  * and a receipt changing state changes no height. */
 @media (width <= 64rem), (hover: none) {
-  /* The hit box stays inside the gutter: it ends 2px before the text column. */
+  /* The hit box fills the top of the gutter and ends 2px before the text column. Beside an avatar the badge
+     sits in the box's lower right corner, which is the avatar's corner as on a desktop; in the gutter of a
+     grouped message it stays in the middle. */
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]),
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]),
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
     --k-badge-hit: 44px;
     --k-badge-cx: -24px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
-    --k-badge-cx: -24px;
     --k-badge-cy: 22px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not([data-stream-grouped]) .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary {
+    place-items: end;
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-delivery-tracked] {
     min-block-size: 44px;
