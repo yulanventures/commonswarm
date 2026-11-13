@@ -482,3 +482,51 @@ systemctl list-timers commonswarm-postgres-backup.timer commonswarm-postgres-res
 - A plain nightly `pg_dump -Fc` has no role SQL, counts, Storage manifest, or cron manifest and is not restorable by these scripts.
 - The hook form of the CLI maintenance failure was not measured.
 - A dump of the frozen source through the hosted pooler has only been proved against local PostgreSQL. A failure at window step 4 fails closed into ABORT-B.
+
+
+## Production service credential scoping (2026-11-13)
+
+PostgREST, Storage, GoTrue and edge use required raw private files under
+`/etc/commonswarm-service-env/`, named `postgrest.env`, `storage-api.env`,
+`gotrue.env`, `edge-runtime.env`. Directory owner/mode root:root 0700; files 0600.
+The registry there contains exact name inventories and verified image IDs;
+its operation receipt identifies the three verified 1Password escrow items.
+Never supply the shared stack env to these four services. Postgres, Realtime
+and controlled host operations keep their existing inputs.
+
+Before any production recreate, render Compose JSON privately and pass it on
+stdin to `/usr/local/libexec/commonswarm-scoped-env-check <service>` (source:
+`scoped-env-check.py` here). This verifies actual private file values, exact
+names, approved image ID, and decoded/encoded aliases of the unchanged admin
+password. Do not print or persist the rendered JSON outside root-only files.
+Missing files, unexpected names, values or image IDs must stop the release.
+The edge release must preserve this contract and the 2 GiB override in both
+effective trees and its canonical full archive before binding/measurement.
+
+The existing logins `authenticator`, `supabase_storage_admin` and
+`supabase_auth_admin` now have independent passwords. The edge SQL password,
+admin and Realtime credentials are unchanged. Legacy
+`postgres/10-runtime-roles.sh` and `migrate/prepare-target.sh` set the three
+vendor passwords from POSTGRES_PASSWORD during NEW database initialization.
+Do not rerun them on production. For new-volume recovery, keep clients closed,
+restore the database, provision these three passwords from verified escrow,
+render the four scoped files, and pass the gate before reopening clients.
+Ordinary existing-volume restarts do not run these init scripts. Current
+Postgres definitions, mounted init scripts, privileges and data are unchanged.
+
+Rollback changes only the selected service and its matching password verifier
+using the retained guarded inverse. Do not restore all globals or data for a
+service password rollback. Keep before-copies and escrow until retention permits
+removal. A return to the old shared password restores the earlier exposure.
+
+The gate registry schema is version 1 and must contain all four service entries,
+even when checking one named service. Each entry has the canonical container
+and private env path, nonempty unique file/effective name inventories, a strict
+`current_image` sha256 ID and nonempty `approved_image_refs` including that ID.
+Approved refs are copied from verified image/launch inventory, never from an
+untrusted rendered model. A controlled gate update must back up and validate
+this registry metadata before installation; the earlier production registry
+needs this explicit metadata addition. This source change alone installs no
+production gate or registry update. Run the focused CLI security regressions
+with `python3 tests/scoped-env-check.test.py`; fixtures contain synthetic values
+and do not access Docker or private host files.

@@ -36,11 +36,11 @@ services:
     network_mode: ${COMMONSWARM_EDGE_NETWORK_MODE:-bridge}
     extra_hosts:
       - "db.commonswarm.internal:${COMMONSWARM_EDGE_DB_ADDRESS:-172.31.0.10}"
-    env_file:
-      # Compose can validate this file away from the box. The main service
-      # still refuses to start when its required variables are missing.
-      - path: ${COMMONSWARM_EDGE_ENV_FILE:-/home/commonswarm/.env}
-        required: false
+    env_file: !override
+      - path: /etc/commonswarm-service-env/edge-runtime.env
+        required: true
+        format: raw
+    environment: !reset {}
     volumes:
       - ./main:/home/deno/main:ro
       - ./bootstrap.sh:/home/deno/deploy/bootstrap.sh:ro
