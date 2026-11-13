@@ -14091,6 +14091,15 @@ import "../../styles/kylon-command-palette.css";
         if (!pressed || !receipt.contains(pressed)) receipt.open = false;
       }
     });
+    /* Escape closes it too, and gives focus back to the receipt's control when focus was inside the card. */
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const opened = all<HTMLDetailsElement>(".dashboard__message-receipt[open]");
+      if (opened.length === 0) return;
+      const holder = opened.find((receipt) => receipt.contains(document.activeElement));
+      for (const receipt of opened) receipt.open = false;
+      holder?.querySelector<HTMLElement>(":scope > summary")?.focus();
+    });
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;
