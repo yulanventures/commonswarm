@@ -416,6 +416,38 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.long"] = long;
         steps.push("seed_long_message");
       } catch (error) { note("seed_long_message", error); }
+
+      // History: four recent messages in the long-named channel whose `until` has already passed. The two that are
+      // conversation (a note to everyone, a note addressed to an agent) stay in the feed; a working-on status and an
+      // agent's note to itself do not.
+      try {
+        const ended = randomUUID(), endedAddressed = randomUUID(), endedStatus = randomUUID(), endedSelf = randomUUID();
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${ended}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'The plumber came on Tuesday and replaced the pressure valve.',
+            statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '30 seconds', ${channels.long}::uuid, NULL, false
+          ), (
+            ${endedAddressed}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', 'Please file the invoice under Boiler.',
+            statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '28 seconds', ${channels.long}::uuid, NULL, false
+          ), (
+            ${endedStatus}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', NULL, NULL, NULL,
+            NULL, 'working-on', 'Filing the boiler invoice.',
+            statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '26 seconds', ${channels.long}::uuid, NULL, false
+          ), (
+            ${endedSelf}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', NULL, ${ids.agent}::uuid, NULL,
+            NULL, 'note', 'CommonSwarm wake test. Confirm receipt in this session.',
+            statement_timestamp() - interval '5 seconds', statement_timestamp() - interval '24 seconds', ${channels.long}::uuid, NULL, false
+          )`;
+        ids["message.ended"] = ended;
+        ids["message.endedAddressed"] = endedAddressed;
+        ids["message.endedStatus"] = endedStatus;
+        ids["message.endedSelf"] = endedSelf;
+        steps.push("seed_history");
+      } catch (error) { note("seed_history", error); }
       // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
       // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
       try {
