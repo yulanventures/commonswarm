@@ -309,6 +309,7 @@ after(async () => {
 async function send(
   bearer: string,
   command: Record<string, unknown>,
+  commandId: string = randomUUID(),
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
@@ -317,7 +318,7 @@ async function send(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      command_id: randomUUID(),
+      command_id: commandId,
       client_version: "0.1.0",
       workspace_id: f.workspace,
       stream: { kind: "workspace" },
@@ -2528,4 +2529,199 @@ test("channel_unarchive restores posting, is idempotent when live, and enforces 
   const idempotent = await send(f.ownerJwt, { kind: "channel_unarchive", channel_id: channelId });
   assert.equal(idempotent.status, 200, JSON.stringify(idempotent.body));
   assert.equal((idempotent.body.channel as Record<string, unknown>).archived_at, null);
+});
+
+test("CM-2a channel preferences: per-person stars, star reorder, isolation, replay, and channel_unread involvement", async () => {
+  const tag = randomBytes(4).toString("hex");
+  const make = async (slug: string): Promise<string> => {
+    const res = await send(f.ownerJwt, { kind: "channel_create", slug });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    return String((res.body.channel as Record<string, unknown>).channel_id);
+  };
+  const alphaId = await make(`pref-a-${tag}`);
+  const betaId = await make(`pref-b-${tag}`);
+  const gammaId = await make(`pref-c-${tag}`);
+
+  // Agents cannot mutate personal stars or notification involvement.
+  for (const cmd of [
+    { kind: "channel_preference_set", channel_id: alphaId, starred: true },
+    { kind: "channel_star_reorder", channel_ids: [alphaId] },
+  ]) {
+    const denied = await send(f.agentToken, cmd);
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.error, "channel_forbidden");
+  }
+
+  // Shape and not-found refusals.
+  assert.equal((await send(f.otherJwt, { kind: "channel_preference_set", channel_id: alphaId })).status, 400);
+  assert.equal((await send(f.otherJwt, { kind: "channel_preference_set", channel_id: "bad", starred: true })).status, 400);
+  assert.equal((await send(f.otherJwt, { kind: "channel_preference_set", channel_id: alphaId, involvement: "loud" })).status, 400);
+  assert.equal((await send(f.otherJwt, { kind: "channel_preference_set", channel_id: randomUUID(), starred: true })).status, 404);
+
+  // Star general (null), alpha, and beta; replay preserves preference response.
+  const starCmdId = randomUUID();
+  const sGeneral = await send(f.otherJwt, { kind: "channel_preference_set", channel_id: null, starred: true }, starCmdId);
+  assert.equal(sGeneral.status, 200, JSON.stringify(sGeneral.body));
+  assert.equal((sGeneral.body.preference as Record<string, unknown>).star_rank, 0);
+  const sGeneralReplay = await send(f.otherJwt, { kind: "channel_preference_set", channel_id: null, starred: true }, starCmdId);
+  assert.equal(sGeneralReplay.status, 200);
+  assert.deepEqual(sGeneralReplay.body.preference, sGeneral.body.preference);
+
+  const sAlpha = await send(f.otherJwt, { kind: "channel_preference_set", channel_id: alphaId, starred: true, involvement: "muted" });
+  const sBeta = await send(f.otherJwt, { kind: "channel_preference_set", channel_id: betaId, starred: true, involvement: "mentions" });
+  assert.equal((sAlpha.body.preference as Record<string, unknown>).star_rank, 1);
+  assert.equal((sBeta.body.preference as Record<string, unknown>).star_rank, 2);
+
+  // Unstarred channel in channel_star_reorder returns 409 channel_star_mismatch.
+  const mismatch = await send(f.otherJwt, { kind: "channel_star_reorder", channel_ids: [betaId, gammaId] });
+  assert.equal(mismatch.status, 409, JSON.stringify(mismatch.body));
+  assert.equal(mismatch.body.error, "channel_star_mismatch");
+
+  // Reorder stars: beta (0), general (1), alpha (2).
+  const reordered = await send(f.otherJwt, { kind: "channel_star_reorder", channel_ids: [betaId, null, alphaId] });
+  assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+  assert.deepEqual(
+    (reordered.body.preferences as Array<Record<string, unknown>>).map((p) => [p.channel_id, p.star_rank]),
+    [[betaId, 0], [null, 1], [alphaId, 2]],
+  );
+
+  // swarm_read.channel_preferences isolates rows to the signed-in person.
+  const otherPrefs = await viewRowAs(f.otherId, async (tx) => {
+    const rows = await tx<{ target_key: string; star_rank: number | null; involvement: string }[]>`
+      SELECT target_key, star_rank, involvement
+      FROM swarm_read.channel_preferences
+      WHERE workspace_id = ${f.workspace}::uuid
+      ORDER BY star_rank NULLS LAST, target_key`;
+    return rows.map((row) => ({ ...row }));
+  });
+  assert.deepEqual(otherPrefs, [
+    { target_key: betaId, star_rank: 0, involvement: "mentions" },
+    { target_key: "general", star_rank: 1, involvement: "everything" },
+    { target_key: alphaId, star_rank: 2, involvement: "muted" },
+  ]);
+  const ownerPrefs = await viewRowAs(f.ownerId, async (tx) =>
+    await tx`SELECT target_key FROM swarm_read.channel_preferences WHERE workspace_id = ${f.workspace}::uuid`
+  );
+  assert.equal(ownerPrefs.length, 0, "owner never sees another member's personal preferences");
+
+  // Baseline receipt for f.otherId so channel_unread evaluates live unread rules.
+  const seedPost = await send(f.ownerJwt, installedPost({ body: "baseline seed" }));
+  assert.equal(seedPost.status, 200, JSON.stringify(seedPost.body));
+  const seedId = String(signalOf(seedPost.body).id);
+  const seenBaseline = await send(f.otherJwt, { kind: "signals_seen", signal_ids: [seedId] });
+  assert.equal(seenBaseline.status, 200, JSON.stringify(seenBaseline.body));
+
+  // Plain unmentioned posts in muted (alpha), mentions-only (beta), and everything (gamma).
+  assert.equal((await send(f.ownerJwt, installedPost({ channel: `pref-a-${tag}`, body: "muted noise" }))).status, 200);
+  assert.equal((await send(f.ownerJwt, installedPost({ channel: `pref-b-${tag}`, body: "unmentioned chatter" }))).status, 200);
+  assert.equal((await send(f.ownerJwt, installedPost({ channel: `pref-c-${tag}`, body: "normal update" }))).status, 200);
+
+  type UnreadRow = {
+    channel_id: string | null;
+    slug: string;
+    starred: boolean;
+    star_rank: number | null;
+    involvement: string;
+    unread: boolean | null;
+  };
+  const readUnread = async (): Promise<Map<string, UnreadRow>> => {
+    const data = await viewRowAs(f.otherId, async (tx) => {
+      const [row] = await tx<{ u: { channels: UnreadRow[] } }[]>`
+        SELECT swarm_read.channel_unread(${f.workspace}::uuid) AS u`;
+      return row!.u.channels;
+    });
+    return new Map(data.map((r) => [r.slug, r]));
+  };
+
+  const beforeMention = await readUnread();
+  assert.equal(beforeMention.get(`pref-a-${tag}`)?.unread, false, "muted channel suppresses unread");
+  assert.equal(beforeMention.get(`pref-b-${tag}`)?.unread, false, "mentions-only channel ignores plain post");
+  assert.equal(beforeMention.get(`pref-c-${tag}`)?.unread, true, "everything channel marks plain post unread");
+  assert.equal(beforeMention.get(`pref-b-${tag}`)?.star_rank, 0);
+
+  // Mentioning f.otherId in the mentions-only channel lights unread.
+  const mentioned = await send(
+    f.ownerJwt,
+    installedPost({
+      channel: `pref-b-${tag}`,
+      body: "hey @ChatOther",
+      mentions: [{ kind: "user", id: f.otherId }],
+    }),
+  );
+  assert.equal(mentioned.status, 200, JSON.stringify(mentioned.body));
+  const afterMention = await readUnread();
+  assert.equal(afterMention.get(`pref-b-${tag}`)?.unread, true, "mentions-only channel lights on @mention");
+});
+
+test("CM-2a channel_reorder and workspace_channel_policy_set enforce owner/admin and order new channels", async () => {
+  const tag = randomBytes(4).toString("hex");
+  const make = async (bearer: string, slug: string) =>
+    await send(bearer, { kind: "channel_create", slug });
+
+  const c1 = String(((await make(f.ownerJwt, `ord-a-${tag}`)).body.channel as Record<string, unknown>).channel_id);
+  const c2 = String(((await make(f.ownerJwt, `ord-b-${tag}`)).body.channel as Record<string, unknown>).channel_id);
+
+  // Non-admin member and agent cannot reorder channels or change creation policy.
+  for (const bearer of [f.otherJwt, f.agentToken]) {
+    assert.equal((await send(bearer, { kind: "channel_reorder", channel_ids: [c2, c1] })).status, 403);
+    assert.equal(
+      (await send(bearer, { kind: "workspace_channel_policy_set", channel_creation_policy: "admins" })).status,
+      403,
+    );
+  }
+
+  // Owner reorders c2 ahead of c1; replay returns identical ordered_channel_ids.
+  const reorderId = randomUUID();
+  const reordered = await send(f.ownerJwt, { kind: "channel_reorder", channel_ids: [c2, c1] }, reorderId);
+  assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+  const orderedIds = reordered.body.ordered_channel_ids as string[];
+  assert.ok(orderedIds.indexOf(c2) < orderedIds.indexOf(c1));
+  const reorderReplay = await send(f.ownerJwt, { kind: "channel_reorder", channel_ids: [c2, c1] }, reorderId);
+  assert.deepEqual(reorderReplay.body.ordered_channel_ids, orderedIds);
+
+  // A channel created after reorder receives sort_rank > existing max, landing after c2 and c1.
+  const c3 = String(((await make(f.ownerJwt, `ord-0-${tag}`)).body.channel as Record<string, unknown>).channel_id);
+  const ranks = await viewRowAs(f.ownerId, async (tx) =>
+    await tx<{ channel_id: string; sort_rank: number }[]>`
+      SELECT channel_id, sort_rank FROM swarm_read.channels
+      WHERE workspace_id = ${f.workspace}::uuid
+        AND channel_id IN (${c1}::uuid, ${c2}::uuid, ${c3}::uuid)
+      ORDER BY sort_rank ASC, slug ASC`
+  );
+  assert.deepEqual(ranks.map((r) => r.channel_id), [c2, c1, c3]);
+
+  // Restricting channel creation to admins blocks plain members and agents while allowing owner.
+  try {
+    const policyId = randomUUID();
+    const locked = await send(
+      f.ownerJwt,
+      { kind: "workspace_channel_policy_set", channel_creation_policy: "admins" },
+      policyId,
+    );
+    assert.equal(locked.status, 200, JSON.stringify(locked.body));
+    assert.equal(locked.body.channel_creation_policy, "admins");
+    const lockedReplay = await send(
+      f.ownerJwt,
+      { kind: "workspace_channel_policy_set", channel_creation_policy: "admins" },
+      policyId,
+    );
+    assert.equal(lockedReplay.body.channel_creation_policy, "admins");
+
+    const [wsView] = await viewRowAs(f.otherId, async (tx) =>
+      await tx<{ channel_creation_policy: string }[]>`
+        SELECT channel_creation_policy FROM swarm_read.workspaces
+        WHERE workspace_id = ${f.workspace}::uuid`
+    );
+    assert.equal(wsView?.channel_creation_policy, "admins");
+
+    assert.equal((await make(f.otherJwt, `locked-m-${tag}`)).status, 403);
+    assert.equal((await make(f.agentToken, `locked-a-${tag}`)).status, 403);
+    assert.equal((await make(f.ownerJwt, `locked-o-${tag}`)).status, 200);
+  } finally {
+    const restored = await send(f.ownerJwt, {
+      kind: "workspace_channel_policy_set",
+      channel_creation_policy: "members",
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+  }
 });
