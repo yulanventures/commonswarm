@@ -138,6 +138,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt
  * keeps the floating corner, each on its own. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) {
   display: contents;
+  /* Stated, not left to the absence of a hiding rule: the home sheet (home/workspace.css) hides every
+     tool strip at rest on hover devices, and pointer-events would be inherited by the badge. */
+  opacity: 1;
+  pointer-events: auto;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
   --k-badge: 22px;
