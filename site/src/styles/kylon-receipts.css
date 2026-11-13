@@ -4,8 +4,10 @@
  * top-right corner. kylon-channel.css places it and shows it on hover, keyboard focus or a tap;
  * no row reserves space for it, so messages sit at their natural spacing on every screen.
  *
- * A receipt that is a problem or still moving (no data-receipt-quiet) is never hidden: its bar
- * stays in the flow under the message, as a footer of fixed closed height. */
+ * A receipt that is a problem or still moving (no data-receipt-quiet) is never hidden. It is a
+ * badge on the lower corner of the sender's avatar (in the empty gutter of a grouped message),
+ * painted and reachable at rest, and its sentence opens as a card. It is placed, not laid out: a
+ * receipt turning into a problem cannot move or resize a row (#385). The rules are at the end. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-body {
   --k-receipt-block: 28px;
 }
@@ -17,7 +19,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   max-inline-size: min(30rem, calc(100% - 8px));
 }
 /* Opened, the bar becomes a small card: the detail drops under the summary and the reply
- * control keeps its corner. It leaves with the bar when the pointer or focus leaves the row. */
+ * control keeps its corner. It stays until it is closed or the reader clicks elsewhere. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt[open]) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -27,28 +29,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   max-block-size: min(60vh, 28rem);
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) {
-  position: static;
-  inset: auto;
-  flex: 1 0 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 2px 4px;
-  inline-size: 100%;
-  min-inline-size: 0;
-  max-inline-size: 100%;
-  max-block-size: none;
-  min-block-size: var(--k-receipt-block);
-  overflow: visible;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  opacity: 1;
-  pointer-events: auto;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools > .dashboard__message-receipt {
   display: block;
@@ -150,5 +130,134 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-receipt
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
     max-inline-size: 11rem;
+  }
+}
+
+/* ---- A problem receipt: a badge beside the message, never in its flow ---- */
+/* The bar has no box of its own here: the receipt is placed in the gutter and the reply control
+ * keeps the floating corner, each on its own. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) {
+  display: contents;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+  --k-badge: 22px;
+  --k-badge-hit: var(--k-badge);
+  /* The badge's centre, from the text column's top-left corner. The avatar is 36px wide, sits 2px
+     down, and ends 10px before the text: this is its lower right corner. */
+  --k-badge-cx: -15px;
+  --k-badge-cy: 31px;
+  position: absolute;
+  inset-block-start: calc(var(--k-badge-cy) - var(--k-badge-hit) / 2);
+  inset-inline-start: calc(var(--k-badge-cx) - var(--k-badge-hit) / 2);
+  z-index: 2;
+  inline-size: auto;
+  max-inline-size: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+  /* No avatar: the middle of the gutter, on the first line. */
+  --k-badge-cx: -28px;
+  --k-badge-cy: 11px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+  /* A reply's avatar is 28px. */
+  --k-badge-cx: -13px;
+  --k-badge-cy: 24px;
+}
+/* Closed: the summary is the hit box and the glyph is the badge. The sentence stays the control's
+ * accessible name and title. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  inline-size: var(--k-badge-hit);
+  min-inline-size: var(--k-badge-hit);
+  block-size: var(--k-badge-hit);
+  min-block-size: var(--k-badge-hit);
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary > .dashboard__message-receipt-glyph {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  flex: none;
+  inline-size: var(--k-badge);
+  min-inline-size: var(--k-badge);
+  block-size: var(--k-badge);
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  background: var(--k-shell-surface);
+  box-shadow: 0 0 0 2px var(--k-shell-surface);
+  font-family: var(--k-shell-font);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary > span:not(.dashboard__message-receipt-glyph) {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary::after {
+  content: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .dashboard__message-receipt:not([data-receipt-quiet]):not([open]) > summary:hover > .dashboard__message-receipt-glyph {
+  background: var(--k-shell-subtle);
+}
+/* Opened: a card that starts where the badge was. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet])[open] {
+  z-index: 4;
+  box-sizing: border-box;
+  inline-size: min(24rem, calc(100% + 30px));
+  max-block-size: min(60vh, 28rem);
+  padding: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--carbon-line, var(--k-shell-line));
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  box-shadow: var(--k-shell-shadow);
+}
+/* The gutter of a grouped message shows its time on hover; the badge has that place. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:has(> .dashboard__message-body > .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet])) .hm-message-time {
+  display: none;
+}
+/* The reply control of such a row floats alone in the usual corner. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
+  position: absolute;
+  inset: -14px 16px auto auto;
+  z-index: 3;
+  padding: 3px;
+  border: 1px solid var(--carbon-line, var(--k-shell-line));
+  border-radius: 8px;
+  background: var(--k-shell-surface);
+  box-shadow: var(--k-shell-shadow);
+}
+/* Touch and narrow windows: the badge keeps its size inside a 44px hit box, and a message whose
+ * delivery is tracked is at least that tall from its first paint, so two badges never overlap
+ * and a receipt changing state changes no height. */
+@media (width <= 64rem), (hover: none) {
+  /* The hit box stays inside the gutter: it ends 2px before the text column. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]),
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message--reply .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+    --k-badge-hit: 44px;
+    --k-badge-cx: -24px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-stream-grouped] .dashboard__message-tools > .dashboard__message-receipt:not([data-receipt-quiet]) {
+    --k-badge-cx: -24px;
+    --k-badge-cy: 22px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-delivery-tracked] {
+    min-block-size: 44px;
+  }
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
+    inset-inline-end: 8px;
   }
 }
