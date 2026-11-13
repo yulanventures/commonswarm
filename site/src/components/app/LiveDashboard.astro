@@ -8306,7 +8306,8 @@ import "../../styles/kylon-command-palette.css";
            from the other. Inside a channel every row is in that channel and the name would
            be repeated on every line, so it is not shown there. An unfiled message shows
            nothing rather than a word for "no channel": it is the ordinary case. */
-        const rowChannel = activeChannelId === null && signal.channelId !== null
+        /* Nor in a direct message: it is one conversation with one party, wherever each message was filed. */
+        const rowChannel = activeChannelId === null && signal.channelId !== null && !(typeof activeDm !== "undefined" && activeDm)
           ? channelById(channels, signal.channelId)
           : null;
         if (rowChannel !== null) {
