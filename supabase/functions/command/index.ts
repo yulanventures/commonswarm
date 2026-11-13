@@ -49,6 +49,10 @@ import {
 } from "../_shared/signal-text.ts";
 import {
   CHANNEL_PURPOSE_MAX,
+  CHANNEL_PURPOSE_MAX_TEXT,
+  CHANNEL_PURPOSE_TYPE_TEXT,
+  CHANNEL_UPDATE_EMPTY_TEXT,
+  CHANNEL_UPDATE_OPTIONAL_FIELDS,
   channelSlugProblem,
   chatSignalKeys,
   chatSignalShapeProblem,
@@ -385,7 +389,14 @@ interface AnswerChoiceCommand {
 type ChannelCommand =
   | { kind: "channel_create"; slug: string; purpose: string | null }
   | { kind: "channel_rename"; channel_id: string; slug: string }
-  | { kind: "channel_archive"; channel_id: string };
+  | {
+    kind: "channel_update";
+    channel_id: string;
+    slug?: string;
+    purpose?: string | null;
+  }
+  | { kind: "channel_archive"; channel_id: string }
+  | { kind: "channel_unarchive"; channel_id: string };
 
 interface ChannelRecord {
   channel_id: string;
@@ -1129,7 +1140,9 @@ const DISPOSABLE_EMAIL_DOMAINS = [
 const CHANNEL_COMMAND_KINDS = [
   "channel_create",
   "channel_rename",
+  "channel_update",
   "channel_archive",
+  "channel_unarchive",
 ] as const;
 const TOUCH_PRESENCE_KIND = "touch_presence";
 
@@ -2062,7 +2075,7 @@ function validateCommand(
     }
     const rawPurpose = Object.hasOwn(cmd, "purpose") ? cmd.purpose : null;
     if (rawPurpose !== null && rawPurpose !== undefined && typeof rawPurpose !== "string") {
-      return { ok: false, status: 400, reason: "A channel purpose is text." };
+      return { ok: false, status: 400, reason: CHANNEL_PURPOSE_TYPE_TEXT };
     }
     /* MEASURE THE STRING THAT IS STORED. The bound used to run on the sanitized
      * value and the insert stored the sanitized-and-TRIMMED value, so
@@ -2077,7 +2090,7 @@ function validateCommand(
       return {
         ok: false,
         status: 400,
-        reason: `A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`,
+        reason: CHANNEL_PURPOSE_MAX_TEXT,
       };
     }
     return {
@@ -2086,6 +2099,61 @@ function validateCommand(
         kind: "channel_create",
         slug: normalizeChannelSlug(cmd.slug as string),
         purpose,
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_update") {
+    const required = ["channel_id"];
+    const optional = [...CHANNEL_UPDATE_OPTIONAL_FIELDS];
+    const presentOptional = optional.filter((key) => Object.hasOwn(cmd, key));
+    const keysOk = exactKeys(cmd, ["kind", ...required, ...presentOptional]);
+    const idOk = typeof cmd.channel_id === "string" &&
+      UUID_RE.test(cmd.channel_id);
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: !keysOk
+          ? commandFieldsMessage("channel_update", required, optional)
+          : CHANNEL_ID_RULE_TEXT,
+      };
+    }
+    const hasSlug = Object.hasOwn(cmd, "slug") && cmd.slug !== undefined;
+    const hasPurpose = Object.hasOwn(cmd, "purpose") &&
+      cmd.purpose !== undefined;
+    if (!hasSlug && !hasPurpose) {
+      return { ok: false, status: 400, reason: CHANNEL_UPDATE_EMPTY_TEXT };
+    }
+    if (hasSlug) {
+      const slugProblem = channelSlugProblem(cmd.slug);
+      if (slugProblem !== null) {
+        return { ok: false, status: 400, reason: slugProblem };
+      }
+    }
+    let purpose: string | null | undefined = undefined;
+    if (hasPurpose) {
+      if (cmd.purpose !== null && typeof cmd.purpose !== "string") {
+        return { ok: false, status: 400, reason: CHANNEL_PURPOSE_TYPE_TEXT };
+      }
+      purpose = typeof cmd.purpose === "string"
+        ? sanitizeSignalText(cmd.purpose).trim() || null
+        : null;
+      if (purpose !== null && purpose.length > CHANNEL_PURPOSE_MAX) {
+        return {
+          ok: false,
+          status: 400,
+          reason: CHANNEL_PURPOSE_MAX_TEXT,
+        };
+      }
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_update",
+        channel_id: (cmd.channel_id as string).toLowerCase(),
+        ...(hasSlug ? { slug: normalizeChannelSlug(cmd.slug as string) } : {}),
+        ...(hasPurpose ? { purpose } : {}),
       },
     };
   }
@@ -2123,7 +2191,8 @@ function validateCommand(
     };
   }
 
-  if (cmd.kind === "channel_archive") {
+  if (cmd.kind === "channel_archive" || cmd.kind === "channel_unarchive") {
+    const kind = cmd.kind;
     const required = ["channel_id"];
     const keysOk = exactKeys(cmd, ["kind", ...required]);
     const idOk = typeof cmd.channel_id === "string" &&
@@ -2134,13 +2203,13 @@ function validateCommand(
         status: 400,
         reason: keysOk
           ? CHANNEL_ID_RULE_TEXT
-          : commandFieldsMessage("channel_archive", required),
+          : commandFieldsMessage(kind, required),
       };
     }
     return {
       ok: true,
       command: {
-        kind: "channel_archive",
+        kind,
         channel_id: (cmd.channel_id as string).toLowerCase(),
       },
     };
@@ -9720,10 +9789,14 @@ async function applyChannelCommand(
   auth: AuthContext,
   command: ChannelCommand,
 ): Promise<ChannelOutcome> {
-  // Create and rename check a name, then write it. Two at once in one workspace would both pass
-  // the check and the second write would hit the unique index as a server error, so they take
-  // this workspace's channel-name lock first. Archive changes no name and doesn't need it.
-  if (command.kind === "channel_create" || command.kind === "channel_rename") {
+  // Create, rename, and slug-changing updates check a name, then write it. Two at once in one
+  // workspace would both pass the check and the second write would hit the unique index as a
+  // server error, so they take this workspace's channel-name lock first.
+  if (
+    command.kind === "channel_create" ||
+    command.kind === "channel_rename" ||
+    (command.kind === "channel_update" && command.slug !== undefined)
+  ) {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-names:${route.workspaceId}`}, 0))`;
   }
   if (command.kind === "channel_create") {
@@ -9787,8 +9860,8 @@ async function applyChannelCommand(
     };
   }
 
-  /* Rename and archive: the channel's creator, or a workspace owner or admin (owner decision,
-   * 2026-11-04). Creation stays open to members and seated agents. */
+  /* Change, archive and unarchive: the channel's creator, or a workspace owner or admin
+   * (owner decision, 2026-11-04). Creation stays open to members and seated agents. */
   const row = current[0];
   const isCreator = row.created_by_kind === auth.credentialKind &&
     row.created_by_principal === canonicalPrincipal(auth.actor);
@@ -9804,7 +9877,8 @@ async function applyChannelCommand(
       ok: false,
       status: 403,
       error: "channel_forbidden",
-      message: "Only the channel's creator or a workspace owner or admin can rename or archive it.",
+      message:
+        "Only the channel's creator or a workspace owner or admin can change, archive or unarchive it.",
       reason: "channel_not_creator_or_admin",
     };
   }
@@ -9824,32 +9898,52 @@ async function applyChannelCommand(
     return { ok: true, channel: channelRecord(rows[0]!) };
   }
 
-  const clash = await tx<{ channel_id: string }[]>`
-    SELECT channel_id FROM swarm.channels
-    WHERE workspace_id = ${route.workspaceId}::uuid
-      AND lower(slug) = ${command.slug}
-      AND channel_id <> ${command.channel_id}::uuid
-    LIMIT 1
-  `;
-  if (clash[0] !== undefined) {
-    return {
-      ok: false,
-      status: 409,
-      error: "channel_exists",
-      message:
-        `This workspace already has a channel named ${command.slug}.`,
-      reason: "channel_slug_taken",
-    };
+  if (command.kind === "channel_unarchive") {
+    /* Unarchiving an active channel is the symmetric no-op: the end state is live,
+     * and the unique index on (workspace_id, lower(slug)) already held while archived. */
+    const rows = await tx<ChannelRow[]>`
+      UPDATE swarm.channels
+      SET archived_at = NULL
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND channel_id = ${command.channel_id}::uuid
+      RETURNING channel_id, workspace_id, slug, purpose,
+                created_by_principal, created_by_kind, created_at, archived_at
+    `;
+    return { ok: true, channel: channelRecord(rows[0]!) };
   }
-  const renamed = await tx<ChannelRow[]>`
+
+  const nextSlug = command.slug;
+  if (nextSlug !== undefined) {
+    const clash = await tx<{ channel_id: string }[]>`
+      SELECT channel_id FROM swarm.channels
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND lower(slug) = ${nextSlug}
+        AND channel_id <> ${command.channel_id}::uuid
+      LIMIT 1
+    `;
+    if (clash[0] !== undefined) {
+      return {
+        ok: false,
+        status: 409,
+        error: "channel_exists",
+        message:
+          `This workspace already has a channel named ${nextSlug}.`,
+        reason: "channel_slug_taken",
+      };
+    }
+  }
+  const writePurpose = command.kind === "channel_update" &&
+    command.purpose !== undefined;
+  const updated = await tx<ChannelRow[]>`
     UPDATE swarm.channels
-    SET slug = ${command.slug}
+    SET slug = CASE WHEN ${nextSlug !== undefined}::boolean THEN ${nextSlug ?? null}::text ELSE slug END,
+        purpose = CASE WHEN ${writePurpose}::boolean THEN ${writePurpose ? command.purpose! : null}::text ELSE purpose END
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND channel_id = ${command.channel_id}::uuid
     RETURNING channel_id, workspace_id, slug, purpose,
               created_by_principal, created_by_kind, created_at, archived_at
   `;
-  return { ok: true, channel: channelRecord(renamed[0]!) };
+  return { ok: true, channel: channelRecord(updated[0]!) };
 }
 
 interface SignalChannelResolution {

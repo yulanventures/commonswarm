@@ -56,6 +56,14 @@ export const CHANNEL_SLUG_MAX = 32;
 
 /** Longest channel purpose. The database CHECK carries the same bound. */
 export const CHANNEL_PURPOSE_MAX = 500;
+export const CHANNEL_PURPOSE_TYPE_TEXT = "A channel purpose is text.";
+export const CHANNEL_PURPOSE_MAX_TEXT =
+  `A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`;
+
+/** Optional fields `channel_update` accepts; at least one must be provided. */
+export const CHANNEL_UPDATE_OPTIONAL_FIELDS = ["slug", "purpose"] as const;
+export const CHANNEL_UPDATE_EMPTY_TEXT =
+  `channel_update needs ${CHANNEL_UPDATE_OPTIONAL_FIELDS.join(" or ")}, or both.`;
 
 /**
  * Lowercase letters, digits and hyphens; first and last character alphanumeric.

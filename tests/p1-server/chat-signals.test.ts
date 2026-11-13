@@ -2429,3 +2429,103 @@ test("a delivery says who can read its message, and an agent added from another 
   const after = await send(token, { kind: "claim_agent_inbox", listener_instance_id: randomUUID(), limit: 10 });
   assert.notEqual(after.status, 200, JSON.stringify(after.body));
 });
+
+test("channel_update edits or clears purpose, renames under the workspace lock, and preserves untouched fields", async () => {
+  const base = `upd-${randomBytes(4).toString("hex")}`;
+  const created = await send(f.agentToken, { kind: "channel_create", slug: base, purpose: "Initial topic" });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channelId = String((created.body.channel as Record<string, unknown>).channel_id);
+
+  // Shape refusals: extra keys, bad UUID, neither slug nor purpose, bad slug, non-text or overlong purpose.
+  assert.equal((await send(f.agentToken, { kind: "channel_update", channel_id: channelId, extra: true })).status, 400);
+  assert.equal((await send(f.agentToken, { kind: "channel_update", channel_id: "not-a-uuid", purpose: "ok" })).status, 400);
+  const empty = await send(f.agentToken, { kind: "channel_update", channel_id: channelId });
+  assert.equal(empty.status, 400);
+  assert.match(String(empty.body.message ?? empty.body.reason ?? JSON.stringify(empty.body)), /slug or purpose, or both/);
+  assert.equal((await send(f.agentToken, { kind: "channel_update", channel_id: channelId, slug: "Bad Slug" })).status, 400);
+  assert.equal((await send(f.agentToken, { kind: "channel_update", channel_id: channelId, purpose: 42 })).status, 400);
+  assert.equal((await send(f.agentToken, { kind: "channel_update", channel_id: channelId, purpose: "x".repeat(501) })).status, 400);
+
+  // Purpose-only update keeps slug; slug-only update keeps purpose; null or blank clears purpose.
+  const purposeOnly = await send(f.agentToken, { kind: "channel_update", channel_id: channelId, purpose: "  Ship velocity  " });
+  assert.equal(purposeOnly.status, 200, JSON.stringify(purposeOnly.body));
+  assert.deepEqual(
+    [(purposeOnly.body.channel as Record<string, unknown>).slug, (purposeOnly.body.channel as Record<string, unknown>).purpose],
+    [base, "Ship velocity"],
+  );
+
+  const slugOnly = await send(f.ownerJwt, { kind: "channel_update", channel_id: channelId, slug: `${base}-next` });
+  assert.equal(slugOnly.status, 200, JSON.stringify(slugOnly.body));
+  assert.deepEqual(
+    [(slugOnly.body.channel as Record<string, unknown>).slug, (slugOnly.body.channel as Record<string, unknown>).purpose],
+    [`${base}-next`, "Ship velocity"],
+  );
+
+  const cleared = await send(f.agentToken, { kind: "channel_update", channel_id: channelId, purpose: null });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  assert.equal((cleared.body.channel as Record<string, unknown>).purpose, null);
+
+  // Concurrent slug-only and purpose-only updates on the same channel preserve both writes.
+  const [rSlug, rPurpose] = await Promise.all([
+    send(f.ownerJwt, { kind: "channel_update", channel_id: channelId, slug: `${base}-pair` }),
+    send(f.agentToken, { kind: "channel_update", channel_id: channelId, purpose: "Merged topic" }),
+  ]);
+  assert.equal(rSlug.status, 200, JSON.stringify(rSlug.body));
+  assert.equal(rPurpose.status, 200, JSON.stringify(rPurpose.body));
+  const [finalRow] = await sql<{ slug: string; purpose: string | null }[]>`
+    SELECT slug, purpose FROM swarm.channels WHERE channel_id = ${channelId}::uuid`;
+  assert.deepEqual([finalRow?.slug, finalRow?.purpose], [`${base}-pair`, "Merged topic"]);
+
+  // Concurrent channel_update slug contention gets one winner and 409 channel_exists, never 500.
+  const otherMade = await send(f.ownerJwt, { kind: "channel_create", slug: `${base}-other` });
+  const otherId = String((otherMade.body.channel as Record<string, unknown>).channel_id);
+  const sharedTarget = `${base}-won`;
+  const race = await Promise.all([
+    send(f.ownerJwt, { kind: "channel_update", channel_id: channelId, slug: sharedTarget }),
+    send(f.ownerJwt, { kind: "channel_update", channel_id: otherId, slug: sharedTarget }),
+  ]);
+  assert.deepEqual(
+    race.map((r) => (r.status === 200 ? "ok" : `${r.status} ${String(r.body.error)}`)).sort(),
+    ["409 channel_exists", "ok"],
+  );
+});
+
+test("channel_unarchive restores posting, is idempotent when live, and enforces creator or owner/admin", async () => {
+  const slug = `unarch-${randomBytes(4).toString("hex")}`;
+  const created = await send(f.agentToken, { kind: "channel_create", slug, purpose: "Ops room" });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channelId = String((created.body.channel as Record<string, unknown>).channel_id);
+
+  assert.equal((await send(f.agentToken, { kind: "channel_unarchive" })).status, 400);
+  assert.equal((await send(f.agentToken, { kind: "channel_unarchive", channel_id: "nope" })).status, 400);
+
+  // Plain member and another agent of the same owner cannot update or unarchive.
+  assert.equal((await send(f.agentToken, { kind: "channel_archive", channel_id: channelId })).status, 200);
+  for (const bearer of [f.otherJwt, f.agentTokenTwo]) {
+    const upd = await send(bearer, { kind: "channel_update", channel_id: channelId, purpose: "Hijack" });
+    assert.equal(upd.status, 403, JSON.stringify(upd.body));
+    assert.equal(upd.body.error, "channel_forbidden");
+    const unarch = await send(bearer, { kind: "channel_unarchive", channel_id: channelId });
+    assert.equal(unarch.status, 403, JSON.stringify(unarch.body));
+    assert.equal(unarch.body.error, "channel_forbidden");
+  }
+
+  // While archived, updating description/name works for the owner, and posting is still refused.
+  const archivedEdit = await send(f.ownerJwt, { kind: "channel_update", channel_id: channelId, purpose: "Restored ops room" });
+  assert.equal(archivedEdit.status, 200, JSON.stringify(archivedEdit.body));
+  assert.notEqual((archivedEdit.body.channel as Record<string, unknown>).archived_at, null);
+  assert.equal((await send(f.otherJwt, installedPost({ channel: slug, body: "blocked while archived" }))).status, 409);
+
+  // Unarchive restores the channel; posting succeeds; a second unarchive is a clean 200 no-op.
+  const unarchived = await send(f.agentToken, { kind: "channel_unarchive", channel_id: channelId });
+  assert.equal(unarchived.status, 200, JSON.stringify(unarchived.body));
+  assert.equal((unarchived.body.channel as Record<string, unknown>).archived_at, null);
+  assert.equal((unarchived.body.channel as Record<string, unknown>).purpose, "Restored ops room");
+
+  const posted = await send(f.otherJwt, installedPost({ channel: slug, body: "live again" }));
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+
+  const idempotent = await send(f.ownerJwt, { kind: "channel_unarchive", channel_id: channelId });
+  assert.equal(idempotent.status, 200, JSON.stringify(idempotent.body));
+  assert.equal((idempotent.body.channel as Record<string, unknown>).archived_at, null);
+});
