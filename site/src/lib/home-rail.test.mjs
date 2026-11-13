@@ -84,7 +84,7 @@ test("overflow: Show N more counts hidden rows; a selected overflow channel stay
   assert.equal(find(expanded, (node) => node.dataset?.homeChannelsMore !== undefined)[0].textContent, "Show fewer");
 });
 
-test("archived channels sit behind a disclosure, open when one is selected, with no unread and no menu", () => {
+test("archived channels keep their manager menu, open when selected, and never show unread", () => {
   const archived = [row("x", "old", { unread: true, manageable: true })];
   const closed = rail(ready([], { archived }));
   const toggle = find(closed, (node) => node.dataset?.homeArchivedToggle !== undefined)[0];
@@ -93,7 +93,7 @@ test("archived channels sit behind a disclosure, open when one is selected, with
   assert.equal(list.hidden, true);
   const link = find(list, (node) => node.dataset?.railChannel === "x")[0];
   assert.equal(link.dataset.unread, undefined);
-  assert.equal(find(list, (node) => node.dataset?.railChannelMenu !== undefined).length, 0, "no restore, rename or archive");
+  assert.equal(find(list, (node) => node.dataset?.railChannelMenu !== undefined).length, 1, "archived channels remain manageable");
   const open = rail(ready([], { archived: [{ ...archived[0], current: true }] }));
   assert.equal(find(open, (node) => node.id === "hm-rail-archived-list")[0].hidden, false);
 });

@@ -78,7 +78,7 @@ test("composer placement: #general and All messages post unfiled; archived or un
   assert.equal(channelViewLabel("missing", list), null);
 });
 
-test("only the creator or a workspace owner or admin sees rename and archive", () => {
+test("only the creator or a workspace owner or admin manages active and archived channels", () => {
   const byPerson = channel(UUID, "design", { createdByKind: "user", createdByPrincipal: "u-1" });
   const byAgent = channel(UUID, "design", { createdByKind: "agent", createdByPrincipal: "agent-1" });
   assert.equal(mayManageChannel(byPerson, { userId: "u-1", role: "member" }), true);
@@ -90,8 +90,11 @@ test("only the creator or a workspace owner or admin sees rename and archive", (
   assert.equal(mayManageChannel(byAgent, { userId: "agent-1", role: "member" }), false);
   assert.equal(mayManageChannel(byAgent, { userId: "u-1", role: "admin" }), true);
   assert.equal(mayManageChannel(channel(UUID, "x", { createdByPrincipal: "" }), { userId: "", role: "member" }), false);
-  // Archive is one-way: an archived channel has nothing to manage.
-  assert.equal(mayManageChannel({ ...byPerson, archivedAt: "2026-11-02T00:00:00Z" }, { userId: "u-1", role: "owner" }), false);
+  // Archiving preserves those rights, including editing and unarchiving.
+  const archived = { ...byPerson, archivedAt: "2026-11-02T00:00:00Z" };
+  assert.equal(mayManageChannel(archived, { userId: "u-1", role: "member" }), true);
+  assert.equal(mayManageChannel(archived, { userId: "u-2", role: "admin" }), true);
+  assert.equal(mayManageChannel(archived, { userId: "u-2", role: "member" }), false);
 });
 
 test("unread keeps true, false and unknown apart and never invents a value", () => {

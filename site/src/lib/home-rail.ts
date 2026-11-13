@@ -31,6 +31,7 @@ export interface RailCallbacks {
   channelMenu?: (channelId: string, event: MouseEvent, button: HTMLElement) => void;
   /** The Channels heading's +. */
   newChannel?: (button: HTMLElement) => void;
+  browseChannels?: (button: HTMLElement) => void;
   /** "Retry" after the channel list failed to load. */
   retryChannels?: () => void;
   /** Right-click (or Shift+F10 / the Menu key) on a Direct messages row. The page decides the actions. */
@@ -272,7 +273,7 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
 function channelItem(doc: Document, row: RailChannelRowVM, archived: boolean, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__channel-item");
   item.append(channelLink(doc, row, archived, callbacks));
-  if (!archived && !sample && row.manageable && callbacks.channelMenu) {
+  if (!sample && row.manageable && callbacks.channelMenu) {
     const actions = node(doc, "button", "hm-rail__channel-actions");
     actions.type = "button";
     actions.dataset.railChannelMenu = row.id;
@@ -343,6 +344,13 @@ function channelsSection(doc: Document, vm: RailChannelsVM, sample: boolean, cal
       callbacks.toggleChannels?.(expanded);
     });
     section.append(more);
+  }
+  if (!sample && callbacks.browseChannels) {
+    const browse = node(doc, "button", "hm-rail__more", "All channels");
+    browse.type = "button"; browse.dataset.homeAllChannels = "";
+    browse.setAttribute("aria-haspopup", "dialog"); browse.setAttribute("aria-controls", "dashboard-channel-directory");
+    browse.addEventListener("click", () => callbacks.browseChannels?.(browse));
+    section.append(browse);
   }
   if (vm.state === "failed") {
     const failed = node(doc, "div", "hm-rail__channels-failed");

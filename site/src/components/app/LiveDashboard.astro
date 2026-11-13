@@ -56,6 +56,7 @@ import "../../styles/kylon-todos-context.css";
 import "../../styles/kylon-onboarding.css";
 import "../../styles/kylon-entity-profile.css";
 import "../../styles/kylon-channel-dialog.css";
+import "../../styles/kylon-channel-management.css";
 import "../../styles/kylon-agent-page.css";
 import "../../styles/kylon-chat-empty.css";
 import "../../styles/kylon-command-palette.css";
@@ -744,7 +745,9 @@ import "../../styles/kylon-command-palette.css";
             {/* An archived channel's conversation stays readable; this replaces the composer. */}
             <div class="dashboard__channel-archived" data-channel-archived hidden>
               <span>{CHANNEL_ARCHIVED_STATE}</span>
+              <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-unarchive hidden>Unarchive channel</button>
               <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-go-general>{GO_TO_GENERAL_LABEL}</button>
+              <p class="dashboard__form-error" role="alert" data-channel-unarchive-error hidden></p>
             </div>
             <form class="dashboard__composer" data-composer hidden>
               {/* THE REPLY BAR. Hidden until a reply is in progress, so the composer at rest is
@@ -935,7 +938,7 @@ import "../../styles/kylon-command-palette.css";
     <div class="dashboard__workspace-details-dialog-body" data-workspace-details-content></div>
   </dialog>
 
-  {/* Channels: create, rename, archive. One native <dialog> in three modes (data-channel-mode), for the
+  {/* Channels: create, settings, archive. One native <dialog> in three modes (data-channel-mode), for the
       same reasons the roster is one: Escape, modal focus containment and focus restore, outside every
       panel so a view switch cannot hide it mid-command. Refusals show the server's own sentence and
       keep what was typed. */}
@@ -946,7 +949,10 @@ import "../../styles/kylon-command-palette.css";
     data-channel-mode="create"
     aria-labelledby="dashboard-channel-dialog-title"
   >
-    <h2 id="dashboard-channel-dialog-title" data-channel-dialog-title>New channel</h2>
+    <header class="cm-dialog-head">
+      <h2 id="dashboard-channel-dialog-title" data-channel-dialog-title>New channel</h2>
+      <button class="cm-close" type="button" data-channel-dialog-cancel aria-label="Close channel dialog">×</button>
+    </header>
     <form class="dashboard__channel-form" data-channel-create-form>
       <label for="dashboard-channel-new-slug">Name</label>
       <input
@@ -957,13 +963,12 @@ import "../../styles/kylon-command-palette.css";
         spellcheck="false"
         required
       />
-      <label for="dashboard-channel-new-purpose">Purpose (optional)</label>
-      <input
+      <label for="dashboard-channel-new-purpose">Description (optional)</label>
+      <textarea
         id="dashboard-channel-new-purpose"
-        type="text"
         data-channel-new-purpose
-        autocomplete="off"
-      />
+        rows="3"
+      ></textarea>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
         <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
@@ -973,6 +978,7 @@ import "../../styles/kylon-command-palette.css";
       </div>
     </form>
     <form class="dashboard__channel-form" data-channel-rename-form hidden>
+      <p class="cm-channel-state" data-channel-settings-status hidden>Archived</p>
       <label for="dashboard-channel-rename-slug">Name</label>
       <input
         id="dashboard-channel-rename-slug"
@@ -982,11 +988,15 @@ import "../../styles/kylon-command-palette.css";
         spellcheck="false"
         required
       />
+      <label for="dashboard-channel-edit-description">Description (optional)</label>
+      <textarea id="dashboard-channel-edit-description" data-channel-edit-description rows="4"></textarea>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
-        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
+        <span class="cm-action-spacer" aria-hidden="true"></span>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel data-channel-settings-close>Cancel</button>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-rename-submit>
-          Rename channel
+          Save changes
         </button>
       </div>
     </form>
@@ -994,12 +1004,26 @@ import "../../styles/kylon-command-palette.css";
       <p data-channel-archive-consequence></p>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
-        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-archive-cancel>Cancel</button>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-archive-submit>
           Archive channel
         </button>
       </div>
     </form>
+  </dialog>
+
+  <dialog class="cm-directory" id="dashboard-channel-directory" data-channel-directory aria-labelledby="dashboard-channel-directory-title">
+    <header class="cm-dialog-head">
+      <h2 id="dashboard-channel-directory-title">All channels</h2>
+      <button class="cm-close" type="button" data-channel-directory-close aria-label="Close All channels">×</button>
+    </header>
+    <label class="hm-sr" for="dashboard-channel-search">Search channels</label>
+    <input id="dashboard-channel-search" class="cm-search" data-channel-directory-search type="search" placeholder="Search channels" autocomplete="off" />
+    <p class="cm-directory-status" role="status" aria-live="polite" data-channel-directory-status></p>
+    <div class="cm-directory-results" data-channel-directory-list></div>
+    <footer class="cm-directory-footer">
+      <button class="dashboard__button dashboard__button--primary" type="button" data-channel-directory-new>New channel</button>
+    </footer>
   </dialog>
 
   <dialog
@@ -1321,8 +1345,9 @@ import "../../styles/kylon-command-palette.css";
     answerChoice,
     type ChannelUnread,
     createChannel,
-    renameChannel,
+    updateChannel,
     archiveChannel,
+    unarchiveChannel,
     type BrowserSignalPlacement,
     type Signal,
     type WorkspaceChannel,
@@ -1403,11 +1428,13 @@ import "../../styles/kylon-command-palette.css";
     ARCHIVE_CHANNEL_LABEL,
     CHANNEL_ARCHIVED_STATE,
     CHANNEL_UNAVAILABLE_TITLE,
+    CHANNELS_LOAD_FAILED,
     GENERAL_CHANNEL_ID,
     GENERAL_CHANNEL_SLUG,
     GO_TO_GENERAL_LABEL,
     NEW_CHANNEL_LABEL,
-    RENAME_CHANNEL_LABEL,
+    CHANNEL_SETTINGS_LABEL,
+    UNARCHIVE_CHANNEL_LABEL,
     archiveChannelTitle,
     archivedChannels,
     channelById,
@@ -1425,6 +1452,7 @@ import "../../styles/kylon-command-palette.css";
     resolveChannelParam,
     signalInChannelView,
   } from "../../lib/channels";
+  import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
   import {
     pendingAccessRows,
     loadPendingAccess,
@@ -2279,6 +2307,7 @@ import "../../styles/kylon-command-palette.css";
           ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channelLabel(channel.slug),
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
         mayCreateChannel: !sampleMode,
+        channelSettings: activeChannel() !== null && !activeDm,
         filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
           const value = button.dataset.feedFilter;
           return value === "all" || value === "broadcast" || value === "direct-to-you"
@@ -2291,6 +2320,8 @@ import "../../styles/kylon-command-palette.css";
     const feedMenuAction = (action: FeedMenuAction): void => {
       if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
       else if (action.kind === "new-channel") openChannelDialog("create");
+      else if (action.kind === "all-channels") openChannelDirectory();
+      else if (action.kind === "channel-settings") openChannelDialog("settings", activeChannelId);
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
       else one<HTMLButtonElement>("[data-refresh]")?.click();
     };
@@ -5157,6 +5188,7 @@ import "../../styles/kylon-command-palette.css";
         },
         channelMenu: openChannelRowMenu,
         newChannel: (button: HTMLElement) => openChannelDialog("create", null, button),
+        browseChannels: (button: HTMLElement) => openChannelDirectory(button),
         retryChannels: () => { void refreshChannels(activeWorkspaceId, requestVersion).catch(() => {}); },
         toggleChannels: (expanded: boolean) => { railExpanded = expanded; writeRailExpanded(activeWorkspaceId, expanded); },
         toggleArchived: (open: boolean) => { railArchivedOpen = open; },
@@ -5236,7 +5268,7 @@ import "../../styles/kylon-command-palette.css";
         pill.dataset.leadUnset = "";
         pill.addEventListener("click", () => openRosterDialog());
       }
-      copy.append(pill);
+      copy.insertBefore(pill, copy.querySelector("[data-channel-header-description]"));
     };
     const renderHomeShell = (): void => {
       const slot = one<HTMLElement>("[data-home-workspace-shell]");
@@ -5251,12 +5283,14 @@ import "../../styles/kylon-command-palette.css";
         return;
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
+      const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null ? activeChannel() : null;
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
+        channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
         /* Chat's heading is the channel being read; the workspace stays in the picker. */
         channelTitle: (typeof activeDm !== "undefined" && activeDm) || !channelsLoaded ? `# ${workspace.name}` : activeChannelName() };
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
@@ -5266,6 +5300,7 @@ import "../../styles/kylon-command-palette.css";
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
+        channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription),
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
@@ -9033,7 +9068,8 @@ import "../../styles/kylon-command-palette.css";
          closed HERE. Auth change is a privacy boundary, and a modal left open over the
          signed-out surface would keep the previous workspace's channel names and purposes on
          screen. Found by a review arm. */
-      closeChannelDialog();
+      disarmChannelArchive();
+      one<HTMLElement>("[data-channel-directory-list]")?.replaceChildren();
       one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
       connectFocusObserver?.disconnect();
       connectFocusObserver = null;
@@ -11196,7 +11232,10 @@ import "../../styles/kylon-command-palette.css";
       const archived = feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
         unknownChannelId === null && activeChannelArchived();
       block.hidden = !archived;
+      const unarchive = one<HTMLButtonElement>("[data-channel-unarchive]");
+      if (unarchive) unarchive.hidden = !archived || !activeChannel() || !viewerMayManageChannel(activeChannel()!);
       const composer = one<HTMLFormElement>("[data-composer]");
+      if (composer && feedShown && homeRoute.view === "chat" && activeWorkspaceView === "signals") composer.hidden = archived || unknownChannelId !== null;
       if (composer && archived) {
         composer.hidden = true;
         closeMentionPicker();
@@ -11351,13 +11390,22 @@ import "../../styles/kylon-command-palette.css";
       activateWorkspaceView("signals");
     };
 
-    /* ── The channel dialog: New channel, Rename channel, Archive #slug? ───────────── */
-    let channelDialogMode: "create" | "rename" | "archive" = "create";
-    /** The channel a rename or archive acts on: the row whose ⋯ opened it, not the one being read. */
+    /* Channel settings and the full channel directory share the existing channel authority. */
+    let channelDialogMode: "create" | "settings" | "archive" = "create";
     let managedChannelId: string | null = null;
-    /** Where a cancelled dialog hands focus back, and whether it came from the phone drawer. */
-    let channelDialogReturn: { selector: string | null; element: HTMLElement | null; drawer: boolean } | null = null;
+    let channelDialogOriginal: { slug: string; purpose: string | null } | null = null;
+    let channelDialogPending = false;
+    let channelDialogEpoch = 0;
+    let channelArchiveBackToSettings = false;
+    type ChannelFocusReturn = { selector: string | null; element: HTMLElement | null; drawer: boolean; directory?: boolean };
+    let channelDialogReturn: ChannelFocusReturn | null = null;
     let channelDialogSucceeded = false;
+    let channelDirectoryReturn: ChannelFocusReturn | null = null;
+    let channelDirectoryRestore = true;
+    let channelDirectoryEpoch = 0;
+    let channelDirectoryKey = "";
+    const channelUnarchivePending = new Set<string>();
+    const channelDirectoryErrors = new Map<string, string>();
 
     const setChannelDialogError = (message: string): void => {
       for (const target of all<HTMLElement>("[data-channel-dialog-error]")) {
@@ -11375,101 +11423,169 @@ import "../../styles/kylon-command-palette.css";
       });
     };
 
-    const renderChannelDialog = (): void => {
+    const channelFocusReturn = (opener: HTMLElement | null): ChannelFocusReturn => {
+      const element = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      const selector = element?.dataset.railChannelMenu !== undefined
+        ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
+        : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
+        : element?.hasAttribute("data-channel-header-description") ? "[data-channel-header-description]"
+        : element?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]"
+        : element?.hasAttribute("data-home-all-channels") ? "[data-home-all-channels]"
+        : element?.id ? `#${CSS.escape(element.id)}` : null;
+      return { selector, element, drawer: layout.navigationOpen() };
+    };
+    const restoreChannelFocus = (back: ChannelFocusReturn | null): boolean => {
+      if (!back) return false;
+      if (back.drawer) layout.openNavigation();
+      const visible = (el: HTMLElement | null): el is HTMLElement => !!el?.isConnected && !!el.getClientRects().length && !el.closest("[hidden], [inert]");
+      const target = (back.selector ? all<HTMLElement>(back.selector).find(visible) : null) ?? back.element;
+      if (visible(target)) { target.focus({ preventScroll: true }); return true; }
+      return false;
+    };
+
+    const channelSettingsChanges = (): { slug?: string; purpose?: string | null } => {
+      const name = one<HTMLInputElement>("[data-channel-rename-slug]");
+      const description = one<HTMLTextAreaElement>("[data-channel-edit-description]");
+      const slug = channelSubmitSlug(name?.value ?? "");
+      const purpose = description?.value.trim() || null;
+      return {
+        ...(slug !== channelDialogOriginal?.slug ? { slug } : {}),
+        ...(purpose !== channelDialogOriginal?.purpose ? { purpose } : {}),
+      };
+    };
+    const syncChannelSettingsSubmit = (): void => {
+      const channel = channelById(channels, managedChannelId);
+      const save = one<HTMLButtonElement>("[data-channel-rename-submit]");
+      if (save) save.disabled = channelDialogPending || !channel || !viewerMayManageChannel(channel) || Object.keys(channelSettingsChanges()).length === 0;
+    };
+    const renderChannelDialog = (initialize = true): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (!dialog) return;
       const mode = channelDialogMode;
       const channel = channelById(channels, managedChannelId);
+      const manageable = channel !== null && viewerMayManageChannel(channel);
       dialog.dataset.channelMode = mode;
       const title = one<HTMLElement>("[data-channel-dialog-title]");
-      if (title) {
-        title.textContent = mode === "create" ? NEW_CHANNEL_LABEL
-          : mode === "rename" ? RENAME_CHANNEL_LABEL : archiveChannelTitle(channel?.slug ?? "");
+      if (title) title.textContent = mode === "create" ? NEW_CHANNEL_LABEL
+        : mode === "settings" ? CHANNEL_SETTINGS_LABEL : archiveChannelTitle(channel?.slug ?? "");
+      for (const [selector, shown] of [["[data-channel-create-form]", mode === "create"], ["[data-channel-rename-form]", mode === "settings"], ["[data-channel-archive-form]", mode === "archive"]] as const) {
+        const form = one<HTMLFormElement>(selector); if (form) form.hidden = !shown;
       }
-      const create = one<HTMLFormElement>("[data-channel-create-form]");
-      const rename = one<HTMLFormElement>("[data-channel-rename-form]");
-      const archive = one<HTMLFormElement>("[data-channel-archive-form]");
-      if (create) create.hidden = mode !== "create";
-      if (rename) rename.hidden = mode !== "rename";
-      if (archive) archive.hidden = mode !== "archive";
-      /* The bounds are the validator's own constants; the validator still has the last word. */
-      for (const input of all<HTMLInputElement>("[data-channel-new-slug], [data-channel-rename-slug]")) {
-        input.maxLength = channelSlugInputMax();
+      for (const input of all<HTMLInputElement>("[data-channel-new-slug], [data-channel-rename-slug]")) input.maxLength = channelSlugInputMax();
+      for (const input of all<HTMLTextAreaElement>("[data-channel-new-purpose], [data-channel-edit-description]")) input.maxLength = channelPurposeInputMax();
+      const name = one<HTMLInputElement>("[data-channel-rename-slug]");
+      const description = one<HTMLTextAreaElement>("[data-channel-edit-description]");
+      if (name) { name.readOnly = !manageable; if (initialize && mode === "settings") name.value = channel?.slug ?? ""; }
+      if (description) { description.readOnly = !manageable; if (initialize && mode === "settings") description.value = channel?.purpose ?? ""; }
+      if (initialize && mode === "settings") channelDialogOriginal = channel ? { slug: channel.slug, purpose: channel.purpose } : null;
+      for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = channelDialogPending;
+      const state = one<HTMLElement>("[data-channel-settings-status]"); if (state) state.hidden = !channel?.archivedAt;
+      const save = one<HTMLButtonElement>("[data-channel-rename-submit]"); if (save) save.hidden = !manageable;
+      const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
+      const archive = one<HTMLButtonElement>("[data-channel-settings-archive]");
+      if (archive) { archive.hidden = !manageable; archive.textContent = channel?.archivedAt ? UNARCHIVE_CHANNEL_LABEL : ARCHIVE_CHANNEL_LABEL; }
+      const consequence = one<HTMLElement>("[data-channel-archive-consequence]"); if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
+      for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit], [data-channel-settings-archive]")) {
+        submit.disabled = channelDialogPending;
+        if (channelDialogPending) submit.setAttribute("aria-busy", "true"); else submit.removeAttribute("aria-busy");
       }
-      const purposeInput = one<HTMLInputElement>("[data-channel-new-purpose]");
-      if (purposeInput) purposeInput.maxLength = channelPurposeInputMax();
-      const renameInput = one<HTMLInputElement>("[data-channel-rename-slug]");
-      if (renameInput && mode === "rename") renameInput.value = channel?.slug ?? "";
-      const consequence = one<HTMLElement>("[data-channel-archive-consequence]");
-      if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
-      const archiveSubmit = one<HTMLButtonElement>("[data-channel-archive-submit]");
-      if (archiveSubmit) archiveSubmit.textContent = ARCHIVE_CHANNEL_LABEL;
-      for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit]")) {
-        submit.disabled = false;
-        submit.removeAttribute("aria-busy");
-      }
+      syncChannelSettingsSubmit();
     };
 
-    /**
-     * Open the dialog. A phone drawer closes first, so the drawer and the dialog never trap focus
-     * at the same time; a cancel reopens it and puts focus back on the control that opened it.
-     */
+    const closeChannelDirectory = (restore = true): void => {
+      const dialog = one<HTMLDialogElement>("[data-channel-directory]");
+      if (!dialog?.open) return;
+      channelDirectoryRestore = restore;
+      dialog.close();
+    };
+    const renderChannelDirectoryDialog = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-channel-directory]");
+      const list = one<HTMLElement>("[data-channel-directory-list]");
+      if (!dialog?.open || !list) return;
+      const query = one<HTMLInputElement>("[data-channel-directory-search]")?.value ?? "";
+      const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
+      const row = (channel: WorkspaceChannel): DirectoryChannel => ({ id: channel.channelId, slug: channel.slug,
+        description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
+        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
+      const rows: DirectoryChannel[] = [{ id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, description: null,
+        href: href(GENERAL_CHANNEL_ID), archived: false, unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false },
+        ...liveChannels(channels).map(row), ...archivedChannels(channels).map(row)];
+      const key = JSON.stringify([query, rows, channelsLoaded, channelListFailed, [...channelUnarchivePending], [...channelDirectoryErrors]]);
+      if (key === channelDirectoryKey) return;
+      channelDirectoryKey = key;
+      const count = renderChannelDirectory(list, rows, query, channelUnarchivePending, channelDirectoryErrors, {
+        open: id => { closeChannelDirectory(false); layout.closeNavigation(false); selectChannel(id); focusConversationHeading(); },
+        unarchive: (id, button) => { void submitChannelUnarchive(id, "directory", button); },
+      });
+      const status = one<HTMLElement>("[data-channel-directory-status]");
+      if (status) status.textContent = !channelsLoaded ? "Loading channels…" : channelListFailed ? CHANNELS_LOAD_FAILED : count === 0 ? "No channels found" : "";
+      let retry = one<HTMLButtonElement>("[data-channel-directory-retry]");
+      if (channelListFailed && !retry) {
+        retry = document.createElement("button"); retry.type = "button"; retry.className = "cm-directory-retry";
+        retry.dataset.channelDirectoryRetry = ""; retry.textContent = "Retry";
+        retry.addEventListener("click", () => { void refreshChannels(activeWorkspaceId, requestVersion).catch(() => {}); });
+        status?.after(retry);
+      } else if (!channelListFailed) retry?.remove();
+    };
+    const openChannelDirectory = (opener: HTMLElement | null = null, resume = false): void => {
+      const dialog = one<HTMLDialogElement>("[data-channel-directory]");
+      if (!dialog || dialog.open || sampleMode || !session || !activeWorkspaceId) return;
+      if (!resume) {
+        channelDirectoryReturn = channelFocusReturn(opener);
+        const search = one<HTMLInputElement>("[data-channel-directory-search]"); if (search) search.value = "";
+        channelDirectoryErrors.clear();
+      }
+      if (layout.navigationOpen()) layout.closeNavigation(false);
+      channelDirectoryEpoch++; channelDirectoryKey = "";
+      dialog.showModal(); renderChannelDirectoryDialog();
+      const target = resume && opener && dialog.contains(opener) ? opener : one<HTMLInputElement>("[data-channel-directory-search]");
+      target?.focus({ preventScroll: true });
+    };
+
     const openChannelDialog = (
-      mode: "create" | "rename" | "archive",
+      mode: "create" | "settings" | "archive",
       channelId: string | null = null,
       opener: HTMLElement | null = null,
+      editDescription = false,
     ): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (!dialog || dialog.open || sampleMode || !session) return;
       const channel = mode === "create" ? null : channelById(channels, channelId);
-      if (mode !== "create" && (channel === null || !viewerMayManageChannel(channel))) return;
-      channelDialogMode = mode;
-      managedChannelId = channel?.channelId ?? null;
-      channelDialogSucceeded = false;
-      const drawer = layout.navigationOpen();
-      channelDialogReturn = {
-        selector: opener?.dataset.railChannelMenu !== undefined
-          ? `[data-rail-channel-menu="${CSS.escape(opener.dataset.railChannelMenu)}"]`
-          : opener?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]" : null,
-        element: opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null),
-        drawer,
-      };
-      if (drawer) layout.closeNavigation(false);
-      setChannelDialogError("");
-      renderChannelDialog();
-      dialog.showModal();
-      const first = mode === "create" ? one<HTMLInputElement>("[data-channel-new-slug]")
-        : mode === "rename" ? one<HTMLInputElement>("[data-channel-rename-slug]")
-        : one<HTMLButtonElement>("[data-channel-archive-submit]");
+      if (mode !== "create" && (channel === null || (mode === "archive" && !viewerMayManageChannel(channel)))) return;
+      const directory = one<HTMLDialogElement>("[data-channel-directory]")?.open === true;
+      channelDialogReturn = { ...channelFocusReturn(opener), directory };
+      if (directory) closeChannelDirectory(false);
+      if (channelDialogReturn.drawer) layout.closeNavigation(false);
+      channelDialogEpoch++; channelDialogMode = mode; managedChannelId = channel?.channelId ?? null;
+      channelDialogSucceeded = false; channelDialogPending = false; channelArchiveBackToSettings = false;
+      setChannelDialogError(""); renderChannelDialog(); dialog.showModal();
+      const first = mode === "create" ? one<HTMLElement>("[data-channel-new-slug]")
+        : mode === "settings" ? one<HTMLElement>(editDescription ? "[data-channel-edit-description]" : "[data-channel-rename-slug]")
+        : one<HTMLElement>("[data-channel-archive-submit]");
       first?.focus({ preventScroll: true });
-      if (first instanceof HTMLInputElement && mode === "rename") first.select();
     };
-
     const closeChannelDialog = (): void => {
-      const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
-      if (dialog?.open) dialog.close();
+      const dialog = one<HTMLDialogElement>("[data-channel-dialog]"); if (dialog?.open) dialog.close();
     };
-
-    /** Runs on every close: Escape, Cancel, the backdrop, or a result. */
     const channelDialogClosed = (): void => {
+      if (one<HTMLDialogElement>("[data-channel-dialog]")?.open) return;
       const back = channelDialogReturn;
-      channelDialogReturn = null;
-      managedChannelId = null;
+      channelDialogReturn = null; managedChannelId = null; channelDialogOriginal = null; channelDialogPending = false; channelDialogEpoch++;
       if (channelDialogSucceeded || back === null) return;
-      if (back.drawer) layout.openNavigation();
-      const target = (back.selector ? one<HTMLElement>(back.selector) : null) ?? back.element;
-      if (target?.isConnected && target.getClientRects().length && !target.closest("[hidden], [inert]")) {
-        target.focus({ preventScroll: true });
-      }
+      if (back.directory) openChannelDirectory(back.element, true);
+      else if (!restoreChannelFocus(back)) focusConversationHeading();
     };
-
-    /** The ⋯ beside a channel row: the actions the viewer may take, and nothing else. */
     const openChannelRowMenu = (channelId: string, event: MouseEvent, button: HTMLElement): void => {
       const channel = channelById(channels, channelId);
       if (!channel || !viewerMayManageChannel(channel)) return;
       openContextMenu(event, button, [
-        { label: RENAME_CHANNEL_LABEL, run: () => openChannelDialog("rename", channelId, button) },
-        { label: ARCHIVE_CHANNEL_LABEL, run: () => openChannelDialog("archive", channelId, button), danger: true },
+        { label: CHANNEL_SETTINGS_LABEL, run: () => openChannelDialog("settings", channelId, button) },
+        channel.archivedAt
+          ? { label: UNARCHIVE_CHANNEL_LABEL, run: () => {
+              openChannelDialog("settings", channelId, button);
+              void submitChannelUnarchive(channelId, "dialog", one<HTMLButtonElement>("[data-channel-settings-archive]"));
+            } }
+          : { label: ARCHIVE_CHANNEL_LABEL, run: () => openChannelDialog("archive", channelId, button), danger: true },
       ], `${channelLabel(channel.slug)} options`);
     };
 
@@ -11490,6 +11606,7 @@ import "../../styles/kylon-command-palette.css";
       if (generation !== channelUnreadGeneration || workspaceId !== activeWorkspaceId) return;
       channelUnreadRows = rows;
       renderHomeRail();
+      renderChannelDirectoryDialog();
       if (!force && channelsLoaded && channelListStaleAgainstUnread(channels, rows)) {
         void refreshChannels(workspaceId, requestVersion, true).catch(() => {});
       }
@@ -11520,6 +11637,7 @@ import "../../styles/kylon-command-palette.css";
           channelsLoaded = true;
           renderChannelRail();
           renderChannelHead();
+          renderChannelDirectoryDialog();
           if (unknownChannelId !== null) renderFeed();
         }
         throw error;
@@ -11543,6 +11661,7 @@ import "../../styles/kylon-command-palette.css";
       renderChannelHead();
       renderHomeShell();
       void refreshChannelUnread(workspaceId, true);
+      renderChannelDirectoryDialog();
     };
 
     const closeConnect = (): void => {
@@ -13801,153 +13920,169 @@ import "../../styles/kylon-command-palette.css";
      * browser checks first is the one thing it can know without asking: the same
      * channelSlugProblem the edge runs, imported from the edge's own module.
      */
-    /** Kept for its callers (selectChannel, workspace switch, sign-out): a channel move ends any open channel command. */
+    /** Workspace changes and sign-out retire both channel dialogs and their focus returns. */
     const disarmChannelArchive = (): void => {
-      closeChannelDialog();
+      channelDialogEpoch++;
+      channelDialogSucceeded = true; channelDialogReturn = null;
+      closeChannelDialog(); closeChannelDirectory(false); channelDirectoryReturn = null;
+      channelDirectoryErrors.clear();
+      const bannerError = one<HTMLElement>("[data-channel-unarchive-error]");
+      if (bannerError) { bannerError.textContent = ""; bannerError.hidden = true; }
     };
-
-    /** A pending command keeps its row and selection; only its own submit waits for the result. */
     const holdChannelSubmit = (button: HTMLButtonElement | null, pending: boolean): void => {
       if (!button) return;
       button.disabled = pending;
-      if (pending) button.setAttribute("aria-busy", "true");
-      else button.removeAttribute("aria-busy");
+      if (pending) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
     };
-
-    /* A result lands in the conversation: focus goes to the heading, or back to the row on a
-       desktop rename, where the reader was. */
+    const holdChannelDialog = (pending: boolean): void => {
+      channelDialogPending = pending;
+      for (const button of all<HTMLButtonElement>("[data-channel-dialog] button[type=submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) holdChannelSubmit(button, pending);
+      for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = pending;
+      if (!pending) syncChannelSettingsSubmit();
+    };
+    const channelDialogOwns = (epoch: number): boolean => epoch === channelDialogEpoch && one<HTMLDialogElement>("[data-channel-dialog]")?.open === true;
+    /** Paint the accepted row even if the follow-up read fails. A later read may supersede it. */
+    const applyChannelResult = (channel: WorkspaceChannel, workspaceId: string, version: number): void => {
+      channels = [...channels.filter(row => row.channelId !== channel.channelId), channel];
+      channelsLoaded = true;
+      if (activeChannelArchived()) railArchivedOpen = true;
+      renderChannelRail(); renderChannelHead(); renderHomeShell(); renderChannelDirectoryDialog();
+      void refreshChannels(workspaceId, version, true).catch(() => {});
+    };
     const finishChannelCommand = (focusRow: string | null): void => {
       const back = channelDialogReturn;
-      channelDialogSucceeded = true;
-      closeChannelDialog();
+      channelDialogSucceeded = true; closeChannelDialog();
+      if (back?.directory) channelDirectoryReturn = null;
       const row = focusRow && !back?.drawer ? one<HTMLElement>(focusRow) : null;
       if (row?.getClientRects().length) row.focus({ preventScroll: true });
+      else if (back && !back.directory) { if (!restoreChannelFocus(back)) focusConversationHeading(); }
       else focusConversationHeading();
     };
-
     const submitChannelCreate = async (): Promise<void> => {
       const input = one<HTMLInputElement>("[data-channel-new-slug]");
-      const purposeInput = one<HTMLInputElement>("[data-channel-new-purpose]");
-      const submit = one<HTMLButtonElement>("[data-channel-create-submit]");
-      if (!input || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
-      const slug = channelSubmitSlug(input.value);
-      const problem = channelSubmitProblem(slug);
+      const description = one<HTMLTextAreaElement>("[data-channel-new-purpose]");
+      if (!input || !session || sampleMode || !activeWorkspaceId || channelDialogPending) return;
+      const slug = channelSubmitSlug(input.value), problem = channelSubmitProblem(slug);
       setChannelDialogError("");
-      if (problem !== null) {
-        setChannelDialogError(problem);
-        input.focus();
-        return;
-      }
-      const workspaceId = activeWorkspaceId;
-      const version = requestVersion;
-      const purpose = purposeInput === null ? null : purposeInput.value.trim() || null;
-      holdChannelSubmit(submit, true);
-      let created: WorkspaceChannel;
+      if (problem !== null) { setChannelDialogError(problem); input.focus(); return; }
+      const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch;
+      holdChannelDialog(true);
       try {
-        created = await createChannel(session, uuid(), workspaceId, slug, purpose);
-      } catch (error) {
+        const created = await createChannel(session, uuid(), workspaceId, slug, description?.value.trim() || null);
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        holdChannelSubmit(submit, false);
-        setChannelDialogError(readableError(error));
-        return;
-      }
-      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-      holdChannelSubmit(submit, false);
-      input.value = "";
-      if (purposeInput) purposeInput.value = "";
-      /* The channel exists whatever the list read does next, so a failed or superseded re-read
-         still lands in it. */
-      await refreshChannels(workspaceId, version).catch(() => {});
-      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-      if (channelById(channels, created.channelId) === null) channels = [...channels, created];
-      finishChannelCommand(null);
-      if (homeRoute.view !== "chat") {
-        await navigateHome({ view: "chat", workspaceId, channelId: created.channelId }, "push");
+        applyChannelResult(created, workspaceId, version);
+        if (!channelDialogOwns(epoch)) return;
+        input.value = ""; if (description) description.value = "";
+        finishChannelCommand(null);
+        if (homeRoute.view !== "chat") await navigateHome({ view: "chat", workspaceId, channelId: created.channelId }, "push");
+        else selectChannel(created.channelId);
         focusConversationHeading();
-        return;
-      }
-      selectChannel(created.channelId);
-      focusConversationHeading();
-    };
-
-    const submitChannelRename = async (): Promise<void> => {
-      const channel = channelById(channels, managedChannelId);
-      const input = one<HTMLInputElement>("[data-channel-rename-slug]");
-      const submit = one<HTMLButtonElement>("[data-channel-rename-submit]");
-      if (!input || !channel || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
-      const slug = channelSubmitSlug(input.value);
-      const problem = channelSubmitProblem(slug);
-      setChannelDialogError("");
-      if (problem !== null) {
-        setChannelDialogError(problem);
-        input.focus();
-        return;
-      }
-      const workspaceId = activeWorkspaceId;
-      const version = requestVersion;
-      holdChannelSubmit(submit, true);
-      try {
-        await renameChannel(session, uuid(), workspaceId, channel.channelId, slug);
       } catch (error) {
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        /* The server's sentence (403 channel_forbidden included), and the name as typed. */
-        holdChannelSubmit(submit, false);
-        setChannelDialogError(readableError(error));
-        return;
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || !channelDialogOwns(epoch)) return;
+        holdChannelDialog(false); setChannelDialogError(readableError(error));
       }
-      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-      holdChannelSubmit(submit, false);
-      /* The id does not change, so the link, the selection and the conversation all hold. */
-      await refreshChannels(workspaceId, version).catch(() => {});
-      finishChannelCommand(`[data-rail-channel-menu="${CSS.escape(channel.channelId)}"]`);
     };
-
+    const submitChannelSettings = async (): Promise<void> => {
+      const channel = channelById(channels, managedChannelId), input = one<HTMLInputElement>("[data-channel-rename-slug]");
+      if (!input || !channel || !session || sampleMode || !activeWorkspaceId || channelDialogPending || !viewerMayManageChannel(channel)) return;
+      const changes = channelSettingsChanges(); if (!Object.keys(changes).length) return;
+      const problem = channelSubmitProblem(channelSubmitSlug(input.value));
+      setChannelDialogError("");
+      if (problem !== null) { setChannelDialogError(problem); input.focus(); return; }
+      const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch;
+      holdChannelDialog(true);
+      try {
+        const saved = await updateChannel(session, uuid(), workspaceId, channel.channelId, changes);
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        applyChannelResult(saved, workspaceId, version);
+        if (channelDialogOwns(epoch)) finishChannelCommand(null);
+      } catch (error) {
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || !channelDialogOwns(epoch)) return;
+        holdChannelDialog(false); setChannelDialogError(readableError(error));
+      }
+    };
     const submitChannelArchive = async (): Promise<void> => {
       const channel = channelById(channels, managedChannelId);
-      const submit = one<HTMLButtonElement>("[data-channel-archive-submit]");
-      if (!channel || !session || sampleMode || activeWorkspaceId === "" || submit?.disabled) return;
-      setChannelDialogError("");
-      const workspaceId = activeWorkspaceId;
-      const version = requestVersion;
-      holdChannelSubmit(submit, true);
+      if (!channel || !session || sampleMode || !activeWorkspaceId || channelDialogPending || !viewerMayManageChannel(channel)) return;
+      const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch;
+      setChannelDialogError(""); holdChannelDialog(true);
       try {
-        await archiveChannel(session, uuid(), workspaceId, channel.channelId);
+        const archived = await archiveChannel(session, uuid(), workspaceId, channel.channelId);
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        applyChannelResult(archived, workspaceId, version);
+        if (channelDialogOwns(epoch)) finishChannelCommand(`[data-rail-channel="${CSS.escape(channel.channelId)}"]`);
+      } catch (error) {
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || !channelDialogOwns(epoch)) return;
+        holdChannelDialog(false); setChannelDialogError(readableError(error));
+      }
+    };
+    const submitChannelUnarchive = async (channelId: string, surface: "dialog" | "directory" | "banner", button: HTMLButtonElement | null): Promise<void> => {
+      const channel = channelById(channels, channelId);
+      if (!channel || !session || sampleMode || !activeWorkspaceId || !viewerMayManageChannel(channel) || channelUnarchivePending.has(channelId)) return;
+      const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch, directoryEpoch = channelDirectoryEpoch;
+      const banner = one<HTMLElement>("[data-channel-unarchive-error]");
+      if (surface === "banner" && banner) { banner.textContent = ""; banner.hidden = true; }
+      if (surface === "dialog") { setChannelDialogError(""); holdChannelDialog(true); }
+      channelUnarchivePending.add(channelId); channelDirectoryErrors.delete(channelId);
+      if (surface === "directory" && document.activeElement === button) one<HTMLElement>(`[data-channel-directory-action="open:${CSS.escape(channelId)}"]`)?.focus({ preventScroll: true });
+      holdChannelSubmit(button, true); renderChannelDirectoryDialog();
+      try {
+        const unarchived = await unarchiveChannel(session, uuid(), workspaceId, channelId);
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        applyChannelResult(unarchived, workspaceId, version);
+        if (surface === "dialog" && channelDialogOwns(epoch)) finishChannelCommand(`[data-rail-channel="${CSS.escape(channelId)}"]`);
+        else if (surface === "banner" && activeChannelId === channelId && epoch === channelDialogEpoch) focusConversationHeading();
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        holdChannelSubmit(submit, false);
-        setChannelDialogError(readableError(error));
-        return;
+        const message = readableError(error);
+        if (surface === "dialog" && channelDialogOwns(epoch)) { holdChannelDialog(false); setChannelDialogError(message); }
+        if (surface === "directory" && directoryEpoch === channelDirectoryEpoch && one<HTMLDialogElement>("[data-channel-directory]")?.open) channelDirectoryErrors.set(channelId, message);
+        if (surface === "banner" && activeChannelId === channelId && epoch === channelDialogEpoch && banner) { banner.textContent = message; banner.hidden = false; }
+      } finally {
+        channelUnarchivePending.delete(channelId);
+        if (version === requestVersion && workspaceId === activeWorkspaceId) {
+          if (surface === "banner" && activeChannelId === channelId) holdChannelSubmit(button, false);
+          renderChannelDirectoryDialog();
+        }
       }
-      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-      holdChannelSubmit(submit, false);
-      /* The row leaves the active list only now, after the server took it. */
-      if (activeChannelId === channel.channelId) railArchivedOpen = true;
-      await refreshChannels(workspaceId, version).catch(() => {});
-      finishChannelCommand(`[data-rail-channel="${CSS.escape(channel.channelId)}"]`);
     };
-
     {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
-      dialog?.addEventListener("click", (event) => {
-        if (event.target === dialog) dialog.close();
-      });
+      dialog?.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
       dialog?.addEventListener("close", channelDialogClosed);
+      const directory = one<HTMLDialogElement>("[data-channel-directory]");
+      directory?.addEventListener("click", event => { if (event.target === directory) directory.close(); });
+      directory?.addEventListener("close", () => {
+        if (directory.open) return;
+        channelDirectoryEpoch++; channelDirectoryKey = "";
+        if (channelDirectoryRestore) { restoreChannelFocus(channelDirectoryReturn); channelDirectoryReturn = null; }
+        channelDirectoryRestore = true;
+      });
     }
-    for (const cancel of all<HTMLButtonElement>("[data-channel-dialog-cancel]")) {
-      cancel.addEventListener("click", closeChannelDialog);
-    }
-    one<HTMLFormElement>("[data-channel-create-form]")?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void submitChannelCreate();
+    for (const cancel of all<HTMLButtonElement>("[data-channel-dialog-cancel]")) cancel.addEventListener("click", closeChannelDialog);
+    one<HTMLButtonElement>("[data-channel-settings-archive]")?.addEventListener("click", event => {
+      const channel = channelById(channels, managedChannelId);
+      if (!channel || channelDialogPending) return;
+      if (channel.archivedAt) { void submitChannelUnarchive(channel.channelId, "dialog", event.currentTarget as HTMLButtonElement); return; }
+      channelArchiveBackToSettings = true; channelDialogMode = "archive";
+      setChannelDialogError(""); renderChannelDialog(false);
+      one<HTMLElement>("[data-channel-archive-submit]")?.focus();
     });
-    one<HTMLFormElement>("[data-channel-rename-form]")?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void submitChannelRename();
+    one<HTMLButtonElement>("[data-channel-archive-cancel]")?.addEventListener("click", () => {
+      if (!channelArchiveBackToSettings) { closeChannelDialog(); return; }
+      channelDialogMode = "settings"; setChannelDialogError(""); renderChannelDialog(false);
+      one<HTMLElement>("[data-channel-settings-archive]")?.focus();
     });
-    one<HTMLFormElement>("[data-channel-archive-form]")?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void submitChannelArchive();
+    for (const input of all<HTMLElement>("[data-channel-rename-slug], [data-channel-edit-description]")) input.addEventListener("input", syncChannelSettingsSubmit);
+    one<HTMLFormElement>("[data-channel-create-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelCreate(); });
+    one<HTMLFormElement>("[data-channel-rename-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelSettings(); });
+    one<HTMLFormElement>("[data-channel-archive-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelArchive(); });
+    one<HTMLButtonElement>("[data-channel-unarchive]")?.addEventListener("click", event => {
+      if (activeChannelId) void submitChannelUnarchive(activeChannelId, "banner", event.currentTarget as HTMLButtonElement);
     });
+    one<HTMLButtonElement>("[data-channel-directory-close]")?.addEventListener("click", () => closeChannelDirectory());
+    one<HTMLInputElement>("[data-channel-directory-search]")?.addEventListener("input", renderChannelDirectoryDialog);
+    one<HTMLButtonElement>("[data-channel-directory-new]")?.addEventListener("click", event => openChannelDialog("create", null, event.currentTarget as HTMLElement));
     for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
       button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
     }

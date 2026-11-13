@@ -24,6 +24,8 @@ export interface WorkspaceShellVM {
   contextTitle?: boolean;
   /** Chat's heading: the channel being read ("#general", "#slug", "All messages"). Workspace identity stays in the picker. */
   channelTitle?: string;
+  /** A resolved named channel. Other feed views and Direct Messages have no channel settings. */
+  channel?: { slug: string; description: string | null; manageable: boolean };
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
   /** False while the to-dos read is absent: every To-dos entry hides. Nothing is faked. */
   todosAvailable: boolean;
@@ -36,6 +38,7 @@ export interface ShellCallbacks {
   navigate?: (href: string, event: MouseEvent) => void;
   /** Opens the People & agents page. */
   openPeople: () => void;
+  channelSettings?: (opener: HTMLElement, editDescription?: boolean) => void;
   /** The phone "Workspaces" chevron. The page decides between history.back() and its parent route. */
   back?: (event: MouseEvent) => void;
   menu: (item: WorkspaceMenuItem) => void;
@@ -181,11 +184,12 @@ export type FeedFilterValue = "all" | "broadcast" | "direct-to-you";
 export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];
   mayCreateChannel: boolean;
+  channelSettings?: boolean;
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
   /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
   refresh: { label: string } | null;
 }
-export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
+export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
 
 export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", people: "People & agents" };
 const PANES: Exclude<WorkspacePane, "people">[] = ["chat", "todos", "lists", "files"];
@@ -299,6 +303,37 @@ function detailsButton(doc: Document): HTMLButtonElement {
   return button;
 }
 
+function channelSettingsButton(doc: Document, callbacks: ShellCallbacks): HTMLButtonElement {
+  const button = node(doc, "button", "hm-channel-settings");
+  button.type = "button"; button.dataset.channelSettingsOpen = "";
+  button.setAttribute("aria-label", "Channel settings"); button.title = "Channel settings";
+  button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-channel-dialog");
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+  const path = doc.createElementNS(svg.namespaceURI, "path");
+  path.setAttribute("d", "m9.6 4.5.6-2.5h3.6l.6 2.5 2.1 1.2 2.5-.7 1.8 3.1-1.9 1.8v2.4l1.9 1.8-1.8 3.1-2.5-.7-2.1 1.2-.6 2.5h-3.6l-.6-2.5-2.1-1.2-2.5.7-1.8-3.1 1.9-1.8v-2.4L3.3 8.1 5.1 5l2.5.7z");
+  const circle = doc.createElementNS(svg.namespaceURI, "circle");
+  circle.setAttribute("cx", "12"); circle.setAttribute("cy", "11"); circle.setAttribute("r", "3");
+  svg.append(path, circle); button.append(svg);
+  button.addEventListener("click", () => callbacks.channelSettings?.(button));
+  return button;
+}
+
+/** The actual description is visible in the reading header; managers can edit it directly. */
+function channelDescription(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks): HTMLElement | null {
+  if (!vm.channel?.description) return null;
+  const description = node(doc, vm.channel.manageable ? "button" : "p", "hm-channel-description", vm.channel.description);
+  description.dataset.channelHeaderDescription = "";
+  description.title = vm.channel.description;
+  if (vm.channel.manageable) {
+    (description as HTMLButtonElement).type = "button";
+    description.setAttribute("aria-label", `Edit description for #${vm.channel.slug}: ${vm.channel.description}`);
+    description.setAttribute("aria-haspopup", "dialog");
+    description.addEventListener("click", () => callbacks.channelSettings?.(description, true));
+  }
+  return description;
+}
+
 /** The workspace ⋯ menu: a menu button with Wiki, Workspace settings and Admin access and history. */
 export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks, idPrefix: string, options: { account?: boolean } = {}): HTMLElement {
   const wrap = node(doc, "div", "hm-menu");
@@ -403,9 +438,12 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       button.addEventListener("click", () => act(action));
       return button;
     };
+    const channelActions = [plain("All channels", { kind: "all-channels" }, "menuAllChannels")];
+    if (state.channelSettings) channelActions.unshift(plain("Channel settings", { kind: "channel-settings" }, "menuChannelSettings"));
+    if (state.mayCreateChannel) channelActions.push(plain("New channel", { kind: "new-channel" }, "menuChannelNew"));
     const view = group("View", state.channels.map((channel) => ({ text: channel.label, checked: channel.current,
       action: { kind: "channel", id: channel.id } as FeedMenuAction, hook: ["menuChannelPlace", channel.id] as [string, string] })),
-      state.mayCreateChannel ? [plain("New channel", { kind: "new-channel" }, "menuChannelNew")] : []);
+      channelActions);
     const show = group("Show", state.filters.map((filter) => ({ text: filter.label, checked: filter.current,
       action: { kind: "filter", value: filter.value } as FeedMenuAction, hook: ["menuFeedFilter", filter.value] as [string, string] })));
     const built: HTMLElement[] = [view.entry, show.entry];
@@ -486,8 +524,11 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   const copy = node(doc, "div", "hm-ws-header__copy");
   const channel = vm.pane === "chat" && !vm.contextTitle;
   copy.append(title(doc, channel ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true));
+  const description = channel ? channelDescription(doc, vm, callbacks) : null;
+  if (description) copy.append(description);
   const actions = node(doc, "div", "hm-ws-header__actions");
   const doors = shellDoors(vm);
+  if (!vm.sample && channel && vm.channel && callbacks.channelSettings) actions.append(channelSettingsButton(doc, callbacks));
   if (doors.people) {
     const people = node(doc, "button", "hm-ws-header__people");
     people.type = "button"; people.setAttribute("aria-label", "People & agents");
@@ -582,9 +623,12 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   people.append(memberStack(doc, vm));
   people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
   bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
+  const description = vm.pane === "chat" && !vm.contextTitle ? channelDescription(doc, vm, callbacks) : null;
+  if (description) bar.append(description);
   if (doors.menu) {
     const menu = buildWorkspaceMenu(doc, vm, callbacks, "hm-phone", { account: true });
     if (vm.pane === "chat" && !vm.contextTitle) menu.prepend(people, detailsButton(doc));
+    if (!vm.sample && vm.pane === "chat" && !vm.contextTitle && vm.channel && callbacks.channelSettings) menu.prepend(channelSettingsButton(doc, callbacks));
     bar.append(menu);
     /* This ⋯ carries the account entries, so the page's own phone account control stands down (integration.css). */
     if (callbacks.accountAction && callbacks.account?.()) bar.dataset.homeAccountMenu = "";
