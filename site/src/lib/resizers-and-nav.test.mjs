@@ -21,11 +21,12 @@ test("every route in the app maps to its logical place in the Slack-like navigat
   assert.deepEqual(currentFor({ view: "chat", workspaceId: "ws-1" }), ["chat"]);
   assert.deepEqual(currentFor({ view: "channels", workspaceId: "ws-1" }), ["chat"]);
 
-  // Workspace People & agents (including agent details, add-agent, invite)
-  assert.deepEqual(currentFor({ view: "people", workspaceId: "ws-1" }), ["people"]);
-  assert.deepEqual(currentFor({ view: "agent", workspaceId: "ws-1", agentId: "ag-1" }), ["people"]);
-  assert.deepEqual(currentFor({ view: "add-agent", workspaceId: "ws-1" }), ["people"]);
-  assert.deepEqual(currentFor({ view: "invite", workspaceId: "ws-1" }), ["people"]);
+  // People & agents is a dialog, with no workspace tab. Related detail/setup routes do not select one.
+  assert.ok(!projectRoute({ view: "chat", workspaceId: "ws-1" }).navigation.some(product => product.id === "people"));
+  assert.deepEqual(currentFor({ view: "people", workspaceId: "ws-1" }), []);
+  assert.deepEqual(currentFor({ view: "agent", workspaceId: "ws-1", agentId: "ag-1" }), []);
+  assert.deepEqual(currentFor({ view: "add-agent", workspaceId: "ws-1" }), []);
+  assert.deepEqual(currentFor({ view: "invite", workspaceId: "ws-1" }), []);
 
   // Workspace To-dos (index and item detail)
   assert.deepEqual(currentFor({ view: "todos", workspaceId: "ws-1" }), ["todos"]);
