@@ -11748,12 +11748,11 @@ import "../../styles/kylon-command-palette.css";
       }
       railOrderSaving = false;
       if (workspaceId !== activeWorkspaceId || version !== requestVersion) return;
-      // Only if it is still there: the person may have moved on while the save was in flight.
-      const focused = keep !== null && document.activeElement instanceof HTMLElement && document.activeElement.matches(keep);
+      /* No focus handling after this read. If it redraws the rail, the region swap itself keeps focus on the same
+         row or menu button when focus is still in the rail, and leaves it alone when the person has moved on. */
       if (list === "starred") await refreshChannelUnread(workspaceId, true);
       else await refreshChannels(workspaceId, version, true).catch(() => {});
       if (workspaceId !== activeWorkspaceId) return;
-      if (focused && keep) one<HTMLElement>(keep)?.focus({ preventScroll: true });
       if (problem && status) status.textContent = problem;
     };
 
