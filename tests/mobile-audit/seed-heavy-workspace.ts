@@ -771,6 +771,24 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         } else note("seed_delegated_invitation", `expected one pending invitation, found ${listed?.n}`);
       }
     } catch (error) { note("seed_delegated_invitation", error); }
+    /* THE SEEDED THREAD IS THE NEWEST THING IN THE WORKSPACE. Several screens open it by id, and the feed's first
+       page holds 25 messages. The thread was written near the top of this seed with times a minute or two back,
+       and every block after it adds newer rows, some through real commands that are stamped now. One more block
+       was enough to push the root off the page, and the screens that open it then waited for nothing. It is
+       re-timed here, last: the root six seconds ago and its replies after it, one second apart, in their order. */
+    if (ids["message.thread"]) {
+      try {
+        const root = ids["message.thread"];
+        await sql`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '6 seconds'
+          WHERE workspace_id = ${workspace}::uuid AND id = ${root}::uuid`;
+        await sql`UPDATE swarm.signals AS reply
+          SET created_at = statement_timestamp() - interval '6 seconds' + (placed.n * interval '1 second')
+          FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS n FROM swarm.signals
+            WHERE workspace_id = ${workspace}::uuid AND thread_root_id = ${root}::uuid) AS placed
+          WHERE reply.id = placed.id`;
+        steps.push("seed_thread_newest");
+      } catch (error) { note("seed_thread_newest", error); }
+    }
     return { owner: { email: owner.email, password: owner.password }, invitee, ids, notes, steps };
   } finally {
     await sql.end({ timeout: 5 });
