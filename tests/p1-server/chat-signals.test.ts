@@ -4016,10 +4016,14 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(privOnlySeed.status, 200);
   await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(privOnlySeed.body).id));
 
-  const pubAfterPrivSeed = await sendWs(ws, ownerB.jwt, installedPost({
+  const pubAfterPrivSeed = await sendWs(ws, outsiderC.jwt, installedPost({
     channel: openSlug,
     signal_kind: "ask",
-    to_agent_principal_id: wakeProbeAgent.principal,
+    to: [
+      { kind: "agent", id: wakeProbeAgent.principal },
+      { kind: "user", id: personA.id },
+      { kind: "user", id: ownerB.id },
+    ],
     body: "Public ask after hidden #lock seed",
   }));
   assert.equal(pubAfterPrivSeed.status, 200);
@@ -4030,6 +4034,7 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(await wakeRowForProbeAs(ownerB.id), null, "R2-A2: hidden #lock seed must NOT activate public agent_wake_path for non-member owner");
   assert.equal(await wakeRowForProbeAs(outsiderC.id), null, "R2-A2: hidden #lock seed must NOT activate public agent_wake_path for outsider");
   assert.equal(await receiptObservingAs(ownerB.id, pubAfterPrivSeedId), false, "R2-A2: hidden #lock seed must NOT flip public wake_path_observing for non-member owner");
+  assert.equal(await receiptObservingAs(outsiderC.id, pubAfterPrivSeedId), false, "R2-A2: hidden #lock seed must NOT flip public wake_path_observing for outsider");
 
   // Direction 2 (Hidden later-observed supersession): establish a public observed seed, leave a public ask unobserved,
   // then post a newer #lock ask and mark it observed — outsiders' public wake-path row and wake_path_observing must stay UNCHANGED!
@@ -4042,10 +4047,14 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(pubSeed.status, 200);
   await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(pubSeed.body).id));
 
-  const pubVisiblePending = await sendWs(ws, ownerB.jwt, installedPost({
+  const pubVisiblePending = await sendWs(ws, outsiderC.jwt, installedPost({
     channel: openSlug,
     signal_kind: "ask",
-    to_agent_principal_id: wakeProbeAgent.principal,
+    to: [
+      { kind: "agent", id: wakeProbeAgent.principal },
+      { kind: "user", id: personA.id },
+      { kind: "user", id: ownerB.id },
+    ],
     body: "Public pending ask before #lock observation",
   }));
   assert.equal(pubVisiblePending.status, 200);
@@ -4059,6 +4068,7 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(beforePrivSupersedeC, beforePrivSupersedeB);
   assert.equal(await receiptObservingAs(personA.id, pubVisiblePendingId), true);
   assert.equal(await receiptObservingAs(ownerB.id, pubVisiblePendingId), true);
+  assert.equal(await receiptObservingAs(outsiderC.id, pubVisiblePendingId), true);
 
   const privLaterObserved = await sendWs(ws, personA.jwt, installedPost({
     channel: lockSlug,
@@ -4085,6 +4095,11 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
     await receiptObservingAs(ownerB.id, pubVisiblePendingId),
     true,
     "R2-A2: hidden newer #lock observation must NOT flip non-member owner's public wake_path_observing",
+  );
+  assert.equal(
+    await receiptObservingAs(outsiderC.id, pubVisiblePendingId),
+    true,
+    "R2-A2: hidden newer #lock observation must NOT flip outsider's public wake_path_observing",
   );
 });
 
