@@ -200,7 +200,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audien
   color: var(--k-shell-surface);
   background: var(--k-shell-ink);
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer[data-composer-audience="private"] .dashboard__composer-input:not(:focus-within)::before {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer[data-audience="private"] .dashboard__composer-input:not(:focus-within)::before {
   box-shadow: inset 0 0 0 1.5px var(--k-shell-ink);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-sentence {
@@ -242,7 +242,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[dat
   border-color: color-mix(in srgb, #f2b824 60%, var(--k-shell-line));
   font-size: 13px;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-warning] .dashboard__composer-to-note {
+  flex: 1 1 18rem;
+  margin: 0;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-private {
+  flex: none;
+  max-inline-size: 100%;
   min-block-size: 28px;
   padding: 2px 10px;
   color: var(--k-shell-ink);
