@@ -3010,16 +3010,15 @@ test("CM-3a private channel isolation: human, non-member admin, and sibling-agen
     }),
   );
   assert.equal(directedInLock.status, 200, JSON.stringify(directedInLock.body));
-  const directedLockSignalId = ((directedInLock.body.event_ids as string[]) ?? [])[0] ?? "";
+  const directedInLockId = String(signalOf(directedInLock.body).id);
   // E3 directed probe: on an accessible directed signal signals_seen returns 403, whereas an outsider on a directed #lock
   // signal still gets 200 { ok: true, event_ids: [] } (zero existence/directedness oracle).
-  const outsiderDirectedSeen = await send(f.otherJwt, { kind: "signals_seen", signal_ids: [directedLockSignalId] });
-  const siblingDirectedSeen = await send(f.agentTokenTwo, { kind: "signals_seen", signal_ids: [directedLockSignalId] });
+  const outsiderDirectedSeen = await send(f.otherJwt, { kind: "signals_seen", signal_ids: [directedInLockId] });
+  const siblingDirectedSeen = await send(f.agentTokenTwo, { kind: "signals_seen", signal_ids: [directedInLockId] });
   assert.equal(outsiderDirectedSeen.status, 200, JSON.stringify(outsiderDirectedSeen.body));
   assert.deepEqual(outsiderDirectedSeen.body, humanSeenUnknown.body);
   assert.equal(siblingDirectedSeen.status, 200, JSON.stringify(siblingDirectedSeen.body));
   assert.deepEqual(siblingDirectedSeen.body, agentSeenUnknown.body);
-  const directedInLockId = String(signalOf(directedInLock.body).id);
 
   const [wakeAdmitted] = await sql<{ ok: boolean }[]>`
     SELECT swarm.agent_delivery_is_wakeable(${f.workspace}::uuid, ${directedInLockId}::uuid, ${f.principal}::uuid) AS ok
@@ -3596,11 +3595,18 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   });
   assert.equal(ackSeed.status, 200, JSON.stringify(ackSeed.body));
 
-  // Rewind agentX's open-channel presence timestamp past the 60s throttle window so any presence leak on #lock commands is caught!
-  await sql`
-    UPDATE swarm.agent_presence
-    SET last_command_at = statement_timestamp() - interval '2 minutes'
+  // Verify #lock ack_agent_delivery suppressed agent_presence, then seed an open-channel presence timestamp
+  // past the 60s throttle window so any presence leak on #lock commands is caught!
+  const presenceAfterLockAck = await sql`
+    SELECT last_command_at FROM swarm.agent_presence
     WHERE workspace_id = ${ws}::uuid AND principal_id = ${agentX.principal}::uuid
+  `;
+  assert.equal(presenceAfterLockAck.length, 0, "private-channel ack_agent_delivery must NOT write swarm.agent_presence");
+  await sql`
+    INSERT INTO swarm.agent_presence (workspace_id, principal_id, last_command_at)
+    VALUES (${ws}::uuid, ${agentX.principal}::uuid, statement_timestamp() - interval '2 minutes')
+    ON CONFLICT (workspace_id, principal_id)
+    DO UPDATE SET last_command_at = EXCLUDED.last_command_at
   `;
   const [{ ts: baselinePresenceTs }] = await sql<{ ts: string }[]>`
     SELECT to_jsonb(last_command_at)#>>'{}' AS ts
