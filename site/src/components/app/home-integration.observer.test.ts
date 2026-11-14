@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { nextFeedChangeAt, signalHasEnded, signalIsReadable } from '../../lib/signal-history.ts';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
@@ -541,6 +542,7 @@ test('a signal page settling after a same-workspace view change retains data wit
     const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
     let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
     const context = createContext({ ...MESSAGE_STATUS_STUBS,  routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+      signalIsReadable, nextFeedChangeAt,
       // This signal fixture omits channel chrome; still execute its real projection dependency.
       listsChrome: createListsChrome(new ViewNode('div') as unknown as HTMLElement),
       signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
@@ -923,7 +925,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
   const input = { placeholder: '', setAttribute() {}, focus() {} };
   const target = { textContent: '' };
   const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, HTMLElement: RowNode, input, target, loadedRows, mapHomePeople, homeParty,
-    buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
+    buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL, signalHasEnded,
     threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
   });
@@ -993,7 +995,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
 test('chat pictures and file cards each open their own attachment through its signed link', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const signed: string[] = [], opened: string[] = [], previews: string[] = [];
-  const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras,
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras, signalHasEnded,
     canPreviewChatAttachment, homeAskAnswered, window: { requestAnimationFrame() {}, location: { assign: (url: unknown) => opened.push(String(url)) } },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
     freshAttachmentDownload: async (fileId: string) => { signed.push(fileId); return { url: `https://storage.test/${fileId}`, contentWarning: 'untrusted' }; },
@@ -1035,7 +1037,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   const question = 'Which option should we take? '.repeat(24) + '[Read the options](https://example.test/options) Budget';
   let withoutTitle = false;
   const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, HTMLElement: RowNode, buildAuthorLine,
-    buildStreamExtras: (...args: Parameters<typeof buildStreamExtras>) => { const result = buildStreamExtras(...args); if (withoutTitle) (result as unknown as RowNode)?.querySelector('.hm-needs-title')?.remove(); return result; }, deriveStreamExtras, question, homeAskAnswered,
+    buildStreamExtras: (...args: Parameters<typeof buildStreamExtras>) => { const result = buildStreamExtras(...args); if (withoutTitle) (result as unknown as RowNode)?.querySelector('.hm-needs-title')?.remove(); return result; }, deriveStreamExtras,  signalHasEnded,question, homeAskAnswered,
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body;
       const link = document.createElement('a'); link.setAttribute('href', 'https://example.test/options'); node.append(link); },

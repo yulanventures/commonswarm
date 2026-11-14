@@ -1401,6 +1401,7 @@ import "../../styles/kylon-command-palette.css";
     signalIsDirectBetween,
     type SignalFilter,
   } from "../../lib/signal-feed";
+  import { nextFeedChangeAt, signalHasEnded, signalHistoryFilter, signalIsReadable } from "../../lib/signal-history";
   import {
     canStartThread,
     THREAD_REPLY_CHIP_LABEL,
@@ -2897,7 +2898,10 @@ import "../../styles/kylon-command-palette.css";
         .from("signals")
         .select(BROWSER_SIGNAL_COLUMNS)
         .eq("workspace_id", workspaceId)
-        .or(`until.is.null,until.gt.${cutoff}`);
+        /* Notes and asks are history and come back at any age; a status still ends with its
+           `until`. The one rule the query cannot express is applied in renderFeed
+           (`lib/signal-history.ts`). */
+        .or(signalHistoryFilter(cutoff));
       /* #general is the UNFILED messages: `channel_id IS NULL` on the query, so later pages,
          refreshes and the live tick all narrow the same way (never a filter over the page). */
       const narrowing = channelSignalFilter(channelId);
@@ -7469,6 +7473,15 @@ import "../../styles/kylon-command-palette.css";
         body.append(line);
         return;
       }
+      /* An ask past its `until` stays in history, and the server refuses a choice on it
+         (`ask_expired`). It keeps its options as a plain line of what was offered. */
+      if (signalHasEnded(signal, Date.now())) {
+        const line = document.createElement("p");
+        line.className = "dashboard__choice-answer";
+        line.textContent = `Not answered: ${state.options.map((option) => option.label).join(", ")}`;
+        body.append(line);
+        return;
+      }
       const group = document.createElement("div");
       group.className = "dashboard__choices";
       group.setAttribute("role", "group");
@@ -8026,15 +8039,11 @@ import "../../styles/kylon-command-palette.css";
         return;
       }
       const now = Date.now();
-      signals = signals.filter(
-        (signal) => signal.until === null || new Date(signal.until).getTime() > now,
-      );
-      const nextExpiry = signals.reduce<number | null>((nearest, signal) => {
-        if (signal.until === null) return nearest;
-        const expiresAt = new Date(signal.until).getTime();
-        if (!Number.isFinite(expiresAt) || expiresAt <= now) return nearest;
-        return nearest === null || expiresAt < nearest ? expiresAt : nearest;
-      }, null);
+      /* Only a status or an agent's note to itself leaves the feed when its `until` passes.
+         Conversation stays, but at its `until` it stops offering a thread, choices and a Reply
+         card, so the repaint timer below still follows every row's `until`. */
+      signals = signals.filter((signal) => signalIsReadable(signal, now));
+      const nextExpiry = nextFeedChangeAt(signals, now);
       if (nextExpiry !== null) {
         signalExpiryTimer = window.setTimeout(
           renderFeed,
@@ -8322,7 +8331,7 @@ import "../../styles/kylon-command-palette.css";
           meta.append(author, identityBadge, ...recipient, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: clockTime,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), ended: signalHasEnded(signal, now), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {

@@ -44,6 +44,28 @@
     ]
   },
   {
+    "id": "app.chat.history",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "waitFor": "[data-feed-list]:has([data-signal-id=\"{message.ended}\"]):has([data-signal-id=\"{message.endedAddressed}\"]):not(:has([data-signal-id=\"{message.endedStatus}\"])):not(:has([data-signal-id=\"{message.endedSelf}\"]))"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.ended}\"]"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.ended}\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_history"
+    ]
+  },
+  {
     "id": "app.chat.dm",
     "kind": "view",
     "path": "/app?w={workspace}",

@@ -19,6 +19,8 @@ export interface StreamSignalVM {
   addressedToViewer: boolean;
   /** A reply to the ask already exists. */
   answered: boolean;
+  /** The ask's `until` has passed. It stays in history; it can no longer be answered. */
+  ended?: boolean;
   attachments: StreamAttachmentVM[];
 }
 
@@ -95,9 +97,9 @@ export function askExcerpt(body: string, max = ASK_EXCERPT_MAX): string {
   return flat.length > max ? `${flat.slice(0, max - 1).join("").trimEnd()}…` : flat.join("");
 }
 
-/** True only for an ask addressed to the viewer that nobody has answered yet. */
-export function isOpenAskToViewer(signal: Pick<StreamSignalVM, "kind" | "addressedToViewer" | "answered">): boolean {
-  return signal.kind === "ask" && signal.addressedToViewer && !signal.answered;
+/** True only for an ask addressed to the viewer that nobody has answered yet and that can still be answered. */
+export function isOpenAskToViewer(signal: Pick<StreamSignalVM, "kind" | "addressedToViewer" | "answered" | "ended">): boolean {
+  return signal.kind === "ask" && signal.addressedToViewer && !signal.answered && signal.ended !== true;
 }
 
 /** The needs-you card for an open ask to the viewer; null otherwise. The only action is Reply. */
