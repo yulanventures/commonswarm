@@ -697,6 +697,11 @@
       }
     ],
     "ready": "[data-composer-to][data-to-warning] button[data-composer-to-private]:not([hidden])",
+    "frame": [
+      "button[data-composer-to-private]",
+      "button[data-composer-to-public]",
+      "[data-composer-send]"
+    ],
     "states": [
       "dense"
     ],
@@ -733,6 +738,10 @@
       }
     ],
     "ready": "[data-composer-to][data-to-warning] button[data-composer-to-public]:not([hidden])",
+    "frame": [
+      "button[data-composer-to-public]",
+      "[data-composer-send]"
+    ],
     "states": [
       "dense"
     ],
