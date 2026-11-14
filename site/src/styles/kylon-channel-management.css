@@ -190,3 +190,14 @@ live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[aria-checked="
   background: currentColor;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
 }
+
+/* Reordering (CM-2b): a row the viewer may move can be dragged onto another row of its list. The row
+   being dragged fades; the row it would land on shows a line at its top. Alt+Arrow and the row's ⋯ do
+   the same without a pointer. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-dragging] { opacity: 0.45; }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop]::before {
+  content: ""; position: absolute; inset-inline: 8px; inset-block-start: -1px; block-size: 2px;
+  border-radius: 1px; background: var(--k-shell-focus, Highlight); pointer-events: none;
+}
+/* Dragged down, the row lands after this one: the line goes on the bottom edge. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop="after"]::before { inset-block-start: auto; inset-block-end: -1px; }

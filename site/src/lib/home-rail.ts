@@ -29,6 +29,10 @@ export interface RailCallbacks {
   selectChannel?: (channelId: string, event: MouseEvent) => void;
   /** The row's ⋯ button. The page decides the actions (rename, archive). */
   channelMenu?: (channelId: string, event: MouseEvent, button: HTMLElement) => void;
+  /** Alt+Arrow on a row the viewer may move: one step up or down its list. */
+  moveChannel?: (list: RailOrderList, channelId: string, step: -1 | 1) => void;
+  /** A row dragged onto another row of the same list. */
+  dropChannel?: (list: RailOrderList, channelId: string, ontoId: string) => void;
   /** The Channels heading's +. */
   newChannel?: (button: HTMLElement) => void;
   browseChannels?: (button: HTMLElement) => void;
@@ -61,7 +65,11 @@ export interface RailChannelRowVM {
   manageable: boolean;
   /** The viewer muted this channel: the row is quiet and never shows unread. */
   muted?: boolean;
+  /** The viewer may move this row within its list: their own Starred order, or (an owner or admin) the shared one. */
+  reorder?: RailOrderList;
 }
+
+export type RailOrderList = "starred" | "channels";
 
 export interface RailChannelsVM {
   /** loading: the list for this workspace has not been read yet. failed: the latest read failed. */
@@ -276,11 +284,61 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   return link;
 }
 
+/* The row being dragged, between dragstart and dragend. A drag's data cannot be read while it is over a
+   target, so the rail remembers it; only one drag exists at a time. */
+let draggedRow: { list: RailOrderList; id: string } | null = null;
+
+/** A row the viewer may move: Alt+Arrow steps it, and it can be dragged onto another row of its list. */
+function makeReorderable(item: HTMLLIElement, link: HTMLAnchorElement, row: RailChannelRowVM, list: RailOrderList, callbacks: RailCallbacks): void {
+  item.dataset.railReorder = list;
+  link.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+  link.addEventListener("keydown", (event) => {
+    if (!event.altKey || event.ctrlKey || event.metaKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+    event.preventDefault();
+    callbacks.moveChannel?.(list, row.id, event.key === "ArrowUp" ? -1 : 1);
+  });
+  if (!callbacks.dropChannel) return;
+  item.draggable = true;
+  item.addEventListener("dragstart", (event) => {
+    draggedRow = { list, id: row.id };
+    event.dataTransfer?.setData("text/plain", row.slug);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    item.dataset.railDragging = "";
+  });
+  item.addEventListener("dragend", () => { draggedRow = null; delete item.dataset.railDragging; });
+  const accepts = (): boolean => draggedRow !== null && draggedRow.list === list && draggedRow.id !== row.id;
+  /* A row dragged down lands after the row it is dropped on, and a row dragged up lands before it. The line
+     is drawn on the edge where the row will land. */
+  const landsAfter = (): boolean => {
+    const rows = Array.from(item.parentElement?.children ?? []) as HTMLElement[];
+    const from = rows.findIndex((other) => other.dataset?.railDragging !== undefined);
+    return from >= 0 && from < rows.indexOf(item);
+  };
+  item.addEventListener("dragover", (event) => {
+    if (!accepts()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    item.dataset.railDrop = landsAfter() ? "after" : "before";
+  });
+  item.addEventListener("dragleave", () => { delete item.dataset.railDrop; });
+  item.addEventListener("drop", (event) => {
+    delete item.dataset.railDrop;
+    if (!accepts()) return;
+    event.preventDefault();
+    const moved = draggedRow!.id;
+    draggedRow = null;
+    callbacks.dropChannel?.(list, moved, row.id);
+  });
+}
+
 /** One row: the link, and beside it (never inside it) the ⋯ button where an action exists. */
 function channelItem(doc: Document, row: RailChannelRowVM, archived: boolean, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__channel-item");
-  item.append(channelLink(doc, row, archived, callbacks));
-  if (!sample && row.manageable && callbacks.channelMenu) {
+  const link = channelLink(doc, row, archived, callbacks);
+  item.append(link);
+  const reorder = !sample && !archived && callbacks.moveChannel ? row.reorder : undefined;
+  if (reorder) makeReorderable(item, link, row, reorder, callbacks);
+  if (!sample && (row.manageable || reorder) && callbacks.channelMenu) {
     const actions = node(doc, "button", "hm-rail__channel-actions");
     actions.type = "button";
     actions.dataset.railChannelMenu = row.id;

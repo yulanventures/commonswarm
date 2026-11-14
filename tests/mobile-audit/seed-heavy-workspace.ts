@@ -287,6 +287,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       /* The viewer's own settings, through the command a click sends: one starred channel, one muted. */
       ok("star_channel", await command(owner.token, { kind: "channel_preference_set", channel_id: channels.group, starred: true }, workspace));
       ok("mute_channel", await command(owner.token, { kind: "channel_preference_set", channel_id: channels.long, involvement: "muted" }, workspace));
+      /* A second star, so Starred has an order to change; and a shared order an owner chose (CM-2b). */
+      ok("star_general", await command(owner.token, { kind: "channel_preference_set", channel_id: null, starred: true }, workspace));
+      ok("order_channels", await command(owner.token, { kind: "channel_reorder", channel_ids: [channels.long, channels.general] }, workspace));
     } catch (error) { note("channels", error); }
 
     // 240 messages over three days: workspace feed, group chats, DMs both ways and thread replies.
