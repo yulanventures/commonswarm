@@ -62,6 +62,7 @@ import {
   type ChannelInvolvement,
   type WorkspaceChannel,
 } from "./channels.js";
+import { parseChannelVisibility } from "./private-channels.js";
 import {
   attachFeedChannels,
   type FeedPushSubscription,
@@ -3118,7 +3119,7 @@ export async function workspaceChannels(
         .schema("swarm_read")
         .from("channels")
         .select(
-          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank",
+          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank,visibility",
         )
         .eq("workspace_id", workspaceId)
         .order("slug", { ascending: true })
@@ -3126,6 +3127,22 @@ export async function workspaceChannels(
   );
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => browserChannelFromRow(row as unknown as Record<string, unknown>));
+}
+
+/**
+ * One channel's visibility, read now. For the check before a send's files are uploaded: the caller's
+ * list may be stale. Returns the raw value, or `null` when the viewer can read no such channel. Throws
+ * when the read fails; the caller treats that as not open.
+ */
+export async function channelVisibilityNow(workspaceId: string, channelId: string): Promise<unknown> {
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline("the channel", signal => c
+    .schema("swarm_read").from("channels").select("channel_id,visibility")
+    .eq("workspace_id", workspaceId).eq("channel_id", channelId).limit(1).abortSignal(signal));
+  if (error) throw new Error(error.message);
+  const row = (data ?? [])[0] as { visibility?: unknown } | undefined;
+  return row ? row.visibility ?? null : null;
 }
 
 function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
@@ -3143,6 +3160,7 @@ function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
       ? null
       : String(row.archived_at),
     sortRank: Number.isInteger(row.sort_rank) && (row.sort_rank as number) > 0 ? row.sort_rank as number : 0,
+    visibility: parseChannelVisibility(row.visibility),
   };
 }
 
