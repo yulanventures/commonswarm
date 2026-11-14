@@ -290,6 +290,24 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       /* A second star, so Starred has an order to change; and a shared order an owner chose (CM-2b). */
       ok("star_general", await command(owner.token, { kind: "channel_preference_set", channel_id: null, starred: true }, workspace));
       ok("order_channels", await command(owner.token, { kind: "channel_reorder", channel_ids: [channels.long, channels.general] }, workspace));
+      /* A private channel, through the real command: the owner made it, and the admin and one agent were added.
+         It is never placed, so it sorts after the rows above. One message, so its feed is not empty. */
+      const lock = await command(owner.token, { kind: "channel_create", slug: "boiler-quotes", purpose: "Quotes we have not shared yet",
+        visibility: "private", members: [{ kind: "user", id: adminPerson.id }, ...(ids.agent ? [{ kind: "agent", id: ids.agent }] : [])] }, workspace);
+      const lockId = (lock.body.channel as { channel_id?: unknown } | undefined)?.channel_id;
+      if (ok("private_channel", lock) && typeof lockId === "string") {
+        ids["channel.private"] = lockId;
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'Two quotes are in. Keeping them here until we have the third.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 minutes',
+            ${lockId}::uuid, NULL, false
+          )`;
+        steps.push("private_channel_message");
+      }
       /* The policy that is not the default, so the settings capture shows a choice the page had to read.
          After every channel above exists: from here only an owner or admin may create one. */
       ok("channel_policy", await command(owner.token, { kind: "workspace_channel_policy_set", channel_creation_policy: "admins" }, workspace));

@@ -98,6 +98,29 @@
     ]
   },
   {
+    "id": "app.chat.private",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-composer]:not([hidden]) [data-composer-attach][disabled]"
+      }
+    ],
+    "ready": "[data-composer]:not([hidden]) [data-composer-attach][disabled]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "private_channel_message"
+    ],
+    "frame": [
+      "[data-composer]:not([hidden]) [data-composer-attach][disabled]"
+    ]
+  },
+  {
     "id": "app.chat.dm",
     "kind": "view",
     "path": "/app?w={workspace}",

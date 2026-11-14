@@ -371,3 +371,5 @@ With Batch 5, `screens.json` has no pending entries: every entry is a runnable c
 
 - `state.empty`, `state.error` and `state.loading` were generic placeholders, not screens. Per-surface empty captures (`app.todos.empty`, `app.lists.empty`, `app.wiki.empty`, `app.definitions.empty`) are runnable; other empty, error and loading states stay unbound and still need their own per-surface fixtures before any coverage is claimed.
 - `menu.resizers` (M12) was retired as a standalone six-size entry. The `.cs-resizer` separators are hidden at 52rem and below (four of the six audit sizes) and already appear in the wider workspace, Lists and Wiki captures. Dragging, keyboard resizing and reset stay in the interaction inventory, unclaimed.
+
+Private channel capture: `app.chat.private` is a private channel the viewer is a member of (the seed makes it through the real command, with a second person and an agent as members). Its paperclip must be off and wholly on screen: the composer takes no files there.
