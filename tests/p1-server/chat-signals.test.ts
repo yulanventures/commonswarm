@@ -4730,10 +4730,10 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     signalId: wakeAgentMsgId,
     leaseId: firstClaim.deliveries[0]!.leaseId,
     listenerInstanceId: listenerId,
-    outcome: "processed",
+    outcome: "observed",
     lastErrorCode: null,
   });
-  assert.equal(firstAck.outcome, "processed");
+  assert.equal(firstAck.outcome, "observed");
 
   // Workspace owner (ownerOut, NOT in #lock1) removes creatorA from the workspace!
   const remCreator = await sendWs(ws, ownerOut.jwt, { kind: "remove_member", user_id: creatorA.id });
