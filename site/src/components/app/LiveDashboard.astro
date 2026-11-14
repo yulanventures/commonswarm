@@ -3955,6 +3955,12 @@ import "../../styles/kylon-command-palette.css";
      * timer must never be allowed to undo — a debounced write that lands after a send would
      * put the sent text back as a draft. */
     let composerDraftTimer = 0;
+    /* THE STORED DRAFT THIS PAGE IS HOLDING: the key of a draft it restored into its box or
+       wrote itself. A draft is stored per workspace and every open tab of that workspace
+       shares it, so a page that never held it must never delete it. An idle channel tab with
+       an empty box used to remove the item whenever it repainted or was hidden, which threw
+       away a private draft being written in another tab. */
+    let composerDraftHeldKey: string | null = null;
     let mentionPickerTimer = 0;
     /* The tag-to-chip pass has its OWN timer and is not folded into the picker's. The picker
      * closes as soon as the caret leaves an @word, and a finished tag ("@Wren ") is exactly
@@ -4038,6 +4044,7 @@ import "../../styles/kylon-command-palette.css";
     const clearComposerDraft = (key = composerDraftKey()): void => {
       cancelComposerDraftTimer();
       if (!key) return;
+      if (composerDraftHeldKey === key) composerDraftHeldKey = null;
       try {
         window.localStorage.removeItem(key);
       } catch {
@@ -4110,6 +4117,9 @@ import "../../styles/kylon-command-palette.css";
           /* The box can be empty because the pass has not committed, not because the reader
              cleared it. Deleting then throws away an address-only draft the next paint reads. */
           if (!composerToLive && readComposerDraft(key)?.to !== undefined) return;
+          /* Only the page that put this draft in its box, or wrote it, may empty it. */
+          if (composerDraftHeldKey !== key) return;
+          composerDraftHeldKey = null;
           window.localStorage.removeItem(key);
           return;
         }
@@ -4126,6 +4136,7 @@ import "../../styles/kylon-command-palette.css";
         );
         const draftTo = address.to;
         const draftApplied = address.applied;
+        composerDraftHeldKey = key;
         window.localStorage.setItem(
           key,
           JSON.stringify({
@@ -4161,7 +4172,12 @@ import "../../styles/kylon-command-palette.css";
     /* localStorage is synchronous, and on iOS Safari it is synchronous ACROSS PROCESSES. One
      * write per keystroke put that cost inside the keystroke. The draft only has to survive a
      * reload, so an idle write is as good and the send path flushes it anyway. */
+    /* ONLY WHAT THIS PAGE HAS NOT WRITTEN YET. Leaving, hiding or blurring a page whose box
+       has not changed since its last write has nothing to flush, and must not touch a draft
+       another tab may have saved since. An edit always arms the timer, so a pending timer is
+       exactly "there is something unwritten". */
     const flushComposerDraft = (): void => {
+      if (!composerDraftTimer) return;
       persistComposerDraft();
     };
     const scheduleComposerDraft = (): void => {
@@ -4372,6 +4388,7 @@ import "../../styles/kylon-command-palette.css";
       }
       restoredComposerKey = key;
       if (draft !== null) {
+        composerDraftHeldKey = key;
         input.value = draft.body;
         /* A caret remembered in OTHER text is not a caret in this text. The restore would put
            it back at a position the reader never chose here. Kept ADJACENT to the assignment
@@ -5330,7 +5347,11 @@ import "../../styles/kylon-command-palette.css";
     };
     /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
      *  addressed to them, and their profile in the Details column. */
-    const openDirectMessage = async (entity: EntityRef): Promise<void> => {
+    const openDirectMessage = async (
+      entity: EntityRef,
+      /** The whole set the Direct Message opens addressed to; the teammate alone by default. */
+      recipients: readonly ComposerRecipient[] = [{ kind: entity.kind, id: entity.id }],
+    ): Promise<void> => {
       if (!activeWorkspaceId) return;
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       /* A THREAD REPLY ENDS HERE. A reply left open would keep the composer posting into its
@@ -5341,7 +5362,7 @@ import "../../styles/kylon-command-palette.css";
       // The shell's title comes from activeDm: redraw it now, or it changes height on a later render and pushes the
       // conversation down under the reader's pointer.
       renderHomeShell();
-      syncComposerAddress([{ kind: entity.kind, id: entity.id }]);
+      syncComposerAddress(recipients);
       renderFeed();
       syncComposerPlacement();
       renderHomeRail();
@@ -14079,8 +14100,9 @@ import "../../styles/kylon-command-palette.css";
       const writtenTo = [...composerPrivateDraft.reachable];
       const first = writtenTo[0];
       if (first === undefined || composerSending) return;
-      void openDirectMessage({ kind: first.kind, id: first.id } as EntityRef).then(() => {
-        syncComposerAddress(writtenTo);
+      /* One write, with the whole set: opening addressed to the first name alone and then
+         widening would store the draft, for a moment, as written to one of them. */
+      void openDirectMessage({ kind: first.kind, id: first.id } as EntityRef, writtenTo).then(() => {
         one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
       });
     });
@@ -14092,6 +14114,7 @@ import "../../styles/kylon-command-palette.css";
       const stored = readComposerDraft(key);
       const body = one<HTMLTextAreaElement>("[data-composer-input]")?.value ?? stored?.body ?? "";
       try {
+        composerDraftHeldKey = key;
         window.localStorage.setItem(key, JSON.stringify({
           body: body.slice(0, COMPOSER_DRAFT_STORAGE_MAX),
           ...(stored?.hadAttachments ? { hadAttachments: true } : {}),
