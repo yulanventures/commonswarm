@@ -375,3 +375,4 @@ With Batch 5, `screens.json` has no pending entries: every entry is a runnable c
 - `menu.resizers` (M12) was retired as a standalone six-size entry. The `.cs-resizer` separators are hidden at 52rem and below (four of the six audit sizes) and already appear in the wider workspace, Lists and Wiki captures. Dragging, keyboard resizing and reset stay in the interaction inventory, unclaimed.
 
 Thread line capture: `app.thread.line` is a collapsed thread with four replies from three repliers. Their marks, the count and the last reply's time must be wholly on screen.
+Empty composer capture: `app.composer.empty` is a channel's composer with nothing typed. The placeholder names only the channel, and the quiet Send control must be wholly on screen. `app.composer` is the same composer with a message typed and Send ready.
