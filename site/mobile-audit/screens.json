@@ -511,27 +511,6 @@
     ]
   },
   {
-    "id": "app.thread",
-    "kind": "view",
-    "path": "/app?w={workspace}&m={message.thread}",
-    "setup": [
-      {
-        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
-      },
-      {
-        "scroll": "li[data-thread-root=\"{message.thread}\"]"
-      }
-    ],
-    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace",
-      "seed_thread"
-    ]
-  },
-  {
     "id": "app.thread.line",
     "kind": "view",
     "path": "/app?w={workspace}",
@@ -556,6 +535,27 @@
       "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-faces > .dashboard__thread-face:nth-child(3)",
       "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-count",
       "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-last time"
+    ]
+  },
+  {
+    "id": "app.thread",
+    "kind": "view",
+    "path": "/app?w={workspace}&m={message.thread}",
+    "setup": [
+      {
+        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "scroll": "li[data-thread-root=\"{message.thread}\"]"
+      }
+    ],
+    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_thread"
     ]
   },
   {
