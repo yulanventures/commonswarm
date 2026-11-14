@@ -792,13 +792,19 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     if (ids["message.thread"]) {
       try {
         const root = ids["message.thread"];
-        await sql`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '6 seconds'
-          WHERE workspace_id = ${workspace}::uuid AND id = ${root}::uuid`;
-        await sql`UPDATE swarm.signals AS reply
-          SET created_at = statement_timestamp() - interval '6 seconds' + (placed.n * interval '1 second')
-          FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS n FROM swarm.signals
-            WHERE workspace_id = ${workspace}::uuid AND thread_root_id = ${root}::uuid) AS placed
-          WHERE reply.id = placed.id`;
+        // Signals are append-only, so the times are changed with triggers bypassed for this one transaction on
+        // the local test stack, as the refresh note above is removed.
+        await sql.begin(async (tx) => {
+          await tx`SET LOCAL session_replication_role = replica`;
+          const moved = await tx`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '6 seconds'
+            WHERE workspace_id = ${workspace}::uuid AND id = ${root}::uuid`;
+          if (moved.count !== 1) throw new Error(`thread root ${root} was not re-timed`);
+          await tx`UPDATE swarm.signals AS reply
+            SET created_at = statement_timestamp() - interval '6 seconds' + (placed.n * interval '1 second')
+            FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS n FROM swarm.signals
+              WHERE workspace_id = ${workspace}::uuid AND thread_root_id = ${root}::uuid) AS placed
+            WHERE reply.id = placed.id`;
+        });
         steps.push("seed_thread_newest");
       } catch (error) { note("seed_thread_newest", error); }
     }
