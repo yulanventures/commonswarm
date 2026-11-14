@@ -38,6 +38,16 @@ on:
         required: false
         type: string
         default: tests/p1-server/command.test.ts
+      audit_screens:
+        description: "mobile-audit only: screen ids to capture, comma-separated (empty = the full matrix)"
+        required: false
+        type: string
+        default: ""
+      audit_sizes:
+        description: "mobile-audit only: sizes for those screens, comma-separated, e.g. 390x844,1024x1366 (empty = every size)"
+        required: false
+        type: string
+        default: ""
       repeat_pattern:
         description: "--test-name-pattern for the server test to repeat"
         required: false
@@ -64,7 +74,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.suite == 'server' && '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3}]' || format('[{{"suite":"{0}","shard":0}}]', inputs.suite)) || '[{"suite":"server","shard":1},{"suite":"server","shard":2},{"suite":"server","shard":3},{"suite":"p1-cli","shard":0},{"suite":"site","shard":0},{"suite":"unit","shard":0}]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 90 || 30 }}
+    timeout-minutes: ${{ matrix.suite == 'server' && 45 || matrix.suite == 'mobile-audit' && 120 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -395,8 +405,16 @@ jobs:
         if: matrix.suite == 'mobile-audit'
         env:
           RUN_BROWSER_TESTS: "1"
+          # A focused run: only these screens and sizes. Passed as environment, never pasted into the script.
+          MOBILE_AUDIT_SCREENS: ${{ inputs.audit_screens }}
+          MOBILE_AUDIT_SIZES: ${{ inputs.audit_sizes }}
         run: |
           set -euo pipefail
+          # An older commit's runner ignores the list and would capture everything under a "focused" label.
+          if [ -n "${MOBILE_AUDIT_SCREENS}${MOBILE_AUDIT_SIZES}" ] && ! grep -q 'MOBILE_AUDIT_SCREENS' tests/mobile-audit/run-mobile-audit.ts; then
+            echo "this commit's capture runner cannot take a screen list; rebase it onto main or run the full matrix" >&2
+            exit 1
+          fi
           npm run build:command-core
           npm ci --prefix site
           npm install --no-save --no-audit --no-fund playwright@1.64.1
@@ -472,6 +490,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.ref }}
           SUITE: ${{ inputs.suite }}
+          AUDIT_SCREENS: ${{ inputs.audit_screens }}
+          AUDIT_SIZES: ${{ inputs.audit_sizes }}
           SUITE_RESULT: ${{ needs.suite.result }}
           RESULTS_RESULT: ${{ needs.server-results.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -493,10 +513,18 @@ jobs:
           elif [ "$SUITE_RESULT" = cancelled ]; then
             state=error
           fi
+          # A focused capture run is its own status, so it can never be read as the full matrix or replace its result.
+          context="server suite / ${SUITE}"
+          description="dispatch run ${GITHUB_RUN_ID}: ${state}"
+          if [ "$SUITE" = mobile-audit ] && [ -n "${AUDIT_SCREENS}${AUDIT_SIZES}" ]; then
+            context="server suite / mobile-audit (focused)"
+            count="$(printf '%s' "$AUDIT_SCREENS" | tr ',' '\n' | grep -c '[^[:space:]]' || true)"
+            description="dispatch run ${GITHUB_RUN_ID}: ${state}, ${count} screen(s)"
+          fi
           gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
-            -f state="$state" -f context="server suite / ${SUITE}" \
-            -f target_url="$RUN_URL" -f description="dispatch run ${GITHUB_RUN_ID}: ${state}" >/dev/null
-          echo "posted ${state} for ${SUITE} on ${sha}"
+            -f state="$state" -f context="$context" \
+            -f target_url="$RUN_URL" -f description="$description" >/dev/null
+          echo "posted ${state} for ${context} on ${sha}"
 
   server-results:
     name: server results
