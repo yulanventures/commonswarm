@@ -284,6 +284,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       ids["channel.group"] = channels.group;
       ids["channel.long"] = channels.long;
       steps.push("seed_channels");
+      /* The viewer's own settings, through the command a click sends: one starred channel, one muted. */
+      ok("star_channel", await command(owner.token, { kind: "channel_preference_set", channel_id: channels.group, starred: true }, workspace));
+      ok("mute_channel", await command(owner.token, { kind: "channel_preference_set", channel_id: channels.long, involvement: "muted" }, workspace));
     } catch (error) { note("channels", error); }
 
     // 240 messages over three days: workspace feed, group chats, DMs both ways and thread replies.

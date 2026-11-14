@@ -18,6 +18,13 @@ import {
   railChannelSlice,
   resolveChannelParam,
   signalInChannelView,
+  ALL_MESSAGES_LABEL,
+  CHANNEL_INVOLVEMENT_LABELS,
+  CHANNEL_INVOLVEMENT_LEVELS,
+  channelPreferenceFor,
+  starChannelLabel,
+  starredViewIds,
+  withChannelPreference,
 } from "./channels.ts";
 import { parseRoute, routeHref } from "./home-route.ts";
 
@@ -198,4 +205,56 @@ test("rail DM rows (.hm-rail__person, .hm-rail__agent) keep 44px targets alongsi
     css,
     /\.cs-org-shell\s+:is\([^)]*\.hm-rail__(?:person|agent)[^)]*\)\s*\{\s*min-block-size:\s*3[06]px;/,
   );
+});
+
+const PREFERENCE_ROWS = [
+  { channelId: null, slug: "general", unread: true, starred: true, starRank: 2, involvement: "everything" },
+  { channelId: "c-ops", slug: "ops", unread: true, starred: true, starRank: 0, involvement: "mentions" },
+  { channelId: "c-design", slug: "design", unread: true, starred: false, starRank: null, involvement: "everything" },
+  { channelId: "c-arch", slug: "arch", unread: null, starred: true, starRank: 2, involvement: "muted" },
+];
+
+test("a channel's star and notification level are read from its own row, and unknown stays unknown", () => {
+  assert.deepEqual(channelPreferenceFor(PREFERENCE_ROWS, "general"), { starred: true, involvement: "everything" });
+  assert.deepEqual(channelPreferenceFor(PREFERENCE_ROWS, "c-ops"), { starred: true, involvement: "mentions" });
+  assert.deepEqual(channelPreferenceFor(PREFERENCE_ROWS, "c-design"), { starred: false, involvement: "everything" });
+  assert.equal(channelPreferenceFor(PREFERENCE_ROWS, "c-gone"), null);
+  assert.equal(channelPreferenceFor(null, "general"), null);
+  // A row from a read that carried no settings is the defaults, not an error.
+  assert.deepEqual(channelPreferenceFor([{ channelId: "c1", unread: false }], "c1"), { starred: false, involvement: "everything" });
+});
+
+test("starred places come in the viewer's order: rank, then name, #general among them", () => {
+  assert.deepEqual(starredViewIds(PREFERENCE_ROWS), ["c-ops", "c-arch", "general"]);
+  assert.deepEqual(starredViewIds(null), []);
+  assert.deepEqual(starredViewIds(PREFERENCE_ROWS.map((row) => ({ ...row, starred: false }))), []);
+});
+
+test("a change the viewer just made shows at once: a new star goes last, and a muted channel is never unread", () => {
+  const starred = withChannelPreference(PREFERENCE_ROWS, "c-design", { starred: true });
+  assert.deepEqual(starredViewIds(starred), ["c-ops", "c-arch", "general", "c-design"]);
+  assert.equal(starred.find((row) => row.channelId === "c-design").unread, true, "starring changes nothing else");
+  assert.deepEqual(starredViewIds(withChannelPreference(PREFERENCE_ROWS, "general", { starred: false })), ["c-ops", "c-arch"]);
+  assert.deepEqual(starredViewIds(withChannelPreference(PREFERENCE_ROWS, "c-ops", { starred: true })), ["c-ops", "c-arch", "general"],
+    "starring what is already starred keeps its place");
+
+  const muted = withChannelPreference(PREFERENCE_ROWS, "c-design", { involvement: "muted" });
+  assert.deepEqual(channelPreferenceFor(muted, "c-design"), { starred: false, involvement: "muted" });
+  assert.equal(muted.find((row) => row.channelId === "c-design").unread, false);
+  assert.equal(muted.find((row) => row.channelId === "c-ops").unread, true, "other channels are untouched");
+  const unmuted = withChannelPreference(muted, "c-design", { involvement: "everything" });
+  assert.equal(unmuted.find((row) => row.channelId === "c-design").unread, false,
+    "unmuting does not invent an unread mark; the next read says");
+  assert.deepEqual(withChannelPreference(PREFERENCE_ROWS, "c-gone", { starred: true }), PREFERENCE_ROWS);
+});
+
+test("a muted row says so, and each notification level has one plain name", () => {
+  assert.equal(channelRowName("design", false, true), "#design, muted");
+  assert.equal(channelRowName("design", true, false), "#design, unread");
+  assert.deepEqual(Object.keys(CHANNEL_INVOLVEMENT_LABELS), [...CHANNEL_INVOLVEMENT_LEVELS],
+    "every level the server accepts has a name, in the server's order");
+  assert.equal(new Set(Object.values(CHANNEL_INVOLVEMENT_LABELS)).size, CHANNEL_INVOLVEMENT_LEVELS.length);
+  assert.ok(!Object.values(CHANNEL_INVOLVEMENT_LABELS).includes(ALL_MESSAGES_LABEL),
+    "no level shares the unfiltered view's name");
+  assert.equal(starChannelLabel("design"), "Star #design");
 });

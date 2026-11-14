@@ -311,6 +311,7 @@ import "../../styles/kylon-command-palette.css";
           <div data-home-workspace-shell></div>
           <section class="hm-route-pane" data-home-route-pane hidden></section>
         <section class="dashboard__channel hm-frame__channel" aria-labelledby="dashboard-channel-title">
+          <p class="hm-sr" role="status" data-channel-preference-status></p>
           <header class="dashboard__channel-head">
             <div data-home-channel-menu></div>
             <div class="dashboard__channel-titleblock">
@@ -1330,6 +1331,7 @@ import "../../styles/kylon-command-palette.css";
     setAgentModel,
     subscribeAgentActivity,
     subscribeWorkspaceSignals,
+    setChannelPreference,
     uuid,
     browserSignalFromRow,
     BROWSER_SIGNAL_COLUMNS,
@@ -1430,6 +1432,13 @@ import "../../styles/kylon-command-palette.css";
     GENERAL_CHANNEL_SLUG,
     GO_TO_GENERAL_LABEL,
     NEW_CHANNEL_LABEL,
+    CHANNEL_INVOLVEMENT_LABELS,
+    CHANNEL_INVOLVEMENT_LEVELS,
+    CHANNEL_NOTIFY_LABEL,
+    channelPreferenceFor,
+    starredViewIds,
+    withChannelPreference,
+    type ChannelPreference,
     CHANNEL_SETTINGS_LABEL,
     UNARCHIVE_CHANNEL_LABEL,
     archiveChannelTitle,
@@ -2292,6 +2301,56 @@ import "../../styles/kylon-command-palette.css";
       const liveChip = one<HTMLElement>("[data-live-chip]");
       for (const dot of all<HTMLElement>("[data-home-live-dot]")) dot.hidden = sampleMode || !liveChip || liveChip.hidden;
     };
+    /**
+     * The viewer's own star and notification level for the place on screen: #general or a live channel, once
+     * the read that carries them has answered. Null everywhere else (All messages, a Direct Message, an
+     * archived or unknown channel, another view), and there the header offers neither control.
+     */
+    const activePlace = (): ({ viewId: string; slug: string } & ChannelPreference) | null => {
+      if (sampleMode || homeRoute.view !== "chat" || activeWorkspaceView !== "signals" || activeDm ||
+        unknownChannelId !== null || activeChannelId === null) return null;
+      const slug = activeChannelId === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG
+        : activeChannel()?.archivedAt === null ? activeChannel()?.slug : undefined;
+      const preference = channelPreferenceFor(channelUnreadRows, activeChannelId);
+      return slug && preference ? { viewId: activeChannelId, slug, ...preference } : null;
+    };
+
+    /**
+     * Saves a star or a notification level. The control answers at once from the change itself; the server's
+     * answer then replaces it, whether it saved or refused, so a refused change visibly snaps back and its
+     * reason is announced. One save at a time: a second press waits for the first to land.
+     */
+    let channelPreferenceSaving = false;
+    const saveChannelPreference = async (viewId: string, change: Partial<ChannelPreference>, refocus: string | null): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
+      if (!session || !workspaceId || channelUnreadRows === null || channelPreferenceSaving) return;
+      channelPreferenceSaving = true;
+      const status = one<HTMLElement>("[data-channel-preference-status]");
+      if (status) status.textContent = "";
+      /* A read already on its way was asked before this change and would paint the old state back. */
+      channelUnreadGeneration += 1;
+      channelUnreadRows = withChannelPreference(channelUnreadRows, viewId, change);
+      const paint = (): void => {
+        renderHomeRail(); renderHomeShell(); renderChannelDirectoryDialog();
+        if (refocus) one<HTMLElement>(`[data-home-workspace-header] ${refocus}`)?.focus({ preventScroll: true });
+      };
+      paint();
+      let problem = "";
+      try {
+        await setChannelPreference(session, uuid(), workspaceId, viewId === GENERAL_CHANNEL_ID ? null : viewId, change);
+      } catch (error) {
+        problem = readableError(error);
+      }
+      channelPreferenceSaving = false;
+      if (workspaceId !== activeWorkspaceId) return;
+      const focused = refocus !== null && document.activeElement instanceof HTMLElement && document.activeElement.matches(refocus);
+      await refreshChannelUnread(workspaceId, true);
+      if (workspaceId !== activeWorkspaceId) return;
+      renderHomeShell();
+      if (focused && refocus) one<HTMLElement>(`[data-home-workspace-header] ${refocus}`)?.focus({ preventScroll: true });
+      if (problem && status) status.textContent = problem;
+    };
+
     /** What the ⋯ menu offers for the feed, read from the controls that own it, so the two never disagree. */
     const feedMenuState = (): FeedMenuState | null => {
       if (sampleMode || homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return null;
@@ -2305,6 +2364,7 @@ import "../../styles/kylon-command-palette.css";
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
         mayCreateChannel: !sampleMode,
         channelSettings: activeChannel() !== null && !activeDm,
+        place: activePlace(),
         filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
           const value = button.dataset.feedFilter;
           return value === "all" || value === "broadcast" || value === "direct-to-you"
@@ -2320,6 +2380,10 @@ import "../../styles/kylon-command-palette.css";
       else if (action.kind === "all-channels") openChannelDirectory();
       else if (action.kind === "channel-settings") openChannelDialog("settings", activeChannelId);
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
+      else if (action.kind === "star" || action.kind === "involvement") {
+        const place = activePlace();
+        if (place) void saveChannelPreference(place.viewId, action.kind === "star" ? { starred: action.starred } : { involvement: action.value }, null);
+      }
       else one<HTMLButtonElement>("[data-refresh]")?.click();
     };
 
@@ -5274,6 +5338,7 @@ import "../../styles/kylon-command-palette.css";
       }
       const pane = homeRoute.view === "todo" ? "todos" : homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" || homeRoute.view === "people" ? homeRoute.view : "chat";
       const headerChannel = homeRoute.view === "chat" && !activeDm && unknownChannelId === null ? activeChannel() : null;
+      const headerPlace = activePlace();
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
         people: currentHomePeople().groups, otherAgents: currentHomePeople().other, pane, contextTitle: homeRoute.view !== "chat" && homeRoute.view !== "channels", todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
@@ -5281,6 +5346,7 @@ import "../../styles/kylon-command-palette.css";
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
         channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
+        place: headerPlace ? { slug: headerPlace.slug, starred: headerPlace.starred, involvement: headerPlace.involvement } : undefined,
         /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
            agent it is with. The workspace stays in the picker. */
         channelTitle: typeof activeDm !== "undefined" && activeDm ? entityName(activeDm)
@@ -5293,6 +5359,18 @@ import "../../styles/kylon-command-palette.css";
       if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription),
+        toggleStar: () => {
+          const place = activePlace();
+          if (place) void saveChannelPreference(place.viewId, { starred: !place.starred }, "[data-channel-star]");
+        },
+        notifyMenu: (button, event) => {
+          const place = activePlace();
+          if (!place) return;
+          openContextMenu(event, button, CHANNEL_INVOLVEMENT_LEVELS.map(level => ({
+            label: CHANNEL_INVOLVEMENT_LABELS[level], checked: level === place.involvement,
+            run: () => void saveChannelPreference(place.viewId, { involvement: level }, "[data-channel-notify]"),
+          })), `${CHANNEL_NOTIFY_LABEL} for ${channelLabel(place.slug)}`);
+        },
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
@@ -10963,15 +11041,24 @@ import "../../styles/kylon-command-palette.css";
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
       const reading = homeRoute.view === "chat" && activeWorkspaceView === "signals" && unknownChannelId === null &&
         !(typeof activeDm !== "undefined" && activeDm);
+      const muted = (id: string): boolean => channelPreferenceFor(channelUnreadRows, id)?.involvement === "muted";
       const row = (channel: WorkspaceChannel) => ({ id: channel.channelId, slug: channel.slug, href: href(channel.channelId),
         current: reading && activeChannelId === channel.channelId,
-        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
+        unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
+        muted: muted(channel.channelId) });
+      const general = { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
+        current: reading && activeChannelId === GENERAL_CHANNEL_ID,
+        unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
+      const live = liveChannels(channels);
+      /* A starred place is listed once, under Starred, in the viewer's own order. A star on a channel that
+         has since been archived or left shows nothing. */
+      const starredIds = starredViewIds(channelUnreadRows);
       return {
         state: !channelsLoaded ? "loading" : channelListFailed ? "failed" : "ready",
-        general: { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
-          current: reading && activeChannelId === GENERAL_CHANNEL_ID,
-          unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false },
-        channels: liveChannels(channels).map(row),
+        general,
+        starred: starredIds.flatMap(id => id === GENERAL_CHANNEL_ID ? [general]
+          : live.filter(channel => channel.channelId === id).map(row)),
+        channels: live.filter(channel => !starredIds.includes(channel.channelId)).map(row),
         archived: archivedChannels(channels).map(row),
         mayCreate: !sampleMode,
       };
@@ -11612,6 +11699,7 @@ import "../../styles/kylon-command-palette.css";
       if (generation !== channelUnreadGeneration || workspaceId !== activeWorkspaceId) return;
       channelUnreadRows = rows;
       renderHomeRail();
+      renderHomeShell();
       renderChannelDirectoryDialog();
       if (!force && channelsLoaded && channelListStaleAgainstUnread(channels, rows)) {
         void refreshChannels(workspaceId, requestVersion, true).catch(() => {});

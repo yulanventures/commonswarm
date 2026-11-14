@@ -113,3 +113,37 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-chan
 @media (pointer: coarse) {
   live-dashboard.dashboard[data-kylon-shell] :is([data-channel-directory] .cm-search, [data-channel-dialog] textarea) { font-size: 16px; line-height: 24px; }
 }
+
+/* Stars and notification level (CM-2b). The star and the bell share the gear's 44px target. A starred
+   star is filled and warm; a muted bell is struck through and quiet. State is carried by shape as well
+   as colour, so it survives forced colours and a monochrome screen. */
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #b45309; }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] svg { fill: currentColor; }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-notify[data-channel-notify="muted"] { color: var(--k-shell-muted); }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-notify[data-channel-notify="mentions"] svg path:first-child {
+  fill: color-mix(in srgb, currentColor 22%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #fbbf24; }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #fbbf24; }
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: Highlight; }
+}
+
+/* The rail: Starred sits above Channels with the same rows. A muted channel's name is quiet, and it
+   never carries the unread weight or dot. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__starred { margin-block-end: 10px; }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel[data-muted]:not([aria-current="page"]) { color: var(--k-shell-muted); }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel[data-muted] .hm-icon { opacity: 0.6; }
+
+/* A choice among several in a small menu: the one in force carries a check. */
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[role="menuitemradio"] { gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[role="menuitemradio"]::before {
+  content: ""; flex: none; inline-size: 14px; block-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[aria-checked="true"] { font-weight: 650; }
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[aria-checked="true"]::before {
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+}

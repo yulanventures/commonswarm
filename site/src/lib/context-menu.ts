@@ -6,6 +6,8 @@ export interface ContextMenuItem {
   run: () => void;
   /** Draws the item in the danger colour. */
   danger?: boolean;
+  /** Present on a choice among several: the item is a radio, checked or not. */
+  checked?: boolean;
 }
 
 /** null separates groups. */
@@ -69,7 +71,8 @@ export function openContextMenu(event: MouseEvent, anchor: HTMLElement, entries:
     const button = doc.createElement("button");
     button.type = "button";
     button.className = "cs-context-menu__item";
-    button.setAttribute("role", "menuitem");
+    button.setAttribute("role", entry.checked === undefined ? "menuitem" : "menuitemradio");
+    if (entry.checked !== undefined) button.setAttribute("aria-checked", String(entry.checked));
     button.tabIndex = -1;
     button.textContent = entry.label;
     if (entry.danger) button.dataset.danger = "";

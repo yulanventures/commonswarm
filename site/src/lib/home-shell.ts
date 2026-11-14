@@ -3,7 +3,7 @@
 // goes in through textContent only. The shipped hooks (data-roster-open, data-workspace-view,
 // data-workspace-settings-item, data-admin-access-open, data-channel-*) are kept so the page wiring
 // can find them.
-import { ALL_SIGNALS_SLUG, channelLabel } from "./channels";
+import { ALL_SIGNALS_SLUG, CHANNEL_INVOLVEMENT_LABELS, CHANNEL_INVOLVEMENT_LEVELS, CHANNEL_NOTIFY_LABEL, channelLabel, starChannelLabel, type ChannelInvolvement } from "./channels";
 import { personAvatar, agentOrb } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
 import type { AgentVM, CapsuleVM, Id } from "./home-types";
@@ -26,6 +26,8 @@ export interface WorkspaceShellVM {
   channelTitle?: string;
   /** A resolved named channel. Other feed views and Direct Messages have no channel settings. */
   channel?: { slug: string; description: string | null; manageable: boolean };
+  /** The viewer's own star and notification level for the place being read (#general or a live channel), once known. */
+  place?: { slug: string; starred: boolean; involvement: ChannelInvolvement };
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
   /** False while the to-dos read is absent: every To-dos entry hides. Nothing is faked. */
   todosAvailable: boolean;
@@ -39,6 +41,10 @@ export interface ShellCallbacks {
   /** Opens the People & agents page. */
   openPeople: () => void;
   channelSettings?: (opener: HTMLElement, editDescription?: boolean) => void;
+  /** Star or unstar the place being read. */
+  toggleStar?: (button: HTMLElement) => void;
+  /** Opens the three notification levels for the place being read. */
+  notifyMenu?: (button: HTMLElement, event: MouseEvent) => void;
   /** The phone "Workspaces" chevron. The page decides between history.back() and its parent route. */
   back?: (event: MouseEvent) => void;
   menu: (item: WorkspaceMenuItem) => void;
@@ -185,11 +191,14 @@ export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];
   mayCreateChannel: boolean;
   channelSettings?: boolean;
+  /** The viewer's star and notification level for the place being read. The phone menu offers both; a wider header has buttons. */
+  place?: { slug: string; starred: boolean; involvement: ChannelInvolvement } | null;
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
   /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
   refresh: { label: string } | null;
 }
-export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" };
+export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" }
+  | { kind: "star"; starred: boolean } | { kind: "involvement"; value: ChannelInvolvement };
 
 export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", people: "People & agents" };
 const PANES: Exclude<WorkspacePane, "people">[] = ["chat", "todos", "lists", "files"];
@@ -319,6 +328,40 @@ function channelSettingsButton(doc: Document, callbacks: ShellCallbacks): HTMLBu
   return button;
 }
 
+function headerIcon(doc: Document, paths: readonly string[]): SVGSVGElement {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+  for (const d of paths) { const path = doc.createElementNS(svg.namespaceURI, "path"); path.setAttribute("d", d); svg.append(path); }
+  return svg;
+}
+
+const STAR_PATH = "m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z";
+const BELL_PATHS = ["M6.5 16.5v-5.8a5.5 5.5 0 0 1 11 0v5.8l1.5 1.7H5z", "M10 20.5a2.1 2.1 0 0 0 4 0"];
+const BELL_OFF_PATH = "M4.5 4.5l15 15";
+
+/** A toggle: the name stays "Star #slug" and aria-pressed carries the state, so it reads the same before and after. */
+function channelStarButton(doc: Document, place: NonNullable<WorkspaceShellVM["place"]>, callbacks: ShellCallbacks): HTMLButtonElement {
+  const button = node(doc, "button", "hm-channel-settings hm-channel-star");
+  button.type = "button"; button.dataset.channelStar = "";
+  button.setAttribute("aria-pressed", String(place.starred));
+  button.setAttribute("aria-label", starChannelLabel(place.slug)); button.title = starChannelLabel(place.slug);
+  button.append(headerIcon(doc, [STAR_PATH]));
+  button.addEventListener("click", () => callbacks.toggleStar?.(button));
+  return button;
+}
+
+/** The bell names the level in force, and is struck through when the channel is muted. */
+function channelNotifyButton(doc: Document, place: NonNullable<WorkspaceShellVM["place"]>, callbacks: ShellCallbacks): HTMLButtonElement {
+  const button = node(doc, "button", "hm-channel-settings hm-channel-notify");
+  button.type = "button"; button.dataset.channelNotify = place.involvement;
+  const name = `${CHANNEL_NOTIFY_LABEL}: ${CHANNEL_INVOLVEMENT_LABELS[place.involvement]}`;
+  button.setAttribute("aria-label", name); button.title = name;
+  button.setAttribute("aria-haspopup", "menu");
+  button.append(headerIcon(doc, place.involvement === "muted" ? [...BELL_PATHS, BELL_OFF_PATH] : BELL_PATHS));
+  button.addEventListener("click", (event) => callbacks.notifyMenu?.(button, event));
+  return button;
+}
+
 /** The actual description is visible in the reading header; managers can edit it directly. */
 function channelDescription(doc: Document, vm: WorkspaceShellVM, callbacks: ShellCallbacks): HTMLElement | null {
   if (!vm.channel?.description) return null;
@@ -440,14 +483,24 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     };
     const channelActions = [plain("All channels", { kind: "all-channels" }, "menuAllChannels")];
     if (state.channelSettings) channelActions.unshift(plain("Channel settings", { kind: "channel-settings" }, "menuChannelSettings"));
+    const place = options.account ? state.place ?? null : null;
+    if (place) {
+      const star = plain(starChannelLabel(place.slug), { kind: "star", starred: !place.starred }, "menuChannelStar");
+      star.setAttribute("role", "menuitemcheckbox"); star.setAttribute("aria-checked", String(place.starred));
+      star.classList.add("hm-menu__radio");
+      channelActions.unshift(star);
+    }
     if (state.mayCreateChannel) channelActions.push(plain("New channel", { kind: "new-channel" }, "menuChannelNew"));
     const view = group("View", state.channels.map((channel) => ({ text: channel.label, checked: channel.current,
       action: { kind: "channel", id: channel.id } as FeedMenuAction, hook: ["menuChannelPlace", channel.id] as [string, string] })),
       channelActions);
     const show = group("Show", state.filters.map((filter) => ({ text: filter.label, checked: filter.current,
       action: { kind: "filter", value: filter.value } as FeedMenuAction, hook: ["menuFeedFilter", filter.value] as [string, string] })));
-    const built: HTMLElement[] = [view.entry, show.entry];
-    const feedButtons = [...view.buttons, ...show.buttons];
+    const notify = place ? group(CHANNEL_NOTIFY_LABEL, CHANNEL_INVOLVEMENT_LEVELS.map((level) => ({ text: CHANNEL_INVOLVEMENT_LABELS[level],
+      checked: level === place.involvement, action: { kind: "involvement", value: level } as FeedMenuAction,
+      hook: ["menuChannelNotify", level] as [string, string] }))) : null;
+    const built: HTMLElement[] = [view.entry, ...(notify ? [notify.entry] : []), show.entry];
+    const feedButtons = [...view.buttons, ...(notify?.buttons ?? []), ...show.buttons];
     if (state.refresh) {
       const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
       const refresh = plain(state.refresh.label, { kind: "refresh" }, "menuRefresh");
@@ -528,6 +581,8 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   if (description) copy.append(description);
   const actions = node(doc, "div", "hm-ws-header__actions");
   const doors = shellDoors(vm);
+  if (!vm.sample && channel && vm.place && callbacks.toggleStar) actions.append(channelStarButton(doc, vm.place, callbacks));
+  if (!vm.sample && channel && vm.place && callbacks.notifyMenu) actions.append(channelNotifyButton(doc, vm.place, callbacks));
   if (!vm.sample && channel && vm.channel && callbacks.channelSettings) actions.append(channelSettingsButton(doc, callbacks));
   if (doors.people) {
     const people = node(doc, "button", "hm-ws-header__people");

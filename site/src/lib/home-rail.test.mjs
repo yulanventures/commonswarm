@@ -109,3 +109,33 @@ test("Catch up has no Channels section", () => {
   const root = rail(undefined);
   assert.equal(find(root, (node) => node.dataset?.railChannel !== undefined).length, 0);
 });
+
+test("Starred sits above Channels in the viewer's order, and a starred place is listed once", () => {
+  const general = row("general", "general");
+  const ops = row("b", "ops", { manageable: true });
+  const root = rail(ready([row("a", "design")], { general, starred: [ops, general] }));
+  assert.deepEqual(find(root, (node) => node.tag === "h2").map((node) => node.textContent), ["Starred", "Channels"]);
+  const sections = find(root, (node) => node.tag === "section");
+  const ids = (section) => find(section, (node) => node.dataset?.railChannel !== undefined).map((link) => link.dataset.railChannel);
+  assert.deepEqual(sections.map(ids), [["b", "general"], ["a"]], "#general leaves Channels when it is starred");
+  assert.equal(find(sections[0], (node) => node.dataset?.railChannelMenu === "b").length, 1, "a starred row keeps its menu");
+  assert.equal(find(sections[0], (node) => node.dataset?.homeNewChannel !== undefined).length, 0, "the + stays with Channels");
+});
+
+test("nothing starred: no Starred heading; and none while the list is still loading", () => {
+  for (const channels of [ready([row("a", "design")]), ready([row("a", "design")], { starred: [] }),
+    { ...ready([]), state: "loading", starred: [row("a", "design")] }]) {
+    assert.deepEqual(find(rail(channels), (node) => node.tag === "h2").map((node) => node.textContent), ["Channels"]);
+  }
+});
+
+test("a muted channel is marked, says so, and never shows unread even if a row claims it", () => {
+  const root = rail(ready([row("a", "design", { muted: true, unread: true }), row("b", "ops", { unread: true })]));
+  const byId = (id) => find(root, (node) => node.dataset?.railChannel === id)[0];
+  assert.equal(byId("a").dataset.muted, "");
+  assert.equal(byId("a").dataset.unread, undefined);
+  assert.equal(byId("a").attrs["aria-label"], "#design, muted");
+  assert.equal(find(byId("a"), (node) => node.className === "hm-rail__unread").length, 0);
+  assert.equal(byId("b").dataset.muted, undefined);
+  assert.equal(byId("b").attrs["aria-label"], "#ops, unread");
+});
