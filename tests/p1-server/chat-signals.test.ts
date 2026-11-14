@@ -2335,6 +2335,12 @@ test("with a lead set, an untagged post from a person stays public and mentions 
     // Anyone can thread on it, which a lead-addressed post refused.
     const reply = await send(f.ownerJwt, installedPost({ thread_root_id: String(signal.id), body: "I can" }));
     assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    // A body that carries the key with nobody in it is still an untagged post: public, and the lead is mentioned.
+    const empty = await send(f.otherJwt, installedPost({ body: "anyone?", mentions: [] }));
+    assert.equal(empty.status, 200, JSON.stringify(empty.body));
+    assert.equal(signalOf(empty.body).to_agent, null, "an empty list is not re-addressed either");
+    assert.deepEqual(await mentionsOf(String(signalOf(empty.body).id)), [{ position: 0, kind: "agent", id: lead.principal, source: "lead" }]);
+    assert.deepEqual(await deliveriesOf(String(signalOf(empty.body).id)), [lead.principal]);
     // Naming someone yourself leaves the lead out.
     const named = await send(f.otherJwt, installedPost({ mentions: [{ kind: "user", id: f.ownerId }] }));
     assert.equal(named.status, 200, JSON.stringify(named.body));
