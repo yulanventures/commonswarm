@@ -55,7 +55,9 @@ import {
   type AgentActivityFrame,
 } from "./agent-activity.js";
 import {
+  CHANNEL_INVOLVEMENT_LEVELS,
   channelRefusalMessage,
+  type ChannelInvolvement,
   type WorkspaceChannel,
 } from "./channels.js";
 import {
@@ -3239,6 +3241,28 @@ export async function updateChannel(
     "CommonSwarm did not save the channel");
 }
 
+/**
+ * The viewer's own star or notification level for one channel (`null` is #general). Sends only what
+ * changed. The server's sentence is shown as it is when it refuses.
+ */
+export async function setChannelPreference(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string | null,
+  change: { starred?: boolean; involvement?: ChannelInvolvement },
+): Promise<void> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "channel_preference_set", channel_id: channelId, ...change },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status !== 200 || body.status !== "accepted") {
+    throw new Error(channelRefusalMessage(status, body, "CommonSwarm did not save that"));
+  }
+}
+
 export async function unarchiveChannel(
   session: Session,
   commandId: string,
@@ -3610,17 +3634,30 @@ export async function homeOverview(): Promise<HomeOverview | null> {
 
 /** Channels C1b: per-channel unread for the signed-in person. `null` is unknown (no read position yet),
  * never "read". Keyed by channel id; general (unfiled) has `channelId: null`. */
-export interface ChannelUnread { channelId: string | null; slug: string; unread: boolean | null }
+export interface ChannelUnread {
+  channelId: string | null;
+  slug: string;
+  unread: boolean | null;
+  /** The viewer's own star, its place among their stars, and what marks the channel unread for them. */
+  starred: boolean;
+  starRank: number | null;
+  involvement: ChannelInvolvement;
+}
 
+/** A row that leaves the viewer's settings out reads as the defaults; one that sends something else is malformed. */
 export function parseChannelUnread(data: unknown): ChannelUnread[] | null {
   if (data === null || typeof data !== "object" || !Array.isArray((data as { channels?: unknown }).channels)) return null;
   const rows: ChannelUnread[] = [];
   for (const row of (data as { channels: unknown[] }).channels) {
     if (row === null || typeof row !== "object") return null;
-    const { channel_id, slug, unread } = row as Record<string, unknown>;
+    const { channel_id, slug, unread, starred = false, star_rank = null, involvement = "everything" } =
+      row as Record<string, unknown>;
     if ((channel_id !== null && typeof channel_id !== "string") || typeof slug !== "string" ||
-        (unread !== null && typeof unread !== "boolean")) return null;
-    rows.push({ channelId: channel_id, slug, unread });
+        (unread !== null && typeof unread !== "boolean") || typeof starred !== "boolean" ||
+        (star_rank !== null && !Number.isInteger(star_rank)) ||
+        !(CHANNEL_INVOLVEMENT_LEVELS as readonly unknown[]).includes(involvement)) return null;
+    rows.push({ channelId: channel_id, slug, unread, starred, starRank: star_rank as number | null,
+      involvement: involvement as ChannelInvolvement });
   }
   return rows;
 }

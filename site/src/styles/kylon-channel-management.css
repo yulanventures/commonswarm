@@ -113,3 +113,80 @@ live-dashboard.dashboard[data-kylon-shell] :is([data-channel-dialog], [data-chan
 @media (pointer: coarse) {
   live-dashboard.dashboard[data-kylon-shell] :is([data-channel-directory] .cm-search, [data-channel-dialog] textarea) { font-size: 16px; line-height: 24px; }
 }
+
+/* Stars and notification level (CM-2b). The star and the bell share the gear's 44px target. A starred
+   star is filled and warm; a muted bell is struck through and quiet. State is carried by shape as well
+   as colour, so it survives forced colours and a monochrome screen. */
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #b45309; }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] svg { fill: currentColor; }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-notify[data-channel-notify="muted"] { color: var(--k-shell-muted); }
+live-dashboard.dashboard[data-kylon-shell] .hm-channel-notify[data-channel-notify="mentions"] svg path:first-child {
+  fill: color-mix(in srgb, currentColor 22%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #fbbf24; }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: #fbbf24; }
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: Highlight; }
+}
+
+/* Below 64rem the header has no room for two more targets beside a long channel name: the ⋯ menu
+   offers both there, first in its list. */
+@media (width < 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-ws-header :is(.hm-channel-star, .hm-channel-notify) { display: none; }
+}
+/* The ⋯ menu never runs past the bottom of the screen: it takes the space under its button and scrolls
+   inside it. (The phone bar's own rule only reaches the menu while it sits in that bar; the header's
+   menu, and the phone menu once it is docked in the navigation drawer, had no bound.) */
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__list {
+  max-block-size: calc(var(--dashboard-viewport-height, 100dvh) - 104px);
+  overflow-y: auto; overscroll-behavior: contain;
+}
+/* Its rows are as wide as the menu, whatever the longest label. The lists are grids, and a grid's
+   automatic column grows to its longest row: measured at 360px, every row was 539px wide inside a
+   311px menu, so each row's end was cut off. A long label wraps instead. */
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) :is(.hm-menu__list, .hm-menu__group) {
+  grid-template-columns: minmax(0, 1fr);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__list :is(.hm-menu__entry, .hm-menu__item) {
+  min-inline-size: 0; max-inline-size: 100%;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__item { overflow-wrap: anywhere; }
+/* In the phone navigation drawer the rail was as wide as its longest name, so a row's end (its ⋯, an
+   unread dot, a muted bell) sat off-screen until the drawer was panned sideways. The rail now takes
+   the drawer's width and a long name gives way with an ellipsis, as it does on a wide screen. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-rail { flex: 1 1 auto; min-inline-size: 0; max-inline-size: 100%; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-frame__rail-content { min-inline-size: 0; max-inline-size: 100%; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body { min-inline-size: 0; }
+  /* Nothing in the drawer is reached by panning sideways. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll { overflow-x: hidden; overflow-y: auto; }
+  /* The docked ⋯ menu is as wide as the drawer's own column, never the fixed 20rem that ran past a 360px screen's drawer. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu .hm-menu__list {
+    inset-inline: 0; min-inline-size: 0; max-inline-size: none;
+    /* In the drawer the menu ends above the account row at the drawer's foot, not under it. */
+    max-block-size: max(180px, calc(var(--dashboard-viewport-height, 100dvh) - 240px));
+  }
+}
+
+/* The rail: Starred sits above Channels with the same rows. A muted channel's name is quiet, and it
+   never carries the unread weight or dot. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__starred { margin-block-end: 10px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel[data-muted]:not([aria-current="page"]) { color: var(--k-shell-muted); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel[data-muted]:not([aria-current="page"]) .hm-rail__icon { opacity: 0.6; }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__muted {
+  flex: none; inline-size: 14px; block-size: 14px; background: currentColor; opacity: 0.7;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.5 16.5v-5.8a5.5 5.5 0 0 1 11 0v5.8l1.5 1.7H5z'/%3E%3Cpath d='M10 20.5a2.1 2.1 0 0 0 4 0'/%3E%3Cpath d='M4.5 4.5l15 15'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* A choice among several in a small menu: the one in force carries a check. */
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[role="menuitemradio"] { gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[role="menuitemradio"]::before {
+  content: ""; flex: none; inline-size: 14px; block-size: 14px;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[aria-checked="true"] { font-weight: 650; }
+live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[aria-checked="true"]::before {
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+}

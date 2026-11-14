@@ -3,7 +3,7 @@
 // no presence dot on people; a person row opens People & agents, an agent row opens the Agent view.
 import { agentOrb, personAvatar, statusLine } from "./home-primitives";
 import type { AgentVM, CapsuleVM, Id, PersonVM, RailVM } from "./home-types";
-import { ARCHIVED_CHANNELS_LABEL, CHANNELS_LOAD_FAILED, CHANNELS_TITLE, NEW_CHANNEL_LABEL, channelLabel, channelRowName, railSlice } from "./channels";
+import { ARCHIVED_CHANNELS_LABEL, CHANNELS_LOAD_FAILED, CHANNELS_TITLE, NEW_CHANNEL_LABEL, STARRED_TITLE, channelLabel, channelRowName, railSlice } from "./channels";
 
 export const RAIL_OWNERSHIP_NOTE = "Every agent belongs to a person, who connects it.";
 export const RAIL_CATCH_UP_PEOPLE_TITLE = "You and your agents";
@@ -59,13 +59,17 @@ export interface RailChannelRowVM {
   unread: boolean | null;
   /** Rename and archive are offered (the creator, or a workspace owner or admin). */
   manageable: boolean;
+  /** The viewer muted this channel: the row is quiet and never shows unread. */
+  muted?: boolean;
 }
 
 export interface RailChannelsVM {
   /** loading: the list for this workspace has not been read yet. failed: the latest read failed. */
   state: "loading" | "ready" | "failed";
   general: RailChannelRowVM;
-  /** Live named channels, in rail order. */
+  /** The places the viewer starred, in their own order. Each is left out of the list below, #general included. */
+  starred?: RailChannelRowVM[];
+  /** Live named channels that are not starred, in rail order. */
   channels: RailChannelRowVM[];
   /** Archived channels, in rail order. */
   archived: RailChannelRowVM[];
@@ -254,13 +258,16 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   link.href = row.href;
   link.dataset.railChannel = row.id;
   if (row.current) link.setAttribute("aria-current", "page");
-  const unread = archived ? null : row.unread;
+  const muted = !archived && row.muted === true;
+  const unread = archived ? null : muted ? false : row.unread;
   if (unread === true) link.dataset.unread = "";
-  link.setAttribute("aria-label", channelRowName(row.slug, unread));
+  if (muted) link.dataset.muted = "";
+  link.setAttribute("aria-label", channelRowName(row.slug, unread, muted));
   link.title = channelLabel(row.slug);
   const name = node(doc, "span", "hm-rail__name", row.slug);
   link.append(icon(doc, archived ? "archive" : "workspace"), name);
   if (unread === true) { const dot = node(doc, "span", "hm-rail__unread"); dot.setAttribute("aria-hidden", "true"); link.append(dot); }
+  if (muted) { const off = node(doc, "span", "hm-rail__muted"); off.setAttribute("aria-hidden", "true"); link.append(off); }
   link.addEventListener("click", (event) => {
     if (!callbacks.selectChannel || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -289,6 +296,22 @@ function channelItem(doc: Document, row: RailChannelRowVM, archived: boolean, sa
   return item;
 }
 
+/** The viewer's starred places, above Channels. Absent when nothing is starred: an empty heading says nothing. */
+function starredSection(doc: Document, rows: readonly RailChannelRowVM[], sample: boolean, callbacks: RailCallbacks): HTMLElement {
+  const section = node(doc, "section", "hm-rail__channels hm-rail__starred");
+  section.dataset.homeStarred = "";
+  section.setAttribute("aria-labelledby", "hm-rail-starred-title");
+  const head = node(doc, "div", "hm-rail__section-head");
+  const title = node(doc, "h2", "hm-rail__heading", STARRED_TITLE);
+  title.id = "hm-rail-starred-title";
+  head.append(title);
+  const list = node(doc, "ul", "hm-rail__channel-list");
+  list.dataset.homeStarredList = "";
+  for (const row of rows) list.append(channelItem(doc, row, false, sample, callbacks));
+  section.append(head, list);
+  return section;
+}
+
 function channelsSection(doc: Document, vm: RailChannelsVM, sample: boolean, callbacks: RailCallbacks, options: RailOptions): HTMLElement {
   const section = node(doc, "section", "hm-rail__channels");
   section.dataset.homeChannels = vm.state;
@@ -310,7 +333,7 @@ function channelsSection(doc: Document, vm: RailChannelsVM, sample: boolean, cal
   const list = node(doc, "ul", "hm-rail__channel-list");
   list.id = "hm-rail-channel-list";
   list.dataset.homeChannelList = "";
-  list.append(channelItem(doc, vm.general, false, sample, callbacks));
+  if (!vm.starred?.some((row) => row.id === vm.general.id)) list.append(channelItem(doc, vm.general, false, sample, callbacks));
   section.append(head, list);
   if (vm.state === "loading") {
     list.setAttribute("aria-busy", "true");
@@ -410,6 +433,7 @@ export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCall
   catchUp.append(icon(doc, "inbox"), node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
   nav.append(catchUp);
 
+  if (vm.channels?.starred?.length && vm.channels.state !== "loading") nav.append(starredSection(doc, vm.channels.starred, vm.sample, callbacks));
   if (vm.channels) nav.append(channelsSection(doc, vm.channels, vm.sample, callbacks, options));
   root.append(nav);
 

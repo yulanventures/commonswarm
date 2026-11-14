@@ -11,6 +11,7 @@
  * (`LiveDashboard.astro:21`), so this crosses no new boundary.
  */
 import {
+  CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_SLUG_MAX,
   CHANNEL_SLUG_RULE_TEXT,
@@ -19,9 +20,12 @@ import {
   channelSlugProblem,
   isReservedChannelSlug,
   normalizeChannelSlug,
+  type ChannelInvolvement,
 } from "../../../supabase/functions/_shared/channels.js";
 
+export type { ChannelInvolvement };
 export {
+  CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_SLUG_MAX,
   CHANNEL_SLUG_RULE_TEXT,
@@ -227,8 +231,20 @@ export const mayManageChannel = (
     channel.createdByPrincipal === viewer.userId;
 };
 
-/** One row of the per-channel unread read (`channelUnread` in commonswarm.ts). */
-export interface ChannelUnreadState { channelId: string | null; slug?: string; unread: boolean | null }
+/**
+ * One row of the per-channel read (`channelUnread` in commonswarm.ts): unread, and the viewer's own
+ * star and notification level for that channel. The same read carries all three, so the rail and the
+ * header are drawn from one answer.
+ */
+export interface ChannelUnreadState {
+  channelId: string | null;
+  slug?: string;
+  unread: boolean | null;
+  starred?: boolean;
+  /** The viewer's order among their starred channels; null when not starred. */
+  starRank?: number | null;
+  involvement?: ChannelInvolvement;
+}
 
 /**
  * Unread for one view, exactly as the read reported it. `null` is unknown: no read, a failed
@@ -260,9 +276,77 @@ export const channelListStaleAgainstUnread = (
   return reported.some((row) => byId.get(row.channelId) !== row.slug);
 };
 
-/** The row's accessible name: the full "#slug", plus "unread" only when the read said so. */
-export const channelRowName = (slug: string, unread: boolean | null): string =>
-  `${channelLabel(slug)}${unread === true ? ", unread" : ""}`;
+/** The row's accessible name: the full "#slug", plus "unread" only when the read said so, plus "muted". */
+export const channelRowName = (slug: string, unread: boolean | null, muted = false): string =>
+  `${channelLabel(slug)}${unread === true ? ", unread" : ""}${muted ? ", muted" : ""}`;
+
+/** The viewer's own settings for one place. */
+export interface ChannelPreference { starred: boolean; involvement: ChannelInvolvement }
+
+const unreadKey = (viewId: string): string | null => (viewId === GENERAL_CHANNEL_ID ? null : viewId);
+const viewIdOf = (row: Pick<ChannelUnreadState, "channelId">): string => row.channelId ?? GENERAL_CHANNEL_ID;
+
+/**
+ * The viewer's star and notification level for one view, as the read reported them. `null` is unknown
+ * (no read, a failed read, no row): the header then offers neither control rather than guess a state
+ * the next click would overwrite.
+ */
+export const channelPreferenceFor = (
+  rows: readonly ChannelUnreadState[] | null,
+  viewId: string,
+): ChannelPreference | null => {
+  const row = rows?.find((entry) => entry.channelId === unreadKey(viewId));
+  if (row === undefined) return null;
+  return { starred: row.starred === true, involvement: row.involvement ?? "everything" };
+};
+
+/** The view ids the viewer starred, in their own order: by rank, the name breaking a tie. */
+export const starredViewIds = (rows: readonly ChannelUnreadState[] | null): string[] =>
+  (rows ?? [])
+    .filter((row) => row.starred === true)
+    .sort((left, right) =>
+      (left.starRank ?? Number.MAX_SAFE_INTEGER) - (right.starRank ?? Number.MAX_SAFE_INTEGER) ||
+      compareText(left.slug ?? "", right.slug ?? "") || compareText(viewIdOf(left), viewIdOf(right)))
+    .map(viewIdOf);
+
+/**
+ * The rows as they will read once a change the viewer just made is saved, so the star and the bell
+ * answer at once. A newly starred channel goes last, where the server puts it; a muted one is never
+ * unread. The next read replaces this with what the server stored.
+ */
+export const withChannelPreference = <Row extends ChannelUnreadState>(
+  rows: readonly Row[],
+  viewId: string,
+  change: Partial<ChannelPreference>,
+): Row[] => {
+  const lastRank = Math.max(-1, ...rows.filter((row) => row.starred === true).map((row) => row.starRank ?? -1));
+  return rows.map((row) => {
+    if (row.channelId !== unreadKey(viewId)) return row;
+    const starred = change.starred ?? row.starred === true;
+    const involvement = change.involvement ?? row.involvement ?? "everything";
+    return {
+      ...row,
+      starred,
+      starRank: !starred ? null : row.starred === true ? row.starRank ?? null : lastRank + 1,
+      involvement,
+      unread: involvement === "muted" ? false : row.unread,
+    };
+  });
+};
+
+export const STARRED_TITLE = "Starred";
+/** The star is a toggle button: its name stays, and aria-pressed carries the state. */
+export const starChannelLabel = (slug: string): string => `Star ${channelLabel(slug)}`;
+export const CHANNEL_NOTIFY_LABEL = "Notifications";
+/**
+ * What marks a channel unread for the viewer. "Every message" rather than "All messages", which is
+ * already the name of the unfiltered view in the same header.
+ */
+export const CHANNEL_INVOLVEMENT_LABELS: Record<ChannelInvolvement, string> = {
+  everything: "Every message",
+  mentions: "Mentions only",
+  muted: "Muted",
+};
 
 /* Visible copy (Channels C1 spec, "Visible copy inventory"). */
 export const CHANNELS_TITLE = "Channels";

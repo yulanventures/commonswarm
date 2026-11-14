@@ -66,6 +66,38 @@
     ]
   },
   {
+    "id": "app.chat.starred",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.group}",
+    "setup": [
+      {
+        "media": "(width >= 64rem)",
+        "waitFor": ".hm-ws-header [data-channel-star][aria-pressed=\"true\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-home-starred] [data-rail-channel=\"{channel.group}\"]"
+      }
+    ],
+    "ready": "[data-home-starred] [data-rail-channel=\"{channel.group}\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "star_channel",
+      "mute_channel"
+    ],
+    "frame": [
+      "[data-home-channel-list] [data-rail-channel=\"{channel.long}\"] .hm-rail__icon",
+      "[data-home-channel-list] [data-rail-channel=\"{channel.long}\"] .hm-rail__muted"
+    ]
+  },
+  {
     "id": "app.chat.dm",
     "kind": "view",
     "path": "/app?w={workspace}",
@@ -1147,6 +1179,56 @@
     "requiresSeed": [
       "create_workspace",
       "seed_channels"
+    ]
+  },
+  {
+    "id": "menu.notifications",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "media": "(width >= 64rem)",
+        "waitFor": ".hm-ws-header [data-channel-notify=\"muted\"]"
+      },
+      {
+        "media": "(width >= 64rem)",
+        "click": ".hm-ws-header [data-channel-notify=\"muted\"]"
+      },
+      {
+        "media": "(52rem < width < 64rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(52rem < width < 64rem)",
+        "waitFor": ".hm-ws-header [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"]"
+      }
+    ],
+    "ready": ":is(.cs-context-menu [role=\"menuitemradio\"][aria-checked=\"true\"], :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"])",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "mute_channel"
+    ],
+    "frame": [
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(1), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"everything\"])",
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(2), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"mentions\"])",
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(3), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"muted\"])",
+      ":is(.hm-ws-header [data-channel-notify][data-context-open], :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__trigger[aria-expanded=\"true\"])"
     ]
   },
   {
