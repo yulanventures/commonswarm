@@ -7,8 +7,21 @@ IMAGE=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e1
 [[ $EUID == 0 && $(uname -s) == Linux && $(hostname -s) != yulan-vps-1 && ! -d /srv/commonswarm/site && $REV =~ ^[0-9a-f]{40}$ && $H0 =~ ^[01]$ ]]
 SCRIPT=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$SCRIPT/../.." && pwd)
 [[ $(git -C "$REPO" rev-parse "$REV^{commit}") == "$REV" ]]
-mkdir "$OUT"; OUT=$(realpath "$OUT"); JOB=$(mktemp -d /var/tmp/cswarm-site-build.XXXXXX)
-printf 'Build workspace retained: %s\n' "$JOB"
+mkdir "$OUT"; OUT=$(realpath "$OUT"); JOB=; NAME=
+# On any exit: remove this run's container, then this run's workspace. OUT and the exit status stay.
+# The workspace is a live bind mount until Docker confirms no container of this name is left.
+cleanup() { local status=$? left; trap - EXIT; trap '' INT TERM
+  [[ $JOB == /var/tmp/cswarm-site-build.?????? && -d $JOB && ! -L $JOB ]] || exit "$status"
+  if [[ -n $NAME ]]; then
+    timeout --kill-after=5s 60 docker rm -f "$NAME" >/dev/null 2>&1 || :
+    left=$(timeout --kill-after=5s 60 docker ps -aq --filter "name=$NAME" 2>/dev/null) && [[ -z $left ]] || {
+      echo "Build workspace retained: container $NAME is not confirmed removed: $JOB" >&2 || :; exit "$status"; }
+  fi
+  rm -rf -- "$JOB" || echo "Build workspace not removed: $JOB" >&2 || :
+  exit "$status"; }
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+JOB=$(mktemp -d /var/tmp/cswarm-site-build.XXXXXX)
+printf 'Build workspace, removed on exit: %s\n' "$JOB"
 mkdir "$JOB/source" "$JOB/work"
 git -C "$REPO" archive --format=tar "$REV" > "$OUT/source.tar"
 [[ $(git get-tar-commit-id < "$OUT/source.tar") == "$REV" ]]
@@ -21,8 +34,8 @@ node "$SCRIPT/validate-site-env.mjs" config "$CONFIG" "$H0" "$OUT/public.json"
 chmod 755 "$JOB"; chmod -R a+rX "$JOB/source"; chmod 644 "$OUT/public.json"; chown 65534:65534 "$JOB/work"
 timeout --kill-after=5s 300 docker pull "$IMAGE" > "$OUT/build.log" 2>&1
 NAME=cswarm-site-${JOB##*.}
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || :' EXIT
 # Workspace and npm cache live on disk. Container /tmp is bounded, never HOME.
+# The run stays in the foreground: a signal is handled when it returns, so cleanup never races a container start.
 timeout --kill-after=5s 900 docker run --rm -i --name "$NAME" --user 65534:65534 --read-only --cpus 2 --memory 3g --memory-swap 3g --pids-limit 256 --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=268435456,mode=1777 --mount "type=bind,src=$JOB/source,dst=/src,readonly" --mount "type=bind,src=$JOB/work,dst=/work" --mount "type=bind,src=$OUT/public.json,dst=/public.json,readonly" -w /work "$IMAGE" sh -es > "$OUT/site.tar" 2>> "$OUT/build.log" <<'CONTAINER'
 cp -R /src/. /work/
 node --input-type=commonjs <<'NODE'

@@ -50,6 +50,15 @@ function tarMember(name: string, data = Buffer.alloc(0), type = '0', link = '') 
   return Buffer.concat([header, data, Buffer.alloc((512 - data.length % 512) % 512)]);
 }
 const tarEnd = Buffer.alloc(1024);
+const sourcePaths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
+function syntheticSite() {
+  const meta = `<meta name="commonswarm:url" content="${config.PUBLIC_SUPABASE_URL}"><meta name="commonswarm:anon-key" content="${config.PUBLIC_SUPABASE_ANON_KEY}">`;
+  const controls = '<section data-h0-link-join><button data-action="mint-join">Join</button><button data-action="revoke-join">Revoke</button></section>';
+  return Buffer.concat([
+    tarMember('index.html', Buffer.from(meta)), tarMember('app/index.html', Buffer.from(meta + controls)),
+    tarMember('start/index.html', Buffer.from(meta)), tarMember('_astro/new.js', Buffer.from('fixture asset')), tarEnd,
+  ]);
+}
 let fixture: Promise<string> | undefined;
 async function artifactDir() {
   if (suppliedArtifact) return suppliedArtifact;
@@ -60,16 +69,10 @@ async function artifactDir() {
     // this source archive proves fixture semantics, never a real committed build.
     const archive = (await exec('git', ['archive', '--format=tar', revision, 'package.json'], { cwd: repo, encoding: 'buffer' })).stdout;
     assert.equal(archive.subarray(156, 157).toString(), 'g');
-    const paths = ['site/package-lock.json', 'deploy/site/build-artifact.sh', 'deploy/site/validate-site-env.mjs', 'deploy/site/finalize-release.sh', 'deploy/site/refresh-site.py'];
-    const source = await Promise.all(paths.map(async path => tarMember(path, await readFile(join(repo, path)))));
+    const source = await Promise.all(sourcePaths.map(async path => tarMember(path, await readFile(join(repo, path)))));
     await writeFile(join(dir, 'source.tar'), Buffer.concat([archive.subarray(0, 1024), ...source, tarEnd]));
     await writeFile(join(dir, 'public.json'), JSON.stringify({ ...config, PUBLIC_H0_LINK_JOIN: '1' }));
-    const meta = `<meta name="commonswarm:url" content="${config.PUBLIC_SUPABASE_URL}"><meta name="commonswarm:anon-key" content="${config.PUBLIC_SUPABASE_ANON_KEY}">`;
-    const controls = '<section data-h0-link-join><button data-action="mint-join">Join</button><button data-action="revoke-join">Revoke</button></section>';
-    await writeFile(join(dir, 'site.tar'), Buffer.concat([
-      tarMember('index.html', Buffer.from(meta)), tarMember('app/index.html', Buffer.from(meta + controls)),
-      tarMember('start/index.html', Buffer.from(meta)), tarMember('_astro/new.js', Buffer.from('fixture asset')), tarEnd,
-    ]));
+    await writeFile(join(dir, 'site.tar'), syntheticSite());
     await cp(join(repo, 'deploy/site/finalize-release.sh'), join(dir, 'finalize-release.sh'));
     const image = 'node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d';
     // The production receipt owner computes pins; the fixture never supplies them.
@@ -265,6 +268,103 @@ test(`${lane}: rendered Linux release swaps bytes, retains reserves, and rolls b
       assert.equal(await readFile(join(old, '_astro/retained.js'), 'utf8'), 'old asset');
     } finally { await new Promise<void>(r => server.close(() => r())); }
   }
+});
+
+// The builder refuses anything but root on Linux, so these rows run in the root
+// lane and skip elsewhere. The fixture repository commits the working-tree
+// builder, because the builder only runs bytes equal to the revision it builds.
+// Docker is the only stub; it records each removal and whether the workspace
+// was still there, and can refuse to confirm that the container is gone.
+test('builder removes its own container and then its own workspace, keeps the artifact and logs, and keeps the workspace when the container is not confirmed removed', { skip: !linuxProof }, async () => {
+  const src = join(root, 'builder-repo'), state = join(root, 'builder-docker'), bin = join(state, 'bin');
+  await mkdir(bin, { recursive: true });
+  for (const path of sourcePaths) { await mkdir(join(src, path, '..'), { recursive: true }); await cp(join(repo, path), join(src, path)); }
+  const git = (...args: string[]) => exec('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args], { cwd: src });
+  await git('init', '-q'); await git('add', '-f', '.'); await git('commit', '-qm', 'fixture');
+  const revision = (await git('rev-parse', 'HEAD')).stdout.trim();
+  await writeFile(join(state, 'site.tar'), syntheticSite());
+  await writeFile(join(bin, 'docker'), `#!/bin/bash
+state='${state}'; verb=$1; name=\${!#}; mode=$(cat "$state/mode")
+workspace() { [[ -d /var/tmp/cswarm-site-build.\${1#cswarm-site-} ]] && echo present || echo gone; }
+case "$verb" in
+  pull) echo fixture pull;;
+  run) while [[ $# -gt 1 && $1 != --name ]]; do shift; done; name=$2; cat >/dev/null
+    case "$mode" in
+      container|daemon|survivor) echo 'fixture container failure' >&2; exit 37;;
+      term) : > "$state/held"; until [[ -e $state/release ]]; do sleep 0.1; done; workspace "$name" > "$state/run-end";;
+      *) cat "$state/site.tar";;
+    esac;;
+  rm) echo "$name $(workspace "$name")" >> "$state/rm.log"; [[ $mode != daemon ]];;
+  ps) [[ $mode != daemon ]] || exit 1; [[ $mode != survivor ]] || echo fixture-container;;
+  *) exit 64;;
+esac
+`);
+  await chmod(join(bin, 'docker'), 0o755);
+  // A temp directory mounted noexec makes PATH skip the stub and reach any real docker.
+  await writeFile(join(state, 'mode'), 'success');
+  const probe = await exec(join(bin, 'docker'), ['pull']).then(done => done.stdout, (error: Error) => error.message);
+  assert.equal(probe, 'fixture pull\n', 'the docker stub must be executable from the test temp directory (noexec mount?)');
+  const partial =['build.log', 'public.json', 'site.tar', 'source.tar'];
+  const expected = {
+    success: { code: 0, kept: ['BUILD.json', 'build.log', 'finalize-release.sh', 'public.json', 'site.tar', 'source.tar'], retained: false },
+    config: { code: 1, kept: ['source.tar'], retained: false },
+    container: { code: 37, kept: partial, retained: false },
+    term: { code: 143, kept: partial, retained: false },
+    // Docker cannot confirm the container is gone: its daemon fails, or the container is still listed.
+    daemon: { code: 37, kept: partial, retained: true },
+    survivor: { code: 37, kept: partial, retained: true },
+  };
+  // Another build's workspace: cleanup must remove one exact directory, never the pattern.
+  const sibling = await mkdtemp('/var/tmp/cswarm-site-build.');
+  try {
+    for (const row of ['success', 'config', 'container', 'term', 'daemon', 'survivor'] as const) {
+      const out = join(root, `built-${row}`), input = join(state, `${row}.json`);
+      await writeFile(input, JSON.stringify(row === 'config' ? { ...config, PUBLIC_SUPABASE_URL: 'https://other.invalid' } : config));
+      await writeFile(join(state, 'mode'), row);
+      for (const name of ['rm.log', 'held', 'release', 'run-end']) await rm(join(state, name), { force: true });
+      const running = exec('bash', [join(src, 'deploy/site/build-artifact.sh'), revision, input, '1', out], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      const settled = running.then(done => ({ code: 0 as number | null, ...done }), (error: unknown) => error as { code: number | null; stdout: string; stderr: string });
+      let job: string | undefined;
+      try {
+        if (row === 'term') {
+          const held = async () => {
+            for (let i = 0; i < 100; i++) { try { await stat(join(state, 'held')); return true; } catch { await new Promise(r => setTimeout(r, 100)); } }
+            return false;
+          };
+          assert.equal(await Promise.race([held(), settled.then(() => false)]), true, 'builder must reach the container run');
+          assert.equal(running.child.kill('SIGTERM'), true, 'send TERM to the builder');
+          // Leave room for a premature cleanup before the held run is allowed to end.
+          await new Promise(r => setTimeout(r, 500));
+          await writeFile(join(state, 'release'), '');
+        }
+        const result = await settled;
+        job = /\/var\/tmp\/cswarm-site-build\.\w{6}\b/.exec(result.stdout)?.[0];
+        const log = await readFile(join(out, 'build.log'), 'utf8').catch(() => '(none)');
+        const evidence = `${row}: exit ${result.code}\nstdout: ${result.stdout}\nstderr: ${result.stderr}\nbuild.log: ${log}`;
+        assert.ok(job, `builder must name its workspace. ${evidence}`);
+        if (expected[row].retained) {
+          assert.ok((await stat(job)).isDirectory(), `${row}: workspace must stay while its container is not confirmed removed`);
+          assert.ok(result.stderr.includes('Build workspace retained') && result.stderr.includes(job), `${row}: retention must be reported with the path: ${result.stderr}`);
+        } else await assert.rejects(stat(job), { code: 'ENOENT' }, `${row}: build workspace must be removed`);
+        if (row === 'term') assert.equal((await readFile(join(state, 'run-end'), 'utf8')).trim(), 'present', 'workspace must outlive the container run');
+        const removals = (await readFile(join(state, 'rm.log'), 'utf8').catch(() => '')).split('\n').filter(Boolean);
+        assert.ok(removals.every(line => line === `cswarm-site-${job!.slice(-6)} present`), `${row}: only its own container, before the workspace: ${removals}`);
+        if (row !== 'success' && row !== 'config') assert.ok(removals.length > 0, `${row}: container removal must be attempted`);
+        assert.equal(result.code, expected[row].code, evidence);
+        assert.deepEqual((await readdir(out)).sort(), expected[row].kept);
+        if (row === 'success') {
+          assert.match(result.stdout, /^PASS artifact=/m);
+          assert.equal(JSON.parse(await readFile(join(out, 'BUILD.json'), 'utf8')).revision, revision);
+        }
+        if (row === 'config') assert.match(result.stderr, /production API URL required/);
+        if (row === 'container') assert.match(log, /fixture pull\n[\s\S]*fixture container failure/);
+      } finally {
+        await writeFile(join(state, 'release'), ''); await settled;
+        if (job) await rm(job, { recursive: true, force: true });
+      }
+    }
+    assert.ok((await stat(sibling)).isDirectory(), "another build's workspace must survive");
+  } finally { await rm(sibling, { recursive: true, force: true }); }
 });
 
 test('production script requires only static file tools and never compiles or prunes', async () => {
