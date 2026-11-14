@@ -3704,6 +3704,9 @@ import "../../styles/kylon-command-palette.css";
     };
 
     const renderComposerTo = (): void => {
+      /* The marker beside Send first, and unconditionally: nothing about the row below may
+         leave it showing a state the send is no longer in. */
+      renderComposerAudience();
       syncComposerToVisibility();
       const chips = one<HTMLElement>("[data-composer-to-chips]");
       const note = one<HTMLElement>("[data-composer-to-note]");
@@ -3714,15 +3717,18 @@ import "../../styles/kylon-command-palette.css";
       if (toLabel) toLabel.hidden = composerIsPublic();
       /* In a public place the row has one job, the sentence about a tag that mentions nobody,
          so there the sentence is shown rather than only read out. */
-      row?.toggleAttribute("data-composer-to-public", composerIsPublic());
+      /* The row's own state attributes are named `data-to-*`, never `data-composer-to-*`: that
+         prefix selects the controls inside it, and a row that answered to a control's selector
+         had the control's label written over its whole content. */
+      row?.toggleAttribute("data-to-public", composerIsPublic());
       /* A DRAFT WRITTEN PRIVATELY, IN A PUBLIC COMPOSER. Send is held until the author says
          where it goes, with one of two controls: back to the people it was written to (offered
          only for those still here), or here, for everyone, on purpose. */
-      const toPrivate = one<HTMLButtonElement>("[data-composer-to-private]");
-      const toPublic = one<HTMLButtonElement>("[data-composer-to-public]");
+      const toPrivate = one<HTMLButtonElement>("button[data-composer-to-private]");
+      const toPublic = one<HTMLButtonElement>("button[data-composer-to-public]");
       const warned = composerIsPublic() && composerPrivateDraft.written;
       const writtenTo = warned ? composerPrivateDraft.reachable : [];
-      row?.toggleAttribute("data-composer-to-warning", warned);
+      row?.toggleAttribute("data-to-warning", warned);
       if (toPrivate) {
         toPrivate.hidden = writtenTo.length === 0;
         toPrivate.textContent = writtenTo.length === 0 ? "" : privateDraftActionLabel(writtenTo.map(composerRecipientName));
@@ -3731,7 +3737,6 @@ import "../../styles/kylon-command-palette.css";
         toPublic.hidden = !warned;
         toPublic.textContent = warned ? privateDraftPublicLabel(composerPlaceNow().label) : "";
       }
-      renderComposerAudience();
       if (composerIsPublic()) {
         row?.removeAttribute("aria-disabled");
         row?.toggleAttribute("data-composer-to-locked", false);
@@ -14096,7 +14101,7 @@ import "../../styles/kylon-command-palette.css";
        the position rule. Delegated, because the chips are rebuilt on every change. */
     /* Take a draft written to someone back to where it was written for: their Direct Message,
        addressed to the same people. Nothing is sent by this; the author still presses Send. */
-    one<HTMLButtonElement>("[data-composer-to-private]")?.addEventListener("click", () => {
+    one<HTMLButtonElement>("button[data-composer-to-private]")?.addEventListener("click", () => {
       const writtenTo = [...composerPrivateDraft.reachable];
       const first = writtenTo[0];
       if (first === undefined || composerSending) return;
@@ -14108,7 +14113,7 @@ import "../../styles/kylon-command-palette.css";
     });
     /* "Here, for everyone": the author says so on purpose. The stored draft keeps its words
        and loses its private address, so the warning ends and Send is free. */
-    one<HTMLButtonElement>("[data-composer-to-public]")?.addEventListener("click", () => {
+    one<HTMLButtonElement>("button[data-composer-to-public]")?.addEventListener("click", () => {
       const key = composerDraftKey();
       if (key === null || composerSending) return;
       const stored = readComposerDraft(key);

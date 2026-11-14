@@ -228,13 +228,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audien
 }
 /* A draft written to someone, sitting in a public composer: the row under the box says so and
  * offers the way back. It is a caution, so it is drawn as one. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-warning] {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] {
   color: var(--k-shell-ink);
   background: color-mix(in srgb, #f2b824 22%, var(--k-shell-surface));
   border-color: color-mix(in srgb, #f2b824 60%, var(--k-shell-line));
   font-size: 13px;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-warning] .dashboard__composer-to-note {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] .dashboard__composer-to-note {
   flex: 1 1 18rem;
   margin: 0;
 }
@@ -264,7 +264,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-pri
 }
 /* In a channel or a thread the row holds no chips. It appears only to say that a tag mentions
  * nobody, and there the sentence is the row's whole content, so it is shown. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-public] .dashboard__composer-to-note {
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-public] .dashboard__composer-to-note {
   position: static;
   inline-size: auto;
   block-size: auto;
