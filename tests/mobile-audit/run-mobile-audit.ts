@@ -46,7 +46,7 @@ export const THEMES = ["light", "dark"] as const;
  * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
  * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
  */
-const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const DIAGNOSTIC = { screens: ["app.composer.thread-to-dm"], sizes: ["1024x1366", "844x390"] } as { screens: string[]; sizes: string[] } | null;
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
@@ -726,6 +726,9 @@ async function main(): Promise<void> {
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
+            console.log(JSON.stringify({ phase: "capture-error-full", viewport: size, theme, id: screen.id, full: String(error instanceof Error ? error.message : error).slice(0, 3000),
+              media: await page.evaluate(() => ({ hoverHover: matchMedia("(hover: hover)").matches, hoverNone: matchMedia("(hover: none)").matches,
+                replies: Array.from(document.querySelectorAll(".dashboard__message-reply")).length })).catch(() => null) }));
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
           return entry;
