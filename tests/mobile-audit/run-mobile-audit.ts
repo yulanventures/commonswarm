@@ -46,7 +46,7 @@ export const THEMES = ["light", "dark"] as const;
  * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
  * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
  */
-const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const DIAGNOSTIC = { screens: ["app.chat.general", "app.chat.history", "menu.workspace"], sizes: ["360x740", "1024x1366"] } as { screens: string[]; sizes: string[] } | null;
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
