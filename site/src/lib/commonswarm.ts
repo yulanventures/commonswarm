@@ -3129,6 +3129,22 @@ export async function workspaceChannels(
   return (data ?? []).map((row) => browserChannelFromRow(row as unknown as Record<string, unknown>));
 }
 
+/**
+ * One channel's visibility, read now. For the check before a send's files are uploaded: the caller's
+ * list may be stale. Returns the raw value, or `null` when the viewer can read no such channel. Throws
+ * when the read fails; the caller treats that as not open.
+ */
+export async function channelVisibilityNow(workspaceId: string, channelId: string): Promise<unknown> {
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline("the channel", signal => c
+    .schema("swarm_read").from("channels").select("channel_id,visibility")
+    .eq("workspace_id", workspaceId).eq("channel_id", channelId).limit(1).abortSignal(signal));
+  if (error) throw new Error(error.message);
+  const row = (data ?? [])[0] as { visibility?: unknown } | undefined;
+  return row ? row.visibility ?? null : null;
+}
+
 function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
   return {
     channelId: String(row.channel_id),

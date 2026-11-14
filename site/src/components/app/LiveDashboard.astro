@@ -1204,7 +1204,7 @@ import "../../styles/kylon-command-palette.css";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { attachmentsRefusal, placementVisibility } from "../../lib/private-channels";
+  import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
@@ -1314,6 +1314,7 @@ import "../../styles/kylon-command-palette.css";
     postBrowserSignal,
     reportBrowserSignalsSeen,
     uploadBrowserAttachment,
+    channelVisibilityNow,
     revokeAgentToken,
     resumeRenewalGrant,
     revokeWorkspaceInvitation,
@@ -4250,8 +4251,10 @@ import "../../styles/kylon-command-palette.css";
     /* Where the message being written will be filed: the open channel, or the thread root's channel for a reply.
        Files upload when Send is pressed, before the message is posted, and workspace files are readable by every
        member, so a place that is not known to be open takes no files. */
-    const composerFilesRefusal = (): string => attachmentsRefusal(placementVisibility(channels,
-      threadReplyRoot === null ? activeChannel()?.channelId ?? null : threadReplyRoot.channelId));
+    const composerFilesRefusal = (): string => attachmentsRefusal(placementVisibility(channels, sendDestination({
+      activeChannelId, generalId: GENERAL_CHANNEL_ID,
+      ...(threadReplyRoot === null ? {} : { replyRootChannelId: threadReplyRoot.channelId }),
+    }).channelId));
     /** The paperclip follows the place. Sending owns it while a send is in flight. */
     const syncComposerAttach = (): void => {
       const attach = one<HTMLButtonElement>("[data-composer-attach]");
@@ -13519,9 +13522,17 @@ import "../../styles/kylon-command-palette.css";
          the root's channel itself. So the placement channel of a reply is its ROOT's, captured
          when the reply was opened, and the channel the reader happens to be looking at is not
          consulted. */
-      const freshPlacementChannelId = replyRoot === null
-        ? activeChannel()?.channelId ?? null
-        : replyRoot.channelId;
+      /* FROM WHAT IS OPEN, NEVER FROM A LOOKED-UP ROW. This used to read `activeChannel()?.channelId ?? null`,
+         and a channel whose row had left the list (the reader was removed from a private channel, or the list
+         had not loaded) came out as `null`: unfiled. The message, and its files, would have gone to #general.
+         The view's own id is kept instead, and a channel the list does not have stops the send. */
+      const destination = sendDestination({ activeChannelId, generalId: GENERAL_CHANNEL_ID,
+        ...(replyRoot === null ? {} : { replyRootChannelId: replyRoot.channelId }) });
+      if (!sampleMode && destination.mustResolve && channelById(channels, destination.channelId) === null) {
+        setComposerStatus(`${CHANNEL_UNAVAILABLE_TITLE}. ${GO_TO_GENERAL_LABEL} to post.`, "error");
+        return;
+      }
+      const freshPlacementChannelId = destination.channelId;
       const freshPlacementThreadRootId = replyRoot?.id ?? null;
       /* NOTHING IS UPLOADED FOR A SEND THE SERVER WILL REFUSE. Files staged somewhere open stay staged when the
          place changes (another channel, a thread under a private root), so the check is here, where the send
@@ -13730,17 +13741,22 @@ import "../../styles/kylon-command-palette.css";
             }))
           : [];
         if (!sampleMode) {
-          for (const [index, attachment] of attachmentSnapshot.entries()) {
-            setComposerStatus(
-              `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
-              "posting",
-            );
-            attachmentRefs.push(await uploadBrowserAttachment(
-              session!,
-              workspaceId,
-              attachment.intent,
-            ));
-          }
+          /* THE LIST IS NOT PERMISSION TO UPLOAD. It can be stale: the channel may have been made private from
+             another client since this page last read it. The destination's visibility is read again here, for
+             this send's own pinned placement, and nothing is uploaded unless that read says open. A refusal
+             throws, and the catch below puts the draft and its files back. */
+          attachmentRefs.push(...await uploadAttachmentsFor({
+            channelId: placementChannelId,
+            files: attachmentSnapshot,
+            readVisibility: channelId => channelVisibilityNow(workspaceId, channelId),
+            upload: (attachment, index) => {
+              setComposerStatus(
+                `Uploading file ${index + 1} of ${attachmentSnapshot.length}: ${attachment.intent.name}…`,
+                "posting",
+              );
+              return uploadBrowserAttachment(session!, workspaceId, attachment.intent);
+            },
+          }));
         }
         setComposerStatus("Posting message…", "posting");
         if (sampleMode) await sampleSendWindow();
