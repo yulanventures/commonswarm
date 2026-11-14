@@ -624,7 +624,7 @@ async function main(): Promise<void> {
               }
               return rows.join(" || ");
             }, missing[0]!);
-            throw new Error(`not in frame after settling: ${missing.join(" | ")} ## ${chain}`);
+            throw new Error(`not in frame after settling ## ${chain}`);
           }
         }
         return settled;
@@ -715,7 +715,7 @@ async function main(): Promise<void> {
               for (const spec of activationSpecs) (entry.activation as unknown[]).push(await runActivationWitness(page, spec));
             }
           } catch (error) {
-            entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
+            entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 6000);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
           } finally { await page.close(); }
@@ -743,7 +743,7 @@ async function main(): Promise<void> {
             entry.settledBeforeChecks = await openScreen(page, screen);
             entry.hover = await runHovers(page, screen.id, state, size, theme, HOVER_WITNESSES[screen.id]!, freeze ? "--frozen" : "");
           } catch (error) {
-            entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
+            entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 6000);
             console.log(JSON.stringify({ phase: "hover-capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
           } finally { await page.close(); }
           return entry;
