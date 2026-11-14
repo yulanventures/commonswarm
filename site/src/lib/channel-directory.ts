@@ -43,10 +43,11 @@ export function renderChannelDirectory(
       const copy = node("div", "cm-directory-copy");
       const name = node("span", "cm-directory-name", row.private ? row.slug : `#${row.slug}`);
       if (row.private) {
+        // A plain span takes no accessible name of its own, so "private" is text: hidden from sight, read aloud.
         name.dataset.private = "";
-        name.setAttribute("aria-label", `#${row.slug} (private)`);
         const lock = node("span", "cm-directory-lock"); lock.setAttribute("aria-hidden", "true");
         name.prepend(lock);
+        name.append(node("span", "hm-sr", " (private)"));
       }
       copy.append(name);
       if (!archived && row.unread === true) {
