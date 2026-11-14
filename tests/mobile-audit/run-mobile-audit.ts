@@ -46,7 +46,7 @@ export const THEMES = ["light", "dark"] as const;
  * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
  * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
  */
-const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const DIAGNOSTIC = { screens: ["menu.notifications"], sizes: ["360x740", "390x844"] } as { screens: string[]; sizes: string[] } | null;
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
@@ -615,7 +615,17 @@ async function main(): Promise<void> {
             await settle(page);
             missing = await outside();
           }
-          if (missing.length) throw new Error(`not in frame after settling: ${missing.join(" | ")}`);
+          if (missing.length) {
+            const chain = await page.evaluate((selector: string) => {
+              const rows: string[] = [`viewport ${window.innerWidth}x${window.innerHeight}`];
+              for (let el: Element | null = document.querySelector(selector); el && rows.length < 16; el = el.parentElement) {
+                const r = el.getBoundingClientRect(), c = getComputedStyle(el);
+                rows.push(`${el.tagName.toLowerCase()}.${String(el.className).slice(0, 60)} l=${Math.round(r.left)} r=${Math.round(r.right)} t=${Math.round(r.top)} b=${Math.round(r.bottom)} w=${Math.round(r.width)} disp=${c.display} box=${c.boxSizing} ox=${c.overflowX} pos=${c.position} hidden=${(el as HTMLElement).hidden}`);
+              }
+              return rows.join(" || ");
+            }, missing[0]!);
+            throw new Error(`not in frame after settling: ${missing.join(" | ")} ## ${chain}`);
+          }
         }
         return settled;
       };
