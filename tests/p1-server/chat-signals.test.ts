@@ -5421,7 +5421,7 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
         signal_id: d.signal.id,
         lease_id: d.lease_id,
         listener_instance_id: listenerId,
-        outcome: "observed",
+        outcome: "queued",
         last_error_code: null,
       });
       assert.equal(ackRes.status, 200, JSON.stringify(ackRes.body));
@@ -5435,7 +5435,13 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   const lockANote2 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockASlug, body: "LockA note 2" }));
   const lockANote3 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockASlug, body: "LockA note 3" }));
   const lockBNote1 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockBSlug, body: "LockB note 1" }));
-  for (const res of [generalNote, openNote, lockANote1, lockANote2, lockANote3, lockBNote1]) {
+  const lockADirectedToMember = await sendWs(ws, mixedAgent.token, installedPost({
+    channel: lockASlug,
+    signal_kind: "ask",
+    to: [{ kind: "user", id: memberActor.id }],
+    body: "Directed #lockA ask to memberActor for cross-channel reply mismatch",
+  }));
+  for (const res of [generalNote, openNote, lockANote1, lockANote2, lockANote3, lockBNote1, lockADirectedToMember]) {
     assert.equal(res.status, 200, JSON.stringify(res.body));
   }
   const generalNoteId = String(signalOf(generalNote.body).id);
@@ -5444,12 +5450,11 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   const lockANote2Id = String(signalOf(lockANote2.body).id);
   const lockANote3Id = String(signalOf(lockANote3.body).id);
   const lockBNote1Id = String(signalOf(lockBNote1.body).id);
+  const lockADirectedToMemberId = String(signalOf(lockADirectedToMember.body).id);
 
   for (const cid of [openId, lockAId, lockBId]) {
-    assert.equal(
-      (await sendWs(ws, memberActor.jwt, { kind: "channel_preference_set", channel_id: cid, starred: true })).status,
-      200,
-    );
+    const prefRes = await sendWs(ws, memberActor.jwt, { kind: "channel_preference_set", channel_id: cid, starred: true });
+    assert.equal(prefRes.status, 200, JSON.stringify(prefRes.body));
   }
 
   // --- Group 1: Mixed [open, #lockA] real operations (hidden from ownerOutside; visible to adminOnlyA & adminAll) ---
@@ -5465,15 +5470,17 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     to_agent_principal_id: mixedAgent.principal,
     body: "Mixed open+lockA lockA ask",
   }));
-  assert.equal(openAsk1.status, 200);
-  assert.equal(lockAAsk1.status, 200);
+  assert.equal(openAsk1.status, 200, JSON.stringify(openAsk1.body));
+  assert.equal(lockAAsk1.status, 200, JSON.stringify(lockAAsk1.body));
 
   const g1Baseline = await maxServerAuditId();
 
   const g1SeenCmd = randomUUID();
   const g1SeenBody = { kind: "signals_seen", signal_ids: [openNoteId, lockANote1Id] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd)).status, 200);
+  const g1Seen1 = await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd);
+  const g1Seen2 = await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd);
+  assert.equal(g1Seen1.status, 200, JSON.stringify(g1Seen1.body));
+  assert.equal(g1Seen2.status, 200, JSON.stringify(g1Seen2.body));
 
   const g1ClaimCmd = randomUUID();
   const g1Deliveries = await claimMixedBatch(g1ClaimCmd);
@@ -5482,21 +5489,25 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
 
   const g1StarCmd = randomUUID();
   const g1StarBody = { kind: "channel_star_reorder", channel_ids: [openId, lockAId] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd)).status, 200);
+  const g1Star1 = await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd);
+  const g1Star2 = await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd);
+  assert.equal(g1Star1.status, 200, JSON.stringify(g1Star1.body));
+  assert.equal(g1Star2.status, 200, JSON.stringify(g1Star2.body));
 
   const g1ReorderCmd = randomUUID();
   const g1ReorderBody = { kind: "channel_reorder", channel_ids: [openId, lockAId] };
-  assert.equal((await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd)).status, 200);
-  assert.equal((await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd)).status, 200);
+  const g1Reorder1 = await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd);
+  const g1Reorder2 = await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd);
+  assert.equal(g1Reorder1.status, 200, JSON.stringify(g1Reorder1.body));
+  assert.equal(g1Reorder2.status, 200, JSON.stringify(g1Reorder2.body));
 
   const g1Mismatch = await sendWs(ws, memberActor.jwt, installedPost({
     channel: openSlug,
-    in_reply_to: lockANote1Id,
+    in_reply_to: lockADirectedToMemberId,
     body: "Reply mismatch across #lockA and #open",
   }));
-  assert.equal(g1Mismatch.status, 409);
-  assert.equal(g1Mismatch.body.error, "private_reply_channel_mismatch");
+  assert.equal(g1Mismatch.status, 409, JSON.stringify(g1Mismatch.body));
+  assert.equal(g1Mismatch.body.error, "private_reply_channel_mismatch", JSON.stringify(g1Mismatch.body));
 
   const g1ServerRows = await serverAuditsSince(g1Baseline);
   assert.equal(g1ServerRows.length, 9, `expected 9 mixed [open, #lockA] audit rows, got ${JSON.stringify(g1ServerRows)}`);
@@ -5539,15 +5550,17 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     to_agent_principal_id: mixedAgent.principal,
     body: "Mixed lockA+lockB ask B",
   }));
-  assert.equal(lockAAsk2.status, 200);
-  assert.equal(lockBAsk1.status, 200);
+  assert.equal(lockAAsk2.status, 200, JSON.stringify(lockAAsk2.body));
+  assert.equal(lockBAsk1.status, 200, JSON.stringify(lockBAsk1.body));
 
   const g2Baseline = await maxServerAuditId();
 
   const g2SeenCmd = randomUUID();
   const g2SeenBody = { kind: "signals_seen", signal_ids: [lockANote2Id, lockBNote1Id] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd)).status, 200);
+  const g2Seen1 = await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd);
+  const g2Seen2 = await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd);
+  assert.equal(g2Seen1.status, 200, JSON.stringify(g2Seen1.body));
+  assert.equal(g2Seen2.status, 200, JSON.stringify(g2Seen2.body));
 
   const g2ClaimCmd = randomUUID();
   const g2Deliveries = await claimMixedBatch(g2ClaimCmd);
@@ -5556,16 +5569,28 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
 
   const g2StarCmd = randomUUID();
   const g2StarBody = { kind: "channel_star_reorder", channel_ids: [lockAId, lockBId] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd)).status, 200);
+  const g2Star1 = await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd);
+  const g2Star2 = await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd);
+  assert.equal(g2Star1.status, 200, JSON.stringify(g2Star1.body));
+  assert.equal(g2Star2.status, 200, JSON.stringify(g2Star2.body));
 
   const g2ReorderCmd = randomUUID();
   const g2ReorderBody = { kind: "channel_reorder", channel_ids: [lockAId, lockBId] };
-  assert.equal((await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd)).status, 200);
-  assert.equal((await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd)).status, 200);
+  const g2Reorder1 = await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd);
+  const g2Reorder2 = await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd);
+  assert.equal(g2Reorder1.status, 200, JSON.stringify(g2Reorder1.body));
+  assert.equal(g2Reorder2.status, 200, JSON.stringify(g2Reorder2.body));
+
+  const g2Mismatch = await sendWs(ws, memberActor.jwt, installedPost({
+    channel: lockBSlug,
+    in_reply_to: lockADirectedToMemberId,
+    body: "Reply mismatch across #lockA and #lockB",
+  }));
+  assert.equal(g2Mismatch.status, 409, JSON.stringify(g2Mismatch.body));
+  assert.equal(g2Mismatch.body.error, "private_reply_channel_mismatch", JSON.stringify(g2Mismatch.body));
 
   const g2ServerRows = await serverAuditsSince(g2Baseline);
-  assert.equal(g2ServerRows.length, 8, `expected 8 mixed [#lockA, #lockB] audit rows, got ${JSON.stringify(g2ServerRows)}`);
+  assert.equal(g2ServerRows.length, 9, `expected 9 mixed [#lockA, #lockB] audit rows, got ${JSON.stringify(g2ServerRows)}`);
   for (const row of g2ServerRows) {
     assert.deepEqual(
       [...(row.channel_ids ?? [])].sort(),
@@ -5592,7 +5617,7 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
 
   await ackAllDeliveries(g2Deliveries);
 
-  // --- Group 3: Mixed [null/general, #lockA] seen, inbox-claim, and star reorder (409 + accepted + replay + post-leave replay) ---
+  // --- Group 3: Mixed [null/general, #lockA] seen, inbox-claim, and star reorder (409 + accepted + replay + post-leave/remove replay) ---
   const generalAsk = await sendWs(ws, adminAll.jwt, installedPost({
     signal_kind: "ask",
     to_agent_principal_id: mixedAgent.principal,
@@ -5604,8 +5629,8 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     to_agent_principal_id: mixedAgent.principal,
     body: "LockA ask for mixed null+private claim",
   }));
-  assert.equal(generalAsk.status, 200);
-  assert.equal(lockAAsk3.status, 200);
+  assert.equal(generalAsk.status, 200, JSON.stringify(generalAsk.body));
+  assert.equal(lockAAsk3.status, 200, JSON.stringify(lockAAsk3.body));
 
   const g3Baseline = await maxServerAuditId();
 
@@ -5614,34 +5639,49 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     kind: "channel_star_reorder",
     channel_ids: [null, lockAId],
   });
-  assert.equal(g3StarMismatch.status, 409);
+  assert.equal(g3StarMismatch.status, 409, JSON.stringify(g3StarMismatch.body));
 
-  // Star general (channel_id: null -> pure unfiled preference row, captured separately below? Wait: let's star general on adminOnlyA or check g3 rows by filtering out channel_preference_set!).
-  // Better yet: star general for memberActor first? No, we just tested 409 mismatch! Let's star general now and verify its channel_preference_set(null) is untagged while all 7 mixed [null, #lockA] rows retain [lockAId]!
-  assert.equal(
-    (await sendWs(ws, memberActor.jwt, { kind: "channel_preference_set", channel_id: null, starred: true })).status,
-    200,
-  );
+  const g3PrefGeneral = await sendWs(ws, memberActor.jwt, {
+    kind: "channel_preference_set",
+    channel_id: null,
+    starred: true,
+  });
+  assert.equal(g3PrefGeneral.status, 200, JSON.stringify(g3PrefGeneral.body));
 
   const g3StarCmd = randomUUID();
   const g3StarBody = { kind: "channel_star_reorder", channel_ids: [null, lockAId] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
+  const g3Star1 = await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd);
+  const g3Star2 = await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd);
+  assert.equal(g3Star1.status, 200, JSON.stringify(g3Star1.body));
+  assert.equal(g3Star2.status, 200, JSON.stringify(g3Star2.body));
 
   const g3SeenCmd = randomUUID();
   const g3SeenBody = { kind: "signals_seen", signal_ids: [generalNoteId, lockANote3Id] };
-  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
+  const g3Seen1 = await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd);
+  const g3Seen2 = await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd);
+  assert.equal(g3Seen1.status, 200, JSON.stringify(g3Seen1.body));
+  assert.equal(g3Seen2.status, 200, JSON.stringify(g3Seen2.body));
 
   const g3ClaimCmd = randomUUID();
   const g3Deliveries = await claimMixedBatch(g3ClaimCmd);
   assert.equal(g3Deliveries.length, 2, "Group 3 claim must lease [general/null, #lockA] together");
   assert.equal((await claimMixedBatch(g3ClaimCmd)).length, 2);
 
-  // Also test post-leave idempotency replay of BOTH mixed [null, #lockA] seen and star reorder!
-  assert.equal((await sendWs(ws, memberActor.jwt, { kind: "channel_leave", channel_id: lockAId })).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
-  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
+  // Also test post-leave / post-remove idempotency replay of ALL THREE mixed [null, #lockA] batch commands!
+  const g3Leave = await sendWs(ws, memberActor.jwt, { kind: "channel_leave", channel_id: lockAId });
+  assert.equal(g3Leave.status, 200, JSON.stringify(g3Leave.body));
+  const g3RemoveAgent = await sendWs(ws, adminAll.jwt, {
+    kind: "channel_member_remove",
+    channel_id: lockAId,
+    member: { kind: "agent", id: mixedAgent.principal },
+  });
+  assert.equal(g3RemoveAgent.status, 200, JSON.stringify(g3RemoveAgent.body));
+
+  const g3SeenPostLeave = await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd);
+  const g3StarPostLeave = await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd);
+  assert.equal(g3SeenPostLeave.status, 200, JSON.stringify(g3SeenPostLeave.body));
+  assert.equal(g3StarPostLeave.status, 200, JSON.stringify(g3StarPostLeave.body));
+  assert.equal((await claimMixedBatch(g3ClaimCmd)).length, 2);
 
   const g3AllServerRows = await serverAuditsSince(g3Baseline);
   const g3UnfiledPrefRows = g3AllServerRows.filter((r) => r.command_kind === "channel_preference_set");
@@ -5651,8 +5691,8 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   const g3PrivateRows = g3AllServerRows.filter((r) => r.command_kind !== "channel_preference_set");
   assert.equal(
     g3PrivateRows.length,
-    10,
-    `expected 10 #lockA-tagged rows (409 star + 2 star + 2 seen + 2 claim + 1 leave + 2 post-leave replays), got ${JSON.stringify(g3PrivateRows)}`,
+    12,
+    `expected 12 #lockA-tagged rows (409 star + 2 star + 2 seen + 2 claim + leave + remove + 3 post-leave/remove replays), got ${JSON.stringify(g3PrivateRows)}`,
   );
   for (const row of g3PrivateRows) {
     assert.deepEqual(
@@ -5679,21 +5719,20 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
 
   // --- Group 4: Pure unfiled & neutral outsider-probe controls + fail-closed NULL/unknown tag SQL defense-in-depth ---
   const g4Baseline = await maxServerAuditId();
-  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [generalNoteId] })).status, 200);
-  assert.equal(
-    (await sendWs(ws, ownerOutside.jwt, { kind: "channel_preference_set", channel_id: null, starred: true })).status,
-    200,
-  );
-  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null] })).status, 200);
+  const g4SeenGen = await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [generalNoteId] });
+  assert.equal(g4SeenGen.status, 200, JSON.stringify(g4SeenGen.body));
+  const g4PrefGen = await sendWs(ws, ownerOutside.jwt, { kind: "channel_preference_set", channel_id: null, starred: true });
+  assert.equal(g4PrefGen.status, 200, JSON.stringify(g4PrefGen.body));
+  const g4StarGen = await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null] });
+  assert.equal(g4StarGen.status, 200, JSON.stringify(g4StarGen.body));
   // Neutral outsider probes on #lockB alongside null/unknown stay untagged (zero existence oracle):
-  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [lockBNote1Id] })).status, 200);
-  assert.equal(
-    (await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null, lockBId] })).status,
-    409,
-  );
+  const g4ProbeSeen = await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [lockBNote1Id] });
+  assert.equal(g4ProbeSeen.status, 200, JSON.stringify(g4ProbeSeen.body));
+  const g4ProbeStar = await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null, lockBId] });
+  assert.equal(g4ProbeStar.status, 409, JSON.stringify(g4ProbeStar.body));
 
   const g4ControlRows = await serverAuditsSince(g4Baseline);
-  assert.equal(g4ControlRows.length, 5);
+  assert.equal(g4ControlRows.length, 5, JSON.stringify(g4ControlRows));
   for (const row of g4ControlRows) {
     assert.equal(row.channel_ids, null, `pure general / neutral outsider probe ${JSON.stringify(row)} must stay untagged`);
   }
@@ -5703,7 +5742,7 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     "pure unfiled operations and neutral outsider probes remain visible without an existence oracle",
   );
 
-  // Defense-in-depth: malformed NULL or unknown UUID inside swarm.audit_log.channel_ids fails closed even for adminAll!
+  // Defense-in-depth: malformed NULL or unknown UUID inside swarm.audit_log.channel_ids (or NULL stream_id on lifecycle row) fails closed even for adminAll!
   const failClosedBaseline = await maxServerAuditId();
   const unknownChannelId = randomUUID();
   await sql`
@@ -5711,12 +5750,13 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
       actor_user, credential_kind, command_kind, workspace_id, stream_id, outcome, channel_ids
     ) VALUES
       (${adminAll.id}::uuid, 'user', 'signals_seen', ${ws}::uuid, ${ws}::uuid, 'accepted', ARRAY[${openId}::uuid, NULL::uuid]),
-      (${adminAll.id}::uuid, 'user', 'signals_seen', ${ws}::uuid, ${ws}::uuid, 'accepted', ARRAY[${openId}::uuid, ${unknownChannelId}::uuid])
+      (${adminAll.id}::uuid, 'user', 'signals_seen', ${ws}::uuid, ${ws}::uuid, 'accepted', ARRAY[${openId}::uuid, ${unknownChannelId}::uuid]),
+      (${adminAll.id}::uuid, 'user', 'private_channel_manager_promoted', ${ws}::uuid, NULL, 'ok', NULL)
   `;
-  assert.equal((await serverAuditsSince(failClosedBaseline)).length, 2);
+  assert.equal((await serverAuditsSince(failClosedBaseline)).length, 3);
   assert.deepEqual(
     await clientAuditIdsSince(adminAll.id, failClosedBaseline),
     [],
-    "R3-AUDIT fail-closed: NULL or unknown UUID inside channel_ids must hide the client audit row even for workspace owner",
+    "R3-AUDIT fail-closed: NULL or unknown UUID inside channel_ids (or NULL stream_id on lifecycle row) must hide the client audit row even for workspace owner",
   );
 });
