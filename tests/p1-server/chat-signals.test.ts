@@ -5332,7 +5332,6 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   });
 
   const mixedAgent = await createWsAgent(ws, ownerOutside.id, `r4-ag-${tag}`);
-  const deliveryClient = new DeliveryCommandClient(cloudTarget(local.API_URL, local.ANON_KEY));
   const listenerId = randomUUID();
 
   const openSlug = `r4-open-${tag}`;
@@ -5399,20 +5398,33 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     );
     return rows.map((r) => r.audit_id);
   };
+  const claimMixedBatch = async (cmdId: string) => {
+    const res = await sendWs(
+      ws,
+      mixedAgent.token,
+      {
+        kind: "claim_agent_inbox",
+        listener_instance_id: listenerId,
+        limit: 10,
+      },
+      cmdId,
+    );
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    return res.body.deliveries as Array<{ lease_id: string; signal: { id: string } }>;
+  };
   const ackAllDeliveries = async (
-    deliveries: ReadonlyArray<{ leaseId: string; signal: { id: string } }>,
+    deliveries: ReadonlyArray<{ lease_id: string; signal: { id: string } }>,
   ) => {
     for (const d of deliveries) {
-      await deliveryClient.ackAgentDelivery({
-        workspaceId: ws,
-        credential: mixedAgent.token,
-        commandId: randomUUID(),
-        signalId: d.signal.id,
-        leaseId: d.leaseId,
-        listenerInstanceId: listenerId,
+      const ackRes = await sendWs(ws, mixedAgent.token, {
+        kind: "ack_agent_delivery",
+        signal_id: d.signal.id,
+        lease_id: d.lease_id,
+        listener_instance_id: listenerId,
         outcome: "observed",
-        lastErrorCode: null,
+        last_error_code: null,
       });
+      assert.equal(ackRes.status, 200, JSON.stringify(ackRes.body));
     }
   };
 
@@ -5464,21 +5476,9 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   assert.equal((await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd)).status, 200);
 
   const g1ClaimCmd = randomUUID();
-  const g1Claim = await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g1ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
-  assert.equal(g1Claim.deliveries.length, 2, "Group 1 claim must lease [open, #lockA] together");
-  await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g1ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
+  const g1Deliveries = await claimMixedBatch(g1ClaimCmd);
+  assert.equal(g1Deliveries.length, 2, "Group 1 claim must lease [open, #lockA] together");
+  assert.equal((await claimMixedBatch(g1ClaimCmd)).length, 2);
 
   const g1StarCmd = randomUUID();
   const g1StarBody = { kind: "channel_star_reorder", channel_ids: [openId, lockAId] };
@@ -5524,7 +5524,7 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     "R3-AUDIT positive control: all-channel owner sees all mixed [open, #lockA] rows",
   );
 
-  await ackAllDeliveries(g1Claim.deliveries);
+  await ackAllDeliveries(g1Deliveries);
 
   // --- Group 2: Mixed [#lockA, #lockB] real operations (hidden from BOTH ownerOutside AND adminOnlyA; visible to adminAll) ---
   const lockAAsk2 = await sendWs(ws, adminAll.jwt, installedPost({
@@ -5550,21 +5550,9 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   assert.equal((await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd)).status, 200);
 
   const g2ClaimCmd = randomUUID();
-  const g2Claim = await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g2ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
-  assert.equal(g2Claim.deliveries.length, 2, "Group 2 claim must lease [#lockA, #lockB] together");
-  await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g2ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
+  const g2Deliveries = await claimMixedBatch(g2ClaimCmd);
+  assert.equal(g2Deliveries.length, 2, "Group 2 claim must lease [#lockA, #lockB] together");
+  assert.equal((await claimMixedBatch(g2ClaimCmd)).length, 2);
 
   const g2StarCmd = randomUUID();
   const g2StarBody = { kind: "channel_star_reorder", channel_ids: [lockAId, lockBId] };
@@ -5602,7 +5590,7 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     "R3-AUDIT positive control: owner admitted to BOTH #lockA and #lockB sees all [#lockA, #lockB] rows",
   );
 
-  await ackAllDeliveries(g2Claim.deliveries);
+  await ackAllDeliveries(g2Deliveries);
 
   // --- Group 3: Mixed [null/general, #lockA] seen, inbox-claim, and star reorder (409 + accepted + replay + post-leave replay) ---
   const generalAsk = await sendWs(ws, adminAll.jwt, installedPost({
@@ -5646,21 +5634,9 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
 
   const g3ClaimCmd = randomUUID();
-  const g3Claim = await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g3ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
-  assert.equal(g3Claim.deliveries.length, 2, "Group 3 claim must lease [general/null, #lockA] together");
-  await deliveryClient.claimAgentInbox({
-    workspaceId: ws,
-    credential: mixedAgent.token,
-    commandId: g3ClaimCmd,
-    listenerInstanceId: listenerId,
-    expectedPrincipalId: mixedAgent.principal,
-  });
+  const g3Deliveries = await claimMixedBatch(g3ClaimCmd);
+  assert.equal(g3Deliveries.length, 2, "Group 3 claim must lease [general/null, #lockA] together");
+  assert.equal((await claimMixedBatch(g3ClaimCmd)).length, 2);
 
   // Also test post-leave idempotency replay of BOTH mixed [null, #lockA] seen and star reorder!
   assert.equal((await sendWs(ws, memberActor.jwt, { kind: "channel_leave", channel_id: lockAId })).status, 200);
