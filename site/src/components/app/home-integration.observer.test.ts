@@ -466,6 +466,7 @@ test('workspace and channel composers keep their own addresses when a thread clo
     let channel=null, threadReplyRoot=null;
     const activeChannel=()=>channel, channelLabel=slug=>slug==='everyone' ? 'everyone' : '#'+slug;
     const threadReplyPlaceOf=()=>({kind:'unfiled'}), threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
+    const renderComposerAudience=()=>{};
   `, context);
   runInContext(await dashboardFunctions(['syncComposerPlacement'], ['markThreadReplyRoot']), context);
   runInContext('syncComposerPlacement()', context);
@@ -951,7 +952,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const one=selector=>selector==='[data-composer-input]'?input:selector==='[data-composer-reply-target-text]'?target:null;
     const all=()=>loadedRows;
     let threadReplyRoot=null; const composerSending=false, threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
-    const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
+    const retireComposerIntentOnAddressMove=()=>{}, syncComposerAddress=()=>{}, renderComposerAudience=()=>{}, renderFeed=()=>{}, selectChannel=()=>{};
   `, context);
   runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
   for (const [id, channelId, expected] of [
@@ -1447,7 +1448,7 @@ test('accepted agent removals leave every current surface immediately and after 
       const currentPendingAccessRows=()=>[], peopleDialogState={selected:null}, householdAccess={status:'ok',workspaceId:'W'};
       const shouldPollPendingAccess=()=>true, pendingAccessKey=()=>'', renderedPendingAccessKey='', refreshPendingAccess=()=>{};
       const renderHomeShell=()=>{}, renderHeaderRoster=()=>{}, renderDialogRoster=()=>{}, renderHomeSide=()=>{}, renderHomeObjectPane=()=>{};
-      const restoreComposerOnEntry=()=>{}, syncComposerAddress=()=>{}, renderSetupChecklist=()=>{}, composerHasRecipient=()=>false;
+      const restoreComposerOnEntry=()=>{}, syncComposerAddress=()=>{}, renderComposerAudience=()=>{}, renderSetupChecklist=()=>{}, composerHasRecipient=()=>false;
       const wakeMarkKey=()=>'', renderPendingAccess=()=>{}, navigateHomeHref=()=>{}, selectHomePerson=()=>{};
     `, context);
     runInContext(code, context);
