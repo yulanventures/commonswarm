@@ -5681,7 +5681,13 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
   const g3StarPostLeave = await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd);
   assert.equal(g3SeenPostLeave.status, 200, JSON.stringify(g3SeenPostLeave.body));
   assert.equal(g3StarPostLeave.status, 200, JSON.stringify(g3StarPostLeave.body));
-  assert.equal((await claimMixedBatch(g3ClaimCmd)).length, 2);
+  const g3ClaimPostRemove = await claimMixedBatch(g3ClaimCmd);
+  assert.equal(
+    g3ClaimPostRemove.length,
+    1,
+    `post-remove claim replay withholds #lockA delivery while retaining [lockAId] audit tag: ${JSON.stringify(g3ClaimPostRemove)}`,
+  );
+  assert.equal(g3ClaimPostRemove[0]?.signal.id, String(signalOf(generalAsk.body).id));
 
   const g3AllServerRows = await serverAuditsSince(g3Baseline);
   const g3UnfiledPrefRows = g3AllServerRows.filter((r) => r.command_kind === "channel_preference_set");
