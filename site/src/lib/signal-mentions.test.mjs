@@ -21,16 +21,23 @@ test("a public post carries its mentions by id and no recipient", () => {
   assert.equal(reply.thread_root_id, SIGNAL);
 });
 
-test("a post that mentions nobody has no mentions key at all", () => {
-  // The edge refuses the key while mentions are off, and reads an empty list as "mention nobody, not even the lead".
-  for (const placement of [{}, { channel: "design" }, { channel: "design", mentions: [] }]) {
-    assert.equal(Object.hasOwn(browserSignalCommand("hello", [], "note", [], placement), "mentions"), false);
+test("a public post always carries the mentions key, empty when nobody is tagged; an addressed one never does", () => {
+  // The key is what makes a deployment with mentions off refuse the post instead of re-addressing it to the lead.
+  for (const placement of [{ mentions: [] }, { channel: "design", mentions: [] }, { threadRootId: SIGNAL, mentions: [] }]) {
+    const command = browserSignalCommand("hello", [], "note", [], placement);
+    assert.deepEqual(command.mentions, [], JSON.stringify(placement));
+    assert.equal(Object.hasOwn(command, "to"), false);
   }
+  // A Direct Message, and any caller that states no public intent, sends the body installed clients always sent.
+  assert.equal(Object.hasOwn(browserSignalCommand("hi", [{ kind: "agent", id: AGENT }], "ask"), "mentions"), false);
+  assert.equal(Object.hasOwn(browserSignalCommand("hi", [], "note", [], { channel: "design" }), "mentions"), false);
 });
 
 test("a message is addressed or it mentions, never both", () => {
   assert.throws(() => browserSignalCommand("hi", [{ kind: "agent", id: AGENT }], "ask", [],
     { mentions: [{ kind: "person", id: PERSON }] }), /addressed or it mentions/);
+  assert.throws(() => browserSignalCommand("hi", [{ kind: "agent", id: AGENT }], "ask", [], { mentions: [] }),
+    /addressed or it mentions/, "even an empty public intent cannot ride on an addressed message");
 });
 
 test("mention rows are read by id, in the author's order, and anything malformed is dropped", () => {
@@ -61,6 +68,7 @@ test("the command function's own shape check accepts exactly what the browser se
     { threadRootId: SIGNAL, broadcastToChannel: true, mentions }]) {
     assert.equal(chatSignalShapeProblem(browserSignalCommand("@Wren @Dana look", [], "note", [], placement)), null, JSON.stringify(placement));
   }
-  assert.equal(chatSignalShapeProblem(browserSignalCommand("hello", [], "note", [], { channel: "design" })), null);
+  assert.equal(chatSignalShapeProblem(browserSignalCommand("hello", [], "note", [], { channel: "design", mentions: [] })), null,
+    "an untagged public post, as the composer sends it");
   assert.equal(chatSignalShapeProblem(browserSignalCommand("hi", [{ kind: "agent", id: AGENT }], "ask")), null, "a Direct Message is unchanged");
 });
