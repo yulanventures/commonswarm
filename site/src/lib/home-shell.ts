@@ -25,7 +25,7 @@ export interface WorkspaceShellVM {
   /** Chat's heading: the channel being read ("#general", "#slug", "All messages"). Workspace identity stays in the picker. */
   channelTitle?: string;
   /** A resolved named channel. Other feed views and Direct Messages have no channel settings. */
-  channel?: { slug: string; description: string | null; manageable: boolean };
+  channel?: { slug: string; description: string | null; manageable: boolean; /** A private channel: the title draws a lock in place of "#". */ private?: boolean };
   /** The viewer's own star and notification level for the place being read (#general or a live channel), once known. */
   place?: { slug: string; starred: boolean; involvement: ChannelInvolvement };
   hrefs: { chat: string; todos: string; lists: string; files: string; wiki: string; workspaces: string };
@@ -286,10 +286,17 @@ function chevron(doc: Document): SVGSVGElement {
   return svg;
 }
 
-function title(doc: Document, text: string, id: string, className: string, context = false): HTMLElement {
-  const heading = node(doc, context ? "p" : "h1", className, text);
+function title(doc: Document, text: string, id: string, className: string, context = false, privateSlug: string | null = null): HTMLElement {
+  const heading = node(doc, context ? "p" : "h1", className, privateSlug ?? text);
   heading.id = id;
   heading.tabIndex = -1;
+  if (privateSlug !== null) {
+    // A private channel: a lock in place of "#". `text` is its plain name, "#slug (private)".
+    heading.dataset.private = "";
+    heading.setAttribute("aria-label", text);
+    const lock = node(doc, "span", "hm-title-lock"); lock.setAttribute("aria-hidden", "true");
+    heading.prepend(lock);
+  }
   return heading;
 }
 
@@ -595,7 +602,8 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
   header.dataset.homeWorkspaceHeader = vm.workspaceId;
   const copy = node(doc, "div", "hm-ws-header__copy");
   const channel = vm.pane === "chat" && !vm.contextTitle;
-  copy.append(title(doc, channel ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true));
+  copy.append(title(doc, channel ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-ws-title", "hm-ws-header__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true,
+    channel && vm.channel?.private ? vm.channel.slug : null));
   const description = channel ? channelDescription(doc, vm, callbacks) : null;
   if (description) copy.append(description);
   const actions = node(doc, "div", "hm-ws-header__actions");
@@ -696,7 +704,8 @@ export function buildPhoneTopBar(doc: Document, vm: WorkspaceShellVM, callbacks:
   }
   people.append(memberStack(doc, vm));
   people.setAttribute("aria-description", `${people.querySelector(".hm-member-stack__count")?.textContent} members`);
-  bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true), people);
+  bar.append(back, title(doc, vm.pane === "chat" && !vm.contextTitle ? vm.channelTitle ?? `# ${vm.name}` : vm.name, "hm-phone-title", "hm-phone-bar__title", vm.pane === "files" || vm.pane === "todos" || vm.contextTitle === true,
+    vm.pane === "chat" && !vm.contextTitle && vm.channel?.private ? vm.channel.slug : null), people);
   const description = vm.pane === "chat" && !vm.contextTitle ? channelDescription(doc, vm, callbacks) : null;
   if (description) bar.append(description);
   if (doors.menu) {

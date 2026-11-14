@@ -202,3 +202,10 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop
 }
 /* Dragged down, the row lands after this one: the line goes on the bottom edge. */
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop="after"]::before { inset-block-start: auto; inset-block-end: -1px; }
+
+/* A private channel: a lock where "#" would be, drawn (never typed), in the colour of the text beside it. */
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-title-lock, .cm-directory-lock) {
+  display: inline-block; flex: none; inline-size: 0.9em; block-size: 0.9em; margin-inline-end: 0.3em; vertical-align: -0.08em;
+  background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.25' y='7' width='9.5' height='6.5' rx='1.5'/%3E%3Cpath d='M5.5 7V5a2.5 2.5 0 0 1 5 0v2'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+

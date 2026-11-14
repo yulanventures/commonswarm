@@ -1470,6 +1470,7 @@ import "../../styles/kylon-command-palette.css";
     channelSubmitSlug,
     channelUnreadFor,
     channelViewLabel,
+    channelPlainName,
     liveChannels,
     mayManageChannel,
     resolveChannelParam,
@@ -2409,7 +2410,7 @@ import "../../styles/kylon-command-palette.css";
       return {
         channels: [{ id: "", label: ALL_MESSAGES_LABEL, current: activeChannelId === null && unknownChannelId === null },
           { id: GENERAL_CHANNEL_ID, label: channelLabel(GENERAL_CHANNEL_SLUG), current: activeChannelId === GENERAL_CHANNEL_ID && unknownChannelId === null },
-          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channelLabel(channel.slug),
+          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channelPlainName(channel),
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
         mayCreateChannel: viewerMayCreateChannel(),
         channelSettings: activeChannel() !== null && !activeDm,
@@ -5428,7 +5429,8 @@ import "../../styles/kylon-command-palette.css";
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true },
-        channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel) } : undefined,
+        channel: headerChannel ? { slug: headerChannel.slug, description: headerChannel.purpose, manageable: viewerMayManageChannel(headerChannel),
+          private: headerChannel.visibility === "private" } : undefined,
         place: headerPlace ? { slug: headerPlace.slug, starred: headerPlace.starred, involvement: headerPlace.involvement } : undefined,
         /* Chat's heading is the conversation being read: the channel, or in a direct message the person or
            agent it is with. The workspace stays in the picker. */
@@ -11175,7 +11177,7 @@ import "../../styles/kylon-command-palette.css";
       const row = (channel: WorkspaceChannel) => ({ id: channel.channelId, slug: channel.slug, href: href(channel.channelId),
         current: reading && activeChannelId === channel.channelId,
         unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
-        muted: muted(channel.channelId) });
+        muted: muted(channel.channelId), private: channel.visibility === "private" });
       const movable = (rows: RailChannelRowVM[], list: RailOrderList): RailChannelRowVM[] =>
         !sampleMode && rows.length > 1 ? rows.map(entry => ({ ...entry, reorder: list })) : rows;
       const sharedOrder = viewerWorkspaceRole() === "owner" || viewerWorkspaceRole() === "admin";
@@ -11737,7 +11739,7 @@ import "../../styles/kylon-command-palette.css";
       if (!dialog?.open || !list) return;
       const query = one<HTMLInputElement>("[data-channel-directory-search]")?.value ?? "";
       const href = (id: string) => routeHref({ view: "chat", workspaceId: activeWorkspaceId, channelId: id });
-      const row = (channel: WorkspaceChannel): DirectoryChannel => ({ id: channel.channelId, slug: channel.slug,
+      const row = (channel: WorkspaceChannel): DirectoryChannel => ({ id: channel.channelId, slug: channel.slug, private: channel.visibility === "private",
         description: channel.purpose, href: href(channel.channelId), archived: channel.archivedAt !== null,
         unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel) });
       const rows: DirectoryChannel[] = [{ id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, description: null,

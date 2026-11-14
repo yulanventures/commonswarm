@@ -323,3 +323,16 @@ test("who is offered New channel follows the workspace's policy and the viewer's
   assert.deepEqual(Object.keys(CHANNEL_CREATION_LABELS).sort(), [...CHANNEL_CREATION_POLICIES].sort(), "every policy the server has is named");
   assert.equal(new Set(Object.values(CHANNEL_CREATION_LABELS)).size, CHANNEL_CREATION_POLICIES.length);
 });
+
+test("a private channel's plain name says so, and its row name does too", async () => {
+  const { channelPlainName, channelRowName: rowName, channelViewLabel: viewLabel } = await import("./channels.ts");
+  assert.equal(channelPlainName({ slug: "quotes", visibility: "private" }), "#quotes (private)");
+  assert.equal(channelPlainName({ slug: "quotes", visibility: "open" }), "#quotes");
+  assert.equal(channelPlainName({ slug: "quotes" }), "#quotes", "an unknown visibility is not announced as private");
+  assert.equal(channelPlainName({ slug: "quotes", visibility: null }), "#quotes");
+  assert.equal(rowName("quotes", true, false, true), "#quotes, private, unread");
+  assert.equal(rowName("quotes", null, true, true), "#quotes, private, muted");
+  assert.equal(rowName("quotes", null), "#quotes");
+  const list = [{ channelId: "c1", workspaceId: "w", slug: "quotes", purpose: null, createdByPrincipal: "u", createdByKind: "user", createdAt: "", archivedAt: null, visibility: "private" }];
+  assert.equal(viewLabel("c1", list), "#quotes (private)", "the header, the head and the menus read this");
+});
