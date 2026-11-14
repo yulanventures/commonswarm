@@ -593,28 +593,43 @@ export const composerMentionNotice = (
  * mentions a tag in a channel made the message private. So the words in the box can have been
  * written for particular people while the composer they are in posts to everyone. The stored
  * To: set is the record of that. It is never sent from a public place and never dropped in
- * silence: it is named, with where the message would go instead, until the draft is sent,
- * emptied or moved to a Direct Message.
+ * silence.
  *
- * Returns who the draft was written to and who is still here; empty when there is nothing to
- * say (no stored set, an empty one, or nothing typed).
+ * `written` IS A FACT ABOUT THE STORED DRAFT, NOT ABOUT WHO IS STILL HERE. A draft written to
+ * one person who has since left, or to a name that no longer resolves to one person, was
+ * still written privately. Deciding it from the surviving names made the warning disappear in
+ * exactly the case where nobody is left to notice. `reachable` is the narrower question: who a
+ * move to a Direct Message can still address.
  */
-export const privateDraftRecipients = (
+export interface PrivateDraft {
+  written: boolean;
+  reachable: ComposerRecipient[];
+}
+export const privateDraft = (
   body: string,
-  draftTo: readonly ComposerRecipient[] | null | undefined,
+  /** How many recipients the stored draft names, resolved or not. */
+  storedCount: number,
+  /** Those of them that resolve to one person or agent. */
+  resolved: readonly ComposerRecipient[],
   known: (entity: ComposerRecipient) => boolean,
-): ComposerRecipient[] =>
-  body.trim() === "" || draftTo === null || draftTo === undefined
-    ? []
-    : pruneComposerRecipients(draftTo, known);
+): PrivateDraft => {
+  const written = body.trim() !== "" && storedCount > 0;
+  return { written, reachable: written ? pruneComposerRecipients(resolved, known) : [] };
+};
 
-/** The sentence for it. `place` is the channel's label, e.g. "#design". */
+/** The sentence for it. `place` is where Send would post, e.g. "#design". No names: nobody it was written to is still here. */
 export const privateDraftNotice = (names: readonly string[], place: string): string =>
-  `This was written to ${joinNames(names)}. Sent here, everyone in ${place} can read it.`;
+  names.length === 0
+    ? `This was written as a private message, to someone who is no longer here. Sent here, everyone in ${place} can read it.`
+    : `This was written to ${joinNames(names)}. Sent here, everyone in ${place} can read it.`;
 
 /** The control that takes the draft back to where it was written for. */
 export const privateDraftActionLabel = (names: readonly string[]): string =>
   `Send to ${joinNames(names)} instead`;
+
+/** The control by which the author says, on purpose, that the draft is for everyone here now. */
+export const privateDraftPublicLabel = (place: string): string =>
+  `Post in ${place} for everyone`;
 
 /**
  * WHAT A PUBLIC PASS WRITES INTO THE STORED DRAFT'S ADDRESS: exactly what was already there.
@@ -642,9 +657,38 @@ export interface ComposerAudience {
   /** The whole fact, for a screen reader and the hover title. */
   sentence: string;
 }
+/** Where a public message would be posted. `named` is false when this page cannot name it. */
+export interface ComposerPlace {
+  /** For a sentence: "#design", or "this thread's channel". */
+  label: string;
+  /** For the marker, after its glyph: "design", or "this thread". */
+  marker: string;
+  named: boolean;
+}
+
+/**
+ * THE PLACE A PUBLIC MESSAGE GOES. A top-level post goes to the channel being read, and to
+ * #general when none is. A thread reply goes where its thread is, which is not always a place
+ * this page can name: when the channel list did not load, the reply is still filed in the
+ * thread's own channel by the server. Calling that "#general" would name a place the message
+ * is not going to, so it is called what it is.
+ */
+export const composerPlace = (
+  thread: { kind: "unfiled" } | { kind: "channel"; slug: string } | { kind: "unknown" } | null,
+  channelSlug: string | null,
+  generalSlug: string,
+  label: (slug: string) => string,
+): ComposerPlace => {
+  const named = (slug: string): ComposerPlace => ({ label: label(slug), marker: label(slug).replace(/^#/u, ""), named: true });
+  if (thread === null) return named(channelSlug ?? generalSlug);
+  if (thread.kind === "channel") return named(thread.slug);
+  if (thread.kind === "unfiled") return named(generalSlug);
+  return { label: "this thread's channel", marker: "this thread", named: false };
+};
+
 export const composerAudience = (
   privateTo: readonly string[],
-  place: string,
+  place: ComposerPlace,
 ): ComposerAudience =>
   privateTo.length > 0
     ? {
@@ -654,6 +698,67 @@ export const composerAudience = (
     }
     : {
       kind: "public",
-      name: place.replace(/^#/u, ""),
-      sentence: `Public. Everyone in ${place} can read this.`,
+      name: place.marker,
+      sentence: `Public. Everyone in ${place.label} can read this.`,
     };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────
+ * WHAT PRESSING SEND WILL DO, decided in one place. The marker beside Send and the body on the
+ * wire both come from this, so they cannot disagree. And when the composer cannot be sure
+ * what it would send, it sends nothing and says why.
+ * ──────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Private when a Direct Message is open and no thread reply is. Public everywhere else. */
+export const composerReach = (
+  directPartner: ComposerRecipient | null,
+  replying: boolean,
+): "private" | "public" => (directPartner !== null && !replying ? "private" : "public");
+
+export type ComposerSendPlan =
+  /** Public: no recipient, and the mentions key always (empty when nobody is tagged). */
+  | { send: true; audience: "public"; recipients: []; mentions: ComposerRecipient[] }
+  /** Private: the Direct Message partner first, then anyone else in To:. No mentions key. */
+  | { send: true; audience: "private"; recipients: ComposerRecipient[] }
+  | { send: false; reason: string };
+
+export interface ComposerSendInput {
+  /** The address pass committed: the roster is known and no restore is pending. */
+  addressCommitted: boolean;
+  /** The Direct Message that is open, if one is. */
+  directPartner: ComposerRecipient | null;
+  /** A thread reply is being written. */
+  replying: boolean;
+  /** The draft in the box was written privately and the author has not said where it goes. */
+  privateDraftWritten: boolean;
+  /** The To: set on screen. */
+  to: readonly ComposerRecipient[];
+  /** Recipients named by tags in the body, resolved against the roster. */
+  tagged: readonly ComposerRecipient[];
+}
+
+export const SEND_HELD_LOADING = "People and agents here are still loading. Try again in a moment.";
+export const SEND_HELD_THREAD_IN_DM = "A thread reply is still open. Cancel it, then send your Direct Message.";
+export const SEND_HELD_PRIVATE_DRAFT = "This was written as a private message. Choose under the box where it goes, then send.";
+
+export const composerSendPlan = (input: ComposerSendInput): ComposerSendPlan => {
+  /* Until the pass commits, nothing known about the box can be trusted: its tags are not
+     resolved and a draft restored into it has not been checked for who it was written to. */
+  if (!input.addressCommitted) return { send: false, reason: SEND_HELD_LOADING };
+  /* A Direct Message with a thread reply still open would post into the thread. Opening a
+     Direct Message closes the reply, so this is a state that should not exist; if it does,
+     the composer does not guess. */
+  if (input.directPartner !== null && input.replying) return { send: false, reason: SEND_HELD_THREAD_IN_DM };
+  if (composerReach(input.directPartner, input.replying) === "private") {
+    const partner = input.directPartner!;
+    return {
+      send: true,
+      audience: "private",
+      recipients: [
+        { kind: partner.kind, id: partner.id },
+        ...input.to.filter((recipient) => !sameRecipient(recipient, partner)),
+      ],
+    };
+  }
+  if (input.privateDraftWritten) return { send: false, reason: SEND_HELD_PRIVATE_DRAFT };
+  return { send: true, audience: "public", recipients: [], mentions: [...input.tagged] };
+};

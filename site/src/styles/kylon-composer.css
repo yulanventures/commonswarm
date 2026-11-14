@@ -194,6 +194,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audien
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience-unnamed] .dashboard__composer-audience-hash,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"] .dashboard__composer-audience-lock,
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="private"] .dashboard__composer-audience-hash {
   display: none;
@@ -225,14 +226,14 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:f
     max-inline-size: 6rem;
     padding-inline: 6px;
   }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"] .dashboard__composer-audience-name {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed]) .dashboard__composer-audience-name {
     display: none;
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
     padding-inline-end: calc(104px + 6rem + 6px);
   }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]) textarea {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed])) textarea {
     padding-inline-end: calc(104px + 38px);
   }
 }
