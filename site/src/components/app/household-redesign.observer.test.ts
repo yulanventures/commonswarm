@@ -832,6 +832,7 @@ test("openWorkspace settles each read independently so sibling failures keep loa
       deliveryReceiptRefreshOwner: "",
       resetMessageStatus: () => {},
       resetChoices: () => {},
+      resetSignalMentions: () => {},
       files: [],
       fileLoadError: "",
       signalFilter: "all",
