@@ -2275,6 +2275,7 @@
     "states": [
       "dense"
     ],
+    "alone": true,
     "requiresSeed": [
       "create_workspace",
       "seed_channels"
