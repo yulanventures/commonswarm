@@ -56,6 +56,29 @@ export const signalHistoryFilter = (cutoff: string): string =>
   `until.is.null,until.gt.${cutoff},kind.in.(${SIGNAL_HISTORY_KINDS.join(",")})`;
 
 /**
+ * When the feed next has to repaint by the clock alone, in epoch milliseconds, or `null`.
+ *
+ * It is the soonest `until` still ahead among the rows on screen, whatever their kind. At that
+ * moment a status or an agent's note to itself leaves, and a note or an ask kept as history
+ * stops offering a thread, choice buttons and a Reply card. Counting only the rows that leave
+ * would keep those controls on screen until some unrelated repaint. An `until` that does not
+ * parse schedules nothing.
+ */
+export const nextFeedChangeAt = (
+  signals: readonly Pick<HistorySignal, "until">[],
+  now: number,
+): number | null => {
+  let soonest: number | null = null;
+  for (const signal of signals) {
+    if (signal.until === null) continue;
+    const until = new Date(signal.until).getTime();
+    if (!Number.isFinite(until) || until <= now) continue;
+    if (soonest === null || until < soonest) soonest = until;
+  }
+  return soonest;
+};
+
+/**
  * Whether a message's `until` has passed. A row kept as history can still be past it: an ask
  * that ended unanswered is shown, and offers nothing to press. An `until` that does not parse
  * is not treated as passed.

@@ -1401,7 +1401,7 @@ import "../../styles/kylon-command-palette.css";
     signalIsDirectBetween,
     type SignalFilter,
   } from "../../lib/signal-feed";
-  import { signalHasEnded, signalHistoryFilter, signalIsReadable, signalLeavesAt } from "../../lib/signal-history";
+  import { nextFeedChangeAt, signalHasEnded, signalHistoryFilter, signalIsReadable } from "../../lib/signal-history";
   import {
     canStartThread,
     THREAD_REPLY_CHIP_LABEL,
@@ -8040,13 +8040,10 @@ import "../../styles/kylon-command-palette.css";
       }
       const now = Date.now();
       /* Only a status or an agent's note to itself leaves the feed when its `until` passes.
-         Conversation stays, so the repaint timer below is set only for rows that can leave. */
+         Conversation stays, but at its `until` it stops offering a thread, choices and a Reply
+         card, so the repaint timer below still follows every row's `until`. */
       signals = signals.filter((signal) => signalIsReadable(signal, now));
-      const nextExpiry = signals.reduce<number | null>((nearest, signal) => {
-        const expiresAt = signalLeavesAt(signal);
-        if (expiresAt === null || !Number.isFinite(expiresAt) || expiresAt <= now) return nearest;
-        return nearest === null || expiresAt < nearest ? expiresAt : nearest;
-      }, null);
+      const nextExpiry = nextFeedChangeAt(signals, now);
       if (nextExpiry !== null) {
         signalExpiryTimer = window.setTimeout(
           renderFeed,

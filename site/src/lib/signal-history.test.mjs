@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  signalEndsWithUntil, signalHasEnded, signalHistoryFilter, signalIsReadable, signalLeavesAt,
+  nextFeedChangeAt, signalEndsWithUntil, signalHasEnded, signalHistoryFilter, signalIsReadable, signalLeavesAt,
 } from "./signal-history.ts";
 import { isOpenAskToViewer } from "./home-stream.ts";
 
@@ -69,4 +69,17 @@ test("an ask kept as history is ended: it is readable and no longer open to answ
   assert.equal(isOpenAskToViewer(open), true);
   assert.equal(isOpenAskToViewer({ ...open, ended: false }), true);
   assert.equal(isOpenAskToViewer({ ...open, ended: true }), false, "no Reply card on an ended ask");
+});
+
+test("the feed repaints at the soonest until still ahead, including a note that will stay", () => {
+  const SOON = "2026-11-13T12:05:00.000Z";
+  // A note stays in the feed after its until, and still has to lose its thread control and choices then.
+  assert.equal(signalLeavesAt(row({ until: SOON })), null);
+  assert.equal(nextFeedChangeAt([row({ until: SOON })], NOW), Date.parse(SOON));
+  assert.equal(nextFeedChangeAt([row({ until: FUTURE }), row({ kind: "ask", until: SOON }), row({ kind: "working-on", until: FUTURE })], NOW),
+    Date.parse(SOON));
+  // Rows already past their until, with none, or with one that does not parse schedule nothing.
+  assert.equal(nextFeedChangeAt([row(), row({ until: null }), row({ until: "not a date" })], NOW), null);
+  assert.equal(nextFeedChangeAt([row({ until: new Date(NOW).toISOString() })], NOW), null, "the boundary itself is already past");
+  assert.equal(nextFeedChangeAt([], NOW), null);
 });

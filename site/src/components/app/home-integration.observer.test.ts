@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { signalHasEnded, signalIsReadable, signalLeavesAt } from '../../lib/signal-history.ts';
+import { nextFeedChangeAt, signalHasEnded, signalIsReadable } from '../../lib/signal-history.ts';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
@@ -542,7 +542,7 @@ test('a signal page settling after a same-workspace view change retains data wit
     const nodes = new Map([['[data-composer]', composer], ['[data-feed-list]', list], ['[data-feed-empty-title]', emptyTitle]]);
     let resolvePage!: (page: { rows: unknown[]; hasMore: boolean }) => void, reads = 0;
     const context = createContext({ ...MESSAGE_STATUS_STUBS,  routeHref, homeAgentFixCards, browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
-      signalIsReadable, signalLeavesAt,
+      signalIsReadable, nextFeedChangeAt,
       // This signal fixture omits channel chrome; still execute its real projection dependency.
       listsChrome: createListsChrome(new ViewNode('div') as unknown as HTMLElement),
       signalPage: () => { reads++; return new Promise(resolve => { resolvePage = resolve; }); },
