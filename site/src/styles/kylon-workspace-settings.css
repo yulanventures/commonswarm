@@ -260,3 +260,63 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] :is(.dashboard__workspace-danger input, [data-workspace-rename-input]) { min-block-size: 44px; font-size: 16px; }
   live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] [data-workspace-move-destination] { min-inline-size: 44px; min-block-size: 44px; font-size: 16px; }
 }
+
+/* Who can create channels: one quiet group between the workspace's identity and its clean-up.
+   The row is the target; the radio itself stays its own size (the sheet's touch rule sizes every input). */
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy {
+  display: grid;
+  min-inline-size: 0;
+  margin-block-start: 8px;
+  padding-block-start: 16px;
+  border-block-start: 1px solid var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy h3 {
+  margin-block-end: 4px;
+  font-family: var(--k-shell-font);
+  color: var(--k-shell-ink);
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+  min-block-size: 36px;
+  margin-inline: -8px;
+  padding-inline: 8px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 21px;
+  color: var(--k-shell-ink);
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice:hover { background: var(--k-shell-subtle); }
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice:has(input:focus-visible) {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice input {
+  flex: none;
+  inline-size: 18px;
+  block-size: 18px;
+  min-inline-size: 0;
+  min-block-size: 0;
+  margin: 0;
+  accent-color: var(--k-shell-ink);
+  outline: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy[aria-busy="true"] .dashboard__workspace-channel-policy-choice { cursor: progress; opacity: 0.6; }
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-status {
+  min-block-size: 18px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--k-shell-secondary);
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-status[data-problem] { color: var(--k-shell-ink); font-weight: 600; }
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice { min-block-size: 44px; font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-choice input { inline-size: 20px; block-size: 20px; min-block-size: 0; }
+}

@@ -261,7 +261,13 @@
       "dense"
     ],
     "requiresSeed": [
-      "create_workspace"
+      "create_workspace",
+      "channel_policy"
+    ],
+    "frame": [
+      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"admins\"]:checked)",
+      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"members\"]:not(:checked))",
+      "dialog[data-workspace-details-popover][open] [data-workspace-channel-policy] h3"
     ]
   },
   {
