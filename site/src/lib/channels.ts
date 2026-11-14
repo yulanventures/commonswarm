@@ -162,7 +162,7 @@ export const channelViewLabel = (
   if (view.kind === "all") return ALL_MESSAGES_LABEL;
   if (view.kind === "general") return channelLabel(GENERAL_CHANNEL_SLUG);
   const channel = channelById(channels, view.channelId);
-  return channel === null ? null : channelLabel(channel.slug);
+  return channel === null ? null : channelPlainName(channel);
 };
 
 const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
@@ -288,9 +288,16 @@ export const channelListStaleAgainstUnread = (
   return reported.some((row) => byId.get(row.channelId) !== row.slug);
 };
 
-/** The row's accessible name: the full "#slug", plus "unread" only when the read said so, plus "muted". */
-export const channelRowName = (slug: string, unread: boolean | null, muted = false): string =>
-  `${channelLabel(slug)}${unread === true ? ", unread" : ""}${muted ? ", muted" : ""}`;
+/**
+ * A channel's name where it is plain text with no icon beside it: "#slug", and "#slug (private)" for a
+ * private channel. Where the name is drawn, a lock takes the place of "#" and this is its accessible name.
+ */
+export const channelPlainName = (channel: { slug: string; visibility?: "open" | "private" | null }): string =>
+  channel.visibility === "private" ? `${channelLabel(channel.slug)} (private)` : channelLabel(channel.slug);
+
+/** The row's accessible name: the full "#slug", "private" for a private channel, "unread" only when the read said so, and "muted". */
+export const channelRowName = (slug: string, unread: boolean | null, muted = false, isPrivate = false): string =>
+  `${channelLabel(slug)}${isPrivate ? ", private" : ""}${unread === true ? ", unread" : ""}${muted ? ", muted" : ""}`;
 
 /** The viewer's own settings for one place. */
 export interface ChannelPreference { starred: boolean; involvement: ChannelInvolvement }

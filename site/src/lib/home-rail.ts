@@ -67,6 +67,8 @@ export interface RailChannelRowVM {
   muted?: boolean;
   /** The viewer may move this row within its list: their own Starred order, or (an owner or admin) the shared one. */
   reorder?: RailOrderList;
+  /** A private channel: a lock is drawn in place of "#". */
+  private?: boolean;
 }
 
 export type RailOrderList = "starred" | "channels";
@@ -174,7 +176,7 @@ function link(doc: Document, href: string, className: string, callbacks: RailCal
 }
 
 /** A decorative 18px line icon. Its shape is a CSS mask in rail.css and its colour is currentColor. */
-function icon(doc: Document, name: "inbox" | "workspace" | "plus" | "archive"): HTMLElement {
+function icon(doc: Document, name: "inbox" | "workspace" | "plus" | "archive" | "lock"): HTMLElement {
   const mark = node(doc, "span", "hm-rail__icon");
   mark.dataset.icon = name;
   mark.setAttribute("aria-hidden", "true");
@@ -270,10 +272,13 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   const unread = archived ? null : muted ? false : row.unread;
   if (unread === true) link.dataset.unread = "";
   if (muted) link.dataset.muted = "";
-  link.setAttribute("aria-label", channelRowName(row.slug, unread, muted));
-  link.title = channelLabel(row.slug);
+  const isPrivate = row.private === true;
+  if (isPrivate) link.dataset.private = "";
+  link.setAttribute("aria-label", channelRowName(row.slug, unread, muted, isPrivate));
+  link.title = isPrivate ? `${channelLabel(row.slug)} (private)` : channelLabel(row.slug);
   const name = node(doc, "span", "hm-rail__name", row.slug);
-  link.append(icon(doc, archived ? "archive" : "workspace"), name);
+  // A private channel's mark is a lock in place of "#"; an archived one keeps the archive mark.
+  link.append(icon(doc, archived ? "archive" : isPrivate ? "lock" : "workspace"), name);
   if (unread === true) { const dot = node(doc, "span", "hm-rail__unread"); dot.setAttribute("aria-hidden", "true"); link.append(dot); }
   if (muted) { const off = node(doc, "span", "hm-rail__muted"); off.setAttribute("aria-hidden", "true"); link.append(off); }
   link.addEventListener("click", (event) => {
