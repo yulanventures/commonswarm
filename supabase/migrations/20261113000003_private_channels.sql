@@ -15,9 +15,11 @@
 --    swarm.agent_channel_read_advance, swarm_read.agent_channel_unread,
 --    swarm.agent_delivery_is_wakeable, swarm_read.signal_delivery_receipts,
 --    swarm.wake_workspace_signal, swarm.wake_path_eligible_deliveries,
---    swarm_read.agent_wake_path_deliveries, swarm_read.workspace_roster, and
---    swarm_read.home_overview enforce private-channel membership across reads, traffic
---    notifications, and queue/activity aggregates.
+--    swarm.actor_wake_path_eligible_deliveries, swarm.claims_wake_path_eligible_deliveries,
+--    swarm_read.agent_wake_path_deliveries, swarm_read.workspace_roster,
+--    swarm_read.home_overview, and swarm_read.audit_log enforce private-channel
+--    membership across reads, traffic notifications, queue/activity aggregates,
+--    and client-visible administrative audit projections.
 -- 5. Workspace membership/role and agent lifecycle triggers durably revoke private-channel
 --    membership on soft-revocation and serialize manager promotion / orphan auto-archival.
 -- 6. Accepted workspace-wide invariants: channel slugs remain unique across the workspace
@@ -1312,6 +1314,161 @@ ALTER FUNCTION swarm_read.signal_delivery_receipts_without_wake_path(uuid, uuid,
 REVOKE ALL ON FUNCTION swarm_read.signal_delivery_receipts_without_wake_path(uuid, uuid, bytea)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
 
+-- Caller-scoped wake-path eligibility for client-visible surfaces (agent_wake_path and
+-- signal_delivery_receipts.wake_path_observing): evaluates candidate, observed seed, and
+-- later-observed supersession strictly over signals accessible to the viewing actor so
+-- hidden private-channel observations never add or remove visible public wake-path rows.
+-- Kept in plpgsql so HM rollback proofs add no pg_depend edge onto agent_principals.turn_only.
+CREATE OR REPLACE FUNCTION swarm.actor_wake_path_eligible_deliveries(
+  p_actor_kind text,
+  p_actor_id uuid
+)
+RETURNS TABLE (
+  workspace_id uuid,
+  signal_id uuid,
+  principal_id uuid,
+  enqueued_at timestamptz
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+#variable_conflict use_column
+BEGIN
+  IF p_actor_id IS NULL OR p_actor_kind IS NULL OR p_actor_kind NOT IN ('user', 'agent') THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
+         d.enqueued_at
+  FROM swarm.signal_deliveries AS d
+  JOIN swarm.signals AS s
+    ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+  JOIN swarm.agent_principals AS p
+    ON p.workspace_id = d.workspace_id AND p.principal_id = d.recipient_agent_principal_id
+  WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
+    AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+    AND d.enqueued_at >= (SELECT wpr.applied_at FROM swarm.wake_path_release AS wpr WHERE wpr.singleton)
+    AND s.until > statement_timestamp()
+    AND s.kind IN ('ask', 'note')
+    AND (
+      s.channel_id IS NULL
+      OR (
+        swarm.actor_can_access_channel(s.workspace_id, s.channel_id, p_actor_kind, p_actor_id)
+        AND EXISTS (
+          SELECT 1
+          FROM swarm.channels AS ch
+          WHERE ch.workspace_id = s.workspace_id
+            AND ch.channel_id = s.channel_id
+            AND (
+              ch.visibility = 'open'
+              OR EXISTS (
+                SELECT 1
+                FROM swarm.channel_members AS cm
+                WHERE cm.workspace_id = s.workspace_id
+                  AND cm.channel_id = s.channel_id
+                  AND cm.member_kind = 'agent'
+                  AND cm.agent_principal_id = d.recipient_agent_principal_id
+              )
+            )
+        )
+      )
+    )
+    AND (s.to_agent_principal_id = d.recipient_agent_principal_id
+      OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
+        WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+          AND r.recipient_agent_principal_id = d.recipient_agent_principal_id))
+    AND p.revoked_at IS NULL
+    AND p.turn_only = false
+    AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
+      JOIN swarm.signals AS observed_signal
+        ON observed_signal.workspace_id = observed.workspace_id
+       AND observed_signal.id = observed.signal_id
+      WHERE observed.workspace_id = d.workspace_id
+        AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
+        AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
+        AND observed.last_leased_by IS NULL
+        AND observed.acked_at >= (SELECT wpr2.applied_at FROM swarm.wake_path_release AS wpr2 WHERE wpr2.singleton)
+        AND (
+          observed_signal.channel_id IS NULL
+          OR swarm.actor_can_access_channel(observed_signal.workspace_id, observed_signal.channel_id, p_actor_kind, p_actor_id)
+        ))
+    AND NOT EXISTS (SELECT 1 FROM swarm.signal_deliveries AS later
+      JOIN swarm.signals AS later_signal
+        ON later_signal.workspace_id = later.workspace_id AND later_signal.id = later.signal_id
+      WHERE later.workspace_id = d.workspace_id
+        AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
+        AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)
+          > (date_trunc('milliseconds', s.created_at), s.id)
+        AND later_signal.kind IN ('ask', 'note')
+        AND (
+          later_signal.channel_id IS NULL
+          OR swarm.actor_can_access_channel(later_signal.workspace_id, later_signal.channel_id, p_actor_kind, p_actor_id)
+        )
+        AND (later_signal.to_agent_principal_id = d.recipient_agent_principal_id
+          OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS later_recipient
+            WHERE later_recipient.workspace_id = later_signal.workspace_id
+              AND later_recipient.signal_id = later_signal.id
+              AND later_recipient.recipient_agent_principal_id = d.recipient_agent_principal_id))
+        AND later.ack_outcome = 'observed' AND later.last_lease_id IS NULL
+        AND later.last_leased_by IS NULL);
+END;
+$$;
+
+ALTER FUNCTION swarm.actor_wake_path_eligible_deliveries(text, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.actor_wake_path_eligible_deliveries(text, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE OR REPLACE FUNCTION swarm.claims_wake_path_eligible_deliveries()
+RETURNS TABLE (
+  workspace_id uuid,
+  signal_id uuid,
+  principal_id uuid,
+  enqueued_at timestamptz
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+#variable_conflict use_column
+DECLARE
+  claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+  v_user uuid;
+  v_agent uuid;
+BEGIN
+  IF claims IS NULL
+    OR (claims ? 'role' AND claims->>'role' IS DISTINCT FROM 'authenticated')
+    OR coalesce(claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    RETURN;
+  END IF;
+  v_user := (claims->>'sub')::uuid;
+  IF claims ? 'agent_principal_id' THEN
+    IF coalesce(claims->>'agent_principal_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+      RETURN;
+    END IF;
+    v_agent := (claims->>'agent_principal_id')::uuid;
+    IF NOT EXISTS (
+      SELECT 1 FROM swarm.agent_principals AS p
+      WHERE p.principal_id = v_agent AND p.owner_user_id = v_user AND p.revoked_at IS NULL
+    ) THEN
+      RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM swarm.actor_wake_path_eligible_deliveries('agent', v_agent);
+    RETURN;
+  END IF;
+  RETURN QUERY SELECT * FROM swarm.actor_wake_path_eligible_deliveries('user', v_user);
+END;
+$$;
+
+ALTER FUNCTION swarm.claims_wake_path_eligible_deliveries() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.claims_wake_path_eligible_deliveries()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.claims_wake_path_eligible_deliveries()
+  TO authenticated, swarm_read;
+
 CREATE OR REPLACE FUNCTION swarm_read.signal_delivery_receipts(
   p_workspace_id uuid, p_signal_id uuid, p_agent_token_hash bytea DEFAULT NULL
 ) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
@@ -1330,20 +1487,6 @@ BEGIN
     p_workspace_id, p_signal_id, p_agent_token_hash);
   IF v_result IS NULL THEN RETURN NULL; END IF;
 
-  IF v_result ->> 'addressed' = 'true' THEN
-    SELECT COALESCE(jsonb_agg(
-      CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
-        receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
-          SELECT 1 FROM swarm.wake_path_eligible_deliveries AS d
-          WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
-            AND d.principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
-        ))
-      ELSE receipt.value END ORDER BY receipt.ordinality), '[]'::jsonb)
-    INTO v_receipts FROM jsonb_array_elements(v_result -> 'receipts')
-      WITH ORDINALITY AS receipt(value, ordinality);
-    v_result := jsonb_set(v_result, '{receipts}', v_receipts, false);
-  END IF;
-
   IF v_human_user_id IS NULL AND p_agent_token_hash IS NOT NULL THEN
     SELECT original.from_principal
     INTO v_agent_principal_id
@@ -1351,6 +1494,23 @@ BEGIN
     WHERE original.workspace_id = p_workspace_id
       AND original.id = p_signal_id
       AND original.from_kind = 'agent';
+  END IF;
+
+  IF v_result ->> 'addressed' = 'true' THEN
+    SELECT COALESCE(jsonb_agg(
+      CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
+        receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
+          SELECT 1 FROM swarm.actor_wake_path_eligible_deliveries(
+            CASE WHEN v_human_user_id IS NOT NULL THEN 'user' ELSE 'agent' END,
+            COALESCE(v_human_user_id, v_agent_principal_id)
+          ) AS d
+          WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
+            AND d.principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
+        ))
+      ELSE receipt.value END ORDER BY receipt.ordinality), '[]'::jsonb)
+    INTO v_receipts FROM jsonb_array_elements(v_result -> 'receipts')
+      WITH ORDINALITY AS receipt(value, ordinality);
+    v_result := jsonb_set(v_result, '{receipts}', v_receipts, false);
   END IF;
 
   SELECT COALESCE(jsonb_agg(
@@ -1635,9 +1795,8 @@ CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries
 WITH (security_barrier = true)
 AS
 SELECT workspace_id, signal_id, principal_id, enqueued_at
-FROM swarm.wake_path_eligible_deliveries AS d
-WHERE swarm.is_member(d.workspace_id, auth.uid())
-  AND swarm.claims_can_access_signal_channel(d.workspace_id, d.signal_id);
+FROM swarm.claims_wake_path_eligible_deliveries() AS d
+WHERE swarm.is_member(d.workspace_id, auth.uid());
 
 ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
 
@@ -2264,3 +2423,32 @@ CREATE TRIGGER agent_principals_cleanup_private_channels
   AFTER UPDATE OF revoked_at OR DELETE ON swarm.agent_principals
   FOR EACH ROW
   EXECUTE FUNCTION swarm.cleanup_private_channels_on_agent_exit();
+
+-- Retain full server-side rows in swarm.audit_log while hiding private-channel lifecycle
+-- audit rows (and their channel/member UUIDs) from workspace owners and admins who are not
+-- members of that private channel.
+CREATE OR REPLACE VIEW swarm_read.audit_log
+WITH (security_barrier = true)
+AS
+  SELECT a.*
+  FROM swarm.audit_log AS a
+  WHERE swarm.is_member(a.workspace_id, auth.uid())
+    AND EXISTS (
+      SELECT 1
+      FROM swarm.memberships AS m
+      WHERE m.workspace_id = a.workspace_id
+        AND m.user_id = auth.uid()
+        AND m.revoked_at IS NULL
+        AND m.role IN ('owner', 'admin')
+    )
+    AND (
+      a.command_kind NOT IN (
+        'private_channel_manager_promoted',
+        'private_channel_auto_archived'
+      )
+      OR swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+    );
+
+ALTER VIEW swarm_read.audit_log OWNER TO swarm_admin;
+GRANT SELECT ON swarm_read.audit_log TO authenticated, swarm_read;
+REVOKE ALL ON swarm_read.audit_log FROM PUBLIC, anon;

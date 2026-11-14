@@ -401,13 +401,16 @@ channel_not_found`, never `403`, so private channel ids and names are not disclo
 **live human manager** of a private channel is a live workspace member admitted to that
 channel who is its human creator, the human owner of its agent creator, a workspace owner
 or admin, or a member with `is_manager: true` (an ordinary invited member without
-`is_manager: true` is not a manager). Removing a person or agent from the workspace
-durably ends their private-channel memberships (re-admission to the workspace does not
-restore them); if workspace removal or role demotion (`owner`/`admin` to `member`) leaves
-a private channel with no live human manager, the server promotes the earliest-admitted
-remaining live human member (`is_manager: true`, preferring the demoted manager on role
-demotion) or auto-archives the channel when no live human member remains. Channel commands
-need no scope.
+`is_manager: true` is not a manager). Channel manager authority is separate from workspace
+admin role: when a workspace role demotion (`owner`/`admin` to `member`) removes the last
+manager's workspace-admin authority, that demoted member stays in the channel and is
+promoted to `is_manager: true` directly rather than admitting anyone from outside. Removing
+a person from the workspace durably ends both their own and their owned agents'
+private-channel memberships (and removing an agent ends its private-channel memberships;
+re-admission to the workspace does not restore them); if workspace removal leaves a private
+channel with no live human manager, the server promotes the earliest-admitted remaining
+live human member (`is_manager: true`) or auto-archives the channel when no live human
+member remains. Channel commands need no scope.
 
 | `command.kind` | fields |
 |---|---|

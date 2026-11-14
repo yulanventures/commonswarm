@@ -3605,6 +3605,27 @@ async function isPrivateChannelAgentCommand(
     `;
     if (ch?.visibility === "private") return true;
   }
+  if (kind === CLAIM_AGENT_INBOX_KIND && Array.isArray(localBody?.deliveries) && localBody.deliveries.length > 0) {
+    const signalIds: string[] = [];
+    for (const entry of localBody.deliveries) {
+      const sig = record(record(entry)?.signal);
+      if (!sig || typeof sig.id !== "string" || !UUID_RE.test(sig.id)) return false;
+      if (sig.channel_visibility !== "private") return false;
+      signalIds.push(sig.id);
+    }
+    const [nonPrivate] = await tx<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM swarm.signals AS s
+        LEFT JOIN swarm.channels AS c
+          ON c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id
+        WHERE s.workspace_id = ${workspaceId}::uuid
+          AND s.id = ANY (${signalIds}::uuid[])
+          AND (s.channel_id IS NULL OR c.visibility IS DISTINCT FROM 'private')
+      ) AS exists
+    `;
+    if (!nonPrivate?.exists) return true;
+  }
   return false;
 }
 
@@ -17750,8 +17771,12 @@ async function handleTransaction(
       !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.authenticatedAgent !== null
       && (kind !== RENEW_AGENT_TOKEN_KIND || successfulRenewal)
     ) {
-      const suppressPrivatePresence = acceptedPresenceRoute === null &&
-        await isPrivateChannelAgentCommand(tx, String(body.workspace_id ?? ""), kind, localBody);
+      const suppressPrivatePresence = await isPrivateChannelAgentCommand(
+        tx,
+        String(body.workspace_id ?? ""),
+        kind,
+        localBody,
+      );
       if (!suppressPrivatePresence) {
         await recordAgentPresence(
           tx,

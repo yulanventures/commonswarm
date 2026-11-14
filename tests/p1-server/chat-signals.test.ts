@@ -3840,8 +3840,77 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
     "personA todo_queue reflects #lock last_activity_at",
   );
 
-  // 6. pending_for_main_count on swarm_read.signal_delivery_receipts (listener-queued deliveries):
-  // Post open control asks from personA and outsiderC, claim all 3 asks (privInboundAsk + 2 open asks) into 'queued',
+  // 6. R2-A1: A private-only claim_agent_inbox (with route omitted) must NOT bump globally visible
+  // swarm.agent_presence.last_command_at or advance outsider-visible last_activity_at across roster, home_overview, or todo_queue!
+  const listenerInstanceId = randomUUID();
+  const privOnlyClaim = await sendWs(ws, agentX.token, {
+    kind: "claim_agent_inbox",
+    listener_instance_id: listenerInstanceId,
+    limit: 10,
+  });
+  assert.equal(privOnlyClaim.status, 200, JSON.stringify(privOnlyClaim.body));
+  const privOnlyDeliveries = privOnlyClaim.body.deliveries as Array<{
+    lease_id: string;
+    signal: { id: string; channel_visibility?: string };
+  }>;
+  assert.equal(privOnlyDeliveries.length, 1, "private-only inbox claim returns only privInboundAsk");
+  assert.equal(privOnlyDeliveries[0]!.signal.id, privInboundAskId);
+  assert.equal(privOnlyDeliveries[0]!.signal.channel_visibility, "private");
+
+  const [{ ts: afterPrivClaimPresenceTs }] = await sql<{ ts: string }[]>`
+    SELECT to_jsonb(last_command_at)#>>'{}' AS ts
+    FROM swarm.agent_presence
+    WHERE workspace_id = ${ws}::uuid AND principal_id = ${agentX.principal}::uuid
+  `;
+  assert.equal(
+    Date.parse(afterPrivClaimPresenceTs),
+    Date.parse(baselinePresenceTs),
+    "R2-A1: private-only claim_agent_inbox (route omitted) must NOT advance swarm.agent_presence.last_command_at",
+  );
+  for (const [label, userId] of [["ownerB (non-member owner)", ownerB.id], ["outsiderC", outsiderC.id]] as const) {
+    const r = await humanRosterAgentX(userId);
+    assert.equal(
+      Date.parse(r.last_activity_at!),
+      Date.parse(baselinePresenceTs),
+      `R2-A1: ${label} workspace_roster must retain baseline last_activity_at after private-only claim_agent_inbox`,
+    );
+    const h = await homeCardAs(userId);
+    assert.equal(
+      Date.parse(h.agentFacts.last_activity_at!),
+      Date.parse(baselinePresenceTs),
+      `R2-A1: ${label} home_overview must retain baseline last_activity_at after private-only claim_agent_inbox`,
+    );
+  }
+  const cEdgeRosterAfterPrivClaim = await readWs(outsiderAgent.token, { resource: "roster", workspace_id: ws });
+  assert.equal(cEdgeRosterAfterPrivClaim.status, 200);
+  const cSeesXAfterPrivClaim = (cEdgeRosterAfterPrivClaim.body as unknown as RosterShape).agents.find(
+    (a) => a.principal_id === agentX.principal,
+  )!;
+  assert.equal(
+    Date.parse(cSeesXAfterPrivClaim.last_activity_at!),
+    Date.parse(baselinePresenceTs),
+    "R2-A1: outsiderAgent roster must retain baseline last_activity_at after private-only claim_agent_inbox",
+  );
+  const bTodoAfterPrivClaim = await todoQueueFactsAs(ownerB.jwt);
+  assert.equal(
+    Date.parse(bTodoAfterPrivClaim.last_activity_at!),
+    Date.parse(baselinePresenceTs),
+    "R2-A1: ownerB todo_queue must retain baseline last_activity_at after private-only claim_agent_inbox",
+  );
+
+  // Move privInboundAsk into 'queued', then post and claim/queue the two open control asks for pending_for_main_count.
+  const privQueuedAck = await sendWs(ws, agentX.token, {
+    kind: "ack_agent_delivery",
+    signal_id: privInboundAskId,
+    lease_id: privOnlyDeliveries[0]!.lease_id,
+    listener_instance_id: listenerInstanceId,
+    outcome: "queued",
+    last_error_code: null,
+  });
+  assert.equal(privQueuedAck.status, 200, JSON.stringify(privQueuedAck.body));
+
+  // 7. pending_for_main_count on swarm_read.signal_delivery_receipts (listener-queued deliveries):
+  // Post open control asks from personA and outsiderC, claim both into 'queued' alongside privInboundAsk,
   // and verify personA sees pending_for_main_count = 3 while ownerB & outsiderC see 2 (hiding privInboundAsk)!
   const openControlAskA = await sendWs(ws, personA.jwt, installedPost({
     channel: openSlug,
@@ -3861,7 +3930,6 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(openControlAskC.status, 200, JSON.stringify(openControlAskC.body));
   const openControlAskCId = String(signalOf(openControlAskC.body).id);
 
-  const listenerInstanceId = randomUUID();
   const claimed = await sendWs(ws, agentX.token, {
     kind: "claim_agent_inbox",
     listener_instance_id: listenerInstanceId,
@@ -3869,7 +3937,7 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   });
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   const claimedDeliveries = claimed.body.deliveries as Array<{ lease_id: string; signal: { id: string } }>;
-  for (const targetSignalId of [privInboundAskId, openControlAskAId, openControlAskCId]) {
+  for (const targetSignalId of [openControlAskAId, openControlAskCId]) {
     const del = claimedDeliveries.find((d) => d.signal.id === targetSignalId);
     assert.ok(del !== undefined, `expected ${targetSignalId} in claimed deliveries`);
     const queuedAck = await sendWs(ws, agentX.token, {
@@ -3894,6 +3962,130 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   assert.equal(await receiptCountAs(personA.id, openControlAskAId), 3, "admitted #lock member sees all 3 queued deliveries (including #lock)");
   assert.equal(await receiptCountAs(ownerB.id, openControlAskAId), 2, "non-member agent owner must NOT see #lock queued delivery in pending_for_main_count");
   assert.equal(await receiptCountAs(outsiderC.id, openControlAskCId), 2, "outsider must NOT see #lock queued delivery in pending_for_main_count");
+
+  // 8. R2-A2: Hidden observed #lock deliveries must NEVER add (reverse seed-dependency) or remove (later-observed supersession)
+  // outsider-visible public rows in swarm_read.agent_wake_path or signal_delivery_receipts.wake_path_observing!
+  const wakeProbeAgent = await createWsAgent(ws, ownerB.id, `wake-probe-${tag}`);
+  assert.equal(
+    (await sendWs(ws, personA.jwt, {
+      kind: "channel_member_add",
+      channel_id: lockId,
+      members: [{ kind: "agent", id: wakeProbeAgent.principal }],
+    })).status,
+    200,
+  );
+  const wakeRowForProbeAs = async (userId: string) => {
+    const rows = await viewRowAs(userId, async (tx) =>
+      await tx<{ oldest_unobserved_at: Date }[]>`
+        SELECT oldest_unobserved_at
+        FROM swarm_read.agent_wake_path
+        WHERE workspace_id = ${ws}::uuid AND principal_id = ${wakeProbeAgent.principal}::uuid
+      `
+    );
+    return rows[0]?.oldest_unobserved_at?.toISOString() ?? null;
+  };
+  const receiptObservingAs = async (userId: string, signalId: string) => {
+    const [row] = await viewRowAs(userId, async (tx) =>
+      await tx<{ r: { receipts: Array<{ recipient_agent_principal_id?: string; wake_path_observing?: boolean }> } }[]>`
+        SELECT swarm_read.signal_delivery_receipts(${ws}::uuid, ${signalId}::uuid) AS r
+      `
+    );
+    return row!.r.receipts.find((rc) => rc.recipient_agent_principal_id === wakeProbeAgent.principal)?.wake_path_observing ?? null;
+  };
+  const ackObservedUnclaimed = async (token: string, signalId: string) => {
+    const res = await sendWs(ws, token, {
+      kind: "ack_agent_delivery",
+      signal_id: signalId,
+      lease_id: null,
+      listener_instance_id: null,
+      outcome: "observed",
+      last_error_code: null,
+      surfaced: true,
+      unclaimed: true,
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+  };
+
+  // Direction 1 (Reverse seed-dependency): ONLY a #lock delivery is observed, followed by a public unobserved ask.
+  const privOnlySeed = await sendWs(ws, personA.jwt, installedPost({
+    channel: lockSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Hidden observed seed in #lock",
+  }));
+  assert.equal(privOnlySeed.status, 200);
+  await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(privOnlySeed.body).id));
+
+  const pubAfterPrivSeed = await sendWs(ws, ownerB.jwt, installedPost({
+    channel: openSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Public ask after hidden #lock seed",
+  }));
+  assert.equal(pubAfterPrivSeed.status, 200);
+  const pubAfterPrivSeedId = String(signalOf(pubAfterPrivSeed.body).id);
+
+  assert.ok((await wakeRowForProbeAs(personA.id)) !== null, "R2-A2: #lock member sees public wake-path row seeded by #lock observation");
+  assert.equal(await receiptObservingAs(personA.id, pubAfterPrivSeedId), true);
+  assert.equal(await wakeRowForProbeAs(ownerB.id), null, "R2-A2: hidden #lock seed must NOT activate public agent_wake_path for non-member owner");
+  assert.equal(await wakeRowForProbeAs(outsiderC.id), null, "R2-A2: hidden #lock seed must NOT activate public agent_wake_path for outsider");
+  assert.equal(await receiptObservingAs(ownerB.id, pubAfterPrivSeedId), false, "R2-A2: hidden #lock seed must NOT flip public wake_path_observing for non-member owner");
+
+  // Direction 2 (Hidden later-observed supersession): establish a public observed seed, leave a public ask unobserved,
+  // then post a newer #lock ask and mark it observed — outsiders' public wake-path row and wake_path_observing must stay UNCHANGED!
+  const pubSeed = await sendWs(ws, ownerB.jwt, installedPost({
+    channel: openSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Public observed seed",
+  }));
+  assert.equal(pubSeed.status, 200);
+  await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(pubSeed.body).id));
+
+  const pubVisiblePending = await sendWs(ws, ownerB.jwt, installedPost({
+    channel: openSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Public pending ask before #lock observation",
+  }));
+  assert.equal(pubVisiblePending.status, 200);
+  const pubVisiblePendingId = String(signalOf(pubVisiblePending.body).id);
+
+  const beforePrivSupersedeA = await wakeRowForProbeAs(personA.id);
+  const beforePrivSupersedeB = await wakeRowForProbeAs(ownerB.id);
+  const beforePrivSupersedeC = await wakeRowForProbeAs(outsiderC.id);
+  assert.ok(beforePrivSupersedeB !== null, "public pending ask is visible in agent_wake_path before #lock supersession");
+  assert.equal(beforePrivSupersedeA, beforePrivSupersedeB);
+  assert.equal(beforePrivSupersedeC, beforePrivSupersedeB);
+  assert.equal(await receiptObservingAs(personA.id, pubVisiblePendingId), true);
+  assert.equal(await receiptObservingAs(ownerB.id, pubVisiblePendingId), true);
+
+  const privLaterObserved = await sendWs(ws, personA.jwt, installedPost({
+    channel: lockSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Newer #lock ask observed without lease",
+  }));
+  assert.equal(privLaterObserved.status, 200);
+  await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(privLaterObserved.body).id));
+
+  assert.equal(await wakeRowForProbeAs(personA.id), null, "R2-A2: #lock member sees public wake-path row superseded by newer #lock observation");
+  assert.equal(await receiptObservingAs(personA.id, pubVisiblePendingId), false);
+  assert.equal(
+    await wakeRowForProbeAs(ownerB.id),
+    beforePrivSupersedeB,
+    "R2-A2: hidden newer #lock observation must NOT remove or alter non-member owner's public agent_wake_path row",
+  );
+  assert.equal(
+    await wakeRowForProbeAs(outsiderC.id),
+    beforePrivSupersedeC,
+    "R2-A2: hidden newer #lock observation must NOT remove or alter outsider's public agent_wake_path row",
+  );
+  assert.equal(
+    await receiptObservingAs(ownerB.id, pubVisiblePendingId),
+    true,
+    "R2-A2: hidden newer #lock observation must NOT flip non-member owner's public wake_path_observing",
+  );
 });
 
 test("CM-3a R2 E2 + cross-cutting: private reply channel inheritance (ordinary, H0, hosted MCP), directed recipient privacy inside #lock, implicit thread mentions, and hosted check batch isolation", async () => {
@@ -3988,14 +4180,54 @@ test("CM-3a R2 E2 + cross-cutting: private reply channel inheritance (ordinary, 
   assert.equal(lockCreated.status, 200, JSON.stringify(lockCreated.body));
   const lockId = String((lockCreated.body.channel as Record<string, unknown>).channel_id);
 
-  // --- Implicit thread mentions regression: remove threadAgent after participating in a #lock thread ---
-  const rootMsg = await sendWs(ws, personA.jwt, installedPost({ channel: lockSlug, body: "Private thread root" }));
-  assert.equal(rootMsg.status, 200);
-  const rootMsgId = String(signalOf(rootMsg.body).id);
-  assert.equal(
-    (await sendWs(ws, threadAgent.token, installedPost({ thread_root_id: rootMsgId, body: "Thread agent participated" }))).status,
-    200,
-  );
+  // --- R2-B: Implicit thread auto-mentions regression (both agent-authored root and root mentioning agent) ---
+  const rawThreadMentionsOf = async (signalId: string) => {
+    const rows = await sql<{ agent_id: string; source: string }[]>`
+      SELECT mentioned_agent_principal_id::text AS agent_id, source
+      FROM swarm.signal_mentions
+      WHERE workspace_id = ${ws}::uuid AND signal_id = ${signalId}::uuid
+      ORDER BY position
+    `;
+    return rows.map((r) => ({ agent_id: r.agent_id, source: r.source }));
+  };
+
+  // Root shape 1: threadAgent is the root's author inside #lock.
+  const rootByAgent = await sendWs(ws, threadAgent.token, installedPost({
+    channel: lockSlug,
+    body: "Private thread root authored by threadAgent",
+  }));
+  assert.equal(rootByAgent.status, 200, JSON.stringify(rootByAgent.body));
+  const rootByAgentId = String(signalOf(rootByAgent.body).id);
+
+  // Root shape 2: personA authors a root inside #lock that explicitly mentions threadAgent.
+  const rootMentioningAgent = await sendWs(ws, personA.jwt, installedPost({
+    channel: lockSlug,
+    body: "Private thread root mentioning threadAgent",
+    mentions: [{ kind: "agent", id: threadAgent.principal }],
+  }));
+  assert.equal(rootMentioningAgent.status, 200, JSON.stringify(rootMentioningAgent.body));
+  const rootMentioningAgentId = String(signalOf(rootMentioningAgent.body).id);
+
+  // Positive controls BEFORE removing threadAgent from #lock: untagged replies from personA store source='thread' and deliver!
+  for (const [label, rootId] of [
+    ["agent-authored root", rootByAgentId],
+    ["agent-mentioned root", rootMentioningAgentId],
+  ] as const) {
+    const beforeRem = await sendWs(ws, personA.jwt, installedPost({
+      thread_root_id: rootId,
+      body: `Reply before removal (${label})`,
+    }));
+    assert.equal(beforeRem.status, 200, JSON.stringify(beforeRem.body));
+    const beforeRemId = String(signalOf(beforeRem.body).id);
+    assert.deepEqual(
+      await rawThreadMentionsOf(beforeRemId),
+      [{ agent_id: threadAgent.principal, source: "thread" }],
+      `positive control (${label}): admitted threadAgent receives implicit source='thread' mention`,
+    );
+    assert.deepEqual(await deliveriesOf(beforeRemId), [threadAgent.principal]);
+  }
+
+  // Remove threadAgent from #lock while keeping threadAgent's workspace seat live!
   assert.equal(
     (await sendWs(ws, personA.jwt, {
       kind: "channel_member_remove",
@@ -4004,17 +4236,33 @@ test("CM-3a R2 E2 + cross-cutting: private reply channel inheritance (ordinary, 
     })).status,
     200,
   );
-  const followUpInThread = await sendWs(ws, personA.jwt, installedPost({
-    thread_root_id: rootMsgId,
-    body: "Follow-up after threadAgent removed",
+  const stillLiveInWorkspace = await sendWs(ws, threadAgent.token, installedPost({
+    body: "threadAgent workspace seat remains live in #general",
   }));
-  assert.equal(followUpInThread.status, 200);
-  const followUpId = String(signalOf(followUpInThread.body).id);
-  assert.deepEqual(
-    await deliveriesOf(followUpId),
-    [],
-    "removed thread participant must NOT receive implicit source='thread' mention or delivery",
-  );
+  assert.equal(stillLiveInWorkspace.status, 200, JSON.stringify(stillLiveInWorkspace.body));
+
+  // After removal from #lock, untagged replies from personA on BOTH roots must store NO source='thread' mention AND NO delivery!
+  for (const [label, rootId] of [
+    ["agent-authored root", rootByAgentId],
+    ["agent-mentioned root", rootMentioningAgentId],
+  ] as const) {
+    const followUp = await sendWs(ws, personA.jwt, installedPost({
+      thread_root_id: rootId,
+      body: `Follow-up after threadAgent removed (${label})`,
+    }));
+    assert.equal(followUp.status, 200, JSON.stringify(followUp.body));
+    const followUpId = String(signalOf(followUp.body).id);
+    assert.deepEqual(
+      await rawThreadMentionsOf(followUpId),
+      [],
+      `R2-B (${label}): edge gate must omit stored implicit source='thread' row in swarm.signal_mentions after #lock removal`,
+    );
+    assert.deepEqual(
+      await deliveriesOf(followUpId),
+      [],
+      `R2-B (${label}): removed agent must NOT receive delivery on #lock thread reply`,
+    );
+  }
 
   // --- E2: Ordinary post_signal + H0 reply + Hosted MCP reply inheritance & recipient isolation ---
   const askFromLocalX = await sendWs(ws, localAgentX.token, installedPost({
@@ -4469,6 +4717,67 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(promoAudit?.reason, "workspace_member_removed");
   assert.equal(promoAudit?.detail, `channel_id=${lock1Id},promoted_user_id=${memberB.id}`);
 
+  // R2-A3: Client audit view (swarm_read.audit_log) must hide private-channel lifecycle rows and identifiers
+  // from non-member workspace owners/admins (ownerOut, adminY), while showing them to an admitted #lock admin!
+  const clientAuditAs = async (userId: string) =>
+    await viewRowAs(userId, async (tx) =>
+      await tx<{
+        command_kind: string;
+        actor_user: string | null;
+        stream_id: string | null;
+        reason: string | null;
+        detail: string | null;
+      }[]>`
+        SELECT command_kind, actor_user::text, stream_id::text, reason, detail
+        FROM swarm_read.audit_log
+        WHERE workspace_id = ${ws}::uuid
+        ORDER BY audit_id ASC
+      `
+    );
+
+  const ownerOutAuditAfterPromo = await clientAuditAs(ownerOut.id);
+  assert.ok(
+    ownerOutAuditAfterPromo.some((r) => r.command_kind === "remove_member"),
+    "positive control: workspace owner ownerOut can read workspace-level rows in swarm_read.audit_log",
+  );
+  assert.deepEqual(
+    ownerOutAuditAfterPromo.filter((r) =>
+      r.command_kind === "private_channel_manager_promoted" || r.command_kind === "private_channel_auto_archived"
+    ),
+    [],
+    "R2-A3: non-member workspace owner must NOT see private_channel_manager_promoted in swarm_read.audit_log",
+  );
+  assert.equal(
+    JSON.stringify(ownerOutAuditAfterPromo).includes(lock1Id),
+    false,
+    "R2-A3: non-member workspace owner must NOT see private channel UUID in swarm_read.audit_log",
+  );
+
+  // Positive control for admitted admin: memberB adds adminY to #lock1 -> adminY sees #lock1's promotion row in swarm_read.audit_log,
+  // then adminY leaves #lock1 so memberB remains sole manager for subsequent scenarios!
+  assert.equal(
+    (await sendWs(ws, memberB.jwt, {
+      kind: "channel_member_add",
+      channel_id: lock1Id,
+      members: [{ kind: "user", id: adminY.id }],
+    })).status,
+    200,
+  );
+  const adminYAuditWhileAdmitted = await clientAuditAs(adminY.id);
+  assert.deepEqual(
+    adminYAuditWhileAdmitted
+      .filter((r) => r.command_kind === "private_channel_manager_promoted")
+      .map((r) => ({ stream_id: r.stream_id, actor_user: r.actor_user, reason: r.reason, detail: r.detail })),
+    [{
+      stream_id: lock1Id,
+      actor_user: memberB.id,
+      reason: "workspace_member_removed",
+      detail: `channel_id=${lock1Id},promoted_user_id=${memberB.id}`,
+    }],
+    "R2-A3 positive control: admitted #lock1 admin sees #lock1 promotion row in swarm_read.audit_log",
+  );
+  assert.equal((await sendWs(ws, adminY.jwt, { kind: "channel_leave", channel_id: lock1Id })).status, 200);
+
   assert.equal(
     (await sendWs(ws, ownerOut.jwt, { kind: "channel_update", channel_id: lock1Id, purpose: "Owner probe" })).status,
     404,
@@ -4613,6 +4922,22 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(archiveAudit?.command_kind, "private_channel_auto_archived");
   assert.equal(archiveAudit?.reason, "no_remaining_human_members");
   assert.equal(archiveAudit?.detail, `channel_id=${lock1Id}`);
+
+  // R2-A3 after both role-demotion promotion (#lock2) and zero-human auto-archive (#lock1):
+  // neither non-member ownerOut nor departed adminY sees #lock1 or #lock2 lifecycle rows or UUIDs in swarm_read.audit_log!
+  for (const [label, userId] of [["ownerOut", ownerOut.id], ["adminY", adminY.id]] as const) {
+    const auditRows = await clientAuditAs(userId);
+    assert.deepEqual(
+      auditRows.filter((r) =>
+        r.command_kind === "private_channel_manager_promoted" || r.command_kind === "private_channel_auto_archived"
+      ),
+      [],
+      `R2-A3: ${label} outside #lock1/#lock2 must NOT see promotion or auto-archive rows in swarm_read.audit_log`,
+    );
+    const serialized = JSON.stringify(auditRows);
+    assert.equal(serialized.includes(lock1Id), false, `R2-A3: ${label} audit view must NOT leak lock1Id`);
+    assert.equal(serialized.includes(lock2Id), false, `R2-A3: ${label} audit view must NOT leak lock2Id`);
+  }
   const agentPostArchived = await sendWs(ws, agentOwnedByOut.token, installedPost({
     channel: lock1Slug,
     body: "Agent post after zero-human auto-archive",

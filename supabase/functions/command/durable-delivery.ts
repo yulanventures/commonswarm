@@ -948,6 +948,10 @@ export async function ackAgentDelivery(
         WHERE s.workspace_id = ${args.workspaceId}::uuid
           AND s.id = ${args.signalId}::uuid
           AND s.kind IN ('ask', 'note')
+          AND (
+            s.channel_id IS NULL
+            OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'agent', ${args.recipientPrincipalId}::uuid)
+          )
           AND (s.to_agent_principal_id = ${args.recipientPrincipalId}::uuid
             OR EXISTS (
               SELECT 1 FROM swarm.signal_recipients AS r
