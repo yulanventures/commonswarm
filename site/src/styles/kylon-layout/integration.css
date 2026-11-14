@@ -248,10 +248,6 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-product .cs-ico
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__title {
     font-size: 17px; font-weight: 700; line-height: 24px; letter-spacing: -0.02em;
   }
-  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill {
-    margin-inline-start: 0; min-block-size: 24px; padding: 0 8px; border-radius: 6px;
-    border: 1px solid var(--carbon-line, var(--cs-line)); background: var(--k-shell-subtle);
-  }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail {
     flex: none; display: flex; flex-direction: row; align-items: center;
     inline-size: 100%; block-size: 32px; min-block-size: 32px; padding: 0 20px; gap: 4px;
