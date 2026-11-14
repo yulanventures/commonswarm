@@ -83,8 +83,9 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
 type Step = { media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true;
-  /** Write one localStorage item for this origin, then load the page again so the app starts with it (a draft saved
-   *  by an earlier build, for example). */
+  /** Load the page again with one localStorage item already in place, so the app starts with it (a draft saved by an
+   *  earlier build, for example). Every page load clears stored composer drafts first, so the item is handed across
+   *  the reload in sessionStorage and written after that clearing, by the same init script. */
   storage?: { key: string; value: string } };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
@@ -98,9 +99,9 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
    *  as after a deploy; the page's navigation itself is served unchanged. */
   newBuild?: true;
-  /** Captured by itself, after the pooled screens of its pass: it leaves something behind that another open page of
-   *  the same workspace would pick up (a composer draft, which is stored per workspace). The browser context ends
-   *  with the pass, so nothing outlives it. */
+  /** Captured by itself, after the pooled screens of its pass. For a screen whose proof depends on something it keeps
+   *  in localStorage during setup (a composer draft, which is stored per workspace): every page load clears stored
+   *  drafts, so another page loading beside it would remove the item under it. */
   alone?: true }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
@@ -425,8 +426,8 @@ async function main(): Promise<void> {
        own measurement: the list scrolls under a held pointer or the rows around a measured one move. So a screen with
        such a spec is captured by itself, after the pooled ones. Results keep the order the screens were given in. */
     const postsRefreshNote = (id: string) => (HOVER_WITNESSES[id] ?? []).some(spec => spec.focusAcrossRebuild);
-    /* A screen the manifest marks `alone` leaves state behind for its workspace; it runs last of all, after the note
-       posters, so no later page of the pass can open with that state showing. */
+    /* A screen the manifest marks `alone` runs after everything else, one at a time: no other page loads while its
+       setup depends on what it stored. */
     const runScreens = async <T extends { id: string; alone?: true }, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> => {
       const done = new Map<T, R>();
       const pooled = items.filter(item => !postsRefreshNote(item.id) && !item.alone);
@@ -500,7 +501,7 @@ async function main(): Promise<void> {
         // (app.astro). Store this theme explicitly so light captures are really light; each item
         // also records the effective theme, so a mismatch is visible rather than silent.
         for (const c of [context, signedIn, invitee]) {
-          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } } catch {}` });
+          await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } const stored = sessionStorage.getItem("commonswarm-audit:stored"); if (stored) { sessionStorage.removeItem("commonswarm-audit:stored"); for (const [k, v] of Object.entries(JSON.parse(stored))) localStorage.setItem(k, String(v)); } } catch {}` });
         }
         return { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats };
       };
@@ -540,6 +541,14 @@ async function main(): Promise<void> {
         return () => ({ ...answers });
       };
 
+      /** The app has left its loading state and, where a feed is shown, has its first page. */
+      const appBooted = (page: any): Promise<unknown> => page.waitForFunction(() => {
+        const app = document.querySelector("live-dashboard");
+        if (!app) return true;
+        if (app.getAttribute("data-state") === "loading") return false;
+        const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
+        return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
+      }, undefined, { timeout: 30_000 });
       const openScreen = async (page: any, screen: Screen): Promise<boolean> => {
         if (screen.newBuild) {
           const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
@@ -557,13 +566,7 @@ async function main(): Promise<void> {
           if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.base);
         }
         await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
-        await page.waitForFunction(() => {
-          const app = document.querySelector("live-dashboard");
-          if (!app) return true;
-          if (app.getAttribute("data-state") === "loading") return false;
-          const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
-          return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
-        }, undefined, { timeout: 30_000 });
+        await appBooted(page);
         await page.waitForFunction(({ id, hasWorkspace }: { id: string; hasWorkspace: boolean }) => {
           if (hasWorkspace && !document.querySelector('[data-home-workspace-shell] [data-home-pane="todos"]')) return false;
           if (id.startsWith("app.definitions") && !document.querySelector('.household-definitions [data-def-action="select"]')) return false;
@@ -651,9 +654,10 @@ async function main(): Promise<void> {
             catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
           }
           if (step.storage) {
-            await page.evaluate(([key, value]: [string, string]) => window.localStorage.setItem(key, value),
+            await page.evaluate(([key, value]: [string, string]) => window.sessionStorage.setItem("commonswarm-audit:stored", JSON.stringify({ [key]: value })),
               [fill(step.storage.key, seed.ids), fill(step.storage.value, seed.ids)] as [string, string]);
-            await page.reload();
+            await page.reload({ waitUntil: "domcontentloaded" });
+            await appBooted(page);
           }
           if (step.wait) await page.waitForTimeout(step.wait);
           if (step.settle) await settle(page);

@@ -627,12 +627,6 @@
     "path": "/app?w={workspace}",
     "setup": [
       {
-        "storage": {
-          "key": "commonswarm:composer-draft:{owner}:{workspace}:all-signals",
-          "value": ""
-        }
-      },
-      {
         "press": "ControlOrMeta+k"
       },
       {
@@ -729,12 +723,6 @@
     "kind": "view",
     "path": "/app?w={workspace}",
     "setup": [
-      {
-        "storage": {
-          "key": "commonswarm:composer-draft:{owner}:{workspace}:all-signals",
-          "value": ""
-        }
-      },
       {
         "waitFor": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
