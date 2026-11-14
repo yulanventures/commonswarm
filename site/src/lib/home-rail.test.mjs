@@ -210,6 +210,3 @@ test("a private channel's row draws a lock in place of the hash and says private
   assert.equal("private" in link("b").dataset, false);
   assert.equal(link("b").attrs["aria-label"], "#ops");
 });
-  const old = find(archived, (node) => node.dataset?.railChannel === "z")[0];
-  if (old) assert.equal(old.children.find((node) => node.className === "hm-rail__icon").dataset.icon, "archive");
-});
