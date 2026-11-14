@@ -348,6 +348,36 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       ids["message.thread"] = recentRootId;
       steps.push("seed_thread");
     } catch (error) { note("seed_thread", error); }
+    /* Three more replies to that thread, so its summary line has something to say: an agent, the owner,
+       and the first replier again. Four replies from three repliers, the newest a few seconds old. */
+    if (ids["message.thread"] && ids.agent) {
+      try {
+        const root = ids["message.thread"];
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES
+          (
+            ${randomUUID()}::uuid, ${workspace}::uuid, ${ids.agent}::uuid, 'agent', NULL, NULL, ${root}::uuid,
+            NULL, 'note', 'The quote matches last year''s visit plus the vessel check.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '50 seconds',
+            NULL, ${root}::uuid, false
+          ),
+          (
+            ${randomUUID()}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, ${root}::uuid,
+            NULL, 'note', 'Good. Booking it for Friday morning.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '40 seconds',
+            NULL, ${root}::uuid, false
+          ),
+          (
+            ${randomUUID()}::uuid, ${workspace}::uuid, ${adminPerson.id}::uuid, 'user', NULL, NULL, ${root}::uuid,
+            NULL, 'note', 'I will be home to let them in.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '30 seconds',
+            NULL, ${root}::uuid, false
+          )`;
+        steps.push("seed_thread_repliers");
+      } catch (error) { note("seed_thread_repliers", error); }
+    }
 
     if (ids.agent) {
       try {

@@ -1378,6 +1378,7 @@ import "../../styles/kylon-command-palette.css";
   import type { AgentPresenceRow } from "../../../../src/cloud/agent-presence";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
+  import { THREAD_LAST_REPLY_PREFIX, threadLastReplyAt, threadLastReplyTime, threadRepliers } from "../../lib/thread-summary";
   import {
     workspaceStateAfterClose,
     type CloseableWorkspace,
@@ -5362,14 +5363,27 @@ import "../../styles/kylon-command-palette.css";
       pill.type = "button";
       pill.className = "hm-lead-pill";
       pill.dataset.channelLeadPill = "";
+      // The button is the target; the body inside it is what is drawn, so a 44px target stays a small chip.
+      const body = document.createElement("span");
+      body.className = "hm-lead-pill__body";
       if (lead) {
-        pill.textContent = `Lead: ${lead.name}`;
+        const mark = document.createElement("span");
+        mark.className = "hm-lead-pill__mark";
+        mark.setAttribute("aria-hidden", "true");
+        mark.textContent = [...lead.name.trim()][0]?.toUpperCase() ?? "";
+        const name = document.createElement("span");
+        name.className = "hm-lead-pill__name";
+        name.textContent = lead.name;
+        body.append(mark, name);
+        pill.setAttribute("aria-label", `Lead: ${lead.name}`);
+        pill.title = `Lead: ${lead.name}`;
         pill.addEventListener("click", () => openEntityPanel({ kind: "agent", id: lead.principalId }, pill));
       } else {
-        pill.textContent = "Set lead";
+        body.textContent = "Set lead";
         pill.dataset.leadUnset = "";
         pill.addEventListener("click", () => openRosterDialog());
       }
+      pill.append(body);
       copy.insertBefore(pill, copy.querySelector("[data-channel-header-description]"));
     };
     const renderHomeShell = (): void => {
@@ -8684,8 +8698,10 @@ import "../../styles/kylon-command-palette.css";
         replies.id = `dashboard-thread-${group.root.id}`;
         replies.hidden = !expanded;
         let previousReply: Signal | null = null;
+        const replyRows = new Map<Signal, HTMLElement>();
         for (const reply of group.replies) {
           const replyRow = buildMessageRow(reply, true);
+          replyRows.set(reply, replyRow);
           groupStreamMessage(replyRow, reply, previousReply); replies.append(replyRow); previousReply = reply;
         }
         /* THE COUNT IS THE CONTROL. It opens the replies IN PLACE — no drawer, no navigation,
@@ -8697,7 +8713,34 @@ import "../../styles/kylon-command-palette.css";
         toggle.dataset.threadToggle = group.root.id;
         toggle.setAttribute("aria-expanded", String(expanded));
         toggle.setAttribute("aria-controls", replies.id);
-        toggle.textContent = threadReplyCountLabel(group.replies.length);
+        /* One line: who replied, how many, and when the last one came. Each mark is a copy of the one
+           on that person's own reply row, so the line and the rows can never disagree. */
+        const faces = document.createElement("span");
+        faces.className = "dashboard__thread-faces";
+        faces.setAttribute("aria-hidden", "true");
+        for (const reply of threadRepliers(group.replies)) {
+          const mark = replyRows.get(reply)?.querySelector<HTMLElement>(".dashboard__message-avatar")?.cloneNode(true);
+          if (!(mark instanceof HTMLElement)) continue;
+          mark.classList.add("dashboard__thread-face");
+          if (mark.dataset.size) mark.dataset.size = "22";
+          for (const name of ["id", "role", "aria-label", "title", "tabindex"]) mark.removeAttribute(name);
+          mark.querySelector(".hm-owner-badge")?.remove();
+          faces.append(mark);
+        }
+        const count = document.createElement("span");
+        count.className = "dashboard__thread-count";
+        count.textContent = threadReplyCountLabel(group.replies.length);
+        toggle.append(...(faces.childElementCount ? [faces] : []), count);
+        const lastAt = threadLastReplyAt(group.replies);
+        const lastTime = lastAt === null ? "" : threadLastReplyTime(lastAt);
+        if (lastAt !== null && lastTime) {
+          const last = document.createElement("span");
+          last.className = "dashboard__thread-last";
+          const when = document.createElement("time");
+          when.dateTime = lastAt; when.textContent = lastTime;
+          last.append(`${THREAD_LAST_REPLY_PREFIX} `, when);
+          toggle.append(last);
+        }
         toggle.addEventListener("click", () => {
           const next = toggle.getAttribute("aria-expanded") !== "true";
           toggle.setAttribute("aria-expanded", String(next));

@@ -27,7 +27,12 @@
     "id": "app.chat.general",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
-    "setup": [],
+    "setup": [
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "[data-home-workspace-shell] [data-channel-lead-pill] .hm-lead-pill__name"
+      }
+    ],
     "ready": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]",
     "states": [
       "dense"
@@ -509,6 +514,33 @@
     ],
     "requiresSeed": [
       "create_workspace"
+    ]
+  },
+  {
+    "id": "app.thread.line",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-last time"
+      },
+      {
+        "scroll": "li[data-thread-root=\"{message.thread}\"]"
+      }
+    ],
+    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-last time",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_thread",
+      "seed_thread_repliers"
+    ],
+    "frame": [
+      "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-faces > .dashboard__thread-face:nth-child(3)",
+      "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-count",
+      "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-last time"
     ]
   },
   {
