@@ -67,6 +67,7 @@ BEGIN
   INTO missing
   FROM (
     VALUES
+      ('a person receives their own private channel signals'),
       ('agent receives its own wake'),
       ('workspace members receive agent activity'),
       ('workspace members receive signals')
@@ -94,6 +95,6 @@ SQL
 target_psql --file "$sql_file" >>"$LOG_FILE" 2>&1
 log "application-seeded realtime tenant configured to require database TLS"
 log "supabase_realtime publication exists and stays empty because clients use Broadcast only"
-log "all three private Broadcast policies are present"
+log "all four private Broadcast policies are present"
 log "Realtime authorization function EXECUTE grants are present"
 log "complete setup-realtime; restart realtime to clear its tenant cache"
