@@ -554,3 +554,34 @@ export const composerAddressNotice = (
   if (state.announcedPrune > 0) clauses.push(composerPrunedNotice(state.announcedPrune));
   return clauses.join(" ");
 };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────
+ * A PUBLIC PLACE HAS NO To: SET. In a channel and in a thread an @tag is a MENTION: the
+ * message stays readable by everyone there and the people and agents it names are told. Only
+ * a Direct Message is addressed. So the two things a tag can fail at are said in mention
+ * words here, not in To: words.
+ * ──────────────────────────────────────────────────────────────────────────────────────── */
+
+/** A tag that names two people or agents mentions neither. */
+export const mentionAmbiguousNotice = (names: readonly string[]): string =>
+  `${joinNames(names.map((name) => `"${name}"`))} ${
+    names.length === 1 ? "names" : "name"
+  } more than one person or agent here, so ${
+    names.length === 1 ? "it mentions" : "they mention"
+  } nobody. Choose the name from the mention list.`;
+
+/** Tags past the number one message may mention. */
+export const mentionOverflowNotice = (names: readonly string[]): string =>
+  `A message mentions at most ${COMPOSER_TO_MAX}, so ${joinNames(names)} ${
+    names.length === 1 ? "is" : "are"
+  } not mentioned.`;
+
+/** Everything a public composer has to say about tags it could not honour, or "". */
+export const composerMentionNotice = (
+  parsed: { overflow: readonly string[]; ambiguous: readonly string[] },
+): string => {
+  const clauses: string[] = [];
+  if (parsed.overflow.length > 0) clauses.push(mentionOverflowNotice(parsed.overflow));
+  if (parsed.ambiguous.length > 0) clauses.push(mentionAmbiguousNotice(parsed.ambiguous));
+  return clauses.join(" ");
+};
