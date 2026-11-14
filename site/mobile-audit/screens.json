@@ -1232,6 +1232,33 @@
     ]
   },
   {
+    "id": "menu.star-order",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-home-starred] [data-rail-channel-menu=\"{channel.group}\"]"
+      },
+      {
+        "click": "[data-home-starred] [data-rail-channel-menu=\"{channel.group}\"]"
+      }
+    ],
+    "ready": ".cs-context-menu[role=\"menu\"] [role=\"menuitem\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "star_channel",
+      "star_general"
+    ]
+  },
+  {
     "id": "menu.assignee",
     "kind": "view",
     "path": "/app?w={workspace}&todo={todo}",

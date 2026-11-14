@@ -54,6 +54,8 @@ export interface WorkspaceChannel {
   createdByKind: string;
   createdAt: string;
   archivedAt: string | null;
+  /** The workspace's shared order, set by an owner or admin. 0 or absent: never placed. */
+  sortRank?: number;
 }
 
 /** What the feed is filtered to. `null` is the unfiltered view. */
@@ -160,10 +162,16 @@ export const channelViewLabel = (
 };
 
 const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+/**
+ * Channels an owner or admin has placed come first, in that order; the rest follow by name. A channel
+ * created after the last reorder therefore joins at the end instead of jumping above the chosen order,
+ * which is also how the server fills in the channels a reorder does not name.
+ */
+const placed = (channel: WorkspaceChannel): number => ((channel.sortRank ?? 0) > 0 ? channel.sortRank! : Number.MAX_SAFE_INTEGER);
 const compareChannels = (left: WorkspaceChannel, right: WorkspaceChannel): number =>
-  compareText(left.slug, right.slug) || compareText(left.channelId, right.channelId);
+  placed(left) - placed(right) || compareText(left.slug, right.slug) || compareText(left.channelId, right.channelId);
 
-/** Live channels only, in the order a reader scans them: by slug, the id breaking a tie. */
+/** Live channels only, in the order a reader scans them: the workspace's shared order, then by name. */
 export const liveChannels = (
   channels: readonly WorkspaceChannel[],
 ): WorkspaceChannel[] =>
@@ -333,6 +341,58 @@ export const withChannelPreference = <Row extends ChannelUnreadState>(
     };
   });
 };
+
+/** `ids` with one entry moved a step earlier or later, or null where it cannot move (an end, or not listed). */
+export const movedByStep = <T>(ids: readonly T[], id: T, step: -1 | 1): T[] | null => {
+  const from = ids.indexOf(id);
+  const to = from + step;
+  if (from < 0 || to < 0 || to >= ids.length) return null;
+  const next = [...ids];
+  next.splice(to, 0, ...next.splice(from, 1));
+  return next;
+};
+
+/** `ids` with one entry moved to sit just before another (or last, for null); null where nothing would change. */
+export const movedBefore = <T>(ids: readonly T[], id: T, before: T | null): T[] | null => {
+  if (!ids.includes(id) || id === before || (before !== null && !ids.includes(before))) return null;
+  const rest = ids.filter((entry) => entry !== id);
+  const at = before === null ? rest.length : rest.indexOf(before);
+  const next = [...rest.slice(0, at), id, ...rest.slice(at)];
+  return next.every((entry, index) => entry === ids[index]) ? null : next;
+};
+
+/**
+ * A whole list's order after its visible part was reordered: entries that are not shown (a channel the
+ * viewer starred sits under Starred, not in Channels) keep their slots, and the shown ones fill the
+ * other slots in their new order.
+ */
+export const mergedOrder = <T>(full: readonly T[], shown: readonly T[]): T[] => {
+  const queue = [...shown];
+  return full.map((entry) => (shown.includes(entry) ? queue.shift()! : entry));
+};
+
+/** The viewer's stars in a new order, as the rows will read once it is saved. `viewIds` lists them all. */
+export const withStarOrder = <Row extends ChannelUnreadState>(rows: readonly Row[], viewIds: readonly string[]): Row[] =>
+  rows.map((row) => {
+    const at = viewIds.indexOf(viewIdOf(row));
+    return at < 0 || row.starred !== true ? row : { ...row, starRank: at };
+  });
+
+/** The workspace's channels in a new shared order: the listed ones first, in that order. */
+export const withChannelOrder = (channels: readonly WorkspaceChannel[], channelIds: readonly string[]): WorkspaceChannel[] => {
+  const rest = liveChannels(channels).map((channel) => channel.channelId).filter((id) => !channelIds.includes(id));
+  const order = [...channelIds, ...rest];
+  return channels.map((channel) => {
+    const at = order.indexOf(channel.channelId);
+    return at < 0 ? channel : { ...channel, sortRank: at + 1 };
+  });
+};
+
+export const MOVE_UP_LABEL = "Move up";
+export const MOVE_DOWN_LABEL = "Move down";
+/** Read out after a move, so a person who cannot see the rail knows where the channel now sits. */
+export const orderAnnouncement = (slug: string, position: number, total: number): string =>
+  `${channelLabel(slug)}, ${position} of ${total}`;
 
 export const STARRED_TITLE = "Starred";
 /** The star is a toggle button: its name stays, and aria-pressed carries the state. */

@@ -1193,7 +1193,7 @@ import "../../styles/kylon-command-palette.css";
   import { PasswordDialogGuard, type PasswordDialogTicket } from "../../lib/password-dialog";
   import { completePasswordChange, type CurrentCheck } from "../../lib/password-change-completion";
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
-  import { buildHomeRail, type RailChannelsVM } from "../../lib/home-rail";
+  import { buildHomeRail, type RailChannelRowVM, type RailChannelsVM, type RailOrderList } from "../../lib/home-rail";
   import { openContextMenu, type ContextMenuItem } from "../../lib/context-menu";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     buildOrganizationMenu, buildWorkspacePicker, organizationMenuItems, organizationWorkspaces, menuFocusIndex, type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
@@ -1332,6 +1332,8 @@ import "../../styles/kylon-command-palette.css";
     subscribeAgentActivity,
     subscribeWorkspaceSignals,
     setChannelPreference,
+    reorderChannels,
+    reorderStarredChannels,
     uuid,
     browserSignalFromRow,
     BROWSER_SIGNAL_COLUMNS,
@@ -1438,6 +1440,14 @@ import "../../styles/kylon-command-palette.css";
     channelPreferenceFor,
     starredViewIds,
     withChannelPreference,
+    MOVE_DOWN_LABEL,
+    MOVE_UP_LABEL,
+    mergedOrder,
+    movedBefore,
+    movedByStep,
+    orderAnnouncement,
+    withChannelOrder,
+    withStarOrder,
     type ChannelPreference,
     CHANNEL_SETTINGS_LABEL,
     UNARCHIVE_CHANNEL_LABEL,
@@ -5251,6 +5261,8 @@ import "../../styles/kylon-command-palette.css";
           focusConversationHeading();
         },
         channelMenu: openChannelRowMenu,
+        moveChannel: (list: RailOrderList, id: string, step: -1 | 1) => { void applyRailOrder(list, id, ids => movedByStep(ids, id, step)); },
+        dropChannel: (list: RailOrderList, id: string, ontoId: string) => { void applyRailOrder(list, id, ids => droppedOnto(ids, id, ontoId)); },
         newChannel: (button: HTMLElement) => openChannelDialog("create", null, button),
         browseChannels: (button: HTMLElement) => openChannelDirectory(button),
         retryChannels: () => { void refreshChannels(activeWorkspaceId, requestVersion).catch(() => {}); },
@@ -11046,6 +11058,9 @@ import "../../styles/kylon-command-palette.css";
         current: reading && activeChannelId === channel.channelId,
         unread: channelUnreadFor(channelUnreadRows, channel.channelId), manageable: viewerMayManageChannel(channel),
         muted: muted(channel.channelId) });
+      const movable = (rows: RailChannelRowVM[], list: RailOrderList): RailChannelRowVM[] =>
+        !sampleMode && rows.length > 1 ? rows.map(entry => ({ ...entry, reorder: list })) : rows;
+      const sharedOrder = viewerWorkspaceRole() === "owner" || viewerWorkspaceRole() === "admin";
       const general = { id: GENERAL_CHANNEL_ID, slug: GENERAL_CHANNEL_SLUG, href: href(GENERAL_CHANNEL_ID),
         current: reading && activeChannelId === GENERAL_CHANNEL_ID,
         unread: channelUnreadFor(channelUnreadRows, GENERAL_CHANNEL_ID), manageable: false, muted: muted(GENERAL_CHANNEL_ID) };
@@ -11056,9 +11071,12 @@ import "../../styles/kylon-command-palette.css";
       return {
         state: !channelsLoaded ? "loading" : channelListFailed ? "failed" : "ready",
         general,
-        starred: starredIds.flatMap(id => id === GENERAL_CHANNEL_ID ? [general]
-          : live.filter(channel => channel.channelId === id).map(row)),
-        channels: live.filter(channel => !starredIds.includes(channel.channelId)).map(row),
+        /* The Starred order is the viewer's own. The Channels order is the workspace's, so only an owner or
+           admin may move those rows; #general is not a row of it and stays first. */
+        starred: movable(starredIds.flatMap(id => id === GENERAL_CHANNEL_ID ? [general]
+          : live.filter(channel => channel.channelId === id).map(row)), "starred"),
+        channels: sharedOrder ? movable(live.filter(channel => !starredIds.includes(channel.channelId)).map(row), "channels")
+          : live.filter(channel => !starredIds.includes(channel.channelId)).map(row),
         archived: archivedChannels(channels).map(row),
         mayCreate: !sampleMode,
       };
@@ -11668,10 +11686,76 @@ import "../../styles/kylon-command-palette.css";
       if (back.directory) openChannelDirectory(back.element, true);
       else if (!restoreChannelFocus(back)) focusConversationHeading();
     };
+    /** Which movable list a rail row's control belongs to, read from where it sits. */
+    const railOrderListOf = (element: HTMLElement): RailOrderList | null => {
+      const list = element.closest<HTMLElement>("[data-rail-reorder]")?.dataset.railReorder;
+      return list === "starred" || list === "channels" ? list : null;
+    };
+    const railOrderIds = (list: RailOrderList): string[] =>
+      (list === "starred" ? railChannelSection()?.starred : railChannelSection()?.channels)?.map(entry => entry.id) ?? [];
+    /** A row dropped onto another takes that row's place: before it when moving up, after it when moving down. */
+    const droppedOnto = (ids: readonly string[], id: string, ontoId: string): string[] | null => {
+      const from = ids.indexOf(id), onto = ids.indexOf(ontoId);
+      if (from < 0 || onto < 0) return null;
+      return movedBefore(ids, id, from < onto ? ids[onto + 1] ?? null : ontoId);
+    };
+
+    /**
+     * Saves a new order for one rail list: the viewer's own stars, or the workspace's shared channel order.
+     * The rail answers at once and the row keeps focus; the next read replaces the guess with what the server
+     * stored, and a refusal is announced. One save at a time.
+     */
+    let railOrderSaving = false;
+    const applyRailOrder = async (list: RailOrderList, id: string, change: (ids: readonly string[]) => string[] | null): Promise<void> => {
+      const workspaceId = activeWorkspaceId;
+      if (!session || sampleMode || !workspaceId || railOrderSaving || channelPreferenceSaving) return;
+      if (list === "starred" && channelUnreadRows === null) return;
+      const next = change(railOrderIds(list));
+      if (!next) return;
+      railOrderSaving = true;
+      const status = one<HTMLElement>("[data-channel-preference-status]");
+      const slug = id === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG : channelById(channels, id)?.slug ?? "";
+      const row = `[data-rail-reorder="${list}"] [data-rail-channel="${CSS.escape(id)}"]`;
+      const hadFocus = document.activeElement instanceof HTMLElement && document.activeElement.matches(row);
+      const paint = (): void => {
+        renderHomeRail(); renderChannelDirectoryDialog();
+        if (hadFocus) one<HTMLElement>(row)?.focus({ preventScroll: true });
+      };
+      let problem = "";
+      const version = requestVersion;
+      try {
+        if (list === "starred") {
+          channelUnreadGeneration += 1;
+          channelUnreadRows = withStarOrder(channelUnreadRows!, next);
+          paint();
+          if (status) status.textContent = orderAnnouncement(slug, next.indexOf(id) + 1, next.length);
+          await reorderStarredChannels(session, uuid(), workspaceId, next.map(viewId => viewId === GENERAL_CHANNEL_ID ? null : viewId));
+        } else {
+          /* A channel the viewer starred is not in this list but is in the shared order: it keeps its slot. */
+          const full = mergedOrder(liveChannels(channels).map(channel => channel.channelId), next);
+          channelReadGeneration += 1;
+          channels = withChannelOrder(channels, full);
+          paint();
+          if (status) status.textContent = orderAnnouncement(slug, next.indexOf(id) + 1, next.length);
+          await reorderChannels(session, uuid(), workspaceId, full);
+        }
+      } catch (error) {
+        problem = readableError(error);
+      }
+      railOrderSaving = false;
+      if (workspaceId !== activeWorkspaceId || version !== requestVersion) return;
+      const focused = document.activeElement instanceof HTMLElement && document.activeElement.matches(row);
+      if (list === "starred") await refreshChannelUnread(workspaceId, true);
+      else await refreshChannels(workspaceId, version, true).catch(() => {});
+      if (workspaceId !== activeWorkspaceId) return;
+      if (focused) one<HTMLElement>(row)?.focus({ preventScroll: true });
+      if (problem && status) status.textContent = problem;
+    };
+
+    /** The row's ⋯: settings and archive for someone who manages the channel, and the two moves where the row can move. */
     const openChannelRowMenu = (channelId: string, event: MouseEvent, button: HTMLElement): void => {
       const channel = channelById(channels, channelId);
-      if (!channel || !viewerMayManageChannel(channel)) return;
-      openContextMenu(event, button, [
+      const manage: ContextMenuItem[] = channel && viewerMayManageChannel(channel) ? [
         { label: CHANNEL_SETTINGS_LABEL, run: () => openChannelDialog("settings", channelId, button) },
         channel.archivedAt
           ? { label: UNARCHIVE_CHANNEL_LABEL, run: () => {
@@ -11679,7 +11763,14 @@ import "../../styles/kylon-command-palette.css";
               void submitChannelUnarchive(channelId, "dialog", one<HTMLButtonElement>("[data-channel-settings-archive]"));
             } }
           : { label: ARCHIVE_CHANNEL_LABEL, run: () => openChannelDialog("archive", channelId, button), danger: true },
-      ], `${channelLabel(channel.slug)} options`);
+      ] : [];
+      const list = railOrderListOf(button);
+      const ids = list ? railOrderIds(list) : [];
+      const moves: ContextMenuItem[] = list ? ([[MOVE_UP_LABEL, -1], [MOVE_DOWN_LABEL, 1]] as const)
+        .filter(([, step]) => movedByStep(ids, channelId, step) !== null)
+        .map(([label, step]) => ({ label, run: () => { void applyRailOrder(list, channelId, current => movedByStep(current, channelId, step)); } })) : [];
+      const slug = channelId === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG : channel?.slug ?? "";
+      openContextMenu(event, button, [...moves, null, ...manage], `${channelLabel(slug)} options`);
     };
 
     /**

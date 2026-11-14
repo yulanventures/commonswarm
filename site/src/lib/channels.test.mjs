@@ -25,6 +25,11 @@ import {
   starChannelLabel,
   starredViewIds,
   withChannelPreference,
+  movedBefore,
+  movedByStep,
+  orderAnnouncement,
+  withChannelOrder,
+  withStarOrder,
 } from "./channels.ts";
 import { parseRoute, routeHref } from "./home-route.ts";
 
@@ -257,4 +262,47 @@ test("a muted row says so, and each notification level has one plain name", () =
   assert.ok(!Object.values(CHANNEL_INVOLVEMENT_LABELS).includes(ALL_MESSAGES_LABEL),
     "no level shares the unfiltered view's name");
   assert.equal(starChannelLabel("design"), "Star #design");
+});
+
+const ordered = (slug, sortRank, extra = {}) => ({ channelId: `c-${slug}`, workspaceId: "w", slug, purpose: null,
+  createdByPrincipal: "u", createdByKind: "user", createdAt: "", archivedAt: null, sortRank, ...extra });
+
+test("placed channels come first in the shared order; the rest follow by name, a new one at the end", () => {
+  const list = [ordered("zeta", 1), ordered("alpha", 0), ordered("mid", 3), ordered("beta", undefined), ordered("early", 2)];
+  assert.deepEqual(liveChannels(list).map((channel) => channel.slug), ["zeta", "early", "mid", "alpha", "beta"]);
+  assert.deepEqual(liveChannels([ordered("b", 0), ordered("a", 0)]).map((channel) => channel.slug), ["a", "b"],
+    "a workspace nobody has ordered stays alphabetical");
+  assert.deepEqual(liveChannels([ordered("b", 2), ordered("a", 2)]).map((channel) => channel.slug), ["a", "b"], "a tie falls to the name");
+});
+
+test("a step moves one entry and nothing else, and refuses at either end", () => {
+  assert.deepEqual(movedByStep(["a", "b", "c"], "b", -1), ["b", "a", "c"]);
+  assert.deepEqual(movedByStep(["a", "b", "c"], "b", 1), ["a", "c", "b"]);
+  assert.equal(movedByStep(["a", "b", "c"], "a", -1), null);
+  assert.equal(movedByStep(["a", "b", "c"], "c", 1), null);
+  assert.equal(movedByStep(["a", "b"], "x", 1), null);
+});
+
+test("a drop places an entry just before another, or last, and says when nothing changed", () => {
+  assert.deepEqual(movedBefore(["a", "b", "c", "d"], "d", "b"), ["a", "d", "b", "c"]);
+  assert.deepEqual(movedBefore(["a", "b", "c", "d"], "a", null), ["b", "c", "d", "a"]);
+  assert.deepEqual(movedBefore(["a", "b", "c"], "a", "c"), ["b", "a", "c"]);
+  assert.equal(movedBefore(["a", "b", "c"], "a", "b"), null, "already just before it");
+  assert.equal(movedBefore(["a", "b", "c"], "c", null), null, "already last");
+  assert.equal(movedBefore(["a", "b"], "a", "a"), null);
+  assert.equal(movedBefore(["a", "b"], "x", "a"), null);
+  assert.equal(movedBefore(["a", "b"], "a", "x"), null);
+});
+
+test("a new star order and a new shared order show at once", () => {
+  const starred = withStarOrder(PREFERENCE_ROWS, ["general", "c-arch", "c-ops"]);
+  assert.deepEqual(starredViewIds(starred), ["general", "c-arch", "c-ops"]);
+  assert.equal(starred.find((row) => row.channelId === "c-design").starRank, null, "an unstarred row gains no rank");
+
+  const list = [ordered("alpha", 0), ordered("beta", 0), ordered("gamma", 0), ordered("old", 0, { archivedAt: "2026-01-01" })];
+  const next = withChannelOrder(list, ["c-gamma", "c-alpha"]);
+  assert.deepEqual(liveChannels(next).map((channel) => channel.slug), ["gamma", "alpha", "beta"],
+    "the named channels lead, and the ones left out follow in their old order");
+  assert.equal(next.find((channel) => channel.slug === "old").sortRank, 0, "an archived channel is not placed");
+  assert.equal(orderAnnouncement("design", 2, 5), "#design, 2 of 5");
 });

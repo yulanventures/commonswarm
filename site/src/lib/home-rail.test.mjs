@@ -141,3 +141,52 @@ test("a muted channel is marked, says so, and never shows unread even if a row c
   assert.equal(byId("b").dataset.muted, undefined);
   assert.equal(byId("b").attrs["aria-label"], "#ops, unread");
 });
+
+test("a movable row steps with Alt+Arrow, can be dragged onto another row of its own list only, and always has a ⋯", () => {
+  const moves = [], drops = [];
+  const general = row("general", "general", { reorder: "starred" });
+  const ops = row("b", "ops", { reorder: "starred" });
+  const root = buildHomeRail(doc, { sample: false, catchUp: { href: "/app?v=catchup", current: false, needsYou: null }, workspaces: [], people: null,
+    channels: ready([row("a", "design", { reorder: "channels" }), row("c", "qa", { reorder: "channels" }), row("d", "fixed")], { general, starred: [ops, general] }) },
+    { openPerson() {}, openAgent() {}, selectChannel() {}, channelMenu() {}, newChannel() {}, retryChannels() {},
+      moveChannel: (...args) => moves.push(args), dropChannel: (...args) => drops.push(args) });
+  const link = (id) => find(root, (node) => node.dataset?.railChannel === id)[0];
+  const item = (id) => find(root, (node) => node.tag === "li" && node.children.includes(link(id)))[0];
+  const key = (id, event) => { let prevented = false; link(id).listeners.keydown({ ctrlKey: false, metaKey: false, altKey: false, ...event, preventDefault() { prevented = true; } }); return prevented; };
+
+  assert.equal(key("b", { altKey: true, key: "ArrowDown" }), true);
+  assert.equal(key("a", { altKey: true, key: "ArrowUp" }), true);
+  assert.equal(key("a", { key: "ArrowUp" }), false, "a plain arrow is not a move");
+  assert.equal(key("a", { altKey: true, metaKey: true, key: "ArrowUp" }), false);
+  assert.deepEqual(moves, [["starred", "b", 1], ["channels", "a", -1]]);
+  assert.equal(link("d").listeners.keydown, undefined, "a row that cannot move has no shortcut");
+  assert.equal(link("a").attrs["aria-keyshortcuts"], "Alt+ArrowUp Alt+ArrowDown");
+
+  assert.deepEqual(["general", "b", "a", "c", "d"].map((id) => [item(id).draggable === true, item(id).dataset.railReorder]),
+    [[true, "starred"], [true, "starred"], [true, "channels"], [true, "channels"], [false, undefined]]);
+  assert.deepEqual(find(root, (node) => node.dataset?.railChannelMenu !== undefined).map((menu) => menu.dataset.railChannelMenu),
+    ["b", "general", "a", "c"], "a movable row has a ⋯ even when the viewer cannot manage the channel");
+
+  const transfer = { setData() {}, effectAllowed: "", dropEffect: "" };
+  const fire = (id, name) => { let prevented = false; item(id).listeners[name]({ dataTransfer: transfer, preventDefault() { prevented = true; } }); return prevented; };
+  fire("a", "dragstart");
+  assert.equal(fire("c", "dragover"), true, "a row of the same list accepts it");
+  assert.equal(fire("b", "dragover"), false, "a row of the other list does not");
+  assert.equal(fire("a", "dragover"), false, "nor does the row itself");
+  fire("b", "drop");
+  assert.deepEqual(drops, []);
+  fire("c", "drop");
+  assert.deepEqual(drops, [["channels", "a", "c"]]);
+  assert.equal(fire("c", "dragover"), false, "nothing is being dragged once it has dropped");
+});
+
+test("a sample rail and an archived row never move", () => {
+  const vm = ready([row("a", "design", { reorder: "channels" }), row("c", "qa", { reorder: "channels" })],
+    { archived: [row("z", "old", { reorder: "channels" })], channelsExpanded: true });
+  const build = (sample) => buildHomeRail(doc, { sample, catchUp: { href: "/app?v=catchup", current: false, needsYou: null }, workspaces: [], people: null, channels: vm },
+    { openPerson() {}, openAgent() {}, selectChannel() {}, channelMenu() {}, moveChannel() {}, dropChannel() {} }, { archivedOpen: true });
+  const shortcut = (root, id) => typeof find(root, (node) => node.dataset?.railChannel === id)[0].listeners.keydown;
+  assert.deepEqual(["a", "c", "z"].map((id) => shortcut(build(false), id)), ["function", "function", "undefined"],
+    "live rows move; an archived row does not");
+  assert.deepEqual(["a", "c", "z"].map((id) => shortcut(build(true), id)), ["undefined", "undefined", "undefined"]);
+});

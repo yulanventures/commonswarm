@@ -3116,7 +3116,7 @@ export async function workspaceChannels(
         .schema("swarm_read")
         .from("channels")
         .select(
-          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at",
+          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank",
         )
         .eq("workspace_id", workspaceId)
         .order("slug", { ascending: true })
@@ -3140,6 +3140,7 @@ function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
     archivedAt: row.archived_at === null || row.archived_at === undefined
       ? null
       : String(row.archived_at),
+    sortRank: Number.isInteger(row.sort_rank) && (row.sort_rank as number) > 0 ? row.sort_rank as number : 0,
   };
 }
 
@@ -3261,6 +3262,27 @@ export async function setChannelPreference(
   if (status !== 200 || body.status !== "accepted") {
     throw new Error(channelRefusalMessage(status, body, "CommonSwarm did not save that"));
   }
+}
+
+async function orderCommand(session: Session, commandId: string, workspaceId: string,
+  command: Record<string, unknown>, fallback: string): Promise<void> {
+  const { status, body } = await postCommand(session, commandId, command,
+    { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status !== 200 || body.status !== "accepted") throw new Error(channelRefusalMessage(status, body, fallback));
+}
+
+/** The viewer's own order of their starred places (`null` is #general). */
+export async function reorderStarredChannels(session: Session, commandId: string, workspaceId: string,
+  channelIds: readonly (string | null)[]): Promise<void> {
+  return orderCommand(session, commandId, workspaceId, { kind: "channel_star_reorder", channel_ids: channelIds },
+    "CommonSwarm did not save that order");
+}
+
+/** The workspace's shared channel order. An owner or admin only; the server says so otherwise. */
+export async function reorderChannels(session: Session, commandId: string, workspaceId: string,
+  channelIds: readonly string[]): Promise<void> {
+  return orderCommand(session, commandId, workspaceId, { kind: "channel_reorder", channel_ids: channelIds },
+    "CommonSwarm did not save that order");
 }
 
 export async function unarchiveChannel(
