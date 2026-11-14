@@ -535,7 +535,8 @@
     "requiresSeed": [
       "create_workspace",
       "seed_thread",
-      "seed_thread_repliers"
+      "seed_thread_repliers",
+      "seed_thread_newest"
     ],
     "frame": [
       "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-toggle[aria-expanded=\"false\"] .dashboard__thread-faces > .dashboard__thread-face:nth-child(3)",
