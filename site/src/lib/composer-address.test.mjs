@@ -11,6 +11,7 @@ import {
   composerAddressIsChosen,
   deriveComposerAddress,
   recipientKey,
+  composerMentionNotice,
 } from "./composer-address.ts";
 import { resolveStoredIdentityRefs } from "./identity-label.ts";
 
@@ -199,4 +200,14 @@ test("two same-name UUID drafts restore separately and a revoke does not retarge
     },
   );
   assert.deepEqual(renamed.recipients, [wrenA]);
+});
+
+test("a public composer says, in mention words, which tags it could not honour", () => {
+  assert.equal(composerMentionNotice({ overflow: [], ambiguous: [] }), "");
+  assert.equal(composerMentionNotice({ overflow: [], ambiguous: ["Sam"] }),
+    '"Sam" names more than one person or agent here, so it mentions nobody. Choose the name from the mention list.');
+  const both = composerMentionNotice({ overflow: ["Wren", "Orbit"], ambiguous: ["Sam", "Lee"] });
+  assert.match(both, /^A message mentions at most 8, so Wren and Orbit are not mentioned\. /);
+  assert.match(both, /"Sam" and "Lee" name more than one person or agent here, so they mention nobody\./);
+  assert.doesNotMatch(both, /To:/, "a public place has no To: set to talk about");
 });
