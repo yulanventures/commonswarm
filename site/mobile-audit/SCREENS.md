@@ -337,6 +337,8 @@ The four empty candidates use `{emptyWorkspace}` and wait for their actual empty
 
 Additional detail captures: `app.wiki.topic`, `app.wiki.editor`, `app.add-agent.existing`, `app.chat.history` (a channel whose newest messages are past their `until`: the notes stay, the status and the agent's note to itself do not). `app.chat.starred` (a starred channel: the Starred section in the rail, the pressed star and the bell in the header, and a muted row below) and `menu.notifications` (a muted channel's three notification levels: the bell's menu on a wide screen, the ⋯ menu's group on a phone). `menu.star-order` (the ⋯ of a starred row, where Move up and Move down change the viewer's own order; the seeded Channels list is in an order its owner chose, not by name). `app.chat.dm` separately tracks V05 (the header names the other party; its rows carry no recipient and the channel lead marker is absent, which the ready condition requires); `app.definitions.diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 
+Private channel capture: `app.chat.private` is a private channel the viewer is a member of (the seed makes it through the real command, with a second person and an agent as members). Its paperclip must be off and wholly on screen: the composer takes no files there.
+
 Main-branch addendum: PR #271 added password sign-in after the stated source baseline. PR #282 subsequently added the separate Password dialog; the initial open-only candidate is D15 below, while password challenge and submission flows remain outside this audit.
 
 ## Additional capture candidates and CI witness
@@ -371,5 +373,3 @@ With Batch 5, `screens.json` has no pending entries: every entry is a runnable c
 
 - `state.empty`, `state.error` and `state.loading` were generic placeholders, not screens. Per-surface empty captures (`app.todos.empty`, `app.lists.empty`, `app.wiki.empty`, `app.definitions.empty`) are runnable; other empty, error and loading states stay unbound and still need their own per-surface fixtures before any coverage is claimed.
 - `menu.resizers` (M12) was retired as a standalone six-size entry. The `.cs-resizer` separators are hidden at 52rem and below (four of the six audit sizes) and already appear in the wider workspace, Lists and Wiki captures. Dragging, keyboard resizing and reset stay in the interaction inventory, unclaimed.
-
-Private channel capture: `app.chat.private` is a private channel the viewer is a member of (the seed makes it through the real command, with a second person and an agent as members). Its paperclip must be off and wholly on screen: the composer takes no files there.

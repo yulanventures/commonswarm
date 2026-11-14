@@ -1204,6 +1204,7 @@ import "../../styles/kylon-command-palette.css";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { attachmentsRefusal, placementVisibility } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
@@ -1378,7 +1379,6 @@ import "../../styles/kylon-command-palette.css";
   import type { AgentPresenceRow } from "../../../../src/cloud/agent-presence";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
-  import { attachmentsAllowed, attachmentsRefusal, placementVisibility } from "../../lib/private-channels";
   import {
     workspaceStateAfterClose,
     type CloseableWorkspace,
