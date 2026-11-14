@@ -669,6 +669,18 @@ async function main(): Promise<void> {
         const settled = await settle(page);
         // The declared state must still be on screen after settling: a re-render that closed it would
         // otherwise be measured and photographed as if it were that state. Losing it is a capture error.
+        if (screen.id === "app.composer.thread-to-dm") {
+          const state = await page.evaluate(() => {
+            const form = document.querySelector("form[data-composer]");
+            const input = document.querySelector("[data-composer-input]");
+            const app = document.querySelector("live-dashboard");
+            return { audience: form?.getAttribute("data-audience"), formAttrs: form ? form.getAttributeNames().filter(n => n.startsWith("data-")).map(n => `${n}=${form.getAttribute(n)}`).join(" ").slice(0, 300) : null,
+              aria: input?.getAttribute("aria-label"), placeholder: input?.getAttribute("placeholder"), value: (input as HTMLTextAreaElement | null)?.value,
+              replyBar: !document.querySelector("[data-composer-reply]")?.hasAttribute("hidden"), url: location.search, view: app?.getAttribute("data-channel-view"),
+              title: document.querySelector(".hm-phone-bar__title, .hm-ws-header__title")?.textContent };
+          });
+          console.log(JSON.stringify({ phase: "diag-composer", viewport: `${page.viewportSize()?.width}x${page.viewportSize()?.height}`, state }));
+        }
         if (screen.ready && !(await page.waitForSelector(fill(screen.ready, seed.ids), { state: "visible", timeout: 5_000 }).then(() => true, () => false))) {
           throw new Error(`ready state lost after settling: ${screen.ready}`);
         }
