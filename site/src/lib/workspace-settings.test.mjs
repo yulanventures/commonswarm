@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderWorkspaceSettings } from "./workspace-settings.ts";
 
+// Every element focus() call, so a test can say a control left focus alone.
+const focusCalls = [];
+
 // Exercise the DOM builder and its real event handlers without a browser process.
 function fixture(options = {}) {
   const doc = {
@@ -27,7 +30,7 @@ function fixture(options = {}) {
       addEventListener(key, value) {
         this.listeners[key] = value;
       },
-      focus() {},
+      focus() { focusCalls.push(this); },
       select() {},
     }),
   };
@@ -184,16 +187,25 @@ test("a policy change is sent once, held while it is answered, and then shows wh
     value: "members",
     onChange: (policy) => { sent.push(policy); return new Promise((resolve) => { finish = resolve; }); },
   });
+  focusCalls.length = 0;
   choice("admins").checked = true; choice("members").checked = false;
   const pending = choice("admins").listeners.change();
   assert.deepEqual(sent, ["admins"]);
-  assert.deepEqual([choice("members").disabled, choice("admins").disabled], [true, true]);
+  assert.deepEqual([choice("members").attributes["aria-disabled"], choice("admins").attributes["aria-disabled"]], ["true", "true"]);
+  assert.deepEqual([choice("members").disabled, choice("admins").disabled], [undefined, undefined],
+    "never disabled: that would drop keyboard focus");
   assert.equal(group.attributes["aria-busy"], "true");
+  // A choice made while the first is being saved is not taken and sends nothing.
+  choice("members").checked = true; choice("admins").checked = false;
+  await choice("members").listeners.change();
+  assert.deepEqual(sent, ["admins"]);
+  assert.deepEqual([choice("members").checked, choice("admins").checked], [false, true]);
   finish("admins");
   await pending;
   assert.deepEqual([choice("members").checked, choice("admins").checked], [false, true]);
-  assert.deepEqual([choice("members").disabled, choice("admins").disabled], [false, false]);
+  assert.deepEqual([choice("members").attributes["aria-disabled"], choice("admins").attributes["aria-disabled"]], [undefined, undefined]);
   assert.equal(group.attributes["aria-busy"], undefined);
+  assert.deepEqual(focusCalls, [], "the control never moves focus, so it cannot take it from wherever the person went");
   assert.equal(status.textContent, "Saved");
   // Choosing what is already held sends nothing.
   await choice("admins").listeners.change();
@@ -210,5 +222,7 @@ test("a refused policy change goes back to the policy held and says why", async 
   assert.deepEqual([choice("members").checked, choice("admins").checked], [true, false]);
   assert.equal(status.textContent, "Only a workspace owner or admin can change who may create channels.");
   assert.equal("problem" in status.dataset, true);
-  assert.equal(choice("admins").disabled, false);
+  assert.equal(choice("admins").attributes["aria-disabled"], undefined);
+  assert.deepEqual(focusCalls.filter((node) => node === choice("members") || node === choice("admins")), [],
+    "a refusal leaves focus where it is");
 });

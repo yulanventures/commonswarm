@@ -243,7 +243,9 @@ export function renderWorkspaceSettings(
 
 /**
  * Who may create channels: two native radios that save on change. The choice moves at once; a
- * refusal puts it back and says why. A second change waits for the first to be answered.
+ * refusal puts it back and says why. A choice made while the last one is being saved is not taken.
+ * The radios are never `disabled`: that drops keyboard focus, and putting it back when the answer
+ * arrives could take it from wherever the person has gone meanwhile. Focus is left alone throughout.
  */
 function channelPolicyControl(root: HTMLElement,
   policy: NonNullable<WorkspaceSettingsOptions["channelPolicy"]>): HTMLElement {
@@ -261,6 +263,7 @@ function channelPolicyControl(root: HTMLElement,
   status.dataset.workspaceChannelPolicyStatus = "";
   status.setAttribute("role", "status");
   let held = policy.value;
+  let saving: ChannelCreationPolicy | null = null;
   const inputs = new Map<ChannelCreationPolicy, HTMLInputElement>();
   const show = (value: ChannelCreationPolicy | null): void => {
     for (const [key, input] of inputs) input.checked = key === value;
@@ -277,8 +280,10 @@ function channelPolicyControl(root: HTMLElement,
     const name = document.createElement("span");
     name.textContent = CHANNEL_CREATION_LABELS[value];
     input.addEventListener("change", async () => {
+      if (saving !== null) { show(saving); return; }
       if (!input.checked || value === held) return;
-      for (const other of inputs.values()) other.disabled = true;
+      saving = value;
+      for (const other of inputs.values()) other.setAttribute("aria-disabled", "true");
       group.setAttribute("aria-busy", "true");
       status.textContent = "";
       delete status.dataset.problem;
@@ -289,11 +294,10 @@ function channelPolicyControl(root: HTMLElement,
         status.textContent = error instanceof Error ? error.message : "CommonSwarm did not save that.";
         status.dataset.problem = "";
       } finally {
+        saving = null;
         show(held);
-        for (const other of inputs.values()) other.disabled = false;
+        for (const other of inputs.values()) other.removeAttribute("aria-disabled");
         group.removeAttribute("aria-busy");
-        // Disabling the radio dropped focus; put it back on the choice now held.
-        (held ? inputs.get(held) : input)?.focus();
       }
     });
     label.append(input, name);
