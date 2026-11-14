@@ -5766,3 +5766,154 @@ test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [nul
     "R3-AUDIT fail-closed: NULL or unknown UUID inside channel_ids (or NULL stream_id on lifecycle row) must hide the client audit row even for workspace owner",
   );
 });
+
+test("a private channel's message reaches each person in it on their own Realtime topic, chosen when it is written", async () => {
+  const tag = randomBytes(4).toString("hex");
+  const ws = randomUUID();
+  const otherWs = randomUUID();
+  const personA = await createUser(`mt-person-a-${tag}`);
+  const personD = await createUser(`mt-person-d-${tag}`);
+  const ownerB = await createUser(`mt-owner-b-${tag}`);
+  const outsiderC = await createUser(`mt-outsider-c-${tag}`);
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES (${personA.id}::uuid, 'PersonA'), (${personD.id}::uuid, 'PersonD'),
+        (${ownerB.id}::uuid, 'OwnerB'), (${outsiderC.id}::uuid, 'OutsiderC')
+    `;
+    await tx`
+      INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+      VALUES (${ws}::uuid, ${`MemberTopic-${tag}`}, ${ownerB.id}::uuid),
+        (${otherWs}::uuid, ${`MemberTopicOther-${tag}`}, ${ownerB.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${ws}::uuid, ${ownerB.id}::uuid, 'owner'), (${ws}::uuid, ${personA.id}::uuid, 'member'),
+        (${ws}::uuid, ${personD.id}::uuid, 'member'), (${ws}::uuid, ${outsiderC.id}::uuid, 'member'),
+        (${otherWs}::uuid, ${ownerB.id}::uuid, 'owner')
+    `;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'workspace')`;
+  });
+  const agentX = await createWsAgent(ws, ownerB.id, `mt-agent-${tag}`);
+
+  const openSlug = `mt-open-${tag}`;
+  const open = await sendWs(ws, personA.jwt, { kind: "channel_create", slug: openSlug });
+  assert.equal(open.status, 200, JSON.stringify(open.body));
+  const lockSlug = `mt-lock-${tag}`;
+  const lock = await sendWs(ws, personA.jwt, {
+    kind: "channel_create",
+    slug: lockSlug,
+    visibility: "private",
+    members: [{ kind: "user", id: personD.id }, { kind: "agent", id: agentX.principal }],
+  });
+  assert.equal(lock.status, 200, JSON.stringify(lock.body));
+  const lockId = String((lock.body.channel as Record<string, unknown>).channel_id);
+
+  const memberTopic = (userId: string, workspaceId: string = ws) => `cswarm-member:${workspaceId}:${userId}`;
+  const workspaceTopic = `cswarm-signals:${ws}`;
+  /** How many Realtime rows this workspace has produced on each topic: every member topic, and the shared one. */
+  const frames = async (): Promise<Record<string, number>> => {
+    const rows = await sql<{ topic: string; event: string; extension: string; payload: Record<string, unknown> }[]>`
+      SELECT topic, event, extension, payload FROM realtime.messages
+      WHERE topic = ${workspaceTopic} OR topic LIKE ${`cswarm-member:${ws}:%`}
+    `;
+    const byTopic: Record<string, number> = {};
+    for (const row of rows) {
+      assert.equal(row.event, "signal");
+      assert.equal(row.extension, "broadcast");
+      if (row.topic !== workspaceTopic) {
+        const payload = (row.payload.payload as Record<string, unknown> | undefined) ?? row.payload;
+        assert.deepEqual(Object.keys(payload).filter((key) => key !== "id"), ["v"],
+          `a member-topic frame says only that something moved: ${JSON.stringify(row.payload)}`);
+        assert.doesNotMatch(JSON.stringify(row.payload), new RegExp(lockId), "and never which channel");
+      }
+      byTopic[row.topic] = (byTopic[row.topic] ?? 0) + 1;
+    }
+    return byTopic;
+  };
+  const post = async (bearer: string, extra: Record<string, unknown>): Promise<void> => {
+    const sent = await sendWs(ws, bearer, installedPost(extra));
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  };
+  const before = await frames();
+  assert.deepEqual(Object.keys(before).filter((topic) => topic !== workspaceTopic), [],
+    "creating a private channel announces nothing");
+  const shared = before[workspaceTopic] ?? 0;
+  const expected = (people: Record<string, number>, sharedNow: number = shared): Record<string, number> => ({
+    ...(sharedNow > 0 ? { [workspaceTopic]: sharedNow } : {}),
+    ...Object.fromEntries(Object.entries(people).map(([userId, count]) => [memberTopic(userId), count])),
+  });
+
+  // A top-level post, a reply in its thread and an agent's post each reach both people in the channel:
+  // not the agent, not the workspace owner who is outside it, not another member, and never the shared topic.
+  const root = await sendWs(ws, personA.jwt, installedPost({ channel: lockSlug, body: "Private root" }));
+  assert.equal(root.status, 200, JSON.stringify(root.body));
+  await post(personD.jwt, { thread_root_id: String(signalOf(root.body).id), body: "Private reply" });
+  await post(agentX.token, { channel: lockSlug, body: "Private note from the agent" });
+  assert.deepEqual(await frames(), expected({ [personA.id]: 3, [personD.id]: 3 }));
+
+  // Removed from the channel: nothing from the next message on, whatever socket is still open.
+  const removed = await sendWs(ws, personA.jwt, {
+    kind: "channel_member_remove", channel_id: lockId, member: { kind: "user", id: personD.id },
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  await post(personA.jwt, { channel: lockSlug, body: "After the removal" });
+  assert.deepEqual(await frames(), expected({ [personA.id]: 4, [personD.id]: 3 }));
+
+  // Still in the channel's member list but out of the workspace: the access rule, not the row, decides.
+  // (The membership trigger also deletes the row; put it back to hold the rule to account on its own.)
+  const added = await sendWs(ws, personA.jwt, {
+    kind: "channel_member_add", channel_id: lockId, members: [{ kind: "user", id: outsiderC.id }],
+  });
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  await post(personA.jwt, { channel: lockSlug, body: "With the new member" });
+  assert.deepEqual(await frames(), expected({ [personA.id]: 5, [personD.id]: 3, [outsiderC.id]: 1 }));
+  await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
+    WHERE workspace_id = ${ws}::uuid AND user_id = ${outsiderC.id}::uuid`;
+  await sql`
+    INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, added_by_kind, added_by_principal)
+    VALUES (${ws}::uuid, ${lockId}::uuid, 'user', ${outsiderC.id}::uuid, 'user', ${personA.id}::uuid)
+    ON CONFLICT DO NOTHING
+  `;
+  await post(personA.jwt, { channel: lockSlug, body: "After the workspace removal" });
+  assert.deepEqual(await frames(), expected({ [personA.id]: 6, [personD.id]: 3, [outsiderC.id]: 1 }));
+
+  // An open channel still announces on the shared topic and on no person's.
+  await post(personA.jwt, { channel: openSlug, body: "Open post" });
+  assert.deepEqual(await frames(), expected({ [personA.id]: 6, [personD.id]: 3, [outsiderC.id]: 1 }, shared + 1));
+
+  // Who may read a member topic. Each topic below holds at least one row, so a count of 0 is a refusal.
+  const claimsOf = (jwt: string) =>
+    JSON.parse(Buffer.from(jwt.split(".")[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+  const rowsVisible = async (claims: Record<string, unknown>, topic: string): Promise<number> =>
+    await sql.begin(async (tx) => {
+      await tx`SELECT realtime.send('{"v": 1}'::jsonb, 'signal', ${topic}, true)`;
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true),
+        set_config('realtime.topic', ${topic}, true)`;
+      await tx.unsafe("SET LOCAL ROLE authenticated");
+      const [{ n }] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages WHERE topic = ${topic}`;
+      await tx.unsafe("RESET ROLE");
+      return n;
+    }) as number;
+  const a = claimsOf(personA.jwt);
+  assert.equal(a.sub, personA.id);
+  assert.ok(await rowsVisible(a, memberTopic(personA.id)) > 0, "a person reads their own topic: the positive control");
+  for (const [name, claims, topic] of [
+    ["another person's topic", a, memberTopic(personD.id)],
+    ["the workspace owner on a member's topic", claimsOf(ownerB.jwt), memberTopic(personA.id)],
+    ["their own id in a workspace they are not in", a, memberTopic(personA.id, otherWs)],
+    ["a token that names an agent, even its owner's", { ...claimsOf(ownerB.jwt), agent_principal_id: agentX.principal }, memberTopic(ownerB.id)],
+    ["a token with no session", { sub: personA.id, role: "authenticated" }, memberTopic(personA.id)],
+    ["a person removed from the workspace", claimsOf(outsiderC.jwt), memberTopic(outsiderC.id)],
+    ["a topic with no person", a, `cswarm-member:${ws}`],
+    ["a topic with a third part", a, `${memberTopic(personA.id)}:${lockId}`],
+    ["a topic that is not ids", a, "cswarm-member:not-a-workspace:not-a-person"],
+    ["their own topic in capitals", a, memberTopic(personA.id).replace(personA.id, personA.id.toUpperCase())],
+  ] as const) {
+    assert.equal(await rowsVisible(claims, topic), 0, `${name} must read nothing`);
+  }
+  assert.ok(await rowsVisible(claimsOf(ownerB.jwt), memberTopic(ownerB.id)) > 0,
+    "the owner's own topic opens without the agent claim, so that refusal was about the claim");
+  await sql`DELETE FROM auth.sessions WHERE user_id = ${personA.id}::uuid`;
+  assert.equal(await rowsVisible(a, memberTopic(personA.id)), 0, "an ended session reads nothing, on a token that has not expired");
+});

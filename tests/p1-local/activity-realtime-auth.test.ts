@@ -374,3 +374,138 @@ test("a status frame is bound to an addressed message, expires by server time an
 
   await owner.client.removeChannel(joined.channel);
 });
+
+/** Join a topic for the "signal" event and report the outcome, with the refusal text when there is one. */
+async function joinSignals(
+  client: SupabaseClient,
+  topic: string,
+  onFrame: (frame: unknown) => void = () => {},
+): Promise<{ channel: RealtimeChannel; status: string; refusal: string }> {
+  const channel = client.channel(topic, {
+    config: { private: true, broadcast: { ack: false, self: false } },
+  });
+  channel.on("broadcast", { event: "signal" }, onFrame);
+  const outcome = await new Promise<{ status: string; refusal: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Realtime subscribe timed out")), 10_000);
+    channel.subscribe((next, err: unknown) => {
+      if (next !== "SUBSCRIBED" && next !== "CHANNEL_ERROR" && next !== "TIMED_OUT") return;
+      clearTimeout(timer);
+      const message = err && typeof err === "object" && "message" in err ? (err as { message: unknown }).message : err;
+      resolve({ status: next, refusal: (typeof message === "string" ? message : "").split(topic).join("<topic>") });
+    });
+  });
+  return { channel, ...outcome };
+}
+
+const memberTopic = (workspaceId: string, userId: string) => `cswarm-member:${workspaceId}:${userId}`;
+
+test("a person joins their own member topic and no other, and every refusal reads the same", async () => {
+  const anna = await newMember("member-topic-anna");
+  const ben = await newMember("member-topic-ben");
+  const ended = await newMember("member-topic-ended");
+
+  const own = await joinSignals(anna.client, memberTopic(anna.workspaceId, anna.userId));
+  assert.equal(own.status, "SUBSCRIBED", `a member's own topic is the positive control: ${own.refusal}`);
+
+  // The session ends in the database; the token is still unexpired, and it no longer opens the topic.
+  const endedTopic = memberTopic(ended.workspaceId, ended.userId);
+  const whileLive = await joinSignals(ended.client, endedTopic);
+  assert.equal(whileLive.status, "SUBSCRIBED");
+  await ended.client.removeChannel(whileLive.channel);
+  await sql`DELETE FROM auth.sessions WHERE user_id = ${ended.userId}::uuid`;
+
+  const refusals: string[] = [];
+  for (const [name, client, topic] of [
+    ["another person's topic", ben.client, memberTopic(anna.workspaceId, anna.userId)],
+    ["their own id in a workspace they are not in", ben.client, memberTopic(anna.workspaceId, ben.userId)],
+    ["another person's id in their own workspace", ben.client, memberTopic(ben.workspaceId, anna.userId)],
+    ["a workspace that does not exist", ben.client, memberTopic(randomUUID(), ben.userId)],
+    ["a topic with no person", ben.client, `cswarm-member:${ben.workspaceId}`],
+    ["a topic with a third part", ben.client, `${memberTopic(ben.workspaceId, ben.userId)}:${randomUUID()}`],
+    ["a topic that is not ids", ben.client, "cswarm-member:not-a-workspace:not-a-person"],
+    ["an ended session", ended.client, endedTopic],
+  ] as const) {
+    const refused = await joinSignals(client, topic);
+    assert.equal(refused.status, "CHANNEL_ERROR", `${name} must be refused`);
+    assert.ok(refused.refusal.length > 0, `${name}: a refusal carries text`);
+    refusals.push(refused.refusal);
+    await client.removeChannel(refused.channel);
+  }
+  assert.deepEqual([...new Set(refusals)], [refusals[0]], "one refusal for every case: none says which part was wrong");
+
+  // Ben's own topic still opens after all those refusals, so they were about the topics.
+  const bens = await joinSignals(ben.client, memberTopic(ben.workspaceId, ben.userId));
+  assert.equal(bens.status, "SUBSCRIBED", bens.refusal);
+  await ben.client.removeChannel(bens.channel);
+  await anna.client.removeChannel(own.channel);
+});
+
+test("a private channel's message arrives on its members' open sockets and stops for one who is removed", async () => {
+  const anna = await newMember("member-live-anna");
+  const ben = await newMember("member-live-ben");
+  const cara = await newMember("member-live-cara");
+  const ws = anna.workspaceId;
+  const channelId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${ws}::uuid, ${ben.userId}::uuid, 'member'), (${ws}::uuid, ${cara.userId}::uuid, 'admin')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.channels (channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind, visibility)
+      VALUES (${channelId}::uuid, ${ws}::uuid, 'confidential', NULL, ${anna.userId}::uuid, 'user', 'private')`;
+    await tx`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, is_manager, added_by_kind, added_by_principal)
+      VALUES (${ws}::uuid, ${channelId}::uuid, 'user', ${anna.userId}::uuid, true, 'user', ${anna.userId}::uuid),
+        (${ws}::uuid, ${channelId}::uuid, 'user', ${ben.userId}::uuid, false, 'user', ${anna.userId}::uuid)`;
+  });
+
+  const received = { anna: [] as unknown[], ben: [] as unknown[], cara: [] as unknown[] };
+  /** A message's frame is {"v": 1} and nothing else; this test's own marker frames carry an id to tell them apart. */
+  const idOf = (frame: unknown) => {
+    const payload = (frame as { payload?: Record<string, unknown> }).payload ?? {};
+    if (typeof payload.marker === "string") return payload.marker;
+    assert.deepEqual(Object.keys(payload).filter((key) => key !== "id"), ["v"], JSON.stringify(frame));
+    return "message";
+  };
+  const joins = [
+    await joinSignals(anna.client, memberTopic(ws, anna.userId), (frame) => received.anna.push(idOf(frame))),
+    await joinSignals(ben.client, memberTopic(ws, ben.userId), (frame) => received.ben.push(idOf(frame))),
+    // Cara is a workspace admin outside the channel: her topic opens, and nothing arrives on it.
+    await joinSignals(cara.client, memberTopic(ws, cara.userId), (frame) => received.cara.push(idOf(frame))),
+  ];
+  for (const joined of joins) assert.equal(joined.status, "SUBSCRIBED", joined.refusal);
+
+  const post = async (): Promise<void> => {
+    await sql`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, channel_id)
+      VALUES (${randomUUID()}::uuid, ${ws}::uuid, ${anna.userId}::uuid, 'user', 'note', 'private',
+        statement_timestamp() + interval '1 day', ${channelId}::uuid)`;
+  };
+  /** A frame sent straight to each topic after the message, so "nothing arrived" is read off a socket that works. */
+  const marker = async (): Promise<string> => {
+    const id = randomUUID();
+    for (const userId of [anna.userId, ben.userId, cara.userId]) {
+      await sql`SELECT realtime.send(${sql.json({ v: 1, marker: id })}::jsonb, 'signal', ${memberTopic(ws, userId)}, true)`;
+    }
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ([received.anna, received.ben, received.cara].every((list) => list.includes(id))) return id;
+      await delay(50);
+    }
+    assert.fail(`the marker frame did not reach every socket: ${JSON.stringify(received)}`);
+  };
+
+  await post();
+  const firstMarker = await marker();
+  assert.deepEqual(received, { anna: ["message", firstMarker], ben: ["message", firstMarker], cara: [firstMarker] });
+
+  // Ben's socket stays joined. The next message never reaches it, because membership is read when the message is written.
+  await sql`DELETE FROM swarm.channel_members WHERE workspace_id = ${ws}::uuid AND channel_id = ${channelId}::uuid
+    AND user_id = ${ben.userId}::uuid`;
+  await post();
+  const secondMarker = await marker();
+  assert.deepEqual(received, {
+    anna: ["message", firstMarker, "message", secondMarker],
+    ben: ["message", firstMarker, secondMarker],
+    cara: [firstMarker, secondMarker],
+  });
+  for (const [index, joined] of joins.entries()) {
+    await [anna, ben, cara][index]!.client.removeChannel(joined.channel);
+  }
+});
