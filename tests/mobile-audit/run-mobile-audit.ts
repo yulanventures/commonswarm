@@ -41,12 +41,28 @@ export const VIEWPORTS = [
   { width: 844, height: 390 }, { width: 768, height: 1024 }, { width: 1024, height: 1366 },
 ] as const;
 export const THEMES = ["light", "dark"] as const;
+/** A comma-separated list from the environment; empty when the variable is unset. */
+const listed = (name: string): string[] => (process.env[name] ?? "").split(",").map(part => part.trim()).filter(Boolean);
+/** Every size a capture can run at: the audit viewports and the desktop hover pass. */
+const selectableSizes = (): string[] => [...VIEWPORTS, { width: 1280, height: 800 }, { width: 1440, height: 900 }].map(v => `${v.width}x${v.height}`);
 /**
- * Targeted diagnostics, set only on a never-merge diagnostic branch: capture only these screens at these sizes
- * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
- * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
+ * A focused run: capture only these screens at these sizes (mobile and desktop), each once with normal polling and
+ * once more with delivery receipts frozen. The frozen pass is a control for comparison, never acceptance; every
+ * entry it writes carries freeze: true.
+ *
+ * The lists come from MOBILE_AUDIT_SCREENS and MOBILE_AUDIT_SIZES (comma-separated), which the capture workflow
+ * fills from its inputs, so a pull request's own head can be captured without a branch that edits this file.
+ * Screens alone means every size. A name that is not a screen or a size stops the run before it seeds: a typing
+ * mistake must never become a green run that captured nothing.
  */
-const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const DIAGNOSTIC = ((): { screens: string[]; sizes: string[] } | null => {
+  const screenList = listed("MOBILE_AUDIT_SCREENS"), sizeList = listed("MOBILE_AUDIT_SIZES");
+  if (screenList.length === 0 && sizeList.length === 0) return null;
+  if (screenList.length === 0) throw new Error("MOBILE_AUDIT_SIZES needs MOBILE_AUDIT_SCREENS: name the screens to capture");
+  const badSizes = sizeList.filter(size => !selectableSizes().includes(size));
+  if (badSizes.length > 0) throw new Error(`MOBILE_AUDIT_SIZES names no such size: ${badSizes.join(", ")}. Sizes: ${selectableSizes().join(", ")}`);
+  return { screens: screenList, sizes: sizeList.length > 0 ? sizeList : selectableSizes() };
+})();
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
@@ -324,6 +340,11 @@ function screens(): Screen[] {
   if (!existsSync(manifest)) return STARTER;
   const parsed = JSON.parse(readFileSync(manifest, "utf8")) as { screens?: Screen[] } | Screen[];
   return Array.isArray(parsed) ? parsed : parsed.screens ?? STARTER;
+}
+/** The focused run's screen names that are not in the manifest. Checked before anything is seeded. */
+function unknownSelectedScreens(): string[] {
+  const known = new Set(screens().map(screen => screen.id));
+  return (DIAGNOSTIC?.screens ?? []).filter(id => !known.has(id));
 }
 
 /** Static server for the built site: /app -> dist/app/index.html, assets by path. Loopback only. */
@@ -852,11 +873,14 @@ async function main(): Promise<void> {
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
-// 75 minutes: twelve viewport batches with hover witnesses take about four minutes each, then the desktop hover
-// pass and the picture check. The workflow job cap must stay above this.
-test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 75 * 60_000 }, async () => {
+// 105 minutes. The full matrix took about 70 on 2026-11-14 (twelve viewport batches with hover witnesses, then the
+// desktop hover pass and the picture check) and grows with every screen. The workflow job cap (120) must stay
+// above this plus the install and build before it.
+test("mobile audit: seed, capture every manifest screen at six viewports in both themes", { timeout: 105 * 60_000 }, async () => {
   // The fixture matrix runs first; a witness that fails its own fixtures would make the long run meaningless.
   assert.ok(matrixResult.done && matrixResult.failed.length === 0,
     `the witness fixture matrix did not pass (${matrixResult.failed.join("; ") || "it did not finish"}); not starting the audit`);
+  const unknown = unknownSelectedScreens();
+  assert.equal(unknown.length, 0, `MOBILE_AUDIT_SCREENS names no such screen: ${unknown.join(", ")}`);
   await main();
 });
