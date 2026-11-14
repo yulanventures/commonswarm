@@ -109,6 +109,18 @@
     "setup": [
       {
         "waitFor": "[data-composer]:not([hidden]) [data-composer-attach][disabled]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header__title[data-private] .hm-title-lock"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": "[data-rail-channel=\"{channel.private}\"] .hm-rail__icon[data-icon=\"lock\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".hm-phone-bar__title[data-private] .hm-title-lock"
       }
     ],
     "ready": "[data-composer]:not([hidden]) [data-composer-attach][disabled]",
