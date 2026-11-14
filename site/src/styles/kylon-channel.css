@@ -88,15 +88,31 @@ live-dashboard.dashboard[data-kylon-shell] .hm-message-time {
   position: absolute; inset: 4px auto auto 4px; inline-size: 56px; text-align: center; font: 11px/1.5 var(--k-shell-font); font-variant-numeric: tabular-nums; color: var(--k-shell-muted, var(--k-shell-secondary)); opacity: 0;
 }
 live-dashboard.dashboard[data-kylon-shell] .dashboard__message:is(:hover, :focus-within) .hm-message-time { opacity: 1; }
+/* The row's tools float over its top-right corner and take no space in the flow (layout: kylon-receipts.css). */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools {
-  position: absolute; inset: -12px 16px auto auto; z-index: 3;
-  padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 6px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
+  position: absolute; inset: -14px 16px auto auto; z-index: 3;
+  padding: 3px; border: 1px solid var(--carbon-line, var(--k-shell-line)); border-radius: 8px; background: var(--k-shell-surface); box-shadow: var(--k-shell-shadow);
+  transition: opacity var(--k-shell-motion) var(--k-shell-ease);
 }
-@media (hover: hover) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) > .dashboard__message-receipt[data-receipt-quiet],
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(details[open])) > .dashboard__message-actions {
-    opacity: 0; pointer-events: none;
-  }
+/* Hidden at rest on every device, by opacity only so nothing moves: shown when the row is hovered, holds
+   keyboard focus, or was tapped (a tap focuses the row), and kept while its receipt is open. A problem
+   receipt is never hidden (it is a badge, kylon-receipts.css); only that row's reply control waits. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])):not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) {
+  opacity: 0; pointer-events: none;
+}
+/* The controls inside say so themselves too: a control that is not shown is not a tap target, and a check that
+   reads only the control's own style must not take it for one. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])):not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) :is(summary, button) {
+  opacity: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions button {
+  opacity: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message:not(:hover, :focus-within) > .dashboard__message-body > .dashboard__message-tools:has(> .dashboard__message-receipt:not([data-receipt-quiet])) > .dashboard__message-actions {
+  opacity: 0; pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { transition: none; }
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send { background: var(--k-shell-accent); color: var(--k-shell-accent-ink); }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--k-shell-accent-hover); }
@@ -128,11 +144,6 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-details-toggle, .hm-details-c
   live-dashboard.dashboard[data-kylon-shell] .cs-details-sheet > .hm-frame__side { display: block; border: 0; }
   live-dashboard.dashboard[data-kylon-shell] .hm-side :is(a, summary) { min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools { inset-inline-end: 8px; }
-}
-@media (hover: none) {
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message > .dashboard__message-body > .dashboard__message-tools {
-    position: static; padding: 0; border: 0; background: transparent; box-shadow: none;
-  }
 }
 
 /* A grouped author remains reachable with a visible identity control on keyboard focus. */

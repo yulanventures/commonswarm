@@ -111,6 +111,10 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.invitation-inbox": ['human-invitation-inbox[data-placement="corner"]:not([hidden])'],
   // The update notice is a fixed <aside> card floating over the feed and composer.
   "app.update-toast": ["[data-update-notice]:not([hidden])"],
+  // An opened receipt is a card over the message: the row's floating tool bar for a settled receipt, the badge's own
+  // card for a problem one.
+  "menu.receipt": [".dashboard__message-tools:has(> .dashboard__message-receipt[data-receipt-quiet][open])",
+    ".dashboard__message-receipt:not([data-receipt-quiet])[open]"],
   // The right-click menu (lib/context-menu.ts) is created on open and removed on close, never hidden.
   "menu.context": ['.cs-context-menu[role="menu"]'],
   // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
@@ -279,7 +283,13 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     { name: "show-more", rows: FEED_ROWS, prefer: '[data-signal-id="{message.long}"]', require: ['[data-signal-id="{message.long}"]'], max: 1,
       focus: true, focusTarget: ".dashboard__message-toggle", focusAcrossRebuild: true },
   ],
-  "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true }],
+  "app.chat.group": [{ name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, max: 6, focus: true },
+    // A problem receipt is a badge beside its message (on the avatar, or in the gutter of a grouped one): hovering the
+    // row or focusing the badge must not move anything.
+    { name: "problem-receipt", rows: FEED_ROWS, prefer: '[data-signal-id="{message.failedOwn}"]', max: 2, focus: true,
+      focusTarget: ".dashboard__message-receipt:not([data-receipt-quiet]) > summary",
+      require: ['[data-signal-id="{message.failedOwn}"]:has(.dashboard__message-receipt:not([data-receipt-quiet]))',
+        '[data-signal-id="{message.failedGrouped}"][data-stream-grouped]:has(.dashboard__message-receipt:not([data-receipt-quiet]))'] }],
   "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],

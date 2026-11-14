@@ -8429,6 +8429,9 @@ import "../../styles/kylon-command-palette.css";
           body.append(about);
         }
         appendDeliveryReceipt(body, signal);
+        /* A message to an agent has a delivery that can stall or fail. The row is marked from its first paint, whatever
+           the receipt says yet, so touch layouts can give its status badge room without the row changing height later. */
+        if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
         appendChoices(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
@@ -14090,6 +14093,22 @@ import "../../styles/kylon-command-palette.css";
     for (const button of all<HTMLButtonElement>("[data-channel-go-general]")) {
       button.addEventListener("click", () => { selectChannel(GENERAL_CHANNEL_ID); focusConversationHeading(); });
     }
+    /* An opened receipt is a card over the conversation: a press anywhere outside it closes it. */
+    document.addEventListener("pointerdown", (event) => {
+      const pressed = event.target instanceof Node ? event.target : null;
+      for (const receipt of all<HTMLDetailsElement>(".dashboard__message-receipt[open]")) {
+        if (!pressed || !receipt.contains(pressed)) receipt.open = false;
+      }
+    });
+    /* Escape closes it too, and gives focus back to the receipt's control when focus was inside the card. */
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const opened = all<HTMLDetailsElement>(".dashboard__message-receipt[open]");
+      if (opened.length === 0) return;
+      const holder = opened.find((receipt) => receipt.contains(document.activeElement));
+      for (const receipt of opened) receipt.open = false;
+      holder?.querySelector<HTMLElement>(":scope > summary")?.focus();
+    });
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;

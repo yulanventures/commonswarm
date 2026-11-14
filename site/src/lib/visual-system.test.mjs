@@ -216,7 +216,16 @@ test("message headers keep recipient metadata reachable alongside the name, agen
   assert.doesNotMatch(channel, /\.dashboard__message-meta\s*\{[^}]*visibility:\s*hidden;/u);
   assert.doesNotMatch(channel, /\.dashboard__message-tools[^{]*\{[^}]*visibility:\s*hidden;/u);
   assert.match(channel, /\.dashboard__message-operator[\s\S]*?display:\s*none;/u);
-  assert.match(channel, /@media\s*\(hover:\s*none\)\s*\{\s*live-dashboard\.dashboard\[data-kylon-shell\]\s+\.hm-frame\s+\.dashboard__message\s*>\s*\.dashboard__message-body\s*>\s*\.dashboard__message-tools/u);
+  // Row tools float on every device: no touch-only rule puts them back in the flow, and the rule that hides
+  // them at rest is not behind a hover media query (a tap focuses the row, which shows them).
+  assert.doesNotMatch(channel, /@media\s*\(hover:\s*none\)\s*\{[^}]*\.dashboard__message-tools[^}]*position:\s*static/u);
+  assert.match(channel, /\n(?!\s)live-dashboard\.dashboard\[data-kylon-shell\] \.hm-frame \.dashboard__message:not\(:hover, :focus-within\) > \.dashboard__message-body > \.dashboard__message-tools:not\(:has\(> \.dashboard__message-receipt\[open\]\)\):not\(:has\(> \.dashboard__message-receipt:not\(\[data-receipt-quiet\]\)\)\) \{\s*opacity:\s*0;\s*pointer-events:\s*none;/u);
+  const receipts = await readFile(new URL("../styles/kylon-receipts.css", import.meta.url), "utf8");
+  // A problem receipt (not quiet) is placed beside the message, never laid out in it: its bar has no box and the
+  // receipt is absolutely positioned, so a receipt turning into a problem cannot change a row's height.
+  assert.match(receipts, /\.dashboard__message-tools:has\(> \.dashboard__message-receipt:not\(\[data-receipt-quiet\]\)\) \{\s*display:\s*contents;[^}]*opacity:\s*1;\s*pointer-events:\s*auto;\s*\}/u);
+  assert.match(receipts, /\.dashboard__message-tools > \.dashboard__message-receipt:not\(\[data-receipt-quiet\]\) \{[^}]*position:\s*absolute;/u);
+  assert.doesNotMatch(receipts, /\.dashboard__message-tools[^{]*\{[^}]*position:\s*static;/u);
   assert.match(dashboard, /row\.tabIndex = -1;/u);
   assert.match(dashboard, /hour:\s*"numeric",\s*minute:\s*"2-digit"/u);
 });

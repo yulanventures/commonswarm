@@ -1217,6 +1217,10 @@
         "hover": "[data-signal-id=\"{message.addressedOwn}\"]"
       },
       {
+        "media": "(hover: none)",
+        "click": "[data-signal-id=\"{message.addressedOwn}\"] .dashboard__message-markdown"
+      },
+      {
         "click": "[data-signal-id=\"{message.addressedOwn}\"] details.dashboard__message-receipt > summary"
       },
       {
