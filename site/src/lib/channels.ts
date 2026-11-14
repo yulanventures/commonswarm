@@ -11,6 +11,7 @@
  * (`LiveDashboard.astro:21`), so this crosses no new boundary.
  */
 import {
+  CHANNEL_CREATION_POLICIES,
   CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_SLUG_MAX,
@@ -20,10 +21,11 @@ import {
   channelSlugProblem,
   isReservedChannelSlug,
   normalizeChannelSlug,
+  type ChannelCreationPolicy,
   type ChannelInvolvement,
 } from "../../../supabase/functions/_shared/channels.js";
 
-export type { ChannelInvolvement };
+export type { ChannelCreationPolicy, ChannelInvolvement };
 export {
   CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_PURPOSE_MAX,
@@ -407,6 +409,34 @@ export const CHANNEL_INVOLVEMENT_LABELS: Record<ChannelInvolvement, string> = {
   mentions: "Mentions only",
   muted: "Muted",
 };
+
+/* Who may create channels in a workspace. The values are the server's; these are their names. */
+export const CHANNEL_CREATION_TITLE = "Who can create channels";
+export const CHANNEL_CREATION_LABELS: Record<ChannelCreationPolicy, string> = {
+  members: "Everyone",
+  admins: "Owners & admins",
+};
+export const CHANNEL_CREATION_SAVED = "Saved";
+export { CHANNEL_CREATION_POLICIES };
+
+/**
+ * The workspace read's policy. A read without the column is the default, `members`. A value this
+ * build does not know is `null`: the server has a rule the browser cannot name.
+ */
+export const parseChannelCreationPolicy = (value: unknown): ChannelCreationPolicy | null =>
+  value === undefined || value === null ? "members"
+    : (CHANNEL_CREATION_POLICIES as readonly unknown[]).includes(value) ? value as ChannelCreationPolicy
+    : null;
+
+/**
+ * Whether to offer "New channel" to this person. The server decides on every create; this only
+ * keeps the app from offering what it would refuse. Under an unknown policy only an owner or an
+ * admin is offered it, since every policy so far lets them.
+ */
+export const mayCreateChannel = (
+  policy: ChannelCreationPolicy | null | undefined,
+  role: string | null | undefined,
+): boolean => policy === "members" || policy === undefined || role === "owner" || role === "admin";
 
 /* Visible copy (Channels C1 spec, "Visible copy inventory"). */
 export const CHANNELS_TITLE = "Channels";

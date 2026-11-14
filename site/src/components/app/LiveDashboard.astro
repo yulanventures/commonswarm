@@ -1018,7 +1018,7 @@ import "../../styles/kylon-command-palette.css";
     <input id="dashboard-channel-search" class="cm-search" data-channel-directory-search type="search" placeholder="Search channels" autocomplete="off" />
     <p class="cm-directory-status" role="status" aria-live="polite" data-channel-directory-status></p>
     <div class="cm-directory-results" data-channel-directory-list></div>
-    <footer class="cm-directory-footer">
+    <footer class="cm-directory-footer" data-channel-directory-footer>
       <button class="dashboard__button dashboard__button--primary" type="button" data-channel-directory-new>New channel</button>
     </footer>
   </dialog>
@@ -1332,6 +1332,8 @@ import "../../styles/kylon-command-palette.css";
     subscribeAgentActivity,
     subscribeWorkspaceSignals,
     setChannelPreference,
+    setWorkspaceChannelPolicy,
+    workspaceChannelPolicy,
     reorderChannels,
     reorderStarredChannels,
     uuid,
@@ -1434,6 +1436,8 @@ import "../../styles/kylon-command-palette.css";
     GENERAL_CHANNEL_SLUG,
     GO_TO_GENERAL_LABEL,
     NEW_CHANNEL_LABEL,
+    mayCreateChannel,
+    type ChannelCreationPolicy,
     CHANNEL_INVOLVEMENT_LABELS,
     CHANNEL_INVOLVEMENT_LEVELS,
     CHANNEL_NOTIFY_LABEL,
@@ -1568,7 +1572,9 @@ import "../../styles/kylon-command-palette.css";
 
   type SeatAdminConfirmationHandle = ReturnType<typeof buildSeatAdminConfirmation>;
 
-  interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string; leadAgentPrincipalId?: string | null }
+  interface Workspace extends CloseableWorkspace { orgId?: string; orgName?: string; leadAgentPrincipalId?: string | null;
+    /** Who may create channels here. Absent is the default (everyone); `null` is a policy this build does not know. */
+    channelCreationPolicy?: ChannelCreationPolicy | null }
 
   interface Agent {
     principalId: string;
@@ -2316,6 +2322,36 @@ import "../../styles/kylon-command-palette.css";
      * the read that carries them has answered. Null everywhere else (All messages, a Direct Message, an
      * archived or unknown channel, another view), and there the header offers neither control.
      */
+    /** Whether to offer "New channel" here. The server decides on every create. */
+    const viewerMayCreateChannel = (): boolean => !sampleMode && mayCreateChannel(
+      workspaces.find(workspace => workspace.id === activeWorkspaceId)?.channelCreationPolicy,
+      members.find(member => member.userId === session?.user.id)?.role ?? null);
+    /** The All channels footer holds only "New channel", so it goes with it. */
+    const syncChannelDirectoryFooter = (): void => {
+      const footer = one<HTMLElement>("[data-channel-directory-footer]");
+      if (footer) footer.hidden = !viewerMayCreateChannel();
+    };
+    /** Everything that offers "New channel", drawn again after the policy or the viewer's role changed. */
+    const renderChannelCreationOffers = (): void => {
+      syncChannelDirectoryFooter();
+      renderChannelRail(); renderHomeShell();
+    };
+    const withChannelPolicy = (workspaceId: string, policy: ChannelCreationPolicy | null): boolean => {
+      const row = workspaces.find(workspace => workspace.id === workspaceId);
+      if (!row || row.channelCreationPolicy === policy) return false;
+      workspaces = workspaces.map(workspace => workspace.id === workspaceId ? { ...workspace, channelCreationPolicy: policy } : workspace);
+      if (workspaceId === activeWorkspaceId) renderChannelCreationOffers();
+      return true;
+    };
+    /** Reads the policy again: someone else may have changed it since this page loaded. */
+    const refreshChannelPolicy = async (workspaceId: string): Promise<boolean> => {
+      if (sampleMode || !session) return false;
+      try {
+        const policy = await workspaceChannelPolicy(workspaceId);
+        return policy === undefined ? false : withChannelPolicy(workspaceId, policy);
+      } catch { return false; }
+    };
+
     const activePlace = (): ({ viewId: string; slug: string } & ChannelPreference) | null => {
       if (sampleMode || homeRoute.view !== "chat" || activeWorkspaceView !== "signals" || activeDm ||
         unknownChannelId !== null || activeChannelId === null) return null;
@@ -2372,7 +2408,7 @@ import "../../styles/kylon-command-palette.css";
           { id: GENERAL_CHANNEL_ID, label: channelLabel(GENERAL_CHANNEL_SLUG), current: activeChannelId === GENERAL_CHANNEL_ID && unknownChannelId === null },
           ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channelLabel(channel.slug),
             current: channel.channelId === activeChannelId && unknownChannelId === null }))],
-        mayCreateChannel: !sampleMode,
+        mayCreateChannel: viewerMayCreateChannel(),
         channelSettings: activeChannel() !== null && !activeDm,
         place: activePlace(),
         filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
@@ -7185,6 +7221,9 @@ import "../../styles/kylon-command-palette.css";
         const userId=session.user.id;
         moveOrganizations=[];
         renderWorkspaceSettingsPanel(workspace);
+        void refreshChannelPolicy(workspace.id).then(changed => {
+          if (changed && session?.user.id === userId && activeWorkspaceId === workspace.id && dialog.open) renderWorkspaceSettingsPanel(workspace);
+        });
         void myOrganizations().then(orgs=>{
           if(session?.user.id!==userId || activeWorkspaceId!==workspace.id || !dialog.open) return;
           moveOrganizations=orgs;
@@ -9672,9 +9711,11 @@ import "../../styles/kylon-command-palette.css";
       one<HTMLElement>("[data-cleanup-body]")?.replaceChildren();
     });
 
-    const renderWorkspaceSettingsPanel = (workspace: Workspace): void => {
+    const renderWorkspaceSettingsPanel = (opened: Workspace): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
       if (!root) return;
+      // Callers hold the row they opened with; the list may have a newer one (a rename, a policy change).
+      const workspace = workspaces.find(row => row.id === opened.id) ?? opened;
       const me = members.find((member) => member.userId === session?.user.id);
       renderWorkspaceSettings(root, {
         name: workspace.name,
@@ -9683,6 +9724,15 @@ import "../../styles/kylon-command-palette.css";
         agentCount: agents.length,
         canClose: !sampleMode && me?.role === "owner",
         canRename: !sampleMode && (me?.role === "owner" || me?.role === "admin"),
+        channelPolicy: !sampleMode && session && (me?.role === "owner" || me?.role === "admin") ? {
+          value: workspace.channelCreationPolicy === undefined ? "members" : workspace.channelCreationPolicy,
+          onChange: async policy => {
+            if (!session || sampleMode) throw new Error("Sign in to change this.");
+            const saved = await setWorkspaceChannelPolicy(session, uuid(), workspace.id, policy);
+            withChannelPolicy(workspace.id, saved);
+            return saved;
+          },
+        } : undefined,
         onCleanup: !sampleMode && (me?.role === "owner" || me?.role === "admin")
           ? () => { closeWorkspaceDetailsDialog(); openCleanupDialog(workspace.id); } : undefined,
         onRename: async name => {
@@ -11078,7 +11128,7 @@ import "../../styles/kylon-command-palette.css";
         channels: sharedOrder ? movable(live.filter(channel => !starredIds.includes(channel.channelId)).map(row), "channels")
           : live.filter(channel => !starredIds.includes(channel.channelId)).map(row),
         archived: archivedChannels(channels).map(row),
-        mayCreate: !sampleMode,
+        mayCreate: viewerMayCreateChannel(),
       };
     };
 
@@ -11349,7 +11399,7 @@ import "../../styles/kylon-command-palette.css";
       renderHomeRail();
       const slot = one<HTMLElement>("[data-home-channel-menu]");
       if (!slot) return;
-      slot.replaceChildren(buildChannelMenu(document, { sample: sampleMode, label: activeChannelName() }));
+      slot.replaceChildren(buildChannelMenu(document, { sample: sampleMode, mayCreate: viewerMayCreateChannel(), label: activeChannelName() }));
       one<HTMLButtonElement>("[data-channel-place='']")?.addEventListener("click", () => selectChannel(null));
       one<HTMLButtonElement>("[data-channel-new]")?.addEventListener("click", () => openChannelDialog("create"));
       const list = one<HTMLElement>("[data-channel-list]");
@@ -11648,6 +11698,7 @@ import "../../styles/kylon-command-palette.css";
       }
       if (layout.navigationOpen()) layout.closeNavigation(false);
       channelDirectoryEpoch++; channelDirectoryKey = "";
+      syncChannelDirectoryFooter();
       dialog.showModal(); renderChannelDirectoryDialog();
       const target = resume && opener && dialog.contains(opener) ? opener : one<HTMLInputElement>("[data-channel-directory-search]");
       target?.focus({ preventScroll: true });
@@ -11661,6 +11712,7 @@ import "../../styles/kylon-command-palette.css";
     ): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (!dialog || dialog.open || sampleMode || !session) return;
+      if (mode === "create" && !viewerMayCreateChannel()) return;
       const channel = mode === "create" ? null : channelById(channels, channelId);
       if (mode !== "create" && (channel === null || (mode === "archive" && !viewerMayManageChannel(channel)))) return;
       const directory = one<HTMLDialogElement>("[data-channel-directory]")?.open === true;
@@ -13024,6 +13076,7 @@ import "../../styles/kylon-command-palette.css";
         })),
         leadAgentPrincipalId: activeWorkspaceLeadAgent()?.principalId ?? null,
         maySetLead: viewerMaySetWorkspaceLead(),
+        mayCreateChannel: viewerMayCreateChannel(),
         themeLabel: (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim() || undefined,
       });
       commandPaletteFiltered = filterCommandPaletteItems(allItems, input?.value ?? "");
@@ -14171,6 +14224,8 @@ import "../../styles/kylon-command-palette.css";
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId || !channelDialogOwns(epoch)) return;
         holdChannelDialog(false); setChannelDialogError(readableError(error));
+        // The refusal may be the policy having changed under this page; stop offering what is refused.
+        void refreshChannelPolicy(workspaceId);
       }
     };
     const submitChannelSettings = async (): Promise<void> => {

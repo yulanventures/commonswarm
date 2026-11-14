@@ -619,7 +619,7 @@ export function buildWorkspaceHeader(doc: Document, vm: WorkspaceShellVM, callba
 }
 
 /** Local to this lane: the stream header's channel menu. */
-export interface ChannelMenuVM { sample: boolean; label: string }
+export interface ChannelMenuVM { sample: boolean; label: string; /** False hides "New channel". */ mayCreate?: boolean }
 
 /**
  * Stream header "All messages ▾". A disclosure that holds the existing channel hooks: the page's
@@ -650,7 +650,7 @@ export function buildChannelMenu(doc: Document, vm: ChannelMenuVM, callbacks: { 
   const create = node(doc, "button", "hm-channel-menu__item hm-channel-menu__new");
   create.type = "button";
   create.dataset.channelNew = "";
-  create.hidden = vm.sample;
+  create.hidden = vm.sample || vm.mayCreate === false;
   const plus = node(doc, "span", "", "+");
   plus.setAttribute("aria-hidden", "true");
   create.append(plus, node(doc, "span", "", "New channel"));

@@ -156,3 +156,59 @@ test("rename is offered only when allowed, saves a changed name once, and keeps 
   assert.deepEqual(calls, ["Science Lab", "Lab"]);
   assert.equal(again.children[1].disabled, true, "saved: busy until the panel repaints with the new name");
 });
+
+function policyFixture(channelPolicy) {
+  const nodes = fixture(channelPolicy ? { channelPolicy } : {});
+  const group = nodes.find((node) => "workspaceChannelPolicy" in node.dataset);
+  const choice = (value) => nodes.find((node) => node.dataset.workspaceChannelPolicyChoice === value);
+  const status = nodes.find((node) => "workspaceChannelPolicyStatus" in node.dataset);
+  return { group, choice, status };
+}
+
+test("who can create channels is offered only when the caller passes it, and marks the policy held", () => {
+  assert.equal(policyFixture(null).group, undefined, "a member's settings have no such control");
+  const { group, choice } = policyFixture({ value: "admins", onChange: async (policy) => policy });
+  assert.equal(group.attributes.role, "radiogroup");
+  assert.equal(group.children[0].textContent, "Who can create channels");
+  assert.equal(group.attributes["aria-labelledby"], group.children[0].id);
+  assert.deepEqual([choice("members").checked, choice("admins").checked], [false, true]);
+  const unknown = policyFixture({ value: null, onChange: async (policy) => policy });
+  assert.deepEqual([unknown.choice("members").checked, unknown.choice("admins").checked], [false, false],
+    "a policy this build cannot name marks neither choice");
+});
+
+test("a policy change is sent once, held while it is answered, and then shows what the server holds", async () => {
+  let finish;
+  const sent = [];
+  const { group, choice, status } = policyFixture({
+    value: "members",
+    onChange: (policy) => { sent.push(policy); return new Promise((resolve) => { finish = resolve; }); },
+  });
+  choice("admins").checked = true; choice("members").checked = false;
+  const pending = choice("admins").listeners.change();
+  assert.deepEqual(sent, ["admins"]);
+  assert.deepEqual([choice("members").disabled, choice("admins").disabled], [true, true]);
+  assert.equal(group.attributes["aria-busy"], "true");
+  finish("admins");
+  await pending;
+  assert.deepEqual([choice("members").checked, choice("admins").checked], [false, true]);
+  assert.deepEqual([choice("members").disabled, choice("admins").disabled], [false, false]);
+  assert.equal(group.attributes["aria-busy"], undefined);
+  assert.equal(status.textContent, "Saved");
+  // Choosing what is already held sends nothing.
+  await choice("admins").listeners.change();
+  assert.deepEqual(sent, ["admins"]);
+});
+
+test("a refused policy change goes back to the policy held and says why", async () => {
+  const { choice, status } = policyFixture({
+    value: "members",
+    onChange: async () => { throw new Error("Only a workspace owner or admin can change who may create channels."); },
+  });
+  choice("admins").checked = true; choice("members").checked = false;
+  await choice("admins").listeners.change();
+  assert.deepEqual([choice("members").checked, choice("admins").checked], [true, false]);
+  assert.equal(status.textContent, "Only a workspace owner or admin can change who may create channels.");
+  assert.equal("problem" in status.dataset, true);
+  assert.equal(choice("admins").disabled, false);
+});

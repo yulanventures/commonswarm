@@ -306,3 +306,20 @@ test("a new star order and a new shared order show at once", () => {
   assert.equal(next.find((channel) => channel.slug === "old").sortRank, 0, "an archived channel is not placed");
   assert.equal(orderAnnouncement("design", 2, 5), "#design, 2 of 5");
 });
+
+test("who is offered New channel follows the workspace's policy and the viewer's role", async () => {
+  const { CHANNEL_CREATION_LABELS, CHANNEL_CREATION_POLICIES, mayCreateChannel, parseChannelCreationPolicy } = await import("./channels.ts");
+  const offered = (policy) => ["owner", "admin", "member", null].map((role) => mayCreateChannel(policy, role));
+  assert.deepEqual(offered("members"), [true, true, true, true]);
+  assert.deepEqual(offered("admins"), [true, true, false, false], "a member is not offered what the server refuses, nor is anyone before the roster is known");
+  assert.deepEqual(offered(undefined), [true, true, true, true], "a workspace row without the field is the default");
+  assert.deepEqual(offered(null), [true, true, false, false], "a policy this build cannot name is treated as the stricter one");
+
+  assert.equal(parseChannelCreationPolicy(undefined), "members", "a read without the column is the default");
+  assert.equal(parseChannelCreationPolicy("admins"), "admins");
+  assert.equal(parseChannelCreationPolicy("guests-too"), null);
+  assert.equal(parseChannelCreationPolicy(7), null);
+
+  assert.deepEqual(Object.keys(CHANNEL_CREATION_LABELS).sort(), [...CHANNEL_CREATION_POLICIES].sort(), "every policy the server has is named");
+  assert.equal(new Set(Object.values(CHANNEL_CREATION_LABELS)).size, CHANNEL_CREATION_POLICIES.length);
+});
