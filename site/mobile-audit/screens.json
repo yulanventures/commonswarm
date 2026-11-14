@@ -91,6 +91,10 @@
       "seed_channels",
       "star_channel",
       "mute_channel"
+    ],
+    "frame": [
+      "[data-home-channel-list] [data-rail-channel=\"{channel.long}\"] .hm-rail__icon",
+      "[data-home-channel-list] [data-rail-channel=\"{channel.long}\"] .hm-rail__muted"
     ]
   },
   {
@@ -1219,6 +1223,12 @@
       "create_workspace",
       "seed_channels",
       "mute_channel"
+    ],
+    "frame": [
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(1), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"everything\"])",
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(2), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"mentions\"])",
+      ":is(.cs-context-menu [role=\"menuitemradio\"]:nth-of-type(3), :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"muted\"])",
+      ":is(.hm-ws-header [data-channel-notify][data-context-open], :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__trigger[aria-expanded=\"true\"])"
     ]
   },
   {
