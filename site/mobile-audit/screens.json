@@ -138,6 +138,38 @@
     ]
   },
   {
+    "id": "dialog.all-channels",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-home-all-channels]"
+      },
+      {
+        "click": "[data-home-all-channels]"
+      },
+      {
+        "waitFor": "dialog[data-channel-directory][open] [data-channel-directory-row=\"{channel.private}\"] .cm-directory-name[data-private] .cm-directory-lock"
+      }
+    ],
+    "ready": "dialog[data-channel-directory][open] [data-channel-directory-search]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel"
+    ],
+    "frame": [
+      "dialog[data-channel-directory][open] [data-channel-directory-row=\"{channel.private}\"] .cm-directory-name[data-private] .cm-directory-lock"
+    ]
+  },
+  {
     "id": "app.chat.dm",
     "kind": "view",
     "path": "/app?w={workspace}",
