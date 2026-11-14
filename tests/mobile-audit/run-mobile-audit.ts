@@ -66,7 +66,10 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
 type Step = { media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
-  option?: string; press?: string; wait?: number; scroll?: string; settle?: true };
+  option?: string; press?: string; wait?: number; scroll?: string; settle?: true;
+  /** Write one localStorage item for this origin, then load the page again so the app starts with it (a draft saved
+   *  by an earlier build, for example). */
+  storage?: { key: string; value: string } };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
   noJs?: true;
@@ -625,6 +628,11 @@ async function main(): Promise<void> {
             const scrollTarget = fill(step.scroll, seed.ids);
             try { await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
             catch { await page.waitForTimeout(300); await page.locator(scrollTarget).first().scrollIntoViewIfNeeded({ timeout: 8_000 }); }
+          }
+          if (step.storage) {
+            await page.evaluate(([key, value]: [string, string]) => window.localStorage.setItem(key, value),
+              [fill(step.storage.key, seed.ids), fill(step.storage.value, seed.ids)] as [string, string]);
+            await page.reload();
           }
           if (step.wait) await page.waitForTimeout(step.wait);
           if (step.settle) await settle(page);
