@@ -48,12 +48,15 @@ import {
   SIGNAL_UNSAFE_GLOBAL_RE,
 } from "../_shared/signal-text.ts";
 import {
+  CHANNEL_CREATE_OPTIONAL_FIELDS,
   CHANNEL_CREATION_POLICIES,
   CHANNEL_CREATION_POLICY_RULE_TEXT,
   type ChannelCreationPolicy,
   CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_INVOLVEMENT_RULE_TEXT,
   type ChannelInvolvement,
+  CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT,
+  type ChannelMemberRef,
   CHANNEL_PREFERENCE_EMPTY_TEXT,
   CHANNEL_PREFERENCE_OPTIONAL_FIELDS,
   CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
@@ -63,6 +66,11 @@ import {
   CHANNEL_STARRED_RULE_TEXT,
   CHANNEL_UPDATE_EMPTY_TEXT,
   CHANNEL_UPDATE_OPTIONAL_FIELDS,
+  CHANNEL_VISIBILITIES,
+  CHANNEL_VISIBILITY_RULE_TEXT,
+  type ChannelVisibility,
+  channelMemberEntryProblem,
+  channelMembersListProblem,
   channelReorderListProblem,
   channelSlugProblem,
   channelStarReorderListProblem,
@@ -74,6 +82,8 @@ import {
   MODEL_MAX,
   MODEL_RULE_TEXT,
   normalizeChannelSlug,
+  parseChannelMemberEntry,
+  parseChannelMembers,
   SIGNAL_KINDS,
   type SignalKind,
   parseSignalMentions,
@@ -399,16 +409,35 @@ interface AnswerChoiceCommand {
 
 /** Channel authority. Self-contained like post_signal: emits no protocol event. */
 type ChannelCommand =
-  | { kind: "channel_create"; slug: string; purpose: string | null }
+  | {
+    kind: "channel_create";
+    slug: string;
+    purpose: string | null;
+    visibility: ChannelVisibility;
+    members?: ChannelMemberRef[];
+  }
   | { kind: "channel_rename"; channel_id: string; slug: string }
   | {
     kind: "channel_update";
     channel_id: string;
     slug?: string;
     purpose?: string | null;
+    visibility?: ChannelVisibility;
+    members?: ChannelMemberRef[];
   }
   | { kind: "channel_archive"; channel_id: string }
   | { kind: "channel_unarchive"; channel_id: string }
+  | {
+    kind: "channel_member_add";
+    channel_id: string;
+    members: ChannelMemberRef[];
+  }
+  | {
+    kind: "channel_member_remove";
+    channel_id: string;
+    member: ChannelMemberRef;
+  }
+  | { kind: "channel_leave"; channel_id: string }
   | {
     kind: "channel_preference_set";
     channel_id: string | null;
@@ -431,6 +460,17 @@ interface ChannelRecord {
   created_by_kind: CredentialKind;
   created_at: string;
   archived_at: string | null;
+  visibility: ChannelVisibility;
+}
+
+interface ChannelMemberRecord {
+  channel_id: string;
+  workspace_id: string;
+  kind: "user" | "agent";
+  id: string;
+  added_by_principal: string;
+  added_by_kind: CredentialKind;
+  created_at: string;
 }
 
 interface ChannelPreferenceRecord {
@@ -740,6 +780,9 @@ interface StoredResponse {
   signal?: SignalRecord;
   reraise?: ReraiseRecord;
   channel?: ChannelRecord;
+  members?: ChannelMemberRecord[];
+  channel_id?: string;
+  left?: boolean;
   preference?: ChannelPreferenceRecord;
   preferences?: ChannelPreferenceRecord[];
   ordered_channel_ids?: string[];
@@ -1181,6 +1224,9 @@ const CHANNEL_COMMAND_KINDS = [
   "channel_update",
   "channel_archive",
   "channel_unarchive",
+  "channel_member_add",
+  "channel_member_remove",
+  "channel_leave",
   "channel_preference_set",
   "channel_star_reorder",
   "channel_reorder",
@@ -2102,9 +2148,9 @@ function validateCommand(
    * telling a caller a rule that is not enforced. */
   if (cmd.kind === "channel_create") {
     const required = ["slug"];
-    const optional = ["purpose"];
-    const keysOk = exactKeys(cmd, ["kind", ...required]) ||
-      exactKeys(cmd, ["kind", ...required, ...optional]);
+    const optional = [...CHANNEL_CREATE_OPTIONAL_FIELDS];
+    const presentOptional = optional.filter((key) => Object.hasOwn(cmd, key));
+    const keysOk = exactKeys(cmd, ["kind", ...required, ...presentOptional]);
     const slugProblem = channelSlugProblem(cmd.slug);
     if (!keysOk || slugProblem !== null) {
       return {
@@ -2135,12 +2181,41 @@ function validateCommand(
         reason: CHANNEL_PURPOSE_MAX_TEXT,
       };
     }
+    let visibility: ChannelVisibility = "open";
+    if (Object.hasOwn(cmd, "visibility") && cmd.visibility !== undefined) {
+      if (
+        typeof cmd.visibility !== "string" ||
+        !(CHANNEL_VISIBILITIES as readonly string[]).includes(cmd.visibility)
+      ) {
+        return { ok: false, status: 400, reason: CHANNEL_VISIBILITY_RULE_TEXT };
+      }
+      visibility = cmd.visibility as ChannelVisibility;
+    }
+    let members: ChannelMemberRef[] | undefined = undefined;
+    if (Object.hasOwn(cmd, "members") && cmd.members !== undefined) {
+      if (visibility !== "private") {
+        return {
+          ok: false,
+          status: 400,
+          reason: CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT,
+        };
+      }
+      const membersProblem = channelMembersListProblem(cmd.members, {
+        allowEmpty: true,
+      });
+      if (membersProblem !== null) {
+        return { ok: false, status: 400, reason: membersProblem };
+      }
+      members = parseChannelMembers(cmd.members)!;
+    }
     return {
       ok: true,
       command: {
         kind: "channel_create",
         slug: normalizeChannelSlug(cmd.slug as string),
         purpose,
+        visibility,
+        ...(members !== undefined ? { members } : {}),
       },
     };
   }
@@ -2164,7 +2239,11 @@ function validateCommand(
     const hasSlug = Object.hasOwn(cmd, "slug") && cmd.slug !== undefined;
     const hasPurpose = Object.hasOwn(cmd, "purpose") &&
       cmd.purpose !== undefined;
-    if (!hasSlug && !hasPurpose) {
+    const hasVisibility = Object.hasOwn(cmd, "visibility") &&
+      cmd.visibility !== undefined;
+    const hasMembers = Object.hasOwn(cmd, "members") &&
+      cmd.members !== undefined;
+    if (!hasSlug && !hasPurpose && !hasVisibility) {
       return { ok: false, status: 400, reason: CHANNEL_UPDATE_EMPTY_TEXT };
     }
     if (hasSlug) {
@@ -2189,6 +2268,33 @@ function validateCommand(
         };
       }
     }
+    let visibility: ChannelVisibility | undefined = undefined;
+    if (hasVisibility) {
+      if (
+        typeof cmd.visibility !== "string" ||
+        !(CHANNEL_VISIBILITIES as readonly string[]).includes(cmd.visibility)
+      ) {
+        return { ok: false, status: 400, reason: CHANNEL_VISIBILITY_RULE_TEXT };
+      }
+      visibility = cmd.visibility as ChannelVisibility;
+    }
+    let members: ChannelMemberRef[] | undefined = undefined;
+    if (hasMembers) {
+      if (visibility !== "private") {
+        return {
+          ok: false,
+          status: 400,
+          reason: CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT,
+        };
+      }
+      const membersProblem = channelMembersListProblem(cmd.members, {
+        allowEmpty: true,
+      });
+      if (membersProblem !== null) {
+        return { ok: false, status: 400, reason: membersProblem };
+      }
+      members = parseChannelMembers(cmd.members)!;
+    }
     return {
       ok: true,
       command: {
@@ -2196,6 +2302,89 @@ function validateCommand(
         channel_id: (cmd.channel_id as string).toLowerCase(),
         ...(hasSlug ? { slug: normalizeChannelSlug(cmd.slug as string) } : {}),
         ...(hasPurpose ? { purpose } : {}),
+        ...(visibility !== undefined ? { visibility } : {}),
+        ...(members !== undefined ? { members } : {}),
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_member_add") {
+    const required = ["channel_id", "members"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    const idOk = typeof cmd.channel_id === "string" &&
+      UUID_RE.test(cmd.channel_id);
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: !keysOk
+          ? commandFieldsMessage("channel_member_add", required)
+          : CHANNEL_ID_RULE_TEXT,
+      };
+    }
+    const membersProblem = channelMembersListProblem(cmd.members, {
+      allowEmpty: false,
+    });
+    if (membersProblem !== null) {
+      return { ok: false, status: 400, reason: membersProblem };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_member_add",
+        channel_id: (cmd.channel_id as string).toLowerCase(),
+        members: parseChannelMembers(cmd.members)!,
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_member_remove") {
+    const required = ["channel_id", "member"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    const idOk = typeof cmd.channel_id === "string" &&
+      UUID_RE.test(cmd.channel_id);
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: !keysOk
+          ? commandFieldsMessage("channel_member_remove", required)
+          : CHANNEL_ID_RULE_TEXT,
+      };
+    }
+    const entryProblem = channelMemberEntryProblem(cmd.member);
+    if (entryProblem !== null) {
+      return { ok: false, status: 400, reason: entryProblem };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_member_remove",
+        channel_id: (cmd.channel_id as string).toLowerCase(),
+        member: parseChannelMemberEntry(cmd.member)!,
+      },
+    };
+  }
+
+  if (cmd.kind === "channel_leave") {
+    const required = ["channel_id"];
+    const keysOk = exactKeys(cmd, ["kind", ...required]);
+    const idOk = typeof cmd.channel_id === "string" &&
+      UUID_RE.test(cmd.channel_id);
+    if (!keysOk || !idOk) {
+      return {
+        ok: false,
+        status: 400,
+        reason: !keysOk
+          ? commandFieldsMessage("channel_leave", required)
+          : CHANNEL_ID_RULE_TEXT,
+      };
+    }
+    return {
+      ok: true,
+      command: {
+        kind: "channel_leave",
+        channel_id: (cmd.channel_id as string).toLowerCase(),
       },
     };
   }
@@ -3542,6 +3731,15 @@ function storedResponse(value: unknown): StoredResponse {
     ...(record(response.channel) === null
       ? {}
       : { channel: response.channel as unknown as ChannelRecord }),
+    ...(Array.isArray(response.members)
+      ? { members: response.members as unknown as ChannelMemberRecord[] }
+      : {}),
+    ...(typeof response.channel_id === "string"
+      ? { channel_id: response.channel_id }
+      : {}),
+    ...(typeof response.left === "boolean"
+      ? { left: response.left }
+      : {}),
     ...(record(response.preference) === null
       ? {}
       : { preference: response.preference as unknown as ChannelPreferenceRecord }),
@@ -9929,6 +10127,9 @@ type ChannelOutcome =
   | {
     ok: true;
     channel?: ChannelRecord;
+    members?: ChannelMemberRecord[];
+    channel_id?: string;
+    left?: boolean;
     preference?: ChannelPreferenceRecord;
     preferences?: ChannelPreferenceRecord[];
     ordered_channel_ids?: string[];
@@ -9951,6 +10152,18 @@ interface ChannelRow {
   created_by_kind: CredentialKind;
   created_at: Date;
   archived_at: Date | null;
+  visibility: ChannelVisibility;
+}
+
+interface ChannelMemberRow {
+  channel_id: string;
+  workspace_id: string;
+  member_kind: "user" | "agent";
+  user_id: string | null;
+  agent_principal_id: string | null;
+  added_by_principal: string;
+  added_by_kind: CredentialKind;
+  created_at: Date;
 }
 
 interface ChannelPreferenceRow {
@@ -9975,6 +10188,19 @@ function channelRecord(row: ChannelRow): ChannelRecord {
     archived_at: row.archived_at === null
       ? null
       : row.archived_at.toISOString(),
+    visibility: row.visibility,
+  };
+}
+
+function channelMemberRecord(row: ChannelMemberRow): ChannelMemberRecord {
+  return {
+    channel_id: row.channel_id,
+    workspace_id: row.workspace_id,
+    kind: row.member_kind,
+    id: (row.member_kind === "user" ? row.user_id : row.agent_principal_id)!,
+    added_by_principal: row.added_by_principal,
+    added_by_kind: row.added_by_kind,
+    created_at: row.created_at.toISOString(),
   };
 }
 
@@ -9990,6 +10216,34 @@ function channelPreferenceRecord(
     involvement: row.involvement,
     updated_at: row.updated_at.toISOString(),
   };
+}
+
+function authActorIdentity(
+  auth: AuthContext,
+): { kind: "user" | "agent"; id: string } {
+  return {
+    kind: auth.credentialKind === "user" ? "user" : "agent",
+    id: canonicalPrincipal(auth.actor),
+  };
+}
+
+async function actorCanAccessChannel(
+  tx: Sql,
+  workspaceId: string,
+  channelId: string | null,
+  actorKind: "user" | "agent",
+  actorId: string,
+): Promise<boolean> {
+  if (channelId === null) return true;
+  const [row] = await tx<{ allowed: boolean }[]>`
+    SELECT swarm.actor_can_access_channel(
+      ${workspaceId}::uuid,
+      ${channelId}::uuid,
+      ${actorKind},
+      ${actorId}::uuid
+    ) AS allowed
+  `;
+  return row?.allowed === true;
 }
 
 async function isHumanWorkspaceAdmin(
@@ -10008,12 +10262,168 @@ async function isHumanWorkspaceAdmin(
   return membership?.role === "owner" || membership?.role === "admin";
 }
 
-/** Live slugs in the route's workspace, for a refusal message we generate. */
-async function liveChannelSlugs(tx: Sql, route: Route): Promise<string[]> {
+async function canManageChannel(
+  tx: Sql,
+  workspaceId: string,
+  auth: AuthContext,
+  row: ChannelRow,
+): Promise<boolean> {
+  const actor = authActorIdentity(auth);
+  if (
+    row.created_by_kind === actor.kind &&
+    row.created_by_principal === actor.id
+  ) {
+    return true;
+  }
+  if (
+    row.created_by_kind === "agent" &&
+    auth.credentialKind === "user" &&
+    auth.actor.user !== null
+  ) {
+    const [owned] = await tx<{ hit: number }[]>`
+      SELECT 1 AS hit
+      FROM swarm.agent_principals
+      WHERE principal_id = ${row.created_by_principal}::uuid
+        AND owner_user_id = ${auth.actor.user}::uuid
+      LIMIT 1
+    `;
+    if (owned !== undefined) return true;
+  }
+  return await isHumanWorkspaceAdmin(tx, workspaceId, auth);
+}
+
+async function countRemainingLiveHumanManagers(
+  tx: Sql,
+  workspaceId: string,
+  row: ChannelRow,
+  excludeUserId: string | null,
+): Promise<number> {
+  const [res] = await tx<{ cnt: number }[]>`
+    SELECT count(*)::integer AS cnt
+    FROM swarm.channel_members AS cm
+    JOIN swarm.memberships AS wm
+      ON wm.workspace_id = cm.workspace_id
+     AND wm.user_id = cm.user_id
+     AND wm.revoked_at IS NULL
+    WHERE cm.workspace_id = ${workspaceId}::uuid
+      AND cm.channel_id = ${row.channel_id}::uuid
+      AND cm.member_kind = 'user'
+      AND (${excludeUserId}::uuid IS NULL OR cm.user_id <> ${excludeUserId}::uuid)
+      AND (
+        wm.role IN ('owner', 'admin')
+        OR (${row.created_by_kind} = 'user' AND ${row.created_by_principal}::uuid = cm.user_id)
+        OR (
+          ${row.created_by_kind} = 'agent'
+          AND EXISTS (
+            SELECT 1 FROM swarm.agent_principals AS p
+            WHERE p.principal_id = ${row.created_by_principal}::uuid
+              AND p.owner_user_id = cm.user_id
+          )
+        )
+      )
+  `;
+  return res?.cnt ?? 0;
+}
+
+async function validateLiveWorkspaceMembers(
+  tx: Sql,
+  route: Route,
+  members: readonly ChannelMemberRef[],
+): Promise<ChannelOutcome | null> {
+  for (const entry of members) {
+    const live = entry.kind === "user"
+      ? await signalUserTargetIsLive(tx, route, entry.id)
+      : await signalAgentTargetIsLive(tx, route, entry.id);
+    if (!live) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_member_not_in_workspace",
+        message: "Every channel member must belong to this workspace.",
+        reason: "channel_member_not_in_workspace",
+      };
+    }
+  }
+  return null;
+}
+
+async function insertChannelMembers(
+  tx: Sql,
+  workspaceId: string,
+  channelId: string,
+  addedBy: { kind: "user" | "agent"; id: string },
+  members: readonly ChannelMemberRef[],
+): Promise<void> {
+  const seen = new Set<string>();
+  for (const entry of members) {
+    const key = `${entry.kind}:${entry.id.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await tx`
+      INSERT INTO swarm.channel_members (
+        workspace_id, channel_id, member_kind, user_id, agent_principal_id,
+        added_by_kind, added_by_principal, created_at
+      ) VALUES (
+        ${workspaceId}::uuid,
+        ${channelId}::uuid,
+        ${entry.kind},
+        ${entry.kind === "user" ? entry.id.toLowerCase() : null}::uuid,
+        ${entry.kind === "agent" ? entry.id.toLowerCase() : null}::uuid,
+        ${addedBy.kind},
+        ${addedBy.id}::uuid,
+        statement_timestamp()
+      )
+      ON CONFLICT (workspace_id, channel_id, member_key) DO NOTHING
+    `;
+  }
+}
+
+async function channelMemberRecords(
+  tx: Sql,
+  workspaceId: string,
+  channelId: string,
+): Promise<ChannelMemberRecord[]> {
+  const rows = await tx<ChannelMemberRow[]>`
+    SELECT
+      m.channel_id,
+      m.workspace_id,
+      m.member_kind,
+      m.user_id,
+      m.agent_principal_id,
+      m.added_by_principal,
+      m.added_by_kind,
+      m.created_at
+    FROM swarm.channel_members AS m
+    WHERE m.workspace_id = ${workspaceId}::uuid
+      AND m.channel_id = ${channelId}::uuid
+      AND swarm.actor_can_access_channel(
+        m.workspace_id,
+        m.channel_id,
+        m.member_kind,
+        COALESCE(m.user_id, m.agent_principal_id)
+      )
+    ORDER BY m.created_at ASC, m.member_kind ASC, m.member_key ASC
+  `;
+  return rows.map(channelMemberRecord);
+}
+
+/** Live slugs accessible to the caller in the route's workspace, for generated refusal copy. */
+async function liveChannelSlugs(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+): Promise<string[]> {
+  const actor = authActorIdentity(auth);
   const rows = await tx<{ slug: string }[]>`
     SELECT slug FROM swarm.channels
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND archived_at IS NULL
+      AND swarm.actor_can_access_channel(
+        workspace_id,
+        channel_id,
+        ${actor.kind},
+        ${actor.id}::uuid
+      )
     ORDER BY slug
     LIMIT 200
   `;
@@ -10031,6 +10441,8 @@ async function applyChannelCommand(
   auth: AuthContext,
   command: ChannelCommand,
 ): Promise<ChannelOutcome> {
+  const actor = authActorIdentity(auth);
+
   if (command.kind === "channel_preference_set") {
     if (auth.credentialKind !== "user" || auth.actor.user === null) {
       return {
@@ -10049,6 +10461,12 @@ async function applyChannelCommand(
         SELECT channel_id FROM swarm.channels
         WHERE workspace_id = ${route.workspaceId}::uuid
           AND channel_id = ${command.channel_id}::uuid
+          AND swarm.actor_can_access_channel(
+            workspace_id,
+            channel_id,
+            'user',
+            ${userId}::uuid
+          )
         LIMIT 1
       `;
       if (found === undefined) {
@@ -10132,6 +10550,15 @@ async function applyChannelCommand(
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND user_id = ${userId}::uuid
         AND starred = true
+        AND (
+          channel_id IS NULL
+          OR swarm.actor_can_access_channel(
+            workspace_id,
+            channel_id,
+            'user',
+            ${userId}::uuid
+          )
+        )
       ORDER BY star_rank ASC, target_key ASC
     `;
     const starredSet = new Set(starredRows.map((row) => row.target_key));
@@ -10180,15 +10607,26 @@ async function applyChannelCommand(
         reason: "channel_reorder_requires_admin",
       };
     }
+    const adminUserId = auth.actor.user!;
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-order:${route.workspaceId}`}, 0))`;
-    const allChannels = await tx<{ channel_id: string }[]>`
-      SELECT channel_id FROM swarm.channels
+    const allChannels = await tx<{ channel_id: string; accessible: boolean }[]>`
+      SELECT
+        channel_id,
+        swarm.actor_can_access_channel(
+          workspace_id,
+          channel_id,
+          'user',
+          ${adminUserId}::uuid
+        ) AS accessible
+      FROM swarm.channels
       WHERE workspace_id = ${route.workspaceId}::uuid
       ORDER BY CASE WHEN sort_rank > 0 THEN 0 ELSE 1 END, sort_rank ASC, slug ASC, channel_id ASC
     `;
-    const existingSet = new Set(allChannels.map((row) => row.channel_id));
+    const accessibleSet = new Set(
+      allChannels.filter((row) => row.accessible).map((row) => row.channel_id),
+    );
     for (const id of command.channel_ids) {
-      if (!existingSet.has(id)) {
+      if (!accessibleSet.has(id)) {
         return {
           ok: false,
           status: 404,
@@ -10212,7 +10650,10 @@ async function applyChannelCommand(
       WHERE c.workspace_id = ${route.workspaceId}::uuid
         AND c.channel_id = ord.channel_id
     `;
-    return { ok: true, ordered_channel_ids: fullIds };
+    return {
+      ok: true,
+      ordered_channel_ids: fullIds.filter((id) => accessibleSet.has(id)),
+    };
   }
 
   if (command.kind === "workspace_channel_policy_set") {
@@ -10279,9 +10720,17 @@ async function applyChannelCommand(
         reason: "channel_creation_requires_admin",
       };
     }
+    if (command.visibility === "private" && command.members !== undefined) {
+      const memberFailure = await validateLiveWorkspaceMembers(
+        tx,
+        route,
+        command.members,
+      );
+      if (memberFailure !== null) return memberFailure;
+    }
     const existing = await tx<ChannelRow[]>`
       SELECT channel_id, workspace_id, slug, purpose,
-             created_by_principal, created_by_kind, created_at, archived_at
+             created_by_principal, created_by_kind, created_at, archived_at, visibility
       FROM swarm.channels
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND lower(slug) = ${command.slug}
@@ -10292,9 +10741,9 @@ async function applyChannelCommand(
         ok: false,
         status: 409,
         error: "channel_exists",
-        // An archived channel keeps its name, and archived channels take no messages, so
-        // "post to it" would be a dead end. Renaming the archived channel frees the name.
-        message: existing[0].archived_at === null
+        message: existing[0].visibility === "private"
+          ? `This workspace already has a channel named ${command.slug}. Pick another name.`
+          : existing[0].archived_at === null
           ? `This workspace already has a channel named ${command.slug}. Post to it instead.`
           : `An archived channel is named ${command.slug}. Pick another name, or have its creator or a workspace owner or admin rename the archived channel to free this one.`,
         reason: "channel_slug_taken",
@@ -10312,7 +10761,7 @@ async function applyChannelCommand(
     `;
     const rows = await tx<ChannelRow[]>`
       INSERT INTO swarm.channels (
-        channel_id, workspace_id, slug, purpose, sort_rank,
+        channel_id, workspace_id, slug, purpose, sort_rank, visibility,
         created_by_principal, created_by_kind, created_at
       ) VALUES (
         ${crypto.randomUUID()}::uuid,
@@ -10320,27 +10769,72 @@ async function applyChannelCommand(
         ${command.slug},
         ${command.purpose},
         ${rankRow?.next_rank ?? 0}::integer,
-        ${canonicalPrincipal(auth.actor)}::uuid,
-        ${auth.credentialKind},
+        ${command.visibility},
+        ${actor.id}::uuid,
+        ${actor.kind},
         statement_timestamp()
       )
       RETURNING channel_id, workspace_id, slug, purpose,
-                created_by_principal, created_by_kind, created_at, archived_at
+                created_by_principal, created_by_kind, created_at, archived_at, visibility
     `;
     const row = rows[0];
     if (row === undefined) throw new Error("channel insert did not return a row");
+    if (row.visibility === "private") {
+      const seed: ChannelMemberRef[] = [{ kind: actor.kind, id: actor.id }];
+      if (actor.kind === "agent") {
+        const [ownerRow] = await tx<{ owner_user_id: string }[]>`
+          SELECT owner_user_id FROM swarm.agent_principals
+          WHERE principal_id = ${actor.id}::uuid
+          LIMIT 1
+        `;
+        if (ownerRow !== undefined) {
+          seed.push({ kind: "user", id: ownerRow.owner_user_id });
+        }
+      }
+      if (command.members !== undefined) {
+        seed.push(...command.members);
+      }
+      await insertChannelMembers(
+        tx,
+        route.workspaceId,
+        row.channel_id,
+        actor,
+        seed,
+      );
+      return {
+        ok: true,
+        channel: channelRecord(row),
+        members: await channelMemberRecords(tx, route.workspaceId, row.channel_id),
+      };
+    }
     return { ok: true, channel: channelRecord(row) };
   }
 
+  // Serialize membership, visibility, and last-manager transitions per channel.
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`channel-access:${route.workspaceId}:${command.channel_id}`}, 0))`;
+
   const current = await tx<ChannelRow[]>`
     SELECT channel_id, workspace_id, slug, purpose,
-           created_by_principal, created_by_kind, created_at, archived_at
+           created_by_principal, created_by_kind, created_at, archived_at, visibility
     FROM swarm.channels
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND channel_id = ${command.channel_id}::uuid
     LIMIT 1
   `;
-  if (current[0] === undefined) {
+  const row = current[0];
+  if (
+    row === undefined ||
+    (
+      row.visibility === "private" &&
+      !(await actorCanAccessChannel(
+        tx,
+        route.workspaceId,
+        row.channel_id,
+        actor.kind,
+        actor.id,
+      ))
+    )
+  ) {
     return {
       ok: false,
       status: 404,
@@ -10350,26 +10844,163 @@ async function applyChannelCommand(
     };
   }
 
-  /* Change, archive and unarchive: the channel's creator, or a workspace owner or admin
-   * (owner decision, 2026-11-04). Creation stays open to members and seated agents. */
-  const row = current[0];
-  const isCreator = row.created_by_kind === auth.credentialKind &&
-    row.created_by_principal === canonicalPrincipal(auth.actor);
-  const [membership] = !isCreator && auth.credentialKind === "user" && auth.actor.user !== null
-    ? await tx<{ role: string }[]>`
-      SELECT role FROM swarm.memberships
-      WHERE workspace_id = ${route.workspaceId}::uuid AND user_id = ${auth.actor.user}::uuid
-        AND revoked_at IS NULL
-    `
-    : [];
-  if (!isCreator && membership?.role !== "owner" && membership?.role !== "admin") {
+  if (command.kind === "channel_leave") {
+    if (row.visibility !== "private") {
+      return {
+        ok: false,
+        status: 409,
+        error: "channel_is_open",
+        message:
+          "Everyone in this workspace belongs to an open channel, so you cannot leave it. Mute it instead.",
+        reason: "channel_is_open",
+      };
+    }
+    if (actor.kind === "user") {
+      const remainingManagers = await countRemainingLiveHumanManagers(
+        tx,
+        route.workspaceId,
+        row,
+        actor.id,
+      );
+      if (remainingManagers === 0) {
+        return {
+          ok: false,
+          status: 409,
+          error: "channel_last_manager",
+          message:
+            "Every private channel needs at least one person who can manage it. Add a workspace owner or admin before leaving, or archive the channel.",
+          reason: "channel_last_manager",
+        };
+      }
+      await tx`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+          AND member_kind = 'user'
+          AND user_id = ${actor.id}::uuid
+      `;
+      await tx`
+        UPDATE swarm.channel_preferences
+        SET starred = false,
+            star_rank = NULL,
+            involvement = 'everything',
+            updated_at = statement_timestamp()
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND user_id = ${actor.id}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+      `;
+    } else {
+      await tx`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+          AND member_kind = 'agent'
+          AND agent_principal_id = ${actor.id}::uuid
+      `;
+    }
+    return { ok: true, channel_id: row.channel_id, left: true };
+  }
+
+  if (!(await canManageChannel(tx, route.workspaceId, auth, row))) {
     return {
       ok: false,
       status: 403,
       error: "channel_forbidden",
       message:
-        "Only the channel's creator or a workspace owner or admin can change, archive or unarchive it.",
+        "Only the channel's creator or a workspace owner or admin can change, archive, unarchive or manage members of it.",
       reason: "channel_not_creator_or_admin",
+    };
+  }
+
+  if (command.kind === "channel_member_add") {
+    if (row.visibility !== "private") {
+      return {
+        ok: false,
+        status: 409,
+        error: "channel_is_open",
+        message:
+          "Everyone in this workspace already has access to an open channel.",
+        reason: "channel_is_open",
+      };
+    }
+    const memberFailure = await validateLiveWorkspaceMembers(
+      tx,
+      route,
+      command.members,
+    );
+    if (memberFailure !== null) return memberFailure;
+    await insertChannelMembers(
+      tx,
+      route.workspaceId,
+      row.channel_id,
+      actor,
+      command.members,
+    );
+    return {
+      ok: true,
+      channel: channelRecord(row),
+      members: await channelMemberRecords(tx, route.workspaceId, row.channel_id),
+    };
+  }
+
+  if (command.kind === "channel_member_remove") {
+    if (row.visibility !== "private") {
+      return {
+        ok: false,
+        status: 409,
+        error: "channel_is_open",
+        message:
+          "Everyone in this workspace belongs to an open channel, so individual members cannot be removed.",
+        reason: "channel_is_open",
+      };
+    }
+    if (command.member.kind === "user") {
+      const remainingManagers = await countRemainingLiveHumanManagers(
+        tx,
+        route.workspaceId,
+        row,
+        command.member.id,
+      );
+      if (remainingManagers === 0) {
+        return {
+          ok: false,
+          status: 409,
+          error: "channel_last_manager",
+          message:
+            "Every private channel needs at least one person who can manage it. Add another workspace owner or admin before removing the last manager.",
+          reason: "channel_last_manager",
+        };
+      }
+      await tx`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+          AND member_kind = 'user'
+          AND user_id = ${command.member.id}::uuid
+      `;
+      await tx`
+        UPDATE swarm.channel_preferences
+        SET starred = false,
+            star_rank = NULL,
+            involvement = 'everything',
+            updated_at = statement_timestamp()
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND user_id = ${command.member.id}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+      `;
+    } else {
+      await tx`
+        DELETE FROM swarm.channel_members
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND channel_id = ${row.channel_id}::uuid
+          AND member_kind = 'agent'
+          AND agent_principal_id = ${command.member.id}::uuid
+      `;
+    }
+    return {
+      ok: true,
+      channel: channelRecord(row),
+      members: await channelMemberRecords(tx, route.workspaceId, row.channel_id),
     };
   }
 
@@ -10383,7 +11014,7 @@ async function applyChannelCommand(
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND channel_id = ${command.channel_id}::uuid
       RETURNING channel_id, workspace_id, slug, purpose,
-                created_by_principal, created_by_kind, created_at, archived_at
+                created_by_principal, created_by_kind, created_at, archived_at, visibility
     `;
     return { ok: true, channel: channelRecord(rows[0]!) };
   }
@@ -10397,7 +11028,7 @@ async function applyChannelCommand(
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND channel_id = ${command.channel_id}::uuid
       RETURNING channel_id, workspace_id, slug, purpose,
-                created_by_principal, created_by_kind, created_at, archived_at
+                created_by_principal, created_by_kind, created_at, archived_at, visibility
     `;
     return { ok: true, channel: channelRecord(rows[0]!) };
   }
@@ -10424,16 +11055,120 @@ async function applyChannelCommand(
   }
   const writePurpose = command.kind === "channel_update" &&
     command.purpose !== undefined;
+  const nextVisibility = command.kind === "channel_update"
+    ? command.visibility
+    : undefined;
+  if (
+    command.kind === "channel_update" &&
+    nextVisibility === "private" &&
+    command.members !== undefined
+  ) {
+    const memberFailure = await validateLiveWorkspaceMembers(
+      tx,
+      route,
+      command.members,
+    );
+    if (memberFailure !== null) return memberFailure;
+  }
+
   const updated = await tx<ChannelRow[]>`
     UPDATE swarm.channels
     SET slug = CASE WHEN ${nextSlug !== undefined}::boolean THEN ${nextSlug ?? null}::text ELSE slug END,
-        purpose = CASE WHEN ${writePurpose}::boolean THEN ${writePurpose ? command.purpose! : null}::text ELSE purpose END
+        purpose = CASE WHEN ${writePurpose}::boolean THEN ${writePurpose ? command.purpose! : null}::text ELSE purpose END,
+        visibility = CASE WHEN ${nextVisibility !== undefined}::boolean THEN ${nextVisibility ?? null}::text ELSE visibility END
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND channel_id = ${command.channel_id}::uuid
     RETURNING channel_id, workspace_id, slug, purpose,
-              created_by_principal, created_by_kind, created_at, archived_at
+              created_by_principal, created_by_kind, created_at, archived_at, visibility
   `;
-  return { ok: true, channel: channelRecord(updated[0]!) };
+  const updatedRow = updated[0]!;
+  if (command.kind === "channel_update" && nextVisibility === "private") {
+    const seed: ChannelMemberRef[] = [];
+    if (row.visibility === "open") {
+      seed.push({ kind: actor.kind, id: actor.id });
+      if (actor.kind === "agent") {
+        const [ownerRow] = await tx<{ owner_user_id: string }[]>`
+          SELECT owner_user_id FROM swarm.agent_principals
+          WHERE principal_id = ${actor.id}::uuid
+          LIMIT 1
+        `;
+        if (ownerRow !== undefined) {
+          seed.push({ kind: "user", id: ownerRow.owner_user_id });
+        }
+      }
+      if (row.created_by_kind === "user") {
+        if (await signalUserTargetIsLive(tx, route, row.created_by_principal)) {
+          seed.push({ kind: "user", id: row.created_by_principal });
+        }
+      } else {
+        if (await signalAgentTargetIsLive(tx, route, row.created_by_principal)) {
+          seed.push({ kind: "agent", id: row.created_by_principal });
+        }
+        const [creatorOwner] = await tx<{ owner_user_id: string }[]>`
+          SELECT owner_user_id FROM swarm.agent_principals
+          WHERE principal_id = ${row.created_by_principal}::uuid
+          LIMIT 1
+        `;
+        if (
+          creatorOwner !== undefined &&
+          await signalUserTargetIsLive(tx, route, creatorOwner.owner_user_id)
+        ) {
+          seed.push({ kind: "user", id: creatorOwner.owner_user_id });
+        }
+      }
+    }
+    if (command.members !== undefined) {
+      seed.push(...command.members);
+    }
+    if (seed.length > 0) {
+      await insertChannelMembers(
+        tx,
+        route.workspaceId,
+        updatedRow.channel_id,
+        actor,
+        seed,
+      );
+    }
+    if (row.visibility === "open") {
+      await tx`
+        UPDATE swarm.channel_preferences AS p
+        SET starred = false,
+            star_rank = NULL,
+            involvement = 'everything',
+            updated_at = statement_timestamp()
+        WHERE p.workspace_id = ${route.workspaceId}::uuid
+          AND p.channel_id = ${updatedRow.channel_id}::uuid
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm.channel_members AS cm
+            WHERE cm.workspace_id = p.workspace_id
+              AND cm.channel_id = p.channel_id
+              AND cm.member_kind = 'user'
+              AND cm.user_id = p.user_id
+          )
+      `;
+    }
+    return {
+      ok: true,
+      channel: channelRecord(updatedRow),
+      members: await channelMemberRecords(
+        tx,
+        route.workspaceId,
+        updatedRow.channel_id,
+      ),
+    };
+  }
+  if (
+    command.kind === "channel_update" &&
+    nextVisibility === "open" &&
+    row.visibility === "private"
+  ) {
+    await tx`
+      DELETE FROM swarm.channel_members
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND channel_id = ${updatedRow.channel_id}::uuid
+    `;
+  }
+  return { ok: true, channel: channelRecord(updatedRow) };
 }
 
 interface SignalChannelResolution {
@@ -10453,15 +11188,33 @@ interface SignalChannelResolution {
 async function resolveSignalChannel(
   tx: Sql,
   route: Route,
+  auth: AuthContext,
   command: SignalCommand,
 ): Promise<SignalChannelResolution> {
   const slug = command.channel;
   if (slug === undefined) return { ok: true, channelId: null };
+  const actor = authActorIdentity(auth);
+  if (actor === null) {
+    return {
+      ok: false,
+      channelId: null,
+      status: 404,
+      error: "channel_not_found",
+      message: unknownChannelMessage(slug, []),
+      reason: "channel_not_found",
+    };
+  }
   const rows = await tx<{ channel_id: string; archived_at: Date | null }[]>`
     SELECT channel_id, archived_at
     FROM swarm.channels
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND lower(slug) = ${slug}
+      AND swarm.actor_can_access_channel(
+        workspace_id,
+        channel_id,
+        ${actor.kind},
+        ${actor.id}::uuid
+      )
     LIMIT 1
   `;
   const row = rows[0];
@@ -10471,7 +11224,7 @@ async function resolveSignalChannel(
       channelId: null,
       status: 404,
       error: "channel_not_found",
-      message: unknownChannelMessage(slug, await liveChannelSlugs(tx, route)),
+      message: unknownChannelMessage(slug, await liveChannelSlugs(tx, route, auth)),
       reason: "channel_not_found",
     };
   }
@@ -10518,6 +11271,7 @@ interface ThreadRootResolution {
 async function resolveThreadRoot(
   tx: Sql,
   route: Route,
+  auth: AuthContext,
   command: SignalCommand,
 ): Promise<ThreadRootResolution> {
   const rootId = command.thread_root_id ?? null;
@@ -10528,6 +11282,21 @@ async function resolveThreadRoot(
       rootUntil: null,
       rootRemainingMs: null,
       rootChannelId: null,
+    };
+  }
+  const actor = authActorIdentity(auth);
+  if (actor === null) {
+    return {
+      ok: false,
+      threadRootId: null,
+      rootUntil: null,
+      rootRemainingMs: null,
+      rootChannelId: null,
+      status: 404,
+      error: "thread_root_not_found",
+      message:
+        "There is no live, undirected message with that id in this workspace. Threads start from messages everyone can read, and a thread cannot outlive the message it starts from. To answer a directed message privately, reply to it instead.",
+      reason: "thread_root_not_found",
     };
   }
   const rows = await tx<{
@@ -10549,6 +11318,15 @@ async function resolveThreadRoot(
      AND channel.workspace_id = s.workspace_id
     WHERE s.workspace_id = ${route.workspaceId}::uuid
       AND s.id = ${rootId}::uuid
+      AND (
+        s.channel_id IS NULL
+        OR swarm.actor_can_access_channel(
+          s.workspace_id,
+          s.channel_id,
+          ${actor.kind},
+          ${actor.id}::uuid
+        )
+      )
       /* A thread may root ONLY on an undirected signal, and this query is the
        * enforcement. This function reads swarm.signals as swarm_command, which
        * bypasses swarm_read.signals — the view that IS the read policy. Without
@@ -10801,12 +11579,14 @@ async function resolveSignalWriteTarget(
     from_kind: SignalCredentialKind;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
+    channel_id: string | null;
   }[]>`
     SELECT
       from_principal,
       from_kind,
       to_user_id,
-      to_agent_principal_id
+      to_agent_principal_id,
+      channel_id
     FROM swarm.signals
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND id = ${inReplyTo}::uuid
@@ -10816,6 +11596,28 @@ async function resolveSignalWriteTarget(
   `;
   const reference = referenceRows[0];
   if (!reference) return null;
+  if (reference.channel_id !== null) {
+    const actor = authActorIdentity(auth);
+    if (
+      actor === null ||
+      !(await actorCanAccessChannel(
+        tx,
+        route.workspaceId,
+        reference.channel_id,
+        actor.kind,
+        actor.id,
+      )) ||
+      !(await actorCanAccessChannel(
+        tx,
+        route.workspaceId,
+        reference.channel_id,
+        reference.from_kind,
+        reference.from_principal,
+      ))
+    ) {
+      return null;
+    }
+  }
 
   const callerUserId = auth.actor.user;
   const addressedByScalar = auth.agent !== null
@@ -11534,6 +12336,15 @@ async function reraiseAsk(
       AND s.kind = 'ask'
       AND s.from_kind = ${senderKind}
       AND s.from_principal = ${canonicalPrincipal(auth.actor)}::uuid
+      AND (
+        s.channel_id IS NULL
+        OR swarm.actor_can_access_channel(
+          s.workspace_id,
+          s.channel_id,
+          ${senderKind},
+          ${canonicalPrincipal(auth.actor)}::uuid
+        )
+      )
     LIMIT 1
   `;
   if (ask === undefined) {
@@ -11595,7 +12406,15 @@ async function reraiseAsk(
     const live = recipient.kind === "user"
       ? await signalUserTargetIsLive(tx, route, recipient.id)
       : await signalAgentTargetIsLive(tx, route, recipient.id);
-    if (!live) {
+    const channelLive = ask.channel_id === null ||
+      await actorCanAccessChannel(
+        tx,
+        route.workspaceId,
+        ask.channel_id,
+        recipient.kind,
+        recipient.id,
+      );
+    if (!live || !channelLive) {
       await audit("authz", "reraise_recipient_not_live");
       return { status: 403, body: { error: "forbidden" } };
     }
@@ -12096,6 +12915,15 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
     WHERE c.workspace_id = ${route.workspaceId}::uuid AND c.signal_id = ${command.signal_id}::uuid
       AND s.kind = 'ask'
+      AND (
+        s.channel_id IS NULL
+        OR swarm.actor_can_access_channel(
+          s.workspace_id,
+          s.channel_id,
+          'user',
+          ${viewer}::uuid
+        )
+      )
   `;
   // Unknown, another workspace's, not a choice ask, or not addressed to this person: one answer.
   if (ask === undefined || ask.to_user_id !== viewer ||
@@ -14939,6 +15767,11 @@ async function handleTransaction(
         ok: true,
         event_ids: [],
         ...(outcome.channel !== undefined ? { channel: outcome.channel } : {}),
+        ...(outcome.members !== undefined ? { members: outcome.members } : {}),
+        ...(outcome.channel_id !== undefined
+          ? { channel_id: outcome.channel_id }
+          : {}),
+        ...(outcome.left !== undefined ? { left: outcome.left } : {}),
         ...(outcome.preference !== undefined
           ? { preference: outcome.preference }
           : {}),
@@ -15046,6 +15879,7 @@ async function handleTransaction(
        * that is no longer live leaves the post an ordinary broadcast instead of refusing it. */
       let signalTarget = namedTarget;
       let leadMention: string | null = null;
+      let leadAgentApplied: string | null = null;
       if (
         namedTarget !== null && auth.credentialKind === "user" &&
         (command.signal_kind === "note" || command.signal_kind === "ask") &&
@@ -15058,8 +15892,13 @@ async function handleTransaction(
         if (lead?.principal_id && await signalAgentTargetIsLive(tx, route, lead.principal_id)) {
           /* With mentions on, the post stays public and the lead is mentioned,
            * unless the person named someone themselves. */
-          if (!chatMentionsEnabled) signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
-          else if (command.mentions === undefined) leadMention = lead.principal_id;
+          if (!chatMentionsEnabled) {
+            signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
+            leadAgentApplied = lead.principal_id;
+          } else if (command.mentions === undefined) {
+            leadMention = lead.principal_id;
+            leadAgentApplied = lead.principal_id;
+          }
         }
       }
       /* Every named mention has to be reachable, as every recipient does: a
@@ -15159,7 +15998,12 @@ async function handleTransaction(
         });
       }
 
-      const channelResolution = await resolveSignalChannel(tx, route, command);
+      const channelResolution = await resolveSignalChannel(
+        tx,
+        route,
+        auth,
+        command,
+      );
       if (!channelResolution.ok) {
         await insertAudit(tx, {
           auth,
@@ -15179,7 +16023,12 @@ async function handleTransaction(
         };
         return channelResolution.status===404 ? refusal : decided(refusal);
       }
-      const threadResolution = await resolveThreadRoot(tx, route, command);
+      const threadResolution = await resolveThreadRoot(
+        tx,
+        route,
+        auth,
+        command,
+      );
       if (!threadResolution.ok) {
         await insertAudit(tx, {
           auth,
@@ -15198,6 +16047,83 @@ async function handleTransaction(
           },
         };
         return threadResolution.status===404 ? refusal : decided(refusal);
+      }
+      const placementChannelId = threadResolution.threadRootId !== null
+        ? threadResolution.rootChannelId
+        : channelResolution.channelId;
+      if (placementChannelId !== null) {
+        /* A workspace lead that is not admitted to a private channel must neither
+         * receive nor be mentioned on an untagged post inside it: the post stays
+         * inside #lock as an ordinary channel broadcast. */
+        if (
+          leadAgentApplied !== null &&
+          !(await actorCanAccessChannel(
+            tx,
+            route.workspaceId,
+            placementChannelId,
+            "agent",
+            leadAgentApplied,
+          ))
+        ) {
+          signalTarget = namedTarget!;
+          for (let i = signalMentions.length - 1; i >= 0; i--) {
+            if (signalMentions[i]!.source === "lead") {
+              signalMentions.splice(i, 1);
+            }
+          }
+        }
+        /* Explicit recipients (`to`, scalar `to_user_id`/`to_agent_principal_id`,
+         * or an `in_reply_to` filed inside this channel) and explicit `@mentions`
+         * must be admitted to the channel, or the post would either wake someone
+         * outside #lock or create a directed message its addressee cannot read. */
+        const explicitRecipients = signalRecipientSet(command.to ?? null, {
+          to_user_id: signalTarget.toUserId,
+          to_agent_principal_id: signalTarget.toAgentPrincipalId,
+        });
+        let channelTargetEligible = true;
+        for (const recipient of explicitRecipients) {
+          if (
+            !(await actorCanAccessChannel(
+              tx,
+              route.workspaceId,
+              placementChannelId,
+              recipient.kind,
+              recipient.id,
+            ))
+          ) {
+            channelTargetEligible = false;
+            break;
+          }
+        }
+        if (channelTargetEligible) {
+          for (const mention of signalMentions) {
+            if (mention.source !== "author") continue;
+            if (
+              !(await actorCanAccessChannel(
+                tx,
+                route.workspaceId,
+                placementChannelId,
+                mention.kind,
+                mention.id,
+              ))
+            ) {
+              channelTargetEligible = false;
+              break;
+            }
+          }
+        }
+        if (!channelTargetEligible) {
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "authz",
+            reason: "signal target or reply is not eligible",
+            hash,
+          });
+          return { status: 403, body: { error: "forbidden" } };
+        }
       }
       /* Reply expiry: the server CLAMPS a defaulted horizon and REFUSES an
        * explicit one it cannot honour. Silently shortening a horizon the caller
@@ -15268,6 +16194,18 @@ async function handleTransaction(
           if (signalMentions.length >= SIGNAL_MENTION_MAX) break;
           if (signalMentions.some((m) => m.kind === "agent" && m.id === row.principal_id)) continue;
           if (!await signalAgentTargetIsLive(tx, route, row.principal_id)) continue;
+          if (
+            placementChannelId !== null &&
+            !(await actorCanAccessChannel(
+              tx,
+              route.workspaceId,
+              placementChannelId,
+              "agent",
+              row.principal_id,
+            ))
+          ) {
+            continue;
+          }
           signalMentions.push({ kind: "agent", id: row.principal_id, source: "thread" });
         }
       }
@@ -15296,9 +16234,6 @@ async function handleTransaction(
           } });
         }
       }
-      const placementChannelId = threadResolution.threadRootId !== null
-        ? threadResolution.rootChannelId
-        : channelResolution.channelId;
       const postOutcome = await postSignal(
         tx,
         route,
@@ -17306,6 +18241,44 @@ async function handleHostedCheck(
       LIMIT 1
       FOR UPDATE
     `;
+    if (activeRows[0] !== undefined && ackBatchId === null) {
+      /* If every signal in an open batch was inside a private channel this seat
+       * has since been removed from, advance past that now-empty batch instead of
+       * wedging check() behind an unreturnable replay. */
+      const stillVisible = await tx<{ id: string }[]>`
+        SELECT s.id
+        FROM swarm.hosted_mcp_check_visible_signals(
+          ${seat.workspace_id}::uuid,
+          ${seat.principal_id}::uuid,
+          ${activeRows[0].signal_ids}::uuid[]
+        ) AS s
+      `;
+      if (stillVisible.length === 0) {
+        const stale = activeRows[0];
+        await tx`
+          UPDATE swarm.hosted_mcp_check_batches
+          SET acknowledged_at = date_trunc('milliseconds', statement_timestamp())
+          WHERE batch_id = ${stale.batch_id}::uuid
+            AND seat_id = ${seat.seat_id}::uuid
+            AND grant_id = ${seat.grant_id}::uuid
+            AND workspace_id = ${seat.workspace_id}::uuid
+            AND acknowledged_at IS NULL
+        `;
+        await tx`
+          UPDATE swarm.hosted_mcp_check_cursors
+          SET cursor_created_at = ${stale.terminal_created_at},
+              cursor_signal_id = ${stale.terminal_signal_id}::uuid,
+              updated_at = date_trunc('milliseconds', statement_timestamp())
+          WHERE seat_id = ${seat.seat_id}::uuid
+            AND grant_id = ${seat.grant_id}::uuid
+            AND workspace_id = ${seat.workspace_id}::uuid
+            AND principal_id = ${seat.principal_id}::uuid
+        `;
+        cursorRow.cursor_created_at = stale.terminal_created_at;
+        cursorRow.cursor_signal_id = stale.terminal_signal_id;
+        activeRows.length = 0;
+      }
+    }
     const requestedRows = ackBatchId !== null
       ? await tx<HostedCheckBatchRow[]>`
         SELECT batch_id, seat_id, grant_id, workspace_id, signal_ids,
@@ -17464,7 +18437,24 @@ async function handleHostedCheck(
       ORDER BY array_position(${batch.signal_ids}::uuid[], s.id)
     `;
     if (signals.length !== batch.signal_ids.length) {
-      throw new Error("hosted check replay visibility changed for recorded ids");
+      const visibleSet = new Set(signals.map((row) => String(row.id)));
+      const missingIds = (batch.signal_ids as readonly string[]).filter((id: string) => !visibleSet.has(id));
+      const revokedPrivate = await tx<{ id: string }[]>`
+        SELECT s.id
+        FROM swarm.signals AS s
+        WHERE s.workspace_id = ${seat.workspace_id}::uuid
+          AND s.id = ANY(${missingIds}::uuid[])
+          AND s.channel_id IS NOT NULL
+          AND NOT swarm.actor_can_access_channel(
+            s.workspace_id,
+            s.channel_id,
+            'agent',
+            ${seat.principal_id}::uuid
+          )
+      `;
+      if (revokedPrivate.length !== missingIds.length) {
+        throw new Error("hosted check replay visibility changed for recorded ids");
+      }
     }
     return { status: 200, body: {
       context,

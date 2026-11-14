@@ -60,10 +60,37 @@ export const CHANNEL_PURPOSE_TYPE_TEXT = "A channel purpose is text.";
 export const CHANNEL_PURPOSE_MAX_TEXT =
   `A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`;
 
-/** Optional fields `channel_update` accepts; at least one must be provided. */
-export const CHANNEL_UPDATE_OPTIONAL_FIELDS = ["slug", "purpose"] as const;
-export const CHANNEL_UPDATE_EMPTY_TEXT =
-  `channel_update needs ${CHANNEL_UPDATE_OPTIONAL_FIELDS.join(" or ")}, or both.`;
+/** Channel visibility (`swarm.channels.visibility`). */
+export const CHANNEL_VISIBILITIES = ["open", "private"] as const;
+export type ChannelVisibility = typeof CHANNEL_VISIBILITIES[number];
+
+/** Optional fields `channel_create` accepts. */
+export const CHANNEL_CREATE_OPTIONAL_FIELDS = [
+  "purpose",
+  "visibility",
+  "members",
+] as const;
+
+/** Patch fields `channel_update` accepts; at least one must be provided (`members` pairs with `visibility: "private"`). */
+export const CHANNEL_UPDATE_PATCH_FIELDS = [
+  "slug",
+  "purpose",
+  "visibility",
+] as const;
+export const CHANNEL_UPDATE_OPTIONAL_FIELDS = [
+  ...CHANNEL_UPDATE_PATCH_FIELDS,
+  "members",
+] as const;
+export const CHANNEL_UPDATE_EMPTY_TEXT = `channel_update needs at least one of ${
+  CHANNEL_UPDATE_PATCH_FIELDS.slice(0, -1).join(", ")
+} or ${
+  CHANNEL_UPDATE_PATCH_FIELDS[CHANNEL_UPDATE_PATCH_FIELDS.length - 1]
+}.`;
+export const CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT =
+  'members is only accepted when visibility is "private".';
+
+/** Maximum channel members in one `channel_create`, `channel_update` or `channel_member_add` call. */
+export const CHANNEL_MEMBER_MAX = 100;
 
 /** Per-person channel involvement levels (`swarm.channel_preferences.involvement`). */
 export const CHANNEL_INVOLVEMENT_LEVELS = [
@@ -202,9 +229,15 @@ export const RESERVED_CHANNEL_SLUG_TEXT = `Reserved names: ${
   RESERVED_CHANNEL_SLUGS.join(", ")
 }.`;
 
-/** Generated refusal sentences for involvement and workspace channel-creation policy. */
+/** Generated refusal sentences for involvement, visibility, and workspace channel-creation policy. */
 export const CHANNEL_INVOLVEMENT_RULE_TEXT = `involvement is ${
   classList(CHANNEL_INVOLVEMENT_LEVELS.map((level) => ({ words: level })), "or")
+}.`;
+export const CHANNEL_VISIBILITY_RULE_TEXT = `visibility is ${
+  classList(
+    CHANNEL_VISIBILITIES.map((visibility) => ({ words: visibility })),
+    "or",
+  )
 }.`;
 export const CHANNEL_CREATION_POLICY_RULE_TEXT = `channel_creation_policy is ${
   classList(CHANNEL_CREATION_POLICIES.map((policy) => ({ words: policy })), "or")
@@ -358,6 +391,7 @@ export const CHANNEL_READ_COLUMNS = [
   "created_by_kind",
   "created_at",
   "archived_at",
+  "visibility",
 ] as const;
 
 /**
@@ -498,6 +532,70 @@ export function signalMentionListProblem(value: unknown): string | null {
 /** The mention list, lower-cased, after signalMentionListProblem returned null. */
 export function parseSignalMentions(value: unknown): SignalRecipient[] {
   return parseSignalRecipients(value) ?? [];
+}
+
+/** One channel member entry (`user` or `agent` UUID), matching SignalRecipient's `{kind, id}` shape. */
+export type ChannelMemberRef = SignalRecipient;
+
+export const CHANNEL_MEMBER_ENTRY_RULE_TEXT = `member is {kind, id}, kind is ${
+  classList(
+    SIGNAL_RECIPIENT_KINDS.map((kind) => ({ words: kind })),
+    "or",
+  )
+}, and id is a UUID.`;
+
+export const CHANNEL_MEMBERS_RULE_TEXT =
+  `members is a list of 1 to ${CHANNEL_MEMBER_MAX} {kind, id} entries, where kind is ${
+    classList(
+      SIGNAL_RECIPIENT_KINDS.map((kind) => ({ words: kind })),
+      "or",
+    )
+  } and id is a UUID, without duplicates.`;
+
+export function channelMemberEntryProblem(value: unknown): string | null {
+  return isRecipientEntry(value) ? null : CHANNEL_MEMBER_ENTRY_RULE_TEXT;
+}
+
+export function parseChannelMemberEntry(
+  value: unknown,
+): ChannelMemberRef | null {
+  if (!isRecipientEntry(value)) return null;
+  return { kind: value.kind, id: value.id.toLowerCase() };
+}
+
+export function channelMembersListProblem(
+  value: unknown,
+  options: { allowEmpty?: boolean } = {},
+): string | null {
+  if (!Array.isArray(value)) return CHANNEL_MEMBERS_RULE_TEXT;
+  if (!options.allowEmpty && value.length === 0) {
+    return CHANNEL_MEMBERS_RULE_TEXT;
+  }
+  if (value.length > CHANNEL_MEMBER_MAX) {
+    return `members accepts at most ${CHANNEL_MEMBER_MAX} ${
+      countNoun(CHANNEL_MEMBER_MAX, "member")
+    }. This request names ${value.length}.`;
+  }
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isRecipientEntry(entry)) return CHANNEL_MEMBERS_RULE_TEXT;
+    const key = `${entry.kind}:${entry.id.toLowerCase()}`;
+    if (seen.has(key)) {
+      return "members names the same person or agent twice.";
+    }
+    seen.add(key);
+  }
+  return null;
+}
+
+export function parseChannelMembers(value: unknown): ChannelMemberRef[] | null {
+  if (!Array.isArray(value)) return null;
+  const parsed: ChannelMemberRef[] = [];
+  for (const entry of value) {
+    if (!isRecipientEntry(entry)) return null;
+    parsed.push({ kind: entry.kind, id: entry.id.toLowerCase() });
+  }
+  return parsed;
 }
 
 /**

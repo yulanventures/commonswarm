@@ -151,6 +151,7 @@ export interface ChannelRow {
   created_by_kind: "user" | "agent";
   created_at: string;
   archived_at: string | null;
+  visibility?: "open" | "private";
   /**
    * An agent's own unread for this channel: true when channel_read has messages there it hasn't
    * read, null until its first channel_read in the workspace. Agent lists only; a person's list
@@ -183,6 +184,7 @@ export const CHANNEL_COLUMNS = [
   "created_by_kind",
   "created_at",
   "archived_at",
+  "visibility",
 ] as const;
 
 /**
