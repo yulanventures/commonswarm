@@ -59,7 +59,7 @@ import {
   type WorkspaceChannel,
 } from "./channels.js";
 import {
-  attachWorkspaceSignalsChannel,
+  attachFeedChannels,
   type FeedPushSubscription,
 } from "./feed-push.js";
 
@@ -587,7 +587,8 @@ export async function subscribeAgentActivity(
 export type WorkspaceSignalsSubscription = FeedPushSubscription;
 
 /**
- * Subscribe one signed-in member to the private workspace signal topic.
+ * Subscribe one signed-in member to the private workspace signal topic and to
+ * their own member topic, where their private channels are announced.
  * Captures the workspace id before session and setAuth awaits.
  */
 export async function subscribeWorkspaceSignals(
@@ -601,7 +602,7 @@ export async function subscribeWorkspaceSignals(
   const active = await currentSession();
   if (!active) throw new SessionExpired();
   await c.realtime.setAuth(active.access_token);
-  return attachWorkspaceSignalsChannel(c, workspaceForJoin, onEvent, onStatus);
+  return attachFeedChannels(c, workspaceForJoin, active.user.id, onEvent, onStatus);
 }
 
 /**
