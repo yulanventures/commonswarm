@@ -2919,6 +2919,12 @@ export interface BrowserSignalPlacement {
   threadRootId?: string | null;
   /** Send a thread reply to the channel as well. Only valid with a thread root. */
   broadcastToChannel?: boolean;
+  /**
+   * People and agents the message mentions. The message stays public; they are told. The edge
+   * refuses a body that carries both mentions and recipients, so this is only for a message
+   * with no recipients (a channel post or a thread reply).
+   */
+  mentions?: BrowserSignalAudience;
 }
 
 /**
@@ -2939,6 +2945,10 @@ export function browserSignalCommand(
   attachments: readonly BrowserSignalAttachmentRef[] = [],
   placement: BrowserSignalPlacement = {},
 ): Record<string, unknown> {
+  const mentions = placement.mentions ?? [];
+  if (mentions.length > 0 && recipients.length > 0) {
+    throw new Error("A message is either addressed or it mentions; it cannot do both.");
+  }
   return {
     kind: "post_signal",
     signal_kind: signalKind,
@@ -2948,6 +2958,11 @@ export function browserSignalCommand(
     in_reply_to: null,
     about: null,
     ...(recipients.length === 0 ? {} : { to: toWireRecipients(recipients) }),
+    /* NO KEY AT ALL WHEN NOBODY IS MENTIONED, and that is load-bearing twice. A deployment
+       with mentions switched off refuses a body that has the key, even empty. And with them
+       on, the edge mentions the workspace lead only when the author sent no `mentions`: an
+       empty list would say "the author chose to mention nobody". */
+    ...(mentions.length === 0 ? {} : { mentions: toWireRecipients(mentions) }),
     ...(attachments.length === 0 ? {} : { attachments }),
     ...(placement.channel === undefined || placement.channel === null
       ? {}
@@ -3647,6 +3662,58 @@ export async function messageStatus(workspaceId: string, signalIds: readonly str
     }).abortSignal(signal));
   if (result.error) return null;
   return parseMessageStatus(result.data);
+}
+
+/** One stored mention on a message. `source` says who added it: the author, or the server. */
+export interface SignalMention {
+  signalId: string;
+  position: number;
+  kind: "agent" | "person";
+  id: string;
+  source: "author" | "lead" | "thread";
+}
+
+export const SIGNAL_MENTIONS_BATCH = 50;
+
+/** Rows of `swarm_read.signal_mentions` as the browser holds them; anything malformed is dropped. */
+export function signalMentionsFromRows(rows: unknown): SignalMention[] {
+  if (!Array.isArray(rows)) return [];
+  const mentions: SignalMention[] = [];
+  for (const row of rows as Array<Record<string, unknown>>) {
+    if (row === null || typeof row !== "object") continue;
+    if (typeof row.signal_id !== "string" || typeof row.id !== "string") continue;
+    if (row.kind !== "user" && row.kind !== "agent") continue;
+    if (row.source !== "author" && row.source !== "lead" && row.source !== "thread") continue;
+    if (typeof row.position !== "number" || !Number.isInteger(row.position)) continue;
+    mentions.push({
+      signalId: row.signal_id.toLowerCase(),
+      position: row.position,
+      kind: row.kind === "user" ? "person" : "agent",
+      id: row.id.toLowerCase(),
+      source: row.source,
+    });
+  }
+  return mentions.sort((left, right) =>
+    left.signalId.localeCompare(right.signalId) || left.position - right.position);
+}
+
+/**
+ * Who each of these messages mentions, by stable id, in the order the author wrote them.
+ * `null` when the read is unavailable. A message with no mention is simply not in the result.
+ * The view shows a member the mentions of their own workspace and nothing else.
+ */
+export async function signalMentions(workspaceId: string, signalIds: readonly string[]): Promise<SignalMention[] | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const rows: SignalMention[] = [];
+  for (let offset = 0; offset < signalIds.length; offset += SIGNAL_MENTIONS_BATCH) {
+    const { data, error } = await readWithDeadline("Mentions", signal => api.schema("swarm_read")
+      .from("signal_mentions").select("signal_id,position,kind,id,source").eq("workspace_id", workspaceId)
+      .in("signal_id", signalIds.slice(offset, offset + SIGNAL_MENTIONS_BATCH)).abortSignal(signal));
+    if (error) return null;
+    rows.push(...signalMentionsFromRows(data));
+  }
+  return rows;
 }
 
 /** Interactive replies: the stored choices (and any answer) for up to 50 asks the signed-in person can read.
