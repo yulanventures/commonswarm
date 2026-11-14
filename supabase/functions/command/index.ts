@@ -1615,6 +1615,7 @@ interface Audit {
   reason?: string | null;
   detail?: string | null;
   hash?: string | null;
+  channelIds?: readonly string[];
 }
 
 class TestRollback extends Error {
@@ -1887,12 +1888,41 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
     : "ledgerCredentialKind" in auth
     ? auth.ledgerCredentialKind
     : auth.credentialKind;
+  const channelIds = audit.channelIds && audit.channelIds.length > 0
+    ? [...new Set(audit.channelIds)]
+    : null;
+  if (channelIds === null) {
+    await tx`
+      INSERT INTO swarm.audit_log (
+        actor_user, actor_agent_principal, actor_run,
+        credential_kind, credential_id, device_id,
+        command_kind, workspace_id, stream_id,
+        outcome, reason, detail, request_hash, ip
+      ) VALUES (
+        ${auth?.actor.user ?? null}::uuid,
+        ${auth?.actor.agent_principal ?? null}::uuid,
+        ${auth?.actor.run ?? null}::uuid,
+        ${auditCredentialKind},
+        ${auth?.credentialId ?? null}::uuid,
+        ${auth?.deviceId ?? null}::uuid,
+        ${stripControls(audit.commandKind) ?? "unknown"},
+        ${audit.workspaceId ?? null}::uuid,
+        ${audit.streamId ?? null}::uuid,
+        ${audit.outcome},
+        ${stripControls(audit.reason)},
+        ${stripControls(audit.detail)},
+        ${audit.hash ?? null},
+        NULL
+      )
+    `;
+    return;
+  }
   await tx`
     INSERT INTO swarm.audit_log (
       actor_user, actor_agent_principal, actor_run,
       credential_kind, credential_id, device_id,
       command_kind, workspace_id, stream_id,
-      outcome, reason, detail, request_hash, ip
+      outcome, reason, detail, request_hash, ip, channel_ids
     ) VALUES (
       ${auth?.actor.user ?? null}::uuid,
       ${auth?.actor.agent_principal ?? null}::uuid,
@@ -1907,7 +1937,8 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
       ${stripControls(audit.reason)},
       ${stripControls(audit.detail)},
       ${audit.hash ?? null},
-      NULL
+      NULL,
+      ${channelIds}::uuid[]
     )
   `;
 }
@@ -10192,6 +10223,7 @@ type ChannelOutcome =
     preferences?: ChannelPreferenceRecord[];
     ordered_channel_ids?: string[];
     channel_creation_policy?: ChannelCreationPolicy;
+    audit_channel_ids?: string[];
   }
   | {
     ok: false;
@@ -10199,6 +10231,7 @@ type ChannelOutcome =
     error: string;
     message: string;
     reason: string;
+    audit_channel_ids?: string[];
   };
 
 interface ChannelRow {
@@ -10514,6 +10547,33 @@ async function liveChannelSlugs(
   return rows.map((row) => row.slug);
 }
 
+async function accessibleStarOrderAuditChannelIds(
+  tx: Sql,
+  workspaceId: string,
+  userId: string,
+  channelIds: readonly (string | null)[],
+): Promise<string[] | undefined> {
+  if (channelIds.length === 0 || channelIds.some((id) => id === null)) {
+    return undefined;
+  }
+  const distinctIds = [...new Set(channelIds as string[])];
+  const rows = await tx<{ channel_id: string }[]>`
+    SELECT channel_id
+    FROM swarm.channels
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND channel_id = ANY(${distinctIds}::uuid[])
+      AND swarm.actor_can_access_channel(
+        workspace_id,
+        channel_id,
+        'user',
+        ${userId}::uuid
+      )
+  `;
+  return rows.length === distinctIds.length
+    ? rows.map((row) => row.channel_id)
+    : undefined;
+}
+
 /**
  * Channel authority. Every write is pinned to the route's workspace, so a
  * client-supplied channel_id from another tenant resolves to nothing rather
@@ -10612,7 +10672,11 @@ async function applyChannelCommand(
           updated_at = statement_timestamp()
       RETURNING workspace_id, channel_id, target_key, starred, star_rank, involvement, updated_at
     `;
-    return { ok: true, preference: channelPreferenceRecord(saved[0]!) };
+    return {
+      ok: true,
+      preference: channelPreferenceRecord(saved[0]!),
+      ...(command.channel_id !== null ? { audit_channel_ids: [command.channel_id] } : {}),
+    };
   }
 
   if (command.kind === "channel_star_reorder") {
@@ -10651,12 +10715,19 @@ async function applyChannelCommand(
     );
     for (const key of requestedKeys) {
       if (!starredSet.has(key)) {
+        const auditChannelIds = await accessibleStarOrderAuditChannelIds(
+          tx,
+          route.workspaceId,
+          userId,
+          command.channel_ids,
+        );
         return {
           ok: false,
           status: 409,
           error: "channel_star_mismatch",
           message: "Every channel in channel_ids must already be starred.",
           reason: "channel_not_starred",
+          ...(auditChannelIds !== undefined ? { audit_channel_ids: auditChannelIds } : {}),
         };
       }
     }
@@ -10678,7 +10749,15 @@ async function applyChannelCommand(
       RETURNING p.workspace_id, p.channel_id, p.target_key, p.starred, p.star_rank, p.involvement, p.updated_at
     `;
     updatedRows.sort((a, b) => (a.star_rank ?? 0) - (b.star_rank ?? 0));
-    return { ok: true, preferences: updatedRows.map(channelPreferenceRecord) };
+    const nonGeneralIds = command.channel_ids.length > 0 &&
+        command.channel_ids.every((id): id is string => id !== null)
+      ? [...new Set(command.channel_ids)]
+      : undefined;
+    return {
+      ok: true,
+      preferences: updatedRows.map(channelPreferenceRecord),
+      ...(nonGeneralIds !== undefined ? { audit_channel_ids: nonGeneralIds } : {}),
+    };
   }
 
   if (command.kind === "channel_reorder") {
@@ -10737,6 +10816,7 @@ async function applyChannelCommand(
     return {
       ok: true,
       ordered_channel_ids: fullIds.filter((id) => accessibleSet.has(id)),
+      ...(command.channel_ids.length > 0 ? { audit_channel_ids: command.channel_ids } : {}),
     };
   }
 
@@ -10838,6 +10918,7 @@ async function applyChannelCommand(
           ? `This workspace already has a channel named ${command.slug}. Post to it instead.`
           : `An archived channel is named ${command.slug}. Pick another name, or have its creator or a workspace owner or admin rename the archived channel to free this one.`,
         reason: "channel_slug_taken",
+        ...(existingAccessible ? { audit_channel_ids: [existing[0].channel_id] } : {}),
       };
     }
     // Lock order: channel-names:<ws> before channel-order:<ws>.
@@ -10902,9 +10983,14 @@ async function applyChannelCommand(
         ok: true,
         channel: channelRecord(row),
         members: await channelMemberRecords(tx, route.workspaceId, row.channel_id),
+        audit_channel_ids: [row.channel_id],
       };
     }
-    return { ok: true, channel: channelRecord(row) };
+    return {
+      ok: true,
+      channel: channelRecord(row),
+      audit_channel_ids: [row.channel_id],
+    };
   }
 
   // Serialize membership, visibility, and last-manager transitions per channel.
@@ -10941,6 +11027,25 @@ async function applyChannelCommand(
     };
   }
 
+  const outcome = await applyAccessibleChannelCommand(
+    tx,
+    route,
+    auth,
+    actor,
+    command,
+    row,
+  );
+  return { ...outcome, audit_channel_ids: [row.channel_id] };
+}
+
+async function applyAccessibleChannelCommand(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  actor: { kind: "user" | "agent"; id: string },
+  command: Extract<ChannelCommand, { channel_id: string }>,
+  row: ChannelRow,
+): Promise<ChannelOutcome> {
   if (command.kind === "channel_leave") {
     if (row.visibility !== "private") {
       return {
@@ -11280,6 +11385,7 @@ async function applyChannelCommand(
 interface SignalChannelResolution {
   ok: boolean;
   channelId: string | null;
+  auditChannelId?: string | null;
   status?: number;
   error?: string;
   message?: string;
@@ -11338,6 +11444,7 @@ async function resolveSignalChannel(
     return {
       ok: false,
       channelId: null,
+      auditChannelId: row.channel_id,
       status: 409,
       error: "channel_archived",
       message:
@@ -11484,7 +11591,7 @@ async function resolveThreadRoot(
       threadRootId: null,
       rootUntil: null,
       rootRemainingMs: null,
-      rootChannelId: null,
+      rootChannelId: root.channel_id,
       status: 409,
       error: "channel_archived",
       message:
@@ -11498,7 +11605,7 @@ async function resolveThreadRoot(
       threadRootId: null,
       rootUntil: null,
       rootRemainingMs: null,
-      rootChannelId: null,
+      rootChannelId: root.channel_id,
       status: 400,
       error: "thread_root_is_a_reply",
       message:
@@ -12395,6 +12502,170 @@ const RERAISE_NOTE_PREFIX = "Still waiting: ";
  * (before dispatch, or here after the lock when the first request was still running), so it
  * never writes a second note or charges the cap again; a changed retry conflicts.
  */
+async function accessibleSignalBatchChannelIds(
+  tx: Sql,
+  workspaceId: string,
+  auth: AuthContext,
+  signalIds: readonly string[],
+): Promise<string[] | undefined> {
+  if (signalIds.length === 0) return undefined;
+  const actor = authActorIdentity(auth);
+  const rows = await tx<{ channel_id: string | null }[]>`
+    SELECT channel_id
+    FROM swarm.signals
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND id = ANY(${[...signalIds]}::uuid[])
+      AND (
+        channel_id IS NULL
+        OR swarm.actor_can_access_channel(
+          workspace_id,
+          channel_id,
+          ${actor.kind},
+          ${actor.id}::uuid
+        )
+      )
+  `;
+  if (rows.length === 0 || rows.some((row) => row.channel_id === null)) {
+    return undefined;
+  }
+  return [...new Set(rows.map((row) => row.channel_id as string))];
+}
+
+async function signalBatchChannelIdsForAuthorizedRefs(
+  tx: Sql,
+  workspaceId: string,
+  signalIds: readonly string[],
+): Promise<string[] | undefined> {
+  if (signalIds.length === 0) return undefined;
+  const rows = await tx<{ channel_id: string | null }[]>`
+    SELECT channel_id
+    FROM swarm.signals
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND id = ANY(${[...signalIds]}::uuid[])
+  `;
+  if (rows.length === 0 || rows.some((row) => row.channel_id === null)) {
+    return undefined;
+  }
+  return [...new Set(rows.map((row) => row.channel_id as string))];
+}
+
+async function ackAuditChannelIds(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string | null,
+  signalId: string,
+): Promise<string[] | undefined> {
+  if (principalId === null) return undefined;
+  const [row] = await tx<{ channel_id: string }[]>`
+    SELECT s.channel_id
+    FROM swarm.signal_deliveries AS d
+    JOIN swarm.signals AS s
+      ON s.workspace_id = d.workspace_id
+     AND s.id = d.signal_id
+    WHERE d.workspace_id = ${workspaceId}::uuid
+      AND d.signal_id = ${signalId}::uuid
+      AND d.recipient_agent_principal_id = ${principalId}::uuid
+      AND s.channel_id IS NOT NULL
+    LIMIT 1
+  `;
+  return row !== undefined ? [row.channel_id] : undefined;
+}
+
+async function replayAuditChannelIds(
+  tx: Sql,
+  workspaceId: string,
+  auth: AuthContext,
+  command: {
+    readonly kind: string;
+    readonly signal_ids?: readonly string[];
+    readonly channel_ids?: readonly (string | null)[];
+  },
+  matches: boolean,
+  rawResponse: unknown,
+): Promise<string[] | undefined> {
+  const stored = record(rawResponse);
+  const channel = record(stored?.channel);
+  if (typeof channel?.channel_id === "string" && UUID_RE.test(channel.channel_id)) {
+    return [channel.channel_id];
+  }
+  if (typeof stored?.channel_id === "string" && UUID_RE.test(stored.channel_id)) {
+    return [stored.channel_id];
+  }
+  const preference = record(stored?.preference);
+  if (typeof preference?.channel_id === "string" && UUID_RE.test(preference.channel_id)) {
+    return [preference.channel_id];
+  }
+  const signal = record(stored?.signal);
+  if (signal !== null && Object.hasOwn(signal, "channel_id")) {
+    return typeof signal.channel_id === "string" && UUID_RE.test(signal.channel_id)
+      ? [signal.channel_id]
+      : undefined;
+  }
+  const reraise = record(stored?.reraise);
+  if (typeof reraise?.signal_id === "string" && UUID_RE.test(reraise.signal_id)) {
+    return await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [reraise.signal_id]);
+  }
+  const ledger = parseClaimLedger(rawResponse);
+  if (ledger !== null && ledger.delivery_refs.length > 0) {
+    return await signalBatchChannelIdsForAuthorizedRefs(
+      tx,
+      workspaceId,
+      ledger.delivery_refs.map((ref) => ref.signal_id),
+    );
+  }
+  if (typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
+    return await ackAuditChannelIds(
+      tx,
+      workspaceId,
+      auth.agent?.principal_id ?? null,
+      stored.signal_id,
+    );
+  }
+  if (matches && command.kind === SIGNALS_SEEN_KIND && Array.isArray(command.signal_ids)) {
+    return await accessibleSignalBatchChannelIds(tx, workspaceId, auth, command.signal_ids);
+  }
+  if (
+    matches &&
+    command.kind === "channel_star_reorder" &&
+    auth.actor.user !== null &&
+    Array.isArray(command.channel_ids)
+  ) {
+    return await accessibleStarOrderAuditChannelIds(
+      tx,
+      workspaceId,
+      auth.actor.user,
+      command.channel_ids,
+    );
+  }
+  if (matches && command.kind === "channel_reorder" && Array.isArray(command.channel_ids)) {
+    const ids = command.channel_ids.filter((id): id is string => typeof id === "string" && UUID_RE.test(id));
+    return ids.length > 0 ? ids : undefined;
+  }
+  return undefined;
+}
+
+async function accessiblePostSignalEarlyRefusalChannelIds(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: SignalCommand,
+  namedTarget: SignalWriteTarget | null,
+): Promise<string[] | undefined> {
+  if (command.channel !== undefined) {
+    const ch = await resolveSignalChannel(tx, route, auth, command);
+    const cid = ch.channelId ?? ch.auditChannelId ?? null;
+    if (cid !== null) return [cid];
+  }
+  if ((command.thread_root_id ?? null) !== null) {
+    const tr = await resolveThreadRoot(tx, route, auth, command);
+    if (tr.status !== 404 && tr.rootChannelId !== null) return [tr.rootChannelId];
+  }
+  if (namedTarget?.referenceChannelId != null) {
+    return [namedTarget.referenceChannelId];
+  }
+  return undefined;
+}
+
 async function reraiseAsk(
   tx: Sql,
   route: Route,
@@ -12411,10 +12682,11 @@ async function reraiseAsk(
   hostedCapability: HostedSeatCapability | null,
 ): Promise<HttpResult> {
   const { commandId, hash, kind, decided } = ctx;
+  let auditChannelIds: readonly string[] | undefined;
   const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
     insertAudit(tx, {
       auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
-      outcome, reason, detail, hash,
+      outcome, reason, detail, hash, channelIds: auditChannelIds,
     });
   await tx`
     SELECT pg_advisory_xact_lock(
@@ -12434,6 +12706,14 @@ async function reraiseAsk(
   if (prior !== undefined) {
     const matches = prior.request_hash === hash &&
       prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
+    auditChannelIds = await replayAuditChannelIds(
+      tx,
+      prior.workspace_id,
+      auth,
+      command,
+      matches,
+      prior.response,
+    );
     await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
     return decided(matches
       ? replayResult(storedResponse(prior.response), kind)
@@ -12483,6 +12763,7 @@ async function reraiseAsk(
     await audit("authz", "reraise_not_own_ask");
     return { status: 404, body: { error: "not_found", message: "No ask of yours with that id." } };
   }
+  auditChannelIds = ask.channel_id !== null ? [ask.channel_id] : undefined;
   if (!ask.live) {
     await audit("domain", "reraise_ask_expired");
     return decided({ status: 409, body: { error: "ask_expired",
@@ -13019,9 +13300,10 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
  */
 async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: AnswerChoiceCommand,
   ctx: ChoiceCtx): Promise<HttpResult> {
+  let auditChannelIds: readonly string[] | undefined;
   const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
     insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
-      outcome, reason, detail, hash: ctx.hash });
+      outcome, reason, detail, hash: ctx.hash, channelIds: auditChannelIds });
   if (!interactiveRepliesEnabled) {
     await audit("domain", "interactive_replies_unavailable");
     return { status: 404, body: { error: "interactive_replies_unavailable",
@@ -13062,6 +13344,7 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     await audit("authz", "answer_choice_not_addressed");
     return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
   }
+  auditChannelIds = ask.channel_id !== null ? [ask.channel_id] : undefined;
   // A settled answer outlives the ask: a retry after expiry gets this person's answer, not ask_expired.
   const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
   if (replay !== null) return replay;
@@ -15679,6 +15962,14 @@ async function handleTransaction(
         kind === RENEW_AGENT_TOKEN_KIND &&
         await strandedSuccessorOf(tx, existing.response) !== null;
       if (!recovering) {
+        const replayChannelIds = await replayAuditChannelIds(
+          tx,
+          existing.workspace_id,
+          auth,
+          command,
+          matches,
+          existing.response,
+        );
         await insertAudit(tx, {
           auth,
           commandKind: kind,
@@ -15689,6 +15980,7 @@ async function handleTransaction(
           // Never put lease ids or bodies in audit detail.
           detail: ignoredIdentity,
           hash,
+          channelIds: replayChannelIds,
         });
         if (!matches) {
           // Keep this authenticated conflict's rate charge and audit. Final
@@ -15809,6 +16101,12 @@ async function handleTransaction(
           principalId: principalId!,
           signalIds: command.signal_ids,
         });
+      const seenAuditChannelIds = await accessibleSignalBatchChannelIds(
+        tx,
+        route.workspaceId,
+        auth,
+        command.signal_ids,
+      );
       if (seen.status === "forbidden") {
         await insertAudit(tx, {
           auth,
@@ -15821,6 +16119,7 @@ async function handleTransaction(
             : "signal_not_eligible_for_agent_receipt",
           detail: ignoredIdentity,
           hash,
+          channelIds: seenAuditChannelIds,
         });
         return { status: 403, body: { error: "forbidden" } };
       }
@@ -15860,6 +16159,7 @@ async function handleTransaction(
         outcome: "accepted",
         detail: ignoredIdentity,
         hash,
+        channelIds: seenAuditChannelIds,
       });
       return {
         status: 200,
@@ -15887,6 +16187,7 @@ async function handleTransaction(
           outcome: outcome.status === 404 ? "authz" : "domain",
           reason: outcome.reason,
           hash,
+          channelIds: outcome.audit_channel_ids,
         });
         const refusal:HttpResult = {
           status: outcome.status,
@@ -15950,6 +16251,7 @@ async function handleTransaction(
         outcome: "accepted",
         detail: ignoredIdentity,
         hash,
+        channelIds: outcome.audit_channel_ids,
       });
       return {
         status: 200,
@@ -16051,6 +16353,13 @@ async function handleTransaction(
         if (leadMention !== null) signalMentions.push({ kind: "agent", id: leadMention, source: "lead" });
       }
       if (signalTarget === null) {
+        const earlyChannelIds = await accessiblePostSignalEarlyRefusalChannelIds(
+          tx,
+          route,
+          auth,
+          command,
+          namedTarget,
+        );
         await insertAudit(tx, {
           auth,
           commandKind: kind,
@@ -16059,6 +16368,7 @@ async function handleTransaction(
           outcome: "authz",
           reason: "signal target or reply is not eligible",
           hash,
+          channelIds: earlyChannelIds,
         });
         return { status: 403, body: { error: "forbidden" } };
       }
@@ -16077,6 +16387,9 @@ async function handleTransaction(
           outcome: channelResolution.status === 404 ? "authz" : "domain",
           reason: channelResolution.reason!,
           hash,
+          ...(channelResolution.auditChannelId
+            ? { channelIds: [channelResolution.auditChannelId] }
+            : {}),
         });
         const refusal: HttpResult = {
           status: channelResolution.status!,
@@ -16102,6 +16415,9 @@ async function handleTransaction(
           outcome: threadResolution.status === 404 ? "authz" : "domain",
           reason: threadResolution.reason!,
           hash,
+          ...(threadResolution.status !== 404 && threadResolution.rootChannelId !== null
+            ? { channelIds: [threadResolution.rootChannelId] }
+            : {}),
         });
         const refusal: HttpResult = {
           status: threadResolution.status!,
@@ -16129,6 +16445,7 @@ async function handleTransaction(
             outcome: "domain",
             reason: PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR,
             hash,
+            channelIds: [signalTarget.referenceChannelId, channelResolution.channelId],
           });
           return decided({
             status: 409,
@@ -16148,6 +16465,7 @@ async function handleTransaction(
             outcome: "domain",
             reason: "channel_archived",
             hash,
+            channelIds: [signalTarget.referenceChannelId],
           });
           return decided({
             status: 409,
@@ -16165,6 +16483,9 @@ async function handleTransaction(
           (signalTarget.referenceChannelVisibility === "private"
             ? (signalTarget.referenceChannelId ?? null)
             : null));
+      const postAuditChannelIds = placementChannelId !== null
+        ? [placementChannelId]
+        : undefined;
       if (
         (command.attachments?.length ?? 0) > 0 &&
         placementChannelId !== null
@@ -16185,6 +16506,7 @@ async function handleTransaction(
             outcome: "domain",
             reason: "workspace_files_are_workspace_wide",
             hash,
+            channelIds: postAuditChannelIds,
           });
           return decided({
             status: 409,
@@ -16210,6 +16532,7 @@ async function handleTransaction(
           outcome: attachmentResolution.status === 404 ? "authz" : "domain",
           reason: attachmentResolution.reason,
           hash,
+          channelIds: postAuditChannelIds,
         });
         const refusal:HttpResult = {
           status: attachmentResolution.status,
@@ -16242,6 +16565,7 @@ async function handleTransaction(
           reason: "rate_limited",
           detail,
           hash,
+          channelIds: postAuditChannelIds,
         });
         await tx`
           INSERT INTO swarm.security_alerts (kind, subject, detail)
@@ -16337,6 +16661,7 @@ async function handleTransaction(
             outcome: "authz",
             reason: "signal target or reply is not eligible",
             hash,
+            channelIds: postAuditChannelIds,
           });
           return { status: 403, body: { error: "forbidden" } };
         }
@@ -16370,6 +16695,7 @@ async function handleTransaction(
             outcome: "domain",
             reason: "thread_reply_until_exceeds_root",
             hash,
+            channelIds: postAuditChannelIds,
           });
           return decided({
             status: 409,
@@ -16443,6 +16769,7 @@ async function handleTransaction(
           await insertAudit(tx, {
             auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
             outcome: "domain", reason: "agent mention hop limit reached in this thread", hash,
+            channelIds: postAuditChannelIds,
           });
           return decided({ status: 409, body: {
             error: "mention_hop_limit",
@@ -16490,6 +16817,7 @@ async function handleTransaction(
           outcome: "domain",
           reason: postOutcome.error,
           hash,
+          channelIds: postAuditChannelIds,
         });
         return {
           status: 409,
@@ -16512,6 +16840,7 @@ async function handleTransaction(
           outcome: "domain",
           reason: "thread_reply_until_exceeds_root",
           hash,
+          channelIds: postAuditChannelIds,
         });
         return {
           status: 409,
@@ -16574,6 +16903,7 @@ async function handleTransaction(
         outcome: "accepted",
         detail: ignoredIdentity,
         hash,
+        channelIds: postAuditChannelIds,
       });
       await chargeSpend(tx, "signal_post");
       return {
@@ -16954,6 +17284,13 @@ async function handleTransaction(
           );
         }
       }
+      const claimAuditChannelIds = ledger.delivery_refs.length > 0
+        ? await signalBatchChannelIdsForAuthorizedRefs(
+          tx,
+          route.workspaceId,
+          ledger.delivery_refs.map((ref) => ref.signal_id),
+        )
+        : undefined;
       const deliveries = await hydrateDeliveryRefs(tx, {
         workspaceId: route.workspaceId,
         recipientPrincipalId: agent.principal_id,
@@ -16970,6 +17307,7 @@ async function handleTransaction(
           reason: "delivery_hydration_integrity",
           detail: ignoredIdentity,
           hash,
+          channelIds: claimAuditChannelIds,
         });
         return { status: 403, body: { error: "delivery_unavailable" } };
       }
@@ -16996,6 +17334,7 @@ async function handleTransaction(
           outcome: "accepted",
           detail: `terminal_delivery_failure_count=${ledger.terminal_delivery_failure_count}`,
           hash,
+          channelIds: claimAuditChannelIds,
         });
       }
       return {
@@ -17040,6 +17379,12 @@ async function handleTransaction(
         managed: agent.managed_at != null,
         proof: sessionProofParse.ok ? sessionProofParse.proof : null,
       });
+      const ackChannelIds = await ackAuditChannelIds(
+        tx,
+        route.workspaceId,
+        agent.principal_id,
+        command.signal_id,
+      );
       const ackRefused = ackDeliveryRefusal(result);
       /* Map ACK refusals to typed HTTP. Pad keeps mintedHorizon at 9107.
        *
@@ -17055,6 +17400,7 @@ async function handleTransaction(
           reason: ackRefused.auditReason,
           detail: ignoredIdentity,
           hash,
+          channelIds: ackChannelIds,
         });
         return ackRefused.auditOutcome==='domain' ? decided(ackRefused.http) : ackRefused.http;
       }
@@ -17096,6 +17442,7 @@ async function handleTransaction(
         outcome: result.status === "idempotent" ? "replayed" : "accepted",
         detail: ignoredIdentity,
         hash,
+        channelIds: ackChannelIds,
       });
       return {
         status: 200,

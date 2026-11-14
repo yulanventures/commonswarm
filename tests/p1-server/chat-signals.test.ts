@@ -4648,6 +4648,14 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   // --- Scenario A: Ordinary creatorA creates #lock1 with ordinary memberB + agentOwnedByOut;
   // ownerOut removes creatorA from workspace -> memberB promoted to is_manager = true, ownerOut NOT admitted,
   // claim replay after agent workspace removal hides body, and re-admission (E1) does NOT restore #lock1 access! ---
+  const openCtrlRes = await sendWs(ws, memberB.jwt, {
+    kind: "channel_create",
+    slug: `c4-open-${tag}`,
+    visibility: "open",
+  });
+  assert.equal(openCtrlRes.status, 200, JSON.stringify(openCtrlRes.body));
+  const openCtrlId = String((openCtrlRes.body.channel as Record<string, unknown>).channel_id);
+
   const lock1Slug = `c4-promote-${tag}`;
   const lock1Res = await sendWs(ws, creatorA.jwt, {
     kind: "channel_create",
@@ -4664,7 +4672,8 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(lock1InitialMembers.find((m) => m.id === creatorA.id)?.is_manager, true);
   assert.equal(lock1InitialMembers.find((m) => m.id === memberB.id)?.is_manager, false);
 
-  // creatorA posts a directed ask to memberB (for removed-author reraise check) and mentions agentOwnedByOut (for claim replay check).
+  // creatorA posts a directed ask to memberB (for removed-author reraise check) and memberB marks it seen;
+  // memberB mentions agentOwnedByOut (for claim + ack + post-revocation replay check).
   const creatorAsk = await sendWs(ws, creatorA.jwt, installedPost({
     channel: lock1Slug,
     signal_kind: "ask",
@@ -4673,6 +4682,10 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   }));
   assert.equal(creatorAsk.status, 200);
   const creatorAskId = String(signalOf(creatorAsk.body).id);
+  assert.equal(
+    (await sendWs(ws, memberB.jwt, { kind: "signals_seen", signal_ids: [creatorAskId] })).status,
+    200,
+  );
 
   const wakeAgentMsg = await sendWs(ws, memberB.jwt, installedPost({
     channel: lock1Slug,
@@ -4695,6 +4708,18 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(firstClaim.deliveries[0]!.signal.id, wakeAgentMsgId);
   assert.equal(firstClaim.deliveries[0]!.signal.channel_visibility, "private");
 
+  const firstAck = await deliveryClient.ackAgentDelivery({
+    workspaceId: ws,
+    credential: agentOwnedByOut.token,
+    commandId: randomUUID(),
+    signalId: wakeAgentMsgId,
+    leaseId: firstClaim.deliveries[0]!.leaseId,
+    listenerInstanceId: listenerId,
+    outcome: "processed",
+    lastErrorCode: null,
+  });
+  assert.equal(firstAck.outcome, "processed");
+
   // Workspace owner (ownerOut, NOT in #lock1) removes creatorA from the workspace!
   const remCreator = await sendWs(ws, ownerOut.jwt, { kind: "remove_member", user_id: creatorA.id });
   assert.equal(remCreator.status, 200, JSON.stringify(remCreator.body));
@@ -4708,27 +4733,39 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(bReadMembers.find((m) => m.id === creatorA.id), undefined, "removed workspace member deleted from channel_members");
   assert.equal(bReadMembers.find((m) => m.id === memberB.id)?.is_manager, true, "memberB promoted to is_manager = true");
 
-  const [promoAudit] = await sql<{ command_kind: string; reason: string; detail: string }[]>`
-    SELECT command_kind, reason, detail FROM swarm.audit_log
+  const [promoAudit] = await sql<{ command_kind: string; reason: string; detail: string; channel_ids: string[] | null }[]>`
+    SELECT command_kind, reason, detail, channel_ids::text[] AS channel_ids FROM swarm.audit_log
     WHERE workspace_id = ${ws}::uuid
       AND command_kind = 'private_channel_manager_promoted'
       AND stream_id = ${lock1Id}::uuid
   `;
   assert.equal(promoAudit?.reason, "workspace_member_removed");
   assert.equal(promoAudit?.detail, `channel_id=${lock1Id},promoted_user_id=${memberB.id}`);
+  assert.deepEqual(promoAudit?.channel_ids, [lock1Id]);
 
-  // R2-A3: Client audit view (swarm_read.audit_log) must hide private-channel lifecycle rows and identifiers
-  // from non-member workspace owners/admins (ownerOut, adminY), while showing them to an admitted #lock admin!
+  // R2-A3 + Item 11: Client audit view (swarm_read.audit_log) must hide BOTH private-channel lifecycle rows
+  // AND channel-scoped ordinary command rows (channel_create, channel_member_add + replay, channel_member_remove,
+  // channel_leave, channel_update, post_signal, signals_seen, claim_agent_inbox, ack_agent_delivery) from
+  // non-member workspace owners/admins, while showing them to an admitted #lock admin and keeping the 16-column schema!
   const clientAuditAs = async (userId: string) =>
     await viewRowAs(userId, async (tx) =>
       await tx<{
         command_kind: string;
         actor_user: string | null;
+        actor_agent_principal: string | null;
         stream_id: string | null;
+        outcome: string;
         reason: string | null;
         detail: string | null;
       }[]>`
-        SELECT command_kind, actor_user::text, stream_id::text, reason, detail
+        SELECT
+          command_kind,
+          actor_user::text,
+          actor_agent_principal::text,
+          stream_id::text,
+          outcome,
+          reason,
+          detail
         FROM swarm_read.audit_log
         WHERE workspace_id = ${ws}::uuid
         ORDER BY audit_id ASC
@@ -4736,16 +4773,13 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     );
 
   const ownerOutAuditAfterPromo = await clientAuditAs(ownerOut.id);
-  assert.ok(
-    ownerOutAuditAfterPromo.some((r) => r.command_kind === "remove_member"),
-    "positive control: workspace owner ownerOut can read workspace-level rows in swarm_read.audit_log",
-  );
   assert.deepEqual(
-    ownerOutAuditAfterPromo.filter((r) =>
-      r.command_kind === "private_channel_manager_promoted" || r.command_kind === "private_channel_auto_archived"
-    ),
-    [],
-    "R2-A3: non-member workspace owner must NOT see private_channel_manager_promoted in swarm_read.audit_log",
+    ownerOutAuditAfterPromo.map((r) => ({ command_kind: r.command_kind, actor_user: r.actor_user, outcome: r.outcome })),
+    [
+      { command_kind: "channel_create", actor_user: memberB.id, outcome: "accepted" },
+      { command_kind: "remove_member", actor_user: ownerOut.id, outcome: "accepted" },
+    ],
+    "R2-A3 + Item 11: non-member owner sees open-channel create and remove_member, and ZERO #lock1 command or lifecycle rows",
   );
   assert.equal(
     JSON.stringify(ownerOutAuditAfterPromo).includes(lock1Id),
@@ -4753,17 +4787,83 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     "R2-A3: non-member workspace owner must NOT see private channel UUID in swarm_read.audit_log",
   );
 
-  // Positive control for admitted admin: memberB adds adminY to #lock1 -> adminY sees #lock1's promotion row in swarm_read.audit_log,
-  // then adminY leaves #lock1 so memberB remains sole manager for subsequent scenarios!
+  // Exercise #lock1 channel_member_add + channel_member_remove + replayed channel_member_add, then verify
+  // admitted adminY sees all #lock1 ordinary + lifecycle rows (with exact 16-column view projection) before leaving!
   assert.equal(
     (await sendWs(ws, memberB.jwt, {
       kind: "channel_member_add",
       channel_id: lock1Id,
-      members: [{ kind: "user", id: adminY.id }],
+      members: [{ kind: "user", id: adminX.id }],
     })).status,
     200,
   );
+  assert.equal(
+    (await sendWs(ws, memberB.jwt, {
+      kind: "channel_member_remove",
+      channel_id: lock1Id,
+      member: { kind: "user", id: adminX.id },
+    })).status,
+    200,
+  );
+  const addAdminYCmdId = randomUUID();
+  const addAdminYBody = {
+    kind: "channel_member_add",
+    channel_id: lock1Id,
+    members: [{ kind: "user", id: adminY.id }],
+  };
+  assert.equal((await sendWs(ws, memberB.jwt, addAdminYBody, addAdminYCmdId)).status, 200);
+  assert.equal((await sendWs(ws, memberB.jwt, addAdminYBody, addAdminYCmdId)).status, 200);
+
+  const [adminYRawAuditRow] = await viewRowAs(adminY.id, async (tx) =>
+    await tx<Record<string, unknown>[]>`
+      SELECT * FROM swarm_read.audit_log WHERE workspace_id = ${ws}::uuid ORDER BY audit_id ASC LIMIT 1
+    `
+  );
+  assert.deepEqual(
+    Object.keys(adminYRawAuditRow ?? {}).sort(),
+    [
+      "actor_agent_principal",
+      "actor_run",
+      "actor_user",
+      "audit_id",
+      "command_kind",
+      "credential_id",
+      "credential_kind",
+      "detail",
+      "device_id",
+      "ip",
+      "occurred_at",
+      "outcome",
+      "reason",
+      "request_hash",
+      "stream_id",
+      "workspace_id",
+    ],
+    "swarm_read.audit_log must project the exact original 16 columns without exposing channel_ids",
+  );
+
   const adminYAuditWhileAdmitted = await clientAuditAs(adminY.id);
+  assert.ok(
+    adminYAuditWhileAdmitted.some((r) => r.command_kind === "channel_create" && r.actor_user === creatorA.id),
+    "Item 11 positive control: admitted #lock1 admin sees #lock1 channel_create",
+  );
+  assert.ok(
+    adminYAuditWhileAdmitted.some((r) => r.command_kind === "channel_member_add" && r.outcome === "accepted") &&
+      adminYAuditWhileAdmitted.some((r) => r.command_kind === "channel_member_add" && r.outcome === "replayed") &&
+      adminYAuditWhileAdmitted.some((r) => r.command_kind === "channel_member_remove" && r.outcome === "accepted"),
+    "Item 11 positive control: admitted #lock1 admin sees #lock1 channel_member_add (accepted + replayed) and channel_member_remove",
+  );
+  assert.ok(
+    adminYAuditWhileAdmitted.some((r) => r.command_kind === "post_signal" && r.actor_user === creatorA.id) &&
+      adminYAuditWhileAdmitted.some((r) => r.command_kind === "signals_seen" && r.actor_user === memberB.id) &&
+      adminYAuditWhileAdmitted.some((r) =>
+        r.command_kind === "claim_agent_inbox" && r.actor_agent_principal === agentOwnedByOut.principal
+      ) &&
+      adminYAuditWhileAdmitted.some((r) =>
+        r.command_kind === "ack_agent_delivery" && r.actor_agent_principal === agentOwnedByOut.principal
+      ),
+    "Item 11 positive control: admitted #lock1 admin sees #lock1 post_signal, signals_seen, claim_agent_inbox, and ack_agent_delivery",
+  );
   assert.deepEqual(
     adminYAuditWhileAdmitted
       .filter((r) => r.command_kind === "private_channel_manager_promoted")
@@ -4782,6 +4882,11 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     (await sendWs(ws, ownerOut.jwt, { kind: "channel_update", channel_id: lock1Id, purpose: "Owner probe" })).status,
     404,
     "workspace owner outside #lock1 must NOT be silently admitted on manager promotion",
+  );
+  assert.equal(
+    (await sendWs(ws, ownerOut.jwt, { kind: "signals_seen", signal_ids: [creatorAskId] })).status,
+    200,
+    "outsider signals_seen probe returns 200 empty identically to unknown UUIDs",
   );
   const bManages = await sendWs(ws, memberB.jwt, {
     kind: "channel_update",
@@ -4879,14 +4984,15 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     WHERE channel_id = ${lock2Id}::uuid AND user_id = ${adminX.id}::uuid
   `;
   assert.equal(xAfterDemote?.is_manager, true, "C4: demoted sole admin in #lock2 is promoted to explicit is_manager = true");
-  const [demoteAudit] = await sql<{ command_kind: string; reason: string; detail: string }[]>`
-    SELECT command_kind, reason, detail FROM swarm.audit_log
+  const [demoteAudit] = await sql<{ command_kind: string; reason: string; detail: string; channel_ids: string[] | null }[]>`
+    SELECT command_kind, reason, detail, channel_ids::text[] AS channel_ids FROM swarm.audit_log
     WHERE workspace_id = ${ws}::uuid
       AND command_kind = 'private_channel_manager_promoted'
       AND stream_id = ${lock2Id}::uuid
   `;
   assert.equal(demoteAudit?.reason, "workspace_role_demoted");
   assert.equal(demoteAudit?.detail, `channel_id=${lock2Id},promoted_user_id=${adminX.id}`);
+  assert.deepEqual(demoteAudit?.channel_ids, [lock2Id]);
   assert.equal(
     (await sendWs(ws, adminX.jwt, { kind: "channel_update", channel_id: lock2Id, purpose: "Still managed after demotion" })).status,
     200,
@@ -4913,8 +5019,8 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     SELECT archived_at FROM swarm.channels WHERE channel_id = ${lock1Id}::uuid
   `;
   assert.ok(lock1Archived?.archived_at !== null, "C4: private channel with 0 live humans left auto-archives");
-  const [archiveAudit] = await sql<{ command_kind: string; reason: string; detail: string }[]>`
-    SELECT command_kind, reason, detail FROM swarm.audit_log
+  const [archiveAudit] = await sql<{ command_kind: string; reason: string; detail: string; channel_ids: string[] | null }[]>`
+    SELECT command_kind, reason, detail, channel_ids::text[] AS channel_ids FROM swarm.audit_log
     WHERE workspace_id = ${ws}::uuid
       AND command_kind = 'private_channel_auto_archived'
       AND stream_id = ${lock1Id}::uuid
@@ -4922,28 +5028,83 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   assert.equal(archiveAudit?.command_kind, "private_channel_auto_archived");
   assert.equal(archiveAudit?.reason, "no_remaining_human_members");
   assert.equal(archiveAudit?.detail, `channel_id=${lock1Id}`);
+  assert.deepEqual(archiveAudit?.channel_ids, [lock1Id]);
 
-  // R2-A3 after both role-demotion promotion (#lock2) and zero-human auto-archive (#lock1):
-  // neither non-member ownerOut nor departed adminY sees #lock1 or #lock2 lifecycle rows or UUIDs in swarm_read.audit_log!
-  for (const [label, userId] of [["ownerOut", ownerOut.id], ["adminY", adminY.id]] as const) {
-    const auditRows = await clientAuditAs(userId);
-    assert.deepEqual(
-      auditRows.filter((r) =>
-        r.command_kind === "private_channel_manager_promoted" || r.command_kind === "private_channel_auto_archived"
-      ),
-      [],
-      `R2-A3: ${label} outside #lock1/#lock2 must NOT see promotion or auto-archive rows in swarm_read.audit_log`,
-    );
-    const serialized = JSON.stringify(auditRows);
-    assert.equal(serialized.includes(lock1Id), false, `R2-A3: ${label} audit view must NOT leak lock1Id`);
-    assert.equal(serialized.includes(lock2Id), false, `R2-A3: ${label} audit view must NOT leak lock2Id`);
-  }
   const agentPostArchived = await sendWs(ws, agentOwnedByOut.token, installedPost({
     channel: lock1Slug,
     body: "Agent post after zero-human auto-archive",
   }));
   assert.equal(agentPostArchived.status, 409, JSON.stringify(agentPostArchived.body));
   assert.equal(agentPostArchived.body.error, "channel_archived");
+
+  // Server-side swarm.audit_log retains ALL #lock1 and #lock2 lifecycle + ordinary command rows with channel_ids!
+  const serverAuditRows = await sql<{
+    command_kind: string;
+    outcome: string;
+    channel_ids: string[] | null;
+  }[]>`
+    SELECT command_kind, outcome, channel_ids::text[] AS channel_ids
+    FROM swarm.audit_log
+    WHERE workspace_id = ${ws}::uuid
+    ORDER BY audit_id ASC
+  `;
+  const serverPrivateRows = serverAuditRows.filter((r) =>
+    (r.channel_ids ?? []).includes(lock1Id) || (r.channel_ids ?? []).includes(lock2Id)
+  );
+  for (const [kind, outcome] of [
+    ["channel_create", "accepted"],
+    ["channel_member_add", "accepted"],
+    ["channel_member_add", "replayed"],
+    ["channel_member_remove", "accepted"],
+    ["channel_leave", "accepted"],
+    ["channel_leave", "domain"],
+    ["channel_update", "accepted"],
+    ["post_signal", "accepted"],
+    ["post_signal", "domain"],
+    ["signals_seen", "accepted"],
+    ["claim_agent_inbox", "accepted"],
+    ["claim_agent_inbox", "replayed"],
+    ["ack_agent_delivery", "accepted"],
+    ["private_channel_manager_promoted", "accepted"],
+    ["private_channel_auto_archived", "accepted"],
+  ] as const) {
+    assert.ok(
+      serverPrivateRows.some((r) => r.command_kind === kind && r.outcome === outcome),
+      `server-side swarm.audit_log must retain private-channel (${kind}, ${outcome}) row`,
+    );
+  }
+  assert.ok(
+    serverAuditRows.some((r) => r.command_kind === "channel_create" && (r.channel_ids ?? []).includes(openCtrlId)),
+    "server-side swarm.audit_log tags open-channel create with openCtrlId",
+  );
+
+  // R2-A3 + Item 11 after role-demotion promotion (#lock2), zero-human auto-archive (#lock1), and archived post refusal:
+  // neither non-member ownerOut (who also left #lock2) nor departed adminY (who left #lock1) sees ANY #lock1 or #lock2
+  // lifecycle or ordinary command rows, while still seeing workspace-level commands, open-channel commands, and untagged 404/empty probes!
+  for (const [label, userId] of [["ownerOut", ownerOut.id], ["adminY", adminY.id]] as const) {
+    const auditRows = await clientAuditAs(userId);
+    assert.deepEqual(
+      auditRows.map((r) => ({
+        command_kind: r.command_kind,
+        actor_user: r.actor_user,
+        outcome: r.outcome,
+        reason: r.reason,
+      })),
+      [
+        { command_kind: "channel_create", actor_user: memberB.id, outcome: "accepted", reason: null },
+        { command_kind: "remove_member", actor_user: ownerOut.id, outcome: "accepted", reason: null },
+        { command_kind: "channel_update", actor_user: ownerOut.id, outcome: "authz", reason: "channel_not_found" },
+        { command_kind: "signals_seen", actor_user: ownerOut.id, outcome: "accepted", reason: null },
+        { command_kind: "reraise_ask", actor_user: creatorA.id, outcome: "authz", reason: "reraise_not_own_ask" },
+        { command_kind: "change_role", actor_user: ownerOut.id, outcome: "accepted", reason: null },
+        { command_kind: "remove_member", actor_user: ownerOut.id, outcome: "accepted", reason: null },
+      ],
+      `R2-A3 + Item 11: ${label} outside #lock1/#lock2 sees ONLY open/workspace/untagged-probe rows in swarm_read.audit_log`,
+    );
+    const serialized = JSON.stringify(auditRows);
+    assert.equal(serialized.includes(lock1Id), false, `R2-A3: ${label} audit view must NOT leak lock1Id`);
+    assert.equal(serialized.includes(lock2Id), false, `R2-A3: ${label} audit view must NOT leak lock2Id`);
+  }
 
   // --- Scenario D: Concurrent last-manager removal/leave serialization under channel-access advisory lock ---
   const lock4Res = await sendWs(ws, ownerOut.jwt, {

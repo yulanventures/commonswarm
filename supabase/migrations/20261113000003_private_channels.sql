@@ -2130,6 +2130,9 @@ REVOKE ALL ON FUNCTION swarm_read.home_overview()
 GRANT EXECUTE ON FUNCTION swarm_read.home_overview() TO authenticated;
 
 -- 16. Workspace membership, role demotion, and agent exit lifecycle reconciliation (C4 + E1).
+ALTER TABLE swarm.audit_log
+  ADD COLUMN IF NOT EXISTS channel_ids uuid[];
+
 CREATE OR REPLACE FUNCTION swarm.reconcile_private_channels_on_membership_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2277,7 +2280,7 @@ BEGIN
             AND archived_at IS NULL;
 
           INSERT INTO swarm.audit_log (
-            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail
+            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail, channel_ids
           ) VALUES (
             v_user_id,
             'private_channel_auto_archived',
@@ -2285,7 +2288,8 @@ BEGIN
             v_ch.channel_id,
             'ok',
             'no_remaining_human_members',
-            'channel_id=' || v_ch.channel_id::text
+            'channel_id=' || v_ch.channel_id::text,
+            ARRAY[v_ch.channel_id]
           );
         END IF;
       ELSIF v_human_managers = 0 THEN
@@ -2314,7 +2318,7 @@ BEGIN
             AND user_id = v_promoted_user_id;
 
           INSERT INTO swarm.audit_log (
-            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail
+            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail, channel_ids
           ) VALUES (
             v_promoted_user_id,
             'private_channel_manager_promoted',
@@ -2322,7 +2326,8 @@ BEGIN
             v_ch.channel_id,
             'ok',
             CASE WHEN v_is_demotion THEN 'workspace_role_demoted' ELSE 'workspace_member_removed' END,
-            'channel_id=' || v_ch.channel_id::text || ',promoted_user_id=' || v_promoted_user_id::text
+            'channel_id=' || v_ch.channel_id::text || ',promoted_user_id=' || v_promoted_user_id::text,
+            ARRAY[v_ch.channel_id]
           );
         END IF;
       END IF;
@@ -2425,12 +2430,28 @@ CREATE TRIGGER agent_principals_cleanup_private_channels
   EXECUTE FUNCTION swarm.cleanup_private_channels_on_agent_exit();
 
 -- Retain full server-side rows in swarm.audit_log while hiding private-channel lifecycle
--- audit rows (and their channel/member UUIDs) from workspace owners and admins who are not
--- members of that private channel.
+-- and channel-scoped command rows from workspace owners and admins who are not members of
+-- that private channel (projection keeps the exact original 16 client columns).
 CREATE OR REPLACE VIEW swarm_read.audit_log
 WITH (security_barrier = true)
 AS
-  SELECT a.*
+  SELECT
+    a.audit_id,
+    a.occurred_at,
+    a.actor_user,
+    a.actor_agent_principal,
+    a.actor_run,
+    a.credential_kind,
+    a.credential_id,
+    a.device_id,
+    a.command_kind,
+    a.workspace_id,
+    a.stream_id,
+    a.outcome,
+    a.reason,
+    a.detail,
+    a.request_hash,
+    a.ip
   FROM swarm.audit_log AS a
   WHERE swarm.is_member(a.workspace_id, auth.uid())
     AND EXISTS (
@@ -2440,6 +2461,14 @@ AS
         AND m.user_id = auth.uid()
         AND m.revoked_at IS NULL
         AND m.role IN ('owner', 'admin')
+    )
+    AND (
+      COALESCE(cardinality(a.channel_ids), 0) = 0
+      OR EXISTS (
+        SELECT 1
+        FROM unnest(a.channel_ids) AS cid
+        WHERE swarm.claims_can_access_channel(a.workspace_id, cid)
+      )
     )
     AND (
       a.command_kind NOT IN (
