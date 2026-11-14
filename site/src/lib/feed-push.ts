@@ -1,8 +1,9 @@
 /*
- * Workspace feed wake: subscribe to the private cswarm-signals topic and
- * refresh the feed on events, with a 30-second reconcile while SUBSCRIBED and
- * the existing 2-second poll when not. Push is a hint; the signal page is
- * still the truth.
+ * Workspace feed wake: subscribe to the private cswarm-signals topic, and to
+ * the person's own cswarm-member topic where their private channels are
+ * announced, and refresh the feed on events, with a 30-second reconcile while
+ * SUBSCRIBED and the existing 2-second poll when not. Push is a hint; the
+ * signal page is still the truth.
  *
  * Status is classified by the Realtime subscribe callback names in
  * FEED_PUSH_FALLBACK_STATUSES, never by a thrown Error's presentation text (D-053).
@@ -12,6 +13,8 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const WORKSPACE_SIGNALS_TOPIC_PREFIX = "cswarm-signals:";
+/** A person's own topic in one workspace. The server sends a private channel's messages to its members' topics. */
+export const MEMBER_SIGNALS_TOPIC_PREFIX = "cswarm-member:";
 export const WORKSPACE_SIGNALS_EVENT = "signal";
 export const FEED_PUSH_SUBSCRIBED_STATUS = "SUBSCRIBED";
 
@@ -50,6 +53,14 @@ export function workspaceSignalsTopic(workspaceId: string): string {
     throw new Error("workspace signals workspace id is malformed");
   }
   return `${WORKSPACE_SIGNALS_TOPIC_PREFIX}${workspaceId.toLowerCase()}`;
+}
+
+/** Topic name from the workspace id and the signed-in person's id; never caller-entered text. */
+export function memberSignalsTopic(workspaceId: string, userId: string): string {
+  if (!UUID_RE.test(workspaceId) || !UUID_RE.test(userId)) {
+    throw new Error("member signals topic id is malformed");
+  }
+  return `${MEMBER_SIGNALS_TOPIC_PREFIX}${workspaceId.toLowerCase()}:${userId.toLowerCase()}`;
 }
 
 export function feedRefreshIntervalMs(subscribed: boolean): number {
@@ -99,19 +110,14 @@ export interface FeedPushHooks {
   timers: FeedPushTimers;
 }
 
-/**
- * Bind one private workspace-signal channel. Callers that await (session,
- * setAuth) must pass a workspace id captured before those awaits.
- */
-export function attachWorkspaceSignalsChannel(
+function attachSignalsChannel(
   c: FeedPushChannelClient,
-  workspaceId: string,
+  topic: string,
   onEvent: () => void,
   onStatus: (status: string) => void,
 ): FeedPushSubscription {
-  const workspaceForJoin = workspaceId;
   let removed = false;
-  const channel = c.channel(workspaceSignalsTopic(workspaceForJoin), {
+  const channel = c.channel(topic, {
     config: {
       private: true,
       broadcast: { ack: false, self: false },
@@ -130,6 +136,42 @@ export function attachWorkspaceSignalsChannel(
       if (removed) return;
       removed = true;
       await c.removeChannel(channel);
+    },
+  };
+}
+
+/**
+ * Bind both topics a signed-in person's feed listens on: the workspace's, and
+ * their own, where their private channels are announced. Callers that await
+ * (session, setAuth) must pass a workspace id captured before those awaits.
+ * Reports SUBSCRIBED
+ * only while both are joined and a fallback status as soon as either drops, so
+ * a private channel is never left on the slow reconcile behind a healthy
+ * workspace topic.
+ */
+export function attachFeedChannels(
+  c: FeedPushChannelClient,
+  workspaceId: string,
+  userId: string,
+  onEvent: () => void,
+  onStatus: (status: string) => void,
+): FeedPushSubscription {
+  const topics = [workspaceSignalsTopic(workspaceId), memberSignalsTopic(workspaceId, userId)];
+  const joined = topics.map(() => false);
+  const parts = topics.map((topic, index) =>
+    attachSignalsChannel(c, topic, onEvent, (status) => {
+      if (status === FEED_PUSH_SUBSCRIBED_STATUS) {
+        joined[index] = true;
+        if (joined.every(Boolean)) onStatus(status);
+      } else if (isFeedPushFallbackStatus(status)) {
+        joined[index] = false;
+        onStatus(status);
+      }
+    }),
+  );
+  return {
+    async unsubscribe(): Promise<void> {
+      for (const part of parts) await part.unsubscribe();
     },
   };
 }
