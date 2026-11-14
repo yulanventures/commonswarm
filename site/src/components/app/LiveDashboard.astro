@@ -11381,7 +11381,6 @@ import "../../styles/kylon-command-palette.css";
         composerPlaceLabel(),
       );
       marker.dataset.audience = audience.kind;
-      marker.title = audience.sentence;
       const name = one<HTMLElement>("[data-composer-audience-name]");
       if (name) name.textContent = audience.name;
       const sentence = one<HTMLElement>("[data-composer-audience-sentence]");
