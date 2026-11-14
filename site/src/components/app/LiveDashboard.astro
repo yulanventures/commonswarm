@@ -966,6 +966,7 @@ import "../../styles/kylon-command-palette.css";
         data-channel-new-purpose
         rows="3"
       ></textarea>
+      <div data-channel-new-audience></div>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
         <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel>Cancel</button>
@@ -1380,6 +1381,8 @@ import "../../styles/kylon-command-palette.css";
   import type { AgentPresenceRow } from "../../../../src/cloud/agent-presence";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
+  import { CHANNEL_AUDIENCE_NOT_CONFIRMED, CHANNEL_AUDIENCE_UNREADABLE, createdAsRequested, renderChannelAudience,
+    type AudienceCandidate, type ChannelAudienceControl } from "../../lib/channel-audience";
   import { THREAD_LAST_REPLY_PREFIX, threadLastReplyAt, threadLastReplyTime, threadRepliers } from "../../lib/thread-summary";
   import {
     workspaceStateAfterClose,
@@ -3332,7 +3335,15 @@ import "../../styles/kylon-command-palette.css";
       return agent;
     };
 
-    const activeWorkspaceLeadName = (): string | null => activeWorkspaceLeadAgent()?.name ?? null;
+    /* The lead is the workspace's, and a private channel is read only by its members: the lead may not be one.
+       So nothing that speaks for the open channel names the lead in a private channel (the placeholder, the
+       details card, the header chip). The rail, the agent's own page and the palette still show who leads the
+       workspace. The guards are for the fixtures that run this without the route or the channel state. */
+    const activeWorkspaceLeadName = (): string | null => {
+      const inPrivateChannel = typeof homeRoute !== "undefined" && homeRoute.view === "chat" &&
+        typeof activeChannel === "function" && activeChannel()?.visibility === "private";
+      return inPrivateChannel ? null : activeWorkspaceLeadAgent()?.name ?? null;
+    };
 
     const viewerMaySetWorkspaceLead = (): boolean => {
       if (sampleMode || !session) return false;
@@ -5379,6 +5390,8 @@ import "../../styles/kylon-command-palette.css";
       copy?.querySelector("[data-channel-lead-pill]")?.remove();
       // The lead belongs to the channels. A direct message is between two parties and shows only who it is with.
       if (!copy || homeRoute.view !== "chat" || sampleMode || (typeof activeDm !== "undefined" && activeDm)) return;
+      // Nor in a private channel: no lead chip, and no "Set lead" either, which would set the workspace's lead.
+      if (activeChannel()?.visibility === "private") return;
       const lead = activeWorkspaceLeadAgent();
       if (!lead && !viewerMaySetWorkspaceLead()) return;
       const pill = document.createElement("button");
@@ -11622,6 +11635,8 @@ import "../../styles/kylon-command-palette.css";
     let managedChannelId: string | null = null;
     let channelDialogOriginal: { slug: string; purpose: string | null } | null = null;
     let channelDialogPending = false;
+    /** The New channel dialog's who-can-see-it control; drawn each time the create form opens. */
+    let channelAudience: ChannelAudienceControl | null = null;
     let channelDialogEpoch = 0;
     let channelArchiveBackToSettings = false;
     type ChannelFocusReturn = { selector: string | null; element: HTMLElement | null; drawer: boolean; directory?: boolean };
@@ -11705,6 +11720,10 @@ import "../../styles/kylon-command-palette.css";
       for (const [selector, shown] of [["[data-channel-create-form]", mode === "create"], ["[data-channel-rename-form]", mode === "settings"], ["[data-channel-archive-form]", mode === "archive"]] as const) {
         const form = one<HTMLFormElement>(selector); if (form) form.hidden = !shown;
       }
+      if (initialize && mode === "create") {
+        const slot = one<HTMLElement>("[data-channel-new-audience]");
+        channelAudience = slot ? renderChannelAudience(slot, channelAudienceCandidates()) : null;
+      }
       for (const input of all<HTMLInputElement>("[data-channel-new-slug], [data-channel-rename-slug]")) input.maxLength = channelSlugInputMax();
       for (const input of all<HTMLTextAreaElement>("[data-channel-new-purpose], [data-channel-edit-description]")) input.maxLength = channelPurposeInputMax();
       const name = one<HTMLInputElement>("[data-channel-rename-slug]");
@@ -11713,6 +11732,7 @@ import "../../styles/kylon-command-palette.css";
       if (description) { description.readOnly = !manageable; if (initialize && mode === "settings") description.value = channel?.purpose ?? ""; }
       if (initialize && mode === "settings") channelDialogOriginal = channel ? { slug: channel.slug, purpose: channel.purpose } : null;
       for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = channelDialogPending;
+      channelAudience?.hold(channelDialogPending);
       const state = one<HTMLElement>("[data-channel-settings-status]"); if (state) state.hidden = !channel?.archivedAt;
       const save = one<HTMLButtonElement>("[data-channel-rename-submit]"); if (save) save.hidden = !manageable;
       const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
@@ -14274,6 +14294,8 @@ import "../../styles/kylon-command-palette.css";
       channelDialogPending = pending;
       for (const button of all<HTMLButtonElement>("[data-channel-dialog] button[type=submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) holdChannelSubmit(button, pending);
       for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = pending;
+      // The line above switches every input in the dialog; the audience control puts its own limits back.
+      channelAudience?.hold(pending);
       if (!pending) syncChannelSettingsSubmit();
       keepChannelDialogFocus();
     };
@@ -14295,6 +14317,18 @@ import "../../styles/kylon-command-palette.css";
       else if (back && !back.directory) { if (!restoreChannelFocus(back)) focusConversationHeading(); }
       else focusConversationHeading();
     };
+    /* Who can be added to a new private channel: every other person in the workspace, and every live agent.
+       An agent is its own row, named with its owner, because it never comes along with them. */
+    const channelAudienceCandidates = (): AudienceCandidate[] => {
+      const viewer = session?.user.id ?? "";
+      const nameOf = new Map(members.map(member => [member.userId, member.name] as const));
+      return [
+        ...members.filter(member => member.userId !== viewer)
+          .map(member => ({ kind: "user" as const, id: member.userId, name: member.name })),
+        ...agents.filter(agent => !agent.revokedAt).map(agent => ({ kind: "agent" as const, id: agent.principalId, name: agent.name,
+          ...(agent.ownerUserId && nameOf.get(agent.ownerUserId) ? { detail: `${nameOf.get(agent.ownerUserId)}'s agent` } : {}) })),
+      ].sort((left, right) => left.name.localeCompare(right.name));
+    };
     const submitChannelCreate = async (): Promise<void> => {
       const input = one<HTMLInputElement>("[data-channel-new-slug]");
       const description = one<HTMLTextAreaElement>("[data-channel-new-purpose]");
@@ -14302,13 +14336,19 @@ import "../../styles/kylon-command-palette.css";
       const slug = channelSubmitSlug(input.value), problem = channelSubmitProblem(slug);
       setChannelDialogError("");
       if (problem !== null) { setChannelDialogError(problem); input.focus(); return; }
+      /* WHO CAN SEE IT, read once, here. A choice that cannot be read stops the create: it is never taken as
+         open. A refusal below leaves the choice and the ticked people exactly as they were. */
+      const audience = channelAudience?.audience() ?? null;
+      if (audience === null) { setChannelDialogError(CHANNEL_AUDIENCE_UNREADABLE); return; }
       const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch;
       holdChannelDialog(true);
       try {
-        const created = await createChannel(session, uuid(), workspaceId, slug, description?.value.trim() || null);
+        const created = await createChannel(session, uuid(), workspaceId, slug, description?.value.trim() || null, audience);
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         applyChannelResult(created, workspaceId, version);
         if (!channelDialogOwns(epoch)) return;
+        // Asked for private and not told it is private: say so and stay, so nobody posts in it on trust.
+        if (!createdAsRequested(audience, created)) { holdChannelDialog(false); setChannelDialogError(CHANNEL_AUDIENCE_NOT_CONFIRMED); return; }
         input.value = ""; if (description) description.value = "";
         finishChannelCommand(null);
         if (homeRoute.view !== "chat") await navigateHome({ view: "chat", workspaceId, channelId: created.channelId }, "push");

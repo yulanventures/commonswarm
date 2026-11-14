@@ -63,6 +63,7 @@ import {
   type WorkspaceChannel,
 } from "./channels.js";
 import { parseChannelVisibility } from "./private-channels.js";
+import type { ChannelCreateAudience } from "./channel-audience.js";
 import {
   attachFeedChannels,
   type FeedPushSubscription,
@@ -3201,6 +3202,9 @@ export async function createChannel(
   workspaceId: string,
   slug: string,
   purpose: string | null = null,
+  /* Who can see it. `{}` is an open channel: the edge refuses `members` there, so neither key is sent.
+     Built by `channelCreateAudience`, which returns null for a choice it cannot read; the caller stops then. */
+  audience: ChannelCreateAudience = {},
 ): Promise<WorkspaceChannel> {
   return channelCommand(
     session,
@@ -3209,6 +3213,7 @@ export async function createChannel(
     {
       kind: "channel_create",
       slug,
+      ...audience,
       /* `purpose` is optional and its own key group on the edge: an empty box
        * sends no key at all rather than a null the validator would have to
        * decide about. */

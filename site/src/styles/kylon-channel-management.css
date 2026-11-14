@@ -209,3 +209,47 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-title-lock, .cm-directory-loc
   background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.25' y='7' width='9.5' height='6.5' rx='1.5'/%3E%3Cpath d='M5.5 7V5a2.5 2.5 0 0 1 5 0v2'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
+
+/* New channel: who can see it. Two choices, and for a private channel a list to choose from. The list has its
+   own height and scrolls inside itself, so Create stays in reach on a short screen. */
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience { display: grid; gap: 2px; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__title {
+  margin: 0 0 2px; font: 600 13px/20px var(--k-shell-font); color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__choice, .cm-audience__row) {
+  display: flex; align-items: center; gap: 10px; min-inline-size: 0; min-block-size: 36px;
+  margin-inline: -8px; padding-inline: 8px; border-radius: 6px;
+  font: 400 14px/21px var(--k-shell-font); color: var(--k-shell-ink); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__choice, .cm-audience__row):hover { background: var(--k-shell-subtle); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__choice, .cm-audience__row):has(input:focus-visible) {
+  outline: 2px solid var(--k-shell-focus); outline-offset: -2px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__radio, .cm-audience__box) {
+  flex: none; inline-size: 18px; block-size: 18px; min-inline-size: 0; min-block-size: 0; margin: 0;
+  accent-color: var(--k-shell-ink); outline: none;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__picker {
+  display: grid; gap: 6px; min-inline-size: 0; margin-block-start: 6px; padding-inline-start: 28px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__picker[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__list {
+  max-block-size: min(240px, 32dvh); overflow-y: auto; overscroll-behavior: contain;
+  padding: 2px 8px; border: 1px solid var(--k-shell-line); border-radius: 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__heading {
+  margin: 6px 0 0; font: 600 12px/18px var(--k-shell-font); color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__name {
+  min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-audience__detail {
+  flex: none; margin-inline-start: auto; font-size: 12px; color: var(--k-shell-secondary); white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__count, .cm-audience__empty) {
+  margin: 0; min-block-size: 18px; font: 400 12px/18px var(--k-shell-font); color: var(--k-shell-secondary);
+}
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__choice, .cm-audience__row) { min-block-size: 44px; font-size: 16px; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(.cm-audience__radio, .cm-audience__box) { inline-size: 20px; block-size: 20px; }
+}
