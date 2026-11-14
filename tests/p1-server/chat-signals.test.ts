@@ -3717,10 +3717,19 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
     }>;
   };
   const humanRosterAgentX = async (userId: string) => {
-    const [row] = await viewRowAs(userId, async (tx) =>
-      await tx<{ r: RosterShape }[]>`SELECT swarm_read.workspace_roster(${ws}::uuid) AS r`
-    );
-    return row!.r.agents.find((a) => a.principal_id === agentX.principal)!;
+    return await sql.begin(async (tx) => {
+      await tx.unsafe("SET LOCAL ROLE swarm_read");
+      await tx`
+        SELECT set_config(
+          'request.jwt.claims',
+          ${JSON.stringify({ sub: userId, role: "authenticated" })},
+          true
+        )
+      `;
+      const [row] = await tx<{ r: RosterShape }[]>`SELECT swarm_read.workspace_roster(${ws}::uuid) AS r`;
+      await tx.unsafe("RESET ROLE");
+      return row!.r.agents.find((a) => a.principal_id === agentX.principal)!;
+    });
   };
   const aRoster = await humanRosterAgentX(personA.id);
   assert.ok(aRoster.open_work !== null && aRoster.open_work.since.length > 0, "admitted #lock member sees open_work in workspace_roster");
@@ -4253,15 +4262,20 @@ Deno.exit(0);
     );
     assert.equal(ownerBSignals.length, 0, "non-member agent owner must read ZERO #lock asks or replies in swarm_read.signals");
 
-    const ownerBDecisions = await viewRowAs(ownerB.id, async (tx) =>
-      await tx`SELECT id FROM swarm_read.decision_queue WHERE workspace_id = ${ws}::uuid`
+    const [ownerBDecisions] = await viewRowAs(ownerB.id, async (tx) =>
+      await tx<{ q: { total: number; asks: unknown[] } }[]>`
+        SELECT swarm_read.decision_queue(${ws}::uuid) AS q
+      `
     );
-    assert.equal(ownerBDecisions.length, 0, "non-member agent owner must read ZERO rows in decision_queue");
+    assert.equal(ownerBDecisions!.q.total, 0, "non-member agent owner must read ZERO rows in decision_queue");
+    assert.deepEqual(ownerBDecisions!.q.asks, []);
 
-    const ownerBStatuses = await viewRowAs(ownerB.id, async (tx) =>
-      await tx`SELECT signal_id FROM swarm_read.message_status WHERE signal_id = ANY(${allProtectedSignalIds}::uuid[])`
+    const [ownerBStatuses] = await viewRowAs(ownerB.id, async (tx) =>
+      await tx<{ ms: { statuses: unknown[] } }[]>`
+        SELECT swarm_read.message_status(${ws}::uuid, ${allProtectedSignalIds}::uuid[]) AS ms
+      `
     );
-    assert.equal(ownerBStatuses.length, 0, "non-member agent owner must read ZERO rows in message_status");
+    assert.deepEqual(ownerBStatuses!.ms.statuses, [], "non-member agent owner must read ZERO rows in message_status");
 
     // Verify memberC (admitted to #lock, but NOT a directed recipient!) CANNOT read the 1:1 directed asks or replies!
     const memberCDirected = await viewRowAs(memberC.id, async (tx) =>
@@ -4273,11 +4287,17 @@ Deno.exit(0);
       "inheriting private channel_id on in_reply_to must NEVER widen directed 1:1 replies to other #lock members",
     );
 
-    // Positive control: personA (authorized recipient/sender in #lock) reads all 6 directed signals!
+    // Positive control: personA (authorized recipient/sender in #lock) reads all 6 directed signals and their message_status!
     const personADirected = await viewRowAs(personA.id, async (tx) =>
       await tx`SELECT id FROM swarm_read.signals WHERE id = ANY(${allProtectedSignalIds}::uuid[])`
     );
     assert.equal(personADirected.length, 6, "authorized #lock participant reads all 6 directed asks/replies");
+    const [personAStatuses] = await viewRowAs(personA.id, async (tx) =>
+      await tx<{ ms: { statuses: Array<{ signal_id: string }> } }[]>`
+        SELECT swarm_read.message_status(${ws}::uuid, ${allProtectedSignalIds}::uuid[]) AS ms
+      `
+    );
+    assert.equal(personAStatuses!.ms.statuses.length, 2, "authorized #lock sender reads message_status for own replies to agents");
 
     // Remove hostedPrincipalX from #lock while step2.xBatch (holding ONLY #lock signals) is still open,
     // post an open-channel ask, and verify open_hosted_mcp_check_batch automatically advances past the
