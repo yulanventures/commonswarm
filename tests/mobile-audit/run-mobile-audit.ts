@@ -46,7 +46,7 @@ export const THEMES = ["light", "dark"] as const;
  * (mobile and desktop), each once with normal polling and once more with delivery receipts frozen. The frozen pass
  * is a control for comparison, never acceptance; every entry it writes carries freeze: true.
  */
-const DIAGNOSTIC = null as { screens: string[]; sizes: string[] } | null;
+const DIAGNOSTIC = { screens: ["app.chat.general"], sizes: ["390x844"] } as { screens: string[]; sizes: string[] } | null;
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
@@ -601,6 +601,24 @@ async function main(): Promise<void> {
         }
         // What the capture is for must actually be in the picture: scroll the first part that is not into view once, settle, and
         // check again.
+        if (screen.id === "app.chat.general") {
+          const dump = await page.evaluate(() => {
+            const bar = document.querySelector(".cs-org-phone-bar");
+            const out: unknown[] = [];
+            const visit = (el: Element, depth: number) => {
+              const r = el.getBoundingClientRect();
+              const cs = getComputedStyle(el);
+              out.push({ d: depth, tag: el.tagName.toLowerCase(), cls: String(el.getAttribute("class") ?? "").slice(0, 90),
+                data: el.getAttributeNames().filter(n => n.startsWith("data-") || n === "hidden" || n === "aria-label").map(n => `${n}=${el.getAttribute(n)}`).join(" ").slice(0, 160),
+                x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), display: cs.display, bg: cs.backgroundColor,
+                text: (el.childElementCount === 0 ? el.textContent ?? "" : "").slice(0, 40) });
+              if (depth < 4) for (const child of el.children) visit(child, depth + 1);
+            };
+            if (bar) visit(bar, 0);
+            return out;
+          });
+          console.log(JSON.stringify({ phase: "diag-phone-bar", dump }));
+        }
         if (screen.frame?.length) {
           const parts = screen.frame.map(selector => fill(selector, seed.ids));
           const outside = () => page.evaluate((list: string[]) => list.filter(selector => {
