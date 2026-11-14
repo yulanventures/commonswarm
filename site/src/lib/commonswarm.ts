@@ -62,6 +62,7 @@ import {
   type ChannelInvolvement,
   type WorkspaceChannel,
 } from "./channels.js";
+import { parseChannelVisibility } from "./private-channels.js";
 import {
   attachFeedChannels,
   type FeedPushSubscription,
@@ -3118,7 +3119,7 @@ export async function workspaceChannels(
         .schema("swarm_read")
         .from("channels")
         .select(
-          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank",
+          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank,visibility",
         )
         .eq("workspace_id", workspaceId)
         .order("slug", { ascending: true })
@@ -3143,6 +3144,7 @@ function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
       ? null
       : String(row.archived_at),
     sortRank: Number.isInteger(row.sort_rank) && (row.sort_rank as number) > 0 ? row.sort_rank as number : 0,
+    visibility: parseChannelVisibility(row.visibility),
   };
 }
 

@@ -1378,6 +1378,7 @@ import "../../styles/kylon-command-palette.css";
   import type { AgentPresenceRow } from "../../../../src/cloud/agent-presence";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
+  import { attachmentsAllowed, attachmentsRefusal, placementVisibility } from "../../lib/private-channels";
   import {
     workspaceStateAfterClose,
     type CloseableWorkspace,
@@ -4246,8 +4247,28 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    /* Where the message being written will be filed: the open channel, or the thread root's channel for a reply.
+       Files upload when Send is pressed, before the message is posted, and workspace files are readable by every
+       member, so a place that is not known to be open takes no files. */
+    const composerFilesRefusal = (): string => attachmentsRefusal(placementVisibility(channels,
+      threadReplyRoot === null ? activeChannel()?.channelId ?? null : threadReplyRoot.channelId));
+    /** The paperclip follows the place. Sending owns it while a send is in flight. */
+    const syncComposerAttach = (): void => {
+      const attach = one<HTMLButtonElement>("[data-composer-attach]");
+      const picker = one<HTMLInputElement>("[data-composer-file-input]");
+      const refusal = sampleMode ? "" : composerFilesRefusal();
+      if (attach) {
+        attach.disabled = composerSending || refusal !== "";
+        if (refusal) { attach.dataset.attachRefused = ""; attach.title = refusal; }
+        else if ("attachRefused" in attach.dataset) { delete attach.dataset.attachRefused; attach.title = attach.getAttribute("aria-label") ?? ""; }
+      }
+      if (picker) picker.disabled = composerSending || refusal !== "";
+    };
     const stageComposerFiles = (files: readonly File[]): void => {
       if (composerSending || files.length === 0) return;
+      // The picker is off here, but a drop or a paste still arrives.
+      const refusal = sampleMode ? "" : composerFilesRefusal();
+      if (refusal) { setComposerStatus(refusal, "error"); return; }
       try {
         const prepared = prepareBrowserAttachments(files, stagedAttachments.length);
         stagedAttachments.push(...prepared.map((intent) => ({
@@ -4329,10 +4350,7 @@ import "../../styles/kylon-command-palette.css";
         if (sending) send.setAttribute("aria-busy", "true");
         else send.removeAttribute("aria-busy");
       }
-      const attach = one<HTMLButtonElement>("[data-composer-attach]");
-      const picker = one<HTMLInputElement>("[data-composer-file-input]");
-      if (attach) attach.disabled = sending;
-      if (picker) picker.disabled = sending;
+      syncComposerAttach();
       renderStagedAttachments();
       syncComposerControls();
     };
@@ -11215,6 +11233,8 @@ import "../../styles/kylon-command-palette.css";
       for (const row of all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")) {
         markThreadReplyRoot(row);
       }
+      // A reply under another channel's root, or leaving one, changes where files would go.
+      if (typeof syncComposerAttach === "function") syncComposerAttach();
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       const bar = one<HTMLElement>("[data-composer-reply]");
       const targetText = one<HTMLElement>("[data-composer-reply-target-text]");
@@ -11351,6 +11371,8 @@ import "../../styles/kylon-command-palette.css";
     };
 
     const renderChannelHead = (): void => {
+      // The channel list or the open channel changed: the paperclip follows the place.
+      if (typeof syncComposerAttach === "function") syncComposerAttach();
       /* Files and Brain own the head while they are on screen. Writing the channel's name
          over one of them was reachable from a rename, which re-renders the head without
          going through the view switch. */
@@ -13501,6 +13523,13 @@ import "../../styles/kylon-command-palette.css";
         ? activeChannel()?.channelId ?? null
         : replyRoot.channelId;
       const freshPlacementThreadRootId = replyRoot?.id ?? null;
+      /* NOTHING IS UPLOADED FOR A SEND THE SERVER WILL REFUSE. Files staged somewhere open stay staged when the
+         place changes (another channel, a thread under a private root), so the check is here, where the send
+         starts, and it reads the same placement the message will carry. The draft and its files are untouched. */
+      if (!sampleMode && stagedAttachments.length > 0) {
+        const refusal = attachmentsRefusal(placementVisibility(channels, freshPlacementChannelId));
+        if (refusal) { setComposerStatus(`${refusal} Remove the files to send this message.`, "error"); return; }
+      }
       /* AND WHETHER IT ALSO GOES TO THE CHANNEL. Read from the control only where the control
          is offered: `threadReplyMayBroadcast` is false for an unfiled thread, and a stale
          checked box from an earlier thread cannot leak through, because `syncComposerPlacement`

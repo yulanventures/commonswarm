@@ -58,6 +58,8 @@ export interface WorkspaceChannel {
   archivedAt: string | null;
   /** The workspace's shared order, set by an owner or admin. 0 or absent: never placed. */
   sortRank?: number;
+  /** `"private"`: read only by its members. `null` or absent: not known (see private-channels.ts). */
+  visibility?: "open" | "private" | null;
 }
 
 /** What the feed is filtered to. `null` is the unfiltered view. */
