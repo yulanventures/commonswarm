@@ -136,6 +136,8 @@ test("a muted channel is marked, says so, and never shows unread even if a row c
   assert.equal(byId("a").dataset.unread, undefined);
   assert.equal(byId("a").attrs["aria-label"], "#design, muted");
   assert.equal(find(byId("a"), (node) => node.className === "hm-rail__unread").length, 0);
+  assert.equal(find(byId("a"), (node) => node.className === "hm-rail__muted").length, 1, "the row carries a struck bell, not colour alone");
+  assert.equal(find(byId("b"), (node) => node.className === "hm-rail__muted").length, 0);
   assert.equal(byId("b").dataset.muted, undefined);
   assert.equal(byId("b").attrs["aria-label"], "#ops, unread");
 });

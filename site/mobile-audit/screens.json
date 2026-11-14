@@ -71,7 +71,7 @@
     "path": "/app?w={workspace}&c={channel.group}",
     "setup": [
       {
-        "media": "(width > 52rem)",
+        "media": "(width >= 64rem)",
         "waitFor": ".hm-ws-header [data-channel-star][aria-pressed=\"true\"]"
       },
       {
@@ -1183,12 +1183,20 @@
     "path": "/app?w={workspace}&c={channel.long}",
     "setup": [
       {
-        "media": "(width > 52rem)",
+        "media": "(width >= 64rem)",
         "waitFor": ".hm-ws-header [data-channel-notify=\"muted\"]"
       },
       {
-        "media": "(width > 52rem)",
+        "media": "(width >= 64rem)",
         "click": ".hm-ws-header [data-channel-notify=\"muted\"]"
+      },
+      {
+        "media": "(52rem < width < 64rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(52rem < width < 64rem)",
+        "waitFor": ".hm-ws-header [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"]"
       },
       {
         "media": "(width <= 52rem)",
@@ -1203,7 +1211,7 @@
         "waitFor": ".cs-kylon-workspace-menu [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"]"
       }
     ],
-    "ready": ":is(.cs-context-menu [role=\"menuitemradio\"][aria-checked=\"true\"], .cs-kylon-workspace-menu [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"])",
+    "ready": ":is(.cs-context-menu [role=\"menuitemradio\"][aria-checked=\"true\"], :is(.cs-kylon-workspace-menu, .hm-ws-header) [data-menu-channel-notify=\"muted\"][aria-checked=\"true\"])",
     "states": [
       "dense"
     ],

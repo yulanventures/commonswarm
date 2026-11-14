@@ -267,6 +267,7 @@ function channelLink(doc: Document, row: RailChannelRowVM, archived: boolean, ca
   const name = node(doc, "span", "hm-rail__name", row.slug);
   link.append(icon(doc, archived ? "archive" : "workspace"), name);
   if (unread === true) { const dot = node(doc, "span", "hm-rail__unread"); dot.setAttribute("aria-hidden", "true"); link.append(dot); }
+  if (muted) { const off = node(doc, "span", "hm-rail__muted"); off.setAttribute("aria-hidden", "true"); link.append(off); }
   link.addEventListener("click", (event) => {
     if (!callbacks.selectChannel || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();

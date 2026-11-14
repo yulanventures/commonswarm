@@ -131,11 +131,21 @@ live-dashboard.dashboard[data-kylon-shell] .hm-channel-notify[data-channel-notif
   live-dashboard.dashboard[data-kylon-shell] .hm-channel-star[aria-pressed="true"] { color: Highlight; }
 }
 
+/* Below 64rem the header has no room for two more targets beside a long channel name: the ⋯ menu,
+   which offers both at every size, is the way in there. */
+@media (width < 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-ws-header :is(.hm-channel-star, .hm-channel-notify) { display: none; }
+}
+
 /* The rail: Starred sits above Channels with the same rows. A muted channel's name is quiet, and it
    never carries the unread weight or dot. */
 live-dashboard.dashboard[data-kylon-shell] .hm-rail__starred { margin-block-end: 10px; }
-live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel[data-muted]:not([aria-current="page"]) { color: var(--k-shell-muted); }
-live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel[data-muted] .hm-icon { opacity: 0.6; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel[data-muted]:not([aria-current="page"]) { color: var(--k-shell-muted); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-rail .hm-rail__channel[data-muted]:not([aria-current="page"]) .hm-icon { opacity: 0.6; }
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__muted {
+  flex: none; inline-size: 14px; block-size: 14px; background: currentColor; opacity: 0.7;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.5 16.5v-5.8a5.5 5.5 0 0 1 11 0v5.8l1.5 1.7H5z'/%3E%3Cpath d='M10 20.5a2.1 2.1 0 0 0 4 0'/%3E%3Cpath d='M4.5 4.5l15 15'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 
 /* A choice among several in a small menu: the one in force carries a check. */
 live-dashboard.dashboard[data-kylon-shell] .cs-context-menu__item[role="menuitemradio"] { gap: 8px; }

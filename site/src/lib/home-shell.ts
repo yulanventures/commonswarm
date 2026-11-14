@@ -191,7 +191,7 @@ export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];
   mayCreateChannel: boolean;
   channelSettings?: boolean;
-  /** The viewer's star and notification level for the place being read. The phone menu offers both; a wider header has buttons. */
+  /** The viewer's star and notification level for the place being read. The menu always offers both; a header with room also has buttons. */
   place?: { slug: string; starred: boolean; involvement: ChannelInvolvement } | null;
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
   /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
@@ -483,7 +483,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     };
     const channelActions = [plain("All channels", { kind: "all-channels" }, "menuAllChannels")];
     if (state.channelSettings) channelActions.unshift(plain("Channel settings", { kind: "channel-settings" }, "menuChannelSettings"));
-    const place = options.account ? state.place ?? null : null;
+    const place = state.place ?? null;
     if (place) {
       const star = plain(starChannelLabel(place.slug), { kind: "star", starred: !place.starred }, "menuChannelStar");
       star.setAttribute("role", "menuitemcheckbox"); star.setAttribute("aria-checked", String(place.starred));
