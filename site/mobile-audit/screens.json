@@ -552,6 +552,69 @@
     ]
   },
   {
+    "id": "app.composer.private-draft",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "press": "ControlOrMeta+k"
+      },
+      {
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
+      },
+      {
+        "type": "[data-command-palette-input]",
+        "text": "Atlas"
+      },
+      {
+        "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
+      },
+      {
+        "waitFor": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]"
+      },
+      {
+        "click": "[data-entity-panel-close]"
+      },
+      {
+        "waitFor": "[data-composer-input][aria-label^=\"Message Atlas\"]"
+      },
+      {
+        "type": "[data-composer-input]",
+        "text": "The offer is 240. Keep it between us for now."
+      },
+      {
+        "wait": 500
+      },
+      {
+        "press": "ControlOrMeta+k"
+      },
+      {
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
+      },
+      {
+        "type": "[data-command-palette-input]",
+        "text": "design-studio"
+      },
+      {
+        "click": "[data-command-palette-item=\"channel:design-studio\"]"
+      },
+      {
+        "waitFor": "form[data-composer][data-composer-audience=\"public\"] [data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])"
+      }
+    ],
+    "ready": "[data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "alone": true,
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent",
+      "seed_dm"
+    ]
+  },
+  {
     "id": "app.composer",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",
