@@ -356,3 +356,103 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { backgr
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea { padding-inline-end: 112px; font-size: 16px; }
 }
+
+/* THE AUDIENCE MARKER BESIDE SEND, in this sheet because it has to agree with the geometry set
+ * above: Send and Attach are 36px controls at 6px and 46px from the field's end on a pointer
+ * screen, and 44px controls at 4px and 56px at 64rem and below. The marker sits left of
+ * Attach, centred on the same line, and the text box stops short of it in every state
+ * (resting and focused share one selector pair, as the rules above do), so neither a long
+ * hint nor a long typed line runs under it. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+  inset-inline-end: 88px;
+  inset-block-end: 12px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+  padding-inline-end: calc(88px + 9.5rem + 8px);
+}
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+    inset-inline-end: 104px;
+    inset-block-end: 14px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+    padding-inline-end: calc(104px + 9.5rem + 8px);
+  }
+}
+@media (width <= 40rem) {
+  /* The marker is at most 6rem here; a named public place shows its hash alone. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+    padding-inline-end: calc(104px + 6rem + 6px);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed])) textarea {
+    padding-inline-end: calc(104px + 34px);
+  }
+}
+
+/* A DRAFT WRITTEN PRIVATELY, IN A PUBLIC COMPOSER: BOTH CHOICES STAY ON SCREEN. Send is held
+ * until the author takes one of them, so neither may be pushed out of the frame by the draft
+ * itself. Three things, in this sheet because they depend on its field geometry:
+ *
+ *  1. A height budget. While the warning shows, the text box stops growing early and a long
+ *     draft scrolls inside it. On a short screen (a phone on its side) it keeps two lines.
+ *  2. A fixed-height row. The sentence takes a line of its own and names the people in full;
+ *     the two choices sit side by side under it, the private one first, each on one line (a
+ *     long name is cut with an ellipsis in the button, not wrapped). On a narrow phone they
+ *     stack, private first.
+ *  3. A scroll path, as a last resort: the composer may take the whole conversation column
+ *     and scrolls inside itself, instead of being cut off by it. The budget in 1 and 2 is
+ *     what keeps both choices in view; this only keeps them reachable if it is ever beaten. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-to[data-to-warning]) textarea {
+  max-block-size: min(calc(var(--dashboard-viewport-height, 100dvh) * 0.22), 7.5rem);
+}
+/* The row is a two-column grid while it warns: the sentence across both, then the private
+ * choice (which gives way, with an ellipsis) and the public choice (which never shrinks) on
+ * one line. A flex row wrapped the second choice onto a line of its own as soon as the first
+ * was wide, which is what pushed it off a short screen. With no private choice to offer, the
+ * public one takes the first column. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] {
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto;
+  justify-content: start;
+  align-items: center;
+  gap: 6px 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning][hidden] {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] .dashboard__composer-to-chips {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] .dashboard__composer-to-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] button[data-composer-to-private],
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] button[data-composer-to-public] {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__channel-body:has(.dashboard__composer-to[data-to-warning]) {
+  grid-template-rows: minmax(0, 1fr) minmax(0, auto);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-to[data-to-warning]) {
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (height <= 30rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-to[data-to-warning]) textarea {
+    max-block-size: 52px;
+  }
+}
+@media (width <= 40rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-to-warning] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

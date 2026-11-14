@@ -213,42 +213,6 @@ export const threadReplyTargetText = (
     : `Replying to ${author} in ${threadReplyPlaceLabel(place)}.`;
 
 /**
- * The bar's second sentence: the reach, stated rather than implied.
- *
- * TRUE OF BOTH SURFACES. A thread reply is undirected, so `swarm.enqueue_signal_delivery`
- * writes no `swarm.signal_deliveries` row for it and nothing is woken — not an agent in the
- * hosted workspace, and not a local listener, which reads the same delivery rows. The
- * p1-server suite measures the general form of that claim ("a channel post wakes nobody").
- */
-export const THREAD_REPLY_REACH_TEXT =
-  "Everyone who can read the thread can read this reply. It notifies nobody.";
-
-/**
- * WHAT THE To: ROW SHOWS AS THE ADDRESS OF A REPLY.
- *
- * The row is not hidden and it does not go blank: an empty address row reads as a bug, and the
- * broadcast label is wrong here because it names the WORKSPACE while a reply's reach is the
- * thread. So the address is named, the way a broadcast is named, and the sentence under it says
- * what that means.
- *
- * It matters that this is a LABEL for an empty set and not a recipient. The row draws
- * `composerSendRecipients` in every state — a mutation proved that an early return for the
- * reply case made "the row draws what the send posts" true by accident, because two separate
- * rules both happened to produce nothing — so if that derivation ever stopped returning an
- * empty set, chips would appear here and the browser control would see them.
- */
-export const THREAD_REPLY_CHIP_LABEL = "This thread";
-
-/**
- * What the To: row says while a reply is being written.
- *
- * It says the reply has no recipients, which is the fact, and it is the same row in the same
- * place so the reader does not have to learn a second one.
- */
-export const THREAD_REPLY_TO_TEXT =
-  "A thread reply has no recipients. " + THREAD_REPLY_REACH_TEXT;
-
-/**
  * The ceiling the server clamps to, when there is one.
  *
  * §6 P4 of the reconciled design requires the composer to show it: the remaining window can

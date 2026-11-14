@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   MENTION_MAX_RECIPIENTS,
   addressFromBody,
+  mentionSpans,
   mentionTargets,
 } from "./mention-address.ts";
 
@@ -221,4 +222,37 @@ test("tags past the cap are named, never dropped in silence", () => {
   /* The body still shows every tag. The send refuses rather than posting a message whose text
    * names people it never reached. */
   assert.ok(address.overflow.every((name) => body.includes(`@${name}`)));
+});
+
+/* Where the tags are, for drawing them. The caller passes only the targets a message is known to mention. */
+const drawn = (text, targets) =>
+  mentionSpans(text, targets).map((span) => `${text.slice(span.start, span.end)}=${span.entity.kind}:${span.entity.id}`);
+const only = (...ids) => roster.filter((target) => ids.includes(target.entity.id));
+
+test("a span covers the @ and the whole name of a mentioned target, wherever it stands", () => {
+  assert.deepEqual(drawn("@Wren please ship it", only("a-wren")), ["@Wren=agent:a-wren"]);
+  assert.deepEqual(drawn("Ask @Dana Rivera, then (@Orbit).", only("p-dana", "a-orbit")),
+    ["@Dana Rivera=person:p-dana", "@Orbit=agent:a-orbit"]);
+  // Folded like the parser: case and accents do not matter, and the span keeps what was typed.
+  assert.deepEqual(drawn("thanks @wren", only("a-wren")), ["@wren=agent:a-wren"]);
+  // The same name twice is drawn twice; who is mentioned was decided elsewhere, once.
+  assert.deepEqual(drawn("@Wren and again @Wren", only("a-wren")), ["@Wren=agent:a-wren", "@Wren=agent:a-wren"]);
+});
+
+test("a name the message does not mention stays plain text, and so does a tag inside a word", () => {
+  // Orbit is in the workspace and in the text, and this message's stored mentions do not include it.
+  assert.deepEqual(drawn("@Orbit and @Wren", only("a-wren")), ["@Wren=agent:a-wren"]);
+  assert.deepEqual(drawn("mail wren@Wren.example or x@Wren", only("a-wren")), []);
+  assert.deepEqual(drawn("@Wrenley is not Wren", only("a-wren")), [], "a longer word is not the shorter name");
+  assert.deepEqual(drawn("no tags here", only("a-wren")), []);
+  assert.deepEqual(drawn("@Wren", []), []);
+});
+
+test("the longest mentioned name wins, and a shared name is drawn only by a label that tells them apart", () => {
+  assert.deepEqual(drawn("@Dana Rivera and @Dana", only("p-dana", "p-dan")),
+    ["@Dana Rivera=person:p-dana", "@Dana=person:p-dan"]);
+  const twins = mentionTargets([agent("11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Sam"), agent("22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "Sam")], []);
+  assert.deepEqual(drawn("@Sam hello", twins), [], "which Sam is not something the words say");
+  const first = twins.find((target) => target.entity.id.startsWith("1111"));
+  assert.deepEqual(drawn(`@${first.label} hello`, twins), [`@${first.label}=agent:${first.entity.id}`]);
 });
