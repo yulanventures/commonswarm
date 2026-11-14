@@ -5080,8 +5080,8 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
     ["claim_agent_inbox", "accepted"],
     ["claim_agent_inbox", "replayed"],
     ["ack_agent_delivery", "accepted"],
-    ["private_channel_manager_promoted", "accepted"],
-    ["private_channel_auto_archived", "accepted"],
+    ["private_channel_manager_promoted", "ok"],
+    ["private_channel_auto_archived", "ok"],
   ] as const) {
     assert.ok(
       serverPrivateRows.some((r) => r.command_kind === kind && r.outcome === outcome),
