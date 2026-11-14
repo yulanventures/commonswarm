@@ -307,7 +307,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .das
   accent-color: var(--k-shell-ink);
   outline: none;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy[aria-busy="true"] .dashboard__workspace-channel-policy-choice { cursor: progress; }
+live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy[aria-busy="true"] .dashboard__workspace-channel-policy-choice { cursor: progress; opacity: 0.6; }
 live-dashboard.dashboard[data-kylon-shell] [data-workspace-details-popover] .dashboard__workspace-channel-policy-status {
   min-block-size: 18px;
   font-size: 12px;
