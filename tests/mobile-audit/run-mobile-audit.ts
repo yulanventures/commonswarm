@@ -476,6 +476,39 @@ async function main(): Promise<void> {
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
        *  Returns whether reads settled. Shared by the main captures and the desktop hover pass. */
+      /**
+       * The Realtime topics a page asked to join and the server's answer to each, read off the socket's own
+       * frames. This is the only place a signed-in browser's joins are seen end to end: `ok` means the join
+       * was admitted. Topics are reported by kind, with every id replaced.
+       */
+      const watchRealtimeJoins = (page: any): (() => Record<string, string>) => {
+        const asked = new Map<string, string>();
+        const answers: Record<string, string> = {};
+        const kind = (topic: string): string => topic.replace(/^realtime:/, "").replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, "<id>");
+        const parts = (payload: unknown): { ref: string; topic: string; event: string; body: any } | null => {
+          try {
+            const frame = JSON.parse(String(payload));
+            const [ref, topic, event, body] = Array.isArray(frame) ? [frame[1], frame[2], frame[3], frame[4]]
+              : [frame?.ref, frame?.topic, frame?.event, frame?.payload];
+            return typeof topic === "string" && typeof event === "string" ? { ref: String(ref), topic, event, body } : null;
+          } catch { return null; }
+        };
+        page.on("websocket", (socket: any) => {
+          if (!String(socket.url()).includes("/realtime/")) return;
+          socket.on("framesent", (frame: { payload: unknown }) => {
+            const sent = parts(frame.payload);
+            if (sent?.event !== "phx_join") return;
+            asked.set(sent.ref, sent.topic);
+            answers[kind(sent.topic)] ??= "asked";
+          });
+          socket.on("framereceived", (frame: { payload: unknown }) => {
+            const got = parts(frame.payload);
+            if (got?.event === "phx_reply" && asked.get(got.ref) === got.topic) answers[kind(got.topic)] = String(got.body?.status ?? "unknown");
+          });
+        });
+        return () => ({ ...answers });
+      };
+
       const openScreen = async (page: any, screen: Screen): Promise<boolean> => {
         if (screen.newBuild) {
           const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
@@ -660,12 +693,14 @@ async function main(): Promise<void> {
           const unmet = (screen.requiresSeed ?? []).filter(step => !seed.steps.includes(step));
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
           const page = await (screen.noJs ? noScript : screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
+          const realtimeJoins = watchRealtimeJoins(page);
           try {
             entry.settledBeforeChecks = await openScreen(page, screen);
             // The page's own scripts are off, not the audit's: give CHECKS and the witness their __name shim (a string, so
             // tsx cannot wrap it in __name itself).
             if (screen.noJs) await page.evaluate("globalThis.__name = globalThis.__name || ((f) => f)");
             Object.assign(entry, await page.evaluate(CHECKS));
+            entry.realtime = realtimeJoins();
             const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             entry.screenshot = shot;
@@ -763,7 +798,14 @@ async function main(): Promise<void> {
       }
     } finally { await browser.close(); }
   } finally {
-    const summary = { screens: new Set(report.map(r => r.id)).size, items: report.length,
+    /* Per topic kind, how many captures saw each answer to their join: {"cswarm-member:<id>:<id>": {"ok": 40}}. */
+    const realtimeJoins: Record<string, Record<string, number>> = {};
+    for (const row of report) {
+      for (const [topic, answer] of Object.entries((row.realtime as Record<string, string> | undefined) ?? {})) {
+        (realtimeJoins[topic] ??= {})[answer] = (realtimeJoins[topic]![answer] ?? 0) + 1;
+      }
+    }
+    const summary = { screens: new Set(report.map(r => r.id)).size, items: report.length, realtimeJoins,
       withOverflow: report.filter(r => ((r.overflow as { offenders?: unknown[] } | undefined)?.offenders?.length ?? 0) > 0).length,
       withSmallTargets: report.filter(r => ((r.tapTargets as unknown[] | undefined)?.length ?? 0) > 0).length,
       withObscured: report.filter(r => ((r.obscured as unknown[] | undefined)?.length ?? 0) > 0).length,
