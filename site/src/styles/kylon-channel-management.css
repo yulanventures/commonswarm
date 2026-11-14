@@ -143,6 +143,16 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspac
   max-block-size: calc(var(--dashboard-viewport-height, 100dvh) - 104px);
   overflow-y: auto; overscroll-behavior: contain;
 }
+/* Its rows are as wide as the menu, whatever the longest label. The lists are grids, and a grid's
+   automatic column grows to its longest row: measured at 360px, every row was 539px wide inside a
+   311px menu, so each row's end was cut off. A long label wraps instead. */
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) :is(.hm-menu__list, .hm-menu__group) {
+  grid-template-columns: minmax(0, 1fr);
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__list :is(.hm-menu__entry, .hm-menu__item) {
+  min-inline-size: 0; max-inline-size: 100%;
+}
+live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspace-menu) .hm-menu__item { overflow-wrap: anywhere; }
 /* In the phone navigation drawer the rail was as wide as its longest name, so a row's end (its ⋯, an
    unread dot, a muted bell) sat off-screen until the drawer was panned sideways. The rail now takes
    the drawer's width and a long name gives way with an ellipsis, as it does on a wide screen. */
@@ -155,6 +165,8 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspac
   /* The docked ⋯ menu is as wide as the drawer's own column, never the fixed 20rem that ran past a 360px screen's drawer. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu .hm-menu__list {
     inset-inline: 0; min-inline-size: 0; max-inline-size: none;
+    /* In the drawer the menu ends above the account row at the drawer's foot, not under it. */
+    max-block-size: max(180px, calc(var(--dashboard-viewport-height, 100dvh) - 240px));
   }
 }
 
