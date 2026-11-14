@@ -11706,7 +11706,8 @@ import "../../styles/kylon-command-palette.css";
      * stored, and a refusal is announced. One save at a time.
      */
     let railOrderSaving = false;
-    const applyRailOrder = async (list: RailOrderList, id: string, change: (ids: readonly string[]) => string[] | null): Promise<void> => {
+    const applyRailOrder = async (list: RailOrderList, id: string, change: (ids: readonly string[]) => string[] | null,
+      fromRowMenu = false): Promise<void> => {
       const workspaceId = activeWorkspaceId;
       if (!session || sampleMode || !workspaceId || railOrderSaving || channelPreferenceSaving) return;
       if (list === "starred" && channelUnreadRows === null) return;
@@ -11716,10 +11717,13 @@ import "../../styles/kylon-command-palette.css";
       const status = one<HTMLElement>("[data-channel-preference-status]");
       const slug = id === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG : channelById(channels, id)?.slug ?? "";
       const row = `[data-rail-reorder="${list}"] [data-rail-channel="${CSS.escape(id)}"]`;
-      const hadFocus = document.activeElement instanceof HTMLElement && document.activeElement.matches(row);
+      /* Where focus belongs once the rail is drawn again. Alt+Arrow: the row, which had it. The row's menu: its ⋯,
+         because the menu has already closed and left focus on nothing. A drag: nowhere. */
+      const keep = fromRowMenu ? `[data-rail-reorder="${list}"] [data-rail-channel-menu="${CSS.escape(id)}"]`
+        : document.activeElement instanceof HTMLElement && document.activeElement.matches(row) ? row : null;
       const paint = (): void => {
         renderHomeRail(); renderChannelDirectoryDialog();
-        if (hadFocus) one<HTMLElement>(row)?.focus({ preventScroll: true });
+        if (keep) one<HTMLElement>(keep)?.focus({ preventScroll: true });
       };
       let problem = "";
       const version = requestVersion;
@@ -11744,11 +11748,12 @@ import "../../styles/kylon-command-palette.css";
       }
       railOrderSaving = false;
       if (workspaceId !== activeWorkspaceId || version !== requestVersion) return;
-      const focused = document.activeElement instanceof HTMLElement && document.activeElement.matches(row);
+      // Only if it is still there: the person may have moved on while the save was in flight.
+      const focused = keep !== null && document.activeElement instanceof HTMLElement && document.activeElement.matches(keep);
       if (list === "starred") await refreshChannelUnread(workspaceId, true);
       else await refreshChannels(workspaceId, version, true).catch(() => {});
       if (workspaceId !== activeWorkspaceId) return;
-      if (focused) one<HTMLElement>(row)?.focus({ preventScroll: true });
+      if (focused && keep) one<HTMLElement>(keep)?.focus({ preventScroll: true });
       if (problem && status) status.textContent = problem;
     };
 
@@ -11768,7 +11773,7 @@ import "../../styles/kylon-command-palette.css";
       const ids = list ? railOrderIds(list) : [];
       const moves: ContextMenuItem[] = list ? ([[MOVE_UP_LABEL, -1], [MOVE_DOWN_LABEL, 1]] as const)
         .filter(([, step]) => movedByStep(ids, channelId, step) !== null)
-        .map(([label, step]) => ({ label, run: () => { void applyRailOrder(list, channelId, current => movedByStep(current, channelId, step)); } })) : [];
+        .map(([label, step]) => ({ label, run: () => { void applyRailOrder(list, channelId, current => movedByStep(current, channelId, step), true); } })) : [];
       const slug = channelId === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG : channel?.slug ?? "";
       openContextMenu(event, button, [...moves, null, ...manage], `${channelLabel(slug)} options`);
     };

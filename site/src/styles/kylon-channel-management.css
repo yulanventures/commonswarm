@@ -199,3 +199,5 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop
   content: ""; position: absolute; inset-inline: 8px; inset-block-start: -1px; block-size: 2px;
   border-radius: 1px; background: var(--k-shell-focus, Highlight); pointer-events: none;
 }
+/* Dragged down, the row lands after this one: the line goes on the bottom edge. */
+live-dashboard.dashboard[data-kylon-shell] .hm-rail__channel-item[data-rail-drop="after"]::before { inset-block-start: auto; inset-block-end: -1px; }

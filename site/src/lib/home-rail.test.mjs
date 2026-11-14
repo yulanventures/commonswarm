@@ -6,7 +6,7 @@ import { buildHomeRail } from "./home-rail.ts";
 /* A minimal element: enough for the rail builder, no layout. */
 const element = (tag) => ({
   tag, children: [], attrs: {}, listeners: {}, dataset: {}, hidden: false, className: "", textContent: "", title: "", href: "", id: "", type: "",
-  append(...children) { this.children.push(...children); },
+  append(...children) { this.children.push(...children); for (const child of children) if (typeof child === "object") child.parentElement = this; },
   setAttribute(name, value) { this.attrs[name] = value; },
   getAttribute(name) { return this.attrs[name] ?? null; },
   addEventListener(name, callback) { this.listeners[name] = callback; },
@@ -171,6 +171,13 @@ test("a movable row steps with Alt+Arrow, can be dragged onto another row of its
   const fire = (id, name) => { let prevented = false; item(id).listeners[name]({ dataTransfer: transfer, preventDefault() { prevented = true; } }); return prevented; };
   fire("a", "dragstart");
   assert.equal(fire("c", "dragover"), true, "a row of the same list accepts it");
+  assert.equal(item("c").dataset.railDrop, "after", "dragged down, the row lands after the one it is over: the line is on its bottom edge");
+  fire("c", "dragleave");
+  assert.equal(item("c").dataset.railDrop, undefined);
+  fire("a", "dragend"); fire("c", "dragstart");
+  assert.equal(fire("a", "dragover"), true);
+  assert.equal(item("a").dataset.railDrop, "before", "dragged up, it lands before: the line is on the top edge");
+  fire("a", "dragleave"); fire("c", "dragend"); fire("a", "dragstart");
   assert.equal(fire("b", "dragover"), false, "a row of the other list does not");
   assert.equal(fire("a", "dragover"), false, "nor does the row itself");
   fire("b", "drop");

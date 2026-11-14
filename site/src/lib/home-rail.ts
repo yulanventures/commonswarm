@@ -307,11 +307,18 @@ function makeReorderable(item: HTMLLIElement, link: HTMLAnchorElement, row: Rail
   });
   item.addEventListener("dragend", () => { draggedRow = null; delete item.dataset.railDragging; });
   const accepts = (): boolean => draggedRow !== null && draggedRow.list === list && draggedRow.id !== row.id;
+  /* A row dragged down lands after the row it is dropped on, and a row dragged up lands before it. The line
+     is drawn on the edge where the row will land. */
+  const landsAfter = (): boolean => {
+    const rows = Array.from(item.parentElement?.children ?? []) as HTMLElement[];
+    const from = rows.findIndex((other) => other.dataset?.railDragging !== undefined);
+    return from >= 0 && from < rows.indexOf(item);
+  };
   item.addEventListener("dragover", (event) => {
     if (!accepts()) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    item.dataset.railDrop = "";
+    item.dataset.railDrop = landsAfter() ? "after" : "before";
   });
   item.addEventListener("dragleave", () => { delete item.dataset.railDrop; });
   item.addEventListener("drop", (event) => {
