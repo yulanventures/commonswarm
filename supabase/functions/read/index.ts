@@ -175,6 +175,11 @@ interface ChannelReadRequest {
   resource: "channels";
   workspace_id: string;
 }
+interface ChannelMembersReadRequest {
+  resource: "channel_members";
+  workspace_id: string;
+  channel_id: string;
+}
 /** Channels C3: one channel's whole-workspace messages ("general" = unfiled), paged oldest first. */
 interface ChannelMessagesReadRequest {
   resource: "channel_messages";
@@ -425,7 +430,7 @@ function exactKeys(
 function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
-  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
+  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest | ChannelMembersReadRequest |
   WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | SeatAdminStatusReadRequest | SeatAdminSelfReadRequest | {resource:"workspaces";workspace_id:string} |
   {resource:"roster";workspace_id:string} | ChannelMessagesReadRequest | MemoryReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -463,6 +468,20 @@ function parseBody(
     return {
       resource: "channels",
       workspace_id: body.workspace_id.toLowerCase(),
+    };
+  }
+  if (
+    body.resource === "channel_members" &&
+    exactKeys(body, ["resource", "workspace_id", "channel_id"]) &&
+    typeof body.workspace_id === "string" &&
+    UUID_RE.test(body.workspace_id) &&
+    typeof body.channel_id === "string" &&
+    UUID_RE.test(body.channel_id)
+  ) {
+    return {
+      resource: "channel_members",
+      workspace_id: body.workspace_id.toLowerCase(),
+      channel_id: body.channel_id.toLowerCase(),
     };
   }
   if (
@@ -881,6 +900,9 @@ async function handle(
       if (body.resource === "channels") {
         return json(200, { channels: [] });
       }
+      if (body.resource === "channel_members") {
+        return json(200, { members: [] });
+      }
       if (body.resource === "channel_messages") {
         return json(200, { workspace_id: body.workspace_id, channel: body.channel, archived: false, messages: [], next: null });
       }
@@ -1029,6 +1051,33 @@ async function handle(
       return json(200, {
         channels: channels.map((row) => ({ ...row, unread: unread.get(String(row.slug).toLowerCase()) ?? null })),
         general_unread: unread.get("general") ?? null,
+      });
+    }
+    if (body.resource === "channel_members") {
+      const [channel] = await tx<{ channel_id: string; visibility: string }[]>`
+        SELECT channel_id, visibility
+        FROM swarm_read.channels
+        WHERE workspace_id = ${body.workspace_id}::uuid
+          AND channel_id = ${body.channel_id}::uuid
+        LIMIT 1
+      `;
+      if (channel === undefined) {
+        return json(404, {
+          error: "channel_not_found",
+          message: "No channel with that id in this workspace.",
+        });
+      }
+      const members = await tx<Record<string, unknown>[]>`
+        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at, is_manager
+        FROM swarm_read.channel_members
+        WHERE workspace_id = ${body.workspace_id}::uuid
+          AND channel_id = ${body.channel_id}::uuid
+        ORDER BY created_at ASC, kind ASC, id ASC
+      `;
+      return json(200, {
+        channel_id: channel.channel_id,
+        visibility: channel.visibility,
+        members,
       });
     }
     if (body.resource === "renewal_grants") {
@@ -1358,6 +1407,7 @@ export type HostedReadInput =
   | { resource: "members"; workspace_id: string }
   | { resource: "roster"; workspace_id: string }
   | { resource: "channels"; workspace_id: string }
+  | { resource: "channel_members"; workspace_id: string; channel_id: string }
   | (Omit<ChannelMessagesReadRequest, "max_bytes"> & { fit_bytes?: number })
   | MemorySearchReadRequest
   | MemoryGetReadRequest
@@ -1403,6 +1453,7 @@ export interface ReadResult {
 
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
+  if (input.resource === "channel_members") return UUID_RE.test(input.channel_id);
   if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
   if (input.resource === "channel_messages" && input.fit_bytes !== undefined) {
     return Number.isSafeInteger(input.fit_bytes) && input.fit_bytes >= CHANNEL_PAGE_MIN_BYTES;
@@ -1445,6 +1496,7 @@ export async function handleHostedRead(
       (input.resource === "members" && tool !== "members") ||
       (input.resource === "roster" && tool !== "roster") ||
       (input.resource === "channels" && tool !== "channel_ls") ||
+      (input.resource === "channel_members" && tool !== "channel_members") ||
       (input.resource === "channel_messages" && tool !== "channel_read") ||
       (input.resource === "memory_search" && tool !== "memory_search") ||
       (input.resource === "memory_get" && tool !== "memory_get") ||
@@ -1513,13 +1565,47 @@ export async function handleHostedRead(
     if (input.resource === "channels") {
       // The read role's view, gated by the seat owner's membership; no new grant.
       const channels = await tx<Record<string, unknown>[]>`
-        SELECT slug, purpose, archived_at FROM swarm_read.channels
+        SELECT slug, purpose, archived_at, visibility FROM swarm_read.channels
         WHERE workspace_id = ${seat.workspace_id}::uuid AND archived_at IS NULL
         ORDER BY lower(slug) LIMIT 200
       `;
       const unread = await agentChannelUnread(tx, seat.workspace_id);
-      return { status: 200, body: { channels: [{ slug: "general", purpose: null, archived_at: null }, ...channels]
+      return { status: 200, body: { channels: [{ slug: "general", purpose: null, archived_at: null, visibility: "open" }, ...channels]
         .map((row) => ({ ...row, unread: unread.get(String(row.slug).toLowerCase()) ?? null })), context } };
+    }
+    if (input.resource === "channel_members") {
+      const [channel] = await tx<{ channel_id: string; visibility: string }[]>`
+        SELECT channel_id, visibility
+        FROM swarm_read.channels
+        WHERE workspace_id = ${seat.workspace_id}::uuid
+          AND channel_id = ${input.channel_id}::uuid
+        LIMIT 1
+      `;
+      if (channel === undefined) {
+        return {
+          status: 404,
+          body: {
+            error: "channel_not_found",
+            message: "No channel with that id in this workspace.",
+          },
+        };
+      }
+      const members = await tx<Record<string, unknown>[]>`
+        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at, is_manager
+        FROM swarm_read.channel_members
+        WHERE workspace_id = ${seat.workspace_id}::uuid
+          AND channel_id = ${input.channel_id}::uuid
+        ORDER BY created_at ASC, kind ASC, id ASC
+      `;
+      return {
+        status: 200,
+        body: {
+          channel_id: channel.channel_id,
+          visibility: channel.visibility,
+          members,
+          context,
+        },
+      };
     }
     if (input.resource === "channel_messages") {
       const page = await channelMessages(tx, seat.workspace_id, { ...input, max_bytes: null });

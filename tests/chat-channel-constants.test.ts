@@ -2,31 +2,44 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  CHANNEL_CREATE_OPTIONAL_FIELDS,
   CHANNEL_CREATION_POLICIES,
   CHANNEL_CREATION_POLICY_RULE_TEXT,
   CHANNEL_INVOLVEMENT_LEVELS,
   CHANNEL_INVOLVEMENT_RULE_TEXT,
+  CHANNEL_MEMBER_ENTRY_RULE_TEXT,
+  CHANNEL_MEMBER_MAX,
+  CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT,
+  CHANNEL_MEMBERS_RULE_TEXT,
   CHANNEL_PREFERENCE_EMPTY_TEXT,
   CHANNEL_PREFERENCE_OPTIONAL_FIELDS,
   CHANNEL_PREFERENCE_TARGET_RULE_TEXT,
   CHANNEL_PURPOSE_MAX,
   CHANNEL_PURPOSE_MAX_TEXT,
   CHANNEL_PURPOSE_TYPE_TEXT,
+  CHANNEL_READ_COLUMNS,
   CHANNEL_REORDER_MAX,
   CHANNEL_REORDER_RULE_TEXT,
   CHANNEL_STAR_REORDER_RULE_TEXT,
   CHANNEL_STARRED_RULE_TEXT,
   CHANNEL_UPDATE_EMPTY_TEXT,
   CHANNEL_UPDATE_OPTIONAL_FIELDS,
+  CHANNEL_VISIBILITIES,
+  CHANNEL_VISIBILITY_RULE_TEXT,
+  channelMemberEntryProblem,
+  channelMembersListProblem,
   channelReorderListProblem,
   channelStarReorderListProblem,
   commandFieldsMessage,
+  parseChannelMemberEntry,
+  parseChannelMembers,
   parseSignalRecipients,
   SIGNAL_RECIPIENT_KINDS,
   SIGNAL_RECIPIENT_MAX,
   SIGNAL_RECIPIENT_RULE_TEXT,
   signalRecipientListProblem,
 } from "../supabase/functions/_shared/channels.js";
+import { CHANNEL_COLUMNS } from "../src/cloud/channels.js";
 
 /**
  * Two enforcement points, two languages: the database CHECK on
@@ -166,18 +179,95 @@ test("parseSignalRecipients lower-cases ids and refuses what the rules refuse", 
 
 test("channel_update and channel_unarchive generated field and purpose sentences stay pinned to their constants", () => {
   assert.equal(
+    commandFieldsMessage("channel_create", ["slug"], CHANNEL_CREATE_OPTIONAL_FIELDS),
+    "channel_create takes slug, and optionally purpose, visibility and members, and nothing else.",
+  );
+  assert.equal(
     commandFieldsMessage("channel_update", ["channel_id"], CHANNEL_UPDATE_OPTIONAL_FIELDS),
-    "channel_update takes channel_id, and optionally slug and purpose, and nothing else.",
+    "channel_update takes channel_id, and optionally slug, purpose, visibility and members, and nothing else.",
   );
   assert.equal(
     commandFieldsMessage("channel_unarchive", ["channel_id"]),
     "channel_unarchive takes channel_id, and nothing else.",
   );
-  assert.equal(CHANNEL_UPDATE_EMPTY_TEXT, "channel_update needs slug or purpose, or both.");
+  assert.equal(
+    CHANNEL_UPDATE_EMPTY_TEXT,
+    "channel_update needs at least one of slug, purpose or visibility.",
+  );
   assert.equal(CHANNEL_PURPOSE_TYPE_TEXT, "A channel purpose is text.");
   assert.ok(
     new RegExp(`(?<!\\d)${CHANNEL_PURPOSE_MAX}(?!\\d)`).test(CHANNEL_PURPOSE_MAX_TEXT),
     "the purpose bound sentence carries CHANNEL_PURPOSE_MAX",
+  );
+  assert.deepEqual(
+    CHANNEL_READ_COLUMNS,
+    CHANNEL_COLUMNS,
+    "human REST select columns and agent read edge columns stay identical",
+  );
+});
+
+test("CM-3a private channel visibility and member constants match SQL CHECKs and generate their sentences", () => {
+  const migration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261113000003_private_channels.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (const visibility of CHANNEL_VISIBILITIES) {
+    assert.ok(
+      CHANNEL_VISIBILITY_RULE_TEXT.includes(visibility),
+      `visibility rule text names ${visibility}`,
+    );
+    assert.ok(
+      migration.includes(`'${visibility}'`),
+      `migration CHECK names visibility '${visibility}'`,
+    );
+  }
+  assert.ok(
+    new RegExp(`(?<!\\d)${CHANNEL_MEMBER_MAX}(?!\\d)`).test(
+      CHANNEL_MEMBERS_RULE_TEXT,
+    ),
+    "member list rule text carries CHANNEL_MEMBER_MAX",
+  );
+  assert.equal(
+    CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT,
+    'members is only accepted when visibility is "private".',
+  );
+  const u1 = "22222222-2222-4222-8222-222222222222";
+  const u2 = "33333333-3333-4333-8333-333333333333";
+  assert.equal(channelMemberEntryProblem({ kind: "user", id: u1 }), null);
+  assert.equal(channelMemberEntryProblem({ kind: "agent", id: u2 }), null);
+  assert.equal(
+    channelMemberEntryProblem({ kind: "team", id: u1 }),
+    CHANNEL_MEMBER_ENTRY_RULE_TEXT,
+  );
+  assert.deepEqual(
+    parseChannelMemberEntry({ kind: "agent", id: u1.toUpperCase() }),
+    { kind: "agent", id: u1 },
+  );
+  assert.equal(channelMembersListProblem([{ kind: "user", id: u1 }]), null);
+  assert.equal(channelMembersListProblem([]), CHANNEL_MEMBERS_RULE_TEXT);
+  assert.match(
+    String(
+      channelMembersListProblem([
+        { kind: "user", id: u1 },
+        { kind: "user", id: u1.toUpperCase() },
+      ]),
+    ),
+    /same person or agent twice/,
+  );
+  assert.equal(
+    channelMembersListProblem([
+      { kind: "user", id: u1 },
+      { kind: "agent", id: u1 },
+    ]),
+    null,
+    "same UUID with different kind is distinct",
+  );
+  assert.deepEqual(
+    parseChannelMembers([{ kind: "user", id: u1.toUpperCase() }]),
+    [{ kind: "user", id: u1 }],
   );
 });
 

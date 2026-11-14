@@ -571,6 +571,9 @@ export function parseSignalRecord(
     ...(row.channel_id === undefined
       ? {}
       : { channel_id: checkedNullableUuid(row.channel_id, "channel_id") }),
+    ...(row.channel_visibility === "open" || row.channel_visibility === "private" || row.channel_visibility === null
+      ? { channel_visibility: row.channel_visibility }
+      : {}),
     ...(row.thread_root_id === undefined
       ? {}
       : {

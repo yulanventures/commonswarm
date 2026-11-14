@@ -34,34 +34,43 @@ export function claimAgentInboxPersistsLedger(
  * workspace: an absent row is never read as removal. Credentials are never consulted, so rotating or expiring the
  * sender's bearer after it posted does not cancel the message.
  */
-function senderLive(tx: Sql) {
+function senderLive(tx: Sql, recipientPrincipalId: string) {
   return tx`(
-    (s.from_kind = 'user' AND EXISTS (
-      SELECT 1 FROM swarm.memberships AS sender_member
-      WHERE sender_member.workspace_id = s.workspace_id
-        AND sender_member.user_id = s.from_principal
-        AND sender_member.revoked_at IS NULL))
-    OR (s.from_kind = 'agent' AND EXISTS (
-      SELECT 1
-      FROM swarm.agent_principals AS sender_agent
-      JOIN swarm.memberships AS sender_owner
-        ON sender_owner.workspace_id = s.workspace_id
-       AND sender_owner.user_id = sender_agent.owner_user_id
-       AND sender_owner.revoked_at IS NULL
-      WHERE sender_agent.principal_id = s.from_principal
-        AND sender_agent.revoked_at IS NULL
-        AND (
-          EXISTS (
-            SELECT 1 FROM swarm.agent_workspace_memberships AS sender_seat
-            WHERE sender_seat.principal_id = sender_agent.principal_id
-              AND sender_seat.workspace_id = s.workspace_id
-              AND sender_seat.owner_user_id = sender_agent.owner_user_id
-              AND sender_seat.revoked_at IS NULL)
-          OR (sender_agent.workspace_id = s.workspace_id AND NOT EXISTS (
-            SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
-            WHERE any_seat.principal_id = sender_agent.principal_id
-              AND any_seat.workspace_id = s.workspace_id))
-        )))
+    (
+      (s.from_kind = 'user' AND EXISTS (
+        SELECT 1 FROM swarm.memberships AS sender_member
+        WHERE sender_member.workspace_id = s.workspace_id
+          AND sender_member.user_id = s.from_principal
+          AND sender_member.revoked_at IS NULL))
+      OR (s.from_kind = 'agent' AND EXISTS (
+        SELECT 1
+        FROM swarm.agent_principals AS sender_agent
+        JOIN swarm.memberships AS sender_owner
+          ON sender_owner.workspace_id = s.workspace_id
+         AND sender_owner.user_id = sender_agent.owner_user_id
+         AND sender_owner.revoked_at IS NULL
+        WHERE sender_agent.principal_id = s.from_principal
+          AND sender_agent.revoked_at IS NULL
+          AND (
+            EXISTS (
+              SELECT 1 FROM swarm.agent_workspace_memberships AS sender_seat
+              WHERE sender_seat.principal_id = sender_agent.principal_id
+                AND sender_seat.workspace_id = s.workspace_id
+                AND sender_seat.owner_user_id = sender_agent.owner_user_id
+                AND sender_seat.revoked_at IS NULL)
+            OR (sender_agent.workspace_id = s.workspace_id AND NOT EXISTS (
+              SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+              WHERE any_seat.principal_id = sender_agent.principal_id
+                AND any_seat.workspace_id = s.workspace_id))
+          )))
+    )
+    AND (
+      s.channel_id IS NULL
+      OR (
+        swarm.actor_can_access_channel(s.workspace_id, s.channel_id, s.from_kind, s.from_principal)
+        AND swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'agent', ${recipientPrincipalId}::uuid)
+      )
+    )
   )`;
 }
 
@@ -199,6 +208,7 @@ export interface HydratedDelivery {
     created_at: string;
     /** Where the message sits, so the agent can answer in the same place. Null for an unfiled or top-level message. */
     channel_id: string | null;
+    channel_visibility?: "open" | "private" | null;
     thread_root_id: string | null;
     /**
      * Who can read the message this delivery is for. "workspace": it has no recipient and is not a
@@ -377,7 +387,7 @@ export async function claimAgentInbox(
           AND d.surfaced_at IS NULL
         )
       )
-      AND NOT ${senderLive(tx)}
+      AND NOT ${senderLive(tx, args.recipientPrincipalId)}
     RETURNING d.signal_id
   `;
   const senderNotLiveCount = senderNotLiveRows.length;
@@ -631,6 +641,7 @@ export async function hydrateDeliveryRefs(
     until: Date;
     created_at: Date;
     channel_id: string | null;
+    channel_visibility: "open" | "private" | null;
     thread_root_id: string | null;
     sender_owner_relation: SenderOwnerRelation;
     recipient_position: number;
@@ -640,7 +651,7 @@ export async function hydrateDeliveryRefs(
     sender_canceled: boolean;
   }[]>`
     SELECT
-      ${senderLive(tx)} AS sender_live,
+      ${senderLive(tx, args.recipientPrincipalId)} AS sender_live,
       /* A delivery already ended as sender_not_live stays ended, even after the sender is re-added: a replay of an
        * old claim reads its stored refs here and must not resume it. */
       EXISTS (
@@ -689,6 +700,7 @@ export async function hydrateDeliveryRefs(
       s.until,
       s.created_at,
       s.channel_id,
+      ch.visibility AS channel_visibility,
       s.thread_root_id,
       (
         s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.in_reply_to IS NULL
@@ -742,6 +754,9 @@ export async function hydrateDeliveryRefs(
         ELSE 'unknown'
       END::text AS sender_owner_relation
     FROM swarm.signals AS s
+    LEFT JOIN swarm.channels AS ch
+      ON ch.workspace_id = s.workspace_id
+     AND ch.channel_id = s.channel_id
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
      AND author.principal_id = s.from_principal
@@ -803,6 +818,7 @@ export async function hydrateDeliveryRefs(
         until: asIso(signal.until),
         created_at: asIso(signal.created_at),
         channel_id: signal.channel_id,
+        ...(signal.channel_visibility === null ? {} : { channel_visibility: signal.channel_visibility }),
         thread_root_id: signal.thread_root_id,
         audience: signal.whole_workspace ? "workspace" : "private",
       },
@@ -932,6 +948,10 @@ export async function ackAgentDelivery(
         WHERE s.workspace_id = ${args.workspaceId}::uuid
           AND s.id = ${args.signalId}::uuid
           AND s.kind IN ('ask', 'note')
+          AND (
+            s.channel_id IS NULL
+            OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'agent', ${args.recipientPrincipalId}::uuid)
+          )
           AND (s.to_agent_principal_id = ${args.recipientPrincipalId}::uuid
             OR EXISTS (
               SELECT 1 FROM swarm.signal_recipients AS r

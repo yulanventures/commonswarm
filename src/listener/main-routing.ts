@@ -28,6 +28,7 @@ const ENTRY_KEYS = new Set([
   "queuedAt",
   "observationPending",
   "replyThreadRootId",
+  "channelVisibility",
 ]);
 
 export const LISTENER_MAIN_QUEUE_MAX = 200;
@@ -188,8 +189,10 @@ export interface PendingMainEntry {
   createdAt: string;
   queuedAt: string;
   observationPending?: true;
-  /** Set when the whole workspace can read the message: the thread an answer is posted in. Absent: answer privately. */
+  /** Set when the channel/workspace audience can read the message: the thread an answer is posted in. Absent: answer privately. */
   replyThreadRootId?: string;
+  /** Visibility of the channel when known ("open" | "private"), so private-channel mentions are described accurately. */
+  channelVisibility?: "open" | "private";
 }
 
 interface PendingMainFile {
@@ -227,7 +230,10 @@ function parseEntry(value: unknown, rejectUnknownKeys: boolean): PendingMainEntr
     !checkedTimestamp(row.createdAt) || !checkedTimestamp(row.queuedAt) ||
     !(row.observationPending === undefined || row.observationPending === true) ||
     !(row.replyThreadRootId === undefined ||
-      (typeof row.replyThreadRootId === "string" && UUID_RE.test(row.replyThreadRootId)))
+      (typeof row.replyThreadRootId === "string" && UUID_RE.test(row.replyThreadRootId))) ||
+    !(row.channelVisibility === undefined ||
+      row.channelVisibility === "open" ||
+      row.channelVisibility === "private")
   ) {
     throw new Error("stored pending-for-main entry is malformed");
   }
@@ -247,6 +253,9 @@ function parseEntry(value: unknown, rejectUnknownKeys: boolean): PendingMainEntr
     queuedAt: row.queuedAt,
     ...(row.observationPending === true ? { observationPending: true as const } : {}),
     ...(typeof row.replyThreadRootId === "string" ? { replyThreadRootId: row.replyThreadRootId.toLowerCase() } : {}),
+    ...(row.channelVisibility === "open" || row.channelVisibility === "private"
+      ? { channelVisibility: row.channelVisibility }
+      : {}),
   };
 }
 
@@ -389,5 +398,8 @@ export function pendingMainEntry(
     queuedAt: new Date(now).toISOString(),
     ...(options.observationPending ? { observationPending: true } : {}),
     ...(publicReplyThreadRoot(signal) === null ? {} : { replyThreadRootId: publicReplyThreadRoot(signal)! }),
+    ...(signal.channel_visibility === "open" || signal.channel_visibility === "private"
+      ? { channelVisibility: signal.channel_visibility }
+      : {}),
   }, true);
 }

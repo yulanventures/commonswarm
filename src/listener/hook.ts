@@ -662,6 +662,9 @@ function entryFromSignal(
     createdAt: signal.created_at,
     queuedAt: new Date(now).toISOString(),
     ...(publicReplyThreadRoot(signal) === null ? {} : { replyThreadRootId: publicReplyThreadRoot(signal)! }),
+    ...(signal.channel_visibility === "open" || signal.channel_visibility === "private"
+      ? { channelVisibility: signal.channel_visibility }
+      : {}),
   };
 }
 
@@ -689,20 +692,23 @@ export function renderHookSignal(
 ): string {
   const sender = item.senderName === null ? item.fromId : item.senderName;
   const senderKind = item.fromKind === "user" ? "teammate" : "agent";
+  const readableWhere = item.channelVisibility === "private"
+    ? "members of that private channel can read"
+    : "everyone in the workspace can read";
   const intent = item.replyThreadRootId !== undefined
-    ? "mentioned you in a message everyone in the workspace can read:"
+    ? `mentioned you in a message ${readableWhere}:`
     : item.kind === "ask"
     ? "is asking you:"
     : item.kind === "note"
     ? "sent you a note:"
     : "sent you a message:";
-  /* A message the whole workspace can read is answered in its thread, in the open, and the line
-   * says so: the agent must know its answer is not private before it writes one. The same line
-   * names the private way, which a mentioned agent may still use. */
+  /* A message the channel/workspace audience can read is answered in its thread, and the line
+   * says who can read that thread so the agent knows its answer is not a 1:1 DM before writing.
+   * The same line names the private way, which a mentioned agent may still use. */
   const optional = item.kind === "note" ? " (optional)" : "";
   const replyLine = item.replyThreadRootId === undefined
     ? `reply${optional}: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId}`
-    : `reply in the thread${optional}, where everyone in the workspace can read it: cswarm reply ${item.replyThreadRootId} "<answer>" --thread --workspace-id ${item.workspaceId} (to answer only the author: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId})`;
+    : `reply in the thread${optional}, where ${readableWhere} it: cswarm reply ${item.replyThreadRootId} "<answer>" --thread --workspace-id ${item.workspaceId} (to answer only the author: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId})`;
   const header = `[CommonSwarm] ${senderKind} ${JSON.stringify(sender)} ${intent}`;
   if (cap === HOOK_BODY_PREVIEW_CHARS_NONE) return [header, replyLine].join("\n");
   return [

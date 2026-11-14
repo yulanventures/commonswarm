@@ -50,10 +50,17 @@ export async function markHumanSignalsSeen(
     to_user_id: string | null;
     to_agent_principal_id: string | null;
   }[]>`
-    SELECT id, to_user_id, to_agent_principal_id
+    SELECT
+      id,
+      to_user_id,
+      to_agent_principal_id
     FROM swarm.signals
     WHERE workspace_id = ${args.workspaceId}::uuid
       AND id = ANY (${args.signalIds}::uuid[])
+      AND (
+        channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'user', ${args.userId}::uuid)
+      )
   `;
   const hasIneligibleSignal = known.some((signal) =>
     signal.to_agent_principal_id !== null ||
@@ -83,6 +90,10 @@ export async function markHumanSignalsSeen(
       AND (
         signal.to_user_id IS NULL
         OR signal.to_user_id = ${args.userId}::uuid
+      )
+      AND (
+        signal.channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, signal.channel_id, 'user', ${args.userId}::uuid)
       )
     ON CONFLICT (signal_id, user_id) DO NOTHING
   `;
@@ -126,10 +137,17 @@ export async function markAgentSignalsSeen(
     to_user_id: string | null;
     to_agent_principal_id: string | null;
   }[]>`
-    SELECT id, to_user_id, to_agent_principal_id
+    SELECT
+      id,
+      to_user_id,
+      to_agent_principal_id
     FROM swarm.signals
     WHERE workspace_id = ${args.workspaceId}::uuid
       AND id = ANY (${args.signalIds}::uuid[])
+      AND (
+        channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'agent', ${args.principalId}::uuid)
+      )
   `;
   if (known.some((signal) =>
     signal.to_user_id !== null || signal.to_agent_principal_id !== null
@@ -155,6 +173,10 @@ export async function markAgentSignalsSeen(
       AND signal.id = ANY (${eligibleIds}::uuid[])
       AND signal.to_user_id IS NULL
       AND signal.to_agent_principal_id IS NULL
+      AND (
+        signal.channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, signal.channel_id, 'agent', ${args.principalId}::uuid)
+      )
     ON CONFLICT (signal_id, principal_id) DO NOTHING
   `;
   return { status: "accepted", matched: eligibleIds.length };

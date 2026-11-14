@@ -2500,3 +2500,53 @@ test("hook check still drops a signal that names neither this agent nor nobody",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("private-channel mention preserves channelVisibility in pending-for-main and renders private-channel audience copy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-hook-private-channel-"));
+  try {
+    const { paths } = state(root);
+    const queue = new FilePendingMainQueue(paths.instanceDirectory);
+    const entry = pendingMainEntry(
+      {
+        id: SIGNAL_ID,
+        workspace_id: WORKSPACE_ID,
+        from: "33333333-3333-4333-8333-333333333333",
+        from_kind: "user",
+        to: null,
+        to_agent: PRINCIPAL_ID,
+        in_reply_to: null,
+        about: null,
+        kind: "ask",
+        body: "please review the board packet",
+        until: "2099-01-01T00:00:00.000Z",
+        created_at: "2026-11-13T10:00:00.000Z",
+        channel_id: "77777777-7777-4777-8777-777777777777",
+        channel_visibility: "private",
+        thread_root_id: null,
+        audience: "workspace",
+      },
+      PRINCIPAL_ID,
+      { senderName: "Owner", operatorId: "33333333-3333-4333-8333-333333333333", operatorName: "Owner" },
+      Date.parse("2026-11-13T10:00:01.000Z"),
+    );
+    assert.equal(entry.channelVisibility, "private");
+    assert.equal(entry.replyThreadRootId, SIGNAL_ID);
+    await queue.enqueue(entry);
+    const reloaded = await queue.read();
+    assert.equal(reloaded.length, 1);
+    assert.equal(reloaded[0]!.channelVisibility, "private");
+
+    const renderedPrivate = renderHookSignal(reloaded[0]!);
+    assert.match(renderedPrivate, /mentioned you in a message members of that private channel can read:/);
+    assert.match(
+      renderedPrivate,
+      new RegExp(`reply in the thread, where members of that private channel can read it: cswarm reply ${SIGNAL_ID} "<answer>" --thread --workspace-id ${WORKSPACE_ID}`),
+    );
+    assert.doesNotMatch(renderedPrivate, /everyone in the workspace can read/);
+
+    const renderedOpen = renderHookSignal({ ...reloaded[0]!, channelVisibility: "open" });
+    assert.match(renderedOpen, /everyone in the workspace can read/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
