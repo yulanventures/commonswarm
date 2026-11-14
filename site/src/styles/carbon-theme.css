@@ -356,3 +356,38 @@ live-dashboard.dashboard[data-kylon-shell] .hm-rail [data-context-open] { backgr
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea { padding-inline-end: 112px; font-size: 16px; }
 }
+
+/* THE AUDIENCE MARKER BESIDE SEND, in this sheet because it has to agree with the geometry set
+ * above: Send and Attach are 36px controls at 6px and 46px from the field's end on a pointer
+ * screen, and 44px controls at 4px and 56px at 64rem and below. The marker sits left of
+ * Attach, centred on the same line, and the text box stops short of it in every state
+ * (resting and focused share one selector pair, as the rules above do), so neither a long
+ * hint nor a long typed line runs under it. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+  inset-inline-end: 88px;
+  inset-block-end: 12px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+  padding-inline-end: calc(88px + 9.5rem + 8px);
+}
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+    inset-inline-end: 104px;
+    inset-block-end: 14px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+    padding-inline-end: calc(104px + 9.5rem + 8px);
+  }
+}
+@media (width <= 40rem) {
+  /* The marker is at most 6rem here; a named public place shows its hash alone. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+    padding-inline-end: calc(104px + 6rem + 6px);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed])) textarea {
+    padding-inline-end: calc(104px + 34px);
+  }
+}

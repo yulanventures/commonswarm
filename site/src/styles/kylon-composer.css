@@ -160,8 +160,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-not
  * with a lock, and a standing outline on the whole field. Public is a hash and the place. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
   position: absolute;
-  inset-inline-end: 100px;
-  inset-block-end: 14px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -214,11 +212,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audien
   clip-path: inset(50%);
   white-space: nowrap;
 }
-/* The text stops short of the marker at every length, so a long line never runs under it. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
-  padding-inline-end: calc(104px + 9.5rem + 8px);
-}
+/* Where the marker sits, and how far the text stops short of it, are set in carbon-theme.css:
+ * that sheet is the last word on the field's Attach and Send geometry and on the text box's
+ * padding, and the marker has to agree with both. */
 @media (width <= 40rem) {
   /* A phone has no room for the place beside the box, and the header above already names it.
      Public keeps its hash; private keeps the lock and as much of the name as fits. */
@@ -228,13 +224,6 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:f
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed]) .dashboard__composer-audience-name {
     display: none;
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
-    padding-inline-end: calc(104px + 6rem + 6px);
-  }
-  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]:not([data-audience-unnamed])) textarea {
-    padding-inline-end: calc(104px + 38px);
   }
 }
 /* A draft written to someone, sitting in a public composer: the row under the box says so and
