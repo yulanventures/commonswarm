@@ -2083,5 +2083,26 @@
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
     ]
+  },
+  {
+    "id": "app.composer.empty",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-composer]:not([hidden]) [data-composer-input][placeholder^=\"Message #\"]:not([placeholder*=\"leads\"])"
+      }
+    ],
+    "ready": "[data-composer]:not([hidden]) [data-composer-send][disabled]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ],
+    "frame": [
+      "[data-composer]:not([hidden]) [data-composer-send][disabled]"
+    ]
   }
 ]

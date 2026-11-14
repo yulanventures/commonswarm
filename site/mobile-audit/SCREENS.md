@@ -373,3 +373,5 @@ With Batch 5, `screens.json` has no pending entries: every entry is a runnable c
 
 - `state.empty`, `state.error` and `state.loading` were generic placeholders, not screens. Per-surface empty captures (`app.todos.empty`, `app.lists.empty`, `app.wiki.empty`, `app.definitions.empty`) are runnable; other empty, error and loading states stay unbound and still need their own per-surface fixtures before any coverage is claimed.
 - `menu.resizers` (M12) was retired as a standalone six-size entry. The `.cs-resizer` separators are hidden at 52rem and below (four of the six audit sizes) and already appear in the wider workspace, Lists and Wiki captures. Dragging, keyboard resizing and reset stay in the interaction inventory, unclaimed.
+
+Empty composer capture: `app.composer.empty` is a channel's composer with nothing typed. The placeholder names only the channel, and the quiet Send control must be wholly on screen. `app.composer` is the same composer with a message typed and Send ready.
