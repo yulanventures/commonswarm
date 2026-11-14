@@ -11539,7 +11539,7 @@ import "../../styles/kylon-command-palette.css";
         }
         if (broadcast && !mayBroadcast) broadcast.checked = false;
         if (input) {
-          input.placeholder = "Reply in this thread";
+          input.placeholder = "Reply…";
           input.setAttribute("aria-label", "Thread reply");
         }
         return;
@@ -11555,22 +11555,21 @@ import "../../styles/kylon-command-palette.css";
         input.setAttribute("aria-label", `Message ${partnerName}`);
         return;
       }
-      const leadName = typeof activeWorkspaceLeadName === "function" ? activeWorkspaceLeadName() : null;
-      /* #general names itself; All messages keeps the plain box. Guarded so the fixture that runs this
-         function without the channel state still reads the All-messages branch. */
-      const generalPlace = channel === null && typeof activeChannelId === "string" && activeChannelId === GENERAL_CHANNEL_ID
-        ? channelLabel(GENERAL_CHANNEL_SLUG) : null;
-      if (generalPlace !== null) {
-        input.placeholder = leadName ? `Message ${generalPlace} — ${leadName} leads` : `Message ${generalPlace}`;
-        input.setAttribute("aria-label", `Message in ${generalPlace}`);
+      /* One short line: where the message goes. Who leads is in the header, not here. A message written in
+         All messages is posted to #general, so that box says #general too. The #general view is guarded so the
+         fixture that runs this function without the channel state still reads the All-messages branch. */
+      const general = channelLabel(GENERAL_CHANNEL_SLUG);
+      if (channel === null && typeof activeChannelId === "string" && activeChannelId === GENERAL_CHANNEL_ID) {
+        input.placeholder = `Message ${general}`;
+        input.setAttribute("aria-label", `Message in ${general}`);
         return;
       }
       if (channel === null) {
-        input.placeholder = leadName ? `Message… (${leadName} leads)` : "Message…";
+        input.placeholder = `Message ${general}`;
         input.setAttribute("aria-label", one<HTMLElement>("[data-composer-label]")?.textContent || "Message");
         return;
       }
-      input.placeholder = leadName ? `Message ${channelLabel(channel.slug)} — ${leadName} leads` : `Message ${channelLabel(channel.slug)}`;
+      input.placeholder = `Message ${channelLabel(channel.slug)}`;
       input.setAttribute("aria-label", `Message in ${channelLabel(channel.slug)}`);
     };
 
