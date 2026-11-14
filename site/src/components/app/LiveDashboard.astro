@@ -783,7 +783,6 @@ import "../../styles/kylon-command-palette.css";
                   aria-label="Mention a person or agent"
                   hidden
                 ></div>
-                <p class="hm-pick-footer" data-mention-footer hidden>A tag here highlights the name. To ask them directly, write in chat.</p>
                 </div>
                 <div class="dashboard__composer-input">
                   <div class="dashboard__composer-attachments" data-composer-attachments hidden></div>
@@ -1344,6 +1343,8 @@ import "../../styles/kylon-command-palette.css";
     channelUnread,
     messageStatus,
     askChoices,
+    signalMentions,
+    type SignalMention,
     answerChoice,
     type ChannelUnread,
     createChannel,
@@ -1411,9 +1412,7 @@ import "../../styles/kylon-command-palette.css";
   import { nextFeedChangeAt, signalHasEnded, signalHistoryFilter, signalIsReadable } from "../../lib/signal-history";
   import {
     canStartThread,
-    THREAD_REPLY_CHIP_LABEL,
     THREAD_REPLY_CONTROL_LABEL,
-    THREAD_REPLY_TO_TEXT,
     threadReplyBroadcastLabel,
     threadReplyCountLabel,
     threadReplyMayBroadcast,
@@ -1505,6 +1504,7 @@ import "../../styles/kylon-command-palette.css";
     createBrainTopicReader,
     linkifyBrainTopics,
   } from "../../lib/brain-links";
+  import { markMentions } from "../../lib/mention-pills";
   import {
     MESSAGE_COLLAPSE_LINES,
     setSanitizedMessageMarkdown,
@@ -1526,6 +1526,7 @@ import "../../styles/kylon-command-palette.css";
     COMPOSER_TO_MAX,
     composerAddressIsChosen,
     composerAddressNotice,
+    composerMentionNotice,
     composerDeliveryNote,
     composerPromoteLabel,
     composerSendRecipients,
@@ -1976,6 +1977,12 @@ import "../../styles/kylon-command-palette.css";
     let expandedThreadIds = new Set<string>();
     /** True while a reply is being written, which is the whole of what the To: row is locked by. */
     const composerIsReplying = (): boolean => threadReplyRoot !== null;
+    /* A PUBLIC PLACE: a channel, #general, All messages, and every thread. Anywhere that is
+       not a Direct Message. A message written there has no To: set and stays readable by
+       everyone in the place; an @tag in it is a MENTION, which tells the people and agents it
+       names. Only a Direct Message is addressed. */
+    const composerIsPublic = (): boolean =>
+      (typeof activeDm === "undefined" ? null : activeDm) === null || composerIsReplying();
     let mentionPickerIndex = 0;
     let composerIntent: {
       /** ONE id for the whole message, because a To: set of any size is one signal now.
@@ -1983,6 +1990,8 @@ import "../../styles/kylon-command-palette.css";
       commandId: string;
       body: string;
       audienceKey: string;
+      /** The people and agents the message mentions, when it was written in a public place. */
+      mentionKey?: string;
       attachmentKey: string;
       signalKind: BrowserSignalKind;
       /**
@@ -2038,6 +2047,17 @@ import "../../styles/kylon-command-palette.css";
     let restoredComposerKey = "";
     let focusedComposerWorkspaceId = "";
     const visualMentions = new Map<string, EntityRef[]>();
+    /* WHO EACH LOADED MESSAGE MENTIONS, by stable id, from `swarm_read.signal_mentions`. A
+       message that was read and mentions nobody holds an empty list, so it is not asked about
+       again: a message's mentions are written with it and never change. */
+    let signalMentionRows = new Map<string, SignalMention[]>();
+    let signalMentionGeneration = 0;
+    let signalMentionReading = false;
+    let signalMentionAgain = false;
+    const resetSignalMentions = (): void => {
+      signalMentionRows = new Map();
+      signalMentionGeneration += 1;
+    };
     const expandedSignalIds = new Set<string>();
     const attachmentPreviewUrls = new ChatImagePreviewCache();
     const deliveryReceiptCache = new Map<string, BrowserDeliveryReceiptCacheEntry>();
@@ -3641,13 +3661,17 @@ import "../../styles/kylon-command-palette.css";
      */
     const composerRecipients = (): ComposerRecipient[] => {
       const replying = composerIsReplying();
-      const named = composerSendRecipients(composerTo, replying);
+      const named = composerIsPublic() ? [] : composerSendRecipients(composerTo, replying);
       /* A Direct Message always addresses its teammate first, whatever the chips were reset to;
          anyone else @mentioned rides along after them. */
       const dm = typeof activeDm === "undefined" ? null : activeDm;
       if (!dm || replying) return named;
       return [{ kind: dm.kind, id: dm.id }, ...named.filter(recipient => !(recipient.kind === dm.kind && recipient.id === dm.id))];
     };
+
+    /** Who the next send mentions: the tags in this text, in a public place. A Direct Message mentions nobody; its tags add recipients. */
+    const composerMentionsFrom = (body: string): ComposerRecipient[] =>
+      composerIsPublic() ? composerRecipientsFrom(body) : [];
 
     /** Identity of the whole addressee set, so changing it invalidates a pending send intent. */
     const composerRecipientsKey = (): string =>
@@ -3748,6 +3772,8 @@ import "../../styles/kylon-command-palette.css";
     const syncComposerToVisibility = (): void => {
       const row = one<HTMLElement>("[data-composer-to]");
       if (!row) return;
+      /* A public place has no To: set. The row appears there only to explain a tag it could not honour. */
+      if (composerIsPublic()) { row.hidden = composerToNotice === ""; return; }
       /* In a Direct Message the composer already says who it goes to; the row returns only for extra names. */
       if (typeof activeDm !== "undefined" && activeDm && !composerIsReplying() && composerRecipients().length <= 1) { row.hidden = true; return; }
       const picker = one<HTMLElement>("[data-mention-picker]");
@@ -3767,6 +3793,17 @@ import "../../styles/kylon-command-palette.css";
       const row = one<HTMLElement>("[data-composer-to]");
       if (!chips || !note) return;
       chips.replaceChildren();
+      const toLabel = one<HTMLElement>("[data-composer-to-label]");
+      if (toLabel) toLabel.hidden = composerIsPublic();
+      /* In a public place the row has one job, the sentence about a tag that mentions nobody,
+         so there the sentence is shown rather than only read out. */
+      row?.toggleAttribute("data-composer-to-public", composerIsPublic());
+      if (composerIsPublic()) {
+        row?.removeAttribute("aria-disabled");
+        row?.toggleAttribute("data-composer-to-locked", false);
+        note.textContent = composerToNotice;
+        return;
+      }
       /* THE ROW DRAWS WHAT THE SEND POSTS, from the one derivation both of them read. While a
          reply is in progress that is the empty set, whatever `composerTo` still holds — and
          `composerTo` deliberately still holds it, because it is the address of the message
@@ -3801,7 +3838,7 @@ import "../../styles/kylon-command-palette.css";
         chip.className = "dashboard__composer-chip dashboard__composer-chip--everyone";
         chip.dataset.composerToBroadcast = "";
         chip.setAttribute("role", "listitem");
-        chip.textContent = replying ? THREAD_REPLY_CHIP_LABEL : BROADCAST_CHIP_LABEL;
+        chip.textContent = BROADCAST_CHIP_LABEL;
         chips.append(chip);
       }
       for (const entity of shown) {
@@ -3836,14 +3873,6 @@ import "../../styles/kylon-command-palette.css";
         chip.append(promote, remove);
         chips.append(chip);
       }
-      /* AND THE SENTENCE FOLLOWS THE SAME MODE. A reply's reach is not the delivery note's
-         subject: that note is about which recipient is woken, and a reply has none. The notice
-         about names the pass could not honour is not shown either, because the pass HELD and
-         made no such decision about this message. */
-      if (replying) {
-        note.textContent = THREAD_REPLY_TO_TEXT;
-        return;
-      }
       const sentence = composerDeliveryNote(shown, composerRecipientName);
       note.textContent = composerToNotice === ""
         ? sentence
@@ -3870,7 +3899,13 @@ import "../../styles/kylon-command-palette.css";
     const syncComposerAddress = (edit?: readonly ComposerRecipient[]): boolean => {
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       const rosterKnown = composerRosterKnown();
-      const live: ComposerAddressPair | null = edit !== undefined
+      /* IN A PUBLIC PLACE THE SET IS EMPTY AND STAYS EMPTY. Tags there are mentions and are read
+         from the body when the message is sent, so nothing a tag does, and no set remembered
+         from a Direct Message, may put a recipient on a channel post. */
+      const publicPlace = composerIsPublic();
+      const live: ComposerAddressPair | null = publicPlace
+        ? { to: [], applied: [] }
+        : edit !== undefined
         ? { to: [...edit], applied: composerToApplied }
         : composerToLive
         ? { to: composerTo, applied: composerToApplied }
@@ -3908,7 +3943,7 @@ import "../../styles/kylon-command-palette.css";
            against the reply's body would let an @tag inside a reply edit the address of the
            message the reader comes back to. Holding is the whole lock: there is no second
            write path to keep in step, and cancelling gives the chips back untouched. */
-        replying: composerIsReplying(),
+        replying: publicPlace ? false : composerIsReplying(),
         known: composerRecipientKnown,
         live,
         draft: stored === null
@@ -3918,10 +3953,10 @@ import "../../styles/kylon-command-palette.css";
             applied: stored.applied ?? [],
           },
         remembered: rememberedResolved.recipients,
-        tagged: parsed.recipients.map((entity) => ({ kind: entity.kind, id: entity.id })),
+        tagged: publicPlace ? [] : parsed.recipients.map((entity) => ({ kind: entity.kind, id: entity.id })),
         /* A HAND EDIT ANSWERS THE PRUNE SENTENCE. The reader has looked at the row and acted
          * on it, so the notice about a set they were not looking at has done its work. */
-        announcedPrune: edit !== undefined ? 0 : composerToPruned,
+        announcedPrune: publicPlace || edit !== undefined ? 0 : composerToPruned,
       });
       if (!state.committed) {
         renderComposerTo();
@@ -3931,14 +3966,16 @@ import "../../styles/kylon-command-palette.css";
       composerToApplied = state.applied;
       composerToPruned = state.announcedPrune;
       composerToLive = true;
-      composerToNotice = composerAddressNotice(
-        state,
-        {
-          overflow: parsed.overflow,
-          ambiguous: [...parsed.ambiguous, ...draftAmbiguous],
-        },
-        composerRecipientName,
-      );
+      composerToNotice = publicPlace
+        ? composerMentionNotice(parsed)
+        : composerAddressNotice(
+          state,
+          {
+            overflow: parsed.overflow,
+            ambiguous: [...parsed.ambiguous, ...draftAmbiguous],
+          },
+          composerRecipientName,
+        );
       /* AND THE SAME CALL WRITES IT DOWN, so an edit cannot be on screen and absent from
        * storage. A chip edit used to reach storage only on the next keystroke or at
        * `pagehide`, and a workspace switch cancelled the pending write without flushing, so an
@@ -4607,8 +4644,6 @@ import "../../styles/kylon-command-palette.css";
         button.addEventListener("click", () => selectMention(candidate));
         picker.append(button);
       });
-      const footer = one<HTMLElement>("[data-mention-footer]");
-      if (footer) footer.hidden = !threadReplyRoot;
       const shell = one<HTMLElement>("[data-mention-picker-shell]");
       if (shell) shell.hidden = false;
       picker.hidden = false;
@@ -7707,6 +7742,42 @@ import "../../styles/kylon-command-palette.css";
       if (changed && !addAgentViewOpen()) renderFeed();
     };
 
+    /** Read the mentions of loaded messages not asked about yet, and repaint when any has one. */
+    const refreshSignalMentions = async (workspaceId: string, version: number): Promise<void> => {
+      if (sampleMode || !session) return;
+      /* ONE READ AT A TIME. A page load, the live tick and a send all ask, often together. A
+         second asker waits its turn instead of starting a read that would make the first one's
+         answer look stale; the generation is bumped only by a reset. */
+      if (signalMentionReading) { signalMentionAgain = true; return; }
+      const ids = signals
+        .map((signal) => signal.id)
+        .filter((id) => !id.startsWith("composer-pending-") && !signalMentionRows.has(id));
+      if (ids.length === 0) return;
+      const generation = signalMentionGeneration;
+      signalMentionReading = true;
+      let rows: SignalMention[] | null;
+      try {
+        rows = await signalMentions(workspaceId, ids);
+      } catch {
+        rows = null;
+      } finally {
+        signalMentionReading = false;
+      }
+      const again = signalMentionAgain;
+      signalMentionAgain = false;
+      const current = generation === signalMentionGeneration && version === requestVersion && workspaceId === activeWorkspaceId;
+      if (current && rows !== null) {
+        const next = new Map(signalMentionRows);
+        for (const id of ids) next.set(id, []);
+        for (const row of rows) next.get(row.signalId)?.push(row);
+        signalMentionRows = next;
+        if (rows.length > 0 && !addAgentViewOpen()) renderFeed();
+      }
+      /* Whoever asked meanwhile is answered now, for whatever is on screen now. A failed read
+         is not retried here; the next tick asks again. */
+      if (again && activeWorkspaceId && (rows !== null || !current)) void refreshSignalMentions(activeWorkspaceId, requestVersion);
+    };
+
     const scheduleMessageStatusExpiry = (): void => {
       window.clearTimeout(messageStatusExpiryTimer);
       messageStatusExpiryTimer = undefined;
@@ -8529,6 +8600,20 @@ import "../../styles/kylon-command-palette.css";
           topics: brainTopicNames(),
           open: (topic) => void openBrainTopic(topic),
         });
+        /* Mentions the author wrote, drawn where their names stand. Who is mentioned comes from
+           the stored rows; the body is only searched for those names. Rows the server added
+           (the lead, a thread's participants) have no words in the body and draw nothing. */
+        const authored = (signalMentionRows.get(signal.id) ?? []).filter((mention) => mention.source === "author");
+        if (authored.length > 0) {
+          const keys = new Set(authored.map((mention) => `${mention.kind}:${mention.id}`));
+          markMentions(
+            markdown,
+            mentionTargets(agents, members).filter((target) => keys.has(`${target.entity.kind}:${target.entity.id}`)),
+            (entity) => entity.kind === "person"
+              ? entity.id === viewerId
+              : agents.some((agent) => agent.principalId === entity.id && agent.ownerUserId === viewerId),
+          );
+        }
         if (!expandedSignalIds.has(signal.id)) {
           markdown.classList.add("dashboard__message-markdown--collapsed");
         }
@@ -8540,7 +8625,13 @@ import "../../styles/kylon-command-palette.css";
             if (canStartThread(signal, now, channel?.archivedAt != null)) {
               setThreadReplyRoot({ id: signal.id, author: authorName, channelId: signal.channelId, until: signal.until });
               expandedThreadIds.add(signal.id); renderFeed();
-            } else { syncComposerAddress([{ kind: signal.fromKind === "agent" ? "agent" : "person", id: signal.from }]); }
+            } else {
+              /* A message that cannot carry a thread is answered to its author. From a public
+                 place that is their Direct Message, because nothing written here is addressed. */
+              const author: EntityRef = { kind: signal.fromKind === "agent" ? "agent" : "person", id: signal.from };
+              if (composerIsPublic()) void openDirectMessage(author);
+              else syncComposerAddress([author]);
+            }
             one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
           });
           if (decoration) {
@@ -8974,6 +9065,7 @@ import "../../styles/kylon-command-palette.css";
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
       void refreshChoices(workspaceId, version);
+      void refreshSignalMentions(workspaceId, version);
     };
 
     const refreshLatestSignals = async (): Promise<void> => {
@@ -9028,6 +9120,7 @@ import "../../styles/kylon-command-palette.css";
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
+        void refreshSignalMentions(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
            offers a catch-up, and the shared gate keeps the requests bounded. */
         void refreshPendingAccess(workspaceId, version);
@@ -9283,7 +9376,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices();
+      resetChoices(); resetSignalMentions();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -10028,7 +10121,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices();
+      resetChoices(); resetSignalMentions();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -11579,7 +11672,7 @@ import "../../styles/kylon-command-palette.css";
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
-        resetChoices();
+        resetChoices(); resetSignalMentions();
       }
       syncChannelUrl();
       renderChannelRail();
@@ -13563,6 +13656,10 @@ import "../../styles/kylon-command-palette.css";
         threadReplyMayBroadcast(threadReplyPlaceOf(replyRoot), replyBlock) &&
         (one<HTMLInputElement>("[data-composer-reply-broadcast]")?.checked ?? false);
       const signalKind = browserSignalKind(recipients);
+      /* WHO THIS MESSAGE MENTIONS, frozen with the rest of the send. In a public place the tags
+         in the body are mentions; the message carries no recipient. */
+      const mentions: BrowserSignalAudience = composerMentionsFrom(rawBody);
+      const mentionKey = mentions.map(recipientKey).join("+");
       const audienceKey = composerRecipientsKey();
       const attachmentSnapshot = [...stagedAttachments];
       const attachmentKey = attachmentSnapshot
@@ -13571,6 +13668,9 @@ import "../../styles/kylon-command-palette.css";
       let intent = composerIntent;
       if (
         !intent || intent.body !== rawBody || intent.audienceKey !== audienceKey ||
+        /* The same words can name different people after a roster change, and a replayed
+           command id replays what the server already holds. */
+        (intent.mentionKey ?? "") !== mentionKey ||
         intent.attachmentKey !== attachmentKey || intent.signalKind !== signalKind ||
         /* AND THE PLACEMENT IS PART OF THE MESSAGE'S IDENTITY. The command id is the server's
            idempotency key, so replaying it replays what the server already holds: a reader who
@@ -13584,6 +13684,7 @@ import "../../styles/kylon-command-palette.css";
           commandId: uuid(),
           body: rawBody,
           audienceKey,
+          mentionKey,
           attachmentKey,
           signalKind,
           placementChannelId: freshPlacementChannelId,
@@ -13684,6 +13785,7 @@ import "../../styles/kylon-command-palette.css";
         : placementChannel === null
         ? {}
         : { channel: placementChannel.slug };
+      if (mentions.length > 0) placement.mentions = mentions;
       /** The chips a pending or posted row shows: the whole To: set, which is the address. */
       const rowMentions: EntityRef[] = recipients.map((recipient) => ({
         kind: recipient.kind,
@@ -13728,6 +13830,11 @@ import "../../styles/kylon-command-palette.css";
       const sendToken = ++composerSendToken;
       setComposerSending(true);
       visualMentions.set(pendingId, rowMentions);
+      /* The pending row draws its mentions at once, from what this send is about to store. */
+      const mentionRowsFor = (signalId: string): SignalMention[] => mentions.map((mention, position) => ({
+        signalId, position, kind: mention.kind, id: mention.id, source: "author" as const,
+      }));
+      if (mentions.length > 0) signalMentionRows.set(pendingId, mentionRowsFor(pendingId));
       deliveryReceiptCache.set(pendingId, { result: null, checkedAt: 0, phase: "posting" });
       signals.unshift(optimisticSignal);
       input.value = "";
@@ -13866,6 +13973,8 @@ import "../../styles/kylon-command-palette.css";
         );
         signals = [...visible, ...kept];
         visualMentions.delete(pendingId);
+        signalMentionRows.delete(pendingId);
+        if (mentions.length > 0) signalMentionRows.set(posted.id, mentionRowsFor(posted.id));
         deliveryReceiptCache.delete(pendingId);
         visualMentions.set(posted.id, rowMentions);
         deliveryReceiptCache.set(posted.id, { result: null, checkedAt: 0, phase: "accepted" });
@@ -13895,6 +14004,7 @@ import "../../styles/kylon-command-palette.css";
         void refreshDeliveryReceipts(workspaceId, version);
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
+        void refreshSignalMentions(workspaceId, version);
       } catch (caught) {
         /* THE SEND'S OWN TEARDOWN COMES FIRST, before any question about the screen. This
            block used to open with `if (version !== requestVersion || workspaceId !==
@@ -13961,8 +14071,10 @@ import "../../styles/kylon-command-palette.css";
           signal.id !== pendingId && !visibleFailureIds.has(signal.id));
         signals = [...visibleOnFailure, ...keptOnFailure];
         visualMentions.delete(pendingId);
+        signalMentionRows.delete(pendingId);
         deliveryReceiptCache.delete(pendingId);
         if (posted !== null) {
+          if (mentions.length > 0) signalMentionRows.set(posted.id, mentionRowsFor(posted.id));
           visualMentions.set(posted.id, rowMentions);
           deliveryReceiptCache.set(posted.id, { result: null, checkedAt: 0, phase: "accepted" });
         }
@@ -14006,6 +14118,9 @@ import "../../styles/kylon-command-palette.css";
             commandId,
             body: rawBody,
             audienceKey,
+            /* And who it mentions, or the retry would be told the message changed and mint a
+               second command id for one the server may already hold. */
+            mentionKey,
             attachmentKey,
             signalKind,
             placementChannelId,

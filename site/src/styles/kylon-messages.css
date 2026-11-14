@@ -444,3 +444,21 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(.da
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* A mention in a message body: the name, tinted, in the line. It is text, not a control, so it
+   takes no extra height and no hit box. A mention of the reader (or one of their agents) is
+   marked more strongly, which is how a reader finds what was said to them. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-markdown .dashboard__mention {
+  padding: 1px 3px;
+  margin-inline: -1px;
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--k-shell-focus) 78%, var(--k-shell-ink));
+  background: color-mix(in srgb, var(--k-shell-focus) 11%, transparent);
+  font-weight: 500;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-markdown .dashboard__mention[data-mention-viewer] {
+  color: var(--k-shell-ink);
+  background: color-mix(in srgb, #f2b824 30%, transparent);
+}
