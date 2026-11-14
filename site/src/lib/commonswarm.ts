@@ -2925,9 +2925,10 @@ export interface BrowserSignalPlacement {
   /** Send a thread reply to the channel as well. Only valid with a thread root. */
   broadcastToChannel?: boolean;
   /**
-   * People and agents the message mentions. The message stays public; they are told. The edge
-   * refuses a body that carries both mentions and recipients, so this is only for a message
-   * with no recipients (a channel post or a thread reply).
+   * SET ON EVERY PUBLIC MESSAGE (a channel post or a thread reply), empty when nobody is
+   * tagged; left undefined on an addressed one. The people and agents in it are told; the
+   * message stays readable by everyone in the place. The edge refuses a body that carries both
+   * mentions and recipients.
    */
   mentions?: BrowserSignalAudience;
 }
@@ -2950,8 +2951,8 @@ export function browserSignalCommand(
   attachments: readonly BrowserSignalAttachmentRef[] = [],
   placement: BrowserSignalPlacement = {},
 ): Record<string, unknown> {
-  const mentions = placement.mentions ?? [];
-  if (mentions.length > 0 && recipients.length > 0) {
+  const mentions = placement.mentions;
+  if (mentions !== undefined && recipients.length > 0) {
     throw new Error("A message is either addressed or it mentions; it cannot do both.");
   }
   return {
@@ -2963,11 +2964,13 @@ export function browserSignalCommand(
     in_reply_to: null,
     about: null,
     ...(recipients.length === 0 ? {} : { to: toWireRecipients(recipients) }),
-    /* NO KEY AT ALL WHEN NOBODY IS MENTIONED, and that is load-bearing twice. A deployment
-       with mentions switched off refuses a body that has the key, even empty. And with them
-       on, the edge mentions the workspace lead only when the author sent no `mentions`: an
-       empty list would say "the author chose to mention nobody". */
-    ...(mentions.length === 0 ? {} : { mentions: toWireRecipients(mentions) }),
+    /* THE KEY IS THE PUBLIC INTENT, so a public message always carries it, empty or not. A
+       deployment with mentions switched off refuses any body that has the key. Without it
+       that deployment would accept an untagged post and quietly re-address it to the
+       workspace lead, while this page showed it as public. With mentions on, an empty list
+       names nobody and the edge still mentions the lead, exactly as for a body without the
+       key. An addressed message never carries it. */
+    ...(mentions === undefined ? {} : { mentions: toWireRecipients(mentions) }),
     ...(attachments.length === 0 ? {} : { attachments }),
     ...(placement.channel === undefined || placement.channel === null
       ? {}
