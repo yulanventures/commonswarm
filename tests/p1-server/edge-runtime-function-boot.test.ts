@@ -34,6 +34,7 @@ import {
   functionsRoot,
   listFunctionDirectories,
   rewriteFunctionsBind,
+  rewriteEnvFile,
   rewritePublishedPort,
   startComposeEdgeRuntime,
   type EdgeRuntimeHandle,
@@ -109,6 +110,10 @@ test("compose.yaml is the edge-runtime image pin and functions are listed from d
     rewriteFunctionsBind(source, "/tmp/c1-27-functions"),
     /\/tmp\/c1-27-functions:\/home\/deno\/functions-source:ro/,
   );
+  // The scoped env file the box requires is swapped for the test's own; the entry stays required and raw.
+  const withTestEnv = rewriteEnvFile(source, "/tmp/c1-27-edge.env");
+  assert.match(withTestEnv, /^\s+- path: \/tmp\/c1-27-edge\.env\n\s+required: true\n\s+format: raw$/m);
+  assert.doesNotMatch(withTestEnv, /commonswarm-service-env\/edge-runtime\.env/);
   assert.match(source, /^\s+- \.\/main:\/home\/deno\/main:ro$/m);
   assert.match(source, /^\s+- \.\/bootstrap\.sh:\/home\/deno\/deploy\/bootstrap\.sh:ro$/m);
   assert.match(source, /^\s+- \.\/h0-deno\.json:\/home\/deno\/deploy\/h0-deno\.json:ro$/m);

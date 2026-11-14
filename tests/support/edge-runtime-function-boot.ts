@@ -148,6 +148,21 @@ export function rewriteFunctionsBind(source: string, hostPath: string): string {
   return next;
 }
 
+/**
+ * The compose file names one fixed, root-owned env file for the service and requires it. A test
+ * has no such file, and must not need one: it starts the same service definition with its own
+ * env file, so the path is rewritten in the rendered copy, the way the port and the functions
+ * bind are. Everything else about the entry (required, raw format) is kept.
+ */
+export function rewriteEnvFile(source: string, hostPath: string): string {
+  const next = source.replace(
+    /^(\s+- path: )\/etc\/commonswarm-service-env\/edge-runtime\.env$/m,
+    `$1${hostPath}`,
+  );
+  assert.notEqual(next, source, "compose.yaml must name the scoped edge-runtime env file");
+  return next;
+}
+
 export interface EdgeRuntimeHandle {
   project: string;
   image: string;
@@ -174,6 +189,7 @@ export async function startComposeEdgeRuntime(options: {
   const tempCompose = join(options.workDir, "compose.yaml");
   writeFileSync(envFile, options.envText ?? dummyEdgeEnv(), { encoding: "utf8" });
   chmodSync(envFile, 0o600);
+  rendered = rewriteEnvFile(rendered, envFile);
   writeFileSync(tempCompose, rendered);
   await ensureDockerImage(image);
 
@@ -187,7 +203,7 @@ export async function startComposeEdgeRuntime(options: {
     "--project-directory",
     edgeRuntimeDir,
   ];
-  const env = { ...process.env, ...options.composeEnv, COMMONSWARM_EDGE_ENV_FILE: envFile };
+  const env = { ...process.env, ...options.composeEnv };
   const hostNetwork = options.composeEnv?.COMMONSWARM_EDGE_NETWORK_MODE === "host";
   const close = (): void => {
     docker([...composeArgs, "down", "-v", "--remove-orphans"], { timeout: 120_000, env });
