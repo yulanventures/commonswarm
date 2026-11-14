@@ -663,12 +663,7 @@
         "scroll": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
-        "media": "(hover: hover)",
         "hover": "[data-signal-id=\"{message.groupedBroadcast}\"]"
-      },
-      {
-        "media": "(hover: none)",
-        "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-markdown"
       },
       {
         "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-reply"
