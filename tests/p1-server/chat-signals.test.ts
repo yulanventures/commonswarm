@@ -4257,10 +4257,11 @@ Deno.exit(0);
 
     // Verify ownerB (human owner of BOTH localAgentX and hostedPrincipalX, NOT in #lock!) reads ZERO rows across every read surface!
     const allProtectedSignalIds = [askLocalId, ordinaryReplyId, h0ReplyId, hostedAskId, personAReplyToHostedId, hostedReplyId];
+    const statusTargetIds = [...allProtectedSignalIds, mentionHostedXId];
     const ownerBSignals = await viewRowAs(ownerB.id, async (tx) =>
-      await tx`SELECT id FROM swarm_read.signals WHERE id = ANY(${allProtectedSignalIds}::uuid[])`
+      await tx`SELECT id FROM swarm_read.signals WHERE id = ANY(${statusTargetIds}::uuid[])`
     );
-    assert.equal(ownerBSignals.length, 0, "non-member agent owner must read ZERO #lock asks or replies in swarm_read.signals");
+    assert.equal(ownerBSignals.length, 0, "non-member agent owner must read ZERO #lock asks, replies, or mentions in swarm_read.signals");
 
     const [ownerBDecisions] = await viewRowAs(ownerB.id, async (tx) =>
       await tx<{ q: { total: number; asks: unknown[] } }[]>`
@@ -4272,7 +4273,7 @@ Deno.exit(0);
 
     const [ownerBStatuses] = await viewRowAs(ownerB.id, async (tx) =>
       await tx<{ ms: { statuses: unknown[] } }[]>`
-        SELECT swarm_read.message_status(${ws}::uuid, ${allProtectedSignalIds}::uuid[]) AS ms
+        SELECT swarm_read.message_status(${ws}::uuid, ${statusTargetIds}::uuid[]) AS ms
       `
     );
     assert.deepEqual(ownerBStatuses!.ms.statuses, [], "non-member agent owner must read ZERO rows in message_status");
@@ -4287,17 +4288,38 @@ Deno.exit(0);
       "inheriting private channel_id on in_reply_to must NEVER widen directed 1:1 replies to other #lock members",
     );
 
-    // Positive control: personA (authorized recipient/sender in #lock) reads all 6 directed signals and their message_status!
+    // Positive control: personA (authorized recipient/sender in #lock) reads all 4 agent->personA asks/replies in swarm_read.signals,
+    // reads delivery receipts on personA's 2 replies to ownerB's agents (while ownerB & memberC receive null), and reads message_status on #lock mention!
     const personADirected = await viewRowAs(personA.id, async (tx) =>
-      await tx`SELECT id FROM swarm_read.signals WHERE id = ANY(${allProtectedSignalIds}::uuid[])`
+      await tx<{ id: string }[]>`SELECT id::text AS id FROM swarm_read.signals WHERE id = ANY(${allProtectedSignalIds}::uuid[])`
     );
-    assert.equal(personADirected.length, 6, "authorized #lock participant reads all 6 directed asks/replies");
+    assert.deepEqual(
+      personADirected.map((r) => r.id).sort(),
+      [askLocalId, h0ReplyId, hostedAskId, hostedReplyId].sort(),
+      "authorized #lock recipient reads all 4 incoming directed asks/replies in swarm_read.signals",
+    );
+    for (const sentReplyId of [ordinaryReplyId, personAReplyToHostedId]) {
+      const [personAReceipt] = await viewRowAs(personA.id, async (tx) =>
+        await tx<{ r: { addressed: boolean } | null }[]>`SELECT swarm_read.signal_delivery_receipts(${ws}::uuid, ${sentReplyId}::uuid) AS r`
+      );
+      assert.equal(personAReceipt!.r?.addressed, true, "authorized #lock sender reads delivery receipts for own reply to agent");
+      for (const deniedViewerId of [ownerB.id, memberC.id]) {
+        const [deniedReceipt] = await viewRowAs(deniedViewerId, async (tx) =>
+          await tx<{ r: unknown }[]>`SELECT swarm_read.signal_delivery_receipts(${ws}::uuid, ${sentReplyId}::uuid) AS r`
+        );
+        assert.equal(deniedReceipt!.r, null, `viewer ${deniedViewerId} must NOT read delivery receipts on directed #lock reply`);
+      }
+    }
     const [personAStatuses] = await viewRowAs(personA.id, async (tx) =>
       await tx<{ ms: { statuses: Array<{ signal_id: string }> } }[]>`
-        SELECT swarm_read.message_status(${ws}::uuid, ${allProtectedSignalIds}::uuid[]) AS ms
+        SELECT swarm_read.message_status(${ws}::uuid, ${statusTargetIds}::uuid[]) AS ms
       `
     );
-    assert.equal(personAStatuses!.ms.statuses.length, 2, "authorized #lock sender reads message_status for own replies to agents");
+    assert.deepEqual(
+      personAStatuses!.ms.statuses.map((s) => s.signal_id),
+      [mentionHostedXId],
+      "authorized #lock sender reads message_status on #lock agent mention",
+    );
 
     // Remove hostedPrincipalX from #lock while step2.xBatch (holding ONLY #lock signals) is still open,
     // post an open-channel ask, and verify open_hosted_mcp_check_batch automatically advances past the

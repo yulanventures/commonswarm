@@ -938,11 +938,14 @@ BEGIN
       (
         v_human_user_id IS NOT NULL
         AND swarm.actor_can_access_channel(p_workspace_id, signal.channel_id, 'user', v_human_user_id)
-        AND EXISTS (
-          SELECT 1
-          FROM swarm_read.signals AS readable
-          WHERE readable.workspace_id = p_workspace_id
-            AND readable.id = signal.id
+        AND (
+          (signal.from_kind = 'user' AND signal.from_principal = v_human_user_id)
+          OR EXISTS (
+            SELECT 1
+            FROM swarm_read.signals AS readable
+            WHERE readable.workspace_id = p_workspace_id
+              AND readable.id = signal.id
+          )
         )
       )
       OR (
@@ -1308,6 +1311,105 @@ ALTER FUNCTION swarm_read.signal_delivery_receipts_without_wake_path(uuid, uuid,
   OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.signal_delivery_receipts_without_wake_path(uuid, uuid, bytea)
   FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE OR REPLACE FUNCTION swarm_read.signal_delivery_receipts(
+  p_workspace_id uuid, p_signal_id uuid, p_agent_token_hash bytea DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = swarm, pg_catalog AS $$
+DECLARE
+  v_result jsonb;
+  v_receipts jsonb;
+  v_replies jsonb;
+  v_human_user_id uuid := NULLIF(
+    NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub',
+    ''
+  )::uuid;
+  v_agent_principal_id uuid;
+BEGIN
+  v_result := swarm_read.signal_delivery_receipts_without_wake_path(
+    p_workspace_id, p_signal_id, p_agent_token_hash);
+  IF v_result IS NULL THEN RETURN NULL; END IF;
+
+  IF v_result ->> 'addressed' = 'true' THEN
+    SELECT COALESCE(jsonb_agg(
+      CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
+        receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
+          SELECT 1 FROM swarm.wake_path_eligible_deliveries AS d
+          WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
+            AND d.principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
+        ))
+      ELSE receipt.value END ORDER BY receipt.ordinality), '[]'::jsonb)
+    INTO v_receipts FROM jsonb_array_elements(v_result -> 'receipts')
+      WITH ORDINALITY AS receipt(value, ordinality);
+    v_result := jsonb_set(v_result, '{receipts}', v_receipts, false);
+  END IF;
+
+  IF v_human_user_id IS NULL AND p_agent_token_hash IS NOT NULL THEN
+    SELECT original.from_principal
+    INTO v_agent_principal_id
+    FROM swarm.signals AS original
+    WHERE original.workspace_id = p_workspace_id
+      AND original.id = p_signal_id
+      AND original.from_kind = 'agent';
+  END IF;
+
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'responder_principal_id', reply.from_principal,
+      'responder_display_name', CASE
+        WHEN reply.from_kind = 'user' THEN responder_user.display_name
+        ELSE responder_agent.name
+      END,
+      'reply_signal_id', reply.id,
+      'reply_status', reply.reply_status,
+      'created_at', reply.created_at
+    ) ORDER BY reply.created_at, reply.id
+  ), '[]'::jsonb)
+  INTO v_replies
+  FROM swarm.signals AS reply
+  LEFT JOIN swarm.users AS responder_user
+    ON reply.from_kind = 'user'
+   AND responder_user.user_id = reply.from_principal
+  LEFT JOIN swarm.agent_principals AS responder_agent
+    ON reply.from_kind = 'agent'
+   AND responder_agent.workspace_id = reply.workspace_id
+   AND responder_agent.principal_id = reply.from_principal
+  WHERE reply.workspace_id = p_workspace_id
+    AND reply.in_reply_to = p_signal_id
+    AND (
+      (v_human_user_id IS NOT NULL
+       AND (reply.channel_id IS NULL OR swarm.actor_can_access_channel(p_workspace_id, reply.channel_id, 'user', v_human_user_id))
+       AND (
+        reply.to_user_id = v_human_user_id OR
+        (reply.from_kind = 'user' AND reply.from_principal = v_human_user_id) OR
+        EXISTS (
+          SELECT 1 FROM swarm.agent_principals AS owned
+          WHERE owned.workspace_id = reply.workspace_id
+            AND owned.owner_user_id = v_human_user_id
+            AND (
+              owned.principal_id = reply.to_agent_principal_id OR
+              (reply.from_kind = 'agent' AND owned.principal_id = reply.from_principal)
+            )
+        )
+      ))
+      OR
+      (v_agent_principal_id IS NOT NULL
+       AND (reply.channel_id IS NULL OR swarm.actor_can_access_channel(p_workspace_id, reply.channel_id, 'agent', v_agent_principal_id))
+       AND (
+        reply.to_agent_principal_id = v_agent_principal_id OR
+        (reply.from_kind = 'agent' AND reply.from_principal = v_agent_principal_id)
+      ))
+    );
+
+  RETURN v_result || jsonb_build_object('replies', v_replies);
+END;
+$$;
+
+ALTER FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
+  TO authenticated, swarm_read;
 
 -- 14. Hosted MCP check batch guard: enforce private-channel membership on recorded batch ids.
 CREATE OR REPLACE FUNCTION swarm.hosted_mcp_check_batches_guard()
