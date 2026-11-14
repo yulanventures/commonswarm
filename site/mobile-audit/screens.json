@@ -637,7 +637,7 @@
         "click": "[data-command-palette-item=\"channel:design-studio\"]"
       },
       {
-        "waitFor": "form[data-composer][data-composer-audience=\"public\"] [data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])"
+        "waitFor": "form[data-composer][data-audience=\"public\"] [data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])"
       }
     ],
     "ready": "[data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])",
