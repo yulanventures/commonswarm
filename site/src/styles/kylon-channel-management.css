@@ -149,6 +149,13 @@ live-dashboard.dashboard[data-kylon-shell] :is(.hm-ws-header, .cs-kylon-workspac
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-rail { flex: 1 1 auto; min-inline-size: 0; max-inline-size: 100%; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body .hm-frame__rail-content { min-inline-size: 0; max-inline-size: 100%; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-body { min-inline-size: 0; }
+  /* Nothing in the drawer is reached by panning sideways. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-org-context-scroll { overflow-x: hidden; overflow-y: auto; }
+  /* The docked ⋯ menu is as wide as the drawer's own column, never the fixed 20rem that ran past a 360px screen's drawer. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-kylon-workspace-menu .hm-menu__list {
+    inset-inline: 0; min-inline-size: 0; max-inline-size: none;
+  }
 }
 
 /* The rail: Starred sits above Channels with the same rows. A muted channel's name is quiet, and it
