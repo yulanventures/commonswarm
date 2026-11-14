@@ -155,6 +155,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-not
   clip-path: inset(50%);
   white-space: nowrap;
 }
+/* In a channel or a thread the row holds no chips. It appears only to say that a tag mentions
+ * nobody, and there the sentence is the row's whole content, so it is shown. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-public] .dashboard__composer-to-note {
+  position: static;
+  inline-size: auto;
+  block-size: auto;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+}
 @media (width > 64rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-chips {
     padding-block: 1px;
