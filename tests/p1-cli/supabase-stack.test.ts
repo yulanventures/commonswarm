@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -512,6 +512,59 @@ test("run-db-tool passes only validated trailing arguments", async () => {
     });
     assert.equal(cronTarget.status, 0, cronTarget.stderr);
     assert.deepEqual(cronTarget.stdout.trim().split("\n").slice(-2), ["/work/migrate/restore-cron-jobs.sh", "target"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Recovery contract: restore setup must refuse a database that lacks a Broadcast policy the
+// migrations leave on realtime.messages. The expected names come from the migrations, never a
+// list typed here. The names checked are in the SQL the real script hands to psql. The psql
+// stand-in records that SQL and evaluates none of it, so this proves what recovery asks the
+// database, not what the database answers.
+test("setup-realtime requires every realtime.messages policy the migrations leave in place", async () => {
+  const migrations = join(root, "supabase", "migrations");
+  const live = new Set<string>();
+  for (const file of (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort()) {
+    const statements = (await readFile(join(migrations, file), "utf8"))
+      .matchAll(/^(CREATE|DROP)\s+POLICY\s+(?:IF\s+EXISTS\s+)?"([^"]+)"\s+ON\s+realtime\.messages\b/gim);
+    for (const [, verb, policy] of statements) {
+      if (verb.toUpperCase() === "CREATE") live.add(policy);
+      else live.delete(policy);
+    }
+  }
+  assert.ok(live.size > 0, "the migrations must leave at least one realtime.messages policy");
+
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-setup-realtime-"));
+  try {
+    const bin = join(directory, "bin");
+    const sent = join(directory, "sent.sql");
+    const serviceFile = join(directory, "pg_service.conf");
+    await mkdir(bin);
+    await writeFile(serviceFile, "", { mode: 0o600 });
+    const fakePsql = join(bin, "psql");
+    await writeFile(fakePsql, '#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = --file ]; then cat "$2" >>"$PSQL_SENT"; fi\n  shift\ndone\n', { mode: 0o700 });
+    await chmod(fakePsql, 0o700);
+    const run = spawnSync("bash", [join(stackDir, "migrate", "setup-realtime.sh")], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        TMPDIR: directory,
+        PGSERVICEFILE: serviceFile,
+        PSQL_SENT: sent,
+        MIGRATION_ARTIFACT_DIR: join(directory, "artifact"),
+        TARGET_DATABASE_URL: "postgresql://fixture.invalid/postgres",
+        SELF_HOST_TENANT_NAME: "fixture-tenant",
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const sql = await readFile(sent, "utf8");
+    const unrequired = [...live].filter((policy) => !sql.includes(`'${policy}'`));
+    assert.deepEqual(unrequired, [], `setup-realtime does not require: ${unrequired.join(", ")}`);
+    const count = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"][live.size];
+    assert.match(run.stdout, new RegExp(`all ${count} private Broadcast policies are present`), "the completion log must state the number of policies required");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
