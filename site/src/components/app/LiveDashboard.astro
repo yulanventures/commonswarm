@@ -3683,7 +3683,7 @@ import "../../styles/kylon-command-palette.css";
       const row = one<HTMLElement>("[data-composer-to]");
       if (!row) return;
       /* A public place has no To: set. The row appears there only to explain a tag it could not honour. */
-      if (composerIsPublic()) { row.hidden = composerToNotice === ""; return; }
+      if (composerIsPublic()) { row.hidden = composerToNotice === "" && composerPrivateDraftTo.length === 0; return; }
       /* In a Direct Message the composer already says who it goes to; the row returns only for extra names. */
       if (typeof activeDm !== "undefined" && activeDm && !composerIsReplying() && composerRecipients().length <= 1) { row.hidden = true; return; }
       const picker = one<HTMLElement>("[data-mention-picker]");
@@ -3719,7 +3719,12 @@ import "../../styles/kylon-command-palette.css";
       if (composerIsPublic()) {
         row?.removeAttribute("aria-disabled");
         row?.toggleAttribute("data-composer-to-locked", false);
-        note.textContent = composerToNotice;
+        /* The place is read now, not when the pass ran: moving to a channel runs the pass first
+           and names the place afterwards, and the sentence has to name where Send would post. */
+        note.textContent = [
+          writtenTo.length === 0 ? "" : privateDraftNotice(writtenTo.map(composerRecipientName), composerPlaceLabel()),
+          composerToNotice,
+        ].filter((clause) => clause !== "").join(" ");
         return;
       }
       /* THE ROW DRAWS WHAT THE SEND POSTS, from the one derivation both of them read. While a
@@ -3899,10 +3904,7 @@ import "../../styles/kylon-command-palette.css";
       composerToLive = true;
       composerPrivateDraftTo = writtenTo;
       composerToNotice = publicPlace
-        ? [
-          writtenTo.length === 0 ? "" : privateDraftNotice(writtenTo.map(composerRecipientName), composerPlaceLabel()),
-          composerMentionNotice(parsed),
-        ].filter((clause) => clause !== "").join(" ")
+        ? composerMentionNotice(parsed)
         : composerAddressNotice(
           state,
           {
@@ -11229,11 +11231,15 @@ import "../../styles/kylon-command-palette.css";
       if (name) name.textContent = audience.name;
       const sentence = one<HTMLElement>("[data-composer-audience-sentence]");
       if (sentence) sentence.textContent = audience.sentence;
+      /* The form carries the state too, for the field's outline. A different attribute from the
+         marker's own: `[data-composer-audience]` must keep selecting the marker and nothing else. */
       const form = one<HTMLElement>("[data-composer]");
-      if (form) form.dataset.composerAudience = audience.kind;
+      if (form) form.dataset.audience = audience.kind;
     };
     const syncComposerPlacement = (): void => {
-      renderComposerAudience();
+      /* The row under the box and the marker beside Send both name the place, so they are
+         drawn again whenever the place is. */
+      renderComposerTo();
       for (const row of all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")) {
         markThreadReplyRoot(row);
       }
