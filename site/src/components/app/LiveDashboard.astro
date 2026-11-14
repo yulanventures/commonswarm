@@ -5416,7 +5416,11 @@ import "../../styles/kylon-command-palette.css";
       const composerName = activeChannelId === null ? "Message" : `Message ${activeChannelName()}`;
       const composerLabel = one<HTMLElement>("[data-composer-label]");
       if (composerLabel) composerLabel.textContent = composerName;
-      one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
+      /* THE BOX IS NAMED IN ONE PLACE. This used to write the box's accessible name here as well, from the channel
+         alone. The shell is drawn again on every unread read, so in a direct message it replaced "Message <name>"
+         with a bare "Message" a moment after the placement had named it, and a thread reply lost "Thread reply"
+         the same way. The placement owns the name and reads the label set above. */
+      syncComposerPlacement();
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
