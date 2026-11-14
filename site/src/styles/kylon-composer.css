@@ -113,6 +113,13 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send[d
   color: var(--k-shell-accent-ink);
   opacity: 1;
 }
+/* Nothing to send yet: the same box, with no fill, so it does not ask to be pressed. Its size never changes,
+   so the first character typed moves nothing. Sending keeps the fill; that state is busy, not empty. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send:disabled:not([data-state="posting"]) {
+  color: var(--k-shell-muted);
+  background: transparent;
+  cursor: default;
+}
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-send-icon {
   color: inherit;
 }

@@ -465,25 +465,26 @@ test('workspace and channel composers keep their own addresses when a thread clo
     const all=()=>[];
     let channel=null, threadReplyRoot=null;
     const activeChannel=()=>channel, channelLabel=slug=>slug==='everyone' ? 'everyone' : '#'+slug;
+    const GENERAL_CHANNEL_SLUG='general';
     const threadReplyPlaceOf=()=>({kind:'unfiled'}), threadReplyBlock=()=>null, threadReplyMayBroadcast=()=>false;
     const renderComposerTo=()=>{};
   `, context);
   runInContext(await dashboardFunctions(['syncComposerPlacement'], ['markThreadReplyRoot']), context);
   runInContext('syncComposerPlacement()', context);
-  assert.equal(input.placeholder, 'Message…');
+  assert.equal(input.placeholder, 'Message #general', 'All messages posts to #general, and says so');
   assert.equal(attributes.get('aria-label'), 'Message Home');
   runInContext("channel={slug:'mobile'}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Message #mobile');
   assert.equal(attributes.get('aria-label'), 'Message in #mobile');
   runInContext("channel={slug:'everyone'}; threadReplyRoot={}; syncComposerPlacement();", context);
-  assert.equal(input.placeholder, 'Reply in this thread');
+  assert.equal(input.placeholder, 'Reply…');
   assert.equal(attributes.get('aria-label'), 'Thread reply');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
   assert.equal(input.placeholder, 'Message everyone');
   runInContext('channel=null; threadReplyRoot={}; syncComposerPlacement();', context);
-  assert.equal(input.placeholder, 'Reply in this thread');
+  assert.equal(input.placeholder, 'Reply…');
   runInContext('threadReplyRoot=null; syncComposerPlacement();', context);
-  assert.equal(input.placeholder, 'Message…');
+  assert.equal(input.placeholder, 'Message #general');
   assert.equal(attributes.get('aria-label'), 'Message Home');
   label.textContent = 'Message Another workspace';
   runInContext('syncComposerPlacement()', context);
@@ -496,9 +497,9 @@ test('workspace and channel composers keep their own addresses when a thread clo
     channel = null; threadReplyRoot = null;
     syncComposerPlacement();
   `, context);
-  assert.equal(input.placeholder, 'Message… (Mr. Marketing leads)');
+  assert.equal(input.placeholder, 'Message #general', 'the lead is named in the header, never in the box');
   runInContext("channel={slug:'marketing'}; syncComposerPlacement();", context);
-  assert.equal(input.placeholder, 'Message #marketing — Mr. Marketing leads');
+  assert.equal(input.placeholder, 'Message #marketing');
 });
 
 /** Record the row builder's tree operations. Sanitizing and topic parsing are separate
@@ -945,6 +946,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const agents=roster, channels=[{channelId:'mobile',slug:'mobile'}], signals=[], expandedSignalIds=new Set(), expandedThreadIds=new Set();
     const MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'};
     const channelById=(rows,id)=>rows.find(row=>row.channelId===id)??null, activeChannel=()=>null;
+    const GENERAL_CHANNEL_SLUG='general';
     const signalIsDirectToViewer=()=>false, initials=()=>'', kindLabel=kind=>kind, markAgentAvatar=()=>{};
     const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), brainTopicNames=()=>[], appendDeliveryReceipt=()=>{};
     const entityName=entity=>agentById.get(entity.id).name;
@@ -968,7 +970,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     loadedRows.splice(0, loadedRows.length, row);
     reply.handlers.get('click')!();
     assert.equal(target.textContent, expected, `${id}: the row's author and root channel reach the reply bar`);
-    assert.equal(input.placeholder, 'Reply in this thread');
+    assert.equal(input.placeholder, 'Reply…');
     assert.equal(row.getAttribute('data-thread-reply-root'), '', 'the actual reply row carries its selected-root state');
     runInContext('setThreadReplyRoot(null)', context);
     assert.equal(row.getAttribute('data-thread-reply-root'), null, 'closing clears existing loaded rows without a feed rebuild');
