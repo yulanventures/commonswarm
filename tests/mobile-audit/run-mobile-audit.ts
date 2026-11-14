@@ -78,7 +78,11 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   requiresSeed?: string[];
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
    *  as after a deploy; the page's navigation itself is served unchanged. */
-  newBuild?: true }
+  newBuild?: true;
+  /** Captured by itself, after the pooled screens of its pass: it leaves something behind that another open page of
+   *  the same workspace would pick up (a composer draft, which is stored per workspace). The browser context ends
+   *  with the pass, so nothing outlives it. */
+  alone?: true }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
 const STARTER: Screen[] = [
@@ -397,11 +401,14 @@ async function main(): Promise<void> {
        own measurement: the list scrolls under a held pointer or the rows around a measured one move. So a screen with
        such a spec is captured by itself, after the pooled ones. Results keep the order the screens were given in. */
     const postsRefreshNote = (id: string) => (HOVER_WITNESSES[id] ?? []).some(spec => spec.focusAcrossRebuild);
-    const runScreens = async <T extends { id: string }, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> => {
+    /* A screen the manifest marks `alone` leaves state behind for its workspace; it runs last of all, after the note
+       posters, so no later page of the pass can open with that state showing. */
+    const runScreens = async <T extends { id: string; alone?: true }, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> => {
       const done = new Map<T, R>();
-      const pooled = items.filter(item => !postsRefreshNote(item.id));
+      const pooled = items.filter(item => !postsRefreshNote(item.id) && !item.alone);
       (await runPool(pooled, 3, worker)).forEach((result, index) => done.set(pooled[index]!, result));
-      for (const item of items) if (postsRefreshNote(item.id)) done.set(item, await worker(item));
+      for (const item of items) if (postsRefreshNote(item.id) && !item.alone) done.set(item, await worker(item));
+      for (const item of items) if (item.alone) done.set(item, await worker(item));
       return items.map(item => done.get(item)!);
     };
 
