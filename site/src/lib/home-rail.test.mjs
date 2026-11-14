@@ -197,3 +197,19 @@ test("a sample rail and an archived row never move", () => {
     "live rows move; an archived row does not");
   assert.deepEqual(["a", "c", "z"].map((id) => shortcut(build(true), id)), ["undefined", "undefined", "undefined"]);
 });
+
+test("a private channel's row draws a lock in place of the hash and says private", () => {
+  const root = rail(ready([row("a", "quotes", { private: true }), row("b", "ops")]));
+  const link = (id) => find(root, (node) => node.dataset?.railChannel === id)[0];
+  const mark = (id) => link(id).children.find((node) => node.className === "hm-rail__icon");
+  assert.equal(mark("a").dataset.icon, "lock");
+  assert.equal(mark("b").dataset.icon, "workspace");
+  assert.equal(link("a").attrs["aria-label"], "#quotes, private");
+  assert.equal(link("a").title, "#quotes (private)");
+  assert.equal("private" in link("a").dataset, true);
+  assert.equal("private" in link("b").dataset, false);
+  assert.equal(link("b").attrs["aria-label"], "#ops");
+});
+  const old = find(archived, (node) => node.dataset?.railChannel === "z")[0];
+  if (old) assert.equal(old.children.find((node) => node.className === "hm-rail__icon").dataset.icon, "archive");
+});
