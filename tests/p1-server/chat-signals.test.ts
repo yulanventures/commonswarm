@@ -3021,36 +3021,57 @@ test("CM-3a private channel isolation: human, non-member admin, and sibling-agen
   assert.deepEqual(siblingDirectedSeen.body, agentSeenUnknown.body);
 
   const [wakeAdmitted] = await sql<{ ok: boolean }[]>`
-    SELECT swarm.agent_delivery_is_wakeable(${f.workspace}::uuid, ${directedInLockId}::uuid, ${f.principal}::uuid) AS ok
+    SELECT swarm.agent_delivery_is_wakeable(${directedInLockId}::uuid, ${f.workspace}::uuid, ${f.principal}::uuid) AS ok
   `;
   const [wakeOutsider] = await sql<{ ok: boolean }[]>`
-    SELECT swarm.agent_delivery_is_wakeable(${f.workspace}::uuid, ${directedInLockId}::uuid, ${f.principalTwo}::uuid) AS ok
+    SELECT swarm.agent_delivery_is_wakeable(${directedInLockId}::uuid, ${f.workspace}::uuid, ${f.principalTwo}::uuid) AS ok
   `;
   assert.equal(wakeAdmitted?.ok, true, "admitted agent is wakeable on #lock ask");
   assert.equal(wakeOutsider?.ok, false, "SQL agent_delivery_is_wakeable must reject non-member sibling agent");
 
   await sql.begin(async (tx) => {
     await tx.unsafe("SET LOCAL ROLE swarm_read");
-    const [u2] = await tx<{ u: { channels: Array<{ channel_id: string }> } }[]>`
-      SELECT swarm_read.agent_channel_unread(
-        ${createHash("sha256").update(f.agentTokenTwo).digest()},
-        ${f.workspace}::uuid
-      ) AS u
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({ role: "authenticated", sub: f.ownerId, agent_principal_id: f.principal })},
+        true
+      )
     `;
+    const [u1] = await tx<{ u: Array<{ channel_id: string | null; slug: string }> | null }[]>`
+      SELECT swarm_read.agent_channel_unread(${f.workspace}::uuid) AS u
+    `;
+    assert.ok(Array.isArray(u1?.u), "admitted agent receives channel unread list");
     assert.equal(
-      u2!.u.channels.some((c) => c.channel_id === lockId),
+      u1!.u!.some((c) => c.channel_id === lockId),
+      true,
+      "agent_channel_unread includes #lock for admitted agent",
+    );
+
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({ role: "authenticated", sub: f.ownerId, agent_principal_id: f.principalTwo })},
+        true
+      )
+    `;
+    const [u2] = await tx<{ u: Array<{ channel_id: string | null; slug: string }> | null }[]>`
+      SELECT swarm_read.agent_channel_unread(${f.workspace}::uuid) AS u
+    `;
+    assert.ok(Array.isArray(u2?.u), "non-member sibling agent receives channel unread list");
+    assert.equal(
+      u2!.u!.some((c) => c.channel_id === lockId),
       false,
       "agent_channel_unread must omit #lock for non-member agent",
     );
     await tx`
       SELECT swarm.agent_channel_read_advance(
-        ${createHash("sha256").update(f.agentTokenTwo).digest()},
         ${f.workspace}::uuid,
-        ${lockId}::uuid,
-        statement_timestamp(),
+        ${lockSlug},
         ${lockSignalId}::uuid
       )
     `;
+    await tx.unsafe("RESET ROLE");
   });
   const advanceRows = await sql`
     SELECT channel_id FROM swarm.agent_channel_reads
@@ -3675,12 +3696,12 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
   // 2. swarm_read.agent_wake_path (while privInboundAsk is unacked & unleased):
   // personA sees agentX's unobserved #lock delivery; ownerB & outsiderC see 0 rows!
   const wakePathAs = async (userId: string) =>
-    await viewRowAs(userId, async (tx) =>
+    (await viewRowAs(userId, async (tx) =>
       await tx<{ principal_id: string }[]>`
         SELECT principal_id::text FROM swarm_read.agent_wake_path WHERE workspace_id = ${ws}::uuid
       `
-    );
-  assert.deepEqual((await wakePathAs(personA.id)).map((r) => r.principal_id), [agentX.principal]);
+    )).map((r) => r.principal_id);
+  assert.deepEqual(await wakePathAs(personA.id), [agentX.principal]);
   assert.deepEqual(await wakePathAs(ownerB.id), [], "non-member agent owner must NOT see #lock row in agent_wake_path");
   assert.deepEqual(await wakePathAs(outsiderC.id), [], "outsider must NOT see #lock row in agent_wake_path");
 
