@@ -155,6 +155,115 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-not
   clip-path: inset(50%);
   white-space: nowrap;
 }
+/* WHO CAN READ THE NEXT MESSAGE, beside Send. The marker sits in the field's own control row,
+ * left of Attach, and the text keeps clear of it. Private is the loud state: a filled marker
+ * with a lock, and a standing outline on the whole field. Public is a hash and the place. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+  position: absolute;
+  inset-inline-end: 100px;
+  inset-block-end: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  max-inline-size: 9.5rem;
+  block-size: 24px;
+  padding-inline: 8px;
+  border-radius: 6px;
+  color: var(--k-shell-secondary);
+  background: transparent;
+  font: 500 12px/24px var(--k-shell-font);
+  pointer-events: auto;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-name {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-hash {
+  color: var(--k-shell-muted);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-lock {
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"] .dashboard__composer-audience-lock,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="private"] .dashboard__composer-audience-hash {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="private"] {
+  color: var(--k-shell-surface);
+  background: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer[data-composer-audience="private"] .dashboard__composer-input:not(:focus-within)::before {
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-sentence {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* The text stops short of the marker at every length, so a long line never runs under it. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+  padding-inline-end: calc(104px + 9.5rem + 8px);
+}
+@media (width <= 40rem) {
+  /* A phone has no room for the place beside the box, and the header above already names it.
+     Public keeps its hash; private keeps the lock and as much of the name as fits. */
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience {
+    max-inline-size: 6rem;
+    padding-inline: 6px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience[data-audience="public"] .dashboard__composer-audience-name {
+    display: none;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer textarea,
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:focus-within):has(.dashboard__composer-attachments[hidden]) textarea {
+    padding-inline-end: calc(104px + 6rem + 6px);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]) textarea {
+    padding-inline-end: calc(104px + 30px);
+  }
+}
+/* A draft written to someone, sitting in a public composer: the row under the box says so and
+ * offers the way back. It is a caution, so it is drawn as one. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-warning] {
+  color: var(--k-shell-ink);
+  background: color-mix(in srgb, #f2b824 22%, var(--k-shell-surface));
+  border-color: color-mix(in srgb, #f2b824 60%, var(--k-shell-line));
+  font-size: 13px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-private {
+  min-block-size: 28px;
+  padding: 2px 10px;
+  color: var(--k-shell-ink);
+  background: var(--k-shell-surface);
+  border: 1px solid var(--k-shell-control);
+  border-radius: 6px;
+  font: 500 12px/1.4 var(--k-shell-font);
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-private[hidden] {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-private:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+@media (width <= 64rem), (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to-private {
+    min-block-size: 44px;
+  }
+}
 /* In a channel or a thread the row holds no chips. It appears only to say that a tag mentions
  * nobody, and there the sentence is the row's whole content, so it is shown. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-to[data-composer-to-public] .dashboard__composer-to-note {

@@ -585,3 +585,75 @@ export const composerMentionNotice = (
   if (parsed.ambiguous.length > 0) clauses.push(mentionAmbiguousNotice(parsed.ambiguous));
   return clauses.join(" ");
 };
+
+/**
+ * A DRAFT WRITTEN TO SOMEONE, NOW SITTING IN A PUBLIC COMPOSER.
+ *
+ * A draft belongs to the workspace, not to the place it was typed in, and before public
+ * mentions a tag in a channel made the message private. So the words in the box can have been
+ * written for particular people while the composer they are in posts to everyone. The stored
+ * To: set is the record of that. It is never sent from a public place and never dropped in
+ * silence: it is named, with where the message would go instead, until the draft is sent,
+ * emptied or moved to a Direct Message.
+ *
+ * Returns who the draft was written to and who is still here; empty when there is nothing to
+ * say (no stored set, an empty one, or nothing typed).
+ */
+export const privateDraftRecipients = (
+  body: string,
+  draftTo: readonly ComposerRecipient[] | null | undefined,
+  known: (entity: ComposerRecipient) => boolean,
+): ComposerRecipient[] =>
+  body.trim() === "" || draftTo === null || draftTo === undefined
+    ? []
+    : pruneComposerRecipients(draftTo, known);
+
+/** The sentence for it. `place` is the channel's label, e.g. "#design". */
+export const privateDraftNotice = (names: readonly string[], place: string): string =>
+  `This was written to ${joinNames(names)}. Sent here, everyone in ${place} can read it.`;
+
+/** The control that takes the draft back to where it was written for. */
+export const privateDraftActionLabel = (names: readonly string[]): string =>
+  `Send to ${joinNames(names)} instead`;
+
+/**
+ * WHAT A PUBLIC PASS WRITES INTO THE STORED DRAFT'S ADDRESS: exactly what was already there.
+ * A public composer has no To: set of its own, so it has nothing to store, and overwriting the
+ * stored set with its empty one is how a private draft would lose its address without a word.
+ * An addressed composer stores the set on screen.
+ */
+export const draftAddressToStore = <Stored, Live>(
+  publicPlace: boolean,
+  stored: { to?: Stored; applied?: readonly string[] } | null,
+  live: { to: Live; applied: readonly string[] } | null,
+): { to: Stored | Live | undefined; applied: readonly string[] } =>
+  !publicPlace && live !== null
+    ? { to: live.to, applied: live.applied }
+    : { to: stored?.to, applied: stored?.applied ?? [] };
+
+/**
+ * WHO CAN READ THE NEXT MESSAGE, for the marker beside Send. One of two states and never
+ * neither: private to named people, or public in a named place.
+ */
+export interface ComposerAudience {
+  kind: "private" | "public";
+  /** What the marker shows after its glyph. */
+  name: string;
+  /** The whole fact, for a screen reader and the hover title. */
+  sentence: string;
+}
+export const composerAudience = (
+  privateTo: readonly string[],
+  place: string,
+): ComposerAudience =>
+  privateTo.length > 0
+    ? {
+      kind: "private",
+      name: privateTo.length === 1 ? privateTo[0]! : `${privateTo[0]!} +${privateTo.length - 1}`,
+      sentence: `Private. Only ${joinNames(privateTo)} can read this.`,
+    }
+    : {
+      kind: "public",
+      name: place.replace(/^#/u, ""),
+      sentence: `Public. Everyone in ${place} can read this.`,
+    };
