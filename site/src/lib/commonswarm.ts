@@ -57,6 +57,8 @@ import {
 import {
   CHANNEL_INVOLVEMENT_LEVELS,
   channelRefusalMessage,
+  parseChannelCreationPolicy,
+  type ChannelCreationPolicy,
   type ChannelInvolvement,
   type WorkspaceChannel,
 } from "./channels.js";
@@ -3285,6 +3287,33 @@ export async function reorderChannels(session: Session, commandId: string, works
     "CommonSwarm did not save that order");
 }
 
+/**
+ * Who may create channels in the workspace. An owner or admin only; the server says so otherwise.
+ * Returns the policy the server now holds.
+ */
+export async function setWorkspaceChannelPolicy(session: Session, commandId: string, workspaceId: string,
+  policy: ChannelCreationPolicy): Promise<ChannelCreationPolicy | null> {
+  const { status, body } = await postCommand(session, commandId,
+    { kind: "workspace_channel_policy_set", channel_creation_policy: policy },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status !== 200 || body.status !== "accepted") {
+    throw new Error(channelRefusalMessage(status, body, "CommonSwarm did not save that"));
+  }
+  return parseChannelCreationPolicy(body.channel_creation_policy ?? policy);
+}
+
+/** One workspace's channel creation policy, read again. `undefined` when the workspace is not readable. */
+export async function workspaceChannelPolicy(workspaceId: string): Promise<ChannelCreationPolicy | null | undefined> {
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline("the workspace", signal => c
+    .schema("swarm_read").from("workspaces").select("*")
+    .eq("workspace_id", workspaceId).limit(1).abortSignal(signal));
+  if (error) throw new Error(error.message);
+  const row = (data ?? [])[0];
+  return row ? parseChannelCreationPolicy(row.channel_creation_policy) : undefined;
+}
+
 export async function unarchiveChannel(
   session: Session,
   commandId: string,
@@ -3618,10 +3647,15 @@ export async function myAccountAgents(): Promise<AccountAgent[]> {
  * an empty set rather than an error: no one can probe whether a workspace id exists.
  * archived_at is filtered here because an archived workspace is not somewhere you can work.
  */
-export async function myWorkspaces(): Promise<{ id: string; name: string; orgId: string; orgName: string; leadAgentPrincipalId: string | null }[]> {
+export interface MyWorkspace {
+  id: string; name: string; orgId: string; orgName: string; leadAgentPrincipalId: string | null;
+  /** Who may create channels. `null` is a policy this build does not know. */
+  channelCreationPolicy: ChannelCreationPolicy | null;
+}
+export async function myWorkspaces(): Promise<MyWorkspace[]> {
   const c = client();
   if (!c) throw new NoDeployment();
-  const workspaces: { id: string; name: string; orgId: string; orgName: string; leadAgentPrincipalId: string | null }[] = [];
+  const workspaces: MyWorkspace[] = [];
   const pageSize = 50;
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await readWithDeadline("your workspaces", signal => c
@@ -3636,7 +3670,8 @@ export async function myWorkspaces(): Promise<{ id: string; name: string; orgId:
       orgName: String(row.org_display_name ?? row.name ?? ""),
       leadAgentPrincipalId: typeof row.lead_agent_principal_id === "string" && row.lead_agent_principal_id.length > 0
         ? row.lead_agent_principal_id
-        : null })).filter(workspace => workspace.id.length > 0));
+        : null,
+      channelCreationPolicy: parseChannelCreationPolicy(row.channel_creation_policy) })).filter(workspace => workspace.id.length > 0));
     if (page.length < pageSize) return workspaces;
   }
 }

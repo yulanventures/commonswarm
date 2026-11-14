@@ -1,3 +1,11 @@
+import {
+  CHANNEL_CREATION_LABELS,
+  CHANNEL_CREATION_POLICIES,
+  CHANNEL_CREATION_SAVED,
+  CHANNEL_CREATION_TITLE,
+  type ChannelCreationPolicy,
+} from "./channels";
+
 export interface WorkspaceSettingsOptions {
   name: string;
   workspaceId: string;
@@ -7,6 +15,15 @@ export interface WorkspaceSettingsOptions {
   /** Owners and admins may rename; the server decides. */
   canRename?: boolean;
   onRename?(name: string): Promise<void>;
+  /**
+   * Owners and admins: who may create channels. Absent for everyone else. `value` is `null` under a
+   * policy this build does not know, and then neither choice is marked. `onChange` resolves with the
+   * policy the server now holds.
+   */
+  channelPolicy?: {
+    value: ChannelCreationPolicy | null;
+    onChange(policy: ChannelCreationPolicy): Promise<ChannelCreationPolicy | null>;
+  };
   /** Owners and admins: open the Clean up dialog. Absent for everyone else. */
   onCleanup?(): void;
   moveDestinations?: readonly { id: string; name: string }[];
@@ -160,7 +177,9 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
-  root.replaceChildren(titleRow, counts, identity, cleanup);
+  root.replaceChildren(titleRow, counts, identity);
+  if (options.channelPolicy) root.append(channelPolicyControl(root, options.channelPolicy));
+  root.append(cleanup);
   if (options.moveDestinations?.length && options.onMove) {
     const form = document.createElement("form");
     form.className = "dashboard__workspace-move";
@@ -220,6 +239,69 @@ export function renderWorkspaceSettings(
   }
   root.append(danger);
   return { confirmInput: input, closeButton: button };
+}
+
+/**
+ * Who may create channels: two native radios that save on change. The choice moves at once; a
+ * refusal puts it back and says why. A second change waits for the first to be answered.
+ */
+function channelPolicyControl(root: HTMLElement,
+  policy: NonNullable<WorkspaceSettingsOptions["channelPolicy"]>): HTMLElement {
+  const document = root.ownerDocument;
+  const group = document.createElement("section");
+  group.className = "dashboard__workspace-channel-policy";
+  group.dataset.workspaceChannelPolicy = "";
+  group.setAttribute("role", "radiogroup");
+  const title = document.createElement("h3");
+  title.id = "dashboard-workspace-channel-policy-title";
+  title.textContent = CHANNEL_CREATION_TITLE;
+  group.setAttribute("aria-labelledby", title.id);
+  const status = document.createElement("p");
+  status.className = "dashboard__workspace-channel-policy-status";
+  status.dataset.workspaceChannelPolicyStatus = "";
+  status.setAttribute("role", "status");
+  let held = policy.value;
+  const inputs = new Map<ChannelCreationPolicy, HTMLInputElement>();
+  const show = (value: ChannelCreationPolicy | null): void => {
+    for (const [key, input] of inputs) input.checked = key === value;
+  };
+  const rows = CHANNEL_CREATION_POLICIES.map((value) => {
+    const label = document.createElement("label");
+    label.className = "dashboard__workspace-channel-policy-choice";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "workspace-channel-policy";
+    input.value = value;
+    input.dataset.workspaceChannelPolicyChoice = value;
+    inputs.set(value, input);
+    const name = document.createElement("span");
+    name.textContent = CHANNEL_CREATION_LABELS[value];
+    input.addEventListener("change", async () => {
+      if (!input.checked || value === held) return;
+      for (const other of inputs.values()) other.disabled = true;
+      group.setAttribute("aria-busy", "true");
+      status.textContent = "";
+      delete status.dataset.problem;
+      try {
+        held = await policy.onChange(value);
+        status.textContent = CHANNEL_CREATION_SAVED;
+      } catch (error) {
+        status.textContent = error instanceof Error ? error.message : "CommonSwarm did not save that.";
+        status.dataset.problem = "";
+      } finally {
+        show(held);
+        for (const other of inputs.values()) other.disabled = false;
+        group.removeAttribute("aria-busy");
+        // Disabling the radio dropped focus; put it back on the choice now held.
+        (held ? inputs.get(held) : input)?.focus();
+      }
+    });
+    label.append(input, name);
+    return label;
+  });
+  show(held);
+  group.append(title, ...rows, status);
+  return group;
 }
 
 /** A Rename button that swaps the title for a name field; Escape or Cancel puts the title back. */

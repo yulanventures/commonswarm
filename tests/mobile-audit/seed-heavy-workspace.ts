@@ -290,6 +290,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       /* A second star, so Starred has an order to change; and a shared order an owner chose (CM-2b). */
       ok("star_general", await command(owner.token, { kind: "channel_preference_set", channel_id: null, starred: true }, workspace));
       ok("order_channels", await command(owner.token, { kind: "channel_reorder", channel_ids: [channels.long, channels.general] }, workspace));
+      /* The policy that is not the default, so the settings capture shows a choice the page had to read.
+         After every channel above exists: from here only an owner or admin may create one. */
+      ok("channel_policy", await command(owner.token, { kind: "workspace_channel_policy_set", channel_creation_policy: "admins" }, workspace));
     } catch (error) { note("channels", error); }
 
     // 240 messages over three days: workspace feed, group chats, DMs both ways and thread replies.

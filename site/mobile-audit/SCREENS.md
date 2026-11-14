@@ -303,7 +303,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V25 | `app.todo-offer` — candidate; `{offerWorkspace}` (its own workspace, so the card floats over no other capture) with one owner agent, a member's pending offer to the owner, both with Lists consent, and two notes so the feed shows; `[data-offer-card="{todo.offer}"]` with its answer buttons; Accept and Decline never pressed |
 | V26 | `app.lists-approval` — candidate: in `{approvalWorkspace}` (its own workspace), the owner's local agent `{approvalAgent}` has a live connection and no Lists approval; the People dialog's Allow lands on Lists; after its reads settle the approval card is scrolled into view and must be wholly in the viewport at capture (`frame`). The approval is never submitted |
 | D01 | `dialog.public-menu` — pending |
-| D02 | `dialog.workspace-settings` — pending |
+| D02 | `dialog.workspace-settings` — pending; the seed sets who can create channels to the policy that is not the default (`channel_policy`), and the capture requires that group, with "Owners & admins" checked, to be on screen |
 | D03 | `dialog.channels` — pending |
 | D04 | `dialog.connected-apps` — candidate with responsive drawer setup |
 | D05 | `dialog.signout-others` — candidate with responsive drawer setup |

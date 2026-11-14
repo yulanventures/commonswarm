@@ -52,6 +52,8 @@ export interface CommandPaletteBuildInput {
   channels: readonly CommandPaletteChannelInput[];
   leadAgentPrincipalId: string | null;
   maySetLead: boolean;
+  /** False when this workspace keeps channel creation to owners and admins and the viewer is neither. */
+  mayCreateChannel?: boolean;
   themeLabel?: string;
 }
 
@@ -238,13 +240,13 @@ export function buildCommandPaletteItems(
       keywords: ["add", "connect", "agent", "bot", "new agent"],
       action: { type: "connect-agent" },
     },
-    {
+    ...(input.mayCreateChannel === false ? [] : [{
       id: "action:new-channel",
-      category: "action",
+      category: "action" as const,
       label: "New channel",
       keywords: ["new", "create", "channel", "new channel", "group chat", "new group chat"],
-      action: { type: "new-channel" },
-    },
+      action: { type: "new-channel" as const },
+    }]),
     {
       id: "action:theme",
       category: "action",

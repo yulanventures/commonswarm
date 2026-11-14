@@ -94,6 +94,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-dire
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-unarchive:disabled { cursor: wait; opacity: .7; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-error { grid-column: 1 / -1; margin: 0; color: var(--danger, var(--k-shell-ink)); }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer { display: flex; justify-content: flex-end; flex: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer[hidden] { display: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .dashboard__button--primary {
   color: var(--k-shell-accent-ink); background: var(--k-shell-accent); border-color: var(--k-shell-accent);
 }
