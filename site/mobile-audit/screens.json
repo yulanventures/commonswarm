@@ -637,10 +637,10 @@
         "click": "[data-command-palette-item=\"channel:design-studio\"]"
       },
       {
-        "waitFor": "form[data-composer][data-audience=\"public\"] [data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])"
+        "waitFor": "form[data-composer][data-audience=\"public\"] [data-composer-to][data-to-warning] button[data-composer-to-private]:not([hidden])"
       }
     ],
-    "ready": "[data-composer-to][data-composer-to-warning] [data-composer-to-private]:not([hidden])",
+    "ready": "[data-composer-to][data-to-warning] button[data-composer-to-private]:not([hidden])",
     "states": [
       "dense"
     ],
@@ -667,7 +667,7 @@
         }
       },
       {
-        "waitFor": "form[data-composer][data-audience=\"public\"] [data-composer-to][data-composer-to-warning]:has([data-composer-to-private][hidden]) [data-composer-to-public]:not([hidden])"
+        "waitFor": "form[data-composer][data-audience=\"public\"] [data-composer-to][data-to-warning]:has(button[data-composer-to-private][hidden]) button[data-composer-to-public]:not([hidden])"
       },
       {
         "click": "[data-composer-send]"
@@ -676,7 +676,7 @@
         "waitFor": "[data-composer-status]:has-text(\"written as a private message\")"
       }
     ],
-    "ready": "[data-composer-to][data-composer-to-warning] [data-composer-to-public]:not([hidden])",
+    "ready": "[data-composer-to][data-to-warning] button[data-composer-to-public]:not([hidden])",
     "states": [
       "dense"
     ],
@@ -693,6 +693,9 @@
     "setup": [
       {
         "waitFor": "[data-signal-id=\"{message.groupedBroadcast}\"]"
+      },
+      {
+        "settle": true
       },
       {
         "scroll": "[data-signal-id=\"{message.groupedBroadcast}\"]"
