@@ -16001,11 +16001,16 @@ async function handleTransaction(
           SELECT swarm.workspace_live_lead(${route.workspaceId}::uuid) AS principal_id`;
         if (lead?.principal_id && await signalAgentTargetIsLive(tx, route, lead.principal_id)) {
           /* With mentions on, the post stays public and the lead is mentioned,
-           * unless the person named someone themselves. */
+           * unless the person named someone themselves.
+           *
+           * AN EMPTY LIST NAMES NOBODY, so the lead is mentioned there too. A client that
+           * always sends the key on a public post (so that a deployment with mentions off
+           * refuses the post instead of quietly re-addressing it to the lead) must not lose
+           * the lead by doing so. */
           if (!chatMentionsEnabled) {
             signalTarget = { ...namedTarget, toAgentPrincipalId: lead.principal_id };
             leadAgentApplied = lead.principal_id;
-          } else if (command.mentions === undefined) {
+          } else if ((command.mentions ?? []).length === 0) {
             leadMention = lead.principal_id;
             leadAgentApplied = lead.principal_id;
           }

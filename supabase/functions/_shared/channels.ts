@@ -736,7 +736,11 @@ export function chatSignalShapeProblem(
    * shape in the database. */
   const mentionProblem = signalMentionListProblem(fields.mentions);
   if (mentionProblem !== null) return mentionProblem;
-  if (Array.isArray(fields.mentions) && fields.mentions.length > 0) {
+  /* THE KEY ITSELF IS THE PUBLIC INTENT, so the rules below hold for an empty list too. A
+   * client sends `mentions: []` on an untagged public post so that a deployment with
+   * mentions off refuses it; the same key on an addressed message or a private reply would
+   * be two answers to "who can read this", and is refused the same way with nobody in it. */
+  if (Array.isArray(fields.mentions)) {
     if (!THREAD_REPLY_KINDS.includes(fields.signal_kind as never)) {
       return `Only ${
         THREAD_REPLY_KINDS

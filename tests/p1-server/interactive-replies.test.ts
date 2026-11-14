@@ -422,5 +422,10 @@ test("with mentions off, a post that sends mentions is refused and nothing else 
   const refused = await postCommand(f.ownerJwt, f.workspaceA, { ...base, mentions: [{ kind: "agent", id: f.principal }] });
   assert.equal(refused.status, 400, JSON.stringify(refused.body));
   assert.match(String(refused.body.message), /mentions are not enabled/);
+  // The key alone is refused, with nobody in it: a client that always sends it on a public post fails closed here
+  // instead of having the post quietly re-addressed to the workspace lead.
+  const emptyRefused = await postCommand(f.ownerJwt, f.workspaceA, { ...base, mentions: [] });
+  assert.equal(emptyRefused.status, 400, JSON.stringify(emptyRefused.body));
+  assert.match(String(emptyRefused.body.message), /mentions are not enabled/);
   assert.equal((await postCommand(f.ownerJwt, f.workspaceA, base)).status, 200);
 });

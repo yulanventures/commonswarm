@@ -302,6 +302,24 @@ test("mentions go on public messages only, and a body without the key is unchang
       JSON.stringify(privateShape),
     );
   }
+  // The key is the public intent, so an EMPTY list on a private shape is refused exactly as a filled one is.
+  for (const privateShape of [
+    { to_user_id: id },
+    { to_agent_principal_id: id },
+    { in_reply_to: id },
+    { to: [{ kind: "user", id }] },
+  ]) {
+    assert.match(
+      String(chatSignalShapeProblem({ ...base, ...privateShape, mentions: [] })),
+      /cannot be combined with a recipient or a private reply/,
+      `empty list with ${JSON.stringify(privateShape)}`,
+    );
+  }
+  assert.match(String(chatSignalShapeProblem({ ...base, signal_kind: "working-on", mentions: [] })), /can mention someone/);
+  // A body WITHOUT the key is what every installed client sends, on every shape, and none of this touches it.
+  for (const installed of [{}, { to_user_id: id }, { to_agent_principal_id: id }, { in_reply_to: id }, { to: [{ kind: "user", id }] }, { signal_kind: "working-on" }]) {
+    assert.equal(chatSignalShapeProblem({ ...base, ...installed }), null, `installed body ${JSON.stringify(installed)}`);
+  }
   assert.match(String(chatSignalShapeProblem({ ...base, signal_kind: "working-on", mentions })), /can mention someone/);
   assert.match(String(chatSignalShapeProblem({ ...base, mentions: [{ kind: "agent", id }, { kind: "agent", id }] })), /twice/);
   assert.match(String(chatSignalShapeProblem({ ...base, mentions: [{ kind: "team", id }] })), /mentions is a list/);
