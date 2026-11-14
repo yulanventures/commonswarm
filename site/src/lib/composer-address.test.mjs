@@ -12,6 +12,11 @@ import {
   deriveComposerAddress,
   recipientKey,
   composerMentionNotice,
+  composerAudience,
+  draftAddressToStore,
+  privateDraftActionLabel,
+  privateDraftNotice,
+  privateDraftRecipients,
 } from "./composer-address.ts";
 import { resolveStoredIdentityRefs } from "./identity-label.ts";
 
@@ -210,4 +215,46 @@ test("a public composer says, in mention words, which tags it could not honour",
   assert.match(both, /^A message mentions at most 8, so Wren and Orbit are not mentioned\. /);
   assert.match(both, /"Sam" and "Lee" name more than one person or agent here, so they mention nobody\./);
   assert.doesNotMatch(both, /To:/, "a public place has no To: set to talk about");
+});
+
+/* A draft written to particular people must never be sent to everyone without the author being told first. */
+const DANA = { kind: "person", id: "p-dana" };
+const WREN = { kind: "agent", id: "a-wren" };
+const everyoneKnown = () => true;
+
+test("a draft with a stored To: set is named when it sits in a public composer", () => {
+  assert.deepEqual(privateDraftRecipients("the offer is 240", [DANA, WREN], everyoneKnown), [DANA, WREN]);
+  // A recipient who has left is not named; the rest still are.
+  assert.deepEqual(privateDraftRecipients("the offer is 240", [DANA, WREN], (entity) => entity.id !== "a-wren"), [DANA]);
+  // Nothing to warn about: no stored set, an empty one (a broadcast the author chose), or nothing typed.
+  assert.deepEqual(privateDraftRecipients("hello", undefined, everyoneKnown), []);
+  assert.deepEqual(privateDraftRecipients("hello", null, everyoneKnown), []);
+  assert.deepEqual(privateDraftRecipients("hello", [], everyoneKnown), []);
+  assert.deepEqual(privateDraftRecipients("   ", [DANA], everyoneKnown), []);
+  assert.equal(privateDraftNotice(["Dana Rivera", "Wren"], "#design"),
+    "This was written to Dana Rivera and Wren. Sent here, everyone in #design can read it.");
+  assert.equal(privateDraftActionLabel(["Dana Rivera"]), "Send to Dana Rivera instead");
+});
+
+test("a public composer never overwrites the address a draft was saved with", () => {
+  const stored = { to: [DANA], applied: ["person:p-dana"] };
+  const publicLive = { to: [], applied: [] };
+  // In a public place the set on screen is always empty. Storing it would erase who the draft was written to.
+  assert.deepEqual(draftAddressToStore(true, stored, publicLive), { to: [DANA], applied: ["person:p-dana"] });
+  assert.deepEqual(draftAddressToStore(true, null, publicLive), { to: undefined, applied: [] },
+    "a draft first written in a channel has no address to keep");
+  // An addressed composer stores what is on screen, and falls back to the stored pair before a pass commits.
+  assert.deepEqual(draftAddressToStore(false, stored, { to: [WREN], applied: [] }), { to: [WREN], applied: [] });
+  assert.deepEqual(draftAddressToStore(false, stored, null), { to: [DANA], applied: ["person:p-dana"] });
+  assert.deepEqual(draftAddressToStore(false, null, { to: [], applied: [] }), { to: [], applied: [] },
+    "an emptied To: is still written down in a Direct Message");
+});
+
+test("the marker beside Send is private to named people or public in a named place, never neither", () => {
+  assert.deepEqual(composerAudience(["Dana Rivera"], "#design"),
+    { kind: "private", name: "Dana Rivera", sentence: "Private. Only Dana Rivera can read this." });
+  assert.deepEqual(composerAudience(["Dana Rivera", "Wren", "Orbit"], "#design"),
+    { kind: "private", name: "Dana Rivera +2", sentence: "Private. Only Dana Rivera, Wren and Orbit can read this." });
+  assert.deepEqual(composerAudience([], "#design"),
+    { kind: "public", name: "design", sentence: "Public. Everyone in #design can read this." });
 });
