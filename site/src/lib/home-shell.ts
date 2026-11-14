@@ -191,7 +191,7 @@ export interface FeedMenuState {
   channels: { id: string; label: string; current: boolean }[];
   mayCreateChannel: boolean;
   channelSettings?: boolean;
-  /** The viewer's star and notification level for the place being read. The menu always offers both; a header with room also has buttons. */
+  /** The viewer's star and notification level for the place being read. The menu offers both wherever the header has no room for its buttons. */
   place?: { slug: string; starred: boolean; involvement: ChannelInvolvement } | null;
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
   /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
@@ -483,12 +483,19 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     };
     const channelActions = [plain("All channels", { kind: "all-channels" }, "menuAllChannels")];
     if (state.channelSettings) channelActions.unshift(plain("Channel settings", { kind: "channel-settings" }, "menuChannelSettings"));
-    const place = state.place ?? null;
+    /* Where the header shows the star and the bell (64rem and wider) the menu repeats neither. Narrower, this menu
+       is the way in, so the two come first: they are about the channel on screen, and they must be reachable
+       without scrolling past every other channel. The phone bar's menu always carries them. */
+    const narrow = options.account === true || doc.defaultView?.matchMedia?.("(width < 64rem)").matches !== false;
+    const place = narrow ? state.place ?? null : null;
+    const placeEntries: HTMLElement[] = [];
+    const placeButtons: HTMLButtonElement[] = [];
     if (place) {
       const star = plain(starChannelLabel(place.slug), { kind: "star", starred: !place.starred }, "menuChannelStar");
       star.setAttribute("role", "menuitemcheckbox"); star.setAttribute("aria-checked", String(place.starred));
       star.classList.add("hm-menu__radio");
-      channelActions.unshift(star);
+      const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
+      entry.append(star); placeEntries.push(entry); placeButtons.push(star);
     }
     if (state.mayCreateChannel) channelActions.push(plain("New channel", { kind: "new-channel" }, "menuChannelNew"));
     const view = group("View", state.channels.map((channel) => ({ text: channel.label, checked: channel.current,
@@ -499,8 +506,9 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     const notify = place ? group(CHANNEL_NOTIFY_LABEL, CHANNEL_INVOLVEMENT_LEVELS.map((level) => ({ text: CHANNEL_INVOLVEMENT_LABELS[level],
       checked: level === place.involvement, action: { kind: "involvement", value: level } as FeedMenuAction,
       hook: ["menuChannelNotify", level] as [string, string] }))) : null;
-    const built: HTMLElement[] = [view.entry, ...(notify ? [notify.entry] : []), show.entry];
-    const feedButtons = [...view.buttons, ...(notify?.buttons ?? []), ...show.buttons];
+    if (notify) { placeEntries.push(notify.entry); placeButtons.push(...notify.buttons); }
+    const built: HTMLElement[] = [...placeEntries, view.entry, show.entry];
+    const feedButtons = [...placeButtons, ...view.buttons, ...show.buttons];
     if (state.refresh) {
       const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
       const refresh = plain(state.refresh.label, { kind: "refresh" }, "menuRefresh");
@@ -512,13 +520,24 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     menu.prepend(...built); feedEntries.push(...built);
     items.splice(0, items.length, ...feedButtons, ...staticItems);
   };
+  /* The list scrolls when it is taller than the space under its button. Focus must not scroll the page, so the
+     item is brought into the list's own view by hand. */
+  const focusItem = (item: HTMLElement | undefined) => {
+    if (!item) return;
+    item.focus({ preventScroll: true });
+    const box = item.getBoundingClientRect?.(), frame = menu.getBoundingClientRect?.();
+    if (!box || !frame) return;
+    if (box.top < frame.top) menu.scrollTop -= frame.top - box.top + 6;
+    else if (box.bottom > frame.bottom) menu.scrollTop += box.bottom - frame.bottom + 6;
+  };
   const open = (index: number) => {
     syncFeedEntries();
     syncAccountEntries();
     items.push(...accountButtons);
     menu.hidden = false;
+    menu.scrollTop = 0;
     trigger.setAttribute("aria-expanded", "true");
-    items[index < 0 ? items.length + index : index]?.focus({ preventScroll: true });
+    focusItem(items[index < 0 ? items.length + index : index]);
   };
   for (const { item, label } of workspaceMenuItems(vm)) {
     const entry = node(doc, "li", "hm-menu__entry");
@@ -553,7 +572,7 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     const next = menuFocusIndex(items.indexOf(doc.activeElement as HTMLButtonElement), event.key, items.length);
     if (next === null) return;
     event.preventDefault();
-    items[next]?.focus({ preventScroll: true });
+    focusItem(items[next]);
   });
   wrap.addEventListener("focusout", (event) => {
     if (!menu.hidden && !wrap.contains(event.relatedTarget as Node | null)) close(false);
