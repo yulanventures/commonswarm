@@ -312,6 +312,6 @@ test("the fence's privileges are exactly the narrow ones, and the member Realtim
   assert.deepEqual(reads, { hash: false, update: false, inner: false });
   const policies = await sql<{ name: string; qual: string }[]>`SELECT policyname AS name, qual FROM pg_policies
     WHERE schemaname = 'realtime' AND tablename = 'messages' AND roles @> '{authenticated}'`;
-  assert.equal(policies.length, 2);
+  assert.equal(policies.length, 3);
   for (const policy of policies) assert.match(policy.qual, /current_human_session_live/, policy.name);
 });
