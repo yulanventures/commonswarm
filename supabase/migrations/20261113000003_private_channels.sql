@@ -1353,27 +1353,25 @@ BEGIN
     AND d.enqueued_at >= (SELECT wpr.applied_at FROM swarm.wake_path_release AS wpr WHERE wpr.singleton)
     AND s.until > statement_timestamp()
     AND s.kind IN ('ask', 'note')
+    AND swarm.actor_can_access_channel(d.workspace_id, s.channel_id, p_actor_kind, p_actor_id)
     AND (
       s.channel_id IS NULL
-      OR (
-        swarm.actor_can_access_channel(s.workspace_id, s.channel_id, p_actor_kind, p_actor_id)
-        AND EXISTS (
-          SELECT 1
-          FROM swarm.channels AS ch
-          WHERE ch.workspace_id = s.workspace_id
-            AND ch.channel_id = s.channel_id
-            AND (
-              ch.visibility = 'open'
-              OR EXISTS (
-                SELECT 1
-                FROM swarm.channel_members AS cm
-                WHERE cm.workspace_id = s.workspace_id
-                  AND cm.channel_id = s.channel_id
-                  AND cm.member_kind = 'agent'
-                  AND cm.agent_principal_id = d.recipient_agent_principal_id
-              )
+      OR EXISTS (
+        SELECT 1
+        FROM swarm.channels AS ch
+        WHERE ch.workspace_id = s.workspace_id
+          AND ch.channel_id = s.channel_id
+          AND (
+            ch.visibility = 'open'
+            OR EXISTS (
+              SELECT 1
+              FROM swarm.channel_members AS cm
+              WHERE cm.workspace_id = s.workspace_id
+                AND cm.channel_id = s.channel_id
+                AND cm.member_kind = 'agent'
+                AND cm.agent_principal_id = d.recipient_agent_principal_id
             )
-        )
+          )
       )
     )
     AND (s.to_agent_principal_id = d.recipient_agent_principal_id
@@ -1391,9 +1389,11 @@ BEGIN
         AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
         AND observed.last_leased_by IS NULL
         AND observed.acked_at >= (SELECT wpr2.applied_at FROM swarm.wake_path_release AS wpr2 WHERE wpr2.singleton)
-        AND (
-          observed_signal.channel_id IS NULL
-          OR swarm.actor_can_access_channel(observed_signal.workspace_id, observed_signal.channel_id, p_actor_kind, p_actor_id)
+        AND swarm.actor_can_access_channel(
+          observed_signal.workspace_id,
+          observed_signal.channel_id,
+          p_actor_kind,
+          p_actor_id
         ))
     AND NOT EXISTS (SELECT 1 FROM swarm.signal_deliveries AS later
       JOIN swarm.signals AS later_signal
@@ -1403,9 +1403,11 @@ BEGIN
         AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)
           > (date_trunc('milliseconds', s.created_at), s.id)
         AND later_signal.kind IN ('ask', 'note')
-        AND (
-          later_signal.channel_id IS NULL
-          OR swarm.actor_can_access_channel(later_signal.workspace_id, later_signal.channel_id, p_actor_kind, p_actor_id)
+        AND swarm.actor_can_access_channel(
+          later_signal.workspace_id,
+          later_signal.channel_id,
+          p_actor_kind,
+          p_actor_id
         )
         AND (later_signal.to_agent_principal_id = d.recipient_agent_principal_id
           OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS later_recipient
@@ -1666,8 +1668,7 @@ BEGIN
   IF NOT FOUND THEN
     RETURN false;
   END IF;
-  RETURN v_channel_id IS NULL
-    OR swarm.claims_can_access_channel(p_workspace_id, v_channel_id);
+  RETURN swarm.claims_can_access_channel(p_workspace_id, v_channel_id);
 END;
 $$;
 
@@ -2464,10 +2465,11 @@ AS
     )
     AND (
       COALESCE(cardinality(a.channel_ids), 0) = 0
-      OR EXISTS (
+      OR NOT EXISTS (
         SELECT 1
         FROM unnest(a.channel_ids) AS cid
-        WHERE swarm.claims_can_access_channel(a.workspace_id, cid)
+        WHERE cid IS NULL
+           OR NOT swarm.claims_can_access_channel(a.workspace_id, cid)
       )
     )
     AND (
@@ -2475,7 +2477,10 @@ AS
         'private_channel_manager_promoted',
         'private_channel_auto_archived'
       )
-      OR swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+      OR (
+        a.stream_id IS NOT NULL
+        AND swarm.claims_can_access_channel(a.workspace_id, a.stream_id)
+      )
     );
 
 ALTER VIEW swarm_read.audit_log OWNER TO swarm_admin;

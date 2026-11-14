@@ -1888,9 +1888,10 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
     : "ledgerCredentialKind" in auth
     ? auth.ledgerCredentialKind
     : auth.credentialKind;
-  const channelIds = audit.channelIds && audit.channelIds.length > 0
-    ? [...new Set(audit.channelIds)]
-    : null;
+  const validChannelIds = audit.channelIds
+    ? [...new Set(audit.channelIds.filter((id): id is string => typeof id === "string" && UUID_RE.test(id)))]
+    : [];
+  const channelIds = validChannelIds.length > 0 ? validChannelIds : null;
   if (channelIds === null) {
     await tx`
       INSERT INTO swarm.audit_log (
@@ -10553,10 +10554,14 @@ async function accessibleStarOrderAuditChannelIds(
   userId: string,
   channelIds: readonly (string | null)[],
 ): Promise<string[] | undefined> {
-  if (channelIds.length === 0 || channelIds.some((id) => id === null)) {
+  const distinctIds = [
+    ...new Set(
+      channelIds.filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
+    ),
+  ];
+  if (distinctIds.length === 0) {
     return undefined;
   }
-  const distinctIds = [...new Set(channelIds as string[])];
   const rows = await tx<{ channel_id: string }[]>`
     SELECT channel_id
     FROM swarm.channels
@@ -10569,7 +10574,7 @@ async function accessibleStarOrderAuditChannelIds(
         ${userId}::uuid
       )
   `;
-  return rows.length === distinctIds.length
+  return rows.length > 0
     ? rows.map((row) => row.channel_id)
     : undefined;
 }
@@ -10749,14 +10754,13 @@ async function applyChannelCommand(
       RETURNING p.workspace_id, p.channel_id, p.target_key, p.starred, p.star_rank, p.involvement, p.updated_at
     `;
     updatedRows.sort((a, b) => (a.star_rank ?? 0) - (b.star_rank ?? 0));
-    const nonGeneralIds = command.channel_ids.length > 0 &&
-        command.channel_ids.every((id): id is string => id !== null)
-      ? [...new Set(command.channel_ids)]
-      : undefined;
+    const nonGeneralIds = [
+      ...new Set(command.channel_ids.filter((id): id is string => id !== null)),
+    ];
     return {
       ok: true,
       preferences: updatedRows.map(channelPreferenceRecord),
-      ...(nonGeneralIds !== undefined ? { audit_channel_ids: nonGeneralIds } : {}),
+      ...(nonGeneralIds.length > 0 ? { audit_channel_ids: nonGeneralIds } : {}),
     };
   }
 
@@ -10813,10 +10817,11 @@ async function applyChannelCommand(
       WHERE c.workspace_id = ${route.workspaceId}::uuid
         AND c.channel_id = ord.channel_id
     `;
+    const reorderAuditIds = [...new Set(command.channel_ids)];
     return {
       ok: true,
       ordered_channel_ids: fullIds.filter((id) => accessibleSet.has(id)),
-      ...(command.channel_ids.length > 0 ? { audit_channel_ids: command.channel_ids } : {}),
+      ...(reorderAuditIds.length > 0 ? { audit_channel_ids: reorderAuditIds } : {}),
     };
   }
 
@@ -12508,27 +12513,49 @@ async function accessibleSignalBatchChannelIds(
   auth: AuthContext,
   signalIds: readonly string[],
 ): Promise<string[] | undefined> {
-  if (signalIds.length === 0) return undefined;
+  const validIds = [
+    ...new Set(
+      signalIds.filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
+    ),
+  ];
+  if (validIds.length === 0) return undefined;
   const actor = authActorIdentity(auth);
-  const rows = await tx<{ channel_id: string | null }[]>`
-    SELECT channel_id
-    FROM swarm.signals
-    WHERE workspace_id = ${workspaceId}::uuid
-      AND id = ANY(${[...signalIds]}::uuid[])
+  const rows = await tx<{ channel_id: string }[]>`
+    SELECT DISTINCT s.channel_id
+    FROM swarm.signals AS s
+    WHERE s.workspace_id = ${workspaceId}::uuid
+      AND s.id = ANY(${validIds}::uuid[])
+      AND s.channel_id IS NOT NULL
       AND (
-        channel_id IS NULL
-        OR swarm.actor_can_access_channel(
-          workspace_id,
-          channel_id,
+        swarm.actor_can_access_channel(
+          s.workspace_id,
+          s.channel_id,
           ${actor.kind},
           ${actor.id}::uuid
         )
+        OR (
+          ${actor.kind} = 'user'
+          AND EXISTS (
+            SELECT 1
+            FROM swarm.signal_human_receipts AS hr
+            WHERE hr.workspace_id = s.workspace_id
+              AND hr.signal_id = s.id
+              AND hr.user_id = ${actor.id}::uuid
+          )
+        )
+        OR (
+          ${actor.kind} = 'agent'
+          AND EXISTS (
+            SELECT 1
+            FROM swarm.signal_agent_receipts AS ar
+            WHERE ar.workspace_id = s.workspace_id
+              AND ar.signal_id = s.id
+              AND ar.principal_id = ${actor.id}::uuid
+          )
+        )
       )
   `;
-  if (rows.length === 0 || rows.some((row) => row.channel_id === null)) {
-    return undefined;
-  }
-  return [...new Set(rows.map((row) => row.channel_id as string))];
+  return rows.length > 0 ? rows.map((row) => row.channel_id) : undefined;
 }
 
 async function signalBatchChannelIdsForAuthorizedRefs(
@@ -12536,17 +12563,20 @@ async function signalBatchChannelIdsForAuthorizedRefs(
   workspaceId: string,
   signalIds: readonly string[],
 ): Promise<string[] | undefined> {
-  if (signalIds.length === 0) return undefined;
-  const rows = await tx<{ channel_id: string | null }[]>`
-    SELECT channel_id
+  const validIds = [
+    ...new Set(
+      signalIds.filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
+    ),
+  ];
+  if (validIds.length === 0) return undefined;
+  const rows = await tx<{ channel_id: string }[]>`
+    SELECT DISTINCT channel_id
     FROM swarm.signals
     WHERE workspace_id = ${workspaceId}::uuid
-      AND id = ANY(${[...signalIds]}::uuid[])
+      AND id = ANY(${validIds}::uuid[])
+      AND channel_id IS NOT NULL
   `;
-  if (rows.length === 0 || rows.some((row) => row.channel_id === null)) {
-    return undefined;
-  }
-  return [...new Set(rows.map((row) => row.channel_id as string))];
+  return rows.length > 0 ? rows.map((row) => row.channel_id) : undefined;
 }
 
 async function ackAuditChannelIds(
@@ -12577,71 +12607,89 @@ async function replayAuditChannelIds(
   auth: AuthContext,
   command: {
     readonly kind: string;
+    readonly channel_id?: string | null;
     readonly signal_ids?: readonly string[];
     readonly channel_ids?: readonly (string | null)[];
   },
   matches: boolean,
   rawResponse: unknown,
 ): Promise<string[] | undefined> {
+  const collected = new Set<string>();
+  const addAll = (ids: readonly string[] | undefined) => {
+    if (!ids) return;
+    for (const id of ids) {
+      if (typeof id === "string" && UUID_RE.test(id)) {
+        collected.add(id);
+      }
+    }
+  };
   const stored = record(rawResponse);
   const channel = record(stored?.channel);
   if (typeof channel?.channel_id === "string" && UUID_RE.test(channel.channel_id)) {
-    return [channel.channel_id];
+    collected.add(channel.channel_id);
   }
   if (typeof stored?.channel_id === "string" && UUID_RE.test(stored.channel_id)) {
-    return [stored.channel_id];
+    collected.add(stored.channel_id);
   }
   const preference = record(stored?.preference);
   if (typeof preference?.channel_id === "string" && UUID_RE.test(preference.channel_id)) {
-    return [preference.channel_id];
+    collected.add(preference.channel_id);
   }
   const signal = record(stored?.signal);
-  if (signal !== null && Object.hasOwn(signal, "channel_id")) {
-    return typeof signal.channel_id === "string" && UUID_RE.test(signal.channel_id)
-      ? [signal.channel_id]
-      : undefined;
+  if (signal !== null && Object.hasOwn(signal, "channel_id") &&
+      typeof signal.channel_id === "string" && UUID_RE.test(signal.channel_id)) {
+    collected.add(signal.channel_id);
   }
   const reraise = record(stored?.reraise);
   if (typeof reraise?.signal_id === "string" && UUID_RE.test(reraise.signal_id)) {
-    return await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [reraise.signal_id]);
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [reraise.signal_id]));
+  }
+  const choiceAnswer = record(stored?.choice_answer);
+  if (typeof choiceAnswer?.signal_id === "string" && UUID_RE.test(choiceAnswer.signal_id)) {
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [choiceAnswer.signal_id]));
   }
   const ledger = parseClaimLedger(rawResponse);
   if (ledger !== null && ledger.delivery_refs.length > 0) {
-    return await signalBatchChannelIdsForAuthorizedRefs(
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(
       tx,
       workspaceId,
       ledger.delivery_refs.map((ref) => ref.signal_id),
-    );
+    ));
   }
   if (typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
-    return await ackAuditChannelIds(
+    addAll(await ackAuditChannelIds(
       tx,
       workspaceId,
       auth.agent?.principal_id ?? null,
       stored.signal_id,
-    );
+    ));
   }
-  if (matches && command.kind === SIGNALS_SEEN_KIND && Array.isArray(command.signal_ids)) {
-    return await accessibleSignalBatchChannelIds(tx, workspaceId, auth, command.signal_ids);
+  if (matches) {
+    if (command.kind === SIGNALS_SEEN_KIND && Array.isArray(command.signal_ids)) {
+      addAll(await accessibleSignalBatchChannelIds(tx, workspaceId, auth, command.signal_ids));
+    } else if (
+      (command.kind === "channel_star_reorder" || command.kind === "channel_reorder") &&
+      Array.isArray(command.channel_ids)
+    ) {
+      addAll(command.channel_ids.filter((id): id is string => typeof id === "string" && UUID_RE.test(id)));
+    }
+  } else {
+    if (command.kind === SIGNALS_SEEN_KIND && Array.isArray(command.signal_ids)) {
+      addAll(await accessibleSignalBatchChannelIds(tx, workspaceId, auth, command.signal_ids));
+    } else if (
+      (command.kind === "channel_star_reorder" || command.kind === "channel_reorder") &&
+      auth.actor.user !== null &&
+      Array.isArray(command.channel_ids)
+    ) {
+      addAll(await accessibleStarOrderAuditChannelIds(tx, workspaceId, auth.actor.user, command.channel_ids));
+    } else if (typeof command.channel_id === "string" && UUID_RE.test(command.channel_id)) {
+      const actor = authActorIdentity(auth);
+      if (await actorCanAccessChannel(tx, workspaceId, command.channel_id, actor.kind, actor.id)) {
+        collected.add(command.channel_id);
+      }
+    }
   }
-  if (
-    matches &&
-    command.kind === "channel_star_reorder" &&
-    auth.actor.user !== null &&
-    Array.isArray(command.channel_ids)
-  ) {
-    return await accessibleStarOrderAuditChannelIds(
-      tx,
-      workspaceId,
-      auth.actor.user,
-      command.channel_ids,
-    );
-  }
-  if (matches && command.kind === "channel_reorder" && Array.isArray(command.channel_ids)) {
-    const ids = command.channel_ids.filter((id): id is string => typeof id === "string" && UUID_RE.test(id));
-    return ids.length > 0 ? ids : undefined;
-  }
-  return undefined;
+  return collected.size > 0 ? [...collected] : undefined;
 }
 
 async function accessiblePostSignalEarlyRefusalChannelIds(

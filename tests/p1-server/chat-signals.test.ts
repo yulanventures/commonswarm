@@ -4101,6 +4101,157 @@ test("CM-3a R2 C1 + C2 + E4: private attachment refusal and traffic/queue metada
     true,
     "R2-A2: hidden newer #lock observation must NOT flip outsider's public wake_path_observing",
   );
+
+  // 9. R3-WAKE-GRANT: Direct SQL invocation of swarm.claims_wake_path_eligible_deliveries() as swarm_read
+  // must enforce live workspace membership internally on unfiled (channel_id IS NULL) candidates and never
+  // return cross-workspace rows, while keeping swarm.actor_wake_path_eligible_deliveries uncallable by clients!
+  const wsUnfiledSeed = await sendWs(ws, ownerB.jwt, installedPost({
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Authorized workspace unfiled observed seed",
+  }));
+  assert.equal(wsUnfiledSeed.status, 200, JSON.stringify(wsUnfiledSeed.body));
+  await ackObservedUnclaimed(wakeProbeAgent.token, String(signalOf(wsUnfiledSeed.body).id));
+
+  const wsUnfiledPending = await sendWs(ws, ownerB.jwt, installedPost({
+    signal_kind: "ask",
+    to_agent_principal_id: wakeProbeAgent.principal,
+    body: "Authorized workspace unfiled pending ask",
+  }));
+  assert.equal(wsUnfiledPending.status, 200, JSON.stringify(wsUnfiledPending.body));
+  const wsUnfiledPendingId = String(signalOf(wsUnfiledPending.body).id);
+
+  const otherWs = randomUUID();
+  const otherOwner = await createUser(`r3-wake-other-${tag}`);
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES (${otherOwner.id}::uuid, 'OtherWorkspaceOwner')
+    `;
+    await tx`
+      INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+      VALUES (${otherWs}::uuid, ${`R3WakeOther-${tag}`}, ${otherOwner.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${otherWs}::uuid, ${otherOwner.id}::uuid, 'owner')
+    `;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${otherWs}::uuid, 'workspace')`;
+  });
+  const otherAgent = await createWsAgent(otherWs, otherOwner.id, `wake-other-${tag}`);
+
+  const otherUnfiledSeed = await sendWs(otherWs, otherOwner.jwt, installedPost({
+    signal_kind: "ask",
+    to_agent_principal_id: otherAgent.principal,
+    body: "Unrelated workspace unfiled observed seed",
+  }));
+  assert.equal(otherUnfiledSeed.status, 200, JSON.stringify(otherUnfiledSeed.body));
+  const otherSeedAck = await sendWs(otherWs, otherAgent.token, {
+    kind: "ack_agent_delivery",
+    signal_id: String(signalOf(otherUnfiledSeed.body).id),
+    lease_id: null,
+    listener_instance_id: null,
+    outcome: "observed",
+    last_error_code: null,
+    surfaced: true,
+    unclaimed: true,
+  });
+  assert.equal(otherSeedAck.status, 200, JSON.stringify(otherSeedAck.body));
+
+  const otherUnfiledPending = await sendWs(otherWs, otherOwner.jwt, installedPost({
+    signal_kind: "ask",
+    to_agent_principal_id: otherAgent.principal,
+    body: "Unrelated workspace unfiled pending ask",
+  }));
+  assert.equal(otherUnfiledPending.status, 200, JSON.stringify(otherUnfiledPending.body));
+  const otherUnfiledPendingId = String(signalOf(otherUnfiledPending.body).id);
+
+  const directClaimsWakeHelperAs = async (claims: Record<string, unknown>) =>
+    await sql.begin(async (tx) => {
+      await tx.unsafe("SET LOCAL ROLE swarm_read");
+      await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+      return await tx<{ workspace_id: string; signal_id: string; principal_id: string }[]>`
+        SELECT workspace_id::text, signal_id::text, principal_id::text
+        FROM swarm.claims_wake_path_eligible_deliveries()
+      `;
+    });
+
+  // Positive control on unrelated workspace B: otherOwner's valid claims return otherWs's unfiled delivery (and zero ws rows).
+  const otherOwnerHelperRows = await directClaimsWakeHelperAs({
+    role: "authenticated",
+    sub: otherOwner.id,
+  });
+  assert.ok(
+    otherOwnerHelperRows.some(
+      (r) =>
+        r.workspace_id === otherWs &&
+        r.signal_id === otherUnfiledPendingId &&
+        r.principal_id === otherAgent.principal,
+    ),
+    "R3-WAKE-GRANT positive control: second-workspace unfiled delivery is eligible for its own live member",
+  );
+  assert.equal(
+    otherOwnerHelperRows.some((r) => r.workspace_id === ws),
+    false,
+    "R3-WAKE-GRANT: second-workspace member must NOT receive ws rows from direct helper call",
+  );
+
+  // Cross-workspace negative + authorized positive control as ownerB (human claims) and wakeProbeAgent (agent claims):
+  for (const [label, claims] of [
+    ["human ownerB", { role: "authenticated", sub: ownerB.id }],
+    [
+      "agent wakeProbeAgent",
+      { role: "authenticated", sub: ownerB.id, agent_principal_id: wakeProbeAgent.principal },
+    ],
+  ] as const) {
+    const rows = await directClaimsWakeHelperAs(claims);
+    assert.ok(
+      rows.some(
+        (r) =>
+          r.workspace_id === ws &&
+          r.signal_id === wsUnfiledPendingId &&
+          r.principal_id === wakeProbeAgent.principal,
+      ),
+      `R3-WAKE-GRANT (${label}): authorized workspace unfiled delivery must be retained`,
+    );
+    assert.equal(
+      rows.some((r) => r.workspace_id === otherWs || r.signal_id === otherUnfiledPendingId),
+      false,
+      `R3-WAKE-GRANT (${label}): unrelated workspace unfiled delivery must NOT be returned by direct swarm_read call`,
+    );
+  }
+
+  // Also verify claims_can_access_signal_channel enforces workspace membership on unfiled signals, and
+  // actor_wake_path_eligible_deliveries remains uncallable by swarm_read and authenticated!
+  await sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE swarm_read");
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({ role: "authenticated", sub: ownerB.id })},
+        true
+      )
+    `;
+    const [ownUnfiledAccess] = await tx<{ ok: boolean }[]>`
+      SELECT swarm.claims_can_access_signal_channel(${ws}::uuid, ${wsUnfiledPendingId}::uuid) AS ok
+    `;
+    const [crossWsUnfiledAccess] = await tx<{ ok: boolean }[]>`
+      SELECT swarm.claims_can_access_signal_channel(${otherWs}::uuid, ${otherUnfiledPendingId}::uuid) AS ok
+    `;
+    assert.equal(ownUnfiledAccess?.ok, true);
+    assert.equal(
+      crossWsUnfiledAccess?.ok,
+      false,
+      "claims_can_access_signal_channel must fail closed across workspaces even when channel_id IS NULL",
+    );
+  });
+  const [actorHelperPrivs] = await sql<{ swarm_read_exec: boolean; authenticated_exec: boolean }[]>`
+    SELECT
+      has_function_privilege('swarm_read', 'swarm.actor_wake_path_eligible_deliveries(text, uuid)', 'EXECUTE') AS swarm_read_exec,
+      has_function_privilege('authenticated', 'swarm.actor_wake_path_eligible_deliveries(text, uuid)', 'EXECUTE') AS authenticated_exec
+  `;
+  assert.equal(actorHelperPrivs?.swarm_read_exec, false, "actor_wake_path_eligible_deliveries must stay uncallable by swarm_read");
+  assert.equal(actorHelperPrivs?.authenticated_exec, false, "actor_wake_path_eligible_deliveries must stay uncallable by authenticated");
 });
 
 test("CM-3a R2 E2 + cross-cutting: private reply channel inheritance (ordinary, H0, hosted MCP), directed recipient privacy inside #lock, implicit thread mentions, and hosted check batch isolation", async () => {
@@ -5146,4 +5297,450 @@ test("CM-3a R2 C4 + E1: workspace removal/re-admission durability, role-demotion
   );
   const loser = leave1.status === 409 ? leave1 : leave2;
   assert.equal(loser.body.error, "channel_last_manager");
+});
+
+test("CM-3a R4 R3-AUDIT: mixed [open, private], [private-A, private-B], and [null/general, private] audit tagging, replays, and fail-closed client view", async () => {
+  const tag = randomBytes(4).toString("hex");
+  const ws = randomUUID();
+  const adminAll = await createUser(`r4-admin-all-${tag}`);
+  const adminOnlyA = await createUser(`r4-admin-a-${tag}`);
+  const ownerOutside = await createUser(`r4-owner-out-${tag}`);
+  const memberActor = await createUser(`r4-member-${tag}`);
+
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO swarm.users (user_id, display_name)
+      VALUES
+        (${adminAll.id}::uuid, 'AdminAll'),
+        (${adminOnlyA.id}::uuid, 'AdminOnlyA'),
+        (${ownerOutside.id}::uuid, 'OwnerOutside'),
+        (${memberActor.id}::uuid, 'MemberActor')
+    `;
+    await tx`
+      INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+      VALUES (${ws}::uuid, ${`R4Audit-${tag}`}, ${ownerOutside.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES
+        (${ws}::uuid, ${ownerOutside.id}::uuid, 'owner'),
+        (${ws}::uuid, ${adminAll.id}::uuid, 'owner'),
+        (${ws}::uuid, ${adminOnlyA.id}::uuid, 'admin'),
+        (${ws}::uuid, ${memberActor.id}::uuid, 'member')
+    `;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${ws}::uuid, 'workspace')`;
+  });
+
+  const mixedAgent = await createWsAgent(ws, ownerOutside.id, `r4-ag-${tag}`);
+  const deliveryClient = new DeliveryCommandClient(cloudTarget(local.API_URL, local.ANON_KEY));
+  const listenerId = randomUUID();
+
+  const openSlug = `r4-open-${tag}`;
+  const openRes = await sendWs(ws, adminAll.jwt, { kind: "channel_create", slug: openSlug, visibility: "open" });
+  assert.equal(openRes.status, 200, JSON.stringify(openRes.body));
+  const openId = String((openRes.body.channel as Record<string, unknown>).channel_id);
+
+  // #lockA admits adminAll, adminOnlyA, memberActor, and mixedAgent (NOT ownerOutside).
+  const lockASlug = `r4-lock-a-${tag}`;
+  const lockARes = await sendWs(ws, adminAll.jwt, {
+    kind: "channel_create",
+    slug: lockASlug,
+    visibility: "private",
+    members: [
+      { kind: "user", id: adminOnlyA.id },
+      { kind: "user", id: memberActor.id },
+      { kind: "agent", id: mixedAgent.principal },
+    ],
+  });
+  assert.equal(lockARes.status, 200, JSON.stringify(lockARes.body));
+  const lockAId = String((lockARes.body.channel as Record<string, unknown>).channel_id);
+
+  // #lockB admits adminAll, memberActor, and mixedAgent (NEITHER ownerOutside NOR adminOnlyA!).
+  const lockBSlug = `r4-lock-b-${tag}`;
+  const lockBRes = await sendWs(ws, adminAll.jwt, {
+    kind: "channel_create",
+    slug: lockBSlug,
+    visibility: "private",
+    members: [
+      { kind: "user", id: memberActor.id },
+      { kind: "agent", id: mixedAgent.principal },
+    ],
+  });
+  assert.equal(lockBRes.status, 200, JSON.stringify(lockBRes.body));
+  const lockBId = String((lockBRes.body.channel as Record<string, unknown>).channel_id);
+
+  const maxServerAuditId = async () => {
+    const [row] = await sql<{ max_id: string | null }[]>`
+      SELECT MAX(audit_id)::text AS max_id FROM swarm.audit_log WHERE workspace_id = ${ws}::uuid
+    `;
+    return BigInt(row?.max_id ?? "0");
+  };
+  const serverAuditsSince = async (afterId: bigint) =>
+    await sql<{
+      audit_id: string;
+      command_kind: string;
+      outcome: string;
+      reason: string | null;
+      channel_ids: string[] | null;
+    }[]>`
+      SELECT audit_id::text, command_kind, outcome, reason, channel_ids::text[] AS channel_ids
+      FROM swarm.audit_log
+      WHERE workspace_id = ${ws}::uuid AND audit_id > ${afterId.toString()}::bigint
+      ORDER BY audit_id ASC
+    `;
+  const clientAuditIdsSince = async (userId: string, afterId: bigint) => {
+    const rows = await viewRowAs(userId, async (tx) =>
+      await tx<{ audit_id: string; command_kind: string; outcome: string }[]>`
+        SELECT audit_id::text, command_kind, outcome
+        FROM swarm_read.audit_log
+        WHERE workspace_id = ${ws}::uuid AND audit_id > ${afterId.toString()}::bigint
+        ORDER BY audit_id ASC
+      `
+    );
+    return rows.map((r) => r.audit_id);
+  };
+  const ackAllDeliveries = async (
+    deliveries: ReadonlyArray<{ leaseId: string; signal: { id: string } }>,
+  ) => {
+    for (const d of deliveries) {
+      await deliveryClient.ackAgentDelivery({
+        workspaceId: ws,
+        credential: mixedAgent.token,
+        commandId: randomUUID(),
+        signalId: d.signal.id,
+        leaseId: d.leaseId,
+        listenerInstanceId: listenerId,
+        outcome: "observed",
+        lastErrorCode: null,
+      });
+    }
+  };
+
+  // Pre-seed signals and channel stars BEFORE measuring each mixed batch group so single-channel setup rows don't mix in.
+  const generalNote = await sendWs(ws, adminAll.jwt, installedPost({ body: "General broadcast note" }));
+  const openNote = await sendWs(ws, adminAll.jwt, installedPost({ channel: openSlug, body: "Open broadcast note" }));
+  const lockANote1 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockASlug, body: "LockA note 1" }));
+  const lockANote2 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockASlug, body: "LockA note 2" }));
+  const lockANote3 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockASlug, body: "LockA note 3" }));
+  const lockBNote1 = await sendWs(ws, adminAll.jwt, installedPost({ channel: lockBSlug, body: "LockB note 1" }));
+  for (const res of [generalNote, openNote, lockANote1, lockANote2, lockANote3, lockBNote1]) {
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+  }
+  const generalNoteId = String(signalOf(generalNote.body).id);
+  const openNoteId = String(signalOf(openNote.body).id);
+  const lockANote1Id = String(signalOf(lockANote1.body).id);
+  const lockANote2Id = String(signalOf(lockANote2.body).id);
+  const lockANote3Id = String(signalOf(lockANote3.body).id);
+  const lockBNote1Id = String(signalOf(lockBNote1.body).id);
+
+  for (const cid of [openId, lockAId, lockBId]) {
+    assert.equal(
+      (await sendWs(ws, memberActor.jwt, { kind: "channel_preference_set", channel_id: cid, starred: true })).status,
+      200,
+    );
+  }
+
+  // --- Group 1: Mixed [open, #lockA] real operations (hidden from ownerOutside; visible to adminOnlyA & adminAll) ---
+  const openAsk1 = await sendWs(ws, adminAll.jwt, installedPost({
+    channel: openSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "Mixed open+lockA open ask",
+  }));
+  const lockAAsk1 = await sendWs(ws, adminAll.jwt, installedPost({
+    channel: lockASlug,
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "Mixed open+lockA lockA ask",
+  }));
+  assert.equal(openAsk1.status, 200);
+  assert.equal(lockAAsk1.status, 200);
+
+  const g1Baseline = await maxServerAuditId();
+
+  const g1SeenCmd = randomUUID();
+  const g1SeenBody = { kind: "signals_seen", signal_ids: [openNoteId, lockANote1Id] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g1SeenBody, g1SeenCmd)).status, 200);
+
+  const g1ClaimCmd = randomUUID();
+  const g1Claim = await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g1ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+  assert.equal(g1Claim.deliveries.length, 2, "Group 1 claim must lease [open, #lockA] together");
+  await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g1ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+
+  const g1StarCmd = randomUUID();
+  const g1StarBody = { kind: "channel_star_reorder", channel_ids: [openId, lockAId] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g1StarBody, g1StarCmd)).status, 200);
+
+  const g1ReorderCmd = randomUUID();
+  const g1ReorderBody = { kind: "channel_reorder", channel_ids: [openId, lockAId] };
+  assert.equal((await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd)).status, 200);
+  assert.equal((await sendWs(ws, adminAll.jwt, g1ReorderBody, g1ReorderCmd)).status, 200);
+
+  const g1Mismatch = await sendWs(ws, memberActor.jwt, installedPost({
+    channel: openSlug,
+    in_reply_to: lockANote1Id,
+    body: "Reply mismatch across #lockA and #open",
+  }));
+  assert.equal(g1Mismatch.status, 409);
+  assert.equal(g1Mismatch.body.error, "private_reply_channel_mismatch");
+
+  const g1ServerRows = await serverAuditsSince(g1Baseline);
+  assert.equal(g1ServerRows.length, 9, `expected 9 mixed [open, #lockA] audit rows, got ${JSON.stringify(g1ServerRows)}`);
+  for (const row of g1ServerRows) {
+    assert.deepEqual(
+      [...(row.channel_ids ?? [])].sort(),
+      [openId, lockAId].sort(),
+      `Group 1 row ${JSON.stringify(row)} must retain both openId and lockAId`,
+    );
+  }
+  const g1ExpectedIds = g1ServerRows.map((r) => r.audit_id);
+  assert.deepEqual(
+    await clientAuditIdsSince(ownerOutside.id, g1Baseline),
+    [],
+    "R3-AUDIT: owner admitted ONLY to #open must see ZERO mixed [open, #lockA] audit rows",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminOnlyA.id, g1Baseline),
+    g1ExpectedIds,
+    "R3-AUDIT positive control: admin admitted to BOTH #open and #lockA sees all mixed [open, #lockA] rows",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminAll.id, g1Baseline),
+    g1ExpectedIds,
+    "R3-AUDIT positive control: all-channel owner sees all mixed [open, #lockA] rows",
+  );
+
+  await ackAllDeliveries(g1Claim.deliveries);
+
+  // --- Group 2: Mixed [#lockA, #lockB] real operations (hidden from BOTH ownerOutside AND adminOnlyA; visible to adminAll) ---
+  const lockAAsk2 = await sendWs(ws, adminAll.jwt, installedPost({
+    channel: lockASlug,
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "Mixed lockA+lockB ask A",
+  }));
+  const lockBAsk1 = await sendWs(ws, adminAll.jwt, installedPost({
+    channel: lockBSlug,
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "Mixed lockA+lockB ask B",
+  }));
+  assert.equal(lockAAsk2.status, 200);
+  assert.equal(lockBAsk1.status, 200);
+
+  const g2Baseline = await maxServerAuditId();
+
+  const g2SeenCmd = randomUUID();
+  const g2SeenBody = { kind: "signals_seen", signal_ids: [lockANote2Id, lockBNote1Id] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g2SeenBody, g2SeenCmd)).status, 200);
+
+  const g2ClaimCmd = randomUUID();
+  const g2Claim = await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g2ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+  assert.equal(g2Claim.deliveries.length, 2, "Group 2 claim must lease [#lockA, #lockB] together");
+  await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g2ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+
+  const g2StarCmd = randomUUID();
+  const g2StarBody = { kind: "channel_star_reorder", channel_ids: [lockAId, lockBId] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g2StarBody, g2StarCmd)).status, 200);
+
+  const g2ReorderCmd = randomUUID();
+  const g2ReorderBody = { kind: "channel_reorder", channel_ids: [lockAId, lockBId] };
+  assert.equal((await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd)).status, 200);
+  assert.equal((await sendWs(ws, adminAll.jwt, g2ReorderBody, g2ReorderCmd)).status, 200);
+
+  const g2ServerRows = await serverAuditsSince(g2Baseline);
+  assert.equal(g2ServerRows.length, 8, `expected 8 mixed [#lockA, #lockB] audit rows, got ${JSON.stringify(g2ServerRows)}`);
+  for (const row of g2ServerRows) {
+    assert.deepEqual(
+      [...(row.channel_ids ?? [])].sort(),
+      [lockAId, lockBId].sort(),
+      `Group 2 row ${JSON.stringify(row)} must retain both lockAId and lockBId`,
+    );
+  }
+  const g2ExpectedIds = g2ServerRows.map((r) => r.audit_id);
+  assert.deepEqual(
+    await clientAuditIdsSince(ownerOutside.id, g2Baseline),
+    [],
+    "R3-AUDIT: owner outside both private channels must see ZERO [#lockA, #lockB] rows",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminOnlyA.id, g2Baseline),
+    [],
+    "R3-AUDIT: admin admitted to #lockA ALONE must see ZERO [#lockA, #lockB] rows",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminAll.id, g2Baseline),
+    g2ExpectedIds,
+    "R3-AUDIT positive control: owner admitted to BOTH #lockA and #lockB sees all [#lockA, #lockB] rows",
+  );
+
+  await ackAllDeliveries(g2Claim.deliveries);
+
+  // --- Group 3: Mixed [null/general, #lockA] seen, inbox-claim, and star reorder (409 + accepted + replay + post-leave replay) ---
+  const generalAsk = await sendWs(ws, adminAll.jwt, installedPost({
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "Unfiled general ask for mixed claim",
+  }));
+  const lockAAsk3 = await sendWs(ws, adminAll.jwt, installedPost({
+    channel: lockASlug,
+    signal_kind: "ask",
+    to_agent_principal_id: mixedAgent.principal,
+    body: "LockA ask for mixed null+private claim",
+  }));
+  assert.equal(generalAsk.status, 200);
+  assert.equal(lockAAsk3.status, 200);
+
+  const g3Baseline = await maxServerAuditId();
+
+  // 3a. Mixed [null/general, #lockA] star reorder BEFORE starring general -> 409 channel_star_mismatch (must still retain [lockAId]!).
+  const g3StarMismatch = await sendWs(ws, memberActor.jwt, {
+    kind: "channel_star_reorder",
+    channel_ids: [null, lockAId],
+  });
+  assert.equal(g3StarMismatch.status, 409);
+
+  // Star general (channel_id: null -> pure unfiled preference row, captured separately below? Wait: let's star general on adminOnlyA or check g3 rows by filtering out channel_preference_set!).
+  // Better yet: star general for memberActor first? No, we just tested 409 mismatch! Let's star general now and verify its channel_preference_set(null) is untagged while all 7 mixed [null, #lockA] rows retain [lockAId]!
+  assert.equal(
+    (await sendWs(ws, memberActor.jwt, { kind: "channel_preference_set", channel_id: null, starred: true })).status,
+    200,
+  );
+
+  const g3StarCmd = randomUUID();
+  const g3StarBody = { kind: "channel_star_reorder", channel_ids: [null, lockAId] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
+
+  const g3SeenCmd = randomUUID();
+  const g3SeenBody = { kind: "signals_seen", signal_ids: [generalNoteId, lockANote3Id] };
+  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
+
+  const g3ClaimCmd = randomUUID();
+  const g3Claim = await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g3ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+  assert.equal(g3Claim.deliveries.length, 2, "Group 3 claim must lease [general/null, #lockA] together");
+  await deliveryClient.claimAgentInbox({
+    workspaceId: ws,
+    credential: mixedAgent.token,
+    commandId: g3ClaimCmd,
+    listenerInstanceId: listenerId,
+    expectedPrincipalId: mixedAgent.principal,
+  });
+
+  // Also test post-leave idempotency replay of BOTH mixed [null, #lockA] seen and star reorder!
+  assert.equal((await sendWs(ws, memberActor.jwt, { kind: "channel_leave", channel_id: lockAId })).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g3SeenBody, g3SeenCmd)).status, 200);
+  assert.equal((await sendWs(ws, memberActor.jwt, g3StarBody, g3StarCmd)).status, 200);
+
+  const g3AllServerRows = await serverAuditsSince(g3Baseline);
+  const g3UnfiledPrefRows = g3AllServerRows.filter((r) => r.command_kind === "channel_preference_set");
+  assert.equal(g3UnfiledPrefRows.length, 1);
+  assert.equal(g3UnfiledPrefRows[0]!.channel_ids, null, "pure general channel_preference_set(null) stays untagged");
+
+  const g3PrivateRows = g3AllServerRows.filter((r) => r.command_kind !== "channel_preference_set");
+  assert.equal(
+    g3PrivateRows.length,
+    10,
+    `expected 10 #lockA-tagged rows (409 star + 2 star + 2 seen + 2 claim + 1 leave + 2 post-leave replays), got ${JSON.stringify(g3PrivateRows)}`,
+  );
+  for (const row of g3PrivateRows) {
+    assert.deepEqual(
+      row.channel_ids,
+      [lockAId],
+      `R3-AUDIT: mixed [null/general, #lockA] row ${JSON.stringify(row)} must retain [lockAId]`,
+    );
+  }
+  assert.deepEqual(
+    await clientAuditIdsSince(ownerOutside.id, g3Baseline),
+    g3UnfiledPrefRows.map((r) => r.audit_id),
+    "R3-AUDIT: ownerOutside sees ONLY pure general preference row and ZERO mixed [null/general, #lockA] rows (including replays)",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminOnlyA.id, g3Baseline),
+    g3AllServerRows.map((r) => r.audit_id),
+    "R3-AUDIT positive control: adminOnlyA sees all mixed [null/general, #lockA] rows (including replays)",
+  );
+  assert.deepEqual(
+    await clientAuditIdsSince(adminAll.id, g3Baseline),
+    g3AllServerRows.map((r) => r.audit_id),
+    "R3-AUDIT positive control: adminAll sees all mixed [null/general, #lockA] rows",
+  );
+
+  // --- Group 4: Pure unfiled & neutral outsider-probe controls + fail-closed NULL/unknown tag SQL defense-in-depth ---
+  const g4Baseline = await maxServerAuditId();
+  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [generalNoteId] })).status, 200);
+  assert.equal(
+    (await sendWs(ws, ownerOutside.jwt, { kind: "channel_preference_set", channel_id: null, starred: true })).status,
+    200,
+  );
+  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null] })).status, 200);
+  // Neutral outsider probes on #lockB alongside null/unknown stay untagged (zero existence oracle):
+  assert.equal((await sendWs(ws, ownerOutside.jwt, { kind: "signals_seen", signal_ids: [lockBNote1Id] })).status, 200);
+  assert.equal(
+    (await sendWs(ws, ownerOutside.jwt, { kind: "channel_star_reorder", channel_ids: [null, lockBId] })).status,
+    409,
+  );
+
+  const g4ControlRows = await serverAuditsSince(g4Baseline);
+  assert.equal(g4ControlRows.length, 5);
+  for (const row of g4ControlRows) {
+    assert.equal(row.channel_ids, null, `pure general / neutral outsider probe ${JSON.stringify(row)} must stay untagged`);
+  }
+  assert.deepEqual(
+    await clientAuditIdsSince(ownerOutside.id, g4Baseline),
+    g4ControlRows.map((r) => r.audit_id),
+    "pure unfiled operations and neutral outsider probes remain visible without an existence oracle",
+  );
+
+  // Defense-in-depth: malformed NULL or unknown UUID inside swarm.audit_log.channel_ids fails closed even for adminAll!
+  const failClosedBaseline = await maxServerAuditId();
+  const unknownChannelId = randomUUID();
+  await sql`
+    INSERT INTO swarm.audit_log (
+      actor_user, credential_kind, command_kind, workspace_id, stream_id, outcome, channel_ids
+    ) VALUES
+      (${adminAll.id}::uuid, 'user', 'signals_seen', ${ws}::uuid, ${ws}::uuid, 'accepted', ARRAY[${openId}::uuid, NULL::uuid]),
+      (${adminAll.id}::uuid, 'user', 'signals_seen', ${ws}::uuid, ${ws}::uuid, 'accepted', ARRAY[${openId}::uuid, ${unknownChannelId}::uuid])
+  `;
+  assert.equal((await serverAuditsSince(failClosedBaseline)).length, 2);
+  assert.deepEqual(
+    await clientAuditIdsSince(adminAll.id, failClosedBaseline),
+    [],
+    "R3-AUDIT fail-closed: NULL or unknown UUID inside channel_ids must hide the client audit row even for workspace owner",
+  );
 });
