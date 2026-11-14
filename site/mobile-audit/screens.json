@@ -624,7 +624,7 @@
       },
       {
         "type": "[data-composer-input]",
-        "text": "The offer is 240. Keep it between us for now."
+        "text": "The offer is 240. Keep it between us for now, and do not forward the quote to anyone else until the engineer has confirmed the Friday visit in writing."
       },
       {
         "wait": 500
@@ -695,7 +695,7 @@
   {
     "id": "app.composer.thread-to-dm",
     "kind": "view",
-    "path": "/app?w={workspace}&m={message.thread}",
+    "path": "/app?w={workspace}",
     "setup": [
       {
         "storage": {
@@ -704,21 +704,21 @@
         }
       },
       {
-        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
+        "waitFor": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
-        "scroll": "[data-signal-id=\"{message.thread}\"]"
+        "scroll": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
         "media": "(hover: hover)",
-        "hover": "[data-signal-id=\"{message.thread}\"]"
+        "hover": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
         "media": "(hover: none)",
-        "click": "[data-signal-id=\"{message.thread}\"] .dashboard__message-markdown"
+        "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-markdown"
       },
       {
-        "click": "[data-signal-id=\"{message.thread}\"] .dashboard__message-reply"
+        "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-reply"
       },
       {
         "waitFor": "form[data-composer] [data-composer-reply]:not([hidden])"
@@ -757,7 +757,7 @@
     "alone": true,
     "requiresSeed": [
       "create_workspace",
-      "seed_thread",
+      "seed_grouped_broadcast",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent",
       "seed_dm"
     ]
