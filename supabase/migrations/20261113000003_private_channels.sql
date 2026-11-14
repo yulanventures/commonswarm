@@ -1,22 +1,58 @@
 -- Channel Management CM-3a: private (#lock) channels for people and AI agents.
 --
 -- Additive and fail-closed:
--- 1. swarm.channels gains visibility ('open' | 'private', default 'open').
+-- 1. swarm.channels gains visibility ('open' | 'private', default 'open'), with a table trigger
+--    forbidding private -> open conversion so confidential history is never silently published.
 -- 2. swarm.channel_members stores explicit human and agent principals admitted to a private
---    channel, with FORCE ROW LEVEL SECURITY and policies for both swarm_command and swarm_admin.
+--    channel (plus per-channel human manager grants via is_manager), with FORCE ROW LEVEL SECURITY
+--    and policies for both swarm_command and swarm_admin.
 -- 3. swarm.actor_can_access_channel and swarm.claims_can_access_channel enforce both live
 --    workspace admission AND private-channel membership, checking agent_principal_id BEFORE sub
---    so an agent never inherits its human owner's private-channel access.
+--    so an agent never inherits its human owner's private-channel access (and vice versa).
 -- 4. swarm_read.channels, swarm_read.channel_members, swarm_read.channel_preferences,
 --    swarm_read.signals (dynamic pg_get_viewdef splice + assert_view_clauses_preserved),
 --    swarm_read.signal_mentions, swarm_read.channel_unread, swarm_read.channel_messages,
 --    swarm.agent_channel_read_advance, swarm_read.agent_channel_unread,
---    swarm.agent_delivery_is_wakeable, and swarm_read.signal_delivery_receipts enforce
---    private-channel membership with zero cross-channel metadata or slug disclosure.
+--    swarm.agent_delivery_is_wakeable, swarm_read.signal_delivery_receipts,
+--    swarm.wake_workspace_signal, swarm.wake_path_eligible_deliveries,
+--    swarm_read.agent_wake_path_deliveries, swarm_read.workspace_roster, and
+--    swarm_read.home_overview enforce private-channel membership across reads, traffic
+--    notifications, and queue/activity aggregates.
+-- 5. Workspace membership/role and agent lifecycle triggers durably revoke private-channel
+--    membership on soft-revocation and serialize manager promotion / orphan auto-archival.
+-- 6. Accepted workspace-wide invariants: channel slugs remain unique across the workspace
+--    (channel_create / channel_rename return 409 channel_exists with uniform neutral wording when
+--    the colliding channel is inaccessible), and global sort_rank allocation skips hidden rows.
 
 ALTER TABLE swarm.channels
   ADD COLUMN visibility text NOT NULL DEFAULT 'open'
     CHECK (visibility IN ('open', 'private'));
+
+-- A private channel's message history is confidential to its members, so converting a private
+-- channel to open without a historical audience boundary is forbidden at the table layer as well
+-- as the command edge.
+CREATE FUNCTION swarm.forbid_private_channel_reopen()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF OLD.visibility = 'private' AND NEW.visibility = 'open' THEN
+    RAISE EXCEPTION 'SWARM_PRIVATE_CHANNEL_CANNOT_REOPEN' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+ALTER FUNCTION swarm.forbid_private_channel_reopen() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.forbid_private_channel_reopen()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE TRIGGER channels_forbid_private_reopen
+  BEFORE UPDATE OF visibility ON swarm.channels
+  FOR EACH ROW
+  WHEN (OLD.visibility = 'private' AND NEW.visibility = 'open')
+  EXECUTE FUNCTION swarm.forbid_private_channel_reopen();
 
 CREATE TABLE swarm.channel_members (
   workspace_id uuid NOT NULL REFERENCES swarm.workspaces (workspace_id) ON DELETE CASCADE,
@@ -30,13 +66,14 @@ CREATE TABLE swarm.channel_members (
       ELSE 'agent:' || agent_principal_id::text
     END
   ) STORED,
+  is_manager boolean NOT NULL DEFAULT false,
   added_by_kind text NOT NULL CHECK (added_by_kind IN ('user', 'agent')),
   added_by_principal uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
   PRIMARY KEY (workspace_id, channel_id, member_key),
   CHECK (
     (member_kind = 'user' AND user_id IS NOT NULL AND agent_principal_id IS NULL)
-    OR (member_kind = 'agent' AND agent_principal_id IS NOT NULL AND user_id IS NULL)
+    OR (member_kind = 'agent' AND agent_principal_id IS NOT NULL AND user_id IS NULL AND is_manager = false)
   ),
   FOREIGN KEY (channel_id, workspace_id)
     REFERENCES swarm.channels (channel_id, workspace_id) ON DELETE CASCADE
@@ -79,7 +116,10 @@ SET search_path = pg_catalog AS $$
 DECLARE
   v_visibility text;
 BEGIN
-  IF p_workspace_id IS NULL OR p_actor_id IS NULL OR p_actor_kind NOT IN ('user', 'agent') THEN
+  IF p_workspace_id IS NULL
+    OR p_actor_id IS NULL
+    OR p_actor_kind IS NULL
+    OR p_actor_kind NOT IN ('user', 'agent') THEN
     RETURN false;
   END IF;
 
@@ -88,34 +128,50 @@ BEGIN
       RETURN false;
     END IF;
   ELSE
-    IF NOT EXISTS (
-      SELECT 1
-      FROM swarm.agent_principals p
-      JOIN swarm.memberships owner_m
-        ON owner_m.workspace_id = p_workspace_id
-       AND owner_m.user_id = p.owner_user_id
-       AND owner_m.revoked_at IS NULL
-      WHERE p.principal_id = p_actor_id
-        AND p.revoked_at IS NULL
-        AND (
-          EXISTS (
-            SELECT 1 FROM swarm.agent_workspace_memberships am
-            WHERE am.principal_id = p.principal_id
-              AND am.workspace_id = p_workspace_id
-              AND am.owner_user_id = p.owner_user_id
-              AND am.revoked_at IS NULL
-          )
-          OR (
-            p.workspace_id = p_workspace_id
-            AND NOT EXISTS (
-              SELECT 1 FROM swarm.agent_workspace_memberships any_am
-              WHERE any_am.principal_id = p.principal_id
-                AND any_am.workspace_id = p_workspace_id
+    IF to_regclass('swarm.agent_workspace_memberships') IS NOT NULL THEN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM swarm.agent_principals p
+        JOIN swarm.memberships owner_m
+          ON owner_m.workspace_id = p_workspace_id
+         AND owner_m.user_id = p.owner_user_id
+         AND owner_m.revoked_at IS NULL
+        WHERE p.principal_id = p_actor_id
+          AND p.revoked_at IS NULL
+          AND (
+            EXISTS (
+              SELECT 1 FROM swarm.agent_workspace_memberships am
+              WHERE am.principal_id = p.principal_id
+                AND am.workspace_id = p_workspace_id
+                AND am.owner_user_id = p.owner_user_id
+                AND am.revoked_at IS NULL
+            )
+            OR (
+              p.workspace_id = p_workspace_id
+              AND NOT EXISTS (
+                SELECT 1 FROM swarm.agent_workspace_memberships any_am
+                WHERE any_am.principal_id = p.principal_id
+                  AND any_am.workspace_id = p_workspace_id
+              )
             )
           )
-        )
-    ) THEN
-      RETURN false;
+      ) THEN
+        RETURN false;
+      END IF;
+    ELSE
+      IF NOT EXISTS (
+        SELECT 1
+        FROM swarm.agent_principals p
+        JOIN swarm.memberships owner_m
+          ON owner_m.workspace_id = p_workspace_id
+         AND owner_m.user_id = p.owner_user_id
+         AND owner_m.revoked_at IS NULL
+        WHERE p.principal_id = p_actor_id
+          AND p.workspace_id = p_workspace_id
+          AND p.revoked_at IS NULL
+      ) THEN
+        RETURN false;
+      END IF;
     END IF;
   END IF;
 
@@ -165,7 +221,8 @@ DECLARE
   v_user uuid;
   v_agent uuid;
 BEGIN
-  IF p_workspace_id IS NULL OR claims IS NULL OR claims->>'role' IS DISTINCT FROM 'authenticated'
+  IF p_workspace_id IS NULL OR claims IS NULL
+    OR (claims ? 'role' AND claims->>'role' IS DISTINCT FROM 'authenticated')
     OR coalesce(claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
     RETURN false;
   END IF;
@@ -220,8 +277,83 @@ GRANT SELECT ON swarm_read.channels TO authenticated, swarm_read;
 REVOKE ALL ON swarm_read.channels FROM PUBLIC, anon;
 
 -- Members of a private channel can read its live membership list; non-members see zero rows.
--- Inline live-member verification on the owner-backed tables so swarm.actor_can_access_channel
--- remains strictly swarm_command-only.
+-- Uses a plpgsql helper so swarm.actor_can_access_channel remains strictly swarm_command-only
+-- and swarm_read.channel_members adds no pg_depend edge onto historical rollback tables.
+CREATE OR REPLACE FUNCTION swarm.claims_can_read_channel_member(
+  p_workspace_id uuid,
+  p_channel_id uuid,
+  p_member_kind text,
+  p_member_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+BEGIN
+  IF p_workspace_id IS NULL
+    OR p_channel_id IS NULL
+    OR p_member_id IS NULL
+    OR p_member_kind IS NULL
+    OR p_member_kind NOT IN ('user', 'agent') THEN
+    RETURN false;
+  END IF;
+
+  IF NOT swarm.claims_can_access_channel(p_workspace_id, p_channel_id) THEN
+    RETURN false;
+  END IF;
+
+  IF p_member_kind = 'user' THEN
+    RETURN swarm.is_member(p_workspace_id, p_member_id);
+  END IF;
+
+  IF to_regclass('swarm.agent_workspace_memberships') IS NOT NULL THEN
+    RETURN EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS p
+      JOIN swarm.memberships AS owner_m
+        ON owner_m.workspace_id = p_workspace_id
+       AND owner_m.user_id = p.owner_user_id
+       AND owner_m.revoked_at IS NULL
+      WHERE p.principal_id = p_member_id
+        AND p.revoked_at IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM swarm.agent_workspace_memberships AS am
+            WHERE am.principal_id = p.principal_id
+              AND am.workspace_id = p_workspace_id
+              AND am.owner_user_id = p.owner_user_id
+              AND am.revoked_at IS NULL
+          )
+          OR (
+            p.workspace_id = p_workspace_id
+            AND NOT EXISTS (
+              SELECT 1 FROM swarm.agent_workspace_memberships AS any_am
+              WHERE any_am.principal_id = p.principal_id
+                AND any_am.workspace_id = p_workspace_id
+            )
+          )
+        )
+    );
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1
+    FROM swarm.agent_principals AS p
+    JOIN swarm.memberships AS owner_m
+      ON owner_m.workspace_id = p_workspace_id
+     AND owner_m.user_id = p.owner_user_id
+     AND owner_m.revoked_at IS NULL
+    WHERE p.principal_id = p_member_id
+      AND p.workspace_id = p_workspace_id
+      AND p.revoked_at IS NULL
+  );
+END;
+$$;
+
+ALTER FUNCTION swarm.claims_can_read_channel_member(uuid, uuid, text, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.claims_can_read_channel_member(uuid, uuid, text, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.claims_can_read_channel_member(uuid, uuid, text, uuid)
+  TO authenticated, swarm_read;
+
 CREATE VIEW swarm_read.channel_members
 WITH (security_barrier = true)
 AS
@@ -232,50 +364,15 @@ AS
     COALESCE(m.user_id, m.agent_principal_id) AS id,
     m.added_by_principal,
     m.added_by_kind,
-    m.created_at
+    m.created_at,
+    m.is_manager
   FROM swarm.channel_members AS m
   WHERE swarm.is_member(m.workspace_id, auth.uid())
-    AND swarm.claims_can_access_channel(m.workspace_id, m.channel_id)
-    AND (
-      (
-        m.member_kind = 'user'
-        AND EXISTS (
-          SELECT 1 FROM swarm.memberships AS mem
-          WHERE mem.workspace_id = m.workspace_id
-            AND mem.user_id = m.user_id
-            AND mem.revoked_at IS NULL
-        )
-      )
-      OR (
-        m.member_kind = 'agent'
-        AND EXISTS (
-          SELECT 1
-          FROM swarm.agent_principals AS p
-          JOIN swarm.memberships AS owner_m
-            ON owner_m.workspace_id = m.workspace_id
-           AND owner_m.user_id = p.owner_user_id
-           AND owner_m.revoked_at IS NULL
-          WHERE p.principal_id = m.agent_principal_id
-            AND p.revoked_at IS NULL
-            AND (
-              EXISTS (
-                SELECT 1 FROM swarm.agent_workspace_memberships AS am
-                WHERE am.principal_id = p.principal_id
-                  AND am.workspace_id = m.workspace_id
-                  AND am.owner_user_id = p.owner_user_id
-                  AND am.revoked_at IS NULL
-              )
-              OR (
-                p.workspace_id = m.workspace_id
-                AND NOT EXISTS (
-                  SELECT 1 FROM swarm.agent_workspace_memberships AS any_am
-                  WHERE any_am.principal_id = p.principal_id
-                    AND any_am.workspace_id = m.workspace_id
-                )
-              )
-            )
-        )
-      )
+    AND swarm.claims_can_read_channel_member(
+      m.workspace_id,
+      m.channel_id,
+      m.member_kind,
+      COALESCE(m.user_id, m.agent_principal_id)
     );
 
 ALTER VIEW swarm_read.channel_members OWNER TO swarm_admin;
@@ -373,6 +470,9 @@ BEGIN
   head := split_part(tagged, '@@SWARM_SPLIT@@', 1);
   tail := split_part(tagged, '@@SWARM_SPLIT@@', 2);
 
+  -- Note for future migrations splicing swarm_read.signals: regexp_replace below splits on the
+  -- first \sWHERE\s in tail (between FROM swarm.signals s and the outer WHERE), so never add a
+  -- JOIN subquery containing WHERE inside alias_and_where without anchoring the outer WHERE.
   tagged_where := regexp_replace(tail, '\sWHERE\s', ' WHERE @@SWARM_WHERE@@ ');
   IF tagged_where = tail THEN
     RAISE EXCEPTION
@@ -838,6 +938,12 @@ BEGIN
       (
         v_human_user_id IS NOT NULL
         AND swarm.actor_can_access_channel(p_workspace_id, signal.channel_id, 'user', v_human_user_id)
+        AND EXISTS (
+          SELECT 1
+          FROM swarm_read.signals AS readable
+          WHERE readable.workspace_id = p_workspace_id
+            AND readable.id = signal.id
+        )
       )
       OR (
         v_human_user_id IS NULL
@@ -1030,6 +1136,9 @@ SECURITY DEFINER
 SET search_path = swarm, pg_catalog
 AS $$
 DECLARE
+  v_claims jsonb := NULLIF(current_setting('request.jwt.claims', true), '')::jsonb;
+  v_human_user_id uuid := NULLIF(v_claims ->> 'sub', '')::uuid;
+  v_agent_principal_id uuid;
   v_result jsonb;
   v_receipts jsonb;
   v_channel_id uuid;
@@ -1046,6 +1155,13 @@ BEGIN
   );
   IF v_result IS NULL THEN
     RETURN NULL;
+  END IF;
+
+  IF v_human_user_id IS NULL AND p_agent_token_hash IS NOT NULL THEN
+    SELECT context.principal_id
+    INTO v_agent_principal_id
+    FROM swarm.agent_delivery_read_context(p_agent_token_hash, p_workspace_id) AS context
+    LIMIT 1;
   END IF;
 
   SELECT s.channel_id INTO v_channel_id
@@ -1136,10 +1252,42 @@ BEGIN
           (
             SELECT count(*)
             FROM swarm.signal_deliveries AS pending
+            JOIN swarm.signals AS ps
+              ON ps.workspace_id = pending.workspace_id
+             AND ps.id = pending.signal_id
             WHERE pending.workspace_id = p_workspace_id
               AND pending.recipient_agent_principal_id =
                 (receipt.value ->> 'recipient_agent_principal_id')::uuid
               AND pending.ack_outcome = 'queued'
+              AND (
+                (
+                  v_human_user_id IS NOT NULL
+                  AND (
+                    ps.channel_id IS NULL
+                    OR swarm.actor_can_access_channel(p_workspace_id, ps.channel_id, 'user', v_human_user_id)
+                  )
+                )
+                OR (
+                  v_human_user_id IS NULL
+                  AND v_agent_principal_id IS NOT NULL
+                  AND (
+                    ps.channel_id IS NULL
+                    OR swarm.actor_can_access_channel(p_workspace_id, ps.channel_id, 'agent', v_agent_principal_id)
+                  )
+                  AND (
+                    (ps.from_kind = 'agent' AND ps.from_principal = v_agent_principal_id)
+                    OR ps.to_agent_principal_id = v_agent_principal_id
+                    OR (ps.to_user_id IS NULL AND ps.to_agent_principal_id IS NULL)
+                    OR EXISTS (
+                      SELECT 1
+                      FROM swarm.signal_recipients AS r
+                      WHERE r.workspace_id = ps.workspace_id
+                        AND r.signal_id = ps.id
+                        AND r.recipient_agent_principal_id = v_agent_principal_id
+                    )
+                  )
+                )
+              )
           )
         )
         ELSE receipt.value
@@ -1236,3 +1384,781 @@ BEGIN
 END;
 $fn$;
 
+-- 15. Traffic metadata, wake eligibility, roster, and home overview isolation (C2 + E4).
+CREATE OR REPLACE FUNCTION swarm.claims_can_access_signal_channel(
+  p_workspace_id uuid,
+  p_signal_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  v_channel_id uuid;
+BEGIN
+  IF p_workspace_id IS NULL OR p_signal_id IS NULL THEN
+    RETURN false;
+  END IF;
+  SELECT s.channel_id INTO v_channel_id
+  FROM swarm.signals AS s
+  WHERE s.workspace_id = p_workspace_id
+    AND s.id = p_signal_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  RETURN v_channel_id IS NULL
+    OR swarm.claims_can_access_channel(p_workspace_id, v_channel_id);
+END;
+$$;
+
+ALTER FUNCTION swarm.claims_can_access_signal_channel(uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.claims_can_access_signal_channel(uuid, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.claims_can_access_signal_channel(uuid, uuid)
+  TO authenticated, swarm_read;
+
+-- Suppress workspace-wide Realtime signal broadcasts when the signal is filed in a non-open
+-- channel so outsiders never observe private-channel signal ids or timestamps.
+CREATE OR REPLACE FUNCTION swarm.wake_workspace_signal()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fn$
+DECLARE
+  v_visibility text;
+BEGIN
+  BEGIN
+    IF NEW.channel_id IS NOT NULL THEN
+      SELECT c.visibility INTO v_visibility
+      FROM swarm.channels AS c
+      WHERE c.workspace_id = NEW.workspace_id
+        AND c.channel_id = NEW.channel_id;
+      IF v_visibility IS DISTINCT FROM 'open' THEN
+        RETURN NULL;
+      END IF;
+    END IF;
+    PERFORM realtime.send(
+      pg_catalog.jsonb_build_object(
+        'v', 1,
+        'signal_id', NEW.id,
+        'created_at', NEW.created_at
+      ),
+      'signal',
+      'cswarm-signals:' || NEW.workspace_id::text,
+      true
+    );
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN NULL;
+  END;
+  RETURN NULL;
+END;
+$fn$;
+
+ALTER FUNCTION swarm.wake_workspace_signal() OWNER TO postgres;
+REVOKE ALL ON FUNCTION swarm.wake_workspace_signal() FROM PUBLIC;
+
+COMMENT ON FUNCTION swarm.wake_workspace_signal() IS
+  'AFTER INSERT on swarm.signals: send a content-free payload on the workspace '
+  'signal topic for unfiled and open-channel signals only; private-channel '
+  'signals never broadcast on the workspace-wide Realtime topic.';
+
+CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries
+WITH (security_barrier = true)
+AS
+SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
+       d.enqueued_at
+FROM swarm.signal_deliveries AS d
+JOIN swarm.signals AS s
+  ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+JOIN swarm.agent_principals AS p
+  ON p.workspace_id = d.workspace_id AND p.principal_id = d.recipient_agent_principal_id
+WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
+  AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
+  AND s.until > statement_timestamp()
+  AND s.kind IN ('ask', 'note')
+  AND (
+    s.channel_id IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM swarm.channels AS ch
+      WHERE ch.workspace_id = s.workspace_id
+        AND ch.channel_id = s.channel_id
+        AND (
+          ch.visibility = 'open'
+          OR EXISTS (
+            SELECT 1
+            FROM swarm.channel_members AS cm
+            WHERE cm.workspace_id = s.workspace_id
+              AND cm.channel_id = s.channel_id
+              AND cm.member_kind = 'agent'
+              AND cm.agent_principal_id = d.recipient_agent_principal_id
+          )
+        )
+    )
+  )
+  AND (s.to_agent_principal_id = d.recipient_agent_principal_id
+    OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
+      WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+        AND r.recipient_agent_principal_id = d.recipient_agent_principal_id))
+  AND p.revoked_at IS NULL
+  AND p.turn_only = false
+  AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
+    WHERE observed.workspace_id = d.workspace_id
+      AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
+      AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
+      AND observed.last_leased_by IS NULL
+      AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
+  AND NOT EXISTS (SELECT 1 FROM swarm.signal_deliveries AS later
+    JOIN swarm.signals AS later_signal
+      ON later_signal.workspace_id = later.workspace_id AND later_signal.id = later.signal_id
+    WHERE later.workspace_id = d.workspace_id
+      AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
+      AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)
+        > (date_trunc('milliseconds', s.created_at), s.id)
+      AND later_signal.kind IN ('ask', 'note')
+      AND (later_signal.to_agent_principal_id = d.recipient_agent_principal_id
+        OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS later_recipient
+          WHERE later_recipient.workspace_id = later_signal.workspace_id
+            AND later_recipient.signal_id = later_signal.id
+            AND later_recipient.recipient_agent_principal_id = d.recipient_agent_principal_id))
+      AND later.ack_outcome = 'observed' AND later.last_lease_id IS NULL
+      AND later.last_leased_by IS NULL);
+
+ALTER VIEW swarm.wake_path_eligible_deliveries OWNER TO swarm_admin;
+REVOKE ALL ON swarm.wake_path_eligible_deliveries
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries
+WITH (security_barrier = true)
+AS
+SELECT workspace_id, signal_id, principal_id, enqueued_at
+FROM swarm.wake_path_eligible_deliveries AS d
+WHERE swarm.is_member(d.workspace_id, auth.uid())
+  AND swarm.claims_can_access_signal_channel(d.workspace_id, d.signal_id);
+
+ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
+
+CREATE OR REPLACE FUNCTION swarm_read.workspace_roster(p_workspace_id uuid) RETURNS jsonb
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+ claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+ caller uuid;
+ caller_agent uuid;
+ read_at timestamptz := statement_timestamp();
+ result jsonb;
+BEGIN
+ IF claims IS NULL OR claims->>'role' IS DISTINCT FROM 'authenticated'
+  OR coalesce(claims->>'sub', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+  RETURN NULL;
+ END IF;
+ caller := (claims->>'sub')::uuid;
+ IF NOT swarm.is_member(p_workspace_id, caller) THEN RETURN NULL; END IF;
+ IF claims ? 'agent_principal_id' THEN
+  IF coalesce(claims->>'agent_principal_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+   RETURN NULL;
+  END IF;
+  caller_agent := (claims->>'agent_principal_id')::uuid;
+  IF NOT EXISTS (SELECT 1 FROM swarm.agent_principals p
+   JOIN swarm.agent_workspace_memberships am USING (principal_id, owner_user_id)
+   WHERE am.workspace_id = p_workspace_id AND p.principal_id = caller_agent
+     AND p.owner_user_id = caller AND p.revoked_at IS NULL AND am.revoked_at IS NULL) THEN
+   RETURN NULL;
+  END IF;
+ END IF;
+
+ WITH agents AS MATERIALIZED (
+  SELECT p.principal_id, p.workspace_id, p.name, p.transport, p.turn_only, p.owner_user_id
+  FROM swarm_read.agent_principals p
+  JOIN swarm.memberships owner_membership ON owner_membership.workspace_id = p.workspace_id
+   AND owner_membership.user_id = p.owner_user_id AND owner_membership.revoked_at IS NULL
+  WHERE p.workspace_id = p_workspace_id AND p.revoked_at IS NULL
+  ORDER BY p.principal_id LIMIT 201
+ ), page AS (
+  SELECT * FROM agents ORDER BY principal_id LIMIT 200
+ ), facts AS (
+  SELECT a.*,
+   swarm_read.agent_connection_kind(a.workspace_id, a.principal_id) AS connection,
+   presence.watcher_at, presence.channel_at, presence.listener_at,
+   greatest(presence.last_command_at,
+    (SELECT max(s.created_at) FROM swarm.signals s
+     WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
+       AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))),
+    (SELECT max(greatest(b.created_at, b.acknowledged_at)) FROM swarm.hosted_mcp_check_batches b
+     WHERE b.workspace_id = a.workspace_id AND b.principal_id = a.principal_id
+       AND (cardinality(b.signal_ids) = 0 OR EXISTS (
+        SELECT 1 FROM unnest(b.signal_ids) AS sid
+        JOIN swarm.signals bs ON bs.workspace_id = b.workspace_id AND bs.id = sid
+        WHERE bs.channel_id IS NULL OR swarm.claims_can_access_channel(bs.workspace_id, bs.channel_id)))),
+    (SELECT max(e.occurred_at) FROM swarm.household_todo_events e WHERE e.workspace_id = a.workspace_id AND e.event->>'actor_agent_principal' = a.principal_id::text),
+    (SELECT to_timestamp(max((e.event->>'occurred_at_server')::numeric)/1000) FROM swarm.household_object_events e
+     WHERE e.workspace_id = a.workspace_id AND e.event->>'actor_agent_principal' = a.principal_id::text)) AS last_activity_at,
+   (SELECT min(d.enqueued_at) FROM swarm.signal_deliveries d JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+    WHERE d.workspace_id = a.workspace_id AND d.recipient_agent_principal_id = a.principal_id AND d.acked_at IS NULL AND s.until > read_at
+      AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))) AS messages_waiting_since,
+   working.created_at AS working_since, working.body AS working_body, working.whole_workspace,
+   waiting.open_count, waiting.oldest_at
+  FROM page a
+  LEFT JOIN swarm.agent_presence presence ON presence.workspace_id = a.workspace_id AND presence.principal_id = a.principal_id
+  LEFT JOIN LATERAL (
+   SELECT s.created_at, s.body,
+    (s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.channel_id IS NULL
+     AND s.in_reply_to IS NULL AND s.thread_root_id IS NULL AND s.chain_root_id IS NULL
+     AND s.parent_signal_id IS NULL AND s.chain_participants IS NULL
+     AND NOT EXISTS (SELECT 1 FROM swarm.signal_recipients r WHERE r.signal_id = s.id)) AS whole_workspace
+   FROM swarm.signals s
+   WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
+     AND s.kind = 'working-on' AND s.until > read_at
+     AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
+   ORDER BY s.created_at DESC, s.id DESC LIMIT 1
+  ) working ON true
+  LEFT JOIN LATERAL (
+   SELECT count(*)::integer AS open_count, min(s.created_at) AS oldest_at
+   FROM swarm.signals s
+   WHERE s.workspace_id = a.workspace_id AND s.from_kind = 'agent' AND s.from_principal = a.principal_id
+     AND s.kind = 'ask' AND s.until > read_at
+     AND (s.channel_id IS NULL OR swarm.claims_can_access_channel(s.workspace_id, s.channel_id))
+     AND EXISTS (
+      SELECT 1 FROM (
+       SELECT s.to_user_id AS user_id WHERE s.to_user_id IS NOT NULL
+       UNION SELECT r.recipient_user_id FROM swarm.signal_recipients r
+        WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id AND r.recipient_user_id IS NOT NULL
+      ) addressed)
+     AND NOT swarm.ask_answered(s.workspace_id, s.id)
+  ) waiting ON true
+ )
+ SELECT jsonb_build_object('workspace_id', p_workspace_id, 'generated_at', read_at,
+  'lead_agent_principal_id', (SELECT w.lead_agent_principal_id FROM swarm.workspaces w WHERE w.workspace_id = p_workspace_id),
+  'truncated', (SELECT count(*) FROM agents) > 200,
+  'agents', coalesce(jsonb_agg(jsonb_build_object(
+   'principal_id', f.principal_id,
+   'name', f.name,
+   'transport', f.transport,
+   'turn_only', f.turn_only,
+   'owner', jsonb_build_object('user_id', f.owner_user_id,
+     'display_name', (SELECT u.display_name FROM swarm.users u WHERE u.user_id = f.owner_user_id)),
+   'status', swarm_read.roster_status(f.connection, f.transport,
+     coalesce(f.watcher_at, f.channel_at, f.listener_at) IS NOT NULL,
+     f.messages_waiting_since, f.last_activity_at, read_at),
+   'connection', f.connection,
+   'last_activity_at', f.last_activity_at,
+   'open_work', CASE WHEN f.working_since IS NULL THEN NULL ELSE jsonb_build_object(
+     'since', f.working_since,
+     'text', CASE WHEN f.whole_workspace THEN left(f.working_body, 200) ELSE NULL END) END,
+   'waiting_on_people', jsonb_build_object('count', coalesce(f.open_count, 0),
+     'since', CASE WHEN coalesce(f.open_count, 0) > 0 THEN f.oldest_at ELSE NULL END),
+   'platform', NULL, 'job', NULL, 'reports_to', NULL, 'parent', NULL,
+   'source', 'commonswarm'
+  ) ORDER BY f.name, f.principal_id), '[]'::jsonb))
+ INTO result FROM facts f;
+ RETURN result;
+END;
+$$;
+
+ALTER FUNCTION swarm_read.workspace_roster(uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.workspace_roster(uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm_read.workspace_roster(uuid) TO swarm_read;
+
+CREATE OR REPLACE FUNCTION swarm_read.home_overview() RETURNS jsonb
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+ claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+ viewer uuid;
+ read_at timestamptz := statement_timestamp();
+ workspace record;
+ can_read boolean;
+ last_seen timestamptz;
+ new_messages integer;
+ content jsonb;
+ people jsonb;
+ asks jsonb;
+ assigned jsonb;
+ waiting jsonb;
+ result jsonb := '[]'::jsonb;
+BEGIN
+ IF claims IS NULL OR claims->>'role' IS DISTINCT FROM 'authenticated'
+  OR claims ? 'agent_principal_id' OR nullif(claims->>'sub', '') IS NULL THEN
+  RETURN NULL;
+ END IF;
+ IF claims->>'sub' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN NULL; END IF;
+ viewer := (claims->>'sub')::uuid;
+ FOR workspace IN
+  SELECT w.workspace_id, w.name, m.role
+  FROM swarm.workspaces w JOIN swarm.memberships m USING (workspace_id)
+  WHERE m.user_id = viewer AND m.revoked_at IS NULL AND w.archived_at IS NULL
+  ORDER BY w.created_at, w.workspace_id LIMIT 50
+ LOOP
+  can_read := swarm.household_human_can_read(workspace.workspace_id, viewer);
+  SELECT max(r.first_seen_at) INTO last_seen FROM swarm.signal_human_receipts r
+   WHERE r.workspace_id = workspace.workspace_id AND r.user_id = viewer;
+  SELECT count(*) INTO new_messages FROM (
+   SELECT s.id FROM swarm_read.signals s
+   WHERE s.workspace_id = workspace.workspace_id
+    AND NOT (s.from_kind = 'user' AND s."from" = viewer)
+    AND s.created_at > coalesce(last_seen, read_at - interval '7 days')
+   LIMIT 99
+  ) messages;
+  SELECT coalesce(jsonb_agg(a.value ORDER BY a.created_at DESC, a.id), '[]'::jsonb) INTO asks FROM (
+   SELECT s.id, s.created_at, jsonb_build_object('signal_id', s.id,
+    'from', jsonb_build_object('kind', s.from_kind, 'id', s."from"),
+    'created_at', s.created_at, 'until', s.until) AS value
+   FROM swarm_read.signals s
+   WHERE s.workspace_id = workspace.workspace_id AND s.kind = 'ask' AND s.until > read_at
+    AND (s."to" = viewer OR EXISTS (
+     SELECT 1 FROM swarm.signal_recipients r WHERE r.workspace_id = s.workspace_id
+      AND r.signal_id = s.id AND r.recipient_user_id = viewer))
+    AND NOT EXISTS (
+     SELECT 1 FROM swarm.signals reply WHERE reply.workspace_id = s.workspace_id AND reply.in_reply_to = s.id
+      AND ((reply.from_kind = 'user' AND reply.from_principal = viewer)
+       OR (reply.from_kind = 'agent' AND EXISTS (
+        SELECT 1 FROM swarm.agent_principals p WHERE p.workspace_id = reply.workspace_id
+         AND p.principal_id = reply.from_principal AND p.owner_user_id = viewer))))
+   ORDER BY s.created_at DESC, s.id LIMIT 10
+  ) a;
+  content := NULL;
+  assigned := '[]'::jsonb;
+  waiting := '[]'::jsonb;
+  IF can_read THEN
+   SELECT jsonb_build_object('open_todos', (
+    SELECT count(*) FROM swarm.household_todos t WHERE t.workspace_id = workspace.workspace_id AND t.state IN ('open','doing')),
+    'lists', count(*) FILTER (WHERE o.value->>'kind' = 'list'),
+    'docs', count(*) FILTER (WHERE o.value->>'kind' = 'doc'),
+    'files', count(*) FILTER (WHERE o.value->>'kind' = 'file')) INTO content
+   FROM swarm.household_object_streams os
+   CROSS JOIN LATERAL jsonb_each(coalesce(os.projection->'objects', '{}'::jsonb)) o
+   WHERE os.workspace_id = workspace.workspace_id;
+   SELECT coalesce(jsonb_agg(a.value ORDER BY a.state_at DESC, a.todo_id), '[]'::jsonb) INTO assigned FROM (
+    SELECT t.todo_id, t.state_at, jsonb_build_object('todo_id',t.todo_id,'title',t.title,'state',t.state,'due_on',t.due_on) value
+    FROM swarm.household_todos t WHERE t.workspace_id = workspace.workspace_id
+     AND t.assignee_user = viewer AND t.state IN ('open','doing')
+    ORDER BY t.state_at DESC, t.todo_id LIMIT 20
+   ) a;
+   SELECT coalesce(jsonb_agg(a.value ORDER BY a.state_at DESC, a.todo_id, a.reason), '[]'::jsonb) INTO waiting FROM (
+    SELECT t.todo_id, t.state_at, reason.kind AS reason,
+     jsonb_build_object('todo_id',t.todo_id,'title',t.title,'state',t.state,'due_on',t.due_on,
+      'reason',reason.kind,'agent_id', CASE WHEN reason.kind = 'request' THEN t.offer_principal ELSE t.assignee_principal END) value
+    FROM swarm.household_todos t
+    LEFT JOIN swarm.agent_principals p ON p.workspace_id = t.workspace_id AND p.principal_id = t.assignee_principal
+    CROSS JOIN LATERAL (
+     SELECT CASE
+     WHEN t.offer_id IS NOT NULL AND t.offer_decider = viewer THEN 'request'
+     WHEN t.gate_kind = 'after' AND EXISTS (
+      SELECT 1 FROM swarm.household_todos prerequisite WHERE prerequisite.workspace_id = t.workspace_id
+       AND prerequisite.todo_id = t.gate_todo_id AND prerequisite.assignee_user = viewer AND prerequisite.state IN ('open','doing')) THEN 'after'
+     WHEN t.gate_kind = 'hold' AND p.owner_user_id = viewer AND p.revoked_at IS NULL THEN 'hold'
+     WHEN p.owner_user_id = viewer AND p.revoked_at IS NOT NULL THEN 'agent_removed'
+     END AS kind
+    ) reason
+    WHERE t.workspace_id = workspace.workspace_id AND t.state IN ('open','doing') AND reason.kind IS NOT NULL
+    ORDER BY t.state_at DESC, t.todo_id, reason.kind LIMIT 20
+   ) a;
+  END IF;
+  WITH members AS MATERIALIZED (
+   SELECT m.user_id, m.role, u.display_name FROM swarm.memberships m JOIN swarm.users u USING (user_id)
+   WHERE m.workspace_id = workspace.workspace_id AND m.revoked_at IS NULL
+   ORDER BY (m.user_id = viewer) DESC, m.user_id LIMIT 25
+  ), agents AS MATERIALIZED (
+   SELECT p.* FROM swarm_read.agent_principals p JOIN members m ON m.user_id = p.owner_user_id
+   WHERE p.workspace_id = workspace.workspace_id
+   ORDER BY (p.owner_user_id = viewer) DESC, p.owner_user_id, p.principal_id LIMIT 50
+  ), todo_facts AS MATERIALIZED (
+   SELECT t.*, CASE t.gate_kind
+    WHEN 'none' THEN true WHEN 'hold' THEN false WHEN 'at' THEN t.gate_at <= read_at
+    WHEN 'after' THEN EXISTS (SELECT 1 FROM swarm.household_todos predecessor
+     WHERE predecessor.workspace_id = t.workspace_id AND predecessor.todo_id = t.gate_todo_id AND predecessor.state IN ('done','dropped'))
+    ELSE false END AS gate_clear
+   FROM swarm.household_todos t WHERE t.workspace_id = workspace.workspace_id
+  ), agent_facts AS (
+   SELECT p.*, connection.kind AS connection,
+    CASE WHEN p.transport='hosted_mcp' AND hosted_policy.grant_id IS NOT NULL THEN
+      jsonb_build_object('connection_expires_at',hosted_policy.connection_expires_at,
+        'connection_expired_at',coalesce(hosted_policy.connection_expired_at,
+          CASE WHEN hosted_policy.connection_expires_at<=clock_timestamp() THEN hosted_policy.connection_expires_at END))
+    WHEN p.transport='local' AND local_policy.renewal_grant_id IS NOT NULL THEN
+      jsonb_build_object('renewal_grant_id',local_policy.renewal_grant_id,
+        'connection_expires_at',local_policy.connection_expires_at,
+        'connection_expired_at',coalesce(local_policy.connection_expired_at,
+          CASE WHEN local_policy.connection_expires_at<=clock_timestamp() THEN local_policy.connection_expires_at END))
+        || CASE WHEN selected.selected_token_id IS NOT NULL THEN jsonb_build_object('token_id',selected.selected_token_id) ELSE '{}'::jsonb END
+    WHEN p.transport='local' AND selected.selected_token_id IS NOT NULL THEN
+      jsonb_build_object('renewal_grant_id',NULL,'token_id',selected.selected_token_id)
+    ELSE '{}'::jsonb END AS connection_policy,
+    greatest(presence.last_command_at,
+     (SELECT max(s.created_at) FROM swarm.signals s
+      WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id
+        AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'user', viewer))),
+     (SELECT max(greatest(b.created_at,b.acknowledged_at)) FROM swarm.hosted_mcp_check_batches b
+      WHERE b.workspace_id = p.workspace_id AND b.principal_id = p.principal_id
+        AND (cardinality(b.signal_ids) = 0 OR EXISTS (
+         SELECT 1 FROM unnest(b.signal_ids) AS sid
+         JOIN swarm.signals bs ON bs.workspace_id = b.workspace_id AND bs.id = sid
+         WHERE bs.channel_id IS NULL OR swarm.actor_can_access_channel(bs.workspace_id, bs.channel_id, 'user', viewer)))),
+     (SELECT max(e.occurred_at) FROM swarm.household_todo_events e WHERE e.workspace_id = p.workspace_id AND e.event->>'actor_agent_principal' = p.principal_id::text),
+     (SELECT to_timestamp(max((e.event->>'occurred_at_server')::numeric)/1000) FROM swarm.household_object_events e
+      WHERE e.workspace_id = p.workspace_id AND e.event->>'actor_agent_principal' = p.principal_id::text)) AS last_activity_at,
+    (SELECT min(d.enqueued_at) FROM swarm.signal_deliveries d JOIN swarm.signals s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+     WHERE d.workspace_id = p.workspace_id AND d.recipient_agent_principal_id = p.principal_id AND d.acked_at IS NULL AND s.until > read_at
+       AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'user', viewer))) AS messages_waiting_since,
+    doing.value AS doing, working.value AS working_on,
+    CASE WHEN can_read THEN jsonb_build_object(
+     'working',(SELECT count(*) FROM todo_facts t WHERE t.assignee_principal = p.principal_id AND t.state = 'doing'),
+     'up_next',(SELECT count(*) FROM todo_facts t WHERE t.assignee_principal = p.principal_id AND t.state = 'open' AND t.gate_clear),
+     'not_yet',(SELECT count(*) FROM todo_facts t WHERE t.assignee_principal = p.principal_id AND t.state = 'open' AND NOT t.gate_clear),
+     'requests',(SELECT count(*) FROM todo_facts t WHERE t.offer_principal = p.principal_id AND t.offer_id IS NOT NULL AND t.state IN ('open','doing'))) ELSE NULL END AS queue
+   FROM agents p
+   LEFT JOIN swarm.agent_presence presence ON presence.workspace_id = p.workspace_id AND presence.principal_id = p.principal_id
+   LEFT JOIN LATERAL (
+    SELECT jsonb_build_object('todo_id',t.todo_id,'title',CASE WHEN can_read THEN t.title ELSE NULL END,'since',t.state_at) value
+    FROM todo_facts t WHERE t.assignee_principal = p.principal_id AND t.state = 'doing'
+    ORDER BY t.state_at DESC, t.todo_id LIMIT 1
+   ) doing ON true
+   LEFT JOIN LATERAL (
+    SELECT jsonb_build_object('signal_id',s.id,'at',s.created_at,'until',s.until) value
+    FROM swarm_read.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s."from" = p.principal_id
+     AND s.kind = 'working-on' AND s.until > read_at ORDER BY s.created_at DESC, s.id LIMIT 1
+   ) working ON true
+   LEFT JOIN LATERAL swarm_read.local_connection_selection(p.workspace_id,p.principal_id,p.owner_user_id)
+    selected ON p.transport='local'
+   LEFT JOIN swarm.renewal_grants local_policy
+    ON local_policy.renewal_grant_id=selected.selected_renewal_grant_id
+   LEFT JOIN LATERAL swarm.hosted_connection_policy(p.workspace_id,p.principal_id,p.owner_user_id)
+    hosted_policy ON p.transport='hosted_mcp'
+   CROSS JOIN LATERAL (
+    SELECT CASE
+     WHEN p.revoked_at IS NOT NULL THEN 'removed'
+     WHEN p.transport = 'hosted_mcp' THEN CASE
+      WHEN hosted_policy.seat_revoked_at IS NULL AND hosted_policy.binding_revoked_at IS NULL
+       AND hosted_policy.revoked_at IS NULL AND hosted_policy.state='active'
+       AND hosted_policy.connection_expired_at IS NULL
+       AND (hosted_policy.connection_expires_at IS NULL OR hosted_policy.connection_expires_at>clock_timestamp())
+      THEN 'live' ELSE 'connection_off' END
+     WHEN selected.is_live THEN 'live'
+     WHEN local_policy.connection_expired_at IS NOT NULL OR local_policy.connection_expires_at<=clock_timestamp() THEN 'key_ended'
+     WHEN local_policy.revoked_at IS NULL AND local_policy.suspension_active
+      AND local_policy.connection_expired_at IS NULL
+      AND (local_policy.connection_expires_at IS NULL OR local_policy.connection_expires_at>clock_timestamp()) THEN 'paused'
+     WHEN local_policy.revoked_at IS NOT NULL THEN 'key_off'
+     WHEN EXISTS (SELECT 1 FROM swarm.agent_tokens token WHERE token.principal_id = p.principal_id AND token.revoked_at IS NULL)
+      THEN 'key_ended' ELSE 'key_off' END AS kind
+   ) connection
+  ), rows AS (
+   SELECT m.*, coalesce((SELECT jsonb_agg(jsonb_build_object('principal_id',a.principal_id,'name',a.name,
+    'status',jsonb_build_object('work',CASE WHEN a.connection <> 'live' THEN 'disconnected'
+     WHEN (a.doing IS NOT NULL OR a.working_on IS NOT NULL) AND a.last_activity_at >= read_at - interval '30 minutes' THEN 'working' ELSE 'idle' END,
+     'facts',jsonb_build_object('transport',a.transport,'turn_only',a.turn_only,'connection',a.connection,
+      'last_activity_at',a.last_activity_at,'messages_waiting_since',a.messages_waiting_since,'doing',a.doing,'working_on',a.working_on) || a.connection_policy),
+    'queue',a.queue) ORDER BY a.principal_id) FROM agent_facts a WHERE a.owner_user_id = m.user_id),'[]'::jsonb) AS agents
+   FROM members m
+  )
+  SELECT coalesce(jsonb_agg(jsonb_build_object('user_id',r.user_id,'display_name',r.display_name,'role',r.role,
+   'is_viewer',r.user_id = viewer,'agents',r.agents) ORDER BY (r.user_id = viewer) DESC,r.user_id),'[]'::jsonb) INTO people FROM rows r;
+  result := result || jsonb_build_array(jsonb_build_object('workspace_id',workspace.workspace_id,'name',workspace.name,'role',workspace.role,
+   'last_seen_at',last_seen,'new_messages',new_messages,'content',content,'people',people,
+   'needs_you',jsonb_build_object('asks',asks,'assigned',assigned,'waiting',waiting)));
+ END LOOP;
+ RETURN jsonb_build_object('viewer_user_id',viewer,'generated_at',read_at,'workspaces',result);
+END;
+$$;
+
+ALTER FUNCTION swarm_read.home_overview() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.home_overview()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm_read.home_overview() TO authenticated;
+
+-- 16. Workspace membership, role demotion, and agent exit lifecycle reconciliation (C4 + E1).
+CREATE OR REPLACE FUNCTION swarm.reconcile_private_channels_on_membership_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_ws_id uuid := OLD.workspace_id;
+  v_user_id uuid := OLD.user_id;
+  v_is_revocation boolean := (TG_OP = 'DELETE')
+    OR (TG_OP = 'UPDATE' AND OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL);
+  v_is_readmission boolean := (TG_OP = 'UPDATE' AND OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS NULL);
+  v_is_demotion boolean := (TG_OP = 'UPDATE'
+    AND OLD.revoked_at IS NULL
+    AND NEW.revoked_at IS NULL
+    AND OLD.role IN ('owner', 'admin')
+    AND NEW.role = 'member');
+  v_ch record;
+  v_live_ch record;
+  v_human_members integer;
+  v_human_managers integer;
+  v_promoted_user_id uuid;
+BEGIN
+  IF NOT v_is_revocation AND NOT v_is_readmission AND NOT v_is_demotion THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  FOR v_ch IN
+    SELECT DISTINCT c.channel_id
+    FROM swarm.channels AS c
+    WHERE c.workspace_id = v_ws_id
+      AND c.visibility = 'private'
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM swarm.channel_members AS cm
+          WHERE cm.workspace_id = c.workspace_id
+            AND cm.channel_id = c.channel_id
+            AND (
+              (cm.member_kind = 'user' AND cm.user_id = v_user_id)
+              OR (
+                (v_is_revocation OR v_is_readmission)
+                AND cm.member_kind = 'agent'
+                AND EXISTS (
+                  SELECT 1
+                  FROM swarm.agent_principals AS p
+                  WHERE p.principal_id = cm.agent_principal_id
+                    AND p.owner_user_id = v_user_id
+                )
+              )
+            )
+        )
+        OR (
+          (v_is_revocation OR v_is_readmission)
+          AND EXISTS (
+            SELECT 1
+            FROM swarm.channel_preferences AS cp
+            WHERE cp.workspace_id = c.workspace_id
+              AND cp.channel_id = c.channel_id
+              AND cp.user_id = v_user_id
+          )
+        )
+      )
+    ORDER BY c.channel_id ASC
+  LOOP
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('channel-access:' || v_ws_id::text || ':' || v_ch.channel_id::text, 0)
+    );
+
+    SELECT c.channel_id, c.created_by_kind, c.created_by_principal, c.archived_at
+    INTO v_live_ch
+    FROM swarm.channels AS c
+    WHERE c.workspace_id = v_ws_id
+      AND c.channel_id = v_ch.channel_id
+      AND c.visibility = 'private'
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+      CONTINUE;
+    END IF;
+
+    IF v_is_revocation OR v_is_readmission THEN
+      DELETE FROM swarm.channel_members AS cm
+      WHERE cm.workspace_id = v_ws_id
+        AND cm.channel_id = v_ch.channel_id
+        AND (
+          (cm.member_kind = 'user' AND cm.user_id = v_user_id)
+          OR (
+            cm.member_kind = 'agent'
+            AND EXISTS (
+              SELECT 1
+              FROM swarm.agent_principals AS p
+              WHERE p.principal_id = cm.agent_principal_id
+                AND p.owner_user_id = v_user_id
+            )
+          )
+        );
+
+      UPDATE swarm.channel_preferences
+      SET starred = false,
+          star_rank = NULL,
+          involvement = 'everything',
+          updated_at = statement_timestamp()
+      WHERE workspace_id = v_ws_id
+        AND user_id = v_user_id
+        AND channel_id = v_ch.channel_id;
+    END IF;
+
+    IF v_is_revocation OR v_is_demotion THEN
+      SELECT
+        count(*)::integer,
+        count(*) FILTER (
+          WHERE cm.is_manager = true
+            OR wm.role IN ('owner', 'admin')
+            OR (v_live_ch.created_by_kind = 'user' AND v_live_ch.created_by_principal = cm.user_id)
+            OR (
+              v_live_ch.created_by_kind = 'agent'
+              AND EXISTS (
+                SELECT 1
+                FROM swarm.agent_principals AS cp
+                WHERE cp.principal_id = v_live_ch.created_by_principal
+                  AND cp.owner_user_id = cm.user_id
+              )
+            )
+        )::integer
+      INTO v_human_members, v_human_managers
+      FROM swarm.channel_members AS cm
+      JOIN swarm.memberships AS wm
+        ON wm.workspace_id = cm.workspace_id
+       AND wm.user_id = cm.user_id
+       AND wm.revoked_at IS NULL
+      WHERE cm.workspace_id = v_ws_id
+        AND cm.channel_id = v_ch.channel_id
+        AND cm.member_kind = 'user';
+
+      IF v_human_members = 0 THEN
+        IF v_live_ch.archived_at IS NULL THEN
+          UPDATE swarm.channels
+          SET archived_at = statement_timestamp()
+          WHERE workspace_id = v_ws_id
+            AND channel_id = v_ch.channel_id
+            AND archived_at IS NULL;
+
+          INSERT INTO swarm.audit_log (
+            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail
+          ) VALUES (
+            v_user_id,
+            'private_channel_auto_archived',
+            v_ws_id,
+            v_ch.channel_id,
+            'ok',
+            'no_remaining_human_members',
+            'channel_id=' || v_ch.channel_id::text
+          );
+        END IF;
+      ELSIF v_human_managers = 0 THEN
+        SELECT cm.user_id
+        INTO v_promoted_user_id
+        FROM swarm.channel_members AS cm
+        JOIN swarm.memberships AS wm
+          ON wm.workspace_id = cm.workspace_id
+         AND wm.user_id = cm.user_id
+         AND wm.revoked_at IS NULL
+        WHERE cm.workspace_id = v_ws_id
+          AND cm.channel_id = v_ch.channel_id
+          AND cm.member_kind = 'user'
+        ORDER BY
+          (v_is_demotion AND cm.user_id = v_user_id) DESC,
+          cm.created_at ASC,
+          cm.user_id ASC
+        LIMIT 1;
+
+        IF v_promoted_user_id IS NOT NULL THEN
+          UPDATE swarm.channel_members
+          SET is_manager = true
+          WHERE workspace_id = v_ws_id
+            AND channel_id = v_ch.channel_id
+            AND member_kind = 'user'
+            AND user_id = v_promoted_user_id;
+
+          INSERT INTO swarm.audit_log (
+            actor_user, command_kind, workspace_id, stream_id, outcome, reason, detail
+          ) VALUES (
+            v_promoted_user_id,
+            'private_channel_manager_promoted',
+            v_ws_id,
+            v_ch.channel_id,
+            'ok',
+            CASE WHEN v_is_demotion THEN 'workspace_role_demoted' ELSE 'workspace_member_removed' END,
+            'channel_id=' || v_ch.channel_id::text || ',promoted_user_id=' || v_promoted_user_id::text
+          );
+        END IF;
+      END IF;
+    END IF;
+  END LOOP;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+ALTER FUNCTION swarm.reconcile_private_channels_on_membership_change() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.reconcile_private_channels_on_membership_change()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE TRIGGER memberships_reconcile_private_channels_update
+  AFTER UPDATE OF revoked_at, role ON swarm.memberships
+  FOR EACH ROW
+  EXECUTE FUNCTION swarm.reconcile_private_channels_on_membership_change();
+
+CREATE TRIGGER memberships_reconcile_private_channels_delete
+  AFTER DELETE ON swarm.memberships
+  FOR EACH ROW
+  EXECUTE FUNCTION swarm.reconcile_private_channels_on_membership_change();
+
+CREATE OR REPLACE FUNCTION swarm.cleanup_private_channels_on_agent_exit()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_principal_id uuid := OLD.principal_id;
+  v_row record;
+BEGIN
+  IF TG_TABLE_NAME = 'agent_workspace_memberships' THEN
+    IF TG_OP = 'UPDATE' AND OLD.revoked_at IS NOT DISTINCT FROM NEW.revoked_at THEN
+      RETURN NEW;
+    END IF;
+    FOR v_row IN
+      SELECT cm.workspace_id, cm.channel_id
+      FROM swarm.channel_members AS cm
+      WHERE cm.workspace_id = OLD.workspace_id
+        AND cm.member_kind = 'agent'
+        AND cm.agent_principal_id = v_principal_id
+      ORDER BY cm.channel_id ASC
+    LOOP
+      PERFORM pg_advisory_xact_lock(
+        hashtextextended('channel-access:' || v_row.workspace_id::text || ':' || v_row.channel_id::text, 0)
+      );
+      DELETE FROM swarm.channel_members
+      WHERE workspace_id = v_row.workspace_id
+        AND channel_id = v_row.channel_id
+        AND member_kind = 'agent'
+        AND agent_principal_id = v_principal_id;
+    END LOOP;
+  ELSIF TG_TABLE_NAME = 'agent_principals' THEN
+    IF TG_OP = 'UPDATE' AND OLD.revoked_at IS NOT DISTINCT FROM NEW.revoked_at THEN
+      RETURN NEW;
+    END IF;
+    FOR v_row IN
+      SELECT cm.workspace_id, cm.channel_id
+      FROM swarm.channel_members AS cm
+      WHERE cm.member_kind = 'agent'
+        AND cm.agent_principal_id = v_principal_id
+      ORDER BY cm.workspace_id ASC, cm.channel_id ASC
+    LOOP
+      PERFORM pg_advisory_xact_lock(
+        hashtextextended('channel-access:' || v_row.workspace_id::text || ':' || v_row.channel_id::text, 0)
+      );
+      DELETE FROM swarm.channel_members
+      WHERE workspace_id = v_row.workspace_id
+        AND channel_id = v_row.channel_id
+        AND member_kind = 'agent'
+        AND agent_principal_id = v_principal_id;
+    END LOOP;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+ALTER FUNCTION swarm.cleanup_private_channels_on_agent_exit() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.cleanup_private_channels_on_agent_exit()
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+CREATE TRIGGER agent_workspace_memberships_cleanup_private_channels
+  AFTER UPDATE OF revoked_at OR DELETE ON swarm.agent_workspace_memberships
+  FOR EACH ROW
+  EXECUTE FUNCTION swarm.cleanup_private_channels_on_agent_exit();
+
+CREATE TRIGGER agent_principals_cleanup_private_channels
+  AFTER UPDATE OF revoked_at OR DELETE ON swarm.agent_principals
+  FOR EACH ROW
+  EXECUTE FUNCTION swarm.cleanup_private_channels_on_agent_exit();

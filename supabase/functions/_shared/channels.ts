@@ -89,6 +89,21 @@ export const CHANNEL_UPDATE_EMPTY_TEXT = `channel_update needs at least one of $
 export const CHANNEL_MEMBERS_REQUIRES_PRIVATE_TEXT =
   'members is only accepted when visibility is "private".';
 
+export const CHANNEL_CANNOT_REOPEN_PRIVATE_ERROR =
+  "channel_cannot_reopen_private";
+export const CHANNEL_CANNOT_REOPEN_PRIVATE_TEXT =
+  "A private channel cannot be made open because its message history is confidential to its members. Create a new open channel instead.";
+
+export const PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_ERROR =
+  "private_channel_attachments_unsupported";
+export const PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_TEXT =
+  "File attachments are not supported in private channels yet because workspace files are readable by every workspace member.";
+
+export const PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR =
+  "private_reply_channel_mismatch";
+export const PRIVATE_REPLY_CHANNEL_MISMATCH_TEXT =
+  "A reply to a message in a private channel must stay in that private channel.";
+
 /** Maximum channel members in one `channel_create`, `channel_update` or `channel_member_add` call. */
 export const CHANNEL_MEMBER_MAX = 100;
 

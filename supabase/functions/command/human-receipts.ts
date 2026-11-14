@@ -49,24 +49,20 @@ export async function markHumanSignalsSeen(
     id: string;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
-    channel_id: string | null;
-    channel_accessible: boolean;
   }[]>`
     SELECT
       id,
       to_user_id,
-      to_agent_principal_id,
-      channel_id,
-      (
-        channel_id IS NULL
-        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'user', ${args.userId}::uuid)
-      ) AS channel_accessible
+      to_agent_principal_id
     FROM swarm.signals
     WHERE workspace_id = ${args.workspaceId}::uuid
       AND id = ANY (${args.signalIds}::uuid[])
+      AND (
+        channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'user', ${args.userId}::uuid)
+      )
   `;
   const hasIneligibleSignal = known.some((signal) =>
-    !signal.channel_accessible ||
     signal.to_agent_principal_id !== null ||
     (signal.to_user_id !== null && signal.to_user_id !== args.userId)
   );
@@ -140,24 +136,20 @@ export async function markAgentSignalsSeen(
     id: string;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
-    channel_id: string | null;
-    channel_accessible: boolean;
   }[]>`
     SELECT
       id,
       to_user_id,
-      to_agent_principal_id,
-      channel_id,
-      (
-        channel_id IS NULL
-        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'agent', ${args.principalId}::uuid)
-      ) AS channel_accessible
+      to_agent_principal_id
     FROM swarm.signals
     WHERE workspace_id = ${args.workspaceId}::uuid
       AND id = ANY (${args.signalIds}::uuid[])
+      AND (
+        channel_id IS NULL
+        OR swarm.actor_can_access_channel(${args.workspaceId}::uuid, channel_id, 'agent', ${args.principalId}::uuid)
+      )
   `;
   if (known.some((signal) =>
-    !signal.channel_accessible ||
     signal.to_user_id !== null || signal.to_agent_principal_id !== null
   )) {
     return { status: "forbidden", matched: 0 };

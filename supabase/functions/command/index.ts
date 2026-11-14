@@ -68,6 +68,12 @@ import {
   CHANNEL_UPDATE_OPTIONAL_FIELDS,
   CHANNEL_VISIBILITIES,
   CHANNEL_VISIBILITY_RULE_TEXT,
+  CHANNEL_CANNOT_REOPEN_PRIVATE_ERROR,
+  CHANNEL_CANNOT_REOPEN_PRIVATE_TEXT,
+  PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_ERROR,
+  PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_TEXT,
+  PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR,
+  PRIVATE_REPLY_CHANNEL_MISMATCH_TEXT,
   type ChannelVisibility,
   channelMemberEntryProblem,
   channelMembersListProblem,
@@ -471,6 +477,7 @@ interface ChannelMemberRecord {
   added_by_principal: string;
   added_by_kind: CredentialKind;
   created_at: string;
+  is_manager: boolean;
 }
 
 interface ChannelPreferenceRecord {
@@ -3569,6 +3576,36 @@ function validClientBuild(value: unknown): string | null {
       compareSemver(value, "0.0.0") !== null
     ? value
     : null;
+}
+
+async function isPrivateChannelAgentCommand(
+  tx: Sql,
+  workspaceId: string,
+  kind: string,
+  localBody: Record<string, unknown> | null,
+): Promise<boolean> {
+  if (!UUID_RE.test(workspaceId)) return false;
+  if (kind === "channel_leave" || kind === "signals_seen") return true;
+  const channelObj = record(localBody?.channel);
+  if (channelObj && channelObj.visibility === "private") return true;
+  const signalObj = record(localBody?.signal);
+  if (signalObj && typeof signalObj.channel_id === "string" && UUID_RE.test(signalObj.channel_id)) {
+    const [ch] = await tx<{ visibility: string }[]>`
+      SELECT visibility FROM swarm.channels
+      WHERE workspace_id = ${workspaceId}::uuid AND channel_id = ${signalObj.channel_id}::uuid
+    `;
+    if (ch?.visibility === "private") return true;
+  }
+  if (kind === "ack_agent_delivery" && typeof localBody?.signal_id === "string" && UUID_RE.test(localBody.signal_id)) {
+    const [ch] = await tx<{ visibility: string }[]>`
+      SELECT c.visibility
+      FROM swarm.signals AS s
+      JOIN swarm.channels AS c ON c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id
+      WHERE s.workspace_id = ${workspaceId}::uuid AND s.id = ${localBody.signal_id}::uuid
+    `;
+    if (ch?.visibility === "private") return true;
+  }
+  return false;
 }
 
 /** The single presence mutation used by every successful agent response. */
@@ -10164,6 +10201,7 @@ interface ChannelMemberRow {
   added_by_principal: string;
   added_by_kind: CredentialKind;
   created_at: Date;
+  is_manager: boolean;
 }
 
 interface ChannelPreferenceRow {
@@ -10201,6 +10239,7 @@ function channelMemberRecord(row: ChannelMemberRow): ChannelMemberRecord {
     added_by_principal: row.added_by_principal,
     added_by_kind: row.added_by_kind,
     created_at: row.created_at.toISOString(),
+    is_manager: row.is_manager,
   };
 }
 
@@ -10289,6 +10328,23 @@ async function canManageChannel(
     `;
     if (owned !== undefined) return true;
   }
+  if (
+    row.visibility === "private" &&
+    auth.credentialKind === "user" &&
+    auth.actor.user !== null
+  ) {
+    const [promoted] = await tx<{ hit: number }[]>`
+      SELECT 1 AS hit
+      FROM swarm.channel_members
+      WHERE workspace_id = ${workspaceId}::uuid
+        AND channel_id = ${row.channel_id}::uuid
+        AND member_kind = 'user'
+        AND user_id = ${auth.actor.user}::uuid
+        AND is_manager = true
+      LIMIT 1
+    `;
+    if (promoted !== undefined) return true;
+  }
   return await isHumanWorkspaceAdmin(tx, workspaceId, auth);
 }
 
@@ -10310,7 +10366,8 @@ async function countRemainingLiveHumanManagers(
       AND cm.member_kind = 'user'
       AND (${excludeUserId}::uuid IS NULL OR cm.user_id <> ${excludeUserId}::uuid)
       AND (
-        wm.role IN ('owner', 'admin')
+        cm.is_manager = true
+        OR wm.role IN ('owner', 'admin')
         OR (${row.created_by_kind} = 'user' AND ${row.created_by_principal}::uuid = cm.user_id)
         OR (
           ${row.created_by_kind} = 'agent'
@@ -10353,22 +10410,27 @@ async function insertChannelMembers(
   channelId: string,
   addedBy: { kind: "user" | "agent"; id: string },
   members: readonly ChannelMemberRef[],
+  managerUserIds?: ReadonlySet<string>,
 ): Promise<void> {
   const seen = new Set<string>();
   for (const entry of members) {
-    const key = `${entry.kind}:${entry.id.toLowerCase()}`;
+    const normalizedId = entry.id.toLowerCase();
+    const key = `${entry.kind}:${normalizedId}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const isManager = entry.kind === "user" &&
+      (managerUserIds?.has(normalizedId) ?? false);
     await tx`
       INSERT INTO swarm.channel_members (
         workspace_id, channel_id, member_kind, user_id, agent_principal_id,
-        added_by_kind, added_by_principal, created_at
+        is_manager, added_by_kind, added_by_principal, created_at
       ) VALUES (
         ${workspaceId}::uuid,
         ${channelId}::uuid,
         ${entry.kind},
-        ${entry.kind === "user" ? entry.id.toLowerCase() : null}::uuid,
-        ${entry.kind === "agent" ? entry.id.toLowerCase() : null}::uuid,
+        ${entry.kind === "user" ? normalizedId : null}::uuid,
+        ${entry.kind === "agent" ? normalizedId : null}::uuid,
+        ${isManager}::boolean,
         ${addedBy.kind},
         ${addedBy.id}::uuid,
         statement_timestamp()
@@ -10392,7 +10454,8 @@ async function channelMemberRecords(
       m.agent_principal_id,
       m.added_by_principal,
       m.added_by_kind,
-      m.created_at
+      m.created_at,
+      m.is_manager
     FROM swarm.channel_members AS m
     WHERE m.workspace_id = ${workspaceId}::uuid
       AND m.channel_id = ${channelId}::uuid
@@ -10737,12 +10800,19 @@ async function applyChannelCommand(
       LIMIT 1
     `;
     if (existing[0] !== undefined) {
+      const existingAccessible = await actorCanAccessChannel(
+        tx,
+        route.workspaceId,
+        existing[0].channel_id,
+        actor.kind,
+        actor.id,
+      );
       return {
         ok: false,
         status: 409,
         error: "channel_exists",
-        message: existing[0].visibility === "private"
-          ? `This workspace already has a channel named ${command.slug}. Pick another name.`
+        message: !existingAccessible
+          ? `This workspace already has a channel named ${command.slug}.`
           : existing[0].archived_at === null
           ? `This workspace already has a channel named ${command.slug}. Post to it instead.`
           : `An archived channel is named ${command.slug}. Pick another name, or have its creator or a workspace owner or admin rename the archived channel to free this one.`,
@@ -10781,6 +10851,10 @@ async function applyChannelCommand(
     if (row === undefined) throw new Error("channel insert did not return a row");
     if (row.visibility === "private") {
       const seed: ChannelMemberRef[] = [{ kind: actor.kind, id: actor.id }];
+      const managerUsers = new Set<string>();
+      if (actor.kind === "user") {
+        managerUsers.add(actor.id.toLowerCase());
+      }
       if (actor.kind === "agent") {
         const [ownerRow] = await tx<{ owner_user_id: string }[]>`
           SELECT owner_user_id FROM swarm.agent_principals
@@ -10789,6 +10863,7 @@ async function applyChannelCommand(
         `;
         if (ownerRow !== undefined) {
           seed.push({ kind: "user", id: ownerRow.owner_user_id });
+          managerUsers.add(ownerRow.owner_user_id.toLowerCase());
         }
       }
       if (command.members !== undefined) {
@@ -10800,6 +10875,7 @@ async function applyChannelCommand(
         row.channel_id,
         actor,
         seed,
+        managerUsers,
       );
       return {
         ok: true,
@@ -11060,6 +11136,19 @@ async function applyChannelCommand(
     : undefined;
   if (
     command.kind === "channel_update" &&
+    row.visibility === "private" &&
+    nextVisibility === "open"
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      error: CHANNEL_CANNOT_REOPEN_PRIVATE_ERROR,
+      message: CHANNEL_CANNOT_REOPEN_PRIVATE_TEXT,
+      reason: CHANNEL_CANNOT_REOPEN_PRIVATE_ERROR,
+    };
+  }
+  if (
+    command.kind === "channel_update" &&
     nextVisibility === "private" &&
     command.members !== undefined
   ) {
@@ -11084,9 +11173,12 @@ async function applyChannelCommand(
   const updatedRow = updated[0]!;
   if (command.kind === "channel_update" && nextVisibility === "private") {
     const seed: ChannelMemberRef[] = [];
+    const managerUsers = new Set<string>();
     if (row.visibility === "open") {
       seed.push({ kind: actor.kind, id: actor.id });
-      if (actor.kind === "agent") {
+      if (actor.kind === "user") {
+        managerUsers.add(actor.id.toLowerCase());
+      } else {
         const [ownerRow] = await tx<{ owner_user_id: string }[]>`
           SELECT owner_user_id FROM swarm.agent_principals
           WHERE principal_id = ${actor.id}::uuid
@@ -11094,11 +11186,13 @@ async function applyChannelCommand(
         `;
         if (ownerRow !== undefined) {
           seed.push({ kind: "user", id: ownerRow.owner_user_id });
+          managerUsers.add(ownerRow.owner_user_id.toLowerCase());
         }
       }
       if (row.created_by_kind === "user") {
         if (await signalUserTargetIsLive(tx, route, row.created_by_principal)) {
           seed.push({ kind: "user", id: row.created_by_principal });
+          managerUsers.add(row.created_by_principal.toLowerCase());
         }
       } else {
         if (await signalAgentTargetIsLive(tx, route, row.created_by_principal)) {
@@ -11114,6 +11208,7 @@ async function applyChannelCommand(
           await signalUserTargetIsLive(tx, route, creatorOwner.owner_user_id)
         ) {
           seed.push({ kind: "user", id: creatorOwner.owner_user_id });
+          managerUsers.add(creatorOwner.owner_user_id.toLowerCase());
         }
       }
     }
@@ -11127,6 +11222,7 @@ async function applyChannelCommand(
         updatedRow.channel_id,
         actor,
         seed,
+        managerUsers,
       );
     }
     if (row.visibility === "open") {
@@ -11156,17 +11252,6 @@ async function applyChannelCommand(
         updatedRow.channel_id,
       ),
     };
-  }
-  if (
-    command.kind === "channel_update" &&
-    nextVisibility === "open" &&
-    row.visibility === "private"
-  ) {
-    await tx`
-      DELETE FROM swarm.channel_members
-      WHERE workspace_id = ${route.workspaceId}::uuid
-        AND channel_id = ${updatedRow.channel_id}::uuid
-    `;
   }
   return { ok: true, channel: channelRecord(updatedRow) };
 }
@@ -11413,6 +11498,9 @@ interface SignalWriteTarget {
   toUserId: string | null;
   toAgentPrincipalId: string | null;
   inReplyTo: string | null;
+  referenceChannelId?: string | null;
+  referenceChannelVisibility?: ChannelVisibility | null;
+  referenceChannelArchivedAt?: Date | null;
 }
 
 async function signalUserTargetIsLive(
@@ -11580,18 +11668,25 @@ async function resolveSignalWriteTarget(
     to_user_id: string | null;
     to_agent_principal_id: string | null;
     channel_id: string | null;
+    channel_visibility: ChannelVisibility | null;
+    channel_archived_at: Date | null;
   }[]>`
     SELECT
-      from_principal,
-      from_kind,
-      to_user_id,
-      to_agent_principal_id,
-      channel_id
-    FROM swarm.signals
-    WHERE workspace_id = ${route.workspaceId}::uuid
-      AND id = ${inReplyTo}::uuid
-      AND kind IN ('ask', 'note')
-      AND until > statement_timestamp()
+      s.from_principal,
+      s.from_kind,
+      s.to_user_id,
+      s.to_agent_principal_id,
+      s.channel_id,
+      c.visibility AS channel_visibility,
+      c.archived_at AS channel_archived_at
+    FROM swarm.signals AS s
+    LEFT JOIN swarm.channels AS c
+      ON c.workspace_id = s.workspace_id
+     AND c.channel_id = s.channel_id
+    WHERE s.workspace_id = ${route.workspaceId}::uuid
+      AND s.id = ${inReplyTo}::uuid
+      AND s.kind IN ('ask', 'note')
+      AND s.until > statement_timestamp()
     LIMIT 1
   `;
   const reference = referenceRows[0];
@@ -11660,6 +11755,9 @@ async function resolveSignalWriteTarget(
         toUserId: reference.from_principal,
         toAgentPrincipalId: null,
         inReplyTo,
+        referenceChannelId: reference.channel_id,
+        referenceChannelVisibility: reference.channel_visibility,
+        referenceChannelArchivedAt: reference.channel_archived_at,
       }
       : null;
   }
@@ -11672,6 +11770,9 @@ async function resolveSignalWriteTarget(
       toUserId: null,
       toAgentPrincipalId: reference.from_principal,
       inReplyTo,
+      referenceChannelId: reference.channel_id,
+      referenceChannelVisibility: reference.channel_visibility,
+      referenceChannelArchivedAt: reference.channel_archived_at,
     }
     : null;
 }
@@ -11962,6 +12063,15 @@ async function postSignal(
         AND parent.workspace_id = ${route.workspaceId}::uuid
         AND parent.kind = 'ask'
         AND parent.until > statement_timestamp()
+        AND (
+          parent.channel_id IS NULL
+          OR swarm.actor_can_access_channel(
+            parent.workspace_id,
+            parent.channel_id,
+            'agent',
+            ${auth.actor.agent_principal}::uuid
+          )
+        )
         AND (
           parent.to_agent_principal_id = ${auth.actor.agent_principal}::uuid
           OR EXISTS (
@@ -15926,6 +16036,140 @@ async function handleTransaction(
         });
         return { status: 403, body: { error: "forbidden" } };
       }
+      const channelResolution = await resolveSignalChannel(
+        tx,
+        route,
+        auth,
+        command,
+      );
+      if (!channelResolution.ok) {
+        await insertAudit(tx, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: channelResolution.status === 404 ? "authz" : "domain",
+          reason: channelResolution.reason!,
+          hash,
+        });
+        const refusal: HttpResult = {
+          status: channelResolution.status!,
+          body: {
+            error: channelResolution.error!,
+            message: channelResolution.message!,
+          },
+        };
+        return channelResolution.status === 404 ? refusal : decided(refusal);
+      }
+      const threadResolution = await resolveThreadRoot(
+        tx,
+        route,
+        auth,
+        command,
+      );
+      if (!threadResolution.ok) {
+        await insertAudit(tx, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: threadResolution.status === 404 ? "authz" : "domain",
+          reason: threadResolution.reason!,
+          hash,
+        });
+        const refusal: HttpResult = {
+          status: threadResolution.status!,
+          body: {
+            error: threadResolution.error!,
+            message: threadResolution.message!,
+          },
+        };
+        return threadResolution.status === 404 ? refusal : decided(refusal);
+      }
+      if (
+        signalTarget.referenceChannelVisibility === "private" &&
+        signalTarget.referenceChannelId !== undefined &&
+        signalTarget.referenceChannelId !== null
+      ) {
+        if (
+          channelResolution.channelId !== null &&
+          channelResolution.channelId !== signalTarget.referenceChannelId
+        ) {
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "domain",
+            reason: PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR,
+            hash,
+          });
+          return decided({
+            status: 409,
+            body: {
+              error: PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR,
+              reason: PRIVATE_REPLY_CHANNEL_MISMATCH_ERROR,
+              message: PRIVATE_REPLY_CHANNEL_MISMATCH_TEXT,
+            },
+          });
+        }
+        if (signalTarget.referenceChannelArchivedAt !== null) {
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "domain",
+            reason: "channel_archived",
+            hash,
+          });
+          return decided({
+            status: 409,
+            body: {
+              error: "channel_archived",
+              message:
+                "That channel is archived, so it takes no new messages. Its history still reads and its links still resolve.",
+            },
+          });
+        }
+      }
+      const placementChannelId = threadResolution.threadRootId !== null
+        ? threadResolution.rootChannelId
+        : (channelResolution.channelId ??
+          (signalTarget.referenceChannelVisibility === "private"
+            ? (signalTarget.referenceChannelId ?? null)
+            : null));
+      if (
+        (command.attachments?.length ?? 0) > 0 &&
+        placementChannelId !== null
+      ) {
+        const [placementCh] = await tx<{ visibility: ChannelVisibility }[]>`
+          SELECT visibility
+          FROM swarm.channels
+          WHERE workspace_id = ${route.workspaceId}::uuid
+            AND channel_id = ${placementChannelId}::uuid
+          LIMIT 1
+        `;
+        if (placementCh?.visibility === "private") {
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "domain",
+            reason: "workspace_files_are_workspace_wide",
+            hash,
+          });
+          return decided({
+            status: 409,
+            body: {
+              error: PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_ERROR,
+              reason: "workspace_files_are_workspace_wide",
+              message: PRIVATE_CHANNEL_ATTACHMENTS_UNSUPPORTED_TEXT,
+            },
+          });
+        }
+      }
       const attachmentResolution = await resolveSignalAttachments(
         tx,
         route,
@@ -15997,60 +16241,6 @@ async function handleTransaction(
           },
         });
       }
-
-      const channelResolution = await resolveSignalChannel(
-        tx,
-        route,
-        auth,
-        command,
-      );
-      if (!channelResolution.ok) {
-        await insertAudit(tx, {
-          auth,
-          commandKind: kind,
-          workspaceId: route.workspaceId,
-          streamId: route.streamId,
-          outcome: channelResolution.status === 404 ? "authz" : "domain",
-          reason: channelResolution.reason!,
-          hash,
-        });
-        const refusal:HttpResult = {
-          status: channelResolution.status!,
-          body: {
-            error: channelResolution.error!,
-            message: channelResolution.message!,
-          },
-        };
-        return channelResolution.status===404 ? refusal : decided(refusal);
-      }
-      const threadResolution = await resolveThreadRoot(
-        tx,
-        route,
-        auth,
-        command,
-      );
-      if (!threadResolution.ok) {
-        await insertAudit(tx, {
-          auth,
-          commandKind: kind,
-          workspaceId: route.workspaceId,
-          streamId: route.streamId,
-          outcome: threadResolution.status === 404 ? "authz" : "domain",
-          reason: threadResolution.reason!,
-          hash,
-        });
-        const refusal:HttpResult = {
-          status: threadResolution.status!,
-          body: {
-            error: threadResolution.error!,
-            message: threadResolution.message!,
-          },
-        };
-        return threadResolution.status===404 ? refusal : decided(refusal);
-      }
-      const placementChannelId = threadResolution.threadRootId !== null
-        ? threadResolution.rootChannelId
-        : channelResolution.channelId;
       if (placementChannelId !== null) {
         /* A workspace lead that is not admitted to a private channel must neither
          * receive nor be mentioned on an untagged post inside it: the post stays
@@ -17555,12 +17745,16 @@ async function handleTransaction(
       !recoverSavedPending && result.status >= 200 && result.status < 300 && localState.authenticatedAgent !== null
       && (kind !== RENEW_AGENT_TOKEN_KIND || successfulRenewal)
     ) {
-      await recordAgentPresence(
-        tx,
-        localState.authenticatedAgent,
-        body.client_build,
-        acceptedPresenceRoute,
-      );
+      const suppressPrivatePresence = acceptedPresenceRoute === null &&
+        await isPrivateChannelAgentCommand(tx, String(body.workspace_id ?? ""), kind, localBody);
+      if (!suppressPrivatePresence) {
+        await recordAgentPresence(
+          tx,
+          localState.authenticatedAgent,
+          body.client_build,
+          acceptedPresenceRoute,
+        );
+      }
     }
     if (agentTokenHash!==null && localState.localPlan && localState.authenticatedAgent && !['renew_agent_token','revoke_agent_token','revoke_agent_principal','acquire_agent_session','release_agent_session'].includes(kind)) {
       const finalAgent=await recheckLocalCredential(tx,agentTokenHash,localState.localPlan);
@@ -18397,19 +18591,26 @@ async function handleHostedCheck(
 
     const createBatch = decision.create_batch ?? null;
     if (createBatch !== null) {
-      await tx`
-        INSERT INTO swarm.hosted_mcp_check_batches (
-          batch_id, seat_id, grant_id, workspace_id, principal_id,
-          signal_ids, terminal_created_at, terminal_signal_id
-        ) VALUES (
-          ${createBatch.batch_id}::uuid,
-          ${seat.seat_id}::uuid, ${seat.grant_id}::uuid,
-          ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
-          ${createBatch.signal_ids}::uuid[],
-          ${createBatch.terminal_cursor.created_at}::timestamptz,
-          ${createBatch.terminal_cursor.signal_id}::uuid
-        )
-      `;
+      try {
+        await tx`
+          INSERT INTO swarm.hosted_mcp_check_batches (
+            batch_id, seat_id, grant_id, workspace_id, principal_id,
+            signal_ids, terminal_created_at, terminal_signal_id
+          ) VALUES (
+            ${createBatch.batch_id}::uuid,
+            ${seat.seat_id}::uuid, ${seat.grant_id}::uuid,
+            ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+            ${createBatch.signal_ids}::uuid[],
+            ${createBatch.terminal_cursor.created_at}::timestamptz,
+            ${createBatch.terminal_cursor.signal_id}::uuid
+          )
+        `;
+      } catch (error) {
+        if (dbCode(error) === "23514") {
+          throw new HostedCheckRefusal("hosted_check_batch_forbidden");
+        }
+        throw error;
+      }
     }
 
     const batch = decision.return_batch;

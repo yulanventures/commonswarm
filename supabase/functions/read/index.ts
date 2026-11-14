@@ -1068,7 +1068,7 @@ async function handle(
         });
       }
       const members = await tx<Record<string, unknown>[]>`
-        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at
+        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at, is_manager
         FROM swarm_read.channel_members
         WHERE workspace_id = ${body.workspace_id}::uuid
           AND channel_id = ${body.channel_id}::uuid
@@ -1591,7 +1591,7 @@ export async function handleHostedRead(
         };
       }
       const members = await tx<Record<string, unknown>[]>`
-        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at
+        SELECT channel_id, workspace_id, kind, id, added_by_principal, added_by_kind, created_at, is_manager
         FROM swarm_read.channel_members
         WHERE workspace_id = ${seat.workspace_id}::uuid
           AND channel_id = ${input.channel_id}::uuid

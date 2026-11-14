@@ -246,7 +246,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     }
     return result;
   }
-  async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number) {
+  async function queueFacts(tx: Sql, workspaceId: string, principalId: string, current: HouseholdTodoState, now: number, viewerIdentity: HouseholdIdentity) {
     const contentAccess = await queueContentAccess(tx, workspaceId, principalId);
     const planned=await discoverLocalTargets(tx,workspaceId,{principals:[principalId],tokens:[]});
     const tokenIds=[...new Set(planned.flatMap(r=>r.token_id ? [r.token_id]:[]))];
@@ -342,15 +342,24 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=ANY(${familyIds}::uuid[]) AND g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
       FROM swarm.agent_principals p JOIN swarm.agent_workspace_memberships am ON am.principal_id=p.principal_id AND am.workspace_id=${workspaceId}::uuid WHERE p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
+    const callerKind = viewerIdentity.principal_id !== null ? 'agent' : 'user';
+    const callerId = viewerIdentity.principal_id ?? viewerIdentity.user_id;
     const [activity] = await tx`SELECT greatest(
       (SELECT max(last_command_at) FROM swarm.agent_presence WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),
-      (SELECT max(created_at) FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_kind='agent' AND from_principal=${principalId}::uuid),
-      (SELECT greatest(max(created_at),max(acknowledged_at)) FROM swarm.hosted_mcp_check_batches WHERE workspace_id=${workspaceId}::uuid AND principal_id=${principalId}::uuid),
+      (SELECT max(created_at) FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_kind='agent' AND from_principal=${principalId}::uuid
+        AND (channel_id IS NULL OR swarm.actor_can_access_channel(${workspaceId}::uuid, channel_id, ${callerKind}, ${callerId}::uuid))),
+      (SELECT greatest(max(created_at),max(acknowledged_at)) FROM swarm.hosted_mcp_check_batches b WHERE b.workspace_id=${workspaceId}::uuid AND b.principal_id=${principalId}::uuid
+        AND (cardinality(b.signal_ids) = 0 OR EXISTS (
+          SELECT 1 FROM unnest(b.signal_ids) AS sid JOIN swarm.signals bs ON bs.workspace_id=b.workspace_id AND bs.id=sid
+          WHERE bs.channel_id IS NULL OR swarm.actor_can_access_channel(bs.workspace_id, bs.channel_id, ${callerKind}, ${callerId}::uuid)))),
       (SELECT max(occurred_at) FROM swarm.household_todo_events WHERE workspace_id=${workspaceId}::uuid AND event->>'actor_agent_principal'=${principalId}),
       (SELECT to_timestamp(max((revision->>'occurred_at_server')::double precision)/1000) FROM swarm.household_object_streams s CROSS JOIN LATERAL jsonb_each(s.projection->'objects') o CROSS JOIN LATERAL jsonb_array_elements(o.value->'history') revision WHERE s.workspace_id=${workspaceId}::uuid AND revision->'author'->>'principal_id'=${principalId})
       ) AS last_activity_at,
-      (SELECT min(d.enqueued_at) FROM swarm.signal_deliveries d JOIN swarm.signals s ON s.workspace_id=d.workspace_id AND s.id=d.signal_id WHERE d.workspace_id=${workspaceId}::uuid AND d.recipient_agent_principal_id=${principalId}::uuid AND d.acked_at IS NULL AND s.until>${new Date(now)}) AS messages_waiting_since`;
-    const [claim] = await tx`SELECT id,created_at,until FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_principal=${principalId}::uuid AND from_kind='agent' AND kind='working-on' AND until>${new Date(now)} ORDER BY created_at DESC,id LIMIT 1`;
+      (SELECT min(d.enqueued_at) FROM swarm.signal_deliveries d JOIN swarm.signals s ON s.workspace_id=d.workspace_id AND s.id=d.signal_id WHERE d.workspace_id=${workspaceId}::uuid AND d.recipient_agent_principal_id=${principalId}::uuid AND d.acked_at IS NULL AND s.until>${new Date(now)}
+        AND (s.channel_id IS NULL OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, ${callerKind}, ${callerId}::uuid))) AS messages_waiting_since`;
+    const [claim] = await tx`SELECT id,created_at,until FROM swarm.signals WHERE workspace_id=${workspaceId}::uuid AND from_principal=${principalId}::uuid AND from_kind='agent' AND kind='working-on' AND until>${new Date(now)}
+      AND (channel_id IS NULL OR swarm.actor_can_access_channel(${workspaceId}::uuid, channel_id, ${callerKind}, ${callerId}::uuid))
+      ORDER BY created_at DESC,id LIMIT 1`;
     const doing = Object.values(current.todos).filter(t => t.state === 'doing' && t.assignee?.kind === 'agent' && t.assignee.id === principalId).sort((a,b) => a.state_at.localeCompare(b.state_at))[0];
     const live = agent.revoked_at === null && agent.member_live && (agent.transport === 'hosted_mcp' ? agent.hosted_live : agent.token_live || agent.renewal_live);
     const facts: AgentWorkFacts = { transport: agent.transport as 'local' | 'hosted_mcp', turn_only: Boolean(agent.turn_only),
@@ -397,7 +406,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     } else {
       const principal = query.principal_id ?? identity.principal_id;
       if (!principal) return { status: 'refused' as const, reason: 'principal_required' as const };
-      const facts = await queueFacts(tx, workspaceId, principal, current, now);
+      const facts = await queueFacts(tx, workspaceId, principal, current, now, identity);
       if (!facts) return { status: 'refused' as const, reason: 'assignee_not_member' as const };
       const all = Object.values(current.todos).filter(t => t.state === 'open' || t.state === 'doing').sort((a,b) => (a.queue_rank ?? Number.MAX_SAFE_INTEGER) - (b.queue_rank ?? Number.MAX_SAFE_INTEGER) || a.todo_id.localeCompare(b.todo_id));
       const assigned = all.filter(t => t.assignee?.kind === 'agent' && t.assignee.id === principal);

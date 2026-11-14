@@ -208,6 +208,7 @@ export interface HydratedDelivery {
     created_at: string;
     /** Where the message sits, so the agent can answer in the same place. Null for an unfiled or top-level message. */
     channel_id: string | null;
+    channel_visibility?: "open" | "private" | null;
     thread_root_id: string | null;
     /**
      * Who can read the message this delivery is for. "workspace": it has no recipient and is not a
@@ -640,6 +641,7 @@ export async function hydrateDeliveryRefs(
     until: Date;
     created_at: Date;
     channel_id: string | null;
+    channel_visibility: "open" | "private" | null;
     thread_root_id: string | null;
     sender_owner_relation: SenderOwnerRelation;
     recipient_position: number;
@@ -698,6 +700,7 @@ export async function hydrateDeliveryRefs(
       s.until,
       s.created_at,
       s.channel_id,
+      ch.visibility AS channel_visibility,
       s.thread_root_id,
       (
         s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.in_reply_to IS NULL
@@ -751,6 +754,9 @@ export async function hydrateDeliveryRefs(
         ELSE 'unknown'
       END::text AS sender_owner_relation
     FROM swarm.signals AS s
+    LEFT JOIN swarm.channels AS ch
+      ON ch.workspace_id = s.workspace_id
+     AND ch.channel_id = s.channel_id
     LEFT JOIN swarm.agent_principals AS author
       ON s.from_kind = 'agent'
      AND author.principal_id = s.from_principal
@@ -812,6 +818,7 @@ export async function hydrateDeliveryRefs(
         until: asIso(signal.until),
         created_at: asIso(signal.created_at),
         channel_id: signal.channel_id,
+        ...(signal.channel_visibility === null ? {} : { channel_visibility: signal.channel_visibility }),
         thread_root_id: signal.thread_root_id,
         audience: signal.whole_workspace ? "workspace" : "private",
       },

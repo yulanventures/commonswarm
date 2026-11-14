@@ -342,6 +342,8 @@ export interface SignalRecord {
    * false statement about a signal that IS in a channel.
    */
   channel_id?: string | null;
+  /** Visibility of the channel when hydrated on a delivery ("open" | "private"). Absent on feed reads or older edges. */
+  channel_visibility?: "open" | "private" | null;
   /** The signal this one replies to inside a thread, null when it is not a thread reply. Absent on the same terms as channel_id. */
   thread_root_id?: string | null;
   /** True when a thread reply was also sent to its channel. Absent on the same terms as channel_id. */
