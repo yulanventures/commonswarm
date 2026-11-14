@@ -565,6 +565,63 @@
     ]
   },
   {
+    "id": "app.chat.mention",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.mention}\"] .dashboard__message-markdown:has(.dashboard__mention[data-mention-kind=\"agent\"] ~ .dashboard__mention[data-mention-kind=\"agent\"]):has(code):not(:has(code .dashboard__mention))"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.mention}\"]"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.mention}\"] .dashboard__mention",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_mentions"
+    ]
+  },
+  {
+    "id": "app.composer.mention",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.long}",
+    "setup": [
+      {
+        "waitFor": "[data-composer]:not([hidden]) [data-composer-input]"
+      },
+      {
+        "type": "[data-composer-input]",
+        "text": "@Lumen are you free on Friday?"
+      },
+      {
+        "wait": 220
+      },
+      {
+        "waitFor": "form[data-composer]:has([data-composer-to][hidden])"
+      },
+      {
+        "type": "[data-composer-input]",
+        "text": ""
+      },
+      {
+        "wait": 450
+      }
+    ],
+    "ready": "[data-composer]:not([hidden]) [data-composer-input]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ]
+  },
+  {
     "id": "app.composer",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",

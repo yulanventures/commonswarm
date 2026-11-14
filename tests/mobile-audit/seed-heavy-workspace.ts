@@ -468,6 +468,34 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.groupedBroadcast"] = groupedBroadcast;
         steps.push("seed_grouped_broadcast");
       } catch (error) { note("seed_grouped_broadcast", error); }
+
+      // Mentions: two recent public notes in the long-named channel with stored mention rows. The owner mentions two
+      // agents; the admin mentions the owner, who is the signed-in viewer.
+      try {
+        const lumen = agentRows.find(row => row.name === "Lumen")?.principal_id;
+        if (!lumen) throw new Error("no agent named Lumen");
+        const mention = randomUUID(), mentionViewer = randomUUID();
+        const viewerName = owner.email.split("@")[0]!;
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${mention}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', ${"@Atlas Research & Long-Running Investigations Agent can you check the boiler quote? Then hand the invoice to @Lumen, and keep `@Lumen` in the file name."},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '20 seconds', ${channels.long}::uuid, NULL, false
+          ), (
+            ${mentionViewer}::uuid, ${workspace}::uuid, ${adminPerson.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', ${`@${viewerName} the quote is in Files.`},
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '18 seconds', ${channels.long}::uuid, NULL, false
+          )`;
+        await sql`INSERT INTO swarm.signal_mentions (signal_id, workspace_id, mentioned_user_id, mentioned_agent_principal_id, position, source) VALUES
+          (${mention}::uuid, ${workspace}::uuid, NULL, ${ids.agent}::uuid, 0, 'author'),
+          (${mention}::uuid, ${workspace}::uuid, NULL, ${lumen}::uuid, 1, 'author'),
+          (${mentionViewer}::uuid, ${workspace}::uuid, ${owner.id}::uuid, NULL, 0, 'author')`;
+        ids["message.mention"] = mention;
+        ids["message.mentionViewer"] = mentionViewer;
+        steps.push("seed_mentions");
+      } catch (error) { note("seed_mentions", error); }
       // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
       // real feed rebuild.
       try {
