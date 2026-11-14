@@ -173,7 +173,9 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audien
   color: var(--k-shell-secondary);
   background: transparent;
   font: 500 12px/24px var(--k-shell-font);
-  pointer-events: auto;
+  /* It lies over the text box's own padding. It is read, never pressed, so a press there still
+     lands in the box. */
+  pointer-events: none;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer-audience-name {
   min-inline-size: 0;
@@ -231,7 +233,7 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:not(:f
     padding-inline-end: calc(104px + 6rem + 6px);
   }
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__composer:has(.dashboard__composer-audience[data-audience="public"]) textarea {
-    padding-inline-end: calc(104px + 30px);
+    padding-inline-end: calc(104px + 38px);
   }
 }
 /* A draft written to someone, sitting in a public composer: the row under the box says so and
