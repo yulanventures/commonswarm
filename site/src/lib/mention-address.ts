@@ -209,3 +209,51 @@ export function addressFromBody(
   }
   return { ambiguous, overflow, recipients };
 }
+
+/** One tag in a text and who it names. `end` is exclusive and includes the "@". */
+export interface MentionSpan {
+  start: number;
+  end: number;
+  entity: MentionEntity;
+}
+
+/**
+ * WHERE THE TAGS ARE, for drawing them. `addressFromBody` answers who a body names; this answers
+ * where each name sits, by the same reading: the same boundary characters, the same folding,
+ * longest name first, and a name two targets share is left as plain text unless the tag used a
+ * label that tells them apart.
+ *
+ * The caller passes ONLY the people and agents the message is known to mention. Who was
+ * mentioned is a stored fact with stable ids; this never decides it, it only finds the words.
+ * A mention whose name is no longer in the text (a later rename) is simply not found.
+ */
+export function mentionSpans(
+  text: string,
+  targets: readonly MentionTarget[],
+): MentionSpan[] {
+  const ordered = [...targets]
+    .filter((target) => isTaggable(target.name) || isTaggable(targetLabel(target)))
+    .sort((left, right) =>
+      targetLabel(right).length - targetLabel(left).length ||
+      right.name.length - left.name.length
+    );
+  if (ordered.length === 0) return [];
+  const ambiguousSet = ambiguousNames(ordered);
+  const spans: MentionSpan[] = [];
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    const before = at === 0 ? "" : text[at - 1]!;
+    if (before !== "" && !OPENS_TAG.test(before)) continue;
+    const hits = mentionHitsAt(text, at, ordered);
+    if (hits.length === 0) continue;
+    const consumed = Math.max(...hits.map((hit) => hit.consumed));
+    const top = hits.filter((hit) => hit.consumed === consumed);
+    const matchedIds = new Set(top.map((hit) => entityKey(hit.target)));
+    const sharedNameOnly = top.some((hit) => hit.via === "name" && ambiguousSet.has(fold(hit.target.name))) &&
+      !top.some((hit) => hit.via === "label");
+    if (matchedIds.size === 1 && !sharedNameOnly) {
+      spans.push({ start: at, end: at + 1 + consumed, entity: { ...top[0]!.target.entity } });
+    }
+    at += consumed;
+  }
+  return spans;
+}

@@ -48,6 +48,8 @@ const MESSAGE_STATUS_STUBS = {
   refreshChoices: async () => undefined,
   appendChoices: () => undefined,
   resetChoices: () => undefined,
+  refreshSignalMentions: async () => undefined,
+  resetSignalMentions: () => undefined,
   mountSeatAdminPanel: () => undefined,
   resetSeatAdminState: () => undefined,
   disposeSeatAdminDialog: () => undefined,
@@ -937,7 +939,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const members=[{userId:'tom',name:'Tom',role:'owner'},{userId:'nikki',name:'Nikki',role:'member'}];
     const homePeople=mapHomePeople({viewerId,members,agents:roster,access:[],signals:[],now,sample:false});
     const people=new Map(members.map(member=>[member.userId,member.name])), agentById=new Map(roster.map(agent=>[agent.principalId,agent]));
-    const feedWasEmpty=false, previousSignalIds=new Set(), visualMentions=new Map();
+    const feedWasEmpty=false, previousSignalIds=new Set(), visualMentions=new Map(), signalMentionRows=new Map();
     const removedAgentOwners=new Map();
     const agents=roster, channels=[{channelId:'mobile',slug:'mobile'}], signals=[], expandedSignalIds=new Set(), expandedThreadIds=new Set();
     const MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'};
@@ -1004,7 +1006,7 @@ test('chat pictures and file cards each open their own attachment through its si
   });
   runInContext(`
     const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='viewer', now=0;
-    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map();
+    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map(), signalMentionRows=new Map();
     const removedAgentOwners=new Map(), agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6;
     const streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
     const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'viewer',
@@ -1045,7 +1047,7 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   });
   runInContext(`
     const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='tom', now=0;
-    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map();
+    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map(), signalMentionRows=new Map();
     const removedAgentOwners=new Map([['removed-own','tom'],['removed-other','nikki']]);
     const agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map();
     const streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
