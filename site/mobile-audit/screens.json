@@ -154,6 +154,7 @@
     "states": [
       "dense"
     ],
+    "alone": true,
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent",
@@ -640,6 +641,7 @@
     "states": [
       "dense"
     ],
+    "alone": true,
     "requiresSeed": [
       "create_workspace",
       "seed_channels"
@@ -830,6 +832,7 @@
     "states": [
       "dense"
     ],
+    "alone": true,
     "requiresSeed": [
       "create_workspace",
       "seed_channels"
@@ -1000,6 +1003,7 @@
     "states": [
       "dense"
     ],
+    "alone": true,
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
