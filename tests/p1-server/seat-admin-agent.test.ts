@@ -760,7 +760,8 @@ test("create a seat, replayed: an unused credential is replaced once; a used one
 });
 
 test("create a seat, replayed after only its unused first credential expired: replaced, the seat and grant still live", async () => {
-  await grant();
+  const grantId = await grant();
+  try {
   const commandId = randomUUID();
   const first = await createSeat("Expired token seat", { commandId });
   accepted(first, "first");
@@ -781,6 +782,10 @@ test("create a seat, replayed after only its unused first credential expired: re
   const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens
     WHERE principal_id = ${seat}::uuid AND revoked_at IS NULL`;
   assert.equal(live, 1, "one live credential, the replacement");
+  } finally {
+    // The next test grants the same agent the same level; an open grant here would refuse it.
+    await endGrant(grantId);
+  }
 });
 
 test("create a seat, replayed after the grant ends or expires: refused, and no credential is replaced", async () => {
