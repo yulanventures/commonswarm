@@ -139,17 +139,15 @@ $fn$;
 
 ALTER FUNCTION swarm.signal_reactable(uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.signal_reactable(uuid, uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION swarm.signal_reactable(uuid, uuid) TO swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.signal_reactable(uuid, uuid) TO swarm_command, authenticated, swarm_read;
 
--- Readback: a reaction is shown only beside a message the reader can read, by the same view, and for
--- an agent's claims narrowed the way swarm.signal_reactable narrows them: the view admits the owner's
--- view, and an agent reads only what the whole channel reads and what is addressed to it.
+-- Readback: a reaction is shown only beside a message the reader can read, by the same rule the add
+-- and remove check uses (swarm.signal_reactable: swarm_read.signals under the reader's claims,
+-- narrowed for an agent's). Through the function, not a join: a view that names swarm_read.signals
+-- would pin it, and the signals view is dropped and recreated by its own migrations and rollbacks.
 CREATE VIEW swarm_read.signal_reactions
 WITH (security_barrier = true)
 AS
-  WITH caller AS (
-    SELECT (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'agent_principal_id')::uuid AS agent
-  )
   SELECT
     r.reaction_id,
     r.workspace_id,
@@ -159,18 +157,8 @@ AS
     r.emoji,
     r.source,
     r.created_at
-  FROM swarm.signal_reactions AS r, caller
-  WHERE EXISTS (
-    SELECT 1 FROM swarm_read.signals AS s
-    WHERE s.id = r.signal_id
-      AND s.workspace_id = r.workspace_id
-      AND (
-        caller.agent IS NULL
-        OR (s."to" IS NULL AND s.to_agent IS NULL)
-        OR s.to_agent = caller.agent
-        OR s.recipients @> jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', caller.agent))
-      )
-  );
+  FROM swarm.signal_reactions AS r
+  WHERE swarm.signal_reactable(r.workspace_id, r.signal_id);
 
 ALTER VIEW swarm_read.signal_reactions OWNER TO swarm_admin;
 REVOKE ALL ON swarm_read.signal_reactions FROM PUBLIC, anon;
