@@ -6653,7 +6653,9 @@ async function seatAdminCreateAgentSeat(tx:Sql,body:RequestBody,auth:AuthContext
     // The first token is never returned twice. Once used, it was delivered; anything ended can't be replaced.
     if(seat.first_used_at!==null) return refuse(409,REGISTRATION_TOKEN_ALREADY_USED.code,value,hash,seat.principal_id,
       {message:'This seat already used its first credential.'});
-    if(seat.token_revoked_at!==null || seat.token_expires_at.getTime()<=now || seat.principal_revoked_at!==null || seat.run_ended_at!==null
+    // A deliberate stop ends recovery; an unused first credential that only expired does not (the response that carried it
+    // was lost, and the seat, its family and the original grant are still live), so it is replaced like an unexpired one.
+    if(seat.token_revoked_at!==null || seat.principal_revoked_at!==null || seat.run_ended_at!==null
       || seat.device_revoked_at!==null || seat.grant_revoked_at!==null || seat.grant_suspended || seat.grant_connection_expired_at!==null
       || (seat.grant_connection_expires_at!==null && seat.grant_connection_expires_at.getTime()<=now)) {
       return refuse(409,REGISTRATION_SEAT_REVOKED.code,value,hash,seat.principal_id,{message:'This seat was stopped.'});
@@ -6661,7 +6663,7 @@ async function seatAdminCreateAgentSeat(tx:Sql,body:RequestBody,auth:AuthContext
     // Atomic fence, as replaceUnusedRegistrationToken: the old token is revoked only while still unused and live.
     const revoked=await tx<{token_id:string}[]>`UPDATE swarm.agent_tokens SET revoked_at=${new Date(now)}
       WHERE token_id=${seat.token_id}::uuid AND principal_id=${seat.principal_id}::uuid AND run_id=${seat.run_id}::uuid
-        AND first_used_at IS NULL AND revoked_at IS NULL AND expires_at>${new Date(now)}
+        AND first_used_at IS NULL AND revoked_at IS NULL
         AND EXISTS(SELECT 1 FROM swarm.agent_principals p WHERE p.principal_id=${seat.principal_id}::uuid AND p.revoked_at IS NULL)
         AND EXISTS(SELECT 1 FROM swarm.agent_runs r WHERE r.run_id=${seat.run_id}::uuid AND r.principal_id=${seat.principal_id}::uuid
           AND r.ended_at IS NULL)

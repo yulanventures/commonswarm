@@ -759,6 +759,30 @@ test("create a seat, replayed: an unused credential is replaced once; a used one
   await endGrant((secondGrant.body.seat_admin_grant as { grant_id: string }).grant_id);
 });
 
+test("create a seat, replayed after only its unused first credential expired: replaced, the seat and grant still live", async () => {
+  await grant();
+  const commandId = randomUUID();
+  const first = await createSeat("Expired token seat", { commandId });
+  accepted(first, "first");
+  const seat = String(first.body.principal_id);
+  // The answer was lost, and the seat's first credential then reached its own expiry unused. The grant, the seat and its
+  // family are untouched: this is not a stop, so the caller still recovers the seat.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE swarm.agent_tokens SET issued_at = clock_timestamp() - interval '2 hours',
+      expires_at = clock_timestamp() - interval '1 minute' WHERE token_id = ${String(first.body.token_id)}::uuid`;
+  });
+  assert.notEqual((await readAs(String(first.body.agent_token))).status, 200, "the expired credential no longer works");
+  const recovered = await createSeat("Expired token seat", { commandId });
+  accepted(recovered, "an expired, unused first credential is replaced");
+  assert.equal(recovered.body.principal_id, seat, "the same seat");
+  assert.notEqual(recovered.body.agent_token, first.body.agent_token);
+  assert.equal((await readAs(String(recovered.body.agent_token))).status, 200, "the replacement works");
+  const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens
+    WHERE principal_id = ${seat}::uuid AND revoked_at IS NULL`;
+  assert.equal(live, 1, "one live credential, the replacement");
+});
+
 test("create a seat, replayed after the grant ends or expires: refused, and no credential is replaced", async () => {
   const ended = await grant();
   const endedId = randomUUID();
