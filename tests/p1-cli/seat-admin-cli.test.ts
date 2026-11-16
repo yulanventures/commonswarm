@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,8 @@ import { SEAT_ADMIN_REFUSAL_COPY } from "../../src/protocol/seat-admin.js";
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
+const SEAT = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SEAT_TOKEN = `swm_agt_${"S".repeat(43)}`;
 const CLI = process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js");
 
 test("cswarm admin and the local MCP admin tools use the agent's own profile and self read", { timeout: 60_000 }, async () => {
@@ -31,6 +33,12 @@ test("cswarm admin and the local MCP admin tools use the agent's own profile and
           workspace_ids: [WS], organization_id: null, capability_names: ["rename_workspace"], expires_at: null }] } : { enabled: false });
       }
       if (body.command?.kind === "rename_workspace") return send(200, { status: "accepted", ok: true, event_ids: ["e1"] });
+      if (body.command?.kind === "create_agent_seat") {
+        const name = (body.command as { name?: string }).name;
+        if (name === "Taken") return send(409, { error: "principal_name_taken", message: "principal id or name already exists" });
+        return send(200, { status: "accepted", ok: true, event_ids: ["e1", "e2"], principal_id: SEAT, run_id: "44444444-4444-4444-8444-444444444444",
+          token_id: "55555555-5555-4555-8555-555555555555", workspace_id: WS, expires_at: "2099-01-01T00:00:00.000Z", agent_token: SEAT_TOKEN });
+      }
       if (body.command?.kind === "add_agent_to_workspace") {
         return send(403, { error: "seat_admin_scope_missing", message: SEAT_ADMIN_REFUSAL_COPY.seat_admin_scope_missing });
       }
@@ -84,6 +92,33 @@ test("cswarm admin and the local MCP admin tools use the agent's own profile and
     assert.match((await cli(["admin", "status", "--agent-token-file", join(root, "token")])).stderr, /unknown option: --agent-token-file/);
     assert.match((await cli(["admin", "rename-workspace", "Ops"])).stderr, /--profile is required/);
     assert.equal(bodies.length, before, "refused before any request");
+
+    // create-seat: the new seat's token reaches only a new 0600 file; output names the seat and the file.
+    const seatDir = join(root, "seat");
+    await mkdir(seatDir, { mode: 0o700 });
+    const connectionFile = join(seatDir, "connection.json");
+    const made = await cli(["admin", "create-seat", "Research bot", ...own, "--out-connection-file", connectionFile, "--request-id", "req-00000009"]);
+    assert.equal(made.code, 0, made.stderr);
+    assert.equal(made.stdout, `Created Research bot (${SEAT}). Connection file: ${connectionFile}\n`);
+    assert.deepEqual(bodies.at(-1)!.command, { kind: "create_agent_seat", name: "Research bot" });
+    assert.equal(bodies.at(-1)!.command_id, "req-00000009");
+    assert.equal((await stat(connectionFile)).mode & 0o777, 0o600);
+    assert.ok((await readFile(connectionFile, "utf8")).includes(SEAT_TOKEN), "the file holds the credential");
+    const madeJson = await cli(["admin", "create-seat", "Second bot", ...own, "--out-connection-file", join(seatDir, "second.json"), "--json"]);
+    assert.equal(madeJson.code, 0, madeJson.stderr);
+    assert.deepEqual(JSON.parse(madeJson.stdout), { principal_id: SEAT, name: "Second bot", workspace_id: WS, connection_file: join(seatDir, "second.json") });
+    const beforeExisting = bodies.length;
+    const existing = await cli(["admin", "create-seat", "Third bot", ...own, "--out-connection-file", connectionFile]);
+    assert.equal(existing.code, 1);
+    assert.match(existing.stderr, /already exists/);
+    assert.equal(bodies.length, beforeExisting, "an existing file is refused before any request");
+    const taken = await cli(["admin", "create-seat", "Taken", ...own, "--out-connection-file", join(seatDir, "taken.json"), "--json"]);
+    assert.equal(taken.code, 1);
+    assert.deepEqual(JSON.parse(taken.stdout), { error: "principal_name_taken", message: "principal id or name already exists" });
+    await assert.rejects(stat(join(seatDir, "taken.json")), /ENOENT/);
+    for (const output of [made, madeJson, existing, taken]) {
+      assert.ok(!output.stdout.includes(SEAT_TOKEN) && !output.stderr.includes(SEAT_TOKEN), "the credential never reaches stdout or stderr");
+    }
 
     for (const on of [false, true]) {
       enabled = on;

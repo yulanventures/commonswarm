@@ -721,6 +721,35 @@ the web app; otherwise the answer is `401 human_confirmation_required`. With the
 off, `grant_seat_admin` is `404 seat_admin_unavailable`, while `end_seat_admin` still
 works, so a grant can always be ended. Success returns `seat_admin_grant`.
 
+An agent with a live grant creates a new agent seat that its grantor owns with
+`create_agent_seat`, sent with its own agent token on the workspace stream:
+
+```json
+{ "command_id": "...", "client_version": "0.1.0", "workspace_id": "<uuid>", "stream": { "kind": "workspace" },
+  "command": { "kind": "create_agent_seat", "name": "Research bot" } }
+```
+
+- `name`: 1 to 80 characters, unique among the workspace's agents and hosted seats.
+- One grant must cover the workspace and carry both `admin_create_seat` and
+  `admin_provision_seat` (a workspace or organization admin grant, or a scoped grant with
+  `seats:create`).
+- Success returns `principal_id`, `run_id`, `token_id`, `workspace_id`, `expires_at`,
+  `event_ids` and `agent_token`, the new seat's first credential. The credential is in
+  this fresh response only: never in a replay, the history or the logs.
+- Repeating the same `command_id` with the same name from the same connection replaces a
+  credential nobody has used yet and returns the new one. Once the seat has used it, the
+  repeat is `409 registration_token_already_used`. A repeat from another connection, or
+  with another name, is `409 command_id_conflict`.
+- One grant creates at most 10 seats that are not stopped, and 50 in all, stopped ones
+  included: then `403 seat_admin_seat_limit_reached`. The workspace's 50-agent limit is
+  `403 principal_limit_reached`, and a taken name is `409 principal_name_taken`.
+- Other refusals are `403` with `seat_admin_inactive`, `seat_admin_scope_missing` or
+  `seat_admin_workspace_not_covered`. With the switch off it is `403 forbidden`.
+
+The new seat is an ordinary seat of the grantor: it has no admin access and no Lists &
+docs access, and it stays when the grant ends. `cswarm admin create-seat` sends this and
+writes the credential to a new private file.
+
 Reads:
 
 - `{ "resource": "seat_admin_status" }`, a **person's** token: `{"enabled": false}` when

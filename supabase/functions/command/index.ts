@@ -202,6 +202,7 @@ import {
 import {
   HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR, HUMAN_ONLY_COMMANDS, WORKSPACE_NAME_MAX,
   SEAT_ADMIN_AGENT_KINDS, SEAT_ADMIN_EXECUTED_KINDS, SEAT_ADMIN_REFUSAL_COPY, seatAdminCapability, seatAdminPrincipalTargetRefusal, validWorkspaceName,
+  SEAT_ADMIN_SEATS_PER_GRANT, seatAdminRequiredCapabilities, seatAdminSeatCeilingRefusal,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
@@ -6554,6 +6555,214 @@ async function seatAdminAgentCommand(tx:Sql,body:RequestBody,auth:AuthContext,au
   await recordSeatAdminAction(tx,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace,
     target_kind:lead?'workspace_lead':'agent',target_id:principal,outcome:'accepted',reason_code:null,request_digest:hash});
   return {status:200,body:{status:'accepted',...response}};
+}
+
+/** A created seat's current credential, its run and family, read to classify a replay. */
+interface CreatedSeatToken {
+  token_id: string; principal_id: string; run_id: string; task_id: string | null; lineage_id: string; renewal_grant_id: string;
+  first_used_at: Date | null; token_revoked_at: Date | null; token_expires_at: Date; principal_revoked_at: Date | null;
+  run_ended_at: Date | null; device_revoked_at: Date | null; grant_revoked_at: Date | null; grant_suspended: boolean;
+  grant_connection_expired_at: Date | null; grant_connection_expires_at: Date | null;
+}
+
+/**
+ * Seat admin: an agent creates a new local agent seat that its grantor owns, in a workspace its grant covers, and gets
+ * that seat's first agent token once, in this fresh response. The writes are registerAgentSeat's (device, principal,
+ * run, standing device-bound renewal grant, token); the agent is the event and audit actor, and the grantor's history
+ * names the grant. The new seat holds no admin grant and no Lists & docs access, and stays when the grant ends.
+ *
+ * Delivery (HezSec Q2): the operation belongs to the calling principal (its idempotency namespace) and to the calling
+ * credential's run and lineage (both in the request hash), so another agent, or another connection of this one, can
+ * never read or replace it. A replay re-decides coverage against the grant that authorized the creation, with both
+ * capabilities. Only token hashes are stored: the raw token is in this response alone, never in idempotency_keys,
+ * events, audit_log, admin_events or a log line.
+ *
+ * Ceilings (HezSec Q4): distinct seats ever created under this grant, from the grantor's accepted create_agent_seat
+ * history, read under the admin account row the plan holds FOR UPDATE from this count through the accepted append.
+ * The workspace's principal ceiling is checked independently. A refusal or a credential replacement creates nothing.
+ */
+async function seatAdminCreateAgentSeat(tx:Sql,body:RequestBody,auth:AuthContext,authorized:SeatAdminAuthorized,detail:string|null):Promise<HttpResult> {
+  const kind='create_agent_seat', command=record(body.command);
+  const workspace=typeof body.workspace_id==='string' ? body.workspace_id : '';
+  const actor=auth.actor.agent_principal!, caller=auth.agent!;
+  const commandId=String(body.command_id), grantor=authorized.grantor_user_id;
+  // Refusals commit only after the business savepoint rolls back (LocalAuditedRefused): the audit row and the grantor's
+  // history, never a half-made seat.
+  const refuse=(status:number,error:string,value:SeatAdminAuthorized,digest:string|null,target:string|null=null,
+    extra:Record<string,unknown>={}):never=>{
+    const message=(SEAT_ADMIN_REFUSAL_COPY as Record<string,string>)[error];
+    const outcome=status===400?'validation':status===409?'domain':error.endsWith('limit_reached')?'quota':'authz';
+    throw new LocalAuditedRefused({status,body:{error,...(message?{message}:{}),...extra}},
+      {auth,commandKind:kind,workspaceId:workspace||undefined,outcome,reason:error,detail:seatAdminAuditDetail(value,detail)},
+      digest ? (outer:Sql)=>recordSeatAdminAction(outer,{authorized:value,agent_principal_id:actor,agent_run_id:auth.actor.run,
+        command_id:commandId,kind,workspace_id:workspace,target_kind:'agent',target_id:target,outcome:'refused',reason_code:error,
+        request_digest:digest}) : null);
+  };
+  if(!command || !exactKeys(command,['kind','name']) || !boundedText(command.name,H0_REGISTRATION_NAME_MAX)
+    || !UUID_RE.test(workspace) || record(body.stream)?.kind!=='workspace' || !exactKeys(record(body.stream)!,['kind'])
+    || typeof body.client_version!=='string') return refuse(400,'invalid_request',authorized,null);
+  const [configuration]=await tx<{value:unknown}[]>`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+  const minimum=configuration?.value;
+  const version=typeof minimum==='string'?compareSemver(body.client_version,minimum):null;
+  if(version===null) return refuse(400,'invalid_request',authorized,null);
+  if(version<0) return {status:426,body:{error:'upgrade_required',min_client_version:minimum}};
+  const name=command.name as string;
+  // The calling credential's run and lineage are part of the request: the same command id from another connection of
+  // this agent is a conflict, never a replay.
+  const hash=requestHash(auth.actor,{kind,name,initiator_run_id:caller.run_id,initiator_lineage_id:caller.lineage_id} as never);
+  const [stream]=await tx<{stream_id:string;head_seq:number}[]>`SELECT stream_id,head_seq FROM swarm.streams
+    WHERE workspace_id=${workspace}::uuid AND kind='workspace' FOR UPDATE`;
+  if(!stream) return refuse(403,'forbidden',authorized,hash);
+  const principalKind=auth.credentialKind, principalKey=canonicalPrincipal(auth.actor);
+  const [prior]=await tx<{request_hash:string;workspace_id:string;stream_id:string;response:unknown}[]>`SELECT request_hash,workspace_id,stream_id,response
+    FROM swarm.idempotency_keys WHERE principal_kind=${principalKind} AND principal_id=${principalKey} AND command_id=${commandId}`;
+  const clock=async()=>{
+    const [row]=await tx<{now_ms:string|number}[]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
+    return Number(row!.now_ms);
+  };
+  const event=(seq:number,type:string,now:number,payload:Record<string,unknown>):EventEnvelope=>({workspace_id:workspace,
+    stream_id:stream.stream_id,seq,event_id:crypto.randomUUID(),command_id:commandId,type,schema_version:SCHEMA_VERSION,
+    actor_user:auth.actor.user,actor_agent_principal:actor,actor_run:auth.actor.run,occurred_at_server:now,payload} as EventEnvelope);
+
+  if(prior) {
+    if(prior.request_hash!==hash || prior.workspace_id!==workspace || prior.stream_id!==stream.stream_id) return {status:409,body:{error:'command_id_conflict'}};
+    // The grant that authorized the creation, from the grantor's history; coverage is re-decided against it alone.
+    const [origin]=await tx<{grant_id:string;principal_id:string}[]>`SELECT e.event->'payload'->>'seat_admin_grant_id' AS grant_id,
+        e.event->'payload'->>'target_id' AS principal_id
+      FROM swarm.admin_events e WHERE e.owner_user_id=${grantor}::uuid AND e.command_id=${commandId}
+        AND e.event->>'type'='AdminActionRecorded' AND e.event->'payload'->>'action'=${kind}
+        AND e.event->'payload'->>'outcome'='accepted' AND e.event->'payload'->>'acting_agent_principal_id'=${actor}`;
+    if(!origin) throw new Error('created seat has no accepted history row');
+    const original=await authorizeSeatAdminAction(tx,{principal_id:actor,grantor_user_id:grantor,kind:seatAdminCapability(kind),
+      workspace_id:workspace,capabilities:seatAdminRequiredCapabilities(kind),only_grant_id:origin.grant_id});
+    if(!original.ok) return refuse(403,original.reason,authorized,hash,origin.principal_id);
+    const value=original.value;
+    const stored=record(prior.response) ?? {};
+    const [seat]=await tx<CreatedSeatToken[]>`SELECT t.token_id,t.principal_id,t.run_id,t.task_id,t.lineage_id,t.renewal_grant_id,
+        t.first_used_at,t.revoked_at AS token_revoked_at,t.expires_at AS token_expires_at,p.revoked_at AS principal_revoked_at,
+        r.ended_at AS run_ended_at,d.revoked_at AS device_revoked_at,g.revoked_at AS grant_revoked_at,g.suspension_active AS grant_suspended,
+        g.connection_expired_at AS grant_connection_expired_at,g.connection_expires_at AS grant_connection_expires_at
+      FROM swarm.agent_tokens t JOIN swarm.agent_principals p ON p.principal_id=t.principal_id
+      JOIN swarm.agent_runs r ON r.run_id=t.run_id AND r.principal_id=t.principal_id
+      JOIN swarm.devices d ON d.device_id=r.device_id
+      JOIN swarm.renewal_grants g ON g.renewal_grant_id=t.renewal_grant_id AND g.principal_id=t.principal_id AND g.run_id=t.run_id
+      WHERE t.token_id=${typeof stored.token_id==='string'?stored.token_id:null}::uuid AND t.principal_id=${origin.principal_id}::uuid
+        AND p.owner_user_id=${grantor}::uuid AND p.workspace_id=${workspace}::uuid`;
+    if(!seat) throw new Error('created seat credential is missing');
+    const now=await clock();
+    // The first token is never returned twice. Once used, it was delivered; anything ended can't be replaced.
+    if(seat.first_used_at!==null) return refuse(409,REGISTRATION_TOKEN_ALREADY_USED.code,value,hash,seat.principal_id,
+      {message:'This seat already used its first credential.'});
+    if(seat.token_revoked_at!==null || seat.token_expires_at.getTime()<=now || seat.principal_revoked_at!==null || seat.run_ended_at!==null
+      || seat.device_revoked_at!==null || seat.grant_revoked_at!==null || seat.grant_suspended || seat.grant_connection_expired_at!==null
+      || (seat.grant_connection_expires_at!==null && seat.grant_connection_expires_at.getTime()<=now)) {
+      return refuse(409,REGISTRATION_SEAT_REVOKED.code,value,hash,seat.principal_id,{message:'This seat was stopped.'});
+    }
+    // Atomic fence, as replaceUnusedRegistrationToken: the old token is revoked only while still unused and live.
+    const revoked=await tx<{token_id:string}[]>`UPDATE swarm.agent_tokens SET revoked_at=${new Date(now)}
+      WHERE token_id=${seat.token_id}::uuid AND principal_id=${seat.principal_id}::uuid AND run_id=${seat.run_id}::uuid
+        AND first_used_at IS NULL AND revoked_at IS NULL AND expires_at>${new Date(now)}
+        AND EXISTS(SELECT 1 FROM swarm.agent_principals p WHERE p.principal_id=${seat.principal_id}::uuid AND p.revoked_at IS NULL)
+        AND EXISTS(SELECT 1 FROM swarm.agent_runs r WHERE r.run_id=${seat.run_id}::uuid AND r.principal_id=${seat.principal_id}::uuid
+          AND r.ended_at IS NULL)
+        AND EXISTS(SELECT 1 FROM swarm.renewal_grants g WHERE g.renewal_grant_id=${seat.renewal_grant_id}::uuid
+          AND g.principal_id=${seat.principal_id}::uuid AND g.run_id=${seat.run_id}::uuid AND g.revoked_at IS NULL
+          AND NOT g.suspension_active AND g.connection_expired_at IS NULL
+          AND (g.connection_expires_at IS NULL OR g.connection_expires_at>clock_timestamp()))
+      RETURNING token_id`;
+    if(revoked.length!==1) return refuse(409,REGISTRATION_TOKEN_ALREADY_USED.code,value,hash,seat.principal_id,
+      {message:'This seat already used its first credential.'});
+    await tx`INSERT INTO swarm.revocation_tombstones (kind,target_id,created_by)
+      VALUES (${STRANDED_REGISTRATION_TOKEN_TOMBSTONE},${seat.token_id}::uuid,${grantor}::uuid) ON CONFLICT (kind,target_id) DO NOTHING`;
+    const tokenId=crypto.randomUUID(), secret=opaqueToken("swm_agt_");
+    if(!AGENT_TOKEN_RE.test(secret)) throw new Error("replacement seat token does not match its wire shape");
+    const expiresAt=new Date(now+H0_SEAT_TOKEN_TTL_MS);
+    await tx`INSERT INTO swarm.agent_tokens (token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,issued_at,expires_at,lineage_id,renewal_grant_id)
+      VALUES (${tokenId}::uuid,${seat.principal_id}::uuid,${seat.run_id}::uuid,${seat.task_id}::uuid,0,${tx.json([...P0_AGENT_SCOPES])}::jsonb,
+        ${await sha256(secret)},${new Date(now)},${expiresAt},${seat.lineage_id}::uuid,${seat.renewal_grant_id}::uuid)`;
+    const head=Number(stream.head_seq);
+    const events=[
+      event(head+1,'AgentTokenRevoked',now,{token_id:seat.token_id,revoked_at:now}),
+      event(head+2,'AgentTokenMinted',now,{token_id:tokenId,principal_id:seat.principal_id,run_id:seat.run_id,task_id:seat.task_id,epoch:0,
+        scopes:[...P0_AGENT_SCOPES],issued_at:now,expires_at:expiresAt.getTime()}),
+    ];
+    await appendEvents(tx,events);
+    await tx`UPDATE swarm.streams SET head_seq=${head+events.length} WHERE stream_id=${stream.stream_id}::uuid`;
+    const response={...stored,ok:true,event_ids:events.map(e=>e.event_id),token_id:tokenId,expires_at:expiresAt.toISOString()};
+    const updated=await tx`UPDATE swarm.idempotency_keys SET response=${tx.json(response as never)}
+      WHERE principal_kind=${principalKind} AND principal_id=${principalKey} AND command_id=${commandId} AND request_hash=${hash}
+      RETURNING command_id`;
+    if(updated.length!==1) throw new Error('created seat replay lost its ledger row');
+    await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'recovered',
+      reason:'unused_seat_token_replaced',hash,
+      detail:seatAdminAuditDetail(value,[detail,`principal_id=${seat.principal_id}; old_token_id=${seat.token_id}; token_id=${tokenId}`].filter(Boolean).join('; '))});
+    // Recorded under its own action, so it never counts as a created seat.
+    await recordSeatAdminAction(tx,{authorized:value,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,
+      kind:'replace_created_seat_token',workspace_id:workspace,target_kind:'agent',target_id:seat.principal_id,outcome:'accepted',
+      reason_code:null,request_digest:hash});
+    const freshOnly={agent_token:secret};
+    return {status:200,body:{status:'accepted',...response,...freshOnly}};
+  }
+
+  // Per-grant ceilings. The plan holds the grantor's admin account row FOR UPDATE; re-taking it here names the lock this
+  // count relies on, held through the accepted history append below.
+  await tx`SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id=${grantor}::uuid FOR UPDATE`;
+  const [created]=await tx<{live:number;total:number}[]>`SELECT count(*)::int AS total,
+      count(*) FILTER (WHERE p.revoked_at IS NULL)::int AS live
+    FROM (SELECT DISTINCT e.event->'payload'->>'target_id' AS target FROM swarm.admin_events e
+      WHERE e.owner_user_id=${grantor}::uuid AND e.event->>'type'='AdminActionRecorded'
+        AND e.event->'payload'->>'action'=${kind} AND e.event->'payload'->>'outcome'='accepted'
+        AND e.event->'payload'->>'seat_admin_grant_id'=${authorized.grant.grant_id}
+        AND e.event->'payload'->>'target_id' IS NOT NULL) c
+    LEFT JOIN swarm.agent_principals p ON p.principal_id::text=c.target`;
+  const limit=seatAdminSeatCeilingRefusal({live:created?.live ?? 0,total:created?.total ?? 0});
+  if(limit) return refuse(403,limit,authorized,hash,null,{limit:{...SEAT_ADMIN_SEATS_PER_GRANT}});
+  // Then the workspace's own ceiling and name, in the order create_agent_principal uses: ceiling, name lock, hosted
+  // reservation, exact name.
+  const live=await lockAndCountLivePrincipals(tx,workspace);
+  if(live>=FREE_TIER_PRINCIPAL_LIMIT) return refuse(403,'principal_limit_reached',authorized,hash,null,{limit:FREE_TIER_PRINCIPAL_LIMIT,
+    message:`This workspace has reached its ${FREE_TIER_PRINCIPAL_LIMIT}-principal limit.`});
+  await lockPrincipalName(tx,{workspaceId:workspace},{name});
+  if(await hostedNameReserved(tx,workspace,name)) return refuse(409,PRINCIPAL_NAME_TAKEN.code,authorized,hash,null,{message:PRINCIPAL_NAME_TAKEN.message});
+  const taken=await tx`SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${workspace}::uuid AND name=${name} LIMIT 1`;
+  if(taken.length) return refuse(409,PRINCIPAL_NAME_TAKEN.code,authorized,hash,null,{message:PRINCIPAL_NAME_TAKEN.message});
+
+  const now=await clock();
+  const principalId=crypto.randomUUID(), deviceId=crypto.randomUUID(), runId=crypto.randomUUID(), renewalGrantId=crypto.randomUUID();
+  const tokenId=crypto.randomUUID(), lineageId=crypto.randomUUID(), taskId=crypto.randomUUID();
+  const secret=opaqueToken("swm_agt_");
+  if(!AGENT_TOKEN_RE.test(secret)) throw new Error("seat token does not match its wire shape");
+  const expiresAt=new Date(now+H0_SEAT_TOKEN_TTL_MS);
+  await tx`INSERT INTO swarm.devices (device_id,user_id,label) VALUES (${deviceId}::uuid,${grantor}::uuid,'Admin agent seat')`;
+  await tx`INSERT INTO swarm.agent_principals (principal_id,workspace_id,owner_user_id,name,model,created_at)
+    VALUES (${principalId}::uuid,${workspace}::uuid,${grantor}::uuid,${name},NULL,${new Date(now)})`;
+  await tx`INSERT INTO swarm.agent_runs (run_id,principal_id,device_id) VALUES (${runId}::uuid,${principalId}::uuid,${deviceId}::uuid)`;
+  await tx`INSERT INTO swarm.renewal_grants (renewal_grant_id,workspace_id,principal_id,run_id,kind,max_successors,successors_used,
+      horizon_expires_at,bound_device_id,created_by)
+    VALUES (${renewalGrantId}::uuid,${workspace}::uuid,${principalId}::uuid,${runId}::uuid,'standing',NULL,0,NULL,${deviceId}::uuid,${grantor}::uuid)`;
+  await tx`INSERT INTO swarm.agent_tokens (token_id,principal_id,run_id,task_id,epoch,scopes,token_hash,issued_at,expires_at,lineage_id,renewal_grant_id)
+    VALUES (${tokenId}::uuid,${principalId}::uuid,${runId}::uuid,${taskId}::uuid,0,${tx.json([...P0_AGENT_SCOPES])}::jsonb,
+      ${await sha256(secret)},${new Date(now)},${expiresAt},${lineageId}::uuid,${renewalGrantId}::uuid)`;
+  const head=Number(stream.head_seq);
+  const events=[
+    event(head+1,'AgentPrincipalCreated',now,{principal_id:principalId,owner_user_id:grantor,name,model:null,transport:'local',
+      turn_only:false,created_at:now}),
+    event(head+2,'AgentTokenMinted',now,{token_id:tokenId,principal_id:principalId,run_id:runId,task_id:taskId,epoch:0,
+      scopes:[...P0_AGENT_SCOPES],issued_at:now,expires_at:expiresAt.getTime()}),
+  ];
+  await appendEvents(tx,events);
+  await tx`UPDATE swarm.streams SET head_seq=${head+events.length} WHERE stream_id=${stream.stream_id}::uuid`;
+  // Everything but the token is kept for a replay.
+  const response={ok:true,event_ids:events.map(e=>e.event_id),principal_id:principalId,run_id:runId,token_id:tokenId,
+    workspace_id:workspace,expires_at:expiresAt.toISOString()};
+  await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+    VALUES(${principalKind},${principalKey},${commandId},${workspace}::uuid,${stream.stream_id}::uuid,${hash},${tx.json(response as never)})`;
+  await insertAudit(tx,{auth,commandKind:kind,workspaceId:workspace,streamId:stream.stream_id,outcome:'accepted',hash,
+    detail:seatAdminAuditDetail(authorized,[detail,`principal_id=${principalId}; run_id=${runId}; token_id=${tokenId}`].filter(Boolean).join('; '))});
+  await recordSeatAdminAction(tx,{authorized,agent_principal_id:actor,agent_run_id:auth.actor.run,command_id:commandId,kind,workspace_id:workspace,
+    target_kind:'agent',target_id:principalId,outcome:'accepted',reason_code:null,request_digest:hash});
+  const freshOnly={agent_token:secret};
+  return {status:200,body:{status:'accepted',...response,...freshOnly}};
 }
 
 /**
@@ -15345,7 +15554,7 @@ async function handleTransaction(
         await tx`SELECT swarm.lock_workspace_organization(${localWorkspace}::uuid)`;
       }
       const authorized = await authorizeSeatAdminAction(tx, { principal_id: actingPrincipal, grantor_user_id: agent.owner_user_id,
-        kind: seatAdminCapability(kind), workspace_id: localWorkspace });
+        kind: seatAdminCapability(kind), capabilities: seatAdminRequiredCapabilities(kind), workspace_id: localWorkspace });
       const seatRefuse = (reason: string, value: SeatAdminAuthorized | null): never => {
         throw new LocalAuditedRefused({ status: 403, body: { error: reason, message: (SEAT_ADMIN_REFUSAL_COPY as Record<string, string>)[reason] } },
           { auth, commandKind: kind, workspaceId: localWorkspace, outcome: "authz", reason,
@@ -15363,6 +15572,7 @@ async function handleTransaction(
         return await seatAdminAgentCommand(tx, body, auth, authorized.value, localState.localPlan, ignoredIdentity);
       }
       if (kind === "rename_organization") return await renameOrganization(tx, body, auth, ignoredIdentity, authorized.value);
+      if (kind === "create_agent_seat") return await seatAdminCreateAgentSeat(tx, body, auth, authorized.value, ignoredIdentity);
       if (kind === "revoke_invitation") {
         // Only a member invitation the grantor created in this workspace (2c-1a): never one for an owner or an admin.
         // Creator and role never change; this runs before dispatch and before any replay, and the reducer then decides

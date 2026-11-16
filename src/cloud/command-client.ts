@@ -206,10 +206,12 @@ export type SeatAdminCommand =
   | { kind: "remove_member"; user_id: string }
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "rename_organization"; display_name: string };
+/** Creates a seat its grantor owns; the answer carries that seat's first credential once. Not an MCP tool. */
+export type SeatAdminCreateSeatCommand = { kind: "create_agent_seat"; name: string };
 
 export interface SeatAdminCommandRequest {
   workspaceId: string;
-  command: SeatAdminCommand;
+  command: SeatAdminCommand | SeatAdminCreateSeatCommand;
   credential: string;
   commandId: string;
   signal?: AbortSignal;

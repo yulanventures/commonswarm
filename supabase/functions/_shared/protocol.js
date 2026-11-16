@@ -409,6 +409,8 @@ var RENEWAL_IDLE_PAUSE_DAYS = 14;
 var SEAT_ADMIN_REDUCER_KINDS = /* @__PURE__ */ new Set(["rename_workspace", "remove_member", "revoke_invitation"]);
 var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "add_agent_to_workspace",
+  // A seat admin agent creates a seat for its grantor through its own handler, never the reducer.
+  "create_agent_seat",
   // An organization owner, or a seat admin agent under an organization grant (its own handler, not the reducer).
   "rename_organization",
   "set_workspace_lead",
@@ -5888,7 +5890,7 @@ function formatWorkspaceSkillView(skill, now) {
 // src/protocol/seat-admin-copy.ts
 var DEFERRED_ACTIONS = Object.freeze([
   "Invite people as members",
-  "Create or renew agent seats",
+  "Renew agent seats",
   "Stop agent seats or revoke their credentials",
   "Set up agent connections",
   "Change member roles"
@@ -5900,7 +5902,8 @@ var SEAT_ADMIN_ROLE_COPY = Object.freeze({
       "Choose one of your agents in this workspace as its lead",
       "Add your agents to this workspace or remove them",
       "Remove members, including their agents and Lists & docs access in this workspace",
-      "Cancel member invitations you created"
+      "Cancel member invitations you created",
+      "Create new agent seats you own in this workspace"
     ]),
     deferred: DEFERRED_ACTIONS,
     excluded: Object.freeze([
@@ -6086,7 +6089,8 @@ var SEAT_ADMIN_AGENT_KINDS = Object.freeze([
   "remove_member",
   "change_role",
   "rename_organization",
-  "revoke_invitation"
+  "revoke_invitation",
+  "create_agent_seat"
 ]);
 var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "rename_workspace",
@@ -6095,10 +6099,18 @@ var SEAT_ADMIN_EXECUTED_KINDS = Object.freeze([
   "remove_agent_from_workspace",
   "remove_member",
   "rename_organization",
-  "revoke_invitation"
+  "revoke_invitation",
+  "create_agent_seat"
 ]);
 function seatAdminCapability(kind) {
-  return kind === "revoke_invitation" ? "admin_revoke_invitation" : kind;
+  return kind === "revoke_invitation" ? "admin_revoke_invitation" : kind === "create_agent_seat" ? "admin_create_seat" : kind;
+}
+function seatAdminRequiredCapabilities(kind) {
+  return kind === "create_agent_seat" ? ["admin_create_seat", "admin_provision_seat"] : [seatAdminCapability(kind)];
+}
+var SEAT_ADMIN_SEATS_PER_GRANT = Object.freeze({ ...ADMIN_SEATS_PER_GRANT });
+function seatAdminSeatCeilingRefusal(created) {
+  return created.total >= SEAT_ADMIN_SEATS_PER_GRANT.total || created.live >= SEAT_ADMIN_SEATS_PER_GRANT.live ? "seat_admin_seat_limit_reached" : null;
 }
 var LEVEL_ORDER = { workspace: 0, organization: 1, scoped: 2 };
 function selectCoveringGrant(grants, f) {
@@ -6106,7 +6118,8 @@ function selectCoveringGrant(grants, f) {
   if (!live.length) return { ok: false, reason: "seat_admin_inactive" };
   const covering = live.filter((g) => g.level === "organization" ? g.organization_id !== null && g.organization_id === f.workspace_org_id && f.org_owner_live(g.organization_id) : g.workspace_ids.includes(f.workspace_id));
   if (!covering.length) return { ok: false, reason: "seat_admin_workspace_not_covered" };
-  const grant = covering.find((g) => g.capability_names.includes(f.kind));
+  const needed = f.capabilities ?? [f.kind];
+  const grant = covering.find((g) => needed.every((c) => g.capability_names.includes(c)));
   return grant ? { ok: true, grant } : { ok: false, reason: "seat_admin_scope_missing" };
 }
 function seatAdminPrincipalTargetRefusal(f) {
@@ -6119,7 +6132,8 @@ var SEAT_ADMIN_REFUSAL_COPY = Object.freeze({
   seat_admin_inactive: "This agent's admin access has ended.",
   seat_admin_scope_missing: "This agent's admin access doesn't include that command.",
   seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.",
-  seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves."
+  seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves.",
+  seat_admin_seat_limit_reached: "This agent's admin access has created as many agent seats as it allows."
 });
 
 // src/protocol/signal-reactions.ts
@@ -6259,6 +6273,7 @@ export {
   SEAT_ADMIN_ROLE_BUNDLES,
   SEAT_ADMIN_ROLE_COPY,
   SEAT_ADMIN_SCOPED_SCOPES,
+  SEAT_ADMIN_SEATS_PER_GRANT,
   SIGNAL_REACTION_EMOJI_RULE,
   SIGNAL_REACTION_MAX_BYTES,
   SIGNAL_REACTION_MAX_PER_ACTOR,
@@ -6395,7 +6410,9 @@ export {
   seatAdminManifest,
   seatAdminManifestJson,
   seatAdminPrincipalTargetRefusal,
+  seatAdminRequiredCapabilities,
   seatAdminScopedCommands,
+  seatAdminSeatCeilingRefusal,
   selectCoveringGrant,
   tidyWorkspaceSkills,
   todoNoticeAbout,

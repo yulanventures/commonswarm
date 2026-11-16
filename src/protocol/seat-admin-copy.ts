@@ -3,7 +3,7 @@
 // Presentation availability only. The pinned registry and grant manifests do not change with this copy.
 const DEFERRED_ACTIONS = Object.freeze([
   'Invite people as members',
-  'Create or renew agent seats',
+  'Renew agent seats',
   'Stop agent seats or revoke their credentials',
   'Set up agent connections',
   'Change member roles',
@@ -18,6 +18,7 @@ export const SEAT_ADMIN_ROLE_COPY = Object.freeze({
       'Add your agents to this workspace or remove them',
       'Remove members, including their agents and Lists & docs access in this workspace',
       'Cancel member invitations you created',
+      'Create new agent seats you own in this workspace',
     ]),
     deferred: DEFERRED_ACTIONS,
     excluded: Object.freeze([
