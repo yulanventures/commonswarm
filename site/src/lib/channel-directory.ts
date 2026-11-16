@@ -7,6 +7,8 @@ export interface DirectoryChannel {
   archived: boolean;
   unread: boolean | null;
   manageable: boolean;
+  /** A private channel: a lock is drawn in place of "#". */
+  private?: boolean;
 }
 
 export function renderChannelDirectory(
@@ -39,7 +41,14 @@ export function renderChannelDirectory(
       const item = node("li", "cm-directory-row");
       item.dataset.channelDirectoryRow = row.id;
       const copy = node("div", "cm-directory-copy");
-      const name = node("span", "cm-directory-name", `#${row.slug}`);
+      const name = node("span", "cm-directory-name", row.private ? row.slug : `#${row.slug}`);
+      if (row.private) {
+        // A plain span takes no accessible name of its own, so "private" is text: hidden from sight, read aloud.
+        name.dataset.private = "";
+        const lock = node("span", "cm-directory-lock"); lock.setAttribute("aria-hidden", "true");
+        name.prepend(lock);
+        name.append(node("span", "hm-sr", " (private)"));
+      }
       copy.append(name);
       if (!archived && row.unread === true) {
         const unread = node("span", "cm-directory-unread");
@@ -49,7 +58,7 @@ export function renderChannelDirectory(
       if (row.description) copy.append(node("p", "cm-directory-description", row.description));
       const controls = node("div", "cm-directory-actions");
       const open = node("a", "cm-directory-open", "Open");
-      open.href = row.href; open.setAttribute("aria-label", `Open #${row.slug}`);
+      open.href = row.href; open.setAttribute("aria-label", row.private ? `Open #${row.slug} (private)` : `Open #${row.slug}`);
       open.dataset.channelDirectoryAction = `open:${row.id}`;
       open.addEventListener("click", event => {
         if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;

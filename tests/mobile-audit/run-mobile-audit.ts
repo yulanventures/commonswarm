@@ -676,11 +676,28 @@ async function main(): Promise<void> {
         // check again.
         if (screen.frame?.length) {
           const parts = screen.frame.map(selector => fill(selector, seed.ids));
+          /* Inside the viewport is not the same as on screen. A row can sit below its own list's scroll area, inside
+             the viewport's rectangle and drawn nowhere: the All channels list at 360x740 passed this check with its
+             last row hidden, and the picture showed no lock. So the part must also lie wholly inside every scrolling
+             ancestor's own visible box. The walk stops at a fixed-position box, which no outer scroll area clips. */
           const outside = () => page.evaluate((list: string[]) => list.filter(selector => {
             const el = document.querySelector(selector);
             if (!el) return true;
             const r = el.getBoundingClientRect();
-            return r.width === 0 || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth;
+            if (r.width === 0 || r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth) return true;
+            for (let node: Element | null = el; node; node = node.parentElement) {
+              if (getComputedStyle(node).position === "fixed") break;
+              const parent = node.parentElement;
+              if (!parent) break;
+              const style = getComputedStyle(parent);
+              const scrollsY = /^(auto|scroll)$/.test(style.overflowY), scrollsX = /^(auto|scroll)$/.test(style.overflowX);
+              if (!scrollsY && !scrollsX) continue;
+              const box = parent.getBoundingClientRect();
+              const top = box.top + parent.clientTop, left = box.left + parent.clientLeft;
+              if (scrollsY && (r.top < top - 0.5 || r.bottom > top + parent.clientHeight + 0.5)) return true;
+              if (scrollsX && (r.left < left - 0.5 || r.right > left + parent.clientWidth + 0.5)) return true;
+            }
+            return false;
           }), parts) as Promise<string[]>;
           let missing = await outside();
           if (missing.length) {
