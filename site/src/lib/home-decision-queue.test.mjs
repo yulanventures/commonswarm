@@ -170,7 +170,18 @@ test("Waiting on you gives a decision card only to an unanswered ask with stored
   const options = [{ id: "ship", label: "Ship", description: "Today" }, { id: "wait", label: "Wait", recommended: true }];
   const choices = new Map([["x", { signalId: "x", multi: true, options, answer: null }],
     ["done", { signalId: "done", multi: false, options, answer: { optionId: "ship", optionIds: ["ship"], otherText: null, byViewer: true, actorUserId: null, at: null } }]]);
-  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], queue([ask("x", "2026-11-04T11:00:00Z"), ask("done", "2026-11-04T11:00:00Z"), ask("plain", "2026-11-04T11:00:00Z")]), choices);
-  assert.deepEqual(detail.needsYou.map(item => item.choices ?? null), [{ options, multi: true }, null, null]);
+  const asks = [ask("x", "2026-11-04T11:00:00Z"), ask("done", "2026-11-04T11:00:00Z"), ask("plain", "2026-11-04T11:00:00Z")];
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], queue(asks), choices);
+  assert.deepEqual(detail.needsYou.map(item => [item.id, item.choices ?? null]), [["x", { options, multi: true }], ["plain", null]],
+    "an ask the choices read already shows answered leaves Waiting on you");
   assert.notEqual(detail.needsYou[0].choices.options[0], options[0], "the card gets its own copy of each option");
+  const entry = d => ({ workspace: { id: "W", name: "Home" }, state: "ready", detail: d });
+  assert.equal(homeNeedsYouCount(entry(detail)), 2, "and leaves the count");
+  assert.equal(detail.needsYouComplete, true, "the queue is still fully listed");
+  // A truncated queue keeps its unlisted asks in the count; only the known answer comes off.
+  const truncated = catchUpDetailFromOverview(row, "zoe", now, false, [], queue(asks, { total: 40, truncated: true }), choices);
+  assert.deepEqual([homeNeedsYouCount(entry(truncated)), truncated.needsYouComplete], [39, false]);
+  // A failed or missing choices read resolves nothing.
+  const unread = catchUpDetailFromOverview(row, "zoe", now, false, [], queue(asks), new Map());
+  assert.deepEqual([unread.needsYou.map(item => item.id), homeNeedsYouCount(entry(unread))], [["x", "done", "plain"], 3]);
 });

@@ -218,6 +218,9 @@ test("expired, answered in words and not-yours cards are read-only with every ro
   assert.deepEqual(expired.root.find(el => el.tagName === "LI").map(li => li.dataset.chosen), ["false", "false", "false"]);
   const replied = card({ state: state(), repliedInWords: true });
   assert.equal(replied.root.one(has("hm-decision__foot")).textContent, "Answered");
+  const repliedThenEnded = card({ state: state(), repliedInWords: true, ended: true });
+  assert.deepEqual([repliedThenEnded.root.dataset.decisionState, repliedThenEnded.root.one(has("hm-decision__foot")).textContent], ["replied", "Answered"],
+    "an answer in words stays answered after the ask's until passes");
   const notYours = card({ state: state(), interactive: false });
   assert.equal(notYours.root.dataset.decisionState, "readonly");
   assert.equal(notYours.root.find(has("hm-decision__foot")).length, 0);

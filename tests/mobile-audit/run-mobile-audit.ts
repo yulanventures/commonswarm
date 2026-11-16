@@ -374,6 +374,12 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     require: ['[data-signal-id="{message.choiceMulti}"]'], max: 1, focus: true, focusTarget: ".hm-decision [data-decision-option]" }],
   "app.chat.choice-answered": [{ name: "choice-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceAnswered}"]',
     require: ['[data-signal-id="{message.choiceAnswered}"]'], max: 1 }],
+  /* Hover only: the Other field keeps the focus its keyboard witness starts from (runHovers puts it back). Also what
+     admits these two screens to the 1280x800 and 1440x900 desktop pass. */
+  "app.chat.choice-other": [{ name: "choice-other", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]:has([data-decision-other-trigger][aria-expanded="true"])'], max: 1 }],
+  "app.chat.choice-expired": [{ name: "choice-expired", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceExpired}"]',
+    require: ['[data-signal-id="{message.choiceExpired}"]'], max: 1 }],
   "app.chat.choice-multi-ticked": [{ name: "choice-multi-ticked", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',
     require: ['[data-signal-id="{message.choiceMulti}"]:has(input[data-decision-option="kitchen"]:checked)'], max: 1, focus: true,
     focusTarget: '.hm-decision input[data-decision-option="kitchen"]:checked' }],

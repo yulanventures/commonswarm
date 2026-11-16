@@ -151,7 +151,7 @@ export interface NeedsYouChoiceHandlers {
 /** Needs you, with links or callback actions. An ask with choices shows its decision card in place of Reply. */
 export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: string, n: NeedsYouVM) => void,
   onChoice?: NeedsYouChoiceHandlers): HTMLElement {
-  const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id;
+  const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id; root.dataset.needsWorkspace = n.workspace.id;
   const heading = node(doc, "h3", "hm-needs-title", n.what); heading.id = `hm-needs-${encodeURIComponent(n.id)}`;
   root.setAttribute("aria-labelledby", heading.id);
   if (needsYouUnknownSender(n)) {

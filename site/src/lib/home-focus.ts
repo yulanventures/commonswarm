@@ -23,15 +23,27 @@ export function homeFocusTargetKey(requested: string, available: readonly string
   return available.includes(requested) ? requested : heading;
 }
 
+/** A decision card control's part: one option, the Other row, the Other field or Submit. Null for anything else. */
+function decisionPart(element: HTMLElement): string | null {
+  if (element.dataset.decisionOption !== undefined) return `option:${element.dataset.decisionOption}`;
+  if (element.dataset.decisionOtherTrigger !== undefined) return "other";
+  if (element.dataset.decisionOtherInput !== undefined) return "other-input";
+  if (element.dataset.decisionSubmit !== undefined) return "submit";
+  return null;
+}
 /** Add identities at the integration boundary without changing the shared builders' API. */
 function markFocusKeys(root: HTMLElement, region: string): void {
   for (const element of root.querySelectorAll<HTMLElement>("a[href], button, input, textarea, select, h1, h2, [tabindex]")) {
     const needs = element.closest<HTMLElement>("[data-needs-you]");
     const latest = element.closest<HTMLElement>("[data-latest-id]");
     const queue = element.closest<HTMLElement>("[data-queue-id]");
+    const decision = element.closest<HTMLElement>("[data-decision]");
     const context = element.closest<HTMLElement>("[data-home-phone-bar], [data-home-workspace-header], [data-home-workspace-nav]");
     let kind: string; let id: string; let action: string | undefined;
-    if (queue && element.dataset.queueAction) { kind = "queue"; id = queue.dataset.queueId!; action = element.dataset.queueAction; }
+    const part = decision ? decisionPart(element) : null;
+    // Each card's controls are their own: two open cards, or two checkboxes in one, never share a key.
+    if (decision && part) { kind = "decision"; id = JSON.stringify([needs?.dataset.needsWorkspace ?? "", decision.dataset.decision ?? "", part]); }
+    else if (queue && element.dataset.queueAction) { kind = "queue"; id = queue.dataset.queueId!; action = element.dataset.queueAction; }
     else if (element.matches("input, textarea, select")) {
       kind = "field"; id = [...element.attributes].filter(attribute => attribute.name.startsWith("data-") && attribute.name !== "data-home-focus-key").map(attribute => attribute.name).join("|")
         || `${element.tagName}:${element.getAttribute("name") ?? ""}:${element.getAttribute("type") ?? ""}:${element.closest("form")?.className ?? ""}`;
@@ -66,8 +78,10 @@ export function replaceHomeRegion(slot: HTMLElement, region: string, children: H
     if (openMenu) requested = openMenu.dataset.homeFocusKey ?? requested;
   }
   const drafts = new Map<string, { value: string; start: number | null; end: number | null }>();
-  if (region === "todo" || region === "todos") for (const field of slot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("textarea, input[type=text]")) {
-    if (field.dataset.homeFocusKey) drafts.set(field.dataset.homeFocusKey, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+  // Text and caret survive the swap: every field of a to-do region, and a decision card's Other field in Catch up.
+  const keepsText = (field: HTMLElement) => region === "todo" || region === "todos" || (region === "catchup" && field.dataset.decisionOtherInput !== undefined);
+  for (const field of slot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("textarea, input[type=text]")) {
+    if (keepsText(field) && field.dataset.homeFocusKey) drafts.set(field.dataset.homeFocusKey, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
   }
   for (const child of children) markFocusKeys(child, region);
   slot.replaceChildren(...children);
@@ -83,6 +97,9 @@ export function replaceHomeRegion(slot: HTMLElement, region: string, children: H
   const target = controls.find(element => element.dataset.homeFocusKey === key) ?? fallback ?? slot;
   if (target.matches("h1, h2") || target === slot) target.tabIndex = -1;
   target.focus({ preventScroll: true });
+  // Focusing a field can move its caret; put the kept one back.
+  const kept = drafts.get(target.dataset.homeFocusKey ?? "");
+  if (kept && "setSelectionRange" in target) (target as HTMLInputElement).setSelectionRange(kept.start, kept.end);
 }
 
 /** Polls keep current measured details in titles and accessible names without replacing buttons. */

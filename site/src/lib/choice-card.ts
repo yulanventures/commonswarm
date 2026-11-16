@@ -31,9 +31,10 @@ export interface ChoiceCardHandlers {
 }
 
 export function choiceCardStatus(vm: Pick<ChoiceCardVM, "state" | "interactive" | "ended" | "repliedInWords" | "pending">): ChoiceCardStatus {
+  // Any known answer outlives the ask's `until`: Expired is only for one nobody answered.
   if (vm.state.answer !== null) return "answered";
-  if (vm.ended) return "expired";
   if (vm.repliedInWords) return "replied";
+  if (vm.ended) return "expired";
   if (!vm.interactive) return "readonly";
   return vm.pending ? "pending" : "open";
 }
