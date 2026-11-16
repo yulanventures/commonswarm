@@ -255,10 +255,15 @@ export interface SeatAdminAuthorized { grant: SeatAdminGrantFacts; grantor_user_
  * Re-decide coverage now: the grant is active and unexpired at the post-lock clock, the grantor is still a live
  * owner of this unarchived workspace, the agent is still a live member, and organization coverage still holds.
  */
-export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: string; grantor_user_id: string; kind: string; workspace_id: string }):
+export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: string; grantor_user_id: string; kind: string; workspace_id: string;
+  /** Every capability the one covering grant must carry (seatAdminRequiredCapabilities); `kind` alone when absent. */
+  capabilities?: readonly string[];
+  /** A replay re-decides coverage against the grant that authorized the original action, and no other. */
+  only_grant_id?: string }):
   Promise<{ ok: true; value: SeatAdminAuthorized } | { ok: false; reason: string }> {
-  const grants = await tx<GrantRow[]>`SELECT * FROM swarm.seat_admin_grants
-    WHERE principal_id = ${a.principal_id}::uuid AND owner_user_id = ${a.grantor_user_id}::uuid AND state = 'active' ORDER BY grant_id`;
+  const grants = (await tx<GrantRow[]>`SELECT * FROM swarm.seat_admin_grants
+    WHERE principal_id = ${a.principal_id}::uuid AND owner_user_id = ${a.grantor_user_id}::uuid AND state = 'active' ORDER BY grant_id`)
+    .filter(g => a.only_grant_id === undefined || g.grant_id === a.only_grant_id);
   const [workspace] = await tx<{ org_id: string | null; archived: boolean }[]>`SELECT org_id, archived_at IS NOT NULL AS archived
     FROM swarm.workspaces WHERE workspace_id = ${a.workspace_id}::uuid`;
   const [owner] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${a.workspace_id}::uuid
@@ -281,7 +286,7 @@ export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: strin
     grant_id: g.grant_id, owner_user_id: g.owner_user_id, level: g.level, workspace_ids: g.workspace_ids, organization_id: g.organization_id,
     capability_names: g.manifest.capability_names ?? [], expires_at: g.expires_at?.getTime() ?? null, state: g.state,
   })), { kind: a.kind, workspace_id: a.workspace_id, workspace_org_id: workspace.org_id, now,
-    org_owner_live: (id: string) => orgOwner.get(id) === true }) as CoverageDecision;
+    org_owner_live: (id: string) => orgOwner.get(id) === true, ...(a.capabilities ? { capabilities: a.capabilities } : {}) }) as CoverageDecision;
   return decision.ok ? { ok: true, value: { grant: decision.grant, grantor_user_id: a.grantor_user_id, now } } : { ok: false, reason: decision.reason };
 }
 

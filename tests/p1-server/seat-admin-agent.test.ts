@@ -21,6 +21,8 @@ let sql: postgres.Sql;
 let admin: SupabaseClient;
 let functionProcess: ReturnType<typeof spawn>;
 let functionLogs = "";
+/** Every function log line this file produced, for the check that no seat token was ever logged. */
+let allFunctionLogs = "";
 let envDir: string | undefined;
 let owner: { id: string; jwt: string }, other: { id: string; jwt: string };
 let workspace: string, agent: string, agentToken: string, sibling: string, foreign: string;
@@ -65,7 +67,10 @@ before(async () => {
   functionProcess = spawn("supabase", ["functions", "serve", "--no-verify-jwt", "--env-file", envFile],
     { cwd: process.cwd(), env: { ...process.env, SWARM_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   const cliState = observeFunctionCli(functionProcess);
-  const capture = (chunk: Buffer) => { functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000); };
+  const capture = (chunk: Buffer) => {
+    functionLogs = (functionLogs + chunk.toString("utf8")).slice(-20_000);
+    allFunctionLogs += chunk.toString("utf8");
+  };
   functionProcess.stdout?.on("data", capture);
   functionProcess.stderr?.on("data", capture);
   const deadline = Date.now() + 60_000;
@@ -138,10 +143,10 @@ after(async () => {
 });
 
 
-async function agentCommand(command: Record<string, unknown>, opts: { commandId?: string } = {}) {
+async function agentCommand(command: Record<string, unknown>, opts: { commandId?: string; token?: string; workspaceId?: string } = {}) {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, { method: "POST",
-    headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ command_id: opts.commandId ?? randomUUID(), client_version: "0.1.93", workspace_id: workspace,
+    headers: { authorization: `Bearer ${opts.token ?? agentToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ command_id: opts.commandId ?? randomUUID(), client_version: "0.1.93", workspace_id: opts.workspaceId ?? workspace,
       stream: { kind: "workspace" }, command }) });
   return { status: response.status, body: await response.json() as Record<string, unknown> };
 }
@@ -529,4 +534,340 @@ test("seat_admin_self locks only the admitted workspace, and still lists the age
   });
   assert.equal(body.enabled, true);
   assert.deepEqual(body.grants!.map((g) => g.grant_id).sort(), [here, there].sort(), "both of the agent's own grants");
+});
+
+/* ---- create_agent_seat: a new seat its grantor owns, its first credential once to this caller ---- */
+
+/** Every seat token this file received, for the at-rest and log checks at the end. */
+const seatTokens: string[] = [];
+async function createSeat(name: string, opts: { commandId?: string; token?: string; workspaceId?: string } = {}) {
+  const r = await agentCommand({ kind: "create_agent_seat", name }, opts);
+  if (typeof r.body.agent_token === "string") seatTokens.push(r.body.agent_token);
+  return r;
+}
+async function readAs(token: string, workspaceId = workspace) {
+  const response = await fetch(`${local.API_URL}/functions/v1/read`, { method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "seat_admin_self", workspace_id: workspaceId }) });
+  return { status: response.status, body: await response.json() as Record<string, unknown> };
+}
+const accepted = (r: { status: number; body: Record<string, unknown> }, name: string) => {
+  assert.equal(r.status, 200, `${name}: ${JSON.stringify({ ...r.body, agent_token: undefined })}\n${functionLogs.slice(-2000)}`);
+  assert.equal(r.body.status, "accepted", name);
+  assert.match(String(r.body.agent_token), /^swm_agt_[A-Za-z0-9_-]{43}$/, name);
+};
+/** Another live connection (run and lineage) for a principal, with its own bearer. */
+async function connection(principalId: string): Promise<string> {
+  const token = `swm_agt_${randomBytes(32).toString("base64url")}`, device = randomUUID(), run = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'seat-admin-other')`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id) VALUES (${run}::uuid, ${principalId}::uuid, ${device}::uuid)`;
+    await tx`INSERT INTO swarm.agent_tokens (token_id, principal_id, run_id, scopes, token_hash, expires_at, lineage_id)
+      VALUES (${randomUUID()}::uuid, ${principalId}::uuid, ${run}::uuid, ${tx.json(["post_signal"])}::jsonb,
+        ${createHash("sha256").update(token).digest()}, statement_timestamp() + interval '1 hour', ${randomUUID()}::uuid)`;
+  });
+  return token;
+}
+/** A workspace the owner owns, with its stream; the acting agent joins it when asked. */
+async function ownedWorkspace(name: string, agentMember: boolean): Promise<string> {
+  const id = randomUUID(), streamId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${id}::uuid, ${name}, ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${id}::uuid, ${owner.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.streams (stream_id, workspace_id, kind) VALUES (${streamId}::uuid, ${id}::uuid, 'workspace')`;
+    await tx`INSERT INTO swarm.events (workspace_id, stream_id, seq, event_id, command_id, type, schema_version, actor_user, payload)
+      VALUES (${id}::uuid, ${streamId}::uuid, 1, ${randomUUID()}::uuid, ${randomUUID()}, 'WorkspaceCreated', 1, ${owner.id}::uuid,
+        ${tx.json({ workspace_id: id, name, created_by: owner.id, created_at: Date.now() })})`;
+    await tx`UPDATE swarm.streams SET head_seq = 1 WHERE stream_id = ${streamId}::uuid`;
+    if (agentMember) await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${agent}::uuid, ${id}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)`;
+  });
+  return id;
+}
+/**
+ * Seats already created under a grant, written as the edge writes them: the principal and the grantor's accepted
+ * history row, in sequence. Fixture only, so a ceiling test makes its one boundary call through the edge.
+ */
+async function priorSeats(grantId: string, count: number, revoked: boolean): Promise<string[]> {
+  const ids: string[] = [];
+  await sql.begin(async (tx) => {
+    const [account] = await tx<{ stream_id: string; seq: string }[]>`SELECT stream_id, seq FROM swarm.admin_accounts
+      WHERE owner_user_id = ${owner.id}::uuid FOR UPDATE`;
+    let seq = Number(account!.seq);
+    for (let i = 0; i < count; i += 1) {
+      const principal = randomUUID(), commandId = randomUUID();
+      ids.push(principal);
+      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, revoked_at)
+        VALUES (${principal}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${`prior-seat-${principal}`}, ${revoked ? new Date() : null})`;
+      seq += 1;
+      const event = { stream_kind: "account", owner_user_id: owner.id, stream_id: account!.stream_id, seq, event_id: randomUUID(),
+        command_id: commandId, type: "AdminActionRecorded", schema_version: 1, occurred_at_server: Date.now(), actor_user: null,
+        actor_agent_principal: agent, actor_run: null, admin_identity_id: null, grant_id: null, grant_manifest_digest: null,
+        payload: { audit_record_id: randomUUID(), grant_id: null, admin_identity_id: null, connection_id: null, related_event_ids: [],
+          policy_check: { result: "passed", buckets: [] }, action: "create_agent_seat", capability: "create_agent_seat", target_kind: "agent",
+          target_id: principal, workspace_id: workspace, seat_admin_grant_id: grantId, seat_admin_level: "workspace",
+          acting_agent_principal_id: agent, authorizing_user_id: owner.id, request_digest: "0".repeat(64), outcome: "accepted",
+          reason_code: null, next_action: "none", recovery_kind: "none" } };
+      await tx`INSERT INTO swarm.admin_events (owner_user_id, seq, event_id, command_id, event)
+        VALUES (${owner.id}::uuid, ${seq}, ${event.event_id}::uuid, ${commandId}, ${tx.json(event as unknown as postgres.JSONValue)})`;
+    }
+    await tx`UPDATE swarm.admin_accounts SET seq = ${seq} WHERE owner_user_id = ${owner.id}::uuid`;
+  });
+  return ids;
+}
+
+test("create a seat: refused without a grant, without seats:create, outside the grant, and once the grantor is demoted", async () => {
+  refused(await createSeat("No grant seat"), "seat_admin_inactive", "no grant");
+  const scoped = await grant({ level: "scoped", scope_names: ["admin:read", "workspaces:rename"] });
+  refused(await createSeat("Scoped seat"), "seat_admin_scope_missing", "scoped without seats:create");
+  await endGrant(scoped);
+  const elsewhere = await ownedWorkspace("Seat elsewhere", true);
+  const grantId = await grant();
+  refused(await createSeat("Elsewhere seat", { workspaceId: elsewhere }), "seat_admin_workspace_not_covered", "a workspace the grant doesn't cover");
+  await sql`UPDATE swarm.memberships SET role = 'admin' WHERE workspace_id = ${workspace}::uuid AND user_id = ${owner.id}::uuid`;
+  try {
+    refused(await createSeat("Demoted seat"), "seat_admin_workspace_not_covered", "grantor demoted");
+  } finally {
+    await sql`UPDATE swarm.memberships SET role = 'owner' WHERE workspace_id = ${workspace}::uuid AND user_id = ${owner.id}::uuid`;
+  }
+  await endGrant(grantId);
+  const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.agent_principals
+    WHERE name IN ('No grant seat', 'Scoped seat', 'Elsewhere seat', 'Demoted seat')`;
+  assert.equal(n, 0, "no refusal created a seat");
+  const refusals = (await agentHistory()).filter((h) => h.action === "create_agent_seat");
+  assert.ok(refusals.every((h) => h.outcome === "refused"), "refusals are recorded as refused, never as created seats");
+});
+
+test("create a seat: an ordinary seat of the grantor, with its own working credential and no admin access", async () => {
+  const grantId = await grant({ level: "scoped", scope_names: ["admin:read", "seats:create"] });
+  const commandId = randomUUID();
+  const made = await createSeat("Research seat", { commandId });
+  accepted(made, "scoped grant with seats:create");
+  const seat = String(made.body.principal_id);
+  assert.deepEqual(Object.keys(made.body).sort(), ["agent_token", "event_ids", "expires_at", "ok", "principal_id", "run_id", "status", "token_id",
+    "workspace_id"]);
+  assert.equal(made.body.workspace_id, workspace);
+  const [principal] = await sql<{ owner_user_id: string; transport: string; parent_admin_grant_id: string | null; name: string }[]>`
+    SELECT owner_user_id, transport, parent_admin_grant_id, name FROM swarm.agent_principals WHERE principal_id = ${seat}::uuid`;
+  assert.deepEqual({ ...principal }, { owner_user_id: owner.id, transport: "local", parent_admin_grant_id: null, name: "Research seat" });
+  const [facts] = await sql<{ member: boolean; grants: number; household: number; renewal: string; device_user: string }[]>`SELECT
+    EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships WHERE principal_id = ${seat}::uuid AND workspace_id = ${workspace}::uuid
+      AND revoked_at IS NULL) AS member,
+    (SELECT count(*)::int FROM swarm.seat_admin_grants WHERE principal_id = ${seat}::uuid) AS grants,
+    (SELECT count(*)::int FROM swarm.household_content_connections WHERE principal_id = ${seat}::uuid) AS household,
+    (SELECT g.kind FROM swarm.renewal_grants g WHERE g.principal_id = ${seat}::uuid) AS renewal,
+    (SELECT d.user_id::text FROM swarm.agent_runs r JOIN swarm.devices d USING (device_id) WHERE r.principal_id = ${seat}::uuid) AS device_user`;
+  assert.deepEqual({ ...facts }, { member: true, grants: 0, household: 0, renewal: "standing", device_user: owner.id });
+  const events = await sql<{ type: string; actor_agent_principal: string }[]>`SELECT type, actor_agent_principal FROM swarm.events
+    WHERE workspace_id = ${workspace}::uuid AND command_id = ${commandId} ORDER BY seq`;
+  assert.deepEqual(events.map((e) => [e.type, e.actor_agent_principal]), [["AgentPrincipalCreated", agent], ["AgentTokenMinted", agent]]);
+  const created = (await agentHistory()).filter((h) => h.seat_admin_grant_id === grantId && h.outcome === "accepted");
+  assert.deepEqual(created.map((h) => [h.action, h.target_kind, h.target_id, h.actor]), [["create_agent_seat", "agent", seat, agent]]);
+  const [audit] = await sql<{ actor_agent_principal: string; detail: string }[]>`SELECT actor_agent_principal, detail FROM swarm.audit_log
+    WHERE command_kind = 'create_agent_seat' AND outcome = 'accepted' ORDER BY audit_id DESC LIMIT 1`;
+  assert.equal(audit!.actor_agent_principal, agent);
+  assert.match(audit!.detail, new RegExp(`seat_admin grant=${grantId} level=scoped authorizing_user=${owner.id}`));
+
+  // The new credential works, and the seat holds no admin access of its own.
+  const self = await readAs(String(made.body.agent_token));
+  assert.equal(self.status, 200, JSON.stringify(self.body));
+  assert.deepEqual(self.body.grants, [], "the new seat has no admin access");
+  const theirs = await agentCommand({ kind: "rename_workspace", name: "By the new seat" }, { token: String(made.body.agent_token) });
+  refused(theirs, "seat_admin_inactive", "the new seat on an admin command");
+  // It stays when the grant that created it ends.
+  await endGrant(grantId);
+  const [{ live }] = await sql<{ live: boolean }[]>`SELECT revoked_at IS NULL AS live FROM swarm.agent_principals WHERE principal_id = ${seat}::uuid`;
+  assert.equal(live, true);
+  assert.equal((await readAs(String(made.body.agent_token))).status, 200, "and its credential still works");
+});
+
+test("create a seat: names are unique in the workspace, hosted seat names included", async () => {
+  const grantId = await grant();
+  accepted(await createSeat("Twin seat"), "first");
+  const twin = await createSeat("Twin seat");
+  assert.equal(twin.status, 409, JSON.stringify(twin.body));
+  assert.equal(twin.body.error, "principal_name_taken");
+  // A live hosted seat holds its name in the workspace. Written past its foreign keys: only the name matters here.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+      VALUES (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${workspace}::uuid, ${other.id}::uuid, ${randomUUID()}::uuid, 'Hosted name', clock_timestamp())`;
+  });
+  try {
+    const hosted = await createSeat("Hosted name");
+    assert.equal(hosted.status, 409, JSON.stringify(hosted.body));
+    assert.equal(hosted.body.error, "principal_name_taken");
+  } finally {
+    await sql.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`DELETE FROM swarm.hosted_mcp_seats WHERE workspace_id = ${workspace}::uuid AND name = 'Hosted name'`;
+    });
+  }
+  await endGrant(grantId);
+});
+
+test("create a seat, replayed: an unused credential is replaced once; a used one, another payload or another caller never", async () => {
+  const grantId = await grant();
+  const commandId = randomUUID();
+  const first = await createSeat("Replay seat", { commandId });
+  accepted(first, "first");
+  const seat = String(first.body.principal_id), firstToken = String(first.body.agent_token);
+  // The answer was lost and the caller asks again: the unused credential is revoked and a new one returned, once.
+  const second = await createSeat("Replay seat", { commandId });
+  accepted(second, "replay of an unused credential");
+  assert.equal(second.body.principal_id, seat, "the same seat");
+  assert.notEqual(second.body.agent_token, firstToken, "never the first token twice");
+  assert.notEqual(second.body.token_id, first.body.token_id);
+  assert.notEqual((await readAs(firstToken)).status, 200, "the replaced credential stops working");
+  // Another payload under the same id is a conflict.
+  const conflict = await createSeat("Other name", { commandId });
+  assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
+  assert.equal(conflict.body.error, "command_id_conflict");
+  // Another connection of this same agent (its own run and lineage) can't replay it.
+  const otherConnection = await connection(agent);
+  const elsewhere = await createSeat("Replay seat", { commandId, token: otherConnection });
+  assert.equal(elsewhere.status, 409, JSON.stringify({ ...elsewhere.body, agent_token: undefined }));
+  assert.equal(elsewhere.body.agent_token, undefined);
+  // Another agent of the same owner can't either: without a grant it is refused; with one, the command id is its own
+  // and it would only make a seat of its own (here refused, as the name is taken).
+  const secondAgent = randomUUID();
+  await sql`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+    VALUES (${secondAgent}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'second-admin-agent')`;
+  const secondToken = await connection(secondAgent);
+  refused(await createSeat("Replay seat", { commandId, token: secondToken }), "seat_admin_inactive", "another agent without a grant");
+  const secondGrant = await account(owner.jwt, grantCmd({ principal_id: secondAgent }));
+  assert.equal(secondGrant.status, 200, JSON.stringify(secondGrant.body));
+  const theirs = await createSeat("Replay seat", { commandId, token: secondToken });
+  assert.equal(theirs.status, 409, JSON.stringify({ ...theirs.body, agent_token: undefined }));
+  assert.equal(theirs.body.error, "principal_name_taken");
+  const [{ tokens, live }] = await sql<{ tokens: number; live: number }[]>`SELECT count(*)::int AS tokens,
+    count(*) FILTER (WHERE revoked_at IS NULL)::int AS live FROM swarm.agent_tokens WHERE principal_id = ${seat}::uuid`;
+  assert.deepEqual({ tokens, live }, { tokens: 2, live: 1 }, "only the caller's own replay replaced the credential");
+  // Once the seat has used its credential, a replay returns nothing.
+  assert.equal((await readAs(String(second.body.agent_token))).status, 200);
+  const [{ stamped }] = await sql<{ stamped: boolean }[]>`SELECT first_used_at IS NOT NULL AS stamped FROM swarm.agent_tokens
+    WHERE token_id = ${String(second.body.token_id)}::uuid`;
+  assert.equal(stamped, true, "the read recorded the credential's first use");
+  const used =await createSeat("Replay seat", { commandId });
+  assert.equal(used.status, 409, JSON.stringify({ ...used.body, agent_token: undefined }));
+  assert.equal(used.body.error, "registration_token_already_used");
+  assert.equal(used.body.agent_token, undefined);
+  // A replacement is recorded under its own action and never counts as a created seat.
+  const history = (await agentHistory()).filter((h) => h.seat_admin_grant_id === grantId && h.outcome === "accepted");
+  assert.deepEqual(history.map((h) => h.action), ["create_agent_seat", "replace_created_seat_token"]);
+  await endGrant(grantId);
+  await endGrant((secondGrant.body.seat_admin_grant as { grant_id: string }).grant_id);
+});
+
+test("create a seat, replayed after only its unused first credential expired: replaced, the seat and grant still live", async () => {
+  const grantId = await grant();
+  try {
+  const commandId = randomUUID();
+  const first = await createSeat("Expired token seat", { commandId });
+  accepted(first, "first");
+  const seat = String(first.body.principal_id);
+  // The answer was lost, and the seat's first credential then reached its own expiry unused. The grant, the seat and its
+  // family are untouched: this is not a stop, so the caller still recovers the seat.
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE swarm.agent_tokens SET issued_at = clock_timestamp() - interval '2 hours',
+      expires_at = clock_timestamp() - interval '1 minute' WHERE token_id = ${String(first.body.token_id)}::uuid`;
+  });
+  assert.notEqual((await readAs(String(first.body.agent_token))).status, 200, "the expired credential no longer works");
+  const recovered = await createSeat("Expired token seat", { commandId });
+  accepted(recovered, "an expired, unused first credential is replaced");
+  assert.equal(recovered.body.principal_id, seat, "the same seat");
+  assert.notEqual(recovered.body.agent_token, first.body.agent_token);
+  assert.equal((await readAs(String(recovered.body.agent_token))).status, 200, "the replacement works");
+  const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens
+    WHERE principal_id = ${seat}::uuid AND revoked_at IS NULL`;
+  assert.equal(live, 1, "one live credential, the replacement");
+  } finally {
+    // The next test grants the same agent the same level; an open grant here would refuse it.
+    await endGrant(grantId);
+  }
+});
+
+test("create a seat, replayed after the grant ends or expires: refused, and no credential is replaced", async () => {
+  const ended = await grant();
+  const endedId = randomUUID();
+  accepted(await createSeat("Ended grant seat", { commandId: endedId }), "before the end");
+  await endGrant(ended);
+  refused(await createSeat("Ended grant seat", { commandId: endedId }), "seat_admin_inactive", "replay after end");
+  refused(await createSeat("After end seat"), "seat_admin_inactive", "a new call after end");
+  // A new grant covering the same workspace does not revive the old operation: the replay is pinned to its own grant.
+  const replacement = await grant();
+  refused(await createSeat("Ended grant seat", { commandId: endedId }), "seat_admin_inactive", "replay under a newer grant");
+  await endGrant(replacement);
+
+  const expiring = await grant({ expires_at: Date.now() + 86_400_000 });
+  const expiringId = randomUUID();
+  accepted(await createSeat("Expired grant seat", { commandId: expiringId }), "before expiry");
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    // expires_at must stay after created_at (a CHECK), so the grant is moved back in time whole.
+    await tx`UPDATE swarm.seat_admin_grants SET created_at = clock_timestamp() - interval '1 hour',
+      expires_at = clock_timestamp() - interval '1 second' WHERE grant_id = ${expiring}::uuid`;
+  });
+  refused(await createSeat("Expired grant seat", { commandId: expiringId }), "seat_admin_inactive", "replay after expiry");
+  refused(await createSeat("After expiry seat"), "seat_admin_inactive", "a new call after expiry");
+  const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens t
+    JOIN swarm.agent_principals p USING (principal_id) WHERE p.name IN ('Ended grant seat', 'Expired grant seat') AND t.revoked_at IS NULL`;
+  assert.equal(live, 2, "each seat keeps its one first credential");
+});
+
+test("create a seat: 10 live per grant, and a revoked seat frees a live slot; a replay at the ceiling still answers", async () => {
+  const grantId = await grant();
+  const prior = await priorSeats(grantId, 9, false);
+  try {
+    const boundaryId = randomUUID();
+    accepted(await createSeat("Tenth live seat", { commandId: boundaryId }), "the tenth live seat");
+    const over = await createSeat("Eleventh live seat");
+    refused(over, "seat_admin_seat_limit_reached", "an eleventh live seat");
+    assert.deepEqual(over.body.limit, { live: 10, total: 50 });
+    accepted(await createSeat("Tenth live seat", { commandId: boundaryId }), "a replay at the ceiling is not a new seat");
+    await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp() WHERE principal_id = ${prior[0]!}::uuid`;
+    accepted(await createSeat("Eleventh live seat"), "a revoked seat frees a live slot");
+    refused(await createSeat("Twelfth live seat"), "seat_admin_seat_limit_reached", "full again");
+  } finally {
+    await sql`UPDATE swarm.agent_principals SET revoked_at = clock_timestamp() WHERE principal_id = ANY(${prior}::uuid[]) AND revoked_at IS NULL`;
+    await endGrant(grantId);
+  }
+});
+
+test("create a seat: 50 in all per grant, revoked seats included", async () => {
+  const grantId = await grant();
+  await priorSeats(grantId, 49, true);
+  accepted(await createSeat("Fiftieth seat"), "the fiftieth seat ever");
+  refused(await createSeat("Fifty-first seat"), "seat_admin_seat_limit_reached", "the fifty-first, with one live");
+  await endGrant(grantId);
+});
+
+test("create a seat: the workspace's 50-principal ceiling still applies", async () => {
+  const full = await ownedWorkspace("Seat ceiling", true);
+  await sql.begin(async (tx) => {
+    for (let i = 0; i < 50; i += 1) {
+      await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+        VALUES (${randomUUID()}::uuid, ${full}::uuid, ${owner.id}::uuid, ${`ceiling-${i}`})`;
+    }
+  });
+  const grantId = await grant({ workspace_ids: [full] });
+  const over = await createSeat("Over the ceiling", { workspaceId: full });
+  assert.equal(over.status, 403, JSON.stringify(over.body));
+  assert.equal(over.body.error, "principal_limit_reached");
+  await endGrant(grantId);
+});
+
+test("create a seat: no seat credential is stored or logged anywhere", async () => {
+  assert.ok(seatTokens.length >= 8, `tokens collected: ${seatTokens.length}`);
+  // Every column of every row, as text.
+  for (const table of ["audit_log", "events", "idempotency_keys", "admin_events", "admin_command_results"]) {
+    const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ${sql("swarm." + table)} AS a
+      WHERE a::text LIKE ANY(${seatTokens.map((t) => `%${t}%`)}::text[])`;
+    assert.equal(n, 0, `${table} holds no seat credential`);
+  }
+  const [{ hashed }] = await sql<{ hashed: number }[]>`SELECT count(*)::int AS hashed FROM swarm.agent_tokens
+    WHERE encode(token_hash, 'hex') = ANY(${seatTokens.map((t) => createHash("sha256").update(t).digest("hex"))}::text[])`;
+  assert.equal(hashed, seatTokens.length, "each credential is stored as its hash");
+  for (const token of seatTokens) assert.ok(!allFunctionLogs.includes(token), "no function log line carries a seat credential");
 });

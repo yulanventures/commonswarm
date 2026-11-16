@@ -1460,12 +1460,12 @@ test("claim path keeps every creation path on the shared locks", async () => {
   );
   assert.equal(
     [...source.matchAll(/await lockPrincipalName\(/gu)].length,
-    4,
-    "registration, join mint, ordinary creation, and hosted claim all take the shared name lock",
+    5,
+    "registration, join mint, ordinary creation, a seat admin's created seat, and hosted claim all take the shared name lock",
   );
   assert.equal(
     [...source.matchAll(/await hostedNameReserved\(/gu)].length,
-    3,
+    4,
     "every non-hosted principal creation path refuses a live hosted reservation",
   );
 });

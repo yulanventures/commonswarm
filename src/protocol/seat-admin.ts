@@ -213,15 +213,33 @@ export function decideSeatAdminEnd(f: EndFacts): EndDecision {
 
 /** The workspace commands an agent may ask for under a grant (switch on). Everything else stays human-only. */
 export const SEAT_ADMIN_AGENT_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
-  'remove_agent_from_workspace', 'remove_member', 'change_role', 'rename_organization', 'revoke_invitation'] as const);
+  'remove_agent_from_workspace', 'remove_member', 'change_role', 'rename_organization', 'revoke_invitation',
+  'create_agent_seat'] as const);
 export type SeatAdminAgentKind = (typeof SEAT_ADMIN_AGENT_KINDS)[number];
-/** Executed in 2b. remove_member waits for delegated attribution in its collateral writers; change_role has no
- *  member/guest transition (there is no guest role), so both refuse under seat admin. */
+/** Executed under a grant. change_role has no member/guest transition (there is no guest role), so it refuses. */
 export const SEAT_ADMIN_EXECUTED_KINDS = Object.freeze(['rename_workspace', 'set_workspace_lead', 'add_agent_to_workspace',
-  'remove_agent_from_workspace', 'remove_member', 'rename_organization', 'revoke_invitation'] as const);
+  'remove_agent_from_workspace', 'remove_member', 'rename_organization', 'revoke_invitation', 'create_agent_seat'] as const);
 /** The registry capability a grant must carry for an agent's command, where the names differ (2c: routine names). */
 export function seatAdminCapability(kind: string): string {
-  return kind === 'revoke_invitation' ? 'admin_revoke_invitation' : kind;
+  return kind === 'revoke_invitation' ? 'admin_revoke_invitation' : kind === 'create_agent_seat' ? 'admin_create_seat' : kind;
+}
+/**
+ * Every capability the one covering grant must carry. Creating a seat also hands its first credential to the caller,
+ * so the same grant needs admin_provision_seat as well; grants never combine.
+ */
+export function seatAdminRequiredCapabilities(kind: string): string[] {
+  return kind === 'create_agent_seat' ? ['admin_create_seat', 'admin_provision_seat'] : [seatAdminCapability(kind)];
+}
+
+/**
+ * Seats an agent creates under one grant (the grant's pinned policy.seats_per_grant). `total` counts every distinct
+ * seat ever created under the grant, revoked ones included; `live` counts those not revoked. Replacing an undelivered
+ * credential creates nothing and counts nothing.
+ */
+export const SEAT_ADMIN_SEATS_PER_GRANT = Object.freeze({ ...ADMIN_SEATS_PER_GRANT });
+export function seatAdminSeatCeilingRefusal(created: { live: number; total: number }): 'seat_admin_seat_limit_reached' | null {
+  return created.total >= SEAT_ADMIN_SEATS_PER_GRANT.total || created.live >= SEAT_ADMIN_SEATS_PER_GRANT.live
+    ? 'seat_admin_seat_limit_reached' : null;
 }
 
 export interface SeatAdminGrantFacts {
@@ -243,6 +261,8 @@ export interface CoverageFacts {
   /** Organization grants: is the grantor a live owner of that organization (seat_admin_org_owner)? */
   org_owner_live: (organization_id: string) => boolean;
   now: number;
+  /** When set, the grant must carry every one of these (seatAdminRequiredCapabilities); otherwise `kind`. */
+  capabilities?: readonly string[];
 }
 export type CoverageDecision = { ok: true; grant: SeatAdminGrantFacts } | { ok: false; reason: string };
 
@@ -260,7 +280,8 @@ export function selectCoveringGrant(grants: readonly SeatAdminGrantFacts[], f: C
     ? g.organization_id !== null && g.organization_id === f.workspace_org_id && f.org_owner_live(g.organization_id)
     : g.workspace_ids.includes(f.workspace_id));
   if (!covering.length) return { ok: false, reason: 'seat_admin_workspace_not_covered' };
-  const grant = covering.find(g => g.capability_names.includes(f.kind));
+  const needed = f.capabilities ?? [f.kind];
+  const grant = covering.find(g => needed.every(c => g.capability_names.includes(c)));
   return grant ? { ok: true, grant } : { ok: false, reason: 'seat_admin_scope_missing' };
 }
 
@@ -287,4 +308,5 @@ export const SEAT_ADMIN_REFUSAL_COPY = Object.freeze({
   seat_admin_scope_missing: "This agent's admin access doesn't include that command.",
   seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.",
   seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves.",
+  seat_admin_seat_limit_reached: "This agent's admin access has created as many agent seats as it allows.",
 } as const);

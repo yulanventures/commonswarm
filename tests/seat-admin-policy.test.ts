@@ -218,3 +218,41 @@ test("the reducer admits only rename and member removal for a seat admin agent, 
     assert.equal(d.ok, false, `${kind} is never admitted to the reducer for an agent`);
   }
 });
+
+/* ---- an agent creates a seat for its grantor ---- */
+import { seatAdminCapability, seatAdminRequiredCapabilities, seatAdminSeatCeilingRefusal, SEAT_ADMIN_SEATS_PER_GRANT,
+  SEAT_ADMIN_REFUSAL_COPY } from "../src/protocol/seat-admin.js";
+
+test("create_agent_seat needs admin_create_seat and admin_provision_seat on the same grant", () => {
+  assert.ok((SEAT_ADMIN_EXECUTED_KINDS as readonly string[]).includes("create_agent_seat"));
+  assert.ok(HUMAN_ONLY_COMMANDS.has("create_agent_seat" as never), "human-only without a grant");
+  assert.equal(seatAdminCapability("create_agent_seat"), "admin_create_seat");
+  assert.deepEqual(seatAdminRequiredCapabilities("create_agent_seat"), ["admin_create_seat", "admin_provision_seat"]);
+  assert.deepEqual(seatAdminRequiredCapabilities("revoke_invitation"), ["admin_revoke_invitation"]);
+  const need = () => ({ ...cover("admin_create_seat"), capabilities: seatAdminRequiredCapabilities("create_agent_seat") });
+  const seats = seatAdminScopedCommands(["admin:read", "seats:create"]);
+  assert.ok(seats.includes("admin_create_seat") && seats.includes("admin_provision_seat"));
+  const cases: Array<[string, SeatAdminGrantFacts[], string]> = [
+    ["a workspace admin grant", [G({})], "g-ws"],
+    ["an organization admin grant", [G({ grant_id: "g-org", level: "organization", workspace_ids: [], organization_id: ORG,
+      capability_names: [...SEAT_ADMIN_ROLE_BUNDLES["role:organization_admin"].commands] })], "g-org"],
+    ["a scoped grant with seats:create", [G({ grant_id: "g-sc", level: "scoped", capability_names: seats })], "g-sc"],
+    ["a scoped grant without seats:create", [G({ grant_id: "g-sc", level: "scoped",
+      capability_names: seatAdminScopedCommands(["admin:read", "invites:create"]) })], "seat_admin_scope_missing"],
+    // Two grants that each carry one of the two never combine.
+    ["split across two grants", [G({ grant_id: "g-a", capability_names: ["admin_create_seat"] }),
+      G({ grant_id: "g-b", capability_names: ["admin_provision_seat"] })], "seat_admin_scope_missing"],
+  ];
+  for (const [name, grants, expected] of cases) {
+    const d = selectCoveringGrant(grants, need());
+    assert.equal(d.ok ? d.grant.grant_id : d.reason, expected, name);
+  }
+});
+
+test("seats per grant: 10 live and 50 in all, revoked ones included in the total", () => {
+  assert.deepEqual({ ...SEAT_ADMIN_SEATS_PER_GRANT }, { live: 10, total: 50 });
+  assert.equal(seatAdminSeatCeilingRefusal({ live: 9, total: 49 }), null);
+  assert.equal(seatAdminSeatCeilingRefusal({ live: 10, total: 10 }), "seat_admin_seat_limit_reached");
+  assert.equal(seatAdminSeatCeilingRefusal({ live: 0, total: 50 }), "seat_admin_seat_limit_reached");
+  assert.ok(SEAT_ADMIN_REFUSAL_COPY.seat_admin_seat_limit_reached.length > 0);
+});

@@ -74,8 +74,10 @@ try {
   check('confirmation separates live actions from deferred grant powers',
     available?.textContent.includes('Cancel member invitations you created') &&
     available?.textContent.includes('their agents and Lists & docs access') &&
-    !available?.textContent.includes('Invite people') && !available?.textContent.includes('agent seats') &&
-    deferred?.textContent.includes('Invite people as members') && deferred?.textContent.includes('Change member roles'));
+    available?.textContent.includes('Create new agent seats you own in this workspace') &&
+    !available?.textContent.includes('Invite people') && !available?.textContent.includes('Renew agent seats') &&
+    deferred?.textContent.includes('Invite people as members') && deferred?.textContent.includes('Change member roles') &&
+    deferred?.textContent.includes('Renew agent seats') && !deferred?.textContent.includes('Create'));
   check('agent permissions do not promise access to the owner history', !available?.textContent.includes('history'));
   check('exact permission exclusions are shown', dialog.textContent.includes('Billing, sign-in and passwords') && dialog.textContent.includes('Giving anyone admin access'));
   check('No end date is the default with the approved line', dialog.querySelector('[data-seat-admin-duration]').value === 'none' && dialog.textContent.includes('Admin access stays on until you remove it or retire this agent.'));

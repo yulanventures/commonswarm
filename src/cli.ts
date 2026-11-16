@@ -10750,6 +10750,7 @@ export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "reques
 export const ADMIN_STATUS_ACCEPTED_FLAGS = ["profile", "host-session-id", "workspace-id", "json"] as const;
 export const ADMIN_AGENT_ACCEPTED_FLAGS = [...ADMIN_STATUS_ACCEPTED_FLAGS, "request-id"] as const;
 export const ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "confirm"] as const;
+export const ADMIN_CREATE_SEAT_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "out-connection-file", "setup-profile", "seat-host-session-id"] as const;
 const SEAT_ADMIN_HELP: Readonly<Record<string, readonly [string, string]>> = {
   "rename-workspace": ["<name>", "Rename the workspace."],
   "set-lead": ["<agent-principal-id|none>", "Set or clear the workspace lead."],
@@ -10790,6 +10791,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     revoke: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRevoke, description: "Revoke an admin grant without a workspace.", mutates: true, flags: ADMIN_REVOKE_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin revoke --grant-id <uuid> [--request-id <uuid>] [--json]"] }),
     status: commandEntry({ ...noTool("stdio MCP lists admin_status itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminStatus), description: "Show this agent's admin access.", mutates: false, flags: ADMIN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin status --profile <absolute-path> [--workspace-id <uuid>] [--json]"] }),
     ...Object.fromEntries(Object.entries(SEAT_ADMIN_HELP).map(([verb, [operand, description]]) => [verb, commandEntry({ ...noTool("stdio MCP lists the admin tools itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminCommand), description, mutates: true, flags: verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm admin ${verb} ${operand} --profile <absolute-path> [--workspace-id <uuid>] [--request-id <id>] [--json]`] })])),
+    "create-seat": commandEntry({ ...noTool("the new seat's credential goes only to a private file on this host; never a model tool"), handler: traced("runSeatAdmin", runSeatAdminCreateSeat), description: "Create an agent seat you own and save its connection.", mutates: true, flags: ADMIN_CREATE_SEAT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin create-seat <name> --profile <absolute-path> [--workspace-id <uuid>] (--out-connection-file <path> | --setup-profile <path> --seat-host-session-id <id|manual>) [--host-session-id <id>] [--request-id <id>] [--json]"] }),
   }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm admin takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: ADMIN_READ_ACCEPTED_FLAGS, ...REFUSE_PROFILE },
     profileListOrder: 19,
@@ -11022,6 +11024,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,
   "admin.status": ADMIN_STATUS_ACCEPTED_FLAGS,
   ...Object.fromEntries(Object.keys(SEAT_ADMIN_HELP).map(verb => [`admin.${verb}`, verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS])),
+  "admin.create-seat": ADMIN_CREATE_SEAT_ACCEPTED_FLAGS,
   "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
   "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
   "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
@@ -11533,11 +11536,48 @@ async function runSeatAdminCommand(args: Arguments): Promise<void> {
   }
 }
 
+/**
+ * Creates a seat the grantor owns and saves its first credential to a new private file, or sets up a profile from it.
+ * Every local check runs before the request. The server's answer never reaches a printer: output names the seat and
+ * the file, never the credential.
+ */
+async function runSeatAdminCreateSeat(args: Arguments): Promise<void> {
+  args.assertAcceptedFlags(ADMIN_CREATE_SEAT_ACCEPTED_FLAGS);
+  const seatAdmin = await import("./cloud/seat-admin.js");
+  const hostSessionId = args.optional("host-session-id"), profile = args.required("profile");
+  const session = await seatAdmin.openSeatAdminProfile(profile, hostSessionId, args.optional("workspace-id"));
+  args.assertShape(ADMIN_CREATE_SEAT_ACCEPTED_FLAGS, 3);
+  const name = seatAdmin.seatAdminSeatName(args.positionals[2]);
+  const destination = await seatAdmin.prepareSeatDestination({ connectionFile: args.optional("out-connection-file"),
+    // --host-session-id opens THIS agent's profile; the new seat is another agent with its own session.
+    setupProfile: args.optional("setup-profile"), seatHostSessionId: args.optional("seat-host-session-id"), callerProfile: profile });
+  const requestId = seatAdmin.seatAdminRequestId(args.optional("request-id"));
+  const workspace = session.profile.workspace_id;
+  const { target: cloud, token, fetcher } = await session.open();
+  try {
+    const created = await seatAdmin.createSeatAdminSeat({ target: cloud, token, fetcher, workspaceId: workspace, name, commandId: requestId, destination });
+    const where = created.profile_path !== undefined ? { profile_path: created.profile_path } : { connection_file: created.connection_file! };
+    if (args.has("json")) printJson({ principal_id: created.principal_id, name: created.name, workspace_id: created.workspace_id, ...where });
+    else process.stdout.write(`Created ${created.name} (${created.principal_id}). ${created.profile_path !== undefined
+      ? `Profile: ${created.profile_path}` : `Connection file: ${created.connection_file}`}\n`);
+  } catch (error) {
+    const refusal = seatAdminRefusal(error, seatAdmin);
+    if (refusal === null) throw error;
+    if (!args.has("json")) throw new Error(refusal.message);
+    printJson(refusal);
+    process.exitCode = 1;
+  }
+}
+
 /** The server's message when it sent one, else its code; an unknown outcome names the request id to repeat. */
-export function seatAdminRefusal(error: unknown, seatAdmin: typeof import("./cloud/seat-admin.js")): { error: string; message: string; request_id?: string } | null {
+export function seatAdminRefusal(error: unknown, seatAdmin: typeof import("./cloud/seat-admin.js")): { error: string; message: string; request_id?: string; principal_id?: string } | null {
   if (error instanceof seatAdmin.SeatAdminOutcomeUnknown) {
     return { error: "outcome_unknown", message: `The outcome is unknown. Run the same command again with --request-id ${error.commandId}.`, request_id: error.commandId };
   }
+  if (error instanceof seatAdmin.SeatAdminDeliveryFailed) {
+    return { error: "credential_not_saved", message: error.message, request_id: error.commandId, principal_id: error.principalId };
+  }
+  if (error instanceof seatAdmin.SeatAdminSetupFailed) return { error: "setup_failed", message: error.message, principal_id: error.principalId };
   if (error instanceof seatAdmin.SeatAdminRejected) return { error: error.code, message: error.code };
   if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500) {
     const code = error.code ?? `http_${error.status}`;

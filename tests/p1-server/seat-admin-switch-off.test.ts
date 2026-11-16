@@ -142,6 +142,15 @@ test("switch off: a person ends their own grant; granting, agent actions and bot
       command: { kind: "rename_workspace", name: "Off" } }) });
   assert.equal(agentRename.status, 403, "the active grant gives the agent nothing while the switch is off");
   assert.equal((await agentRename.json() as { error: string }).error, "forbidden");
+  const agentSeat = await fetch(`${local.API_URL}/functions/v1/command`, { method: "POST",
+    headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ command_id: randomUUID(), client_version: "0.1.93", workspace_id: workspace, stream: { kind: "workspace" },
+      command: { kind: "create_agent_seat", name: "Off seat" } }) });
+  assert.equal(agentSeat.status, 403, "no seat is created while the switch is off");
+  assert.equal((await agentSeat.json() as { error: string }).error, "forbidden");
+  const [{ seats }] = await sql<{ seats: number }[]>`SELECT count(*)::int AS seats FROM swarm.agent_principals
+    WHERE workspace_id = ${workspace}::uuid AND name = 'Off seat'`;
+  assert.equal(seats, 0);
 
   const outsider = await account(other.jwt, { kind: "end_seat_admin", grant_id: grantId });
   assert.equal(outsider.status, 404, "only the grant's owner can end it");
