@@ -582,7 +582,8 @@ test("v2: an ask addressed to nobody in a channel is answered by any person who 
   assert.equal(chose.status, 200, JSON.stringify(chose.body));
   const answer = chose.body.choice_answer as Record<string, unknown>;
   assert.deepEqual(await replyRow(String(answer.reply_signal_id)), { body: "Selected: Wait for tomorrow", in_reply_to: askId,
-    to_user_id: null, to_agent_principal_id: f.principal, channel_id: channel.channel_id }, "the answer wakes the asking agent");
+    to_user_id: null, to_agent_principal_id: f.principal, channel_id: null },
+  "the answer wakes the asking agent, unfiled like a typed reply to an open channel's message");
 
   const late = await answerWith(f.ownerJwt, askId, { option_id: "ship" });
   assert.equal(late.status, 409);
@@ -598,7 +599,7 @@ test("v2: a private channel's ask is not answerable from outside it; a directed 
     kind: "channel_create", slug: `lock-${randomBytes(4).toString("hex")}`, visibility: "private",
   });
   assert.equal(created.status, 200, JSON.stringify(created.body));
-  const channel = created.body.channel as { slug: string };
+  const channel = created.body.channel as { channel_id: string; slug: string };
   const privateAsk = await askV2({ channel: channel.slug });
   const unknownAsk = await answerWith(outsider.jwt, randomUUID(), { option_id: "ship" });
   const hidden = await answerWith(outsider.jwt, privateAsk, { option_id: "ship" });
@@ -608,6 +609,8 @@ test("v2: a private channel's ask is not answerable from outside it; a directed 
   assert.deepEqual(await actions(privateAsk), [], "an unreadable ask records no attempt");
   const inside = await answerWith(f.ownerJwt, privateAsk, { option_id: "ship" });
   assert.equal(inside.status, 200, JSON.stringify(inside.body));
+  const insideReply = String((inside.body.choice_answer as { reply_signal_id: string }).reply_signal_id);
+  assert.equal((await replyRow(insideReply)).channel_id, channel.channel_id, "a private channel's answer stays in it");
 
   const directed = await askV2({ to_user_id: f.ownerId });
   const notYours = await answerWith(outsider.jwt, directed, { option_id: "ship" });

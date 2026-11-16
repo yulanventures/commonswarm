@@ -6188,7 +6188,7 @@ var CHOICE_ID_MAX = 32;
 var CHOICE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 var CHOICE_OTHER_OPTION_ID = "other";
 var CHOICE_OPTIONS_MAX_BYTES = 3840;
-var CHOICE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+var CHOICE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u;
 function choiceTextUnsafe(text3) {
   return CHOICE_UNSAFE_RE.test(text3);
 }

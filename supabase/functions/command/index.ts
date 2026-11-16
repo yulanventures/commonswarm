@@ -13747,12 +13747,15 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     id: string; from_kind: "user" | "agent"; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
     until: Date; live: boolean; answered: boolean; options: ChoiceOption[]; multi: boolean;
+    channel_visibility: ChannelVisibility | null; channel_archived_at: Date | null;
   }[]>`
     SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
       s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
-      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options, c.multi
+      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options, c.multi,
+      ch.visibility AS channel_visibility, ch.archived_at AS channel_archived_at
     FROM swarm.ask_choices c
     JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
+    LEFT JOIN swarm.channels ch ON ch.workspace_id = s.workspace_id AND ch.channel_id = s.channel_id
     WHERE c.workspace_id = ${route.workspaceId}::uuid AND c.signal_id = ${command.signal_id}::uuid
       AND s.kind = 'ask'
       AND (
@@ -13860,10 +13863,17 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   if (target === null) {
     return await fail(403, "reply_refused", "Whoever asked is no longer in this workspace, so your answer wasn't sent.");
   }
+  /* Placed as a typed reply is (the post_signal path's placementChannelId): in the ask's channel
+   * only when that channel is private, and refused once it's archived; otherwise unfiled. */
+  const privateChannelId = ask.channel_visibility === "private" ? ask.channel_id : null;
+  if (privateChannelId !== null && ask.channel_archived_at !== null) {
+    return await fail(409, "channel_archived",
+      "That channel is archived, so it takes no new messages. Its history still reads and its links still resolve.");
+  }
   const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, reply, target);
   if (rateLimit !== null) return await fail(429, "rate_limited", "Too many messages just now. Try again shortly.");
   const posted = await postSignal(tx, route, auth, reply, target, [], {
-    channelId: ask.channel_id, threadRootId: ask.thread_root_id, broadcastToChannel: false,
+    channelId: privateChannelId, threadRootId: null, broadcastToChannel: false,
     untilMs: SIGNAL_DEFAULT_UNTIL_MS.note, untilCeiling: null, untilExplicit: false,
   }, null);
   if (posted.status !== "inserted") return await fail(409, "reply_refused", "The reply couldn't be posted.");

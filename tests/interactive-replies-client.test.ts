@@ -59,7 +59,9 @@ test("v2 options: descriptions, one recommended moved first with its id kept, an
   assert.throws(() => choiceOptions([{ label: "A", recommended: true }, { label: "B", recommended: true }]), /At most one/);
   assert.throws(() => choiceOptions([{ label: "A", description: "x".repeat(201) }, "B"]), /description must be 1 to 200/);
   assert.throws(() => choiceOptions([{ label: "A", id: "Bad Id" }, "B"]), /choice id/);
-  assert.throws(() => choiceOptions(["A", `B${String.fromCodePoint(0x202e)}`]), /plain text/);
+  assert.throws(() => choiceOptions(["A", `B${String.fromCodePoint(0x202e)}`]), /plain text/, "a bidi override");
+  assert.equal(choiceOptions([`${String.fromCodePoint(0x1f937, 0x200d, 0x2640, 0xfe0f)} Unsure`, "B"])[0]!.id, "unsure",
+    "an emoji joined with a zero-width joiner is plain text");
   assert.throws(() => choiceOptions(Array.from({ length: 6 }, (_, i) => ({ label: `${"€".repeat(79)}${i}`,
     description: "€".repeat(200) }))), /too long together/, "multibyte text past the stored bound");
 

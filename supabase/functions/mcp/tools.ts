@@ -96,7 +96,9 @@ export const CORE_TOOL_TABLE = [
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Ask one or more workspace participants, optionally attaching files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
+    // recipients may be left out only by an ask with choices, which then goes to whoever reads it.
+    inputSchema: { ...objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
+      anyOf: [{ required: ["recipients"] }, { required: ["options"] }, { required: ["choices"] }] },
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",

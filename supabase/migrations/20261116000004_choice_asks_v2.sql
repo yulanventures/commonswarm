@@ -42,7 +42,7 @@ ALTER TABLE swarm.ui_actions
     other_text IS NULL OR (
       char_length(other_text) BETWEEN 1 AND 500
       AND other_text = btrim(other_text)
-      AND other_text !~ '[[:cntrl:]]'
+      AND other_text !~ '[\u0001-\u001f\u007f-\u009f]'
     )
   );
 

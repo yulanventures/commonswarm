@@ -39,9 +39,12 @@ export type ChoiceOptionInput = string | {
   recommended?: boolean;
 };
 
-/** Characters a choice's text never carries: controls, invisible format and bidi characters. */
+/**
+ * Characters a choice's text never carries: controls, line separators and bidi controls, which
+ * could reorder or break the reply an agent reads. Joiners stay, so emoji sequences survive.
+ */
 const CHOICE_UNSAFE_RE =
-  /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u;
 
 /** True when text carries a character CHOICE_UNSAFE_RE refuses. */
 export function choiceTextUnsafe(text: string): boolean {

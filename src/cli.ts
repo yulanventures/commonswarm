@@ -3880,6 +3880,10 @@ export function askChoiceFlags(args: Arguments): { options: ChoiceOption[]; mult
   const inputs = args.originalOptionEntries().flatMap(({ name, value }) =>
     name === "choice" && value !== undefined ? [{ label: value }]
       : name === "option" && value !== undefined ? [parseChoiceOptionFlag(value)] : []);
+  // The typed order must hold every option the parser kept, or one would be dropped silently.
+  if (inputs.length !== args.all("choice").length + args.all("option").length) {
+    throw new Error("--choice and --option each take one label");
+  }
   const recommended = args.optional("recommended");
   if (inputs.length === 0) {
     for (const flag of ["recommended", "multi"]) {
