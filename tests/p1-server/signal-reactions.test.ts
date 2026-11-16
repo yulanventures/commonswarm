@@ -122,8 +122,11 @@ async function reactionsSeenBy(userId: string, signalId: string): Promise<Array<
 async function frames(topic: string, since: Date): Promise<Row[]> {
   const rows = await sql<{ payload: Row }[]>`
     SELECT payload FROM realtime.messages WHERE topic = ${topic} AND inserted_at >= ${since} ORDER BY inserted_at`;
-  // Some Realtime versions store the sent object under payload.payload.
-  return rows.map((row) => (row.payload?.payload as Row | undefined) ?? row.payload);
+  // Some Realtime versions store the sent object under payload.payload, and Realtime adds its own `id`.
+  return rows.map((row) => {
+    const { id: _realtimeId, ...sent } = (row.payload?.payload as Row | undefined) ?? row.payload;
+    return sent;
+  });
 }
 
 const workspaceTopic = () => `cswarm-signals:${workspace}`;
