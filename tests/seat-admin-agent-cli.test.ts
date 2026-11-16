@@ -115,7 +115,7 @@ test("cswarm admin: agent subcommands open the profile natively and are never re
     assert.ok(!entry.flags.some(flag => ["agent-token-file", "agent-token-stdin", "url", "anon-key"].includes(flag)), name);
   }
   assert.ok(group.subcommands["remove-member"]!.flags.includes("confirm"));
-  assert.ok(["out-connection-file", "setup-profile", "host-session-id", "request-id"].every(flag => group.subcommands["create-seat"]!.flags.includes(flag)));
+  assert.ok(["out-connection-file", "setup-profile", "seat-host-session-id", "host-session-id", "request-id"].every(flag => group.subcommands["create-seat"]!.flags.includes(flag)));
   for (const name of ["grants", "history", "revoke"]) assert.equal(group.subcommands[name]!.profile, "refuse", name);
   for (const transport of ["http", "stdio"] as const) assert.ok(!agentToolsForTransport(transport).some(tool => tool.name.startsWith("admin")));
 });
@@ -162,10 +162,10 @@ test("create-seat: the name follows the server's rule; the destination is checke
     await writeFile(join(root, "taken.json"), "{}", { mode: 0o600 });
     await assert.rejects(seatAdmin.prepareSeatDestination({ callerProfile: caller, connectionFile: join(root, "taken.json") }), /already exists/);
     await assert.rejects(seatAdmin.prepareSeatDestination({ callerProfile: caller, setupProfile: join(root, "new", "profile.json") }),
-      /--host-session-id/);
+      /--seat-host-session-id/);
     await assert.rejects(seatAdmin.prepareSeatDestination({ callerProfile: caller, setupProfile: join(root, "caller", "other.json"),
-      hostSessionId: "manual" }), /own directory/);
-    const setup = await seatAdmin.prepareSeatDestination({ callerProfile: caller, setupProfile: join(root, "new", "profile.json"), hostSessionId: "manual" });
+      seatHostSessionId: "manual" }), /own directory/);
+    const setup = await seatAdmin.prepareSeatDestination({ callerProfile: caller, setupProfile: join(root, "new", "profile.json"), seatHostSessionId: "manual" });
     assert.equal(setup.kind, "setup");
     assert.deepEqual(await seatAdmin.prepareSeatDestination({ callerProfile: caller, connectionFile: join(root, "seat.json") }),
       { kind: "connection", path: join(root, "seat.json") });

@@ -10750,7 +10750,7 @@ export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "reques
 export const ADMIN_STATUS_ACCEPTED_FLAGS = ["profile", "host-session-id", "workspace-id", "json"] as const;
 export const ADMIN_AGENT_ACCEPTED_FLAGS = [...ADMIN_STATUS_ACCEPTED_FLAGS, "request-id"] as const;
 export const ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "confirm"] as const;
-export const ADMIN_CREATE_SEAT_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "out-connection-file", "setup-profile"] as const;
+export const ADMIN_CREATE_SEAT_ACCEPTED_FLAGS = [...ADMIN_AGENT_ACCEPTED_FLAGS, "out-connection-file", "setup-profile", "seat-host-session-id"] as const;
 const SEAT_ADMIN_HELP: Readonly<Record<string, readonly [string, string]>> = {
   "rename-workspace": ["<name>", "Rename the workspace."],
   "set-lead": ["<agent-principal-id|none>", "Set or clear the workspace lead."],
@@ -10791,7 +10791,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     revoke: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRevoke, description: "Revoke an admin grant without a workspace.", mutates: true, flags: ADMIN_REVOKE_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin revoke --grant-id <uuid> [--request-id <uuid>] [--json]"] }),
     status: commandEntry({ ...noTool("stdio MCP lists admin_status itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminStatus), description: "Show this agent's admin access.", mutates: false, flags: ADMIN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin status --profile <absolute-path> [--workspace-id <uuid>] [--json]"] }),
     ...Object.fromEntries(Object.entries(SEAT_ADMIN_HELP).map(([verb, [operand, description]]) => [verb, commandEntry({ ...noTool("stdio MCP lists the admin tools itself when the agent's own read says admin access is on"), handler: traced("runSeatAdmin", runSeatAdminCommand), description, mutates: true, flags: verb === "remove-member" ? ADMIN_REMOVE_MEMBER_ACCEPTED_FLAGS : ADMIN_AGENT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm admin ${verb} ${operand} --profile <absolute-path> [--workspace-id <uuid>] [--request-id <id>] [--json]`] })])),
-    "create-seat": commandEntry({ ...noTool("the new seat's credential goes only to a private file on this host; never a model tool"), handler: traced("runSeatAdmin", runSeatAdminCreateSeat), description: "Create an agent seat you own and save its connection.", mutates: true, flags: ADMIN_CREATE_SEAT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin create-seat <name> --profile <absolute-path> [--workspace-id <uuid>] (--out-connection-file <path> | --setup-profile <path> --host-session-id <id|manual>) [--request-id <id>] [--json]"] }),
+    "create-seat": commandEntry({ ...noTool("the new seat's credential goes only to a private file on this host; never a model tool"), handler: traced("runSeatAdmin", runSeatAdminCreateSeat), description: "Create an agent seat you own and save its connection.", mutates: true, flags: ADMIN_CREATE_SEAT_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm admin create-seat <name> --profile <absolute-path> [--workspace-id <uuid>] (--out-connection-file <path> | --setup-profile <path> --seat-host-session-id <id|manual>) [--host-session-id <id>] [--request-id <id>] [--json]"] }),
   }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm admin takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: ADMIN_READ_ACCEPTED_FLAGS, ...REFUSE_PROFILE },
     profileListOrder: 19,
@@ -11549,7 +11549,8 @@ async function runSeatAdminCreateSeat(args: Arguments): Promise<void> {
   args.assertShape(ADMIN_CREATE_SEAT_ACCEPTED_FLAGS, 3);
   const name = seatAdmin.seatAdminSeatName(args.positionals[2]);
   const destination = await seatAdmin.prepareSeatDestination({ connectionFile: args.optional("out-connection-file"),
-    setupProfile: args.optional("setup-profile"), hostSessionId, callerProfile: profile });
+    // --host-session-id opens THIS agent's profile; the new seat is another agent with its own session.
+    setupProfile: args.optional("setup-profile"), seatHostSessionId: args.optional("seat-host-session-id"), callerProfile: profile });
   const requestId = seatAdmin.seatAdminRequestId(args.optional("request-id"));
   const workspace = session.profile.workspace_id;
   const { target: cloud, token, fetcher } = await session.open();

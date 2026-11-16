@@ -169,7 +169,7 @@ async function refuseExisting(path: string): Promise<void> {
 }
 
 /** Every local check runs before the request, so a seat is never created that this host can't save. */
-export async function prepareSeatDestination(o: { connectionFile?: string; setupProfile?: string; hostSessionId?: string;
+export async function prepareSeatDestination(o: { connectionFile?: string; setupProfile?: string; seatHostSessionId?: string;
   callerProfile: string }): Promise<SeatDestination> {
   if ((o.connectionFile === undefined) === (o.setupProfile === undefined)) {
     throw new AgentSetupError("seat_destination_required", "Pass exactly one of --out-connection-file or --setup-profile.");
@@ -179,10 +179,11 @@ export async function prepareSeatDestination(o: { connectionFile?: string; setup
     await refuseExisting(path);
     return { kind: "connection", path };
   }
-  if (o.hostSessionId === undefined) {
-    throw new AgentSetupError("setup_host_session_required", "--setup-profile needs --host-session-id with this session's id, or manual.");
+  // The new seat's own host session, never this agent's: the seat is a different agent.
+  if (o.seatHostSessionId === undefined) {
+    throw new AgentSetupError("setup_host_session_required", "--setup-profile needs --seat-host-session-id with the new seat's session id, or manual.");
   }
-  const hostSessionId = checkedHostSessionId(o.hostSessionId);
+  const hostSessionId = checkedHostSessionId(o.seatHostSessionId);
   const profilePath = await assertPrivateLocation(o.setupProfile!);
   if (dirname(profilePath) === dirname(await assertPrivateLocation(o.callerProfile))) {
     throw new AgentSetupError("profile_conflict", "Put the new seat's profile in its own directory, not this agent's.");
