@@ -519,12 +519,16 @@ is `404 channel_not_found`.
 `workspace_id`, `generated_at` and `channels`, general first, then each channel the person
 can open that is not archived: `channel_id` (`null` for general), `slug`, `visibility`,
 `starred`, `star_rank`, `involvement`, `unread`, `unread_count`, `first_unread_id` and
-`first_unread_at`. A message is unread when it is someone else's, unexpired, from the last
-14 days, unseen, after the person's read position in that channel, and (unless
-`involvement` is `"everything"`) addressed to or mentioning them. `unread` is `null` until
-the person has seen a message or marked a channel read; `unread_count` counts the unread
-messages, and `first_unread_id` and `first_unread_at` name the oldest (`null` when none).
-A muted channel is never unread. The answer is `null` for a non-member or an agent's token.
+`first_unread_at`. Only top-level channel messages, and thread replies also sent to the
+channel, count. A message is unread when it is someone else's, unexpired, unseen, after the
+person's read position in that channel, newer than both the 14-day cutoff and the person's
+workspace baseline (the earlier of their first seen receipt and their first channel mark in
+this workspace), and (unless `involvement` is `"everything"`) addressed to or mentioning
+them. `unread` is `null` until the person has seen a message or marked a channel read;
+`unread_count` counts the unread messages, and `first_unread_id` and `first_unread_at` name
+the oldest (`null` when none). A muted channel is never unread. For a valid human access
+token, the answer is `null` when the person is not a workspace member. Agent tokens cannot
+call this RPC.
 
 **Mark as read** (human access token only; an agent token gets `403`):
 
