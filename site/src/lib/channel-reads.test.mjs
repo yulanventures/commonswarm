@@ -59,6 +59,8 @@ test("a mark reads at once: the marked view, or every view, is read; unknown sta
   assert.equal(withChannelRead(rows, "c2")[2], rows[2], "nothing to clear: the same row");
 });
 
-test("the bar's words", () => {
+test("the bar's words: a count only while it is a real, current one", () => {
   assert.equal(unreadJumpLabel(12), "12 unread · Jump to first unread");
+  assert.equal(unreadJumpLabel(12, true), "Jump to first unread", "after the visit's mark the count is stale");
+  assert.equal(unreadJumpLabel(0), "Jump to first unread", "a server without counts never shows 0 unread");
 });

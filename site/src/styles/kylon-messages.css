@@ -531,6 +531,21 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar butt
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar-inner { border-block-end-color: CanvasText; }
 }
 
+/* The message Jump to first unread brought on screen: a visible ring while it holds focus, even when focus arrived
+   by script after a click (no :focus-visible then). An outline, so nothing moves. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-unread-jumped]:focus {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+}
+
+/* The header ⋯'s Mark as read and Mark all as read: full touch targets wherever the pointer is coarse or the
+   screen is narrow. */
+@media (width <= 64rem), (pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-menu__item:is([data-menu-mark-read], [data-menu-mark-all-read]) {
+    min-block-size: 44px;
+  }
+}
+
 /* The Unread line above the first unread message, for the visit: a day divider in the selection colour. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-divider {
   color: var(--k-shell-selection-edge);

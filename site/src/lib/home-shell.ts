@@ -6,6 +6,7 @@
 import { ALL_SIGNALS_SLUG, CHANNEL_INVOLVEMENT_LABELS, CHANNEL_INVOLVEMENT_LEVELS, CHANNEL_NOTIFY_LABEL, channelLabel, starChannelLabel, type ChannelInvolvement } from "./channels";
 import { personAvatar, agentOrb } from "./home-primitives";
 import { orderCapsules } from "./home-rail";
+import { MARK_ALL_AS_READ_LABEL, MARK_AS_READ_LABEL } from "./channel-reads";
 import type { AgentVM, CapsuleVM, Id } from "./home-types";
 
 export type WorkspacePane = "chat" | "todos" | "lists" | "files" | "people";
@@ -196,8 +197,12 @@ export interface FeedMenuState {
   filters: { value: FeedFilterValue; label: string; current: boolean }[];
   /** The Refresh entry, or null when the feed has nothing to refresh. The label may carry the update count. */
   refresh: { label: string } | null;
+  /** Mark as read for the channel on screen, and Mark all as read for the workspace, where there is something to mark.
+   *  The menu is every member's way to both, on every screen size (Escape and Shift+Escape are the keyboard's). */
+  read?: { channel: boolean; all: boolean } | null;
 }
 export type FeedMenuAction = { kind: "channel"; id: string } | { kind: "new-channel" | "all-channels" | "channel-settings" } | { kind: "filter"; value: FeedFilterValue } | { kind: "refresh" }
+  | { kind: "mark-read" | "mark-all-read" }
   | { kind: "star"; starred: boolean } | { kind: "involvement"; value: ChannelInvolvement };
 
 export const PANE_LABELS: Record<WorkspacePane, string> = { chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", people: "People & agents" };
@@ -498,6 +503,11 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       entry.append(star); placeEntries.push(entry); placeButtons.push(star);
     }
     if (state.mayCreateChannel) channelActions.push(plain("New channel", { kind: "new-channel" }, "menuChannelNew"));
+    /* Mark all as read reaches every channel and cannot be undone: it sits beside All channels, not where focus lands. */
+    if (state.read?.all === true) {
+      const after = channelActions.findIndex((button) => button.dataset.menuAllChannels !== undefined) + 1;
+      channelActions.splice(after, 0, plain(MARK_ALL_AS_READ_LABEL, { kind: "mark-all-read" }, "menuMarkAllRead"));
+    }
     const view = group("View", state.channels.map((channel) => ({ text: channel.label, checked: channel.current,
       action: { kind: "channel", id: channel.id } as FeedMenuAction, hook: ["menuChannelPlace", channel.id] as [string, string] })),
       channelActions);
@@ -507,8 +517,16 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
       checked: level === place.involvement, action: { kind: "involvement", value: level } as FeedMenuAction,
       hook: ["menuChannelNotify", level] as [string, string] }))) : null;
     if (notify) { placeEntries.push(notify.entry); placeButtons.push(...notify.buttons); }
-    const built: HTMLElement[] = [...placeEntries, view.entry, show.entry];
-    const feedButtons = [...placeButtons, ...view.buttons, ...show.buttons];
+    /* Mark as read is about the channel on screen, so it comes first, at every width. */
+    const readEntries: HTMLElement[] = [];
+    const readButtons: HTMLButtonElement[] = [];
+    if (state.read?.channel === true) {
+      const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
+      const button = plain(MARK_AS_READ_LABEL, { kind: "mark-read" }, "menuMarkRead");
+      entry.append(button); readEntries.push(entry); readButtons.push(button);
+    }
+    const built: HTMLElement[] = [...readEntries, ...placeEntries, view.entry, show.entry];
+    const feedButtons = [...readButtons, ...placeButtons, ...view.buttons, ...show.buttons];
     if (state.refresh) {
       const entry = node(doc, "li", "hm-menu__entry"); entry.setAttribute("role", "none");
       const refresh = plain(state.refresh.label, { kind: "refresh" }, "menuRefresh");

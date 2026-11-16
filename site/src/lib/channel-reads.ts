@@ -5,11 +5,20 @@
 import { GENERAL_CHANNEL_ID, signalInChannelView, type ChannelUnreadState } from "./channels";
 
 export const MARK_AS_READ_LABEL = "Mark as read";
+export const MARK_ALL_AS_READ_LABEL = "Mark all as read";
 export const UNREAD_DIVIDER_LABEL = "Unread";
-/** Older pages Jump to first unread loads, at most, to reach a first unread message above the loaded ones. */
+export const JUMP_TO_FIRST_UNREAD_LABEL = "Jump to first unread";
+/** The bar's action while the first unread message is still older than every page loaded so far. */
+export const CONTINUE_LOADING_LABEL = "Continue loading";
+/** Older pages one Jump (or Continue loading) loads, at most, toward a first unread message above the loaded ones. */
 export const UNREAD_JUMP_PAGES = 3;
+/** After a mark that did not land, how long before the same view is marked on view again. */
+export const CHANNEL_READ_RETRY_MS = 15_000;
 
-export const unreadJumpLabel = (count: number): string => `${count} unread · Jump to first unread`;
+/** The bar's action: the count only while it is still the server's count for this visit (before the visit's mark
+ *  landed) and a real one. A server without counts never shows "0 unread". */
+export const unreadJumpLabel = (count: number, marked = false): string =>
+  !marked && count > 0 ? `${count} unread · ${JUMP_TO_FIRST_UNREAD_LABEL}` : JUMP_TO_FIRST_UNREAD_LABEL;
 
 /** The command's channel_id for a view: null for #general. */
 export const readChannelIdOf = (viewId: string): string | null => (viewId === GENERAL_CHANNEL_ID ? null : viewId);
