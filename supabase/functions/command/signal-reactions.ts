@@ -61,7 +61,7 @@ export function parseReactionCommand(
   if (emoji === null) return { ok: false, status: 400, reason: SIGNAL_REACTION_EMOJI_RULE };
   const signalId = cmd.signal_id.toLowerCase();
   if (!add) return { ok: true, command: { kind: REMOVE_REACTION_KIND, signal_id: signalId, emoji } };
-  const source = cmd.source ?? "manual";
+  const source = Object.hasOwn(cmd, "source") ? cmd.source : "manual";
   if (source !== "manual" && source !== "ack") {
     return { ok: false, status: 400, reason: 'source is "manual" or "ack"' };
   }
@@ -83,11 +83,14 @@ export async function signalReactable(
     SELECT current_setting('request.jwt.claims', true) AS claims
   `;
   await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
-  const [row] = await tx<{ readable: boolean }[]>`
-    SELECT swarm.signal_reactable(${workspaceId}::uuid, ${signalId}::uuid) AS readable
-  `;
-  await tx`SELECT set_config('request.jwt.claims', ${before?.claims ?? ""}, true)`;
-  return row?.readable === true;
+  try {
+    const [row] = await tx<{ readable: boolean }[]>`
+      SELECT swarm.signal_reactable(${workspaceId}::uuid, ${signalId}::uuid) AS readable
+    `;
+    return row?.readable === true;
+  } finally {
+    await tx`SELECT set_config('request.jwt.claims', ${before?.claims ?? ""}, true)`;
+  }
 }
 
 export type ReactionOutcome =

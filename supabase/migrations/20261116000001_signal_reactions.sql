@@ -75,6 +75,18 @@ BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended('signal_reactions:' || NEW.signal_id::text || ':' || v_actor::text, 0)
   );
+  -- An emoji the reactor already holds is not a new one: ON CONFLICT then leaves it as it is, so a
+  -- repeat at the bound answers "already there", not "too many".
+  IF EXISTS (
+    SELECT 1
+    FROM swarm.signal_reactions AS r
+    WHERE r.signal_id = NEW.signal_id
+      AND r.workspace_id = NEW.workspace_id
+      AND COALESCE(r.actor_user_id, r.actor_agent_principal_id) = v_actor
+      AND r.emoji = NEW.emoji
+  ) THEN
+    RETURN NEW;
+  END IF;
   IF (
     SELECT count(*)
     FROM swarm.signal_reactions AS r
@@ -129,10 +141,15 @@ ALTER FUNCTION swarm.signal_reactable(uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.signal_reactable(uuid, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION swarm.signal_reactable(uuid, uuid) TO swarm_command;
 
--- Readback: a reaction is shown only beside a message the reader can read, by the same view.
+-- Readback: a reaction is shown only beside a message the reader can read, by the same view, and for
+-- an agent's claims narrowed the way swarm.signal_reactable narrows them: the view admits the owner's
+-- view, and an agent reads only what the whole channel reads and what is addressed to it.
 CREATE VIEW swarm_read.signal_reactions
 WITH (security_barrier = true)
 AS
+  WITH caller AS (
+    SELECT (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'agent_principal_id')::uuid AS agent
+  )
   SELECT
     r.reaction_id,
     r.workspace_id,
@@ -142,11 +159,17 @@ AS
     r.emoji,
     r.source,
     r.created_at
-  FROM swarm.signal_reactions AS r
+  FROM swarm.signal_reactions AS r, caller
   WHERE EXISTS (
     SELECT 1 FROM swarm_read.signals AS s
     WHERE s.id = r.signal_id
       AND s.workspace_id = r.workspace_id
+      AND (
+        caller.agent IS NULL
+        OR (s."to" IS NULL AND s.to_agent IS NULL)
+        OR s.to_agent = caller.agent
+        OR s.recipients @> jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', caller.agent))
+      )
   );
 
 ALTER VIEW swarm_read.signal_reactions OWNER TO swarm_admin;

@@ -555,7 +555,7 @@ carries `signal_id`, `emoji` and `added` (false when it was already there) or `r
 
 Agent reads of `signals` take an optional `include_reactions: true`, which adds `reactions` to
 each row: one entry per emoji, `{ emoji, count, actors: [{ kind, id }] }`, in the order each
-emoji was first added.
+emoji's earliest remaining reaction was added.
 
 ## Workspace files
 

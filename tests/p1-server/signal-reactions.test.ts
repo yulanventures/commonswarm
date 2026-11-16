@@ -239,15 +239,21 @@ test("what a reaction may carry: one emoji, an agent's ack, a known shortcode", 
   assert.equal(personAck.status, 400, "a person's reaction is never an automatic ack");
   assert.equal((await send(other.jwt, { kind: "add_reaction", signal_id: message, emoji: "\u{1F44D}", extra: 1 })).status, 400);
   assert.equal((await react(other.jwt, "not-a-uuid", "\u{1F44D}")).status, 400);
+  assert.equal((await react(other.jwt, message, "\u{1F44D}", { source: null })).status, 400, "source, when sent, is a string");
 });
 
-test("a reactor holds at most 64 emojis on one message", async () => {
+test("a reactor holds at most 64 emojis on one message, and re-adding one it holds is still accepted", async () => {
   const message = await posted(owner.jwt);
+  // 63 stored directly, plus one real emoji through the edge: 64 held.
   await sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
-    SELECT ${workspace}::uuid, ${message}::uuid, ${other.id}::uuid, 'held-' || n FROM generate_series(1, 64) AS n`;
+    SELECT ${workspace}::uuid, ${message}::uuid, ${other.id}::uuid, 'held-' || n FROM generate_series(1, 63) AS n`;
+  assert.equal((await react(other.jwt, message, "\u{1F440}")).body.added, true);
   const refused = await react(other.jwt, message, "\u{1F44D}");
   assert.equal(refused.status, 409, JSON.stringify(refused.body));
   assert.equal(refused.body.error, "reaction_limit_reached");
+  const again = await react(other.jwt, message, ":eyes:");
+  assert.equal(again.status, 200, `an emoji already held is not a 65th: ${JSON.stringify(again.body)}`);
+  assert.equal(again.body.added, false);
   assert.equal((await react(owner.jwt, message, "\u{1F44D}")).status, 200, "another reactor is unaffected");
 });
 
@@ -322,6 +328,14 @@ test("a private message: only its parties react, and only their topics hear it",
   assert.equal((await react(owner.jwt, direct, "\u{1F44D}")).status, 200, "the author reacts");
   const sibling = await react(agentB.token, direct, "\u{1F44D}");
   assert.equal(sibling.status, 404, "an agent of the author's is not a party");
+  // Read directly, the reactions view under that agent's claims hides the owner's private message too.
+  const seenByAgent = await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner.id, role: "authenticated", agent_principal_id: agentB.principal })}, true)`;
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    return await tx`SELECT 1 FROM swarm_read.signal_reactions WHERE signal_id = ${direct}::uuid`;
+  });
+  assert.equal(seenByAgent.length, 0, "an agent's claims read no reactions on its owner's private message");
+  assert.equal((await reactionsSeenBy(owner.id, direct)).length, 2, "while the owner reads both");
   assert.equal((await frames(workspaceTopic(), since)).some((p) => p.signal_id === direct), false);
   assert.ok((await frames(memberTopic(other.id), since)).length >= 2);
   assert.ok((await frames(memberTopic(owner.id), since)).length >= 2);
