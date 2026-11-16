@@ -335,7 +335,7 @@ curl -s "$PROJECT_URL/functions/v1/read" \
 |---|---|
 | `resource` | `"signals"` |
 | `workspace_id` | UUID |
-| `inbox` | boolean. `true` returns only signals addressed to you. |
+| `inbox` | boolean. `true` returns only signals addressed to you or that mention you. |
 | `about` | string ≤ 500 for an exact match, or `null` |
 | `kind` | `"working-on"`, `"note"`, `"ask"`, or `null` |
 | `since` | ISO-8601 timestamp, or `null`. Filters on `created_at >=`. |
@@ -343,14 +343,18 @@ curl -s "$PROJECT_URL/functions/v1/read" \
 | `include_stale` | boolean. `false` hides signals whose `until` has passed. |
 | `in_reply_to` | optional key. A UUID returns the replies to that signal, oldest first; `null` filters nothing. |
 | `channel` | optional key. A channel's name narrows to that channel; `null` filters nothing. An unknown name is `404 channel_not_found`. |
+| `include_mentions` | optional key, boolean. `true` adds each row's `mentions`. Without it, an `inbox: true` row that only mentions you names you in `to_agent`. |
 | `after_created_at`, `after_id` | optional, **both or neither**. Both `null` returns the matching rows oldest first; both set (ISO-8601 time and UUID of the last row you saw) returns the rows strictly after it, oldest first. |
 
 Response: `{ "signals": [ ... ], "capabilities": {...}, "pending_delivery_count": n }`,
 newest first (`created_at DESC, id DESC`) unless a cursor or `in_reply_to` is sent. Each
 row carries `id, workspace_id, from, from_kind, to, about, kind, body, until,
 created_at`, plus `to_agent, in_reply_to, reply_status, chain_hop, attachments,
-channel_id, thread_root_id, broadcast_to_channel, recipients` and
-`sender_owner_relation` (`same_owner`, `cross_owner` or `unknown`).
+channel_id, thread_root_id, broadcast_to_channel, recipients`,
+`audience` (`workspace` when the whole channel reads it, else `private`) and
+`sender_owner_relation` (`same_owner`, `cross_owner` or `unknown`). With
+`include_mentions: true`, `mentions` lists `{ position, kind, id, source }` in order;
+`source` is `author`, `lead` or `thread`.
 
 Members:
 

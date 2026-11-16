@@ -128,6 +128,13 @@ interface SignalReadRequest {
   cursor_mode: boolean;
   limit: number;
   include_stale: boolean;
+  /**
+   * Its OWN Object.hasOwn group, absent from every installed client's body. True asks for each
+   * row's mentions as stored. Absent or false with inbox: true, a row that reaches this agent only
+   * by a mention names the agent in to_agent, so a client that admits only rows addressed to it
+   * (0.1.82 to 0.1.97 check, hook check and resume) keeps reading its inbox.
+   */
+  include_mentions: boolean;
 }
 
 interface MemberReadRequest {
@@ -548,6 +555,7 @@ function parseBody(
   // is not a valid request shape (exactKeys also rejects a single extra key).
   if (hasAfterCreatedAt !== hasAfterId) return null;
   const cursorMode = hasAfterCreatedAt && hasAfterId;
+  const hasIncludeMentions = Object.hasOwn(body, "include_mentions");
   if (
     !exactKeys(body, [
       "resource",
@@ -561,6 +569,7 @@ function parseBody(
       ...(cursorMode ? ["after_created_at", "after_id"] : []),
       "limit",
       "include_stale",
+      ...(hasIncludeMentions ? ["include_mentions"] : []),
     ]) ||
     body.resource !== "signals" ||
     typeof body.workspace_id !== "string" ||
@@ -588,6 +597,7 @@ function parseBody(
     (body.limit as number) < 1 ||
     (body.limit as number) > 100 ||
     typeof body.include_stale !== "boolean" ||
+    (hasIncludeMentions && typeof body.include_mentions !== "boolean") ||
     (hasChannel &&
       !(body.channel === null ||
         (typeof body.channel === "string" &&
@@ -629,6 +639,7 @@ function parseBody(
     cursor_mode: cursorMode,
     limit: body.limit as number,
     include_stale: body.include_stale as boolean,
+    include_mentions: body.include_mentions === true,
   };
 }
 
@@ -1305,6 +1316,28 @@ async function handle(
         jsonb_build_object('kind', 'agent', 'id', ${agent.principal_id}::uuid)
       )
     )`;
+    /* MENTIONED, the third way a message reaches this agent: an @tag, the lead on a person's
+     * untagged post, or a thread the agent is in. Each is a row in swarm.signal_mentions on a
+     * message the whole channel reads, and the same row is what woke the agent. The mention view
+     * is gated like swarm_read.signals, on these claims' agent_principal_id: a mention in a
+     * private channel the agent has left is not read, even while its owner is still in it.
+     * An agent's own post is left out, as the wake leaves it out (swarm.enqueue_mention_delivery),
+     * so an inbox never holds a message nothing delivered. */
+    const mentionedThisAgent = tx`(
+      NOT (s.from_kind = 'agent' AND s."from" = ${agent.principal_id}::uuid)
+      AND EXISTS (
+        SELECT 1 FROM swarm_read.signal_mentions AS mention
+        WHERE mention.signal_id = s.id
+          AND mention.workspace_id = s.workspace_id
+          AND mention.kind = 'agent'
+          AND mention.id = ${agent.principal_id}::uuid
+      )
+    )`;
+    /* Installed clients (0.1.82 to 0.1.97) refuse an inbox row unless to_agent or recipients
+     * names them, and a refused row stops their cursor. Until a client asks for mentions, an
+     * inbox row that is not addressed to this agent names it in to_agent, as a delivery does
+     * (durable-delivery.ts names its recipient). audience still says who can read it. */
+    const nameThisAgent = body.inbox && !body.include_mentions;
     // Relation is computed solely from the authenticated receiver's owner and
     // the server-stamped author. Filter author.revoked_at so a revoked agent
     // author cannot resolve into an ownership relation and falls to unknown.
@@ -1313,9 +1346,29 @@ async function handle(
       SELECT
         s.id, s.workspace_id, s."from", s.from_kind, s."to",
         s.about, s.kind, s.body, s.until, s.created_at,
-        s.to_agent, s.in_reply_to, s.reply_status, s.chain_hop, s.attachments,
+        CASE
+          WHEN ${nameThisAgent} AND NOT ${addressedToThisAgent} THEN ${agent.principal_id}::uuid
+          ELSE s.to_agent
+        END AS to_agent,
+        s.in_reply_to, s.reply_status, s.chain_hop, s.attachments,
         s.channel_id, s.thread_root_id, s.broadcast_to_channel,
         s.recipients,
+        CASE
+          WHEN s."to" IS NULL AND s.to_agent IS NULL AND s.in_reply_to IS NULL
+           AND jsonb_array_length(COALESCE(s.recipients, '[]'::jsonb)) = 0 THEN 'workspace'
+          ELSE 'private'
+        END AS audience,
+        ${body.include_mentions
+          ? tx`COALESCE((
+              SELECT jsonb_agg(jsonb_build_object(
+                'position', mention.position, 'kind', mention.kind,
+                'id', mention.id, 'source', mention.source
+              ) ORDER BY mention.position)
+              FROM swarm_read.signal_mentions AS mention
+              WHERE mention.signal_id = s.id
+                AND mention.workspace_id = s.workspace_id
+            ), '[]'::jsonb) AS mentions,`
+          : tx``}
         CASE
           WHEN s.from_kind = 'user'
            AND author_member.user_id IS NOT NULL
@@ -1349,6 +1402,7 @@ async function handle(
         AND (
           ${body.inbox} = false
           OR ${addressedToThisAgent}
+          OR ${mentionedThisAgent}
         )
         AND (${body.include_stale} = true OR s.until > statement_timestamp())
         AND (${body.about}::text IS NULL OR s.about = ${body.about})
