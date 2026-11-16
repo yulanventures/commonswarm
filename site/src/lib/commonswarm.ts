@@ -3051,6 +3051,42 @@ export async function reportBrowserSignalsSeen(
   }
 }
 
+/** Where mark_channel_read moves the person's read position: one place (null is general), through one message or,
+ *  without one, up to now; or every place they can open. */
+export type ChannelReadTarget =
+  | { channelId: string | null; throughSignalId?: string | null }
+  | { all: true };
+
+/** ok: the position moved, or already stood there. signal_not_found: not a message the person may mark through, so
+ *  mark again without it (with a new command id). channel_not_found: no such channel for them. unsupported: a server
+ *  from before read positions answers 400. Anything else throws. */
+export type ChannelReadOutcome = "ok" | "signal_not_found" | "channel_not_found" | "unsupported";
+
+export async function markChannelRead(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  target: ChannelReadTarget,
+): Promise<ChannelReadOutcome> {
+  const command: Record<string, unknown> = "all" in target
+    ? { kind: "mark_channel_read", all: true }
+    : {
+      kind: "mark_channel_read",
+      channel_id: target.channelId,
+      ...(target.throughSignalId ? { through_signal_id: target.throughSignalId } : {}),
+    };
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    command,
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") return "ok";
+  if (status === 400) return "unsupported";
+  if (status === 404 && (body.error === "signal_not_found" || body.error === "channel_not_found")) return body.error;
+  throw new Error(`CommonSwarm did not mark the channel read (HTTP ${status}).`);
+}
+
 /**
  * Reads the shared feed through the swarm_read views, which apply the membership gate in the
  * database. A caller who is not a member of the workspace gets an empty set rather than an
@@ -3735,22 +3771,31 @@ export interface ChannelUnread {
   starred: boolean;
   starRank: number | null;
   involvement: ChannelInvolvement;
+  /** How many messages are unread, and the oldest of them. 0 and null from a server that does not send them. */
+  unreadCount: number;
+  firstUnreadId: string | null;
+  firstUnreadAt: string | null;
 }
 
-/** A row that leaves the viewer's settings out reads as the defaults; one that sends something else is malformed. */
+/** A row that leaves the viewer's settings out reads as the defaults; one that sends something else is malformed.
+ *  The count and the first unread message are extras: a missing or wrongly typed one reads as 0 or null. */
 export function parseChannelUnread(data: unknown): ChannelUnread[] | null {
   if (data === null || typeof data !== "object" || !Array.isArray((data as { channels?: unknown }).channels)) return null;
   const rows: ChannelUnread[] = [];
   for (const row of (data as { channels: unknown[] }).channels) {
     if (row === null || typeof row !== "object") return null;
-    const { channel_id, slug, unread, starred = false, star_rank = null, involvement = "everything" } =
-      row as Record<string, unknown>;
+    const { channel_id, slug, unread, starred = false, star_rank = null, involvement = "everything",
+      unread_count: count, first_unread_id: firstId, first_unread_at: firstAt } = row as Record<string, unknown>;
     if ((channel_id !== null && typeof channel_id !== "string") || typeof slug !== "string" ||
         (unread !== null && typeof unread !== "boolean") || typeof starred !== "boolean" ||
         (star_rank !== null && !Number.isInteger(star_rank)) ||
         !(CHANNEL_INVOLVEMENT_LEVELS as readonly unknown[]).includes(involvement)) return null;
+    const firstUnreadId = typeof firstId === "string" && firstId !== "" ? firstId : null;
     rows.push({ channelId: channel_id, slug, unread, starred, starRank: star_rank as number | null,
-      involvement: involvement as ChannelInvolvement });
+      involvement: involvement as ChannelInvolvement,
+      unreadCount: Number.isSafeInteger(count) && (count as number) > 0 ? count as number : 0,
+      firstUnreadId,
+      firstUnreadAt: firstUnreadId !== null && typeof firstAt === "string" ? firstAt : null });
   }
   return rows;
 }

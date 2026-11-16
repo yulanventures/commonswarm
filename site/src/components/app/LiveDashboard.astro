@@ -26,6 +26,7 @@ import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
+import { MARK_AS_READ_LABEL as MARK_AS_READ } from "../../lib/channel-reads";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
 /* The name of the unfiltered view, in the markup as well as in the script. It was typed in
    three places and generated in the script, so the static "# all-signals" even carried a
@@ -557,6 +558,14 @@ import "../../styles/kylon-command-palette.css";
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
                   <button type="button" data-feed-filter="direct-to-you" aria-pressed="false">To you</button>
+                </div>
+              </div>
+              {/* Over the top of the feed while this visit's first unread message is above the screen. It takes no
+                  height in the scroller, so showing or hiding it never moves the transcript. */}
+              <div class="dashboard__unread-bar" data-unread-bar hidden>
+                <div class="dashboard__unread-bar-inner" role="group" aria-label="Unread messages">
+                  <button class="dashboard__unread-jump" type="button" data-unread-jump></button>
+                  <button class="dashboard__unread-mark" type="button" data-unread-mark>{MARK_AS_READ}</button>
                 </div>
               </div>
               <div class="dashboard__feed-more" data-feed-more hidden>
@@ -1326,6 +1335,9 @@ import "../../styles/kylon-command-palette.css";
     browserSignalCommand,
     postBrowserSignal,
     reportBrowserSignalsSeen,
+    markChannelRead,
+    type ChannelReadOutcome,
+    type ChannelReadTarget,
     uploadBrowserAttachment,
     channelVisibilityNow,
     revokeAgentToken,
@@ -1566,6 +1578,21 @@ import "../../styles/kylon-command-palette.css";
   } from "../../lib/composer-address";
   import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
   import { HumanSeenReporter } from "../../lib/human-seen-reporter";
+  import {
+    CHANNEL_READ_RETRY_MS,
+    CONTINUE_LOADING_LABEL,
+    MARK_AS_READ_LABEL,
+    UNREAD_DIVIDER_LABEL,
+    UNREAD_JUMP_PAGES,
+    channelReadRowFor,
+    firstUnreadOlderThanLoaded,
+    newestChannelMessage,
+    newestMarkableChannelMessage,
+    oldestChannelMessage,
+    readChannelIdOf,
+    unreadJumpLabel,
+    withChannelRead,
+  } from "../../lib/channel-reads";
   import { FeedPushController } from "../../lib/feed-push";
   import {
     loadConnectedApps,
@@ -1757,6 +1784,21 @@ import "../../styles/kylon-command-palette.css";
     /** The per-channel unread read for this workspace (C1b). `null` is unknown, never "read". */
     let channelUnreadRows: ChannelUnread[] | null = null;
     let channelUnreadGeneration = 0;
+    /** Read positions (mark_channel_read). A server from before them answers 400: nothing more is sent this page. */
+    let channelReadUnsupported = false;
+    /** Marks on view by workspace, view and newest message: in flight or accepted, so neither is sent twice. A mark that
+     *  did not land is dropped from here and its view waits CHANNEL_READ_RETRY_MS (channelReadRetryAt) before trying again. */
+    const channelReadMarked = new Map<string, "pending" | "done">();
+    const channelReadRetryAt = new Map<string, number>();
+    /** Messages the server would not take as a read position (signal_not_found): marks go through the next eligible
+     *  loaded message instead, never past what was loaded. Message ids are unique, so one set serves every workspace. */
+    const channelReadRefusedIds = new Set<string>();
+    /** This visit to a channel, its own snapshot apart from the server's unread state: whether its first unread message
+     *  was above the screen on entry (the bar, kept for the visit, and the Unread line above that message), the count
+     *  then, and whether the visit's mark has landed since. Taken once both the page and the unread read are in; a new
+     *  channel or workspace starts a new one. */
+    let unreadVisit: { key: string; decided: boolean; firstUnreadId: string | null; firstUnreadAt: string | null;
+      count: number; bar: boolean; divider: boolean; jumping: boolean; stalled: boolean; marked: boolean } | null = null;
     /** The Archived channels disclosure, kept open across rail rebuilds. */
     let railArchivedOpen = false;
     /** A ?c= that resolves to no channel here. Held so the empty state can say so. */
@@ -2468,10 +2510,16 @@ import "../../styles/kylon-command-palette.css";
         }),
         refresh: refresh && !refresh.hidden
           ? { label: count && !count.hidden && count.textContent ? `${refreshLabel} · ${count.textContent}` : refreshLabel } : null,
+        read: channelReadMenuState(),
       };
     };
     const feedMenuAction = (action: FeedMenuAction): void => {
-      if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
+      if (action.kind === "mark-read") {
+        const viewId = channelReadViewId();
+        if (viewId !== null) markViewRead(viewId);
+      }
+      else if (action.kind === "mark-all-read") markViewRead("all");
+      else if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
       else if (action.kind === "new-channel") openChannelDialog("create");
       else if (action.kind === "all-channels") openChannelDirectory();
       else if (action.kind === "channel-settings") openChannelDialog("settings", activeChannelId);
@@ -8162,6 +8210,333 @@ import "../../styles/kylon-command-palette.css";
       if (el) el.scrollTop = el.scrollHeight;
     };
 
+    /* ── read positions (mark_channel_read) ─────────────────────────────────────────────────
+     * Viewing the bottom of a channel in a focused tab marks it read through its newest loaded message. When the
+     * channel's first unread message was above the screen on entry, the visit keeps that message (its own snapshot,
+     * apart from the server's unread state, which only drives the rail): a bar over the top of the feed offers "Jump to
+     * first unread" and "Mark as read" for the rest of the visit, and a line marks where unread started. Escape marks
+     * the open channel read and Shift+Escape every channel; the header's ⋯ offers both to every member on every screen.
+     * People only: never in the sample. */
+    const channelReadViewId = (): string | null =>
+      !sampleMode && session && activeWorkspaceId && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        activeDm === null && unknownChannelId === null && activeChannelId !== null ? activeChannelId : null;
+    const channelReadVisitKey = (): string => {
+      const viewId = channelReadViewId();
+      return viewId === null ? "" : `${activeWorkspaceId}\u0000${viewId}`;
+    };
+    /** The rail reads the view as read at once, and a read already in flight cannot paint the dot back. The re-read
+     *  after every answer replaces this with what the server stored, so a mark that did not land never stays read. */
+    const applyChannelRead = (viewId: string): void => {
+      if (channelUnreadRows === null) return;
+      channelUnreadGeneration += 1;
+      channelUnreadRows = withChannelRead(channelUnreadRows, viewId);
+      renderHomeRail();
+      renderHomeShell();
+      renderChannelDirectoryDialog();
+    };
+    /** One mark, exactly as given: never widened. Whatever the answer (a failure included), the unread read runs again
+     *  so the rail shows what the server stored, and that read syncs the view again. A message refused here
+     *  (signal_not_found) is remembered, so the next mark goes through the next eligible loaded message. */
+    const sendChannelRead = async (workspaceId: string, target: ChannelReadTarget): Promise<ChannelReadOutcome | "failed"> => {
+      const activeSession = session;
+      if (sampleMode || !activeSession || channelReadUnsupported) return "failed";
+      let outcome: ChannelReadOutcome | "failed" = "failed";
+      try {
+        outcome = await markChannelRead(activeSession, uuid(), workspaceId, target);
+        if (outcome === "signal_not_found" && !("all" in target) && target.throughSignalId) {
+          channelReadRefusedIds.add(target.throughSignalId);
+        }
+        if (outcome === "unsupported") channelReadUnsupported = true;
+      } catch {
+        outcome = "failed";
+      } finally {
+        if (workspaceId === activeWorkspaceId) void refreshChannelUnread(workspaceId, true);
+      }
+      return outcome;
+    };
+    /** The view's newest loaded message a mark can go through, or null when there is none. */
+    const channelReadTarget = (viewId: string): string | null =>
+      session ? newestMarkableChannelMessage(signals, viewId, session.user.id, channelReadRefusedIds)?.id ?? null : null;
+    /** A mark for the visit's own view landed: the bar's count is the server's from before it, so it goes. */
+    const noteVisitMarked = (viewKey: string): void => {
+      if (unreadVisit?.key !== viewKey) return;
+      unreadVisit.marked = true;
+      renderUnreadBar();
+    };
+    /** The message's row in the feed: a copy on screen before one folded away in a closed thread. */
+    const feedRowFor = (signalId: string): HTMLElement | null => {
+      const rows = [...(one<HTMLElement>("[data-feed-list]")?.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(signalId)}"]`) ?? [])];
+      return rows.find(row => row.getBoundingClientRect().height > 0) ?? rows[0] ?? null;
+    };
+    /** Where the visit's first unread message is against the feed's screen. Not loaded but older than the oldest
+     *  loaded message is above. */
+    const firstUnreadPlace = (visit: NonNullable<typeof unreadVisit>): "above" | "shown" | "elsewhere" => {
+      const scroller = feedScroller();
+      if (!scroller || visit.firstUnreadId === null) return "elsewhere";
+      const row = feedRowFor(visit.firstUnreadId);
+      if (row) {
+        const screen = scroller.getBoundingClientRect(), rect = row.getBoundingClientRect();
+        return rect.top < screen.top ? "above" : rect.top < screen.bottom ? "shown" : "elsewhere";
+      }
+      const viewId = channelReadViewId();
+      return viewId !== null &&
+        firstUnreadOlderThanLoaded(visit.firstUnreadAt, visit.firstUnreadId, oldestChannelMessage(signals, viewId))
+        ? "above" : "elsewhere";
+    };
+    /** The Unread line, above the visit's first unread message while the visit keeps it. Idempotent. */
+    const paintUnreadDivider = (): void => {
+      const list = one<HTMLElement>("[data-feed-list]");
+      if (!list) return;
+      list.querySelector("[data-unread-divider]")?.remove();
+      const visit = unreadVisit;
+      if (!visit?.divider || visit.firstUnreadId === null || visit.key !== channelReadVisitKey()) return;
+      let row: HTMLElement | null = feedRowFor(visit.firstUnreadId);
+      while (row && row.parentElement !== list) row = row.parentElement;
+      if (!row) return;
+      const divider = document.createElement("li");
+      divider.className = "hm-day dashboard__unread-divider";
+      divider.dataset.unreadDivider = "";
+      const label = document.createElement("span");
+      label.className = "hm-day__label";
+      label.textContent = UNREAD_DIVIDER_LABEL;
+      divider.append(label);
+      list.insertBefore(divider, row);
+    };
+    /** Adds or takes away the Unread line without moving what the reader is looking at: pinned to the newest stays
+     *  pinned, and a reader in history keeps their message under their eye when the line changes above it. */
+    const changeUnreadDivider = (show: boolean): void => {
+      const scroller = feedScroller();
+      const list = one<HTMLElement>("[data-feed-list]");
+      const pinned = atBottom();
+      const top = scroller?.getBoundingClientRect().top ?? 0;
+      const aboveScreen = (): boolean => {
+        const divider = list?.querySelector<HTMLElement>("[data-unread-divider]");
+        return !!divider && divider.getBoundingClientRect().top < top;
+      };
+      const wasAbove = aboveScreen();
+      const before = scroller?.scrollHeight ?? 0;
+      if (show) paintUnreadDivider();
+      else list?.querySelector("[data-unread-divider]")?.remove();
+      if (pinned) scrollToNewest();
+      else if (scroller && (show ? aboveScreen() : wasAbove)) scroller.scrollTop += scroller.scrollHeight - before;
+    };
+    const renderUnreadBar = (): void => {
+      const bar = one<HTMLElement>("[data-unread-bar]");
+      if (!bar) return;
+      const visit = unreadVisit;
+      const shown = !!visit && visit.bar && visit.key !== "" && visit.key === channelReadVisitKey() &&
+        signalFilter === "all" && signals.length > 0;
+      // Focus leaving with the bar goes to the composer, except on a phone, where that would raise the keyboard.
+      if (!shown && !bar.hidden && bar.contains(document.activeElement) && !window.matchMedia?.("(max-width: 52rem)").matches) {
+        one<HTMLElement>("[data-composer-input]")?.focus({ preventScroll: true });
+      }
+      bar.hidden = !shown;
+      const jump = one<HTMLElement>("[data-unread-jump]");
+      if (jump && visit) jump.textContent = visit.stalled ? CONTINUE_LOADING_LABEL : unreadJumpLabel(visit.count, visit.marked);
+      if (jump) jump.toggleAttribute("aria-busy", !!visit?.jumping);
+    };
+    /** Hides the bar; `clear` also takes the Unread line out (the channel was marked read). */
+    const dismissUnreadBar = (clear: boolean): void => {
+      if (unreadVisit) {
+        unreadVisit.bar = false;
+        unreadVisit.stalled = false;
+        if (clear) unreadVisit.divider = false;
+      }
+      if (clear) changeUnreadDivider(false);
+      renderUnreadBar();
+    };
+    /** "Mark as read", Escape and the menus: the person asked, so the mark may reach up to now where there is nothing
+     *  narrower. The view on screen goes through its newest markable loaded message, and only when there is none, or
+     *  the server refuses it, up to now; a channel off screen, and "all", up to now. */
+    const markViewRead = (viewId: string): void => {
+      const workspaceId = activeWorkspaceId;
+      if (sampleMode || !session || !workspaceId || channelReadUnsupported) return;
+      const active = viewId !== "all" && viewId === channelReadViewId();
+      const through = active ? channelReadTarget(viewId) : null;
+      applyChannelRead(viewId);
+      if (viewId === "all" || active) dismissUnreadBar(true);
+      const viewKey = `${workspaceId}\u0000${viewId}`;
+      const channelId = readChannelIdOf(viewId);
+      void (async () => {
+        let outcome = await sendChannelRead(workspaceId, viewId === "all" ? { all: true } : { channelId, throughSignalId: through });
+        // Explicit only: a refused message gives way to the whole channel up to now. A mark on view never does.
+        if (outcome === "signal_not_found" && through !== null) outcome = await sendChannelRead(workspaceId, { channelId });
+        if (outcome === "ok" && active) noteVisitMarked(viewKey);
+      })();
+    };
+    /** The bottom of an unread channel is on screen in a focused tab: mark through its newest markable loaded message,
+     *  and only through a message: never up to now, which could take in a message that has not reached this page.
+     *  With no such message nothing is sent and the dot stays. Only work in flight or accepted is not repeated. A
+     *  refused message is skipped from then on, and the re-read that follows every answer tries the next one; a mark
+     *  that did not land for another reason is tried again after CHANNEL_READ_RETRY_MS. */
+    const autoMarkChannelRead = (): void => {
+      const viewId = channelReadViewId();
+      const workspaceId = activeWorkspaceId;
+      const viewer = session?.user.id ?? "";
+      if (viewId === null || !viewer || channelReadUnsupported || signalFilter !== "all") return;
+      if (channelReadRowFor(channelUnreadRows, viewId)?.unread !== true) return;
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      if (app.dataset.channelView !== "feed" || !atBottom()) return;
+      const target = newestMarkableChannelMessage(signals, viewId, viewer, channelReadRefusedIds);
+      if (!target) return;
+      const viewKey = `${workspaceId}\u0000${viewId}`;
+      const key = `${viewKey}\u0000${target.id}`;
+      if (channelReadMarked.has(key) || (channelReadRetryAt.get(viewKey) ?? 0) > Date.now()) return;
+      channelReadMarked.set(key, "pending");
+      // A retry leaves the dot until the mark lands, so a mark that keeps failing does not flicker it.
+      if (!channelReadRetryAt.has(viewKey)) applyChannelRead(viewId);
+      void sendChannelRead(workspaceId, { channelId: readChannelIdOf(viewId), throughSignalId: target.id })
+        .then((outcome) => {
+          if (outcome === "ok") {
+            channelReadMarked.set(key, "done");
+            channelReadRetryAt.delete(viewKey);
+            noteVisitMarked(viewKey);
+            return;
+          }
+          channelReadMarked.delete(key);
+          // A refused message is in channelReadRefusedIds: the re-read already under way tries the next one.
+          if (outcome !== "unsupported" && outcome !== "signal_not_found") {
+            channelReadRetryAt.set(viewKey, Date.now() + CHANNEL_READ_RETRY_MS);
+          }
+        });
+    };
+    /** After the feed, the unread read, a scroll or a return to the tab: take the visit's snapshot once, keep the bar
+     *  honest, then mark what is on screen. */
+    const syncChannelRead = (): void => {
+      const key = channelReadVisitKey();
+      if (unreadVisit?.key !== key) {
+        unreadVisit = { key, decided: false, firstUnreadId: null, firstUnreadAt: null, count: 0, bar: false, divider: false,
+          jumping: false, stalled: false, marked: false };
+      }
+      const visit = unreadVisit;
+      const viewId = channelReadViewId();
+      if (viewId !== null && !visit.decided && channelUnreadRows !== null && app.dataset.channelView === "feed" &&
+          newestChannelMessage(signals, viewId) !== null) {
+        visit.decided = true;
+        const row = channelReadRowFor(channelUnreadRows, viewId);
+        if (row?.unread === true && row.firstUnreadId !== null) {
+          visit.firstUnreadId = row.firstUnreadId;
+          visit.firstUnreadAt = row.firstUnreadAt;
+          visit.count = row.unreadCount;
+          if (firstUnreadPlace(visit) === "above") {
+            visit.bar = true;
+            visit.divider = true;
+            changeUnreadDivider(true);
+          }
+        }
+      }
+      // Scrolled to the first unread message: the bar has done its job. Loaded by scrolling up: no more to continue.
+      if (visit.bar && !visit.jumping && firstUnreadPlace(visit) === "shown") {
+        visit.bar = false;
+        visit.stalled = false;
+      }
+      if (visit.stalled && visit.firstUnreadId !== null && feedRowFor(visit.firstUnreadId)) visit.stalled = false;
+      renderUnreadBar();
+      autoMarkChannelRead();
+    };
+    /** Puts a row (and the Unread line just above it) at the top of the feed's own scrollport, below its sticky
+     *  toolbar when that shows, rather than wherever the window would scroll it. */
+    const revealFeedRow = (row: HTMLElement): void => {
+      const scroller = feedScroller();
+      if (!scroller) return;
+      const divider = one<HTMLElement>("[data-feed-list] [data-unread-divider]");
+      const anchor = divider && divider.getBoundingClientRect().top <= row.getBoundingClientRect().top ? divider : row;
+      const toolbar = scroller.querySelector<HTMLElement>(".dashboard__feed-toolbar")?.getBoundingClientRect().height ?? 0;
+      scroller.scrollTop += anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top - toolbar - 8;
+    };
+    /** Brings the visit's first unread message on screen and focuses it. When it is older than the loaded pages, loads a
+     *  few more at a time: the bar stays, offering Continue loading, until the message is reached. A message that is gone
+     *  (expired, deleted, no longer readable) ends the jump quietly and the unread state is read again. */
+    const jumpToFirstUnread = async (): Promise<void> => {
+      const visit = unreadVisit;
+      if (!visit || visit.firstUnreadId === null || visit.jumping || visit.key !== channelReadVisitKey()) return;
+      const id = visit.firstUnreadId;
+      const olderThanLoaded = (): boolean => {
+        const viewId = channelReadViewId();
+        return viewId !== null &&
+          firstUnreadOlderThanLoaded(visit.firstUnreadAt, visit.firstUnreadId, oldestChannelMessage(signals, viewId));
+      };
+      visit.jumping = true;
+      renderUnreadBar();
+      try {
+        for (let page = 0; page < UNREAD_JUMP_PAGES && !feedRowFor(id) && signalHasMore && olderThanLoaded(); page += 1) {
+          const before = signals.length;
+          await loadOlderSignals();
+          if (unreadVisit !== visit) return;
+          if (signals.length === before) break;
+        }
+      } finally {
+        visit.jumping = false;
+      }
+      const target = feedRowFor(id);
+      if (!target) {
+        if (signalHasMore && olderThanLoaded()) {
+          visit.stalled = true;
+          renderUnreadBar();
+          return;
+        }
+        dismissUnreadBar(true);
+        if (activeWorkspaceId) void refreshChannelUnread(activeWorkspaceId, true);
+        return;
+      }
+      visit.bar = false;
+      visit.stalled = false;
+      revealFeedRow(target);
+      // A visible ring on the message even when focus arrived by script after a click; gone once focus leaves it.
+      target.dataset.unreadJumped = "";
+      target.addEventListener("blur", () => { delete target.dataset.unreadJumped; }, { once: true });
+      // Focus moves to the message before the bar goes, so it never passes through the composer.
+      target.focus({ preventScroll: true });
+      renderUnreadBar();
+    };
+    /** The header ⋯'s read entries: the channel on screen while it is unread or the visit still shows where unread
+     *  began, and the whole workspace while anything is unread. */
+    const channelReadMenuState = (): { channel: boolean; all: boolean } | null => {
+      if (sampleMode || !session || !activeWorkspaceId || channelReadUnsupported) return null;
+      const viewId = channelReadViewId();
+      const visit = unreadVisit?.key === channelReadVisitKey() ? unreadVisit : null;
+      const channel = viewId !== null &&
+        (channelReadRowFor(channelUnreadRows, viewId)?.unread === true || !!visit?.bar || !!visit?.divider);
+      const all = (channelUnreadRows ?? []).some(row => row.unread === true);
+      return channel || all ? { channel, all } : null;
+    };
+    /** Escape in the chat marks the open channel read; Shift+Escape every channel. It is the last owner of the key:
+     *  anything that uses Escape itself (a dialog, a menu, a picker, a receipt card, the mention list, a reply,
+     *  another field, a composition, a selection) consumes it first or is checked for here, and a consumed Escape is
+     *  never also a mark, with or without Shift. The composer is focused on entry, so Escape there, with nothing
+     *  selected and no mention list or reply open, still marks: it has no other meaning in the composer. */
+    const channelReadEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+          event.altKey || event.ctrlKey || event.metaKey) return;
+      if (sampleMode || !session || !activeWorkspaceId || channelReadUnsupported || app.dataset.state !== "channel" || homeRoute.view !== "chat" ||
+          activeWorkspaceView !== "signals" || !["feed", "feed-empty"].includes(app.dataset.channelView ?? "")) return;
+      if (document.querySelector("dialog[open], [data-context-menu], [data-reaction-picker], .dashboard__message-receipt[open]")) return;
+      const mentions = one<HTMLElement>("[data-mention-picker]");
+      if ((mentions && !mentions.hidden) || composerIsReplying()) return;
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement) {
+        // Inside something that may close on Escape: a menu, a disclosure, a side panel.
+        if (focused.closest('[role="menu"], [role="listbox"], [role="dialog"], details[open], .hm-frame__side')) return;
+        if (focused.closest("input, textarea, select, [contenteditable]")) {
+          if (!focused.matches("[data-composer-input]")) return;
+          const field = focused as HTMLTextAreaElement;
+          if (field.selectionStart !== field.selectionEnd) return;
+        }
+      }
+      if (document.getSelection()?.isCollapsed === false) return;
+      if (event.shiftKey) {
+        event.preventDefault();
+        markViewRead("all");
+        return;
+      }
+      const viewId = channelReadViewId();
+      if (viewId === null) return;
+      const visit = unreadVisit?.key === channelReadVisitKey() ? unreadVisit : null;
+      if (channelReadRowFor(channelUnreadRows, viewId)?.unread !== true && !visit?.bar && !visit?.divider) return;
+      event.preventDefault();
+      markViewRead(viewId);
+    };
+
     const freshAttachmentDownload = async (
       fileId: string,
       version: number,
@@ -8980,6 +9355,8 @@ import "../../styles/kylon-command-palette.css";
         thread.append(toggle, replies);
         list.append(thread);
       }
+      // Before the scroll below is restored, so the line is part of the height it measures.
+      paintUnreadDivider();
       previousSignalIds = new Set(signals.map((signal) => signal.id));
       feedWasEmpty = false;
       showChannelView("feed");
@@ -9009,6 +9386,7 @@ import "../../styles/kylon-command-palette.css";
       focusComposerOnEntry();
       // A rebuild can bring rows into view that were never read (an opened thread, a permalink, a reply target).
       requestVisibleReceipts();
+      syncChannelRead();
     };
 
     const syncConnectWorkspace = (workspace: Workspace): void => {
@@ -9688,13 +10066,17 @@ import "../../styles/kylon-command-palette.css";
       }
       void refreshLatestSignals();
       armLiveFeed();
+      syncChannelRead();
       /* Coming back to the tab is exactly when a redemption has likely happened;
          catch up now rather than a tick later. */
       void refreshPendingAccess(activeWorkspaceId, requestVersion);
       syncPendingPoll();
     });
 
-    window.addEventListener("focus", () => humanSeenReporter.focus());
+    window.addEventListener("focus", () => {
+      humanSeenReporter.focus();
+      syncChannelRead();
+    });
 
     const connectedAppsStatus = (message: string, failed = false): void => {
       const target = one<HTMLElement>("[data-connected-apps-status]");
@@ -11872,6 +12254,9 @@ import "../../styles/kylon-command-palette.css";
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
         resetChoices(); resetSignalMentions();
+        // A new visit takes a fresh unread snapshot, even when it comes back to the channel it left.
+        unreadVisit = null;
+        renderUnreadBar();
       }
       syncChannelUrl();
       renderChannelRail();
@@ -12147,7 +12532,8 @@ import "../../styles/kylon-command-palette.css";
       if (problem && status) status.textContent = problem;
     };
 
-    /** The row's ⋯: settings and archive for someone who manages the channel, and the two moves where the row can move. */
+    /** The row's ⋯ and right-click menu: Mark as read while it is unread, the two moves where the row can move, and
+     *  settings and archive for someone who manages the channel. */
     const openChannelRowMenu = (channelId: string, event: MouseEvent, button: HTMLElement): void => {
       const channel = channelById(channels, channelId);
       const manage: ContextMenuItem[] = channel && viewerMayManageChannel(channel) ? [
@@ -12165,7 +12551,9 @@ import "../../styles/kylon-command-palette.css";
         .filter(([, step]) => movedByStep(ids, channelId, step) !== null)
         .map(([label, step]) => ({ label, run: () => { void applyRailOrder(list, channelId, current => movedByStep(current, channelId, step), true); } })) : [];
       const slug = channelId === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_SLUG : channel?.slug ?? "";
-      openContextMenu(event, button, [...moves, null, ...manage], `${channelLabel(slug)} options`);
+      const read: ContextMenuItem[] = !sampleMode && !channelReadUnsupported && channelUnreadFor(channelUnreadRows, channelId) === true
+        ? [{ label: MARK_AS_READ_LABEL, run: () => markViewRead(channelId) }] : [];
+      openContextMenu(event, button, [...read, null, ...moves, null, ...manage], `${channelLabel(slug)} options`);
     };
 
     /**
@@ -12187,6 +12575,7 @@ import "../../styles/kylon-command-palette.css";
       renderHomeRail();
       renderHomeShell();
       renderChannelDirectoryDialog();
+      syncChannelRead();
       if (!force && channelsLoaded && channelListStaleAgainstUnread(channels, rows)) {
         void refreshChannels(workspaceId, requestVersion, true).catch(() => {});
       }
@@ -14771,15 +15160,20 @@ import "../../styles/kylon-command-palette.css";
         if (!pressed || !receipt.contains(pressed)) receipt.open = false;
       }
     });
-    /* Escape closes it too, and gives focus back to the receipt's control when focus was inside the card. */
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
+    /* Escape closes it too, and gives focus back to the receipt's control when focus was inside the card. Closing a card
+       consumes the key, so the same Escape is not also a mark (channelReadEscape, registered after this). */
+    const closeReceiptsOnEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
       const opened = all<HTMLDetailsElement>(".dashboard__message-receipt[open]");
       if (opened.length === 0) return;
+      event.preventDefault();
       const holder = opened.find((receipt) => receipt.contains(document.activeElement));
       for (const receipt of opened) receipt.open = false;
       holder?.querySelector<HTMLElement>(":scope > summary")?.focus();
-    });
+    };
+    document.addEventListener("keydown", closeReceiptsOnEscape);
+    /* The last Escape owner: a key any handler above, or any closer to the focus, consumed is not a mark. */
+    document.addEventListener("keydown", channelReadEscape);
     for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
       button.addEventListener("click", () => {
         const next = button.dataset.feedFilter;
@@ -14873,12 +15267,28 @@ import "../../styles/kylon-command-palette.css";
     // Rows scrolled into view (by the reader, a permalink or an opened thread) need their first receipt read now; with
     // push connected nothing else may ask for 30 s.
     feedScroller()?.addEventListener("scroll", () => requestVisibleReceipts(), { passive: true });
+    // A scroll can reach the first unread message (the bar's job is done) or the bottom (the channel is read).
+    let channelReadFrame = 0;
+    feedScroller()?.addEventListener("scroll", () => {
+      if (channelReadFrame) return;
+      channelReadFrame = window.requestAnimationFrame(() => {
+        channelReadFrame = 0;
+        syncChannelRead();
+      });
+    }, { passive: true });
+    one<HTMLButtonElement>("[data-unread-jump]")?.addEventListener("click", () => { void jumpToFirstUnread(); });
+    one<HTMLButtonElement>("[data-unread-mark]")?.addEventListener("click", () => {
+      const viewId = channelReadViewId();
+      if (viewId !== null) markViewRead(viewId);
+    });
 
-    one<HTMLButtonElement>("[data-load-older]")?.addEventListener("click", async (event) => {
-      if (!activeWorkspaceId || !signalHasMore) return;
+    /** One older page, as Load older updates and Jump to first unread ask for it: the button carries the busy state
+     *  and the inline error either way. */
+    const loadOlderSignals = async (): Promise<void> => {
+      const button = one<HTMLButtonElement>("[data-load-older]");
+      if (!activeWorkspaceId || !signalHasMore || !button || button.disabled) return;
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
-      const button = event.currentTarget as HTMLButtonElement;
       const inlineError = one<HTMLElement>("[data-load-older-error]");
       if (inlineError) {
         inlineError.textContent = "";
@@ -14898,7 +15308,8 @@ import "../../styles/kylon-command-palette.css";
         button.disabled = false;
         button.textContent = "Load older updates";
       }
-    });
+    };
+    one<HTMLButtonElement>("[data-load-older]")?.addEventListener("click", () => { void loadOlderSignals(); });
 
     app.addEventListener("commonswarm:agent-prompt-ready", async (event) => {
       const detail = (event as CustomEvent<{

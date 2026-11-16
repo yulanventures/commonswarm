@@ -27,7 +27,7 @@ export interface RailCallbacks {
   toggleArchived?: (open: boolean) => void;
   /** A plain click on a channel row. Without it the row navigates natively. */
   selectChannel?: (channelId: string, event: MouseEvent) => void;
-  /** The row's ⋯ button. The page decides the actions (rename, archive). */
+  /** The row's ⋯ button, and a right-click on the row. The page decides the actions (mark as read, rename, archive). */
   channelMenu?: (channelId: string, event: MouseEvent, button: HTMLElement) => void;
   /** Alt+Arrow on a row the viewer may move: one step up or down its list. */
   moveChannel?: (list: RailOrderList, channelId: string, step: -1 | 1) => void;
@@ -338,6 +338,8 @@ function channelItem(doc: Document, row: RailChannelRowVM, archived: boolean, sa
   item.append(link);
   const reorder = !sample && !archived && callbacks.moveChannel ? row.reorder : undefined;
   if (reorder) makeReorderable(item, link, row, reorder, callbacks);
+  // Right-click (or Shift+F10 / the Menu key) opens the same menu as ⋯; with nothing to offer, the browser's own.
+  if (!sample && callbacks.channelMenu) link.addEventListener("contextmenu", (event) => callbacks.channelMenu?.(row.id, event, link));
   if (!sample && (row.manageable || reorder) && callbacks.channelMenu) {
     const actions = node(doc, "button", "hm-rail__channel-actions");
     actions.type = "button";

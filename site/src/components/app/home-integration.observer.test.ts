@@ -48,6 +48,9 @@ const MESSAGE_STATUS_STUBS = {
   refreshChoices: async () => undefined,
   appendChoices: () => undefined,
   resetChoices: () => undefined,
+  // Read positions have their own test (channel-reads.observer.test.ts).
+  paintUnreadDivider: () => undefined,
+  syncChannelRead: () => undefined,
   refreshSignalMentions: async () => undefined,
   resetSignalMentions: () => undefined,
   mountSeatAdminPanel: () => undefined,

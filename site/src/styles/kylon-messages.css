@@ -462,3 +462,98 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-markdow
   color: var(--k-shell-ink);
   background: color-mix(in srgb, #f2b824 30%, transparent);
 }
+
+/* Unread bar: over the top of the feed while the visit's first unread message is above the screen. Sticky with no
+   height of its own, so showing or hiding it never changes the scroller's height, its bottom pin or its anchoring.
+   The controls change colour on hover, never size. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 3;
+  block-size: 0;
+  overflow: visible;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar-inner {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-block-size: 40px;
+  padding-inline: 12px 8px;
+  border-block-end: 1px solid var(--k-shell-line);
+  background: var(--k-shell-surface);
+  box-shadow: inset 3px 0 0 var(--k-shell-selection-edge);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
+  font-size: 13px;
+  line-height: 1.4;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar button {
+  min-block-size: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-jump {
+  min-inline-size: 0;
+  overflow: hidden;
+  color: var(--k-shell-ink);
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-mark {
+  flex: none;
+  color: var(--k-shell-secondary);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar button:hover {
+  background: var(--k-shell-hover);
+  color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar button:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+}
+@media (width <= 64rem), (hover: none) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar-inner { min-block-size: 48px; padding-inline: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar button { min-inline-size: 44px; min-block-size: 44px; }
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-bar-inner { border-block-end-color: CanvasText; }
+}
+
+/* The message Jump to first unread brought on screen: a visible ring while it holds focus, even when focus arrived
+   by script after a click (no :focus-visible then). An outline, so nothing moves. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-unread-jumped]:focus {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+}
+
+/* The header ⋯'s Mark as read and Mark all as read: full touch targets wherever the pointer is coarse or the
+   screen is narrow. */
+@media (width <= 64rem), (pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-menu__item:is([data-menu-mark-read], [data-menu-mark-all-read]) {
+    min-block-size: 44px;
+  }
+}
+
+/* The Unread line above the first unread message, for the visit: a day divider in the selection colour. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-divider {
+  color: var(--k-shell-selection-edge);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-divider .hm-day__label {
+  border-color: var(--k-shell-selection-edge);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-divider::before,
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__unread-divider::after {
+  background: var(--k-shell-selection-edge);
+}

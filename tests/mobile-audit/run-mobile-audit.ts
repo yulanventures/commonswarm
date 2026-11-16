@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
-import { CONFLICT_DOC, postRefreshNote, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
+import { CONFLICT_DOC, postRefreshNote, resetUnreadChannel, seedHeavyWorkspace, setHouseholdDoc } from "./seed-heavy-workspace.js";
 import { browserTest as test, launchPlaywrightChromium } from "../../site/tests/chrome.js";
 import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, witnessSummary, type ActivationSpec, type DeclaredOverlay, type KeyboardSpec } from "./audit-checks.js";
 // The fixture regression matrix registers first, so a broken witness contract fails before the long run.
@@ -102,7 +102,10 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   /** Captured by itself, after the pooled screens of its pass. For a screen whose proof depends on something it keeps
    *  in localStorage during setup (a composer draft, which is stored per workspace): every page load clears stored
    *  drafts, so another page loading beside it would remove the item under it. */
-  alone?: true }
+  alone?: true;
+  /** The seeded unread channel is put back to unread (resetUnreadChannel) before the page opens: each capture of it
+   *  marks it read. With `alone`, so no other page marks it meanwhile. */
+  unread?: true }
 
 /** Starter list, replaced by site/mobile-audit/screens.json (the Designer's manifest) when present. */
 const STARTER: Screen[] = [
@@ -315,6 +318,10 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
       require: ['[data-signal-id="{message.failedOwn}"]:has(.dashboard__message-receipt:not([data-receipt-quiet]))',
         '[data-signal-id="{message.failedGrouped}"][data-stream-grouped]:has(.dashboard__message-receipt:not([data-receipt-quiet]))'] }],
   "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
+  // The unread bar's two controls change colour on hover and focus, never size.
+  // `prefer` names the jump button (one of the rows), which also photographs it at rest and on hover.
+  "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
+    prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
@@ -561,6 +568,7 @@ async function main(): Promise<void> {
             return route.fulfill({ status: served.status(), headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(body, "utf8") });
           });
         }
+        if (screen.unread) await resetUnreadChannel(env, seed.ids);
         // The save-conflict doc opens at its fixed base text in every capture.
         for (const step of screen.setup ?? []) {
           if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.base);
