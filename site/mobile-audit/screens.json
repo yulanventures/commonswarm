@@ -1728,6 +1728,44 @@
     ]
   },
   {
+    "id": "menu.reactions.first",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"] [data-reaction-add]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"]:not(:has([data-reaction-more]))"
+      },
+      {
+        "scroll": "[data-reaction-add=\"{message.unreacted}\"]"
+      },
+      {
+        "focus": "[data-reaction-add=\"{message.unreacted}\"]",
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-reaction-picker=\"{message.unreacted}\"] [data-reaction-option]"
+      }
+    ],
+    "ready": "[data-reaction-picker=\"{message.unreacted}\"] [data-reaction-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_unreacted"
+    ],
+    "frame": [
+      "[data-reaction-picker=\"{message.unreacted}\"]"
+    ]
+  },
+  {
     "id": "menu.wiki-version",
     "kind": "view",
     "path": "/app?w={workspace}&v=wiki",
