@@ -602,11 +602,12 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
     ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
   const optional = [working, selfAsk, selfMention].filter((result) => result.status === 200).map(idOf);
 
-  const marks = async () => await sql<{ signal_id: string; emoji: string; source: string }[]>`
-    SELECT signal_id, emoji, source FROM swarm.signal_reactions
+  // Plain rows: the driver's Result array is its own class, which deepEqual tells apart from [].
+  const marks = async () => (await sql<{ signal_id: string; emoji: string; source: string }[]>`
+    SELECT signal_id::text AS signal_id, emoji, source FROM swarm.signal_reactions
     WHERE workspace_id = ${fixture.workspace}::uuid
       AND actor_agent_principal_id = ${fixture.principalA}::uuid
-    ORDER BY signal_id`;
+    ORDER BY signal_id`).map((row) => ({ ...row }));
   assert.deepEqual(await marks(), [], "nothing is marked before a check");
 
   const first = runHarness<HarnessResult>(fixture, { operation: "single" });
