@@ -563,6 +563,11 @@ the person, `in_reply_to` the message, `body` "Reacted <emoji> to your message <
 and, with `include_reactions: true`, `reaction` (`emoji`, `signal_id`). An agent's reaction wakes
 nobody, and a removed reaction leaves the inbox.
 
+The hosted connector's `react` tool (`signal_id`, `emoji`, optional `remove`, `request_id`) sends
+one of these two commands for its seat's agent, never with `source`. When the hosted `check` tool
+returns messages, the seat's agent marks each ask or note it did not write with 👀 (`source:
+"ack"`), at most 20 per batch, once per message; the check's result does not change.
+
 ## Workspace files
 
 Files hold bytes for a workspace; the bytes never pass through the command function.

@@ -68,12 +68,12 @@ const authModule = await import(${JSON.stringify(authUrl.href)});
 const { db, handleHostedCommand, handleRequest } = commandModule;
 const { authenticateHostedSeatCapability } = authModule;
 
-async function capability(handle) {
+async function capability(handle, tool = "check") {
   return await db.begin(async (tx) => await authenticateHostedSeatCapability(tx, {
     grantId: input.grant,
     providerGrantId: "provider-" + input.grant,
     handle,
-    tool: "check",
+    tool,
     providerStatus: async () => ({ active: true }),
   }, "command"));
 }
@@ -157,6 +157,17 @@ if (input.operation === "single") {
       ...(input.mention ? { mentions: [{ kind: "agent", id: input.recipientPrincipal }] } : {}),
     }));
   }
+} else if (input.operation === "public") {
+  result = await publicCommand(input.command);
+} else if (input.operation === "seat-post") {
+  const cap = await capability(input.capabilityHandle, input.tool);
+  result = cap === null ? { status: 403, body: { error: "forbidden" } } : await handleHostedCommand({
+    command_id: crypto.randomUUID(),
+    client_version: "0.1.80",
+    workspace_id: input.workspace,
+    stream: { kind: "workspace" },
+    command: input.command,
+  }, cap);
 } else {
   throw new Error("unknown hosted check operation");
 }
@@ -560,6 +571,68 @@ test("a public message that mentions the seat's agent arrives in its check, and 
   const opened = runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   assert.deepEqual((opened.body.signals as Array<{ id: string }>).map((signal) => signal.id), [mineId]);
+});
+
+test("a check marks each ask and note it returns with one 👀 by the seat's agent, once, and its result is unchanged", async () => {
+  const fixture = await seedFixture();
+  const unaddressed = { to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null };
+  const asOwner = (command: Record<string, unknown>) =>
+    runHarness<HarnessResult>(fixture, { operation: "public", command });
+  const asSeat = (tool: string, command: Record<string, unknown>) =>
+    runHarness<HarnessResult>(fixture, { operation: "seat-post", tool, command });
+  const idOf = (result: HarnessResult): string => {
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    return String((result.body.signal as { id: string }).id);
+  };
+  const ask = idOf(asOwner({ kind: "post_signal", signal_kind: "ask", body: `seen ask ${randomUUID()}`,
+    ...unaddressed, to_agent_principal_id: fixture.principalA }));
+  const mentioned = idOf(asOwner({ kind: "post_signal", signal_kind: "note", body: `seen mention ${randomUUID()}`,
+    ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] }));
+  /* The seat's own public note, with a person's reaction on it. The read edge shows that reaction to
+   * a local agent as a reaction note; a hosted check never returns one, so nothing is marked. */
+  const own = idOf(asSeat("note", { kind: "post_signal", signal_kind: "note", body: `own ${randomUUID()}`, ...unaddressed }));
+  const ownerReaction = asOwner({ kind: "add_reaction", signal_id: own, emoji: "\u{1F44D}" });
+  assert.equal(ownerReaction.status, 200, JSON.stringify(ownerReaction.body));
+  // Where the server takes these at all, they stay unmarked.
+  const working = asOwner({ kind: "post_signal", signal_kind: "working-on", body: `working ${randomUUID()}`,
+    ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
+  const selfAsk = asSeat("ask", { kind: "post_signal", signal_kind: "ask", body: `self ${randomUUID()}`,
+    ...unaddressed, to: [{ kind: "agent", id: fixture.principalA }] });
+  const optional = [working, selfAsk].filter((result) => result.status === 200).map(idOf);
+
+  const marks = async () => await sql<{ signal_id: string; emoji: string; source: string }[]>`
+    SELECT signal_id, emoji, source FROM swarm.signal_reactions
+    WHERE workspace_id = ${fixture.workspace}::uuid
+      AND actor_agent_principal_id = ${fixture.principalA}::uuid
+    ORDER BY signal_id`;
+  assert.deepEqual(await marks(), [], "nothing is marked before a check");
+
+  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.deepEqual(Object.keys(first.body).sort(), ["acknowledged_batch_id", "batch_id", "context", "cursor", "signals"],
+    "the check's result has no new field");
+  const returned = (first.body.signals as Array<{ id: string }>).map((signal) => signal.id);
+  assert.ok(returned.includes(ask) && returned.includes(mentioned), JSON.stringify(returned));
+  assert.ok(!returned.includes(own), "the seat's own public note is not in its check");
+  // A working-on and the seat's own message get no mark whether or not the check returned them.
+  assert.ok(optional.every((id) => ![ask, mentioned].includes(id)));
+  const expected = [ask, mentioned].sort().map((signal_id) => ({ signal_id, emoji: "\u{1F440}", source: "ack" }));
+  assert.deepEqual(await marks(), expected, "one 👀 by the seat's agent on the addressed ask and the mentioning note only");
+  const [onOwn] = await sql<{ count: string }[]>`
+    SELECT count(*)::text AS count FROM swarm.signal_reactions WHERE signal_id = ${own}::uuid`;
+  assert.equal(onOwn!.count, "1", "only the person's reaction is on the seat's own note");
+
+  // Opening again replays the same batch; acknowledging it opens an empty one. Neither adds a mark.
+  const replay = runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.batch_id, first.body.batch_id);
+  assert.deepEqual(replay.body.signals, first.body.signals, "a replay returns the same rows");
+  assert.deepEqual(await marks(), expected, "a second check does not duplicate a mark");
+  const acked = runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
+  assert.equal(acked.status, 200, JSON.stringify(acked.body));
+  assert.equal(acked.body.acknowledged_batch_id, first.body.batch_id, "the acknowledgement still lands");
+  assert.deepEqual(acked.body.signals, []);
+  assert.deepEqual(await marks(), expected);
 });
 
 test("batch guard rejects signals not addressed to the seat principal", async () => {

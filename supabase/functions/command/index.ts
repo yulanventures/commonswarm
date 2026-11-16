@@ -190,6 +190,7 @@ import {
 } from "./human-receipts.ts";
 import {
   applyReaction,
+  markHostedCheckSeen,
   parseReactionCommand,
   REACTION_COMMAND_KINDS,
   type ReactionCommand,
@@ -13597,6 +13598,14 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   // Roster R1b: the hosted reraise tool sends exactly one reraise_ask, and no other tool can.
   if (tool === "reraise") return command?.kind === "reraise_ask" && exactKeys(command, ["kind", "signal_id"]);
   if (command?.kind === "reraise_ask") return false;
+  /* The hosted react tool sends exactly one add_reaction or remove_reaction with signal_id and emoji,
+   * never a source: a hosted seat's automatic seen mark is its check's own write (handleHostedCheck).
+   * No other tool can send either kind. */
+  if (tool === "react") {
+    return (command?.kind === "add_reaction" || command?.kind === "remove_reaction") &&
+      exactKeys(command, ["kind", "signal_id", "emoji"]);
+  }
+  if ((REACTION_COMMAND_KINDS as readonly string[]).includes(String(command?.kind))) return false;
   if (command?.kind === FILE_DOWNLOAD_URL_KIND || command?.kind === FILE_VERSION_CREATE_KIND ||
       command?.kind === FILE_VERSION_COMMIT_KIND) return false;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
@@ -19193,6 +19202,8 @@ async function handleHostedCheck(
         throw new Error("hosted check replay visibility changed for recorded ids");
       }
     }
+    // 👀 on what this check returns, under the seat's claims installed above. Never fails the check.
+    await markHostedCheckSeen(tx, seat.workspace_id, seat.principal_id, signals);
     return { status: 200, body: {
       context,
       batch_id: batch.batch_id,

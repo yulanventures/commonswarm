@@ -37,7 +37,7 @@ For remote MCP, the host stores the OAuth connection. Use the returned seat hand
 Always listed by the hosted connector.
 
 <!-- hosted-tools:core -->
-`claim_seat`, `whoami`, `check`, `ask`, `note`, `reply`, `reraise`, `working_on`, `members`, `roster`, `channel_ls`, `channel_read`, `file_ls`, `file_get`, `file_put`, `seat_list`, `seat_release`.
+`claim_seat`, `whoami`, `check`, `ask`, `note`, `reply`, `reraise`, `react`, `working_on`, `members`, `roster`, `channel_ls`, `channel_read`, `file_ls`, `file_get`, `file_put`, `seat_list`, `seat_release`.
 <!-- /hosted-tools:core -->
 
 ### Workspace memory

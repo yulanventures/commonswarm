@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { reportSeenReactions, seenAckTargets, AGENT_SEEN_REACTION_MAX } from "../src/cloud/agent-signal-receipts.js";
+import { deliveryAckIds } from "../src/cloud/agent-check.js";
 import { CommandHttpError, ThinCommandClient, type SignalRecord } from "../src/cloud/command-client.js";
 import { cloudTarget } from "../src/cloud/config.js";
 import { parseSignalRecord, readAgentSignalPage, renderSignals, SignalMalformedError } from "../src/cloud/signals.js";
@@ -119,6 +120,16 @@ test("seenAckTargets marks only asks and notes that reach this agent, from someo
   const many = Array.from({ length: AGENT_SEEN_REACTION_MAX + 5 }, (_, index) =>
     row({ id: `77777777-7777-4777-8777-${String(index).padStart(12, "0")}` }));
   assert.equal(ids(many).length, AGENT_SEEN_REACTION_MAX, "bounded per batch");
+});
+
+test("a check acknowledges the delivery of the asks and notes it showed, never of a reaction note", () => {
+  const ask = parseSignalRecord(row());
+  const note = parseSignalRecord(row({ id: REACTION_ID.replace(/^6/u, "8"), kind: "note" }));
+  const working = parseSignalRecord(row({ id: REACTION_ID.replace(/^6/u, "9"), kind: "working-on" }));
+  const reacted = parseSignalRecord(reactionNote());
+  assert.equal(reacted.reaction?.signal_id, MESSAGE, "positive control: the fixture is a reaction note");
+  assert.deepEqual(deliveryAckIds([ask, reacted, note, working]), [ask.id, note.id]);
+  assert.deepEqual(deliveryAckIds([reacted]), []);
 });
 
 test("reportSeenReactions sends one ack reaction per message and never throws", async () => {

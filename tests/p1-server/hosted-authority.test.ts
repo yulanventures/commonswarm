@@ -4258,6 +4258,75 @@ test("hosted reraise sends only reraise_ask, and only for an ask its own seat se
   assert.equal(again.body.error, "reraise_too_soon");
 });
 
+test("hosted react sends only add_reaction or remove_reaction, as its seat's agent, on messages that agent can read", { timeout: 240_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const seat = claimSeat(fixture, fixture.grantA, `react-${randomUUID()}`);
+  const member = claimSeat(fixture, fixture.grantA, `react-member-${randomUUID()}`);
+  const handle = String(seat.body.handle);
+  const principal = String(seat.body.principal_id);
+  const call = (tool: string, command: Record<string, unknown>, seatHandle = handle) =>
+    runHostedHarness<HarnessResult>({ operation: "seat-command",
+      seat: { grantId: fixture.grantA, handle: seatHandle, workspaceId: fixture.workspaceA, tool }, command });
+  const asOwner = (command: Record<string, unknown>) => runHostedHarness<HarnessResult>({ operation: "public",
+    ownerJwt: fixture.ownerJwt, workspaceId: fixture.workspaceA, command });
+  const post = (extra: Record<string, unknown> = {}) => {
+    const posted = asOwner({ kind: "post_signal", signal_kind: "note", body: `hosted react ${randomUUID()}`,
+      to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null, ...extra });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    return String((posted.body.signal as Record<string, unknown>).id);
+  };
+  const reactions = async (signalId: string) => await sql<Record<string, unknown>[]>`
+    SELECT actor_user_id, actor_agent_principal_id, emoji, source FROM swarm.signal_reactions
+    WHERE signal_id = ${signalId}::uuid ORDER BY created_at, reaction_id`;
+  const message = post();
+  const add = { kind: "add_reaction", signal_id: message, emoji: "\u{1F44D}" };
+
+  // The capability binds the tool to the two reaction commands, both ways, and never to source "ack".
+  assert.equal(call("note", add).status, 403, "note cannot send add_reaction");
+  assert.equal(call("reraise", { kind: "remove_reaction", signal_id: message, emoji: "\u{1F44D}" }).status, 403,
+    "reraise cannot send remove_reaction");
+  assert.equal(call("react", { kind: "post_signal", signal_kind: "note", body: "x", to_user_id: null,
+    to_agent_principal_id: null, in_reply_to: null, about: null }).status, 403, "react cannot send a post");
+  assert.equal(call("react", { ...add, source: "ack" }).status, 403, "react never sends source ack");
+  assert.equal(call("react", { ...add, source: "manual" }).status, 403, "react sends no source at all");
+  assert.deepEqual(await reactions(message), [], "no refused call wrote a reaction");
+
+  const added = call("react", add);
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.equal(added.body.signal_id, message);
+  assert.equal(added.body.emoji, "\u{1F44D}");
+  assert.equal(added.body.added, true);
+  assert.deepEqual(await reactions(message), [{ actor_user_id: null, actor_agent_principal_id: principal,
+    emoji: "\u{1F44D}", source: "manual" }], "the seat's agent is the reactor");
+  assert.equal(call("react", add).body.added, false, "a repeat changes nothing");
+  const removed = call("react", { kind: "remove_reaction", signal_id: message, emoji: "\u{1F44D}" });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal(removed.body.removed, true);
+  assert.deepEqual(await reactions(message), []);
+  assert.equal(call("react", { kind: "remove_reaction", signal_id: message, emoji: "\u{1F44D}" }).body.removed, false);
+
+  // A private channel the seat's agent is not in: its message answers exactly as an unknown id.
+  const slug = `hosted-react-${randomBytes(4).toString("hex")}`;
+  const created = asOwner({ kind: "channel_create", slug, visibility: "private",
+    members: [{ kind: "agent", id: String(member.body.principal_id) }] });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const hidden = post({ channel: slug });
+  const memberReacted = call("react", { kind: "add_reaction", signal_id: hidden, emoji: "\u{1F440}" }, String(member.body.handle));
+  assert.equal(memberReacted.status, 200, `positive control: the channel's member agent reacts ${JSON.stringify(memberReacted.body)}`);
+  const unknown = call("react", { kind: "add_reaction", signal_id: randomUUID(), emoji: "\u{1F44D}" });
+  assert.equal(unknown.status, 404, JSON.stringify(unknown.body));
+  assert.equal(unknown.body.error, "signal_not_found");
+  for (const attempt of [
+    call("react", { kind: "add_reaction", signal_id: hidden, emoji: "\u{1F44D}" }),
+    call("react", { kind: "remove_reaction", signal_id: hidden, emoji: "\u{1F440}" }),
+  ]) {
+    assert.equal(attempt.status, 404, JSON.stringify(attempt.body));
+    assert.deepEqual(attempt.body, unknown.body, "no different from an unknown id");
+  }
+  assert.deepEqual((await reactions(hidden)).map((row) => row.actor_agent_principal_id), [String(member.body.principal_id)],
+    "only the member's reaction is there");
+});
+
 test("seat_release ends only that seat: the sibling seat works, the agent stays, and a reconnect brings nothing back", { timeout: 180_000 }, async () => {
   const fixture = await seedHostedFixture();
   const first = claimSeat(fixture, fixture.grantA, `release-${randomUUID()}`);

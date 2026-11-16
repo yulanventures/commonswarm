@@ -8,7 +8,10 @@ import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannel
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { contentTypeForName } from "../../../src/protocol/file-types.ts";
 
-import { HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError } from "../_shared/protocol.js";
+import {
+  HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError,
+  normalizeReactionEmoji, SIGNAL_REACTION_MAX_BYTES,
+} from "../_shared/protocol.js";
 import type { HouseholdToolName } from "../_shared/household-tool-registry.d.ts";
 // @ts-ignore TS5097: Node tests import this Deno module through tsx.
 import { HOSTED_HOUSEHOLD_TOOLS_ENABLED } from "./household-release.ts";
@@ -107,6 +110,13 @@ export const CORE_TOOL_TABLE = [
     description: "Re-raise an open ask this seat sent: one reminder to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id.",
     annotations: { title: "Re-raise an open ask", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, signal_id: uuid, request_id: requestId }, ["seat", "signal_id", "request_id"]),
+  },
+  {
+    name: "react", effect: "write", title: "React to a message",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
+    description: "React to a message this seat can read with one emoji, or a shortcode such as :+1:. Set remove to true to take the reaction off. Retry with the same request_id.",
+    annotations: { title: "React to a message", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, signal_id: uuid, emoji: text(1, SIGNAL_REACTION_MAX_BYTES), remove: { type: "boolean" }, request_id: requestId }, ["seat", "signal_id", "emoji", "request_id"]),
   },
   {
     name: "working_on", effect: "write", title: "Share current work",
@@ -348,6 +358,7 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   note: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
+  react: { allowed: ["seat", "signal_id", "emoji", "remove", "request_id"], required: ["seat", "signal_id", "emoji", "request_id"] },
   working_on: { allowed: ["seat", "body", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   members: { allowed: ["seat"], required: ["seat"] },
   roster: { allowed: ["seat"], required: ["seat"] },
@@ -402,6 +413,9 @@ const EXPECTED: Record<string, string> = {
   expected_revision: "provide the positive revision number of the memory you read, or omit it for a new subject",
   query: `provide up to ${MEMORY_QUERY_MAX} characters to match in a subject or statement, or omit it`,
   memory_id: "provide the memory UUID from memory_search or memory_save",
+  emoji: "provide one emoji, or a shortcode such as :+1:, :eyes: or :white_check_mark:",
+  remove: "provide true to take the reaction off, or omit it to add one",
+  reaction_signal_id: "provide the signal UUID from check or channel_read that you want to react to",
 };
 
 /** A subject as the server stores it: lowercase, single spaces, trimmed. */
@@ -459,11 +473,13 @@ export function validateHostedToolArguments(
     // Unknown keys and supplied values can contain secrets; list trusted keys.
     throw new HostedToolInputError(`Unknown tool argument. Use only: ${shape.allowed.join(", ")}.`);
   }
+  const expected = (key: string): string | undefined =>
+    name === "react" && key === "signal_id" ? EXPECTED.reaction_signal_id : EXPECTED[key];
   for (const key of shape.required) {
-    if (!Object.hasOwn(args, key)) throw new HostedToolInputError(`Missing ${key}: ${EXPECTED[key]}.`);
+    if (!Object.hasOwn(args, key)) throw new HostedToolInputError(`Missing ${key}: ${expected(key)}.`);
   }
   const invalid = (key: string): never => {
-    throw new HostedToolInputError(`Invalid ${key}: ${EXPECTED[key]}.`);
+    throw new HostedToolInputError(`Invalid ${key}: ${expected(key)}.`);
   };
   if (name === "seat_list") return args;
   if (name === "claim_seat") {
@@ -498,6 +514,13 @@ export function validateHostedToolArguments(
   }
   if (name === "reraise") {
     if (!validUuid(args.signal_id)) invalid("signal_id");
+    if (!validRequestId(args.request_id)) invalid("request_id");
+    return args;
+  }
+  if (name === "react") {
+    if (!validUuid(args.signal_id)) invalid("signal_id");
+    if (normalizeReactionEmoji(args.emoji) === null) invalid("emoji");
+    if (args.remove !== undefined && typeof args.remove !== "boolean") invalid("remove");
     if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
   }
