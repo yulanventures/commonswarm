@@ -290,12 +290,24 @@ export function replyAuthorNotNotified(code: string | null | undefined): string 
     : "The author could not be mentioned, so the reply was sent without notifying them.";
 }
 
+/** 32-bit FNV-1a over the UTF-16 code units, as 8 lowercase hex digits. */
+function fnv1a8hex(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 /**
  * The command id of the second send. The first was refused and may be recorded under its own id,
- * so the second needs another; derived, so a retried request takes the same two ids.
+ * so the second needs another; derived, so a retried request takes the same two ids. Up to 65
+ * characters the id gains "_noauth" (72 at most). A longer one keeps 56 characters and a digest of
+ * the whole id ("_<8 hex>_na", 68), so two ids that differ only past the cut still differ.
  */
 export function replyRetryCommandId(commandId: string): string {
-  return `${commandId.slice(0, 65)}_noauth`;
+  return commandId.length <= 65 ? `${commandId}_noauth` : `${commandId.slice(0, 56)}_${fnv1a8hex(commandId)}_na`;
 }
 
 export class MentionResolutionError extends Error {

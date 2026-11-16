@@ -246,7 +246,19 @@ test("a thread reply notifies the author it answers: not the replier, never twic
   assert.equal(replyAuthorMentionRefused(404, "thread_root_not_found"), false);
   assert.equal(replyAuthorMentionRefused(429, "rate_limited"), false);
   assert.equal(replyRetryCommandId("request_0001"), "request_0001_noauth");
-  assert.match(replyRetryCommandId("x".repeat(72)), /^[A-Za-z0-9_-]{8,72}$/);
+  const ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
+  assert.equal(replyRetryCommandId("a".repeat(65)), `${"a".repeat(65)}_noauth`);
+  for (const length of [66, 72]) {
+    const derived = replyRetryCommandId("a".repeat(length));
+    assert.match(derived, ID_RE, String(length));
+    assert.match(derived, /^a{56}_[0-9a-f]{8}_na$/);
+  }
+  assert.match(replyRetryCommandId("a".repeat(65)), ID_RE);
+  const shared = "r".repeat(65);
+  const [one, two] = [`${shared}_try1`, `${shared}_try2`];
+  assert.equal(one.length, 70);
+  assert.notEqual(replyRetryCommandId(one), replyRetryCommandId(two), "ids sharing 65 characters still retry under different ids");
+  assert.equal(replyRetryCommandId(one), replyRetryCommandId(one), "and the same id always derives the same one");
 });
 
 test("the hosted reply adds the author the reply_target read names, and knows when it was implicit", () => {
