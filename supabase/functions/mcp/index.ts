@@ -48,7 +48,7 @@ import type {
   HostedToolCall,
   HostedToolName,
 } from "./tools.ts";
-import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage } from "./tools.ts";
+import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, hostedChoiceOptions } from "./tools.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -247,6 +247,26 @@ function hostedCommand(
   workspaceId: string,
 ) {
   const addressed = recipients(args);
+  /* An ask with choices is one ask_choice: to the one person named, or to nobody so that anyone
+   * who reads it may answer. The command edge admits it only from this tool. */
+  if (name === "ask" && (args.options !== undefined || args.choices !== undefined)) {
+    return {
+      command_id: args.request_id,
+      client_version: "0.1.80",
+      workspace_id: workspaceId,
+      stream: { kind: "workspace" },
+      command: {
+        kind: "ask_choice",
+        body: args.body,
+        to_user_id: addressed === null ? null : addressed[0]!.id.toLowerCase(),
+        about: null,
+        options: hostedChoiceOptions(args),
+        ...(args.multi === true ? { multi: true } : {}),
+        ...(typeof args.channel === "string" && args.channel.toLowerCase() !== "general"
+          ? { channel: args.channel.toLowerCase() } : {}),
+      },
+    };
+  }
   const attached = name !== "working_on" && Array.isArray(args.attachments)
     ? (args.attachments as Array<{ file_id: string; version_n: number }>)
       .map((row) => ({ file_id: row.file_id.toLowerCase(), version_n: row.version_n }))

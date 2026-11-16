@@ -69,6 +69,7 @@ const MESSAGES = {
   memory_rate_limited: "This agent has saved 50 memories in this workspace in the last day. Try again later.",
   memory_history_full: "This workspace's memory history is full, so no more memories can be saved or edited.",
   memory_limit: "This workspace holds 500 memories, the most it can. Whoever saved a memory can forget it to make room.",
+  interactive_replies_unavailable: "Choice asks aren't turned on here, so nothing was sent. To send a plain ask, leave out options, choices and multi, and add recipients if the ask had none.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;
@@ -141,6 +142,8 @@ export function commandOutput(result: CommandResult): Record<string, unknown> {
       kind: row.kind,
       created_at: row.created_at,
       in_reply_to: row.in_reply_to ?? null,
+      // An ask with choices returns the options as stored, ids and order included.
+      ...(Array.isArray(result.body.choice_options) ? { choices: result.body.choice_options } : {}),
     };
   }
   if (typeof result.body.handle === "string") {

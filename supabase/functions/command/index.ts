@@ -205,6 +205,7 @@ import {
   parseMarkChannelReadCommand,
   personCanAccessChannel,
 } from "./channel-reads.ts";
+import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
@@ -237,6 +238,8 @@ import {
   publicHostedCommandForbidden, legacyHouseholdAcceptRefusal, legacyRemovalRejoinRefusal,
   reduceHostedAuthority,
   SEAT_ADMIN_COMMAND_KINDS,
+  CHOICE_DESCRIPTION_MAX, CHOICE_ID_RE, CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN, CHOICE_OPTIONS_MAX_BYTES,
+  CHOICE_OTHER_OPTION_ID, CHOICE_OTHER_TEXT_MAX, choiceAnswerBody, choiceTextUnsafe, recommendedFirst,
 } from "../_shared/protocol.js";
 import {
   revalidateHouseholdSeat,
@@ -413,23 +416,41 @@ interface MemoryRecord {
   status: "active" | "deleted";
 }
 
-/** Interactive replies G1: an ask to one person with fixed choices, and a person's click. */
+/**
+ * Interactive replies: an ask with fixed choices, to one person or to everyone who reads it, and a
+ * person's answer. v2 adds a description and one recommended option, multi-select, and "Other"
+ * text; the v1 shapes (one addressed person, {id, label} options, one option_id) still parse.
+ */
 interface ChoiceOption {
   id: string;
   label: string;
+  description?: string;
+  recommended?: true;
 }
 interface AskChoiceCommand {
   kind: "ask_choice";
   body: string;
-  to_user_id: string;
+  /** null: nobody is addressed, so any person who can read the ask may answer it. */
+  to_user_id: string | null;
   about: string | null;
   options: ChoiceOption[];
+  multi: boolean;
+  channel?: string;
 }
 interface AnswerChoiceCommand {
   kind: "answer_choice";
   signal_id: string;
-  option_id: string;
+  /** Distinct, in the order sent; empty when the answer is only other_text. */
+  option_ids: string[];
+  other_text: string | null;
 }
+type ChoiceAnswerRecord = {
+  signal_id: string;
+  option_id: string;
+  option_ids: string[];
+  other_text: string | null;
+  reply_signal_id: string;
+};
 
 /** Channel authority. Self-contained like post_signal: emits no protocol event. */
 type ChannelCommand =
@@ -818,7 +839,7 @@ interface StoredResponse {
   memory_outcome?: "created" | "updated" | "duplicate" | "forgotten";
   previous_statement?: string;
   choice_options?: ChoiceOption[];
-  choice_answer?: { signal_id: string; option_id: string; reply_signal_id: string };
+  choice_answer?: ChoiceAnswerRecord | { signal_id: string; option_id: string; reply_signal_id: string };
   grant_id?: string;
   seat_id?: string;
   handle?: string;
@@ -2715,45 +2736,107 @@ function validateCommand(
   }
 
   if (cmd.kind === "ask_choice") {
-    const keys = ["kind", "body", "to_user_id", "about", "options"];
+    // v1 sends exactly kind, body, to_user_id, about and options; v2 adds multi and channel.
+    const keys = ["kind", "body", "to_user_id", "about", "options", "multi", "channel"];
     if (Object.keys(cmd).some((key) => !keys.includes(key))) {
       return { ok: false, status: 400, reason: commandFieldsMessage("ask_choice", keys.slice(1)) };
     }
     const body = typeof cmd.body === "string" ? sanitizeSignalText(cmd.body).trim() : "";
     const about = typeof cmd.about === "string" ? sanitizeSignalText(cmd.about) || null : null;
     const options = Array.isArray(cmd.options) ? cmd.options : null;
+    // The signal sanitizer's rules, keeping a joiner inside an emoji sequence (choice-text.ts).
+    const oneLine = choiceOptionText;
     const parsed: ChoiceOption[] = [];
+    let recommended = 0;
     for (const option of options ?? []) {
       const row = record(option);
-      const label = typeof row?.label === "string" ? sanitizeSignalText(row.label).replace(/\s+/g, " ").trim() : "";
-      if (!row || !exactKeys(row, ["id", "label"]) || typeof row.id !== "string" ||
-          !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(row.id) || label.length < 1 || label.length > 80) {
+      const label = typeof row?.label === "string" ? oneLine(row.label) : "";
+      const description = typeof row?.description === "string" ? oneLine(row.description) : null;
+      if (!row || Object.keys(row).some((key) => !["id", "label", "description", "recommended"].includes(key)) ||
+          typeof row.id !== "string" || !CHOICE_ID_RE.test(row.id) || label.length < 1 || label.length > CHOICE_LABEL_MAX ||
+          (Object.hasOwn(row, "description") &&
+            (description === null || description.length < 1 || description.length > CHOICE_DESCRIPTION_MAX)) ||
+          (Object.hasOwn(row, "recommended") && typeof row.recommended !== "boolean")) {
         parsed.length = 0;
         break;
       }
-      parsed.push({ id: row.id, label });
+      if (row.recommended === true) recommended += 1;
+      parsed.push({ id: row.id, label, ...(description === null ? {} : { description }),
+        ...(row.recommended === true ? { recommended: true as const } : {}) });
     }
     if (body.length < 1 || body.length > SIGNAL_BODY_MAX) {
       return { ok: false, status: 400, reason: `body must be 1 to ${SIGNAL_BODY_MAX} characters` };
     }
-    if (typeof cmd.to_user_id !== "string" || !UUID_RE.test(cmd.to_user_id)) {
-      return { ok: false, status: 400, reason: "to_user_id must be the UUID of the person who chooses" };
+    if (cmd.to_user_id !== undefined && cmd.to_user_id !== null &&
+        (typeof cmd.to_user_id !== "string" || !UUID_RE.test(cmd.to_user_id))) {
+      return { ok: false, status: 400,
+        reason: "to_user_id must be the UUID of the person who chooses, or null so anyone who can read the ask may" };
     }
-    if (options === null || parsed.length < 2 || parsed.length > 6 || parsed.length !== options.length ||
+    if (options === null || parsed.length < CHOICE_MIN || parsed.length > CHOICE_MAX || parsed.length !== options.length ||
         new Set(parsed.map((option) => option.id)).size !== parsed.length) {
       return { ok: false, status: 400,
-        reason: "options must be 2 to 6 entries {id, label}: unique ids (a-z, 0-9, _ or -, up to 32) and plain-text labels up to 80 characters" };
+        reason: `options must be ${CHOICE_MIN} to ${CHOICE_MAX} entries {id, label, description?, recommended?}: unique ids (a-z, 0-9, _ or -, up to 32), plain-text labels up to ${CHOICE_LABEL_MAX} characters, descriptions up to ${CHOICE_DESCRIPTION_MAX}` };
     }
-    return { ok: true, command: { kind: "ask_choice", body, to_user_id: cmd.to_user_id.toLowerCase(), about, options: parsed } };
+    if (recommended > 1) {
+      return { ok: false, status: 400, reason: "options may mark at most one choice recommended" };
+    }
+    // The recommended option is stored first, so every reader shows it first.
+    const ordered = recommendedFirst(parsed);
+    if (new TextEncoder().encode(JSON.stringify(ordered)).length > CHOICE_OPTIONS_MAX_BYTES) {
+      return { ok: false, status: 400, reason: "options are too long together; shorten the labels or descriptions" };
+    }
+    if (cmd.multi !== undefined && typeof cmd.multi !== "boolean") {
+      return { ok: false, status: 400, reason: "multi is true or false" };
+    }
+    let channel: string | undefined;
+    if (cmd.channel !== undefined && cmd.channel !== null) {
+      // "general" is the unfiled main channel: no channel at all, as the hosted tools send it.
+      if (typeof cmd.channel !== "string" || normalizeChannelSlug(cmd.channel) !== "general") {
+        const slugProblem = channelSlugProblem(cmd.channel);
+        if (slugProblem !== null) return { ok: false, status: 400, reason: slugProblem };
+        channel = normalizeChannelSlug(cmd.channel as string);
+      }
+    }
+    return { ok: true, command: { kind: "ask_choice", body,
+      to_user_id: typeof cmd.to_user_id === "string" ? cmd.to_user_id.toLowerCase() : null, about,
+      options: ordered, multi: cmd.multi === true, ...(channel === undefined ? {} : { channel }) } };
   }
 
   if (cmd.kind === "answer_choice") {
-    if (!exactKeys(cmd, ["kind", "signal_id", "option_id"]) || typeof cmd.signal_id !== "string" ||
-        !UUID_RE.test(cmd.signal_id) || typeof cmd.option_id !== "string" ||
-        !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(cmd.option_id)) {
-      return { ok: false, status: 400, reason: "answer_choice takes signal_id (a choice ask) and option_id" };
+    // v1 sends exactly signal_id and option_id; v2 sends option_ids and/or other_text instead.
+    const keys = ["kind", "signal_id", "option_id", "option_ids", "other_text"];
+    const usage = `answer_choice takes signal_id (a choice ask) and option_id, or option_ids (up to ${CHOICE_MAX} distinct ids) and/or other_text`;
+    if (Object.keys(cmd).some((key) => !keys.includes(key)) || typeof cmd.signal_id !== "string" ||
+        !UUID_RE.test(cmd.signal_id) || (Object.hasOwn(cmd, "option_id") && Object.hasOwn(cmd, "option_ids"))) {
+      return { ok: false, status: 400, reason: usage };
     }
-    return { ok: true, command: { kind: "answer_choice", signal_id: cmd.signal_id.toLowerCase(), option_id: cmd.option_id } };
+    let optionIds: string[] = [];
+    if (Object.hasOwn(cmd, "option_id")) {
+      if (typeof cmd.option_id !== "string" || !CHOICE_ID_RE.test(cmd.option_id)) return { ok: false, status: 400, reason: usage };
+      optionIds = [cmd.option_id];
+    } else if (Object.hasOwn(cmd, "option_ids")) {
+      if (!Array.isArray(cmd.option_ids) || cmd.option_ids.length > CHOICE_MAX ||
+          cmd.option_ids.some((id) => typeof id !== "string" || !CHOICE_ID_RE.test(id)) ||
+          new Set(cmd.option_ids).size !== cmd.option_ids.length) {
+        return { ok: false, status: 400, reason: usage };
+      }
+      optionIds = cmd.option_ids as string[];
+    }
+    let otherText: string | null = null;
+    if (Object.hasOwn(cmd, "other_text") && cmd.other_text !== null) {
+      const text = typeof cmd.other_text === "string" ? cmd.other_text.trim() : "";
+      const length = Array.from(text).length;
+      if (length < 1 || length > CHOICE_OTHER_TEXT_MAX || choiceTextUnsafe(text)) {
+        return { ok: false, status: 400,
+          reason: `other_text must be 1 to ${CHOICE_OTHER_TEXT_MAX} characters on one line, with no control characters` };
+      }
+      otherText = text;
+    }
+    if (optionIds.length === 0 && otherText === null) {
+      return { ok: false, status: 400, reason: "answer_choice needs at least one option id or other_text" };
+    }
+    return { ok: true, command: { kind: "answer_choice", signal_id: cmd.signal_id.toLowerCase(),
+      option_ids: optionIds, other_text: otherText } };
   }
 
   if (cmd.kind === "post_signal") {
@@ -13530,8 +13613,38 @@ type ChoiceCtx = {
   decided: (result: HttpResult) => HttpResult;
 };
 
+function unionChannelIds(
+  ...lists: Array<readonly string[] | undefined>
+): string[] | undefined {
+  const ids = [...new Set(lists.flatMap((list) => list ?? []))];
+  return ids.length > 0 ? ids : undefined;
+}
+
+/** The channels a stored success under this command id touched, by the shared replay rule; none without one. */
+async function storedChoiceChannelIds(tx: Sql, auth: AuthContext, ctx: ChoiceCtx,
+  command: AskChoiceCommand | AnswerChoiceCommand): Promise<string[] | undefined> {
+  const [prior] = await tx<{ workspace_id: string; response: unknown }[]>`
+    SELECT workspace_id, response FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind} AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${ctx.commandId}
+    LIMIT 1
+  `;
+  return prior === undefined
+    ? undefined
+    : await replayAuditChannelIds(tx, prior.workspace_id, auth, command, false, prior.response);
+}
+
+/**
+ * A choice command's own replay: the choice kinds skip the shared replay branch so that nothing
+ * replays before the current ask and person checks. Its audit row carries every channel the
+ * stored success touched (replayAuditChannelIds, the shared branch's rule), whatever the incoming
+ * kind or payload and whatever the caller can access now, unioned with the channel the caller
+ * has already been checked against. So a private channel's replay or conflict row stays hidden
+ * from owners and admins outside that channel.
+ */
 async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx: ChoiceCtx,
-  audit: (outcome: string, reason: string | null) => Promise<unknown>): Promise<HttpResult | null> {
+  command: AskChoiceCommand | AnswerChoiceCommand,
+  currentChannelIds: readonly string[] | undefined): Promise<HttpResult | null> {
   const [prior] = await tx<{ request_hash: string; workspace_id: string; stream_id: string; response: unknown }[]>`
     SELECT request_hash, workspace_id, stream_id, response FROM swarm.idempotency_keys
     WHERE principal_kind = ${auth.ledgerCredentialKind} AND principal_id = ${auth.ledgerPrincipalId}
@@ -13541,7 +13654,10 @@ async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx:
   if (prior === undefined) return null;
   const matches = prior.request_hash === ctx.hash &&
     prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
-  await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
+  const storedChannelIds = await replayAuditChannelIds(tx, prior.workspace_id, auth, command, matches, prior.response);
+  await insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
+    outcome: matches ? "replayed" : "conflict", reason: matches ? null : "command_id_conflict",
+    detail: ctx.ignoredIdentity, hash: ctx.hash, channelIds: unionChannelIds(storedChannelIds, currentChannelIds) });
   return ctx.decided(matches
     ? replayResult(storedResponse(prior.response), ctx.kind)
     : { status: 409, body: { error: "command_id_conflict" } });
@@ -13566,36 +13682,45 @@ async function choiceLedgerSettle(tx: Sql, route: Route, auth: AuthContext, ctx:
 }
 
 /**
- * Interactive replies G1: an ask to one person with fixed choices, behind
- * SWARM_INTERACTIVE_REPLIES. The ask goes through the normal target, rate and post path; the
- * choices are stored once beside it and never change. Hosted seats wait for G3's tool binding.
+ * Interactive replies: an ask with fixed choices, behind SWARM_INTERACTIVE_REPLIES. It is addressed
+ * to one person (to_user_id) or to nobody, so that anyone who can read it may answer, in general or
+ * in a channel. The ask goes through the normal target, channel, rate and post path; the choices
+ * and multi are stored once beside it and never change. A hosted seat sends one through its ask
+ * tool only (hostedToolAllowsCommand).
  */
 async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskChoiceCommand,
-  ctx: ChoiceCtx): Promise<HttpResult> {
+  ctx: ChoiceCtx, hostedCapability: HostedSeatCapability | null): Promise<HttpResult> {
+  let auditChannelIds: readonly string[] | undefined;
   const audit = (outcome: string, reason: string | null, detail: string | null = ctx.ignoredIdentity) =>
     insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
-      outcome, reason, detail, hash: ctx.hash });
+      outcome, reason, detail, hash: ctx.hash, channelIds: auditChannelIds });
   if (!interactiveRepliesEnabled) {
     await audit("domain", "interactive_replies_unavailable");
     return { status: 404, body: { error: "interactive_replies_unavailable",
       message: "Choice asks aren't turned on here." } };
   }
-  if (auth.ledgerCredentialKind === "hosted_seat") {
-    await audit("authz", "ask_choice_hosted_unsupported");
-    return { status: 403, body: { error: "forbidden" } };
-  }
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ask_choice:${auth.ledgerPrincipalId}:${ctx.commandId}`}, 0))`;
-  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  // No channel is resolved yet: the replay row takes its tags from the stored success.
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, command, undefined);
   if (replay !== null) return replay;
   const ask: SignalCommand = {
     kind: "post_signal", signal_kind: "ask", body: command.body, to_user_id: command.to_user_id,
     to_agent_principal_id: null, in_reply_to: null, about: command.about,
+    ...(command.channel === undefined ? {} : { channel: command.channel }),
   };
   const target = await resolveSignalWriteTarget(tx, route, auth, ask);
   if (target === null) {
     await audit("authz", "ask_choice_target_refused");
     return { status: 403, body: { error: "forbidden" } };
   }
+  const channel = await resolveSignalChannel(tx, route, auth, ask);
+  if (!channel.ok) {
+    auditChannelIds = channel.auditChannelId ? [channel.auditChannelId] : undefined;
+    await audit(channel.status === 404 ? "authz" : "domain", channel.reason!);
+    const refusal: HttpResult = { status: channel.status!, body: { error: channel.error!, message: channel.message! } };
+    return channel.status === 404 ? refusal : ctx.decided(refusal);
+  }
+  auditChannelIds = channel.channelId !== null ? [channel.channelId] : undefined;
   const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, ask, target);
   if (rateLimit !== null) {
     const detail = `${rateLimit.bucket} limit ${rateLimit.description}; resets at ${rateLimit.resetsAt}`;
@@ -13604,13 +13729,15 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
       limit: rateLimit.limit, resets_at: rateLimit.resetsAt } });
   }
   const posted = await postSignal(tx, route, auth, ask, target, [], {
-    channelId: null, threadRootId: null, broadcastToChannel: false,
+    channelId: channel.channelId, threadRootId: null, broadcastToChannel: false,
     untilMs: SIGNAL_DEFAULT_UNTIL_MS.ask, untilCeiling: null, untilExplicit: false,
-  }, null);
+  }, hostedCapability);
+  if (posted.status === "hosted_refused") return { status: 403, body: { error: "forbidden" } };
   if (posted.status !== "inserted") throw new Error("choice ask returned an unexpected outcome");
   await tx`
-    INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
-    VALUES (${posted.signal.id}::uuid, ${route.workspaceId}::uuid, ${tx.json(command.options as unknown as postgres.JSONValue)}::jsonb)
+    INSERT INTO swarm.ask_choices (signal_id, workspace_id, options, multi)
+    VALUES (${posted.signal.id}::uuid, ${route.workspaceId}::uuid,
+      ${tx.json(command.options as unknown as postgres.JSONValue)}::jsonb, ${command.multi})
   `;
   const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal, choice_options: command.options };
   await choiceLedgerSettle(tx, route, auth, ctx, response);
@@ -13620,13 +13747,19 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
 }
 
 /**
- * Interactive replies G1: a person answers a choice ask by clicking. The click is only that
- * person's ordinary reply: the reply goes through the normal target, rate and post path with the
- * chosen option's stored label as its text. A person's session only, never an agent or hosted
- * credential. Answers to one ask are serialized; the first completed answer wins and later ones
- * are refused and recorded as failed; a retry by the person who answered returns their answer.
- * Every attempt is recorded in swarm.ui_actions (pending, approved, completed, failed) and
- * attempts are capped per person and ask.
+ * Interactive replies: a person answers a choice ask. The answer is only that person's ordinary
+ * reply: it goes through the normal rate and post path, in reply to the ask, and its text is built
+ * from the stored labels ("Selected: <labels>") and the person's "Other" text ("Other: <text>").
+ *
+ * Who may answer: an addressed ask only its addressee (the v1 rule, unchanged); an ask addressed to
+ * nobody any person who can read it, decided by swarm.signal_reactable under that person's claims
+ * (swarm_read.signals, the read policy). Everyone else, an unknown id and a hidden one all get the
+ * same 404 and leave no attempt. A person's session only, never an agent or hosted credential.
+ *
+ * Answers to one ask are serialized; the first completed answer wins and later ones are refused and
+ * recorded as failed; a retry of the same answer by the person who gave it returns their answer.
+ * Every attempt is recorded in swarm.ui_actions (pending, approved, completed, failed) and attempts
+ * are capped per person and ask.
  */
 async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: AnswerChoiceCommand,
   ctx: ChoiceCtx): Promise<HttpResult> {
@@ -13639,6 +13772,10 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     return { status: 404, body: { error: "interactive_replies_unavailable",
       message: "Choice answers aren't turned on here." } };
   }
+  /* A refusal before the replay still reuses this command id: tag it with the stored success's
+   * channels, so a reused private id never writes a row outside-channel admins can read. */
+  const storedChannelIds = await storedChoiceChannelIds(tx, auth, ctx, command);
+  auditChannelIds = storedChannelIds;
   if (auth.credentialKind !== "user" || auth.actor.user === null) {
     await audit("authz", "answer_choice_person_only");
     return { status: 403, body: { error: "forbidden" } };
@@ -13647,15 +13784,18 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`answer_choice:${route.workspaceId}:${command.signal_id}`}, 0))`;
   // The ask and person come first: nothing replays for an ask that isn't this person's to answer.
   const [ask] = await tx<{
-    id: string; from_kind: string; from_principal: string; to_user_id: string | null;
+    id: string; from_kind: "user" | "agent"; from_principal: string; to_user_id: string | null;
     to_agent_principal_id: string | null; channel_id: string | null; thread_root_id: string | null;
-    until: Date; live: boolean; answered: boolean; options: Array<{ id: string; label: string }>;
+    until: Date; live: boolean; answered: boolean; options: ChoiceOption[]; multi: boolean;
+    channel_visibility: ChannelVisibility | null; channel_archived_at: Date | null;
   }[]>`
     SELECT s.id, s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id,
       s.thread_root_id, s.until, s.until > statement_timestamp() AS live,
-      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options
+      swarm.ask_answered(s.workspace_id, s.id) AS answered, c.options, c.multi,
+      ch.visibility AS channel_visibility, ch.archived_at AS channel_archived_at
     FROM swarm.ask_choices c
     JOIN swarm.signals s ON s.id = c.signal_id AND s.workspace_id = c.workspace_id
+    LEFT JOIN swarm.channels ch ON ch.workspace_id = s.workspace_id AND ch.channel_id = s.channel_id
     WHERE c.workspace_id = ${route.workspaceId}::uuid AND c.signal_id = ${command.signal_id}::uuid
       AND s.kind = 'ask'
       AND (
@@ -13668,30 +13808,41 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
         )
       )
   `;
-  // Unknown, another workspace's, not a choice ask, or not addressed to this person: one answer.
-  if (ask === undefined || ask.to_user_id !== viewer ||
-      (ask.from_kind === "user" && ask.from_principal === viewer)) {
+  let mayAnswer = false;
+  if (ask !== undefined && !(ask.from_kind === "user" && ask.from_principal === viewer)) {
+    mayAnswer = ask.to_user_id !== null
+      ? ask.to_user_id === viewer
+      : ask.to_agent_principal_id === null &&
+        await signalReactable(tx, route.workspaceId, ask.id, { kind: "user", userId: viewer });
+  }
+  // Unknown, another workspace's, not a choice ask, unreadable, or addressed to someone else: one answer.
+  if (ask === undefined || !mayAnswer) {
     await audit("authz", "answer_choice_not_addressed");
     return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
   }
-  auditChannelIds = ask.channel_id !== null ? [ask.channel_id] : undefined;
+  auditChannelIds = unionChannelIds(storedChannelIds, ask.channel_id !== null ? [ask.channel_id] : undefined);
   // A settled answer outlives the ask: a retry after expiry gets this person's answer, not ask_expired.
-  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, command, auditChannelIds);
   if (replay !== null) return replay;
-  const [mine] = await tx<{ option_id: string; reply_signal_id: string }[]>`
-    SELECT option_id, reply_signal_id FROM swarm.ui_actions
+  const [mine] = await tx<{ option_id: string; option_ids: string[] | null; other_text: string | null;
+    reply_signal_id: string }[]>`
+    SELECT option_id, option_ids, other_text, reply_signal_id FROM swarm.ui_actions
     WHERE signal_id = ${ask.id}::uuid AND actor_user_id = ${viewer}::uuid AND state = 'completed'
   `;
   if (mine !== undefined) {
-    if (mine.option_id !== command.option_id) {
+    const mineIds = mine.option_ids ?? [mine.option_id];
+    const same = mineIds.length === command.option_ids.length &&
+      command.option_ids.every((id) => mineIds.includes(id)) && mine.other_text === command.other_text;
+    if (!same) {
       await audit("domain", "choice_conflict");
       return ctx.decided({ status: 409, body: { error: "choice_conflict",
-        message: "You already chose a different option for this ask." } });
+        message: "You already gave a different answer to this ask." } });
     }
-    // The same person retrying the same choice (a lost response or a second click): their answer.
+    // The same person retrying the same answer (a lost response or a second click): their answer.
     await audit("replayed", "answer_choice_already_answered_by_you");
     return ctx.decided({ status: 200, body: { status: "accepted", ok: true, event_ids: [],
-      choice_answer: { signal_id: ask.id, option_id: mine.option_id, reply_signal_id: mine.reply_signal_id },
+      choice_answer: { signal_id: ask.id, option_id: mine.option_id, option_ids: mineIds,
+        other_text: mine.other_text, reply_signal_id: mine.reply_signal_id },
       events: [], min_client_version: ctx.minClientVersion } });
   }
   if (!ask.live) {
@@ -13707,10 +13858,18 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     return ctx.decided({ status: 429, body: { error: "answer_attempts_exhausted",
       message: "Too many attempts on this ask. Reply in words instead." } });
   }
+  // The ask's own order, so the reply lists choices as the ask did; ids it doesn't hold stay recorded.
+  const chosen = ask.options.filter((option) => command.option_ids.includes(option.id));
+  const unknownIds = command.option_ids.filter((id) => !ask.options.some((option) => option.id === id));
+  const optionIds = [...chosen.map((option) => option.id), ...unknownIds];
+  // option_id keeps v1 readers working: the first chosen id, or "other" for an answer that is only text.
+  const optionId = optionIds[0] ?? CHOICE_OTHER_OPTION_ID;
   const actionId = crypto.randomUUID();
   await tx`
-    INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, state)
-    VALUES (${actionId}::uuid, ${route.workspaceId}::uuid, ${ask.id}::uuid, ${viewer}::uuid, ${command.option_id}, 'pending')
+    INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, option_ids,
+      other_text, state)
+    VALUES (${actionId}::uuid, ${route.workspaceId}::uuid, ${ask.id}::uuid, ${viewer}::uuid, ${optionId},
+      ${optionIds}::text[], ${command.other_text}, 'pending')
   `;
   const fail = async (status: number, error: string, message: string): Promise<HttpResult> => {
     await tx`UPDATE swarm.ui_actions SET state = 'failed', error_code = ${error} WHERE action_id = ${actionId}::uuid`;
@@ -13722,25 +13881,39 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     SELECT count(*)::int AS n FROM swarm.ui_actions WHERE signal_id = ${ask.id}::uuid AND state = 'completed'
   `;
   if (ask.answered || won!.n > 0) return await fail(409, "ask_answered", "This ask already has an answer.");
-  const option = ask.options.find((candidate) => candidate.id === command.option_id);
-  if (option === undefined) return await fail(400, "unknown_option", "That isn't one of this ask's choices.");
+  if (unknownIds.length > 0) return await fail(400, "unknown_option", "That isn't one of this ask's choices.");
+  if (!ask.multi && optionIds.length + (command.other_text === null ? 0 : 1) !== 1) {
+    return await fail(400, "one_answer_only", "This ask takes one answer: one choice, or Other text.");
+  }
   await tx`UPDATE swarm.ui_actions SET state = 'approved' WHERE action_id = ${actionId}::uuid`;
   const reply: SignalCommand = {
-    kind: "post_signal", signal_kind: "note", body: `Chose: ${option.label}`,
+    kind: "post_signal", signal_kind: "note",
+    body: choiceAnswerBody(chosen.map((option) => option.label), command.other_text),
     to_user_id: ask.from_kind === "user" ? ask.from_principal : null,
     to_agent_principal_id: ask.from_kind === "agent" ? ask.from_principal : null,
     in_reply_to: ask.id, about: null,
   };
-  const target = await resolveSignalWriteTarget(tx, route, auth, reply);
-  // The ask is live and addressed to this person, so only the asker can be missing: a person who
+  /* An addressed ask: the ordinary reply rule, as v1. An ask addressed to nobody: the reader was
+   * admitted above, so the reply needs only a live asker who can still read the ask's channel. */
+  const target = ask.to_user_id !== null
+    ? await resolveSignalWriteTarget(tx, route, auth, reply)
+    : await openChoiceReplyTarget(tx, route, ask);
+  // The ask is live and this person may answer it, so only the asker can be missing: a person who
   // left, or an agent that was removed or whose owner left.
   if (target === null) {
     return await fail(403, "reply_refused", "Whoever asked is no longer in this workspace, so your answer wasn't sent.");
   }
+  /* Placed as a typed reply is (the post_signal path's placementChannelId): in the ask's channel
+   * only when that channel is private, and refused once it's archived; otherwise unfiled. */
+  const privateChannelId = ask.channel_visibility === "private" ? ask.channel_id : null;
+  if (privateChannelId !== null && ask.channel_archived_at !== null) {
+    return await fail(409, "channel_archived",
+      "That channel is archived, so it takes no new messages. Its history still reads and its links still resolve.");
+  }
   const rateLimit = await enforceSignalRate(tx, auth, route.workspaceId, reply, target);
   if (rateLimit !== null) return await fail(429, "rate_limited", "Too many messages just now. Try again shortly.");
   const posted = await postSignal(tx, route, auth, reply, target, [], {
-    channelId: ask.channel_id, threadRootId: ask.thread_root_id, broadcastToChannel: false,
+    channelId: privateChannelId, threadRootId: null, broadcastToChannel: false,
     untilMs: SIGNAL_DEFAULT_UNTIL_MS.note, untilCeiling: null, untilExplicit: false,
   }, null);
   if (posted.status !== "inserted") return await fail(409, "reply_refused", "The reply couldn't be posted.");
@@ -13750,11 +13923,29 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     WHERE action_id = ${actionId}::uuid
   `;
   const response: StoredResponse = { ok: true, event_ids: [], signal: posted.signal,
-    choice_answer: { signal_id: ask.id, option_id: option.id, reply_signal_id: posted.signal.id } };
+    choice_answer: { signal_id: ask.id, option_id: optionId, option_ids: optionIds, other_text: command.other_text,
+      reply_signal_id: posted.signal.id } };
   await choiceLedgerSettle(tx, route, auth, ctx, response);
   await audit("accepted", null);
   await chargeSpend(tx, "signal_post");
   return { status: 200, body: { status: "accepted", ...response, events: [], min_client_version: ctx.minClientVersion } };
+}
+
+/** The asker of an ask addressed to nobody, as a reply target: live, and still able to read the ask's channel. */
+async function openChoiceReplyTarget(tx: Sql, route: Route, ask: {
+  id: string; from_kind: "user" | "agent"; from_principal: string; channel_id: string | null;
+}): Promise<SignalWriteTarget | null> {
+  const live = ask.from_kind === "user"
+    ? await signalUserTargetIsLive(tx, route, ask.from_principal)
+    : await signalAgentTargetIsLive(tx, route, ask.from_principal);
+  if (!live || !await actorCanAccessChannel(tx, route.workspaceId, ask.channel_id, ask.from_kind, ask.from_principal)) {
+    return null;
+  }
+  return {
+    toUserId: ask.from_kind === "user" ? ask.from_principal : null,
+    toAgentPrincipalId: ask.from_kind === "agent" ? ask.from_principal : null,
+    inReplyTo: ask.id,
+  };
 }
 
 /**
@@ -13843,6 +14034,13 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   // Roster R1b: the hosted reraise tool sends exactly one reraise_ask, and no other tool can.
   if (tool === "reraise") return command?.kind === "reraise_ask" && exactKeys(command, ["kind", "signal_id"]);
   if (command?.kind === "reraise_ask") return false;
+  /* Choice asks: the hosted ask tool sends an ask with choices as one ask_choice, with only the
+   * fields that command takes. answer_choice is a person's click and no hosted tool sends it. */
+  if (tool === "ask" && command?.kind === "ask_choice") {
+    return Object.keys(command).every((key) =>
+      ["kind", "body", "to_user_id", "about", "options", "multi", "channel"].includes(key));
+  }
+  if (command?.kind === "ask_choice" || command?.kind === "answer_choice") return false;
   /* The hosted react tool sends exactly one add_reaction or remove_reaction with signal_id and emoji,
    * never a source: a hosted seat's automatic seen mark is its check's own write (handleHostedCheck).
    * No other tool can send either kind. */
@@ -16768,7 +16966,7 @@ async function handleTransaction(
     if (command.kind === "ask_choice") {
       return await askChoice(tx, route, auth, command, {
         commandId, hash, kind, minClientVersion, ignoredIdentity, decided,
-      });
+      }, hostedSeatCapability);
     }
 
     if (command.kind === "answer_choice") {

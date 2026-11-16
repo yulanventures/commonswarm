@@ -334,6 +334,8 @@ export const MCP_ENV_NAMES = [
   "SWARM_BRAIN_MEMORY_HOSTED",
   // Hosted seats post through command's handler in this worker.
   "SWARM_CHAT_MENTIONS",
+  // The hosted ask tool's choice asks run command's ask_choice in this worker.
+  "SWARM_INTERACTIVE_REPLIES",
   // Shared only by main and mcp: it authenticates mcp to main's internal PDF text path.
   "SWARM_FILE_TEXT_TOKEN",
 ] as const;

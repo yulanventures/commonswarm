@@ -560,12 +560,21 @@ ask_expired`, `409 ask_answered`, `409 channel_archived`, `409 reraise_unsupport
 
 | `command.kind` | fields |
 |---|---|
-| `ask_choice` | `body` (1–8000), `to_user_id` (the one person who chooses), optional `about`, `options`: 2–6 `{ "id", "label" }`, ids unique and matching `^[a-z0-9][a-z0-9_-]{0,31}$`, labels 1–80 characters of plain text |
-| `answer_choice` | `signal_id` (the choice ask), `option_id` |
+| `ask_choice` | `body` (1–8000), `to_user_id` (the one person who chooses, or `null` so any other person who can read the ask may), optional `about`, optional `channel`, optional `multi` (several answers), `options`: 2–6 `{ "id", "label", "description"?, "recommended"? }`, ids unique and matching `^[a-z0-9][a-z0-9_-]{0,31}$`, labels 1–80 and descriptions 1–200 characters of plain text, at most one `recommended: true` (stored first); the options together, as stored, at most 3,840 bytes of UTF-8 JSON |
+| `answer_choice` | `signal_id` (the choice ask), and `option_id`, or `option_ids` (up to 6 distinct ids) and/or `other_text` (1–500 characters on one line) |
 
 `ask_choice` posts an ask and needs `post_signal`; its result adds `choice_options`.
-`answer_choice` is a person's command (an agent token gets `403`); it posts the reply
-and returns `choice_answer` (`signal_id`, `option_id`, `reply_signal_id`).
+`answer_choice` is a person's command (an agent token gets `403`). An addressed ask is
+answered only by its addressee; an unaddressed one by any person other than the asker who
+can read it, and anyone else gets `404 not_found`. A single-choice ask takes one option or
+`other_text` (`400 one_answer_only` otherwise); a `multi` ask takes any of its options
+and/or `other_text`. The first answer wins: its sender gets the same answer back as
+accepted, even under a new command id, and `409 choice_conflict` for a different one;
+anyone else then gets `409 ask_answered`, as everyone does once a typed reply answers the
+ask. The answer posts a
+reply to the asker reading `Selected: <labels>` and/or `Other: <text>`, and returns
+`choice_answer` (`signal_id`, `option_id`, `option_ids`, `other_text`,
+`reply_signal_id`); `option_id` is the first chosen id, or `other` for a text-only answer.
 
 ## Reactions
 

@@ -4,7 +4,7 @@ import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/ve
 import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
-import { CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN } from "../cloud/choices.js";
+import { CHOICE_DESCRIPTION_MAX, CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN, choiceOptions, type ChoiceOption, type ChoiceOptionInput } from "../cloud/choices.js";
 import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
@@ -33,6 +33,15 @@ const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
 export const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
 const absolutePath = { ...string(4096, 1), description: "Absolute path on this host." };
 const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
+/** An ask's choice options: an object form beside the v1 bare labels (choices). */
+const choiceOptionsSchema = {
+  type: "array" as const, minItems: CHOICE_MIN, maxItems: CHOICE_MAX,
+  items: {
+    type: "object" as const, additionalProperties: false as const, required: ["label"],
+    properties: { id: string(32, 1, "^[a-z0-9][a-z0-9_-]{0,31}$"), label: string(CHOICE_LABEL_MAX, 1),
+      description: string(CHOICE_DESCRIPTION_MAX, 1), recommended: { type: "boolean" as const } },
+  },
+};
 export const schema = (properties: Record<string, object>, required: string[] = []) => ({
   type: "object" as const, properties, required, additionalProperties: false as const,
 });
@@ -40,7 +49,7 @@ export const schema = (properties: Record<string, object>, required: string[] = 
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. To let a person answer with a click, give choices (2 to 6 labels) and to (that member); the reply reads \"Chose: <label>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX } }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several. With to (a member) only that person answers; without it, anyone who reads the ask may. Choices take no until or parent_signal_id. The reply reads \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX }, options: choiceOptionsSchema, multi: { type: "boolean" as const } }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
@@ -78,6 +87,14 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
           item.some(label => typeof label !== "string" || !label.trim() || label.length > CHOICE_LABEL_MAX)) throw new Error("Invalid argument: choices.");
       continue;
     }
+    if (key === "options") {
+      try {
+        if (!Array.isArray(item) || item.some(option => !option || typeof option !== "object" || Array.isArray(option) ||
+            Object.keys(option).some(name => !["id", "label", "description", "recommended"].includes(name)))) throw new Error();
+        choiceOptions(item);
+      } catch { throw new Error("Invalid argument: options."); }
+      continue;
+    }
     if (key === "if_version") {
       if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) throw new Error("Invalid argument: if_version.");
       continue;
@@ -110,6 +127,25 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");
   return args as Record<string, string>;
+}
+
+/**
+ * The ask tool's choice arguments (validated) as stored options: options or choices, never both,
+ * and multi. null for an ask without choices. Throws the sentence for a rule broken.
+ */
+export function askChoiceArguments(args: Record<string, unknown>): { options: ChoiceOption[]; multi: boolean } | null {
+  const inputs = (args.options ?? args.choices) as ChoiceOptionInput[] | undefined;
+  if (inputs === undefined) {
+    if (args.multi !== undefined) throw new Error("Invalid argument: multi needs options or choices.");
+    return null;
+  }
+  if (args.options !== undefined && args.choices !== undefined) {
+    throw new Error("Invalid argument: give options or choices, not both.");
+  }
+  for (const key of ["until", "parent_signal_id"]) {
+    if (args[key] !== undefined) throw new Error(`Invalid argument: choices can't be combined with ${key}.`);
+  }
+  return { options: choiceOptions(inputs), multi: args.multi === true };
 }
 
 const CHECK_SCOPE = "new messages addressed to this agent";

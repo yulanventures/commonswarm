@@ -144,6 +144,7 @@ test("H1 worker environments admit storage only where needed and exclude OAuth s
     "SWARM_BRAIN_MEMORY",
     "SWARM_BRAIN_MEMORY_HOSTED",
     "SWARM_CHAT_MENTIONS",
+    "SWARM_INTERACTIVE_REPLIES",
     "SWARM_FILE_TEXT_TOKEN",
   ];
   const allowlists = {
