@@ -100,4 +100,9 @@ test("a choice prompt splits only when nothing can be lost: one plain block is t
     "x".repeat(241),                                                    // one block past 240 characters
   ]) assert.deepEqual(splitChoicePrompt(body), whole(body), JSON.stringify(body));
   assert.deepEqual(splitChoicePrompt("x".repeat(240)), { prose: null, question: "x".repeat(240) }, "240 characters is still a title");
+  // The prose is the body's own text: indented code keeps its four spaces, and a leading indented line stays code.
+  assert.deepEqual(splitChoicePrompt("Run these first:\n\n    npm ci\n    npm test\n\nShould I push?"),
+    { prose: "Run these first:\n\n    npm ci\n    npm test", question: "Should I push?" });
+  assert.deepEqual(splitChoicePrompt("\n    npm ci\n\nShould I push?"), { prose: "    npm ci", question: "Should I push?" });
+  assert.deepEqual(splitChoicePrompt("    npm ci\n\nI ran it."), { prose: "    npm ci\n\nI ran it.", question: null });
 });

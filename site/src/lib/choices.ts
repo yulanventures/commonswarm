@@ -120,15 +120,22 @@ const BLOCK_PREFIX_RE = /^[ \t]*(?:[-*+>|#]|\d+\.)/mu;
  *   multi-line last block, or one that isn't a question): the whole body is prose and the card has no title.
  */
 export function splitChoicePrompt(body: string): { prose: string | null; question: string | null } {
-  const text = body.replace(/\r\n?/gu, "\n").trim();
+  // Leading blank lines and trailing space go; the prose keeps its own indentation (an indented code line stays code).
+  const text = body.replace(/\r\n?/gu, "\n").replace(/^(?:[ \t]*\n)+/u, "").trimEnd();
   const whole = { prose: text, question: null };
   if (/```|~~~/u.test(text)) return whole;
-  const blocks = text.split(/\n\s*\n/u).map((block) => block.trim()).filter(Boolean);
   const plain = (block: string) => !BLOCK_PREFIX_RE.test(block) && Array.from(block).length <= CHOICE_TITLE_MAX;
-  if (blocks.length === 1) return plain(blocks[0]!) ? { prose: null, question: blocks[0]! } : whole;
-  const last = blocks[blocks.length - 1];
-  if (last === undefined || !plain(last) || last.includes("\n") || !last.endsWith("?")) return whole;
-  return { prose: blocks.slice(0, -1).join("\n\n"), question: last };
+  const separators = Array.from(text.matchAll(/\n[ \t]*\n/gu));
+  const lastSeparator = separators[separators.length - 1];
+  const prose = lastSeparator ? text.slice(0, lastSeparator.index).trimEnd() : "";
+  if (!lastSeparator || !prose.trim()) {
+    const question = text.trim();
+    return plain(question) ? { prose: null, question } : whole;
+  }
+  // The prose is the body's own text up to the last blank line, never re-joined from trimmed blocks.
+  const last = text.slice((lastSeparator.index ?? 0) + lastSeparator[0].length).trim();
+  if (!last || !plain(last) || last.includes("\n") || !last.endsWith("?")) return whole;
+  return { prose, question: last };
 }
 
 /** Trimmed Other text that can be sent, or null. Control characters are refused rather than silently changed. */

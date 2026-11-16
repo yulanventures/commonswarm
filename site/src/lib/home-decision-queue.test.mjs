@@ -195,4 +195,8 @@ test("a choice ask whose body is prose then a plain question is headed by that q
   // No choices read, or a body kept whole: the body's start, as before.
   assert.match(what([ask("x", "2026-11-04T11:00:00Z", { body })], new Map())[0], /^Claude asked you: ‘All seven Intercom replies are drafted/u);
   assert.deepEqual(what([ask("x", "2026-11-04T11:00:00Z", { body: "Context.\n\n- a list?" })], choices), ["Claude asked you: ‘Context. - a list?’"]);
+  // The question title is never cut to the 160-character excerpt.
+  const long = `${"W".repeat(199)}?`;
+  assert.deepEqual(what([ask("x", "2026-11-04T11:00:00Z", { body: `Context.\n\n${long}` })], choices), [`Claude asked you: ‘${long}’`]);
+  assert.deepEqual(what([ask("x", "2026-11-04T11:00:00Z", { body: long })], choices), [`Claude asked you: ‘${long}’`]);
 });

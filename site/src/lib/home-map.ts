@@ -271,9 +271,10 @@ function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: N
   const from = author ?? (ask.from.name ? { ...unnamedMember(), name: ask.from.name, firstName: ask.from.name } : unnamedMember());
   const name = "label" in from ? from.label : from.name;
   const raised = ask.reraised ? `re-raised ×${ask.reraised.count}` : "";
-  // A choice ask whose body is prose and then a plain question is headed by that question, not the prose's start.
+  // A choice ask with a question title is headed by that whole question (at most 240 characters, never cut);
+  // any other ask by an excerpt of its body.
   const prompt = choice ? splitChoicePrompt(ask.body) : null;
-  const excerpt = askExcerpt(prompt?.prose && prompt.question ? prompt.question : ask.body);
+  const excerpt = prompt?.question ? prompt.question.replace(/\s+/gu, " ") : askExcerpt(ask.body);
   return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
     what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) },
