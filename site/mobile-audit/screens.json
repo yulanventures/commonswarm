@@ -126,6 +126,34 @@
     ]
   },
   {
+    "id": "app.chat.unread-bar",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.unread}",
+    "setup": [
+      {
+        "waitFor": "[data-unread-bar]:not([hidden]) [data-unread-jump]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-unread-bar]:not([hidden]) [data-unread-mark]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_viewer_seen",
+      "seed_unread_channel"
+    ],
+    "unread": true,
+    "alone": true,
+    "frame": [
+      "[data-unread-bar] [data-unread-jump]",
+      "[data-unread-bar] [data-unread-mark]"
+    ]
+  },
+  {
     "id": "app.chat.dm",
     "kind": "view",
     "path": "/app?w={workspace}",

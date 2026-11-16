@@ -92,6 +92,31 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
   };
 }
 
+/**
+ * The unread channel as seeded, before each capture of it: opening it marks it read (the read position) and reports
+ * the rows on screen seen (receipts), so each capture takes the viewer's position and receipts there away again.
+ * Receipts are append-only, so as in postRefreshNote this one transaction on the local stack bypasses the trigger. A
+ * stack from before read positions has no swarm.human_channel_reads; only its receipts are taken away.
+ */
+export async function resetUnreadChannel(env: SeedEnvironment, ids: Record<string, string>): Promise<void> {
+  assert.ok(loopback(env.dbUrl), "local stack only");
+  if (!ids["channel.unread"] || !ids.owner || !ids.workspace) return;
+  const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
+  try {
+    await sql.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`DELETE FROM swarm.signal_human_receipts r USING swarm.signals s
+        WHERE r.signal_id = s.id AND r.user_id = ${ids.owner!}::uuid
+          AND s.workspace_id = ${ids.workspace!}::uuid AND s.channel_id = ${ids["channel.unread"]!}::uuid`;
+      const [table] = await tx<{ present: boolean }[]>`SELECT to_regclass('swarm.human_channel_reads') IS NOT NULL AS present`;
+      if (table?.present) {
+        await tx`DELETE FROM swarm.human_channel_reads
+          WHERE workspace_id = ${ids.workspace!}::uuid AND user_id = ${ids.owner!}::uuid AND channel_id = ${ids["channel.unread"]!}::uuid`;
+      }
+    });
+  } finally { await sql.end({ timeout: 5 }); }
+}
+
 /** The save-conflict doc's two fixed texts: every capture opens it at the base and meets the current one, so the comparison is
  *  the same at every size and theme. */
 export const CONFLICT_DOC = {
@@ -568,13 +593,44 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } catch (error) { note("seed_history", error); }
       // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
       // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
+      // The oldest one first, seen a minute after it was sent: the viewer's unread count starts there, so the
+      // unread channel below (messages from the last hour) counts as unread.
       try {
+        await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id, first_seen_at)
+          SELECT workspace_id, id, ${owner.id}::uuid, created_at + interval '1 minute' FROM swarm.signals
+          WHERE workspace_id = ${workspace}::uuid AND from_principal <> ${owner.id}::uuid
+          ORDER BY created_at, id LIMIT 1
+          ON CONFLICT DO NOTHING`;
         await sql`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
           SELECT workspace_id, id, ${owner.id}::uuid FROM swarm.signals
           WHERE workspace_id = ${workspace}::uuid AND from_principal <> ${owner.id}::uuid
           ON CONFLICT DO NOTHING`;
         steps.push("seed_viewer_seen");
       } catch (error) { note("seed_viewer_seen", error); }
+      // An unread channel: 40 messages from others over the last hour, after everything above was seen, with no
+      // receipts and no read position. More than one page (25), so its first unread message is above the screen
+      // when it opens at any size (app.chat.unread-bar). resetUnreadChannel puts it back before each capture.
+      try {
+        const unreadChannel = randomUUID();
+        await sql`INSERT INTO swarm.channels (channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind) VALUES
+          (${unreadChannel}::uuid, ${workspace}::uuid, 'renovation', 'Kitchen and bathroom work', ${owner.id}::uuid, 'user')`;
+        ids["channel.unread"] = unreadChannel;
+        const others = senders.filter(sender => sender.id !== owner.id);
+        for (let i = 0; i < 40; i += 1) {
+          const from = others[(i * 5) % others.length]!;
+          const id = randomUUID();
+          await sql`INSERT INTO swarm.signals (
+              id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+              about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+            ) VALUES (
+              ${id}::uuid, ${workspace}::uuid, ${from.id}::uuid, ${from.kind}, NULL, NULL, NULL,
+              NULL, 'note', ${BODIES[(i + 3) % BODIES.length]!},
+              statement_timestamp() + interval '25 days', statement_timestamp() - (${(40 - i) * 90} * interval '1 second'),
+              ${unreadChannel}::uuid, NULL, false)`;
+          if (i === 0) ids["message.firstUnread"] = id;
+        }
+        steps.push("seed_unread_channel");
+      } catch (error) { note("seed_unread_channel", error); }
     }
 
     // Seed workspace Files and Wiki (brain--overview.md with 2 versions) through the real create -> PUT -> commit flow.
