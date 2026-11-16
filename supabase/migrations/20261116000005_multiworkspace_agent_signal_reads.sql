@@ -24,12 +24,18 @@
 -- swarm.agent_workspace_memberships since 20261028000002), so the first-workspace test is replaced.
 -- The other surfaces key on an author, an assignee or the whole agent list, where that is not
 -- guaranteed (registrar principals have no membership row), so they keep the first-workspace test
--- and add the membership as an alternative: the first workspace reads exactly as before.
+-- beside the membership: the first workspace reads exactly as before. The broadcast rosters list
+-- live members only, by the same admission swarm.actor_can_access_channel applies: a live
+-- membership here, or this is the agent's first workspace and it has no membership row here.
 --
--- Revocation is unchanged: a removed membership already ends the agent's reads in that workspace
--- at the credential (agent_delivery_read_context, then 403 from the read edge), and an owner keeps
--- reading messages addressed to an agent it owns after the agent is removed, as in its first
--- workspace. Messages an agent sends to someone else stay readable only to their recipients.
+-- Revocation: a removed membership already ends the agent's reads in that workspace at the
+-- credential (agent_delivery_read_context, then 403 from the read edge), and an owner keeps reading
+-- messages addressed to an agent it owns after the agent is removed, as in its first workspace.
+-- What happened while the agent was a member stays as it was: its replies keep its name and the
+-- owner's oversight, and an ask it answered stays answered. What is live follows the membership:
+-- the broadcast rosters leave a removed agent out, and home_overview reports a to-do assigned to an
+-- agent removed from the to-do's workspace as agent_removed. Messages an agent sends to someone
+-- else stay readable only to their recipients.
 --
 -- Rollback: recreate swarm_read.signals by swapping each membership EXISTS below back to its
 -- first-workspace equality, and the four functions from 20261113000003_private_channels.sql
@@ -114,9 +120,9 @@ $$;
 
 -- 2. Delivery receipts. The three functions below are 20261113000003_private_channels.sql
 -- (867-1130, 1132-1315 and 1474-1574) unchanged except the agent's workspace: in the broadcast
--- rosters, an agent is listed in this workspace by its membership here (and its owner's membership
--- and its seen receipt are this workspace's, as they always were for its first workspace); in
--- replies, a responder's name and the owner's oversight follow the membership too.
+-- rosters, an agent is listed in this workspace by its live membership here (and its owner's
+-- membership and its seen receipt are this workspace's, as they always were for its first
+-- workspace); in replies, a responder's name and the owner's oversight follow the membership too.
 
 CREATE OR REPLACE FUNCTION swarm_read.signal_delivery_receipts_without_main_queue_count(
   p_workspace_id uuid,
@@ -241,12 +247,21 @@ BEGIN
      AND owner_membership.user_id = principal.owner_user_id
      AND owner_membership.revoked_at IS NULL
     WHERE (
-      principal.workspace_id = p_workspace_id
-      OR EXISTS (
+      EXISTS (
         SELECT 1 FROM swarm.agent_workspace_memberships AS seat
         WHERE seat.principal_id = principal.principal_id
           AND seat.owner_user_id = principal.owner_user_id
           AND seat.workspace_id = p_workspace_id
+          AND seat.revoked_at IS NULL
+      )
+      -- No membership row here at all (a join registrar): its first workspace, as before.
+      OR (
+        principal.workspace_id = p_workspace_id
+        AND NOT EXISTS (
+          SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+          WHERE any_seat.principal_id = principal.principal_id
+            AND any_seat.workspace_id = p_workspace_id
+        )
       )
     )
       AND principal.revoked_at IS NULL
@@ -314,12 +329,21 @@ BEGIN
        AND owner_membership.user_id = principal.owner_user_id
        AND owner_membership.revoked_at IS NULL
       WHERE (
-        principal.workspace_id = p_workspace_id
-        OR EXISTS (
+        EXISTS (
           SELECT 1 FROM swarm.agent_workspace_memberships AS seat
           WHERE seat.principal_id = principal.principal_id
             AND seat.owner_user_id = principal.owner_user_id
             AND seat.workspace_id = p_workspace_id
+            AND seat.revoked_at IS NULL
+        )
+        -- No membership row here at all (a join registrar): its first workspace, as before.
+        OR (
+          principal.workspace_id = p_workspace_id
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+            WHERE any_seat.principal_id = principal.principal_id
+              AND any_seat.workspace_id = p_workspace_id
+          )
         )
       )
         AND principal.revoked_at IS NULL
@@ -456,12 +480,21 @@ BEGIN
      AND agent_receipt.signal_id = p_signal_id
      AND agent_receipt.principal_id = principal.principal_id
     WHERE (
-      principal.workspace_id = p_workspace_id
-      OR EXISTS (
+      EXISTS (
         SELECT 1 FROM swarm.agent_workspace_memberships AS seat
         WHERE seat.principal_id = principal.principal_id
           AND seat.owner_user_id = principal.owner_user_id
           AND seat.workspace_id = p_workspace_id
+          AND seat.revoked_at IS NULL
+      )
+      -- No membership row here at all (a join registrar): its first workspace, as before.
+      OR (
+        principal.workspace_id = p_workspace_id
+        AND NOT EXISTS (
+          SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+          WHERE any_seat.principal_id = principal.principal_id
+            AND any_seat.workspace_id = p_workspace_id
+        )
       )
     )
       AND principal.revoked_at IS NULL
@@ -499,12 +532,21 @@ BEGIN
        AND agent_receipt.signal_id = p_signal_id
        AND agent_receipt.principal_id = principal.principal_id
       WHERE (
-        principal.workspace_id = p_workspace_id
-        OR EXISTS (
+        EXISTS (
           SELECT 1 FROM swarm.agent_workspace_memberships AS seat
           WHERE seat.principal_id = principal.principal_id
             AND seat.owner_user_id = principal.owner_user_id
             AND seat.workspace_id = p_workspace_id
+            AND seat.revoked_at IS NULL
+        )
+        -- No membership row here at all (a join registrar): its first workspace, as before.
+        OR (
+          principal.workspace_id = p_workspace_id
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm.agent_workspace_memberships AS any_seat
+            WHERE any_seat.principal_id = principal.principal_id
+              AND any_seat.workspace_id = p_workspace_id
+          )
         )
       )
         AND principal.revoked_at IS NULL
@@ -720,7 +762,8 @@ GRANT EXECUTE ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
 
 -- 3. swarm_read.home_overview: 20261113000003_private_channels.sql (1926-2131) unchanged except
 -- the agent's workspace in two places: an ask stays answered when the viewer's agent answered it
--- here, and a held to-do assigned to the viewer's agent here is listed as waiting on the viewer.
+-- here, and a to-do assigned to the viewer's agent here waits on the viewer when it is held, or when
+-- the agent is removed (from this workspace or altogether).
 -- Agents and their queues already came from swarm_read.agent_principals, which follows
 -- memberships.
 CREATE OR REPLACE FUNCTION swarm_read.home_overview() RETURNS jsonb
@@ -805,10 +848,15 @@ BEGIN
      jsonb_build_object('todo_id',t.todo_id,'title',t.title,'state',t.state,'due_on',t.due_on,
       'reason',reason.kind,'agent_id', CASE WHEN reason.kind = 'request' THEN t.offer_principal ELSE t.assignee_principal END) value
     FROM swarm.household_todos t
-    LEFT JOIN swarm.agent_principals p ON (p.workspace_id = t.workspace_id
-      OR EXISTS (SELECT 1 FROM swarm.agent_workspace_memberships seat WHERE seat.principal_id = p.principal_id
-       AND seat.owner_user_id = p.owner_user_id AND seat.workspace_id = t.workspace_id))
-     AND p.principal_id = t.assignee_principal
+    -- The assignee as this workspace sees it: removed when the agent is, or when it is removed from here.
+    LEFT JOIN LATERAL (
+     SELECT ap.owner_user_id, coalesce(ap.revoked_at, seat.revoked_at) AS revoked_at
+     FROM swarm.agent_principals ap
+     LEFT JOIN swarm.agent_workspace_memberships seat ON seat.principal_id = ap.principal_id
+      AND seat.owner_user_id = ap.owner_user_id AND seat.workspace_id = t.workspace_id
+     WHERE ap.principal_id = t.assignee_principal
+      AND (ap.workspace_id = t.workspace_id OR seat.principal_id IS NOT NULL)
+    ) p ON true
     CROSS JOIN LATERAL (
      SELECT CASE
      WHEN t.offer_id IS NOT NULL AND t.offer_decider = viewer THEN 'request'

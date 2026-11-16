@@ -63,6 +63,10 @@ let note: string;
 let ask: string;
 let multi: string;
 let homeNote: string;
+/** A held to-do in `shared` assigned to `lead` (home_overview test). */
+let heldShared: string;
+/** The to-do `lead` is doing in `shared` (home_overview test). */
+let doingShared: string;
 
 function localEnvironment(): Local {
   const parsed = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
@@ -203,6 +207,25 @@ async function rosterStatus(workspace: string, viewer: Person, principal: string
       SELECT swarm_read.workspace_roster(${workspace}::uuid) AS roster`;
     return row!.roster?.agents.find((agent) => agent.principal_id === principal)?.status;
   });
+}
+
+/** The agents a person's broadcast receipt lists (its broadcast_roster). */
+async function broadcastRoster(person: Person, workspace: string, signal: string): Promise<string[]> {
+  const receipt = await receiptsAs(person, workspace, signal);
+  assert.equal(receipt?.addressed, false, "a broadcast");
+  const agents = (receipt!.broadcast_roster as { agents: { principals: Row[] } }).agents;
+  return agents.principals.map((agent) => String(agent.principal_id));
+}
+
+/** home_overview's waiting to-dos for one workspace, as [todo_id, reason, agent_id]. */
+async function waitingIn(person: Person, workspace: string): Promise<unknown[][]> {
+  const overview = await asPerson(person, async (tx) => {
+    const [row] = await tx<{ overview: { workspaces: Row[] } }[]>`SELECT swarm_read.home_overview() AS overview`;
+    return row!.overview;
+  });
+  const entry = overview.workspaces.find((candidate) => candidate.workspace_id === workspace);
+  assert.ok(entry, `the overview lists ${workspace}`);
+  return (entry.needs_you as { waiting: Row[] }).waiting.map((row) => [row.todo_id, row.reason, row.agent_id]);
 }
 
 before(async () => {
@@ -395,7 +418,7 @@ test("a private channel in the second workspace still closes to the agent when i
 });
 
 test("home_overview in the second workspace: an ask the owner's agent answered is closed, and its held to-do waits on the owner", { timeout: 60_000 }, async () => {
-  const answeredAsk = randomUUID(), openAsk = randomUUID(), held = randomUUID(), doing = randomUUID(), foreignHeld = randomUUID();
+  const answeredAsk = randomUUID(), openAsk = randomUUID(), held = heldShared = randomUUID(), doing = doingShared = randomUUID(), foreignHeld = randomUUID();
   await sql.begin(async (tx) => {
     await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose) VALUES (${shared}::uuid, 'shared')`;
     await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
@@ -439,6 +462,24 @@ test("home_overview in the second workspace: an ask the owner's agent answered i
 });
 
 test("removing the agent from the second workspace ends its reads there; its first workspace is unaffected", { timeout: 120_000 }, async () => {
+  // A broadcast in each workspace, and a held to-do for the agent in its first workspace beside the one in shared.
+  const sharedBroadcast = await posted(owner.jwt, shared);
+  const homeBroadcast = await posted(owner.jwt, home);
+  const heldHome = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.household_workspace_boundaries (workspace_id, purpose) VALUES (${home}::uuid, 'shared')`;
+    await tx`INSERT INTO swarm.household_member_content_roles (workspace_id, user_id, content_role, content_consent_id, confirmed_at)
+      VALUES (${home}::uuid, ${owner.id}::uuid, 'reader', ${randomUUID()}::uuid, statement_timestamp())`;
+    await tx`INSERT INTO swarm.household_todos (workspace_id, todo_id, version, title, state, created_by_user, created_at,
+        state_by_user, state_at, last_seq, gate_kind, assignee_principal, assigned_by_user, assigned_at)
+      VALUES (${home}::uuid, ${heldHome}::uuid, 1, 'Synthetic title', 'open', ${owner.id}::uuid, statement_timestamp(),
+        ${owner.id}::uuid, statement_timestamp(), 0, 'hold', ${lead.principal}::uuid, ${owner.id}::uuid, statement_timestamp())`;
+  });
+  assert.ok((await broadcastRoster(owner, shared, sharedBroadcast)).includes(lead.principal), "listed in shared while a member");
+  assert.ok((await broadcastRoster(owner, home, homeBroadcast)).includes(lead.principal), "and in its first workspace");
+  assert.deepEqual(await waitingIn(owner, shared), [[heldShared, "hold", lead.principal]]);
+  assert.deepEqual(await waitingIn(owner, home), [[heldHome, "hold", lead.principal]]);
+
   await sql`UPDATE swarm.agent_workspace_memberships SET revoked_at = clock_timestamp()
     WHERE principal_id = ${lead.principal}::uuid AND workspace_id = ${shared}::uuid`;
   for (const inbox of [true, false]) {
@@ -447,6 +488,19 @@ test("removing the agent from the second workspace ends its reads there; its fir
     assert.deepEqual(refused.body, { error: "forbidden" }, "the membership refusal, not an unknown credential");
   }
   assert.ok((await readIds(lead, home, true)).includes(homeNote), "its first workspace reads as before");
+
+  // The principal is still live: only its shared membership ended.
+  const sharedRoster = await broadcastRoster(owner, shared, sharedBroadcast);
+  assert.equal(sharedRoster.includes(lead.principal), false, "a removed agent leaves shared's broadcast roster");
+  assert.ok(sharedRoster.includes(sibling.principal), "while the agents still there stay");
+  assert.ok((await broadcastRoster(owner, home, homeBroadcast)).includes(lead.principal), "its first workspace still lists it");
+  // Both of its shared to-dos (the held one and the one it was doing) now wait on the owner as agent_removed.
+  const sortById = (rows: unknown[][]) => [...rows].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  assert.deepEqual(sortById(await waitingIn(owner, shared)),
+    sortById([[heldShared, "agent_removed", lead.principal], [doingShared, "agent_removed", lead.principal]]),
+    "an agent removed from shared, though its principal is live, reads as removed there");
+  assert.deepEqual(await waitingIn(owner, home), [[heldHome, "hold", lead.principal]], "its first workspace is unchanged");
+
   const ownerView = await viewIds(owner, shared);
   for (const id of [note, ask, multi]) {
     assert.ok(ownerView.includes(id), `its owner still reads ${id}, as for an agent removed from its first workspace`);
