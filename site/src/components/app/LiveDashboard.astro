@@ -8157,18 +8157,33 @@ import "../../styles/kylon-command-palette.css";
         opener.setAttribute("aria-expanded", String(reactionPicker?.signalId === signalId && reactionPicker?.opener === kind));
       }
     };
-    /** Anchored under the opener (above it when there is no room), kept inside the viewport. */
+    /** Whether the opener is still in view vertically (the feed scrolls up and down): inside the window and
+     *  inside every scrolling box around it. */
+    const reactionOpenerShown = (opener: HTMLElement): boolean => {
+      const rect = opener.getBoundingClientRect();
+      let top = 0, bottom = window.innerHeight;
+      for (let node = opener.parentElement; node; node = node.parentElement) {
+        const style = typeof window.getComputedStyle === "function" ? window.getComputedStyle(node) : null;
+        if (!style || !/(auto|scroll|hidden|clip)/.test(style.overflowY)) continue;
+        const box = node.getBoundingClientRect();
+        top = Math.max(top, box.top); bottom = Math.min(bottom, box.bottom);
+      }
+      return rect.bottom > top && rect.top < bottom;
+    };
+    /** Anchored under the opener (above it when there is no room), kept inside the viewport. When a scroll
+     *  carries the opener out of view, the picker closes rather than float over other messages. */
     const placeReactionPicker = (): void => {
       const node = reactionPickerNode;
       if (!node || !reactionPicker) return;
       const opener = reactionOpener();
-      if (!opener || opener.getClientRects().length === 0) { closeReactionPicker(false); return; }
+      if (!opener || opener.getClientRects().length === 0 || !reactionOpenerShown(opener)) { closeReactionPicker(false); return; }
       const anchor = opener.getBoundingClientRect();
       const box = node.getBoundingClientRect();
       const margin = 8;
       const left = Math.max(margin, Math.min(anchor.right - box.width, window.innerWidth - box.width - margin));
       const below = anchor.bottom + 4;
-      const top = below + box.height <= window.innerHeight - margin ? below : Math.max(margin, anchor.top - 4 - box.height);
+      const preferred = below + box.height <= window.innerHeight - margin ? below : anchor.top - 4 - box.height;
+      const top = Math.max(margin, Math.min(preferred, window.innerHeight - box.height - margin));
       node.style.left = `${left}px`;
       node.style.top = `${top}px`;
     };

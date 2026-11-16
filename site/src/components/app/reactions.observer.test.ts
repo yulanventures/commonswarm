@@ -14,7 +14,7 @@ import { REACTION_PICKER_EMOJIS, pickerMove, reactionNames, reactionPillLabel } 
 const REACTION_FUNCTIONS = [
   "reactionKey", "REACTION_PICKER_COLUMNS", "reactionsAllowed", "reactionTicketLive", "reactionIsPending",
   "refreshSignalReactions", "repaintReactions", "applyOwnReaction", "showReactionError", "syncReactionPending",
-  "toggleReaction", "reactionOpener", "syncReactionOpeners", "placeReactionPicker", "syncReactionPicker",
+  "toggleReaction", "reactionOpener", "syncReactionOpeners", "reactionOpenerShown", "placeReactionPicker", "syncReactionPicker",
   "onReactionPickerOutside", "onReactionPickerFocusOut", "onReactionPickerKey", "closeReactionPicker",
   "openReactionPicker", "reactionAddButton", "appendReactions", "resetSignalReactions",
 ];
@@ -358,4 +358,24 @@ test("the sample and a signed-out page have no reactions UI and read nothing", a
   g.run("session = null");
   g.context.renderFeed();
   assert.equal(g.list.querySelector("[data-reaction-add]"), null);
+});
+
+test("a scroll that carries the opener out of view closes the picker; while in view it stays inside the window", async () => {
+  const f = await fixture();
+  f.setGroups(twoGroups);
+  await f.run("refreshSignalReactions('W', 1)");
+  const opener = () => f.row(S2).querySelector("[data-reaction-add]")!;
+  // Near the bottom edge: the picker opens above its opener and stays inside the window.
+  opener().rect = { left: 300, right: 328, top: 600, bottom: 628, width: 28, height: 28 };
+  opener().click();
+  const picker = f.picker()!;
+  picker.rect = { left: 0, right: 200, top: 0, bottom: 120, width: 200, height: 120 };
+  f.run("placeReactionPicker()");
+  const top = Number.parseFloat(picker.style.top!);
+  assert.ok(top >= 8 && top + 120 <= 640 - 8, `inside the 640px window: ${top}`);
+  // Scrolled above the top of the window: closed, without taking focus anywhere.
+  opener().rect = { left: 300, right: 328, top: -60, bottom: -32, width: 28, height: 28 };
+  f.run("placeReactionPicker()");
+  assert.equal(f.picker(), null, "out of view, so closed");
+  assert.equal(opener().getAttribute("aria-expanded"), "false");
 });
