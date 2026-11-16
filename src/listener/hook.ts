@@ -20,6 +20,7 @@ import {
 } from "../cloud/session-context.js";
 import type { AgentSessionProof } from "../cloud/session-contract.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
+import { reportSeenReactions, seenAckTargets } from "../cloud/agent-signal-receipts.js";
 import {
   followHttpDetails,
   readAgentSignalDirectory,
@@ -796,7 +797,7 @@ function renderStrandedQueue(context: ListenerHookContext, count: number): strin
 async function inboxItems(
   context: ListenerHookContext,
   options: { fetcher?: typeof fetch; signal: AbortSignal; deadlineMs: number; now: () => number },
-): Promise<SurfaceItem[]> {
+): Promise<{ items: SurfaceItem[]; seen: string[] }> {
   const stored = context.credential!;
   const target = cloudTarget(stored.targetUrl, stored.anonKey);
   const readOptions = {
@@ -823,7 +824,10 @@ async function inboxItems(
     signal.workspace_id === stored.workspaceId &&
     signalReachesAgent(signal, stored.principalId)
   );
-  if (directed.length === 0) return [];
+  if (directed.length === 0) return { items: [], seen: [] };
+  // Which of these get 👀 once surfaced. Decided here, where the full rows still are; unbounded,
+  // because only the ones this hook prints are marked (reportSeenReactions bounds those).
+  const seen = seenAckTargets(directed, stored.principalId, Number.POSITIVE_INFINITY);
   let directory: SignalDirectory | null = null;
   try {
     directory = await readAgentSignalDirectory(
@@ -838,7 +842,7 @@ async function inboxItems(
   const candidates = directed
     .map((signal) => entryFromSignal(signal, stored.principalId, directory, options.now()))
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-  return candidates;
+  return { items: candidates, seen };
 }
 
 function renderDroppedAsks(count: number): string {
@@ -859,6 +863,8 @@ interface ContextCheck {
   pending: SurfaceItem[];
   droppedCount: number;
   network: SurfaceItem[];
+  /** Network rows that get 👀 if this hook prints them (seenAckTargets). */
+  seenCandidates: readonly string[];
   credentialFailure: "read" | "401" | null;
   credentialHealthy: boolean;
 }
@@ -1017,17 +1023,18 @@ export async function checkListenerHooks(
       const pending = await queue.read();
       const stats = await queue.stats();
       let network: SurfaceItem[] = [];
+      let seenCandidates: readonly string[] = [];
       let credentialFailure: ContextCheck["credentialFailure"] =
         context.credentialReadFailed ? "read" : null;
       let credentialHealthy = false;
       if (networkAllowed && !options.signal.aborted && context.credential !== null) {
         try {
-          network = await inboxItems(context, {
+          ({ items: network, seen: seenCandidates } = await inboxItems(context, {
             ...(options.fetcher ? { fetcher: options.fetcher } : {}),
             signal: options.signal,
             deadlineMs: options.deadlineMs,
             now,
-          });
+          }));
           credentialHealthy = true;
         } catch (error) {
           if (followHttpDetails(error)?.status === 401) credentialFailure = "401";
@@ -1039,6 +1046,7 @@ export async function checkListenerHooks(
         pending,
         droppedCount: context.listenerLive === false ? 0 : stats.droppedCount,
         network,
+        seenCandidates,
         credentialFailure,
         credentialHealthy,
       };
@@ -1133,6 +1141,11 @@ export async function checkListenerHooks(
     const statusUpdate = workingOn === undefined
       ? Promise.resolve()
       : messageStatusUpdate(workingOn.context, { kind: "working", signalId: workingOn.signalId }, options);
+    // 👀 on the inbox rows this hook just printed, beside the queue bookkeeping below.
+    const seenMarks = Promise.all(commits.map((commit) => {
+      const printed = new Set(commit.signalIds);
+      return markHookSeen(commit.check, commit.check.seenCandidates.filter((id) => printed.has(id)), options, now);
+    }));
 
     for (const commit of commits) {
       await commit.store.commit({
@@ -1170,11 +1183,37 @@ export async function checkListenerHooks(
         }
       }
     }
-    await statusUpdate;
+    await Promise.all([statusUpdate, seenMarks]);
     return surfaced;
   } catch {
     return "";
   }
+}
+
+/**
+ * 👀 on messages a hook printed, under the same managed gate as its observations: a refused gate
+ * sends nothing, a managed principal sends its session proof. Bounded by the hook's deadline;
+ * never throws.
+ */
+async function markHookSeen(
+  check: ContextCheck,
+  signalIds: readonly string[],
+  options: { fetcher?: typeof fetch; hostSessionId?: string; signal: AbortSignal; deadlineMs: number },
+  now: () => number,
+): Promise<void> {
+  const stored = check.context.credential;
+  if (stored === null || signalIds.length === 0 || options.signal.aborted) return;
+  try {
+    const gate = await managedHookGate(stored, options.hostSessionId);
+    if (gate.mode === "refuse") return;
+    // A test clock can sit far from the deadline's; the hook's own ceiling bounds the wait either way.
+    const remainingMs = Math.min(Math.floor(options.deadlineMs - now()), HOOK_CHECK_TIMEOUT_MS);
+    if (remainingMs <= 0) return;
+    const base = options.fetcher ?? fetch;
+    const fetcher = gate.mode === "managed" ? bindSessionProof(base, gate.proof) as typeof fetch : base;
+    await reportSeenReactions(cloudTarget(stored.targetUrl, stored.anonKey), stored.credential, stored.workspaceId,
+      signalIds, fetcher, AbortSignal.any([options.signal, AbortSignal.timeout(remainingMs)]));
+  } catch { /* Best effort: the hook's output is already written. */ }
 }
 
 /**

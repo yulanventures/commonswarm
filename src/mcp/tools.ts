@@ -15,7 +15,8 @@ import {
   MEMORY_EVIDENCE_MAX, MEMORY_EVIDENCE_URL_MAX, MEMORY_KINDS, MEMORY_QUERY_MAX, MEMORY_SEARCH_LIMIT_MAX,
   MEMORY_STATEMENT_MAX, MEMORY_SUBJECT_MAX,
 } from "../cloud/memory.js";
-import type { PostSignalResult } from "../cloud/command-client.js";
+import type { PostSignalResult, ReactionOutcome } from "../cloud/command-client.js";
+import { normalizeReactionEmoji, SIGNAL_REACTION_MAX_BYTES } from "../protocol/signal-reactions.js";
 import { messageReadProvenance, provenanceForms, withReadProvenance, type ReadProvenance } from "../protocol/read-provenance.js";
 
 /** An unknown argument name is echoed to the caller only up to this length. */
@@ -43,6 +44,7 @@ export const MCP_TOOL_TABLE = [
   { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
+  { name: "react", description: "React to a message with one emoji, or a shortcode such as :+1:. Set remove to true to take your reaction off. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, emoji: string(SIGNAL_REACTION_MAX_BYTES, 1), remove: { type: "boolean" as const }, request_id: requestId }, ["signal_id", "emoji", "request_id"]), mapResult: mapReaction },
   { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
   { name: "channel_ls", description: "List this workspace's live channels, general (unfiled messages) first. unread is true when channel_read has messages there you haven't read, and null until you first read a channel.", inputSchema: schema({}), mapResult: mapChannelList },
@@ -80,6 +82,10 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
       if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) throw new Error("Invalid argument: if_version.");
       continue;
     }
+    if (rule.type === "boolean") {
+      if (typeof item !== "boolean") throw new Error(`Invalid argument: ${key}.`);
+      continue;
+    }
     if (rule.type === "integer") {
       if (typeof item !== "number" || !Number.isSafeInteger(item) || (rule.minimum !== undefined && item < rule.minimum) ||
           (rule.maximum !== undefined && item > rule.maximum)) throw new Error(`Invalid argument: ${key}.`);
@@ -99,6 +105,7 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
       try { signalDuration(item); } catch { throw new Error("Invalid argument: until."); }
     }
     if (key === "path" && !isAbsolute(item)) throw new Error("Invalid argument: path.");
+    if (key === "emoji" && normalizeReactionEmoji(item) === null) throw new Error("Invalid argument: emoji.");
   }
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");
@@ -169,6 +176,13 @@ export function mapSignal(result: PostSignalResult): object {
   const row = result.response.signal!;
   return { signal_id: row.id, kind: row.kind, created_at: row.created_at,
     in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null };
+}
+
+/** A reaction's outcome: added or already_there, removed or not_there. */
+export function mapReaction(result: ReactionOutcome): object {
+  const outcome = result.added === true ? "added" : result.added === false ? "already_there"
+    : result.removed === true ? "removed" : "not_there";
+  return { signal_id: result.signal_id, emoji: result.emoji, outcome };
 }
 
 export function mapReraise(result: PostSignalResult): object {

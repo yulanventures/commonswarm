@@ -18,6 +18,7 @@ import {
 } from "../cloud/memory.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
 import { choiceOptions } from "../cloud/choices.js";
+import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
 import { signalDuration } from "../cloud/signal-duration.js";
 import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, MCP_CHANNEL_PAGE_MAX_BYTES, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
 import { mapMcpError, OutcomeStillUnknown } from "./errors.js";
@@ -355,6 +356,31 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
                 next_step: mapMcpError(error).next_step,
                 conflict_check: prepared.conflict_check };
             } else throw error;
+          }
+          break;
+        }
+        case "react": {
+          const raw = selected.arguments as Record<string, unknown>;
+          // validateMcpArguments refused anything this rule does not take; this maps a shortcode to its emoji.
+          const emoji = normalizeReactionEmoji(raw.emoji)!;
+          const signalId = args.signal_id!.toLowerCase();
+          const key = `react:${args.request_id}`;
+          const { fetcher, token } = await authenticated();
+          const client = new ThinCommandClient(profileTarget(profile), fetcher);
+          try {
+            const sent = await client.sendReaction({ workspaceId: profile.workspace_id, credential: token,
+              command: raw.remove === true
+                ? { kind: "remove_reaction", signal_id: signalId, emoji }
+                : { kind: "add_reaction", signal_id: signalId, emoji },
+              commandId: args.request_id!, signal: extra.signal });
+            output = tool.mapResult(sent.response);
+            unknownOnce.delete(key);
+          } catch (error) {
+            if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {
+              unknownOnce.delete(key);
+              throw error;
+            }
+            output = unknownOutcome(key);
           }
           break;
         }

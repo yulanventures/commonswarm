@@ -265,6 +265,7 @@ test("an agent read asks for mentions, and a row that only mentions this agent r
   const [mentioned] = await readSignals(target, credential, query,
     served([{ position: 0, kind: "agent", id: AGENT, source: "lead", later_key: 1 }, { position: 1, kind: "user", id: USER, source: "a-new-source" }]));
   assert.equal(bodies[0]!.include_mentions, true);
+  assert.equal(bodies[0]!.include_reactions, true);
   assert.deepEqual(mentioned!.mentions, [
     { position: 0, kind: "agent", id: AGENT, source: "lead" },
     { position: 1, kind: "user", id: USER, source: "a-new-source" },
@@ -313,9 +314,10 @@ test("legacy cursor fallback is explicit and a capable 400 still fails", async (
     { allowLegacyCursorFallback: true },
   );
   assert.equal(page.legacyCursorFallback, true);
-  // Such an edge also predates include_mentions: asked without it, then without the cursor.
-  assert.deepEqual(requests.map((body) => [Object.hasOwn(body, "include_mentions"), Object.hasOwn(body, "after_created_at")]),
-    [[true, true], [false, true], [false, false]]);
+  // Such an edge also predates include_mentions and include_reactions: asked without both, then without the cursor.
+  assert.deepEqual(requests.map((body) => [Object.hasOwn(body, "include_mentions"), Object.hasOwn(body, "include_reactions"),
+    Object.hasOwn(body, "after_created_at")]),
+  [[true, true, true], [false, false, true], [false, false, false]]);
 
   await assert.rejects(
     readAgentSignalPage(

@@ -21,6 +21,7 @@ import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
 import { DeliveryCommandClient, DeliveryHttpError } from "./delivery.js";
 import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
+import { reportSeenReactions, seenAckTargets } from "./agent-signal-receipts.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -361,6 +362,16 @@ export async function checkAgentMessages(options: {
           if (writeBudgetMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) return;
           if (batch.length > 0 || removed.size > 0 || retryUpdates.size > 0) await persist(undefined, true);
         };
+        /* 👀 on what this check surfaced, after the delivery acks and inside the same deadline.
+         * Best effort: it never changes the output, the cursor or the exit status. */
+        const markSeen = async (rows: readonly SignalRecord[]) => {
+          const ids = seenAckTargets(rows, profile.principal_id);
+          const remainingMs = Math.floor(deadlineMs - Date.now());
+          if (ids.length === 0 || remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) return;
+          try {
+            await reportSeenReactions(target, token, profile.workspace_id, ids, fetcher, AbortSignal.timeout(remainingMs));
+          } catch { /* Never change check output. */ }
+        };
         if (presented.length > 0) {
           if (options.deferCursorCommit) {
             options.deferCursorCommit((lastVisibleId?: string) => withFileLock(dirname(path), "check", async () => {
@@ -381,12 +392,18 @@ export async function checkAgentMessages(options: {
             }).then(async () => {
               await replaceTurnContext(lastVisibleId);
               try { await ackPending(); } catch { /* Never change MCP output. */ }
+              // Only the rows the response showed: a capped result leaves the rest for the next check.
+              await markSeen(lastVisibleId === undefined
+                ? presented
+                : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1));
             }));
           } else {
             await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds,
               pending_observed_retries: queuedRetries(cached, pendingIds) }));
             await replaceTurnContext();
-            ackAfterCommit = ackPending;
+            ackAfterCommit = async () => {
+              try { await ackPending(); } finally { await markSeen(presented); }
+            };
           }
         } else if (pendingIds.length > 0) {
           if (options.deferCursorCommit) {

@@ -49,6 +49,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const previousHome = process.env.HOME;
   process.env.HOME = root;
   const posts: Array<Record<string, any>> = [];
+  const reactions: Array<Record<string, any>> = [];
   const observations: Array<Record<string, any>> = [];
   const fileCommands: Array<Record<string, any>> = [];
   const fileCreates = new Map<string, Record<string, any>>();
@@ -168,6 +169,14 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         if (delayAnswer) { delayAnswer = false; setTimeout(() => send(200, response), 250); return; }
         return send(200, response);
       }
+      if (body.command?.kind === "add_reaction" || body.command?.kind === "remove_reaction") {
+        reactions.push(body);
+        if (body.command.signal_id !== ID) {
+          return send(404, { error: "signal_not_found", message: "There is no message with that id that you can read in this workspace." });
+        }
+        return send(200, { status: "accepted", ok: true, event_ids: [], signal_id: body.command.signal_id, emoji: body.command.emoji,
+          ...(body.command.kind === "add_reaction" ? { added: true } : { removed: false }) });
+      }
       return send(400, { error: "unexpected" });
     });
   });
@@ -222,7 +231,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     assert.ok(!text.text.includes("cswarm check --"));
     return { result, value: JSON.parse(text.text) as Record<string, any> };
   };
-  return { root, profile, posts, observations, fileCommands, fileCreates, fileCommits, fileObjects, created: () => committed.size, renewals: () => renewals, get client() { return client; }, get transport() { return transport; }, call, close, restart, killAfter: (phase: "create" | "put" | "commit") => { killPhase = phase; }, stderr: () => stderr, stdout: () => stdout,
+  return { root, profile, posts, reactions, observations, fileCommands, fileCreates, fileCommits, fileObjects, created: () => committed.size, renewals: () => renewals, get client() { return client; }, get transport() { return transport; }, call, close, restart, killAfter: (phase: "create" | "put" | "commit") => { killPhase = phase; }, stderr: () => stderr, stdout: () => stdout,
     refuseReads: (value: boolean) => { readRefusal = value; }, refuseSends: (value: boolean) => { sendRefusal = value; },
     setReadError: (value: typeof readError) => { readError = value; }, setSendError: (value: typeof sendError) => { sendError = value; },
     loseNextAnswer: () => { lostAttempts = 3; }, delayNextAnswer: () => { delayAnswer = true; }, malformedNextAnswer: () => { malformedAnswer = true; },
@@ -914,6 +923,34 @@ test("a second unknown outcome for the same request id stops instead of asking f
     // One unknown followed by an answer starts over: a later unknown is a first unknown again.
     f.loseNextAnswer();
     assert.deepEqual((await f.call("note", { body: "later", request_id: "stuck0002" })).value, { outcome: "unknown", retry_with_same_request_id: true });
+  } finally { await f.close(); }
+});
+
+test("MCP react adds or removes one emoji with request_id as its command id, and check marks what it showed", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  try {
+    const added = await f.call("react", { signal_id: ID.toUpperCase(), emoji: ":+1:", request_id: "react0001" });
+    assert.deepEqual(added.value, { signal_id: ID, emoji: "\u{1F44D}", outcome: "added" });
+    const removed = await f.call("react", { signal_id: ID, emoji: "\u{1F44D}", remove: true, request_id: "react0002" });
+    assert.deepEqual(removed.value, { signal_id: ID, emoji: "\u{1F44D}", outcome: "not_there" });
+    assert.deepEqual(f.reactions.map(body => [body.command_id, body.command]), [
+      ["react0001", { kind: "add_reaction", signal_id: ID, emoji: "\u{1F44D}" }],
+      ["react0002", { kind: "remove_reaction", signal_id: ID, emoji: "\u{1F44D}" }],
+    ]);
+    for (const bad of [{ emoji: "ok" }, { emoji: "\u{1F44D}", remove: "yes" }]) {
+      await assert.rejects(f.client.callTool({ name: "react", arguments: { signal_id: ID, request_id: "react0003", ...bad } }),
+        (error: any) => error.code === -32602, JSON.stringify(bad));
+    }
+    const missing = await f.call("react", { signal_id: OWNER, emoji: "\u{1F44D}", request_id: "react0004" });
+    assert.equal(missing.result.isError, true);
+    assert.equal(missing.value.code, "signal_not_found");
+    assert.equal(missing.value.next_step, "fix the named argument");
+    assert.equal(f.reactions.length, 3, "an invalid emoji or remove is refused before any request");
+    // A check that shows the incoming ask marks it seen once the response is written.
+    assert.equal((await f.call("check")).value.messages[0].id, ID);
+    const until = Date.now() + 5_000;
+    while (f.reactions.length === 3 && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+    assert.deepEqual(f.reactions.at(-1)!.command, { kind: "add_reaction", signal_id: ID, emoji: "\u{1F440}", source: "ack" });
   } finally { await f.close(); }
 });
 

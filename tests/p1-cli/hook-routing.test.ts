@@ -2381,8 +2381,9 @@ test("hook check surfaces a signal that names this agent at position 1", async (
     const paths = await installCredential(root);
     await writeStatus(paths);
     let signalReads = 0;
+    const seenMarks: Array<Record<string, unknown>> = [];
     const fetcher: typeof fetch = async (_input, init) => {
-      const body = JSON.parse(String(init?.body)) as { resource?: string };
+      const body = JSON.parse(String(init?.body)) as { resource?: string; command?: Record<string, unknown> };
       if (body.resource === "files") {
         return new Response(JSON.stringify({ files: [] }), { status: 200 });
       }
@@ -2394,6 +2395,12 @@ test("hook check surfaces a signal that names this agent at position 1", async (
           status: 200,
           headers: { "content-type": "application/json" },
         });
+      }
+      if (body.command?.kind === "add_reaction") {
+        // The 👀 the hook adds once it has printed the ask; counted apart from the inbox read.
+        seenMarks.push(body.command);
+        return new Response(JSON.stringify({ status: "accepted", ok: true, event_ids: [],
+          signal_id: body.command.signal_id, emoji: body.command.emoji, added: true }), { status: 200 });
       }
       signalReads += 1;
       return new Response(
@@ -2438,6 +2445,8 @@ test("hook check surfaces a signal that names this agent at position 1", async (
       /both of you please look at this/,
       "a signal naming this agent at position 1 must reach the session",
     );
+    assert.deepEqual(seenMarks, [{ kind: "add_reaction", signal_id: SIGNAL_ID, emoji: "\u{1F440}", source: "ack" }],
+      "the printed ask is marked seen once");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

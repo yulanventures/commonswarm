@@ -9,6 +9,7 @@ import {
   type SenderOwnerRelation,
   type SignalKind,
   type SignalMentionRef,
+  type SignalReactionSummary,
   type SignalRecipientRef,
   type SignalRecord,
 } from "./command-client.js";
@@ -33,6 +34,7 @@ import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 import { parseServerSessionStatus, type ServerSessionStatus } from "./session-client.js";
 import { isReplyStatus } from "./reply-status.js";
 import { CHAIN_MAX_HOPS } from "./ask-chain-constants.js";
+import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -439,6 +441,51 @@ function parseSignalMentions(value: unknown): { mentions?: SignalMentionRef[] } 
   };
 }
 
+/**
+ * Parse a row's reactions and, on a reaction note, the reaction it stands for. Absent stays
+ * absent: only a read that asked for reactions gets them. Keys beyond the documented ones are
+ * ignored, so the server can add one without breaking this reader.
+ */
+function parseSignalReactions(
+  value: unknown,
+  note: unknown,
+): { reactions?: SignalReactionSummary[]; reaction?: { emoji: string; signal_id: string } } {
+  const malformed = (what: string) => new SignalMalformedError(`signal read returned a malformed ${what}`);
+  const record = (entry: unknown, what: string): Record<string, unknown> => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw malformed(what);
+    return entry as Record<string, unknown>;
+  };
+  const emoji = (entry: unknown, what: string): string => {
+    if (typeof entry !== "string" || entry.length < 1 || entry.length > 64) throw malformed(what);
+    return entry;
+  };
+  let reactions: SignalReactionSummary[] | undefined;
+  if (value !== undefined) {
+    if (!Array.isArray(value)) throw malformed("reactions list");
+    reactions = value.map((entry) => {
+      const row = record(entry, "reaction");
+      if (!Number.isSafeInteger(row.count) || (row.count as number) < 1 || !Array.isArray(row.actors)) {
+        throw malformed("reaction");
+      }
+      return {
+        emoji: emoji(row.emoji, "reaction"),
+        count: row.count as number,
+        actors: row.actors.map((actor) => {
+          const who = record(actor, "reaction actor");
+          if (!SIGNAL_RECIPIENT_KINDS.has(who.kind as SignalRecipientRef["kind"])) throw malformed("reaction actor");
+          return { kind: who.kind as "user" | "agent", id: checkedUuid(who.id, "reaction actor id") };
+        }),
+      };
+    });
+  }
+  let reaction: { emoji: string; signal_id: string } | undefined;
+  if (note !== undefined) {
+    const row = record(note, "reaction note");
+    reaction = { emoji: emoji(row.emoji, "reaction note"), signal_id: checkedUuid(row.signal_id, "reaction signal_id") };
+  }
+  return { ...(reactions === undefined ? {} : { reactions }), ...(reaction === undefined ? {} : { reaction }) };
+}
+
 function parseSignalRecipients(
   value: unknown,
 ): { recipients?: SignalRecipientRef[] } {
@@ -646,6 +693,7 @@ export function parseSignalRecord(
      * nobody), so absence cannot be flattened into it. */
     ...parseSignalRecipients(row.recipients),
     ...parseSignalMentions(row.mentions),
+    ...parseSignalReactions(row.reactions, row.reaction),
   };
 }
 
@@ -1265,7 +1313,7 @@ async function agentSignalPage(
   const cursorRequested = query.ascending === true || query.after !== undefined;
   const perform = async (
     includeCursor: boolean,
-    includeMentions: boolean,
+    includeOptional: boolean,
   ): Promise<{ response: Response; body: unknown }> => {
     let result: { response: Response; body: unknown } | null;
     try {
@@ -1298,8 +1346,9 @@ async function agentSignalPage(
           limit: query.limit,
           include_stale: query.includeStale ?? false,
           /* Each row's mentions, as stored. Without it the edge names this agent in to_agent on an
-           * inbox row that only mentions it, for clients that admit only addressed rows. */
-          ...(includeMentions ? { include_mentions: true } : {}),
+           * inbox row that only mentions it, for clients that admit only addressed rows. Reactions
+           * also mark a reaction note (`reaction`), which this client never acknowledges. */
+          ...(includeOptional ? { include_mentions: true, include_reactions: true } : {}),
         }),
         ...(options.signal ? { signal: options.signal } : {}),
       }, perReadTimeoutMs(options));
@@ -1313,8 +1362,9 @@ async function agentSignalPage(
   };
 
   let result = await perform(cursorRequested, true);
-  /* An edge from before include_mentions refuses the key it does not know. Ask again without it:
-   * that edge returns no mention rows, so nothing is missed that it could have returned. */
+  /* An edge from before include_mentions or include_reactions refuses a key it does not know. Ask
+   * once more without both: that edge returns no mention rows and no reaction notes, so nothing is
+   * missed that it could have returned. */
   if (result.response.status === 400) result = await perform(cursorRequested, false);
   let legacyCursorFallback = false;
   if (
@@ -2119,6 +2169,14 @@ export function askReplyReadFailureMessage(
   return `Your message was posted, but its reply could not be fetched (${failure.detail}). Do not resend this ask. Check with: cswarm inbox --workspace-id ${workspaceId}`;
 }
 
+/** ` [👀 2  👍 1]` for a row with reactions; empty when there are none or nobody asked. */
+export function reactionSummary(reactions: SignalRecord["reactions"]): string {
+  if (reactions === undefined || reactions.length === 0) return "";
+  // An emoji the shared rule would not store is quoted, so a terminal never prints raw control text.
+  const shown = (emoji: string) => normalizeReactionEmoji(emoji) === emoji ? emoji : JSON.stringify(emoji);
+  return ` [${reactions.map((reaction) => `${shown(reaction.emoji)} ${reaction.count}`).join("  ")}]`;
+}
+
 export function renderSignals(
   signals: readonly SignalRecord[],
   options: {
@@ -2174,7 +2232,8 @@ export function renderSignals(
     const about = displayedAbout === null
       ? ""
       : ` about ${JSON.stringify(displayedAbout)}`;
-    const replyTo = (signal.in_reply_to ?? null) === null
+    // A reaction note's body already names the message it is about.
+    const replyTo = (signal.in_reply_to ?? null) === null || signal.reaction !== undefined
       ? ""
       : ` — in reply to ${signal.in_reply_to}`;
     const replyStatus = signal.reply_status == null
@@ -2190,7 +2249,7 @@ export function renderSignals(
      * Worse than absent. The line already carries a uuid — the AUTHOR's — so a reader following
      * the obvious cue pastes the wrong one and gets a refusal that looks like their mistake.
      * Shown only for kinds that can BE replied to, so every other row stays quiet. */
-    const replyable = signal.kind === "ask";
+    const replyable = signal.kind === "ask" && signal.reaction === undefined;
     // A message the workspace or channel reads is answered in its thread, as the hook and an arrival say.
     const threadRoot = publicReplyThreadRoot(signal);
     const idHint = !replyable ? ""
@@ -2201,11 +2260,11 @@ export function renderSignals(
       ? signal.body.slice(0, SIGNAL_BODY_DISPLAY_MAX)
       : signal.body;
     lines.push(
-      `- [${signal.kind}]${replyStatus} ${author} — ${
+      `- [${signal.reaction === undefined ? signal.kind : "reaction"}]${replyStatus} ${author} — ${
         relativeAge(signal.created_at, now)
       } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}${chainHop}: ${
         JSON.stringify(displayedBody)
-      }${idHint}`,
+      }${reactionSummary(signal.reactions)}${idHint}`,
     );
     for (const [index, attachment] of (signal.attachments ?? []).entries()) {
       lines.push(
