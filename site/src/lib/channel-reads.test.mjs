@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  firstUnreadOlderThanLoaded, newestChannelMessage, oldestChannelMessage, readChannelIdOf, throughSignalFor,
-  unreadJumpLabel, withChannelRead,
+  firstUnreadOlderThanLoaded, newestChannelMessage, newestMarkableChannelMessage, oldestChannelMessage, readChannelIdOf,
+  timestampMicros, unreadJumpLabel, withChannelRead,
 } from "./channel-reads.ts";
 
 /** A server id for a test name. */
@@ -26,12 +26,24 @@ test("the newest and oldest message a read position can name skip other channels
   assert.equal(newestChannelMessage(signals, "c3"), null);
 });
 
-test("the person's own addressed message is marked up to now; anything else through itself", () => {
-  assert.equal(throughSignalFor(message("m"), "viewer"), U("m"));
-  assert.equal(throughSignalFor(message("m", { from: "viewer", fromKind: "user" }), "viewer"), U("m"));
-  assert.equal(throughSignalFor(message("m", { from: "viewer", fromKind: "user", to: "dana" }), "viewer"), null);
-  assert.equal(throughSignalFor(message("m", { from: "viewer", fromKind: "user", toAgent: "orbit" }), "viewer"), null);
-  assert.equal(throughSignalFor(message("m", { from: "someone", fromKind: "user", to: "viewer" }), "viewer"), U("m"));
+test("a mark goes through the newest markable loaded message: not the person's own addressed one, not a refused one", () => {
+  const own = (name, extra) => message(name, { from: "viewer", fromKind: "user", ...extra });
+  const signals = [ // newest first, as loaded
+    own("toDana", { to: "dana" }),
+    own("toOrbit", { toAgent: "orbit" }),
+    own("toMany", { recipients: [{ kind: "user", id: "dana" }, { kind: "agent", id: "orbit" }] }),
+    message("refuse"),
+    own("ownOpen"),
+    message("older"),
+  ];
+  assert.equal(newestMarkableChannelMessage(signals, "c1", "viewer")?.id, U("refuse"));
+  assert.equal(newestMarkableChannelMessage(signals, "c1", "viewer", new Set([U("refuse")]))?.id, U("ownOpen"),
+    "the person's own message to everyone is one they can name");
+  assert.equal(newestMarkableChannelMessage(signals, "c1", "viewer", new Set([U("refuse"), U("ownOpen"), U("older")])), null,
+    "nothing left: null, so a mark on view sends nothing");
+  assert.equal(newestMarkableChannelMessage([message("m", { from: "someone", fromKind: "user", to: "viewer" })], "c1", "viewer")?.id,
+    U("m"), "a message addressed to the person is theirs to mark through");
+  assert.equal(newestMarkableChannelMessage(signals, "c2", "viewer"), null);
 });
 
 test("general is null on the wire", () => {
@@ -39,11 +51,36 @@ test("general is null on the wire", () => {
   assert.equal(readChannelIdOf("c1"), "c1");
 });
 
-test("a first unread message is older than the page by time, not by text", () => {
-  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T09:59:59.5+00:00", "2026-11-16T10:00:00Z"), true);
-  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.5Z", "2026-11-16T10:00:00Z"), false);
-  assert.equal(firstUnreadOlderThanLoaded(null, "2026-11-16T10:00:00Z"), false);
-  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00Z", null), false);
+test("timestamps keep PostgreSQL's microseconds and their offset", () => {
+  const base = BigInt(Date.UTC(2026, 10, 16, 10, 0, 0)) * 1000n;
+  assert.equal(timestampMicros("2026-11-16T10:00:00Z"), base);
+  assert.equal(timestampMicros("2026-11-16T10:00:00.123456Z"), base + 123456n);
+  assert.equal(timestampMicros("2026-11-16T10:00:00.1234567Z"), base + 123456n, "past six digits is below a microsecond");
+  assert.equal(timestampMicros("2026-11-16T10:00:00.5Z"), base + 500000n);
+  assert.equal(timestampMicros("2026-11-16 12:30:00.000001+02:30"), base + 1n, "PostgreSQL's text form, offset applied");
+  assert.equal(timestampMicros("2026-11-16T04:00:00-06"), base);
+  assert.equal(timestampMicros("2026-11-16T05:00:00-0500"), base);
+  assert.equal(timestampMicros("2026-11-16T10:00:00"), base, "no offset reads as UTC");
+  assert.equal(timestampMicros("yesterday"), null);
+});
+
+test("a first unread message is older than the page by the feed's own order: time to the microsecond, then id", () => {
+  const floor = (createdAt, id = "00000000-0000-4000-8000-000000000002") => ({ createdAt, id });
+  // Inside one JavaScript millisecond: Date.parse would call these equal.
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.123100Z", "00000000-0000-4000-8000-000000000009",
+    floor("2026-11-16T10:00:00.123456Z")), true);
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.123456Z", "00000000-0000-4000-8000-000000000001",
+    floor("2026-11-16T10:00:00.123100Z")), false);
+  // The same time across a page boundary: the id decides, as the feed's ORDER BY created_at, id does.
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.123456Z", "00000000-0000-4000-8000-000000000001",
+    floor("2026-11-16T10:00:00.123456Z")), true);
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.123456Z", "00000000-0000-4000-8000-00000000000A",
+    floor("2026-11-16T10:00:00.123456Z", "00000000-0000-4000-8000-00000000000b")), true, "ids compare in lower case");
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00.123456Z", "00000000-0000-4000-8000-000000000002",
+    floor("2026-11-16T10:00:00.123456Z")), false, "the page's own oldest message is loaded, not older");
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T09:59:59.5+00:00", null, floor("2026-11-16T10:00:00Z")), true);
+  assert.equal(firstUnreadOlderThanLoaded(null, null, floor("2026-11-16T10:00:00Z")), false);
+  assert.equal(firstUnreadOlderThanLoaded("2026-11-16T10:00:00Z", "x", null), false);
 });
 
 test("a mark reads at once: the marked view, or every view, is read; unknown stays unknown", () => {

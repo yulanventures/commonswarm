@@ -6,7 +6,7 @@ import ts from "typescript";
 import {
   CHANNEL_READ_RETRY_MS, CONTINUE_LOADING_LABEL, MARK_ALL_AS_READ_LABEL, MARK_AS_READ_LABEL, UNREAD_DIVIDER_LABEL,
   UNREAD_JUMP_PAGES, channelReadRowFor, firstUnreadOlderThanLoaded, newestChannelMessage, oldestChannelMessage,
-  readChannelIdOf, throughSignalFor, unreadJumpLabel, withChannelRead,
+  readChannelIdOf, newestMarkableChannelMessage, unreadJumpLabel, withChannelRead,
 } from "../../lib/channel-reads";
 import { GENERAL_CHANNEL_ID, channelUnreadFor } from "../../lib/channels";
 import { buildWorkspaceMenu } from "../../lib/home-shell";
@@ -17,7 +17,7 @@ import { buildWorkspaceMenu } from "../../lib/home-shell";
  */
 
 const READ_FUNCTIONS = [
-  "channelReadViewId", "channelReadVisitKey", "applyChannelRead", "sendChannelRead", "channelReadThrough", "noteVisitMarked",
+  "channelReadViewId", "channelReadVisitKey", "applyChannelRead", "sendChannelRead", "channelReadTarget", "noteVisitMarked",
   "feedRowFor", "firstUnreadPlace", "paintUnreadDivider", "changeUnreadDivider", "renderUnreadBar", "dismissUnreadBar",
   "markViewRead", "autoMarkChannelRead", "syncChannelRead", "revealFeedRow", "jumpToFirstUnread", "channelReadMenuState",
   "channelReadEscape", "openChannelRowMenu", "closeReceiptsOnEscape", "feedMenuAction",
@@ -177,7 +177,7 @@ async function fixture(options: { sample?: boolean; rows?: unknown[]; signals?: 
     window: {}, Date: { now: () => clock },
     CHANNEL_READ_RETRY_MS, CONTINUE_LOADING_LABEL, MARK_AS_READ_LABEL, UNREAD_DIVIDER_LABEL, UNREAD_JUMP_PAGES,
     GENERAL_CHANNEL_ID, channelReadRowFor, channelUnreadFor, firstUnreadOlderThanLoaded, newestChannelMessage,
-    oldestChannelMessage, readChannelIdOf, throughSignalFor, unreadJumpLabel, withChannelRead,
+    oldestChannelMessage, readChannelIdOf, newestMarkableChannelMessage, unreadJumpLabel, withChannelRead,
     markChannelRead: async (_session: unknown, id: string, workspaceId: string, target: Record<string, unknown>) => {
       // Copied out of the vm's realm, so deepEqual compares values rather than prototypes.
       marks.push({ id, workspaceId, target: JSON.parse(JSON.stringify(target)) });
@@ -192,7 +192,8 @@ async function fixture(options: { sample?: boolean; rows?: unknown[]; signals?: 
     atBottom: () => bottom,
     scrollToNewest: () => { scroller.scrollTop = scroller.scrollHeight; },
     composerIsReplying: () => false,
-    refreshChannelUnread: async () => { refreshes += 1; },
+    // The re-read after every answer; a test can make it answer and sync, as the page does.
+    refreshChannelUnread: async () => { refreshes += 1; await onRefresh(); },
     renderHomeRail: () => { railPaints += 1; }, renderHomeShell: () => {}, renderChannelDirectoryDialog: () => {},
     loadOlderSignals: async () => {
       olderLoads += 1;
@@ -209,12 +210,13 @@ async function fixture(options: { sample?: boolean; rows?: unknown[]; signals?: 
     },
   });
   let clock = 1_000_000, hasMoreAfterLast = true;
+  let onRefresh: () => unknown = () => {};
   runInContext(`
     var sampleMode = ${options.sample ? "true" : "false"}, session = { user: { id: '${VIEWER}' } }, activeWorkspaceId = 'W';
     var homeRoute = { view: 'chat', workspaceId: 'W' }, activeWorkspaceView = 'signals', activeDm = null, unknownChannelId = null;
     var activeChannelId = 'c1', signalFilter = 'all', signalHasMore = true, channels = [];
     var channelUnreadRows = ${JSON.stringify(options.rows ?? [unreadRow()])}, channelUnreadGeneration = 0;
-    var channelReadUnsupported = false; const channelReadMarked = new Map(), channelReadRetryAt = new Map(); var unreadVisit = null;
+    var channelReadUnsupported = false; const channelReadMarked = new Map(), channelReadRetryAt = new Map(), channelReadRefusedIds = new Set(); var unreadVisit = null;
   `, context);
   context.signals = options.signals ?? [message("m5", 5), message("m4", 4), message("m3", 3), message("m2", 2)];
   runInContext(await dashboardFunctions(READ_FUNCTIONS), context);
@@ -251,6 +253,7 @@ async function fixture(options: { sample?: boolean; rows?: unknown[]; signals?: 
     setReplies: (next: Reply[]) => { replies = next; },
     setOlder: (pages: Message[][], moreAfter = true) => { older = pages; hasMoreAfterLast = moreAfter; },
     tick: (ms: number) => { clock += ms; },
+    setOnRefresh: (next: () => unknown) => { onRefresh = next; },
     refreshes: () => refreshes, railPaints: () => railPaints, olderLoads: () => olderLoads,
     rows: () => run("channelUnreadRows") as Array<Record<string, unknown>>,
     setRows: (rows: unknown[]) => run(`channelUnreadRows = ${JSON.stringify(rows)}`),
@@ -334,24 +337,73 @@ test("a mark in flight is not sent twice; a failed one is not a read: the dot co
   assert.deepEqual(f.marks.map(({ target }) => target.throughSignalId), [U("m5"), U("m5"), U("m5")]);
 });
 
-test("a message the person may not name is marked again without it, under a new command id", async () => {
+/** A mark on view never reaches past what was loaded: every one names a message. */
+const assertBounded = (marks: Array<{ target: Record<string, unknown> }>) => {
+  for (const { target } of marks) {
+    assert.equal(typeof target.throughSignalId, "string", `a mark on view without a message: ${JSON.stringify(target)}`);
+  }
+};
+
+test("a refused message on view gives way to the next loaded one after the re-read, never to up to now", async () => {
   const f = await fixture();
   f.places.set("m3", 300);
-  f.setReplies(["signal_not_found", "ok"]);
+  // The re-read after each answer says the channel is still unread, and syncs, as the page does.
+  f.setOnRefresh(() => { f.setRows([unreadRow()]); f.run("syncChannelRead()"); });
+  f.setReplies(["signal_not_found", "signal_not_found", "ok"]);
   f.paint();
-  await settle();
+  for (let turn = 0; turn < 5; turn += 1) await settle();
   assert.deepEqual(f.marks.map(({ id, target }) => [id, target]), [
     ["command-1", { channelId: "c1", throughSignalId: U("m5") }],
-    ["command-2", { channelId: "c1" }],
+    ["command-2", { channelId: "c1", throughSignalId: U("m4") }],
+    ["command-3", { channelId: "c1", throughSignalId: U("m3") }],
   ]);
+  assertBounded(f.marks);
+
+  // Every loaded message refused: nothing is sent and the dot stays.
+  const g = await fixture({ signals: [message("m5", 5), message("m4", 4)] });
+  g.setOnRefresh(() => { g.setRows([unreadRow()]); g.run("syncChannelRead()"); });
+  g.setReplies(["signal_not_found", "signal_not_found"]);
+  g.paint();
+  for (let turn = 0; turn < 5; turn += 1) await settle();
+  assert.equal(g.marks.length, 2);
+  assertBounded(g.marks);
+  assert.equal(g.rows()[0]!.unread, true, "the dot stays for a later view");
 });
 
-test("the person's own message addressed to someone is marked up to now, without naming it", async () => {
+test("the person's own addressed message is passed over on view: the mark goes through the newest message they can name", async () => {
   const f = await fixture({ signals: [message("own", 6, { from: VIEWER, to: "dana" }), message("m5", 5), message("m3", 3)] });
   f.places.set("m3", 300);
   f.paint();
   await settle();
-  assert.deepEqual(f.marks.map(({ target }) => target), [{ channelId: "c1", throughSignalId: null }]);
+  assert.deepEqual(f.marks.map(({ target }) => target), [{ channelId: "c1", throughSignalId: U("m5") }]);
+
+  // Only the person's own addressed messages loaded: there is nothing to mark through, so nothing is sent.
+  const only = await fixture({ signals: [message("own2", 6, { from: VIEWER, toAgent: "orbit" }),
+    message("own1", 5, { from: VIEWER, recipients: [{ kind: "user", id: "dana" }] } as Partial<Message>)] });
+  only.paint();
+  only.run("syncChannelRead()");
+  await settle();
+  assert.equal(only.marks.length, 0);
+  assert.equal(only.rows()[0]!.unread, true);
+});
+
+test("an explicit Mark as read prefers a loaded message, and only it may fall back to up to now when that is refused", async () => {
+  const f = await fixture();
+  f.setBottom(false);
+  f.paint();
+  f.setReplies(["signal_not_found", "ok"]);
+  f.run("markViewRead(channelReadViewId())");
+  for (let turn = 0; turn < 3; turn += 1) await settle();
+  assert.deepEqual(f.marks.map(({ target }) => target), [
+    { channelId: "c1", throughSignalId: U("m5") },
+    { channelId: "c1" },
+  ]);
+  // The next mark on view skips the refused message.
+  f.setRows([unreadRow()]);
+  f.setBottom(true);
+  f.run("syncChannelRead()");
+  await settle();
+  assert.deepEqual(f.marks.at(-1)!.target, { channelId: "c1", throughSignalId: U("m4") });
 });
 
 test("the visit keeps its own snapshot: the bar and line stay after the mark and later reads, then drop the stale count", async () => {
@@ -455,6 +507,24 @@ test("Jump loads older pages toward a message above the loaded ones, and offers 
   await g.run("loadOlderSignals()");
   assert.equal(g.bar.hidden, false);
   assert.equal(g.jump.textContent, "9 unread · Jump to first unread");
+});
+
+test("a first unread message beyond the page by microseconds or by id alone still shows the bar and is reached", async () => {
+  const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+  for (const [name, firstAt, firstId] of [
+    ["the same time, a smaller id", "2026-11-16T10:04:00.123456Z", id(1)],
+    ["the same millisecond, fewer microseconds", "2026-11-16T10:04:00.123100Z", id(9)],
+  ] as const) {
+    const floor = message("floor", 4, { id: id(2), createdAt: "2026-11-16T10:04:00.123456Z" });
+    const f = await fixture({ rows: [unreadRow({ firstUnreadId: firstId, firstUnreadAt: firstAt })], signals: [message("m5", 5), floor] });
+    f.setBottom(false);
+    f.paint();
+    assert.equal(f.bar.hidden, false, name);
+    f.setOlder([[message("first", 4, { id: firstId, createdAt: firstAt })]]);
+    await f.run("jumpToFirstUnread()");
+    assert.equal(f.olderLoads(), 1, name);
+    assert.equal(f.doc.activeElement?.dataset.signalId, firstId, `${name}: reached, not given up as gone`);
+  }
 });
 
 test("a first unread message that is gone ends the jump quietly and reads the unread state again", async () => {

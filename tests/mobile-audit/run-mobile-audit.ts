@@ -319,8 +319,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
         '[data-signal-id="{message.failedGrouped}"][data-stream-grouped]:has(.dashboard__message-receipt:not([data-receipt-quiet]))'] }],
   "app.chat.dm": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   // The unread bar's two controls change colour on hover and focus, never size.
+  // `prefer` names the jump button (one of the rows), which also photographs it at rest and on hover.
   "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
-    require: ["[data-unread-jump]", "[data-unread-mark]"] }],
+    prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],

@@ -34,6 +34,8 @@ export interface ReadableMessage {
   channelId: string | null;
   threadRootId: string | null;
   broadcastToChannel?: boolean;
+  /** A message addressed to several people or agents names them here. */
+  recipients?: readonly unknown[] | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,21 +53,61 @@ export const newestChannelMessage = <S extends ReadableMessage>(signals: readonl
 export const oldestChannelMessage = <S extends ReadableMessage>(signals: readonly S[], viewId: string): S | null =>
   [...signals].reverse().find((signal) => signalInChannelView(signal.channelId, viewId) && countsInChannel(signal)) ?? null;
 
-/**
- * The message to mark through, or null to mark up to now. The person's own message addressed to
- * someone is not one they can name (the server answers signal_not_found); it is the newest one on
- * screen, so up to now is the nearest mark.
- */
-export const throughSignalFor = (signal: ReadableMessage, viewerId: string): string | null =>
-  signal.fromKind === "user" && signal.from === viewerId && (signal.to !== null || signal.toAgent !== null)
-    ? null
-    : signal.id;
+/** The person's own message addressed to someone: never unread for them (channel_unread leaves out their own
+ *  messages), and not one they can name in a mark (the server answers signal_not_found). */
+const ownAddressed = (signal: ReadableMessage, viewerId: string): boolean =>
+  signal.fromKind === "user" && signal.from === viewerId &&
+  (signal.to !== null || signal.toAgent !== null || (signal.recipients?.length ?? 0) > 0);
 
-/** Whether the first unread message is older than every loaded message of the view (so not on the page). */
-export const firstUnreadOlderThanLoaded = (firstUnreadAt: string | null, oldestLoadedAt: string | null): boolean => {
-  if (firstUnreadAt === null || oldestLoadedAt === null) return false;
-  const first = Date.parse(firstUnreadAt), oldest = Date.parse(oldestLoadedAt);
-  return Number.isFinite(first) && Number.isFinite(oldest) && first < oldest;
+/**
+ * The newest loaded message of a view that a mark can go through: one the unread counts, not the person's own
+ * addressed message, and not one the server already refused. A mark through it never reaches past what was
+ * loaded; null means there is nothing to mark through, and an automatic mark then sends nothing.
+ */
+export const newestMarkableChannelMessage = <S extends ReadableMessage>(
+  signals: readonly S[],
+  viewId: string,
+  viewerId: string,
+  refusedIds: ReadonlySet<string> = new Set(),
+): S | null =>
+  signals.find((signal) => signalInChannelView(signal.channelId, viewId) && countsInChannel(signal) &&
+    !ownAddressed(signal, viewerId) && !refusedIds.has(signal.id)) ?? null;
+
+/**
+ * A timestamp as whole microseconds since the epoch, exactly: PostgreSQL keeps six fractional digits and a
+ * JavaScript Date only three, so two messages inside one millisecond are told apart here. Takes ISO 8601 and
+ * PostgreSQL's own text form (a space for the T, an offset of +HH, +HHMM or +HH:MM, or Z); null when unreadable.
+ */
+export const timestampMicros = (value: string): bigint | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}(?::?\d{2})?)?$/i.exec(value.trim());
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, fraction = "", zone = "Z"] = match;
+  const wholeMs = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  if (!Number.isFinite(wholeMs)) return null;
+  let offsetMinutes = 0;
+  if (zone.toUpperCase() !== "Z") {
+    const digits = zone.slice(1).replace(":", "");
+    offsetMinutes = (zone.startsWith("-") ? -1 : 1) * (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4) || "0"));
+  }
+  const micros = BigInt((fraction + "000000").slice(0, 6));
+  return BigInt(wholeMs) * 1000n + micros - BigInt(offsetMinutes) * 60_000_000n;
+};
+
+/**
+ * Whether the first unread message comes before every loaded message of the view (so it is not on the page), by
+ * the order the feed pages in: created_at, then id. Equal times are broken by id, so a message that shares its
+ * time with the page's oldest one is still found on the next page.
+ */
+export const firstUnreadOlderThanLoaded = (
+  firstUnreadAt: string | null,
+  firstUnreadId: string | null,
+  oldestLoaded: { createdAt: string; id: string } | null,
+): boolean => {
+  if (firstUnreadAt === null || oldestLoaded === null) return false;
+  const first = timestampMicros(firstUnreadAt), oldest = timestampMicros(oldestLoaded.createdAt);
+  if (first === null || oldest === null) return false;
+  if (first !== oldest) return first < oldest;
+  return firstUnreadId !== null && firstUnreadId.toLowerCase() < oldestLoaded.id.toLowerCase();
 };
 
 type ReadRow = ChannelUnreadState & { unreadCount?: number; firstUnreadId?: string | null; firstUnreadAt?: string | null };

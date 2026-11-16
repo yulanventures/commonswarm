@@ -1587,9 +1587,9 @@ import "../../styles/kylon-command-palette.css";
     channelReadRowFor,
     firstUnreadOlderThanLoaded,
     newestChannelMessage,
+    newestMarkableChannelMessage,
     oldestChannelMessage,
     readChannelIdOf,
-    throughSignalFor,
     unreadJumpLabel,
     withChannelRead,
   } from "../../lib/channel-reads";
@@ -1790,6 +1790,9 @@ import "../../styles/kylon-command-palette.css";
      *  did not land is dropped from here and its view waits CHANNEL_READ_RETRY_MS (channelReadRetryAt) before trying again. */
     const channelReadMarked = new Map<string, "pending" | "done">();
     const channelReadRetryAt = new Map<string, number>();
+    /** Messages the server would not take as a read position (signal_not_found): marks go through the next eligible
+     *  loaded message instead, never past what was loaded. Message ids are unique, so one set serves every workspace. */
+    const channelReadRefusedIds = new Set<string>();
     /** This visit to a channel, its own snapshot apart from the server's unread state: whether its first unread message
      *  was above the screen on entry (the bar, kept for the visit, and the Unread line above that message), the count
      *  then, and whether the visit's mark has landed since. Taken once both the page and the unread read are in; a new
@@ -8231,8 +8234,9 @@ import "../../styles/kylon-command-palette.css";
       renderHomeShell();
       renderChannelDirectoryDialog();
     };
-    /** One mark. A message the person may not name is marked again without it, under a new command id. Whatever the
-     *  answer (a failure included), the unread read runs again so the rail shows what the server stored. */
+    /** One mark, exactly as given: never widened. Whatever the answer (a failure included), the unread read runs again
+     *  so the rail shows what the server stored, and that read syncs the view again. A message refused here
+     *  (signal_not_found) is remembered, so the next mark goes through the next eligible loaded message. */
     const sendChannelRead = async (workspaceId: string, target: ChannelReadTarget): Promise<ChannelReadOutcome | "failed"> => {
       const activeSession = session;
       if (sampleMode || !activeSession || channelReadUnsupported) return "failed";
@@ -8240,7 +8244,7 @@ import "../../styles/kylon-command-palette.css";
       try {
         outcome = await markChannelRead(activeSession, uuid(), workspaceId, target);
         if (outcome === "signal_not_found" && !("all" in target) && target.throughSignalId) {
-          outcome = await markChannelRead(activeSession, uuid(), workspaceId, { channelId: target.channelId });
+          channelReadRefusedIds.add(target.throughSignalId);
         }
         if (outcome === "unsupported") channelReadUnsupported = true;
       } catch {
@@ -8250,11 +8254,9 @@ import "../../styles/kylon-command-palette.css";
       }
       return outcome;
     };
-    /** The view's newest loaded message to mark through, or null for up to now. */
-    const channelReadThrough = (viewId: string): string | null => {
-      const newest = newestChannelMessage(signals, viewId);
-      return newest && session ? throughSignalFor(newest, session.user.id) : null;
-    };
+    /** The view's newest loaded message a mark can go through, or null when there is none. */
+    const channelReadTarget = (viewId: string): string | null =>
+      session ? newestMarkableChannelMessage(signals, viewId, session.user.id, channelReadRefusedIds)?.id ?? null : null;
     /** A mark for the visit's own view landed: the bar's count is the server's from before it, so it goes. */
     const noteVisitMarked = (viewKey: string): void => {
       if (unreadVisit?.key !== viewKey) return;
@@ -8278,7 +8280,7 @@ import "../../styles/kylon-command-palette.css";
       }
       const viewId = channelReadViewId();
       return viewId !== null &&
-        firstUnreadOlderThanLoaded(visit.firstUnreadAt, oldestChannelMessage(signals, viewId)?.createdAt ?? null)
+        firstUnreadOlderThanLoaded(visit.firstUnreadAt, visit.firstUnreadId, oldestChannelMessage(signals, viewId))
         ? "above" : "elsewhere";
     };
     /** The Unread line, above the visit's first unread message while the visit keeps it. Idempotent. */
@@ -8343,21 +8345,30 @@ import "../../styles/kylon-command-palette.css";
       if (clear) changeUnreadDivider(false);
       renderUnreadBar();
     };
-    /** "Mark as read" and Escape mark the view on screen through its newest loaded message (up to now when there is
-     *  none); a channel off screen, and "all", up to now. */
+    /** "Mark as read", Escape and the menus: the person asked, so the mark may reach up to now where there is nothing
+     *  narrower. The view on screen goes through its newest markable loaded message, and only when there is none, or
+     *  the server refuses it, up to now; a channel off screen, and "all", up to now. */
     const markViewRead = (viewId: string): void => {
       const workspaceId = activeWorkspaceId;
       if (sampleMode || !session || !workspaceId || channelReadUnsupported) return;
       const active = viewId !== "all" && viewId === channelReadViewId();
-      const through = active ? channelReadThrough(viewId) : null;
+      const through = active ? channelReadTarget(viewId) : null;
       applyChannelRead(viewId);
       if (viewId === "all" || active) dismissUnreadBar(true);
       const viewKey = `${workspaceId}\u0000${viewId}`;
-      void sendChannelRead(workspaceId, viewId === "all" ? { all: true } : { channelId: readChannelIdOf(viewId), throughSignalId: through })
-        .then((outcome) => { if (outcome === "ok" && active) noteVisitMarked(viewKey); });
+      const channelId = readChannelIdOf(viewId);
+      void (async () => {
+        let outcome = await sendChannelRead(workspaceId, viewId === "all" ? { all: true } : { channelId, throughSignalId: through });
+        // Explicit only: a refused message gives way to the whole channel up to now. A mark on view never does.
+        if (outcome === "signal_not_found" && through !== null) outcome = await sendChannelRead(workspaceId, { channelId });
+        if (outcome === "ok" && active) noteVisitMarked(viewKey);
+      })();
     };
-    /** The bottom of an unread channel is on screen in a focused tab: mark through its newest loaded message. Only work
-     *  in flight or accepted is not repeated; a mark that did not land is tried again after CHANNEL_READ_RETRY_MS. */
+    /** The bottom of an unread channel is on screen in a focused tab: mark through its newest markable loaded message,
+     *  and only through a message: never up to now, which could take in a message that has not reached this page.
+     *  With no such message nothing is sent and the dot stays. Only work in flight or accepted is not repeated. A
+     *  refused message is skipped from then on, and the re-read that follows every answer tries the next one; a mark
+     *  that did not land for another reason is tried again after CHANNEL_READ_RETRY_MS. */
     const autoMarkChannelRead = (): void => {
       const viewId = channelReadViewId();
       const workspaceId = activeWorkspaceId;
@@ -8366,15 +8377,15 @@ import "../../styles/kylon-command-palette.css";
       if (channelReadRowFor(channelUnreadRows, viewId)?.unread !== true) return;
       if (document.visibilityState !== "visible" || !document.hasFocus()) return;
       if (app.dataset.channelView !== "feed" || !atBottom()) return;
-      const newest = newestChannelMessage(signals, viewId);
-      if (!newest) return;
+      const target = newestMarkableChannelMessage(signals, viewId, viewer, channelReadRefusedIds);
+      if (!target) return;
       const viewKey = `${workspaceId}\u0000${viewId}`;
-      const key = `${viewKey}\u0000${newest.id}`;
+      const key = `${viewKey}\u0000${target.id}`;
       if (channelReadMarked.has(key) || (channelReadRetryAt.get(viewKey) ?? 0) > Date.now()) return;
       channelReadMarked.set(key, "pending");
       // A retry leaves the dot until the mark lands, so a mark that keeps failing does not flicker it.
       if (!channelReadRetryAt.has(viewKey)) applyChannelRead(viewId);
-      void sendChannelRead(workspaceId, { channelId: readChannelIdOf(viewId), throughSignalId: throughSignalFor(newest, viewer) })
+      void sendChannelRead(workspaceId, { channelId: readChannelIdOf(viewId), throughSignalId: target.id })
         .then((outcome) => {
           if (outcome === "ok") {
             channelReadMarked.set(key, "done");
@@ -8383,7 +8394,10 @@ import "../../styles/kylon-command-palette.css";
             return;
           }
           channelReadMarked.delete(key);
-          if (outcome !== "unsupported") channelReadRetryAt.set(viewKey, Date.now() + CHANNEL_READ_RETRY_MS);
+          // A refused message is in channelReadRefusedIds: the re-read already under way tries the next one.
+          if (outcome !== "unsupported" && outcome !== "signal_not_found") {
+            channelReadRetryAt.set(viewKey, Date.now() + CHANNEL_READ_RETRY_MS);
+          }
         });
     };
     /** After the feed, the unread read, a scroll or a return to the tab: take the visit's snapshot once, keep the bar
@@ -8440,7 +8454,7 @@ import "../../styles/kylon-command-palette.css";
       const olderThanLoaded = (): boolean => {
         const viewId = channelReadViewId();
         return viewId !== null &&
-          firstUnreadOlderThanLoaded(visit.firstUnreadAt, oldestChannelMessage(signals, viewId)?.createdAt ?? null);
+          firstUnreadOlderThanLoaded(visit.firstUnreadAt, visit.firstUnreadId, oldestChannelMessage(signals, viewId));
       };
       visit.jumping = true;
       renderUnreadBar();
