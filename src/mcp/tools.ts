@@ -6,7 +6,7 @@ import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../clou
 import { MENTION_MAX_RECIPIENTS } from "../protocol/mention-address.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
 import { CHOICE_DESCRIPTION_MAX, CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN, choiceOptions, type ChoiceOption, type ChoiceOptionInput } from "../cloud/choices.js";
-import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, GENERAL_CHANNEL_SLUG, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
@@ -35,7 +35,9 @@ export const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.repl
 const absolutePath = { ...string(4096, 1), description: "Absolute path on this host." };
 /** Names or ids of people and agents a public message mentions. @Name in the body counts too. */
 const mentions = { type: "array" as const, items: string(SIGNAL_RECIPIENT_MAX, 1), minItems: 1, maxItems: MENTION_MAX_RECIPIENTS };
-const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
+// "general" posts unfiled, as channel_ls and channel_read name it; the other reserved names are refused.
+const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source),
+  not: { enum: RESERVED_CHANNEL_SLUGS.filter((slug) => slug !== GENERAL_CHANNEL_SLUG) } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
 /** An ask's choice options: an object form beside the v1 bare labels (choices). */
 const choiceOptionsSchema = {
   type: "array" as const, minItems: CHOICE_MIN, maxItems: CHOICE_MAX,

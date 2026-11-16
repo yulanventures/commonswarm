@@ -117,6 +117,8 @@ import {
   channelSelectorProblem,
   CHANNEL_PURPOSE_MAX,
   channelSlugProblem,
+  GENERAL_CHANNEL_SLUG,
+  isGeneralChannel,
   findChannelBySlug,
   CHANNEL_PAGE_MAX_BYTES,
   listChannelsWithUnreadAsAgent,
@@ -1039,8 +1041,9 @@ deployment's operators — agents are encouraged to report friction they hit.
 
 A channel is where a message is FILED, not who may read it. Everyone in the
 workspace reads every channel, and --channel changes nothing about who sees a
-signal. Archiving a channel keeps its history and its permalinks and refuses new
-messages. cswarm reply answers a message everyone in its channel can read in
+signal. --channel general posts unfiled and reads only unfiled messages; the
+name stays reserved for channel create and rename. Archiving a channel keeps its
+history and its permalinks and refuses new messages. cswarm reply answers a message everyone in its channel can read in
 its thread and notifies the author, and answers an addressed message privately
 to its author. --private
 answers the author privately instead; --broadcast-to-channel sends a thread reply
@@ -3460,9 +3463,14 @@ function signalKind(value: string): SignalKind {
  * server does not apply. `src/cloud/channels.ts` explains why the rule is a
  * copy and what keeps the two byte-identical.
  */
+/**
+ * --channel for posting and reading. "general" (any case) is unfiled messages: a post omits the
+ * channel, and a read filters strictly to channel_id NULL. Other names follow the slug rule.
+ */
 function channelOption(args: Arguments): string | undefined {
   const value = args.optional("channel");
   if (value === undefined) return undefined;
+  if (isGeneralChannel(value)) return GENERAL_CHANNEL_SLUG;
   const problem = channelSlugProblem(value);
   if (problem !== null) throw new Error(problem);
   return normalizeChannelSlug(value);
@@ -4034,7 +4042,7 @@ async function runPostSignal(
     about: args.optional("about") === undefined ? null : signalText(args.required("about"), "about"),
     options: choices,
     ...(choiceAsk?.multi === true ? { multi: true } : {}),
-    ...(channel === undefined ? {} : { channel }),
+    ...(channel === undefined || channel === GENERAL_CHANNEL_SLUG ? {} : { channel }),
   } : {
     kind: "post_signal",
     signal_kind: kind,
@@ -4048,7 +4056,8 @@ async function runPostSignal(
     ...(untilMs === undefined
       ? {}
       : { until_ms: untilMs }),
-    ...(channel === undefined ? {} : { channel }),
+    // "general" is unfiled: no channel key at all.
+    ...(channel === undefined || channel === GENERAL_CHANNEL_SLUG ? {} : { channel }),
     ...(mentions.length === 0 ? {} : { mentions }),
   };
   let result: PostSignalResult;
@@ -5251,7 +5260,8 @@ async function runSignalRead(
    * on the id. Resolving locally is also what lets an unknown name be answered
    * with the names that DO exist, generated from the rows just read. */
   let channelId: string | undefined;
-  if (channelSlug !== undefined && selected.kind === "human") {
+  const unfiledOnly = channelSlug === GENERAL_CHANNEL_SLUG;
+  if (channelSlug !== undefined && selected.kind === "human" && !unfiledOnly) {
     const rows = await listChannelsAsHuman(
       cloud,
       selected.human!.accessToken,
@@ -5268,6 +5278,7 @@ async function runSignalRead(
       ? {}
       : { channel: channelSlug }),
     ...(channelId === undefined ? {} : { channelId }),
+    ...(unfiledOnly && selected.kind === "human" ? { unfiledOnly: true } : {}),
     ...(args.optional("about") === undefined
       ? {}
       : { about: signalText(args.required("about"), "about") }),

@@ -22,6 +22,7 @@ import {
   CHANNEL_READ_COLUMNS,
   channelSlugProblem,
   chatReadKeys,
+  GENERAL_CHANNEL_SLUG,
   normalizeChannelSlug,
   SIGNAL_KINDS as SIGNAL_KIND_LIST,
   unknownChannelMessage,
@@ -616,7 +617,8 @@ function parseBody(
     (hasChannel &&
       !(body.channel === null ||
         (typeof body.channel === "string" &&
-          channelSlugProblem(body.channel) === null)))
+          (channelSlugProblem(body.channel) === null ||
+            normalizeChannelSlug(body.channel) === GENERAL_CHANNEL_SLUG))))
   ) {
     return null;
   }
@@ -1289,8 +1291,11 @@ async function handle(
      * silent fall back to the unfiltered feed: falling back would return
      * strictly MORE than the caller asked for. */
     const channelSlug = body.channel ?? null;
+    /* "general" is unfiled messages (channel_id NULL), the name channel_ls and channel_read give
+     * them. It is reserved, so no real channel can carry it; it filters strictly to unfiled. */
+    const unfiledOnly = channelSlug === GENERAL_CHANNEL_SLUG;
     let channelId: string | null = null;
-    if (channelSlug !== null) {
+    if (channelSlug !== null && !unfiledOnly) {
       const channelRows = await tx<{ channel_id: string }[]>`
         SELECT channel_id
         FROM swarm_read.channels
@@ -1470,6 +1475,7 @@ async function handle(
           ${channelId}::uuid IS NULL
           OR s.channel_id = ${channelId}::uuid
         )
+        AND (${unfiledOnly} = false OR s.channel_id IS NULL)
         AND (
           ${body.since}::timestamptz IS NULL OR
           s.created_at >= ${body.since}::timestamptz
@@ -1545,6 +1551,7 @@ async function handle(
         AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
         AND (${inReplyTo}::uuid IS NULL OR r.signal_id = ${inReplyTo}::uuid)
         AND (${channelId}::uuid IS NULL OR s.channel_id = ${channelId}::uuid)
+        AND (${unfiledOnly} = false OR s.channel_id IS NULL)
         AND (${body.since}::timestamptz IS NULL OR r.created_at >= ${body.since}::timestamptz)
         AND (
           ${useAfterCursor} = false

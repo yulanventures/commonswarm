@@ -260,3 +260,26 @@ test("a thread reply notifies its author, never itself, and still lands when tha
   } finally { await fake.close(); }
 });
 
+test("--channel general posts unfiled and reads only unfiled messages, in any case", async () => {
+  const fake = await cloud();
+  try {
+    for (const [verb, value] of [["note", "general"], ["ask", "General"], ["working-on", "GENERAL"]] as const) {
+      const result = await cli(fake.url, [verb, `to general ${verb}`, "--channel", value, "--json"]);
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(Object.hasOwn(fake.posts.at(-1)!, "channel"), false, `${verb} --channel ${value} is unfiled`);
+    }
+    const named = await cli(fake.url, ["note", "to ops", "--channel", "ops", "--json"]);
+    assert.equal(named.code, 0, named.stderr);
+    assert.equal(fake.posts.at(-1)!.channel, "ops");
+    for (const verb of ["feed", "inbox"]) {
+      const result = await cli(fake.url, [verb, "--channel", "General", "--json"]);
+      assert.equal(result.code, 0, result.stderr);
+      const read = fake.reads.filter((body) => body.resource === "signals").at(-1)!;
+      assert.equal(read.channel, "general", `${verb} asks the read edge for unfiled messages`);
+      assert.equal(read.inbox, verb === "inbox");
+    }
+    const reserved = await cli(fake.url, ["note", "x", "--channel", "all-signals"]);
+    assert.notEqual(reserved.code, 0);
+    assert.match(reserved.stderr, /all-signals is reserved/);
+  } finally { await fake.close(); }
+});

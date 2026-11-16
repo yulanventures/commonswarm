@@ -116,6 +116,8 @@ export interface SignalQuery {
    * `swarm_read.channels` first and passes the id it found.
    */
   channelId?: string;
+  /** Only unfiled messages (channel_id NULL): `--channel general` on a person's read. */
+  unfiledOnly?: boolean;
   since?: string;
   /**
    * Strict keyset lower bound: return rows after this (created_at, id).
@@ -1228,7 +1230,7 @@ async function humanSignals(
     "select",
     [
       "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,reply_status,about,kind,body,attachments,until,created_at,chain_hop",
-      ...(query.channelId === undefined
+      ...(query.channelId === undefined && query.unfiledOnly !== true
         ? []
         : ["channel_id", "thread_root_id", "broadcast_to_channel"]),
     ].join(","),
@@ -1236,6 +1238,8 @@ async function humanSignals(
   url.searchParams.set("workspace_id", `eq.${query.workspaceId}`);
   if (query.channelId !== undefined) {
     url.searchParams.set("channel_id", `eq.${query.channelId}`);
+  } else if (query.unfiledOnly === true) {
+    url.searchParams.set("channel_id", "is.null");
   }
   if (query.inbox) url.searchParams.set("to", `eq.${credential.userId}`);
   if (!query.includeStale) {

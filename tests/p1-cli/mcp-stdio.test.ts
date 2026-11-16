@@ -1223,7 +1223,7 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
       [{ body: "hello", request_id: "valid004", to: "x".repeat(81) }, "to"],
     ] as const) await assert.rejects(f.client.callTool({ name: "note", arguments: args }), (error: any) => error.code === -32602 && error.message.includes(bad));
     const channelRule = note.inputSchema.properties!.channel as { pattern: string; maxLength: number; not: { enum: string[] } };
-    assert.deepEqual(channelRule.not.enum, ["all-signals", "general"]);
+    assert.deepEqual(channelRule.not.enum, ["all-signals"], "general posts unfiled");
     assert.match("all-signals", new RegExp(channelRule.pattern));
     for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates ", "all-signals"]) {
       await assert.rejects(f.client.callTool({ name: "note", arguments: { body: "hello", request_id: "valid005", channel } }),
@@ -1232,6 +1232,10 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
     const posted = await f.call("note", { body: "hello", request_id: "valid006", channel: "team-updates" });
     assert.equal(posted.result.isError, undefined);
     assert.equal(f.posts.at(-1)!.command.channel, "team-updates");
+    for (const [tool, extra] of [["note", {}], ["ask", {}], ["working_on", {}]] as const) {
+      await f.call(tool, { body: "hello", request_id: `general_${tool}`, channel: "general", ...extra });
+      assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "channel"), false, `${tool} to general is unfiled`);
+    }
     assert.equal((note.inputSchema.properties!.channel as { maxLength: number }).maxLength, 32);
     assert.match(note.description!, /slugs are lowercase/);
   } finally { await f.close(); }

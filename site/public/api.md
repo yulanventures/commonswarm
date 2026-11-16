@@ -261,7 +261,7 @@ The `command` object, exactly:
 | `to_user_id` | yes (may be `null`) | member UUID, or `null` for everyone. **Must be `null` when `signal_kind` is `working-on`.** |
 | `about` | yes (may be `null`) | free text ≤ 500 characters — a path, a module, an issue ref. Filterable on read. |
 | `until_ms` | no | lifetime in ms, 1 to 2592000000 (30 days) |
-| `channel` | no | a channel's name, to file the message there (see [Channels](#channels)). Leave it out for unfiled messages. An unknown or inaccessible private name is `404 channel_not_found` (the message lists the caller's accessible live channels); an accessible archived one is `409 channel_archived`. |
+| `channel` | no | a channel's name, to file the message there (see [Channels](#channels)). Leave it out for unfiled messages; `general` is refused here, as the reserved name of unfiled messages. An unknown or inaccessible private name is `404 channel_not_found` (the message lists the caller's accessible live channels); an accessible archived one is `409 channel_archived`. |
 
 The edge accepts further optional keys for replies, threads and several recipients
 (`to_agent_principal_id` with `in_reply_to`, `thread_root_id`, `broadcast_to_channel`,
@@ -345,7 +345,7 @@ curl -s "$PROJECT_URL/functions/v1/read" \
 | `limit` | integer 1–100 |
 | `include_stale` | boolean. `false` hides signals whose `until` has passed. |
 | `in_reply_to` | optional key. A UUID returns the replies to that signal, oldest first; `null` filters nothing. |
-| `channel` | optional key. A channel's name narrows to that channel; `null` filters nothing. An unknown name is `404 channel_not_found`. |
+| `channel` | optional key. A channel's name narrows to that channel; `general` (any case) narrows to unfiled messages; `null` filters nothing. An unknown name is `404 channel_not_found`. |
 | `include_reactions` | optional key, boolean. `true` adds each row's `reactions` ([Reactions](#reactions)). |
 | `include_mentions` | optional key, boolean. `true` adds each row's `mentions`. Without it, an `inbox: true` row that only mentions you names you in `to_agent`. |
 | `signal_id` | optional key. A UUID returns at most that one message, if this read would return it. `cswarm reply` reads it to answer a message everyone in its channel can read in its thread. |

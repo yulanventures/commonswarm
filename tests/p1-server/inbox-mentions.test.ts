@@ -455,3 +455,35 @@ test("an agent's cswarm reply to another agent's channel post lands in the threa
   assert.ok((await check(bystander)).includes(id), "and reads the reply in its inbox");
 });
 
+test("--channel general writes unfiled, and a general read holds only unfiled messages", { timeout: 120_000 }, async () => {
+  const slug = `named-${randomBytes(4).toString("hex")}`;
+  assert.equal((await send(owner.jwt, { kind: "channel_create", slug })).status, 200);
+  const inNamed = await posted(owner.jwt, { channel: slug, mentions: [{ kind: "agent", id: mentioned.principal }] });
+  const unfiled = await posted(owner.jwt, { mentions: [{ kind: "agent", id: mentioned.principal }] });
+  const result = await cswarm(bystander, ["note", "to everyone, unfiled", "--channel", "General"]);
+  assert.equal(result.code, 0, result.stderr + functionLogs.slice(-3000));
+  const viaCli = String((JSON.parse(result.stdout).signal as Row).id);
+  const [stored] = await sql<{ channel_id: string | null }[]>`SELECT channel_id FROM swarm.signals WHERE id = ${viaCli}::uuid`;
+  assert.equal(stored!.channel_id, null, "cswarm note --channel General is unfiled");
+
+  const readGeneral = async (agent: Agent, inbox: boolean, channel: string) => {
+    const response = await fetch(`${local.API_URL}/functions/v1/read`, {
+      method: "POST", signal: AbortSignal.timeout(15_000),
+      headers: { authorization: `Bearer ${agent.token}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+      body: JSON.stringify({ resource: "signals", workspace_id: workspace, inbox, about: null, kind: null,
+        since: null, in_reply_to: null, channel, limit: 100, include_stale: false }),
+    });
+    const body = await response.json() as Row;
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body.signals as Row[];
+  };
+  const feed = await readGeneral(mentioned, false, "general");
+  assert.ok(byId(feed, unfiled) && byId(feed, viaCli), "unfiled messages are in the general feed");
+  assert.equal(byId(feed, inNamed), undefined, "a named-channel message is not");
+  assert.ok(feed.every((row) => row.channel_id === null), "only unfiled rows");
+  const inbox = await readGeneral(mentioned, true, "GENERAL");
+  assert.ok(byId(inbox, unfiled));
+  assert.equal(byId(inbox, inNamed), undefined);
+  assert.ok(byId(await readGeneral(mentioned, false, slug), inNamed), "the named channel still reads its own");
+});
+

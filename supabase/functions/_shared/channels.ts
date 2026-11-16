@@ -296,6 +296,9 @@ export function channelStarReorderListProblem(value: unknown): string | null {
   return null;
 }
 
+/** Unfiled messages (channel_id NULL) as a selector. Reserved, so no channel takes the name. */
+export const GENERAL_CHANNEL_SLUG = "general";
+
 /** Trim and lowercase. Slugs compare case-insensitively in the unique index. */
 export function normalizeChannelSlug(value: string): string {
   return value.trim().toLowerCase();

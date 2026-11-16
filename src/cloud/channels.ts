@@ -93,6 +93,16 @@ export function normalizeChannelSlug(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Unfiled messages (channel_id NULL) as a selector for posting and reading: the name channel ls
+ * and channel read give them. Still reserved for channel create and rename.
+ */
+export const GENERAL_CHANNEL_SLUG = "general";
+
+export function isGeneralChannel(value: string): boolean {
+  return normalizeChannelSlug(value) === GENERAL_CHANNEL_SLUG;
+}
+
 export function isReservedChannelSlug(value: string): boolean {
   return RESERVED_CHANNEL_SLUGS.includes(normalizeChannelSlug(value));
 }

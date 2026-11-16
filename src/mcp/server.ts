@@ -16,7 +16,7 @@ import {
   withoutReplyAuthor, type WireMention,
 } from "../protocol/mention-address.js";
 import { decideReplyPlacement, type ReplyPlacement } from "../protocol/reply-placement.js";
-import { listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
+import { GENERAL_CHANNEL_SLUG, listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
   type MemoryKind, type MemorySaveInput,
@@ -424,7 +424,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
               const sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
                 command: { kind: "ask_choice", body: args.body!, to_user_id: toUserId, about: args.about ?? null,
                   options: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}),
-                  ...(args.channel === undefined ? {} : { channel: args.channel }) },
+                  ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }) },
                 commandId: args.request_id!, signal: extra.signal });
               output = { ...tool.mapResult(sent), choices: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}) };
             } catch (error) {
@@ -485,7 +485,8 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             ...(mentions.length === 0 ? {} : { mentions }),
             ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
             about: args.about ?? null,
-            ...(args.channel === undefined ? {} : { channel: args.channel }),
+            // "general" is unfiled: no channel key at all.
+            ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }),
             ...(args.until === undefined ? {} : { until_ms: signalDuration(args.until) }),
           };
           const client = new ThinCommandClient(profileTarget(profile), fetcher);
