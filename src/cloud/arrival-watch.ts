@@ -660,7 +660,10 @@ export function arrivalNotification(
     snippet: arrivalSnippet(signal.body),
     body: signal.body,
     attachment_count: signal.attachments?.length ?? 0,
-    reply_command: arrivalReplyCommand(signal.id, workspaceId, publicReplyThreadRoot(signal)),
+    // A reaction's id is not a message: an answer to it goes in the thread of the message it was on.
+    reply_command: signal.reaction !== undefined
+      ? arrivalReplyCommand(signal.reaction.signal_id, workspaceId, signal.reaction.signal_id)
+      : arrivalReplyCommand(signal.id, workspaceId, publicReplyThreadRoot(signal)),
   };
 }
 

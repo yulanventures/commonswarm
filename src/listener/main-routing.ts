@@ -193,6 +193,9 @@ export interface PendingMainEntry {
   replyThreadRootId?: string;
   /** Visibility of the channel when known ("open" | "private"), so private-channel mentions are described accurately. */
   channelVisibility?: "open" | "private";
+  /** Set when the item is a person's reaction to the agent's own message: that message's id. The item's
+   *  id is the reaction's, not a message, so an answer goes in the message's thread. */
+  reactedTo?: string;
 }
 
 interface PendingMainFile {

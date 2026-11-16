@@ -98,6 +98,7 @@ import {
   type SignalRecord,
   type StreamRoute,
 } from "./cloud/command-client.js";
+import { normalizeReactionEmoji, SIGNAL_REACTION_EMOJI_RULE } from "./protocol/signal-reactions.js";
 import {
   isReplyStatus,
   REPLY_STATUSES,
@@ -369,6 +370,8 @@ import {
 import {
   renderedBroadcastIds,
   reportRenderedBroadcasts,
+  reportSeenReactions,
+  seenAckTargets,
 } from "./cloud/agent-signal-receipts.js";
 import {
   compareSemVer,
@@ -720,6 +723,7 @@ export const BOOLEAN_FLAGS = new Set([
   "write",
   "allow-duplicate-name",
   "message-status",
+  "remove",
 ]);
 
 const UUID_RE =
@@ -4624,6 +4628,68 @@ async function runReraise(args: Arguments): Promise<void> {
   process.stdout.write(`Re-raised. You can re-raise it again after ${reraise?.next_allowed_at ?? "24 hours"}.\n`);
 }
 
+export const RUN_REACT_ACCEPTED_FLAGS = [
+    ...TARGET_FLAGS,
+    "workspace-id",
+    ...CREDENTIAL_FLAGS,
+    "remove",
+    "json",
+    ...SESSION_CONTEXT_FLAGS,
+  ] as const;
+
+export const RUN_UNREACT_ACCEPTED_FLAGS = RUN_REACT_ACCEPTED_FLAGS.filter(flag => flag !== "remove");
+
+type ReactionResult = "added" | "already_there" | "removed" | "not_there";
+const REACTION_RESULT_TEXT: Readonly<Record<ReactionResult, string>> = {
+  added: "added", already_there: "was already there", removed: "removed", not_there: "was not there",
+};
+
+/** `cswarm react <signal-id> <emoji>...` and `cswarm unreact`: one add_reaction or remove_reaction per emoji. */
+async function runReact(args: Arguments): Promise<void> {
+  const verb = args.positionals[0] === "unreact" ? "unreact" : "react";
+  args.assertAcceptedFlags(verb === "unreact" ? RUN_UNREACT_ACCEPTED_FLAGS : RUN_REACT_ACCEPTED_FLAGS);
+  const signalId = args.positionals[1];
+  const inputs = args.positionals.slice(2);
+  if (signalId === undefined || !UUID_RE.test(signalId) || inputs.length === 0) {
+    throw new UsageError(`${verb} requires the id of a message and at least one emoji`);
+  }
+  // Every emoji is checked before anything is sent; 👍 and :+1: are the same reaction.
+  const emojis: string[] = [];
+  for (const input of inputs) {
+    const emoji = normalizeReactionEmoji(input);
+    if (emoji === null) throw new UsageError(`${JSON.stringify(input.slice(0, 40))} is not a reaction: ${SIGNAL_REACTION_EMOJI_RULE}`);
+    if (!emojis.includes(emoji)) emojis.push(emoji);
+  }
+  const remove = verb === "unreact" || args.has("remove");
+  const cloud = await target(args);
+  const credential = await commandWorkspaceAndCredential(args, cloud, { validateHumanWorkspace: true });
+  const client = new ThinCommandClient(cloud, credential.fetcher);
+  const id = signalId.toLowerCase();
+  const results: Array<{ emoji: string; result: ReactionResult }> = [];
+  for (const emoji of emojis) {
+    let result: ReactionResult;
+    try {
+      const sent = await client.sendReaction({
+        workspaceId: credential.selectedWorkspace, credential: credential.bearer, commandId: newCommandId(),
+        command: remove ? { kind: "remove_reaction", signal_id: id, emoji } : { kind: "add_reaction", signal_id: id, emoji },
+      });
+      result = remove
+        ? sent.response.removed ? "removed" : "not_there"
+        : sent.response.added ? "added" : "already_there";
+    } catch (error) {
+      // What already went through stays; say so before the refusal.
+      if (!args.has("json")) for (const done of results) process.stdout.write(`${done.emoji} ${REACTION_RESULT_TEXT[done.result]}\n`);
+      throw error;
+    }
+    results.push({ emoji, result });
+  }
+  if (args.has("json")) {
+    process.stdout.write(`${JSON.stringify({ signal_id: id, reactions: results }, null, 2)}\n`);
+    return;
+  }
+  for (const done of results) process.stdout.write(`${done.emoji} ${REACTION_RESULT_TEXT[done.result]}\n`);
+}
+
 function rosterAge(at: string | null): string {
   if (at === null) return "never";
   const minutes = Math.floor(Math.max(0, Date.now() - Date.parse(at)) / 60_000);
@@ -5457,13 +5523,23 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
       },
       afterEmitBatch: async (signals) => {
-        await reportRenderedBroadcasts(
-          cloud,
-          renderedBearer,
-          selected.selectedWorkspace,
-          renderedBroadcastIds(signals),
-          httpClient.fetch,
-        );
+        // 👀 on the arrivals just printed that reach this agent, beside the broadcast seen report.
+        await Promise.all([
+          reportRenderedBroadcasts(
+            cloud,
+            renderedBearer,
+            selected.selectedWorkspace,
+            renderedBroadcastIds(signals),
+            httpClient.fetch,
+          ),
+          reportSeenReactions(
+            cloud,
+            renderedBearer,
+            selected.selectedWorkspace,
+            seenAckTargets(signals, principalId),
+            httpClient.fetch,
+          ),
+        ]);
       },
       onRetry: (_error, delayMs) => {
         const notice = retryNotices.failure(Date.now(), delayMs);
@@ -10891,6 +10967,8 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 9,
     refusalTrace: "runBrain",
   }),
+  react: commandEntry({ tool: "react", mcp: true, handler: traced("runReact", runReact), description: "React to a message with one or more emojis, or shortcodes such as :+1:. --remove takes them off.", mutates: true, flags: [...agentFlags, "remove"], transports: STDIO_ONLY, ...EXPAND_PROFILE, profileListOrder: 20, visible: true, help: ["cswarm react <signal-id> <emoji>... [--remove] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  unreact: commandEntry({ ...noTool("the react tool takes remove"), handler: traced("runReact", runReact), description: "Take your emoji reactions off a message.", mutates: true, flags: agentFlags, transports: STDIO_ONLY, ...EXPAND_PROFILE, profileListOrder: 21, visible: true, help: ["cswarm unreact <signal-id> <emoji>... [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   reraise: commandEntry({ tool: "reraise", mcp: true, handler: traced("runReraise", runReraise), description: "Re-raise an open ask you sent: one reminder to the same people, at most once every 24 hours.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 17, visible: true, help: ["cswarm reraise <ask-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
@@ -11006,6 +11084,8 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
   roster: RUN_ROSTER_ACCEPTED_FLAGS,
   reraise: RUN_RERAISE_ACCEPTED_FLAGS,
+  react: RUN_REACT_ACCEPTED_FLAGS,
+  unreact: RUN_UNREACT_ACCEPTED_FLAGS,
   "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
   note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
   ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,

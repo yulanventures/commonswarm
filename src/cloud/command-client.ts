@@ -215,6 +215,30 @@ export interface SeatAdminCommandRequest {
   signal?: AbortSignal;
 }
 
+/**
+ * One emoji on a message, added or removed. `source` is sent only on an agent client's automatic
+ * seen mark ("ack"); the edge refuses a key it does not expect, so a manual reaction leaves it out.
+ */
+export type ReactionCommand =
+  | { kind: "add_reaction"; signal_id: string; emoji: string; source?: "ack" }
+  | { kind: "remove_reaction"; signal_id: string; emoji: string };
+
+export interface ReactionCommandRequest {
+  workspaceId: string;
+  command: ReactionCommand;
+  credential: string;
+  commandId: string;
+  signal?: AbortSignal;
+}
+
+/** What the edge answers for a reaction: `added` on add, `removed` on remove; false means nothing changed. */
+export interface ReactionOutcome {
+  signal_id: string;
+  emoji: string;
+  added?: boolean;
+  removed?: boolean;
+}
+
 export class ChannelCommandError extends Error {
   constructor(
     readonly status: number,
@@ -376,6 +400,22 @@ export interface SignalRecord {
    * not "nobody", the same rule recipients carries.
    */
   mentions?: SignalMentionRef[];
+  /**
+   * The message's reactions, one entry per emoji in the order each first appeared. Present only on
+   * an agent read that asked for it (include_reactions); absent is not "none", as with mentions.
+   */
+  reactions?: SignalReactionSummary[];
+  /**
+   * Set only on an inbox row that is a person's reaction to this agent's message: `id` is then the
+   * reaction's, not a message's, so it cannot be replied or reacted to.
+   */
+  reaction?: { emoji: string; signal_id: string };
+}
+
+export interface SignalReactionSummary {
+  emoji: string;
+  count: number;
+  actors: Array<{ kind: "user" | "agent"; id: string }>;
 }
 
 export interface SignalMentionRef {
@@ -1528,6 +1568,23 @@ export class ThinCommandClient {
    * uncertain attempt is retried with the same id and payload.
    */
   async sendSeatAdmin(request: SeatAdminCommandRequest): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
+    return await this.sendWithReason(request);
+  }
+
+  /** A reaction, with the same refusal handling as seat admin: a 404 or 409 names its reason. */
+  async sendReaction(request: ReactionCommandRequest): Promise<{ httpStatus: number; response: CommandHttpResponse & ReactionOutcome }> {
+    const sent = await this.sendWithReason(request);
+    const body = sent.response as CommandHttpResponse & Partial<ReactionOutcome>;
+    const flag = request.command.kind === "add_reaction" ? body.added : body.removed;
+    if (body.status !== "accepted" || typeof body.signal_id !== "string" || typeof body.emoji !== "string" || typeof flag !== "boolean") {
+      throw new Error("command endpoint returned a malformed reaction outcome");
+    }
+    return { httpStatus: sent.httpStatus, response: body as CommandHttpResponse & ReactionOutcome };
+  }
+
+  private async sendWithReason(request: {
+    workspaceId: string; command: SeatAdminCommand | ReactionCommand; credential: string; commandId: string; signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);
     const onCallerAbort = () => controller.abort();

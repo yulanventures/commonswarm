@@ -98,6 +98,9 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   ask_answered: entry("That ask already has an answer, so there's nothing to re-raise.", "call check to read the replies"),
   reraise_too_soon: entry("This ask was re-raised in the last 24 hours.", "wait until 24 hours after the last re-raise, then use a new request_id"),
   reraise_unsupported: entry("Only an ask sent to someone can be re-raised; this one went to the whole workspace.", NEW_ASK),
+  // react refusals.
+  signal_not_found: entry("The signal_id argument names no message this agent can read in this workspace.", FIX),
+  reaction_limit_reached: entry("This agent already has 64 emojis on that message; remove one first.", FIX),
   // The server refuses ask_choice while SWARM_INTERACTIVE_REPLIES is off; nothing was sent.
   interactive_replies_unavailable: entry("Choice asks aren't turned on here, so nothing was sent.", "send it as a plain ask, without choices"),
   outcome_still_unknown: entry("CommonSwarm still can't confirm whether this request was applied, after a retry with the same request_id.", STOP),

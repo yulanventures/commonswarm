@@ -37,14 +37,15 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
   };
   const receiptBefore = structuredClone(receipt);
   // SIGTERM goes out only after both lines are rendered AND the server has seen the best-effort
-  // attest (signals_seen) and the attended-seat canary (post_signal), never on a fixed delay that a
-  // loaded runner can beat.
+  // attest (signals_seen), the seen mark (add_reaction) and the attended-seat canary (post_signal),
+  // never on a fixed delay that a loaded runner can beat.
   let rendered = false;
   let stopped = false;
   let stop = (): void => {};
   const commandKinds = () => requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
   const maybeStop = () => {
-    if (stopped || !rendered || !commandKinds().includes("signals_seen") || !commandKinds().includes("post_signal")) return;
+    if (stopped || !rendered || !commandKinds().includes("signals_seen") || !commandKinds().includes("add_reaction") ||
+        !commandKinds().includes("post_signal")) return;
     stopped = true;
     stop();
   };
@@ -67,6 +68,11 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
       }
       if (req.url === "/functions/v1/command" && command?.kind === "release_wake_lease") {
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, released: true }));
+        return;
+      }
+      if (req.url === "/functions/v1/command" && command?.kind === "add_reaction") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "accepted", ok: true,
+          event_ids: [], signal_id: command.signal_id, emoji: command.emoji, added: true }));
         return;
       }
       if (req.url === "/functions/v1/command" && command?.kind === "signals_seen") {
@@ -236,18 +242,28 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
         "/functions/v1/command",
         "/functions/v1/command",
         "/functions/v1/command",
+        "/functions/v1/command",
       ],
     );
     assert.equal((requests[0]?.body.command as Record<string, unknown>).kind, "claim_wake_lease");
     assert.equal(requests[1]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
     assert.equal(requests[1]?.body.after_id, OLD_SIGNAL);
+    assert.equal(requests[1]?.body.include_reactions, true);
+    // The broadcast attest and the seen mark go out together after the batch; their order is not fixed.
+    const afterBatch = requests.slice(2, 4).map(({ body }) => body.command as Record<string, unknown>);
+    assert.deepEqual(afterBatch.map((command) => command.kind).sort(), ["add_reaction", "signals_seen"]);
     assert.deepEqual(
-      (requests[2]?.body.command as Record<string, unknown>).signal_ids,
+      afterBatch.find((command) => command.kind === "signals_seen")?.signal_ids,
       [BROADCAST_SIGNAL],
       "a directed line is rendered but only the rendered broadcast is attested",
     );
-    assert.equal((requests[3]?.body.command as Record<string, unknown>).kind, "post_signal");
-    assert.equal((requests[4]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
+    assert.deepEqual(
+      afterBatch.find((command) => command.kind === "add_reaction"),
+      { kind: "add_reaction", signal_id: NEW_SIGNAL, emoji: "\u{1F440}", source: "ack" },
+      "only the ask addressed to this agent is marked seen",
+    );
+    assert.equal((requests[4]?.body.command as Record<string, unknown>).kind, "post_signal");
+    assert.equal((requests[5]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
     assert.deepEqual(receipt, receiptBefore);
 
     const stored = JSON.parse(await readFile(cursorStore.location, "utf8")) as {
