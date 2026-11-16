@@ -144,6 +144,8 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
     ".dashboard__message-receipt:not([data-receipt-quiet])[open]"],
   // The right-click menu (lib/context-menu.ts) is created on open and removed on close, never hidden.
   "menu.context": ['.cs-context-menu[role="menu"]'],
+  // The reaction picker is fixed to the viewport, created on open and removed on close.
+  "menu.reactions": ["[data-reaction-picker]"],
   // Only between 52rem and 1399px is the channel details panel a side sheet over the main column: phones
   // use a native dialog, and from 1400px it is an ordinary column beside the main one.
   "dialog.details-sheet": [{ selector: ".hm-frame > #cs-channel-details.hm-frame__side", media: "(width > 52rem) and (width <= 1399px)" }],
@@ -195,6 +197,17 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "ArrowUp", expect: '.cs-context-menu[role="menu"] > .cs-context-menu__item:first-of-type' },
     ],
     activate: { key: "Escape", expect: { active: '[data-rail-agent="{agent}"]', inView: '[data-rail-agent="{agent}"]' } },
+  }],
+  // The reaction picker focuses its first emoji; arrows move through the grid, and Escape closes it and returns focus to
+  // the row's Add reaction control. No emoji is picked.
+  "menu.reactions": [{
+    name: "reaction-picker-escape-returns-to-add",
+    start: { active: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:first-child' },
+    keys: [
+      { key: "ArrowRight", expect: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:nth-child(2)' },
+      { key: "ArrowLeft", expect: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:first-child' },
+    ],
+    activate: { key: "Escape", expect: { active: '[data-reaction-add="{message.reacted}"]', inView: '[data-reaction-add="{message.reacted}"]' } },
   }],
   // The review dialog opens on its heading; Tab reaches the first role, then leaves the radio group for the consent checkbox,
   // which must be revealed (not under the Join and Not now bar). Escape (like Not now) closes it without joining; the inbox then

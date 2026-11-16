@@ -1373,6 +1373,10 @@ import "../../styles/kylon-command-palette.css";
     askChoices,
     signalMentions,
     type SignalMention,
+    signalReactions,
+    addReaction,
+    removeReaction,
+    type ReactionResult,
     answerChoice,
     type ChannelUnread,
     createChannel,
@@ -1422,6 +1426,7 @@ import "../../styles/kylon-command-palette.css";
     type MessageStatus,
   } from "../../lib/message-status";
   import { choiceAnswerText, ASK_CHOICES_BATCH, type AskChoiceState } from "../../lib/choices";
+  import { REACTION_PICKER_EMOJIS, pickerMove, reactionNames, reactionPillLabel, type ReactionGroup } from "../../lib/reactions";
   import {
     agentActivityFrameIsNewer,
     agentActivityPanelView,
@@ -2128,6 +2133,35 @@ import "../../styles/kylon-command-palette.css";
     const resetSignalMentions = (): void => {
       signalMentionRows = new Map();
       signalMentionGeneration += 1;
+    };
+    /* REACTIONS ON LOADED MESSAGES, from `swarm_read.signal_reactions`, by message id. Unlike mentions they
+       change, so every read asks about every loaded message and the feed repaints only when the answer differs.
+       The epoch moves when one of this person's own changes settles: a read that started before it carries the
+       old answer, so it is dropped and asked again rather than flipping the pill back. */
+    let signalReactionRows = new Map<string, ReactionGroup[]>();
+    let signalReactionGeneration = 0;
+    let signalReactionEpoch = 0;
+    let signalReactionReading = false;
+    let signalReactionAgain = false;
+    /* A click's ticket, as for choices: by message and emoji, dropped by a reset or a change of account,
+       workspace or request. Only that pill waits. */
+    type ReactionTicket = { viewer: string; workspaceId: string; version: number; generation: number };
+    const reactionTickets = new Map<string, ReactionTicket>();
+    const reactionErrors = new Map<string, string>();
+    let reactionErrorTimer: number | undefined;
+    /* One picker at a time, outside the feed list, so a repaint never takes it away; its opener is found again
+       by message id after every repaint. */
+    let reactionPicker: { signalId: string; opener: "tools" | "pill" } | null = null;
+    let reactionPickerNode: HTMLElement | null = null;
+    const reactionKey = (signalId: string, emoji: string): string => `${signalId}\n${emoji}`;
+    const resetSignalReactions = (): void => {
+      signalReactionRows = new Map();
+      signalReactionGeneration += 1;
+      reactionTickets.clear();
+      reactionErrors.clear();
+      window.clearTimeout(reactionErrorTimer);
+      reactionErrorTimer = undefined;
+      closeReactionPicker(false);
     };
     const expandedSignalIds = new Set<string>();
     const attachmentPreviewUrls = new ChatImagePreviewCache();
@@ -7959,6 +7993,360 @@ import "../../styles/kylon-command-palette.css";
       if (again && activeWorkspaceId && (rows !== null || !current)) void refreshSignalMentions(activeWorkspaceId, requestVersion);
     };
 
+    /* ---- Reactions ---- */
+    /** The picker's grid is this many emojis wide (kylon-reactions.css); arrow keys move by row and column. */
+    const REACTION_PICKER_COLUMNS = 6;
+    /** A message the signed-in person may react to here: never in the sample, never a row still being posted. */
+    const reactionsAllowed = (signal: Signal): boolean =>
+      !sampleMode && !!session && !!activeWorkspaceId && !signal.id.startsWith("composer-pending-");
+    const reactionTicketLive = (ticket: ReactionTicket): boolean =>
+      ticket.viewer === (session?.user.id ?? "") && ticket.workspaceId === activeWorkspaceId &&
+      ticket.version === requestVersion && ticket.generation === signalReactionGeneration;
+    const reactionIsPending = (signalId: string, emoji: string): boolean => {
+      const ticket = reactionTickets.get(reactionKey(signalId, emoji));
+      return ticket !== undefined && reactionTicketLive(ticket);
+    };
+
+    /** Read the reactions of every loaded message (or only `only`), and repaint when any changed. */
+    const refreshSignalReactions = async (workspaceId: string, version: number, only?: readonly string[]): Promise<void> => {
+      const viewer = session?.user.id ?? "";
+      if (sampleMode || !viewer) return;
+      /* ONE READ AT A TIME, as for mentions. Whoever asks meanwhile is answered by one more read of
+         everything on screen once this one settles. */
+      if (signalReactionReading) { signalReactionAgain = true; return; }
+      const loaded = new Set(signals.map((signal) => signal.id));
+      const ids = (only ?? [...loaded]).filter((id) => loaded.has(id) && !id.startsWith("composer-pending-"));
+      if (ids.length === 0) return;
+      const generation = signalReactionGeneration;
+      const epoch = signalReactionEpoch;
+      signalReactionReading = true;
+      let groups: Map<string, ReactionGroup[]> | null;
+      try {
+        groups = await signalReactions(workspaceId, ids, viewer);
+      } catch {
+        groups = null;
+      } finally {
+        signalReactionReading = false;
+      }
+      const again = signalReactionAgain;
+      signalReactionAgain = false;
+      const current = generation === signalReactionGeneration && version === requestVersion &&
+        workspaceId === activeWorkspaceId && session?.user.id === viewer;
+      const fresh = epoch === signalReactionEpoch;
+      if (current && fresh && groups !== null) {
+        const next = only ? new Map(signalReactionRows) : new Map<string, ReactionGroup[]>();
+        for (const id of ids) {
+          const list = groups.get(id.toLowerCase());
+          if (list?.length) next.set(id, list); else next.delete(id);
+        }
+        // Compared in feed order, so a Map whose keys were added in another order is not a change.
+        const snapshot = (rows: Map<string, ReactionGroup[]>): string => JSON.stringify(signals.map((signal) => rows.get(signal.id) ?? null));
+        const changed = snapshot(next) !== snapshot(signalReactionRows);
+        signalReactionRows = next;
+        if (changed) repaintReactions();
+      }
+      /* A failed read is not retried here; the next tick asks again. */
+      if (activeWorkspaceId && (again || (current && !fresh))) void refreshSignalReactions(activeWorkspaceId, requestVersion);
+    };
+
+    /** Repaint the feed for a reactions change, keeping focus on the pill (or add control) it was on: a pill's
+        accessible name carries its count, so the feed's own focus keeping cannot match it after a change. */
+    const repaintReactions = (): void => {
+      const active = document.activeElement;
+      const control = active instanceof HTMLElement ? active.closest<HTMLElement>("[data-reaction-emoji], [data-reaction-more], [data-reaction-add]") : null;
+      const signalId = control?.closest<HTMLElement>("[data-signal-id]")?.dataset.signalId ?? null;
+      const emoji = control?.dataset.reactionEmoji ?? null;
+      const kind = control === null ? null : control.hasAttribute("data-reaction-add") ? "add" : control.hasAttribute("data-reaction-more") ? "more" : "pill";
+      /* "latest": the change is in place, so the reader's scroll position holds as it is. "history" would treat a
+         taller row as rows prepended above and move the view by that height. */
+      renderFeed("latest");
+      if (signalId !== null && (document.activeElement === null || document.activeElement === document.body)) {
+        const row = document.querySelector<HTMLElement>(`[data-signal-id="${CSS.escape(signalId)}"]`);
+        const pill = emoji === null ? null : Array.from(row?.querySelectorAll<HTMLElement>("[data-reaction-emoji]") ?? [])
+          .find((candidate) => candidate.dataset.reactionEmoji === emoji) ?? null;
+        const more = row?.querySelector<HTMLElement>("[data-reaction-more]") ?? null;
+        const add = row?.querySelector<HTMLElement>("[data-reaction-add]") ?? null;
+        // The same kind of control first; a pill that went away hands focus to the add pill, then the tools.
+        const target = kind === "add" ? add ?? more : kind === "more" ? more ?? add : pill ?? more ?? add;
+        target?.focus({ preventScroll: true });
+      }
+      syncReactionPicker();
+    };
+
+    /** The signed-in person's own change, shown at once; the read that follows confirms it. */
+    const applyOwnReaction = (signalId: string, emoji: string, added: boolean): void => {
+      const viewer = session?.user.id.toLowerCase() ?? "";
+      const groups = (signalReactionRows.get(signalId) ?? []).map((group) => ({ ...group, actors: [...group.actors] }));
+      let group = groups.find((entry) => entry.emoji === emoji);
+      if (added && !group?.mine) {
+        if (!group) { group = { emoji, count: 0, actors: [], mine: false }; groups.push(group); }
+        group.actors.push({ kind: "person", id: viewer });
+        group.count += 1;
+        group.mine = true;
+      } else if (!added && group?.mine) {
+        group.actors = group.actors.filter((actor) => !(actor.kind === "person" && actor.id === viewer));
+        group.count = group.actors.length;
+        group.mine = false;
+      }
+      const next = new Map(signalReactionRows);
+      const kept = groups.filter((entry) => entry.count > 0);
+      if (kept.length) next.set(signalId, kept); else next.delete(signalId);
+      signalReactionRows = next;
+    };
+
+    const showReactionError = (signalId: string, message: string): void => {
+      reactionErrors.clear();
+      reactionErrors.set(signalId, message);
+      window.clearTimeout(reactionErrorTimer);
+      reactionErrorTimer = window.setTimeout(() => {
+        reactionErrorTimer = undefined;
+        if (reactionErrors.delete(signalId)) repaintReactions();
+      }, 6_000);
+    };
+
+    /** Mark the pills of one message waiting (or not) in place: only the clicked pill waits, and nothing is rebuilt. */
+    const syncReactionPending = (signalId: string): void => {
+      const row = document.querySelector<HTMLElement>(`[data-signal-id="${CSS.escape(signalId)}"]`);
+      for (const pill of Array.from(row?.querySelectorAll<HTMLElement>("[data-reaction-emoji]") ?? [])) {
+        if (reactionIsPending(signalId, pill.dataset.reactionEmoji ?? "")) pill.setAttribute("aria-disabled", "true");
+        else pill.removeAttribute("aria-disabled");
+      }
+    };
+
+    /** Add the person's emoji, or take theirs back when they already have it. */
+    const toggleReaction = async (signalId: string, emoji: string): Promise<void> => {
+      const activeSession = session;
+      const workspaceId = activeWorkspaceId;
+      if (sampleMode || !activeSession || !workspaceId || reactionIsPending(signalId, emoji)) return;
+      const mine = (signalReactionRows.get(signalId) ?? []).some((group) => group.emoji === emoji && group.mine);
+      const key = reactionKey(signalId, emoji);
+      const ticket: ReactionTicket = { viewer: activeSession.user.id, workspaceId, version: requestVersion, generation: signalReactionGeneration };
+      reactionTickets.set(key, ticket);
+      syncReactionPending(signalId);
+      let result: ReactionResult;
+      try {
+        result = await (mine ? removeReaction : addReaction)(activeSession, uuid(), workspaceId, signalId, emoji);
+      } catch {
+        result = { ok: false, reason: "unknown", message: "That reaction couldn't be saved." };
+      }
+      // Stale: another account, workspace, request or reset owns this message now. Touch nothing.
+      if (reactionTickets.get(key) !== ticket) return;
+      reactionTickets.delete(key);
+      if (!reactionTicketLive(ticket)) return;
+      signalReactionEpoch += 1;
+      if (result.ok) {
+        applyOwnReaction(signalId, emoji, !mine);
+        reactionErrors.delete(signalId);
+      } else {
+        showReactionError(signalId, result.message);
+      }
+      repaintReactions();
+      void refreshSignalReactions(workspaceId, ticket.version, [signalId]);
+    };
+
+    /** The opener the picker belongs to, found again in the current feed. */
+    const reactionOpener = (): HTMLElement | null => {
+      if (!reactionPicker) return null;
+      const name = reactionPicker.opener === "pill" ? "data-reaction-more" : "data-reaction-add";
+      return document.querySelector<HTMLElement>(`[${name}="${CSS.escape(reactionPicker.signalId)}"]`);
+    };
+    const syncReactionOpeners = (): void => {
+      for (const opener of Array.from(document.querySelectorAll<HTMLElement>("[data-reaction-add], [data-reaction-more]"))) {
+        const kind = opener.hasAttribute("data-reaction-more") ? "pill" : "tools";
+        const signalId = opener.dataset.reactionMore ?? opener.dataset.reactionAdd;
+        opener.setAttribute("aria-expanded", String(reactionPicker?.signalId === signalId && reactionPicker?.opener === kind));
+      }
+    };
+    /** Anchored under the opener (above it when there is no room), kept inside the viewport. */
+    const placeReactionPicker = (): void => {
+      const node = reactionPickerNode;
+      if (!node || !reactionPicker) return;
+      const opener = reactionOpener();
+      if (!opener || opener.getClientRects().length === 0) { closeReactionPicker(false); return; }
+      const anchor = opener.getBoundingClientRect();
+      const box = node.getBoundingClientRect();
+      const margin = 8;
+      const left = Math.max(margin, Math.min(anchor.right - box.width, window.innerWidth - box.width - margin));
+      const below = anchor.bottom + 4;
+      const top = below + box.height <= window.innerHeight - margin ? below : Math.max(margin, anchor.top - 4 - box.height);
+      node.style.left = `${left}px`;
+      node.style.top = `${top}px`;
+    };
+    /** After a repaint: the opener is a new node. Re-anchor to it, or close when it is gone. */
+    const syncReactionPicker = (): void => {
+      if (!reactionPicker) return;
+      syncReactionOpeners();
+      placeReactionPicker();
+    };
+    const onReactionPickerOutside = (event: Event): void => {
+      const target = event.target;
+      if (!(target instanceof Node) || reactionPickerNode?.contains(target)) return;
+      // The opener's own click toggles the picker closed.
+      if (reactionOpener()?.contains(target)) return;
+      closeReactionPicker(false);
+    };
+    const onReactionPickerFocusOut = (event: FocusEvent): void => {
+      const next = event.relatedTarget;
+      if (!(next instanceof Node) || reactionPickerNode?.contains(next) || reactionOpener()?.contains(next)) return;
+      closeReactionPicker(false);
+    };
+    const onReactionPickerKey = (event: KeyboardEvent): void => {
+      const node = reactionPickerNode;
+      if (!node) return;
+      if (event.key === "Escape" || event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeReactionPicker(true);
+        return;
+      }
+      const items = Array.from(node.querySelectorAll<HTMLElement>("[data-reaction-option]"));
+      const index = items.findIndex((item) => item === document.activeElement);
+      const next = pickerMove(event.key, Math.max(index, 0), items.length, REACTION_PICKER_COLUMNS);
+      if (next === null) return;
+      event.preventDefault();
+      for (const [position, item] of items.entries()) item.tabIndex = position === next ? 0 : -1;
+      items[next]?.focus();
+    };
+    const closeReactionPicker = (returnFocus: boolean): void => {
+      if (!reactionPicker && !reactionPickerNode) return;
+      const opener = returnFocus ? reactionOpener() : null;
+      reactionPicker = null;
+      const node = reactionPickerNode;
+      reactionPickerNode = null;
+      document.removeEventListener("pointerdown", onReactionPickerOutside, true);
+      document.removeEventListener("scroll", placeReactionPicker, true);
+      window.removeEventListener("resize", placeReactionPicker);
+      node?.removeEventListener("focusout", onReactionPickerFocusOut);
+      node?.remove();
+      syncReactionOpeners();
+      opener?.focus({ preventScroll: true });
+    };
+    const openReactionPicker = (signalId: string, opener: "tools" | "pill"): void => {
+      if (sampleMode || !session) return;
+      if (reactionPicker?.signalId === signalId && reactionPicker.opener === opener) { closeReactionPicker(true); return; }
+      closeReactionPicker(false);
+      reactionPicker = { signalId, opener };
+      const node = document.createElement("div");
+      node.className = "dashboard__reaction-picker";
+      node.dataset.reactionPicker = signalId;
+      node.setAttribute("role", "menu");
+      node.setAttribute("aria-label", "Add reaction");
+      const own = new Set((signalReactionRows.get(signalId) ?? []).filter((group) => group.mine).map((group) => group.emoji));
+      for (const [index, emoji] of REACTION_PICKER_EMOJIS.entries()) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "dashboard__reaction-option";
+        item.dataset.reactionOption = emoji;
+        item.setAttribute("role", "menuitemcheckbox");
+        item.setAttribute("aria-checked", String(own.has(emoji)));
+        item.tabIndex = index === 0 ? 0 : -1;
+        item.textContent = emoji;
+        item.addEventListener("click", () => {
+          closeReactionPicker(true);
+          void toggleReaction(signalId, emoji);
+        });
+        node.append(item);
+      }
+      node.addEventListener("keydown", onReactionPickerKey);
+      node.addEventListener("focusout", onReactionPickerFocusOut);
+      app.append(node);
+      reactionPickerNode = node;
+      syncReactionOpeners();
+      placeReactionPicker();
+      if (!reactionPickerNode) return;
+      document.addEventListener("pointerdown", onReactionPickerOutside, true);
+      document.addEventListener("scroll", placeReactionPicker, true);
+      window.addEventListener("resize", placeReactionPicker);
+      node.querySelector<HTMLElement>("[data-reaction-option]")?.focus({ preventScroll: true });
+    };
+
+    /** The row's add control, in its tools footer beside "Reply in thread". */
+    const reactionAddButton = (signal: Signal): HTMLButtonElement | null => {
+      if (!reactionsAllowed(signal)) return null;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dashboard__text-button dashboard__message-react";
+      button.dataset.reactionAdd = signal.id;
+      button.setAttribute("aria-label", "Add reaction");
+      button.title = "Add reaction";
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", String(reactionPicker?.signalId === signal.id && reactionPicker.opener === "tools"));
+      const svgNs = "http://www.w3.org/2000/svg";
+      const face = document.createElementNS(svgNs, "svg");
+      face.setAttribute("class", "dashboard__message-react-icon");
+      face.setAttribute("viewBox", "0 0 20 20"); face.setAttribute("fill", "none"); face.setAttribute("stroke", "currentColor");
+      face.setAttribute("stroke-width", "1.6"); face.setAttribute("stroke-linecap", "round");
+      face.setAttribute("aria-hidden", "true"); face.setAttribute("focusable", "false");
+      const outline = document.createElementNS(svgNs, "circle");
+      outline.setAttribute("cx", "10"); outline.setAttribute("cy", "10"); outline.setAttribute("r", "7.25");
+      const smile = document.createElementNS(svgNs, "path");
+      smile.setAttribute("d", "M7 11.6c.7.9 1.7 1.4 3 1.4s2.3-.5 3-1.4M7.6 7.9h.01M12.4 7.9h.01");
+      face.append(outline, smile);
+      button.append(face);
+      button.addEventListener("click", () => openReactionPicker(signal.id, "tools"));
+      return button;
+    };
+
+    /** The row's reactions: one pill per emoji, then a compact add pill. Nothing when the message has none. */
+    const appendReactions = (body: HTMLElement, signal: Signal): void => {
+      if (!reactionsAllowed(signal)) return;
+      const viewer = session?.user.id.toLowerCase() ?? "";
+      const groups = signalReactionRows.get(signal.id) ?? [];
+      if (groups.length > 0) {
+        const line = document.createElement("div");
+        line.className = "dashboard__message-reactions";
+        line.setAttribute("role", "group");
+        line.setAttribute("aria-label", "Reactions");
+        for (const group of groups) {
+          const names = reactionNames(group, viewer, (actor) => entityName(actor));
+          const pill = document.createElement("button");
+          pill.type = "button";
+          pill.className = "dashboard__reaction";
+          pill.dataset.reactionEmoji = group.emoji;
+          pill.setAttribute("aria-pressed", String(group.mine));
+          pill.setAttribute("aria-label", reactionPillLabel(group, names));
+          pill.title = names;
+          if (reactionIsPending(signal.id, group.emoji)) pill.setAttribute("aria-disabled", "true");
+          const chip = document.createElement("span");
+          chip.className = "dashboard__reaction-chip";
+          chip.setAttribute("aria-hidden", "true");
+          const glyph = document.createElement("span");
+          glyph.className = "dashboard__reaction-emoji";
+          glyph.textContent = group.emoji;
+          const count = document.createElement("span");
+          count.className = "dashboard__reaction-count";
+          count.textContent = String(group.count);
+          chip.append(glyph, count);
+          pill.append(chip);
+          pill.addEventListener("click", () => void toggleReaction(signal.id, group.emoji));
+          line.append(pill);
+        }
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "dashboard__reaction dashboard__reaction--add";
+        more.dataset.reactionMore = signal.id;
+        more.setAttribute("aria-label", "Add reaction");
+        more.setAttribute("aria-haspopup", "menu");
+        more.setAttribute("aria-expanded", String(reactionPicker?.signalId === signal.id && reactionPicker.opener === "pill"));
+        const plus = document.createElement("span");
+        plus.className = "dashboard__reaction-chip";
+        plus.setAttribute("aria-hidden", "true");
+        plus.textContent = "+";
+        more.append(plus);
+        more.addEventListener("click", () => openReactionPicker(signal.id, "pill"));
+        line.append(more);
+        body.append(line);
+      }
+      const error = reactionErrors.get(signal.id);
+      if (error) {
+        const note = document.createElement("p");
+        note.className = "dashboard__choice-error dashboard__reaction-error";
+        note.setAttribute("role", "alert");
+        note.textContent = error;
+        body.append(note);
+      }
+    };
+
     const scheduleMessageStatusExpiry = (): void => {
       window.clearTimeout(messageStatusExpiryTimer);
       messageStatusExpiryTimer = undefined;
@@ -9180,6 +9568,8 @@ import "../../styles/kylon-command-palette.css";
         if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
         appendChoices(body, signal);
+        /* Reactions sit under the message, before the row's tools; they are never in the floating footer. */
+        appendReactions(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
            `threadRootBlock` is every rule `resolveThreadRoot` applies, in its order: directed
            or expiring inside the server's one-second margin (both 404), then an archived
@@ -9200,9 +9590,14 @@ import "../../styles/kylon-command-palette.css";
            on threads the server refuses. The question here is about the ROW's channel, so it
            is asked of the row's channel, in every view. */
         const rootChannel = channelById(channels, signal.channelId);
-        if (!isReply && canStartThread(signal, now, rootChannel?.archivedAt != null)) {
-          const actions = document.createElement("div");
-          actions.className = "dashboard__message-actions";
+        const canReply = !isReply && canStartThread(signal, now, rootChannel?.archivedAt != null);
+        /* "Add reaction" shares the footer with "Reply in thread", so a row that cannot carry a thread still
+           offers it there, quiet at rest like the rest of the footer. */
+        const reactButton = reactionAddButton(signal);
+        const actions = canReply || reactButton ? document.createElement("div") : null;
+        if (actions) actions.className = "dashboard__message-actions";
+        if (actions && reactButton) actions.append(reactButton);
+        if (actions && canReply) {
           const reply = document.createElement("button");
           reply.type = "button";
           reply.className = "dashboard__text-button dashboard__message-reply";
@@ -9227,8 +9622,8 @@ import "../../styles/kylon-command-palette.css";
             one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
           });
           actions.append(reply);
-          body.append(actions);
         }
+        if (actions) body.append(actions);
         /* THE ROW'S TOOLS (ruling 1): the receipt, whatever its state, and "Reply in thread" share one permanent
            footer, so a receipt changing between quiet and problem never moves it or reorders the DOM (#385). A quiet
            receipt is hidden at rest by opacity only and shows on hover or keyboard focus; a problem receipt
@@ -9361,6 +9756,7 @@ import "../../styles/kylon-command-palette.css";
       feedWasEmpty = false;
       showChannelView("feed");
       observeHumanSeenRows();
+      syncReactionPicker();
       /* Two cases, and the anchoring MUST live here rather than around the load-older click.
        * The click handler is `async` and returns at its first `await`, so measuring around
        * `button.click()` reads the height before a single row has been added — the anchor was a
@@ -9577,6 +9973,7 @@ import "../../styles/kylon-command-palette.css";
       void refreshMessageStatus(workspaceId, version);
       void refreshChoices(workspaceId, version);
       void refreshSignalMentions(workspaceId, version);
+      void refreshSignalReactions(workspaceId, version);
     };
 
     const refreshLatestSignals = async (): Promise<void> => {
@@ -9632,6 +10029,7 @@ import "../../styles/kylon-command-palette.css";
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
         void refreshSignalMentions(workspaceId, version);
+        void refreshSignalReactions(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
            offers a catch-up, and the shared gate keeps the requests bounded. */
         void refreshPendingAccess(workspaceId, version);
@@ -9887,7 +10285,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices(); resetSignalMentions();
+      resetChoices(); resetSignalMentions(); resetSignalReactions();
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
       attachmentPreviewUrls.clear();
@@ -10636,7 +11034,7 @@ import "../../styles/kylon-command-palette.css";
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       resetMessageStatus();
-      resetChoices(); resetSignalMentions();
+      resetChoices(); resetSignalMentions(); resetSignalReactions();
       files = [];
       fileLoadError = "";
       signalFilter = "all";
@@ -12253,7 +12651,7 @@ import "../../styles/kylon-command-palette.css";
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
         resetMessageStatus();
-        resetChoices(); resetSignalMentions();
+        resetChoices(); resetSignalMentions(); resetSignalReactions();
         // A new visit takes a fresh unread snapshot, even when it comes back to the channel it left.
         unreadVisit = null;
         renderUnreadBar();
@@ -14633,6 +15031,7 @@ import "../../styles/kylon-command-palette.css";
         void refreshMessageStatus(workspaceId, version);
         void refreshChoices(workspaceId, version);
         void refreshSignalMentions(workspaceId, version);
+        void refreshSignalReactions(workspaceId, version);
       } catch (caught) {
         /* THE SEND'S OWN TEARDOWN COMES FIRST, before any question about the screen. This
            block used to open with `if (version !== requestVersion || workspaceId !==

@@ -1666,6 +1666,76 @@
     ]
   },
   {
+    "id": "app.chat.reactions",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-reactions .dashboard__reaction[aria-pressed=\"true\"]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-reactions"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-reactions .dashboard__reaction[aria-pressed=\"true\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_reactions"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.reacted}\"] .dashboard__message-reactions"
+    ]
+  },
+  {
+    "id": "menu.reactions",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-reactions .dashboard__reaction"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.reacted}\"]"
+      },
+      {
+        "media": "(hover: hover)",
+        "hover": "[data-signal-id=\"{message.reacted}\"]"
+      },
+      {
+        "media": "(hover: none)",
+        "click": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-markdown"
+      },
+      {
+        "click": "[data-reaction-add=\"{message.reacted}\"]"
+      },
+      {
+        "waitFor": "[data-reaction-picker=\"{message.reacted}\"] [data-reaction-option]"
+      }
+    ],
+    "ready": "[data-reaction-picker=\"{message.reacted}\"] [data-reaction-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_reactions"
+    ],
+    "frame": [
+      "[data-reaction-picker=\"{message.reacted}\"]"
+    ]
+  },
+  {
     "id": "menu.wiki-version",
     "kind": "view",
     "path": "/app?w={workspace}&v=wiki",
