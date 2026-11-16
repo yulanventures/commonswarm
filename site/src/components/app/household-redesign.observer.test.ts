@@ -214,11 +214,27 @@ function approvalDom() {
     children: Element[] = []; dataset: Record<string, string> = {}; attributes: Record<string, string> = {};
     textContent = ""; className = ""; hidden = false; disabled = false; checked = false; value = "";
     ownerDocument = doc; events = new Map<string, () => void>();
-    classList = { add: (...names: string[]) => { this.className += ` ${names.join(" ")}`; } };
+    classList = {
+      add: (...names: string[]) => { this.className += ` ${names.join(" ")}`; },
+      remove: (...names: string[]) => { this.className = this.className.split(" ").filter(name => !names.includes(name)).join(" "); },
+      contains: (name: string) => this.className.split(" ").includes(name),
+      toggle: (name: string, force?: boolean) => {
+        const on = force ?? !this.className.split(" ").includes(name);
+        if (on) this.classList.add(name); else this.classList.remove(name); return on;
+      },
+    };
     constructor(public tag: string) {}
     get childElementCount() { return this.children.filter(child => child.tag !== "#text").length; }
     setAttribute(name: string, value: string) { this.attributes[name] = value; }
     append(...nodes: Element[]) { this.children.push(...nodes); }
+    prepend(...nodes: Element[]) { this.children.unshift(...nodes); }
+    insertBefore(node: Element, ref: Element | null) {
+      const at = ref ? this.children.indexOf(ref) : -1; if (at < 0) this.children.push(node); else this.children.splice(at, 0, node); return node;
+    }
+    remove() {}
+    removeAttribute(name: string) { delete this.attributes[name]; }
+    getAttribute(name: string) { return this.attributes[name] ?? null; }
+    toggleAttribute(name: string, force?: boolean) { if (force === false) delete this.attributes[name]; else this.attributes[name] = ""; return force !== false; }
     replaceChildren(...nodes: Element[]) { this.children = nodes; }
     addEventListener(event: string, callback: () => void) { this.events.set(event, callback); }
     click() { if (!this.disabled) this.events.get("click")?.(); }
@@ -256,8 +272,9 @@ test("hosted and local owners use the same Allow controls and approval command; 
       { selected: { type: "agent", id: principal }, collapsed: new Set(), showAllAttention: false, query: "" },
       { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {},
         confirm: () => assert.fail("Allow opens the existing Lists & docs choices") });
-    const allowButton = () => dom.detail.descendants().find(node => node.tag === "button" && node.textContent === "Allow…");
-    paint(); assert.ok(allowButton(), `${kind}: owner has Allow…`);
+    const allowButton = () => dom.detail.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
+    paint(); assert.ok(allowButton(), `${kind}: owner has Allow`);
+    assert.equal(allowButton()!.attributes["data-allow-agent-access"], principal);
     allowButton()!.click(); assert.deepEqual(actions, [["allow", principal]]);
     for (const role of ["owner", "admin", "member"]) {
       f.ctx.agents[0].ownerUserId = "someone-else"; f.ctx.members[0].role = role;
@@ -293,6 +310,81 @@ test("hosted and local owners use the same Allow controls and approval command; 
     funcs.renderAgentApprovals();
     assert.ok(dom.list.descendants().some(node => node.tag === "button" && node.textContent === "Save"));
   }
+});
+
+test("People Allow approves in place with the Lists & docs defaults, and only falls back to setup before it exists", async () => {
+  const principal = "00000000-0000-4000-8000-000000000001";
+  for (const [role, operations] of [["editor", ["read", "create", "update"]], ["reader", ["read"]]] as const) {
+    const f = dialogConnectionsFixture(), calls: any[] = [];
+    const connection: any = { kind: "local", principal_id: principal, name: "Muse", approval: null,
+      connection_id: "00000000-0000-4000-8000-000000000002", grant_id: "00000000-0000-4000-8000-000000000003" };
+    let reads = 0;
+    f.ctx.postCommand = async (_session: any, _id: string, body: any, envelope: any) => {
+      if (body.kind === "household_connections") { reads += 1; return { status: 200, body: { status: "ok", connections: [connection] } }; }
+      calls.push(JSON.parse(JSON.stringify({ body, envelope })));
+      return { status: 200, body: { status: "committed", expires_at: null } };
+    };
+    const focused: string[] = [];
+    Object.assign(f.ctx, { householdAccess: { workspaceId: "workspace", status: "ok", contentRole: role }, CONTENT_OPERATIONS,
+      approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load,
+      peopleDialogFocusTarget: (_action: string, id: string) => ({ focus: () => focused.push(id) }) });
+    const funcs = execute(`${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ allowAgentFromPeople });`, f.ctx);
+    // The People dialog disables the button for the click before it calls the action, as here.
+    const button: any = { disabled: true }, status: any = { textContent: "" };
+    // Connections not read yet: it reads them first, then approves the one seat, in place.
+    assert.equal(await funcs.allowAgentFromPeople("workspace", principal, button, status), "approved");
+    assert.equal(reads, 2, "read before approving, and again after");
+    assert.deepEqual(calls, [{ body: { kind: "household_approve_connection", connection: {
+      kind: "local", principal_id: principal, connection_id: connection.connection_id, grant_id: connection.grant_id, operations } },
+      envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } }], role);
+    assert.equal(status.textContent, "Allowed until you withdraw it.");
+    assert.equal(f.ctx.peopleDialogReceipts.get(`workspace:${principal}`), "Allowed until you withdraw it.",
+      "the receipt outlives the roster being drawn again");
+    assert.deepEqual(focused, [principal], "and focus returns to the seat");
+    assert.equal(button.disabled, false);
+    // No connection to approve for that seat: setup, and no command.
+    assert.equal(await funcs.allowAgentFromPeople("workspace", "00000000-0000-4000-8000-00000000000f", button, status), "setup");
+    assert.equal(calls.length, 1);
+    // A refusal goes back to the dialog, which shows it on the row.
+    f.ctx.postCommand = async (_session: any, _id: string, body: any) => body.kind === "household_connections"
+      ? { status: 200, body: { status: "ok", connections: [connection] } }
+      : { status: 200, body: { status: "refused", reason: "content_consent_required" } };
+    await assert.rejects(funcs.allowAgentFromPeople("workspace", principal, { disabled: true }, { textContent: "" }),
+      new RegExp(accessRefusalMessage("content_consent_required").slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  for (const access of [{ workspaceId: "workspace", status: "refused", contentRole: null }, { workspaceId: "other", status: "ok", contentRole: "editor" }]) {
+    const f = dialogConnectionsFixture(), calls: any[] = [];
+    f.ctx.postCommand = async (_session: any, _id: string, body: any) => { calls.push(body.kind); return { status: 200, body: { status: "ok", connections: [] } }; };
+    Object.assign(f.ctx, { householdAccess: access, CONTENT_OPERATIONS, approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
+    const funcs = execute(`${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ allowAgentFromPeople });`, f.ctx);
+    assert.equal(await funcs.allowAgentFromPeople("workspace", principal, { disabled: false }, { textContent: "" }), "setup",
+      `Lists & docs not set up here (${access.status}, ${access.workspaceId}): the setup page`);
+    assert.deepEqual(calls, [], "and nothing is sent");
+  }
+});
+
+test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [];
+  const principal = "00000000-0000-4000-8000-000000000001";
+  f.ctx.agents[0].principalId = principal;
+  f.ctx.postCommand = async () => ({ status: 200, body: { status: "ok", connections: [{ kind: "local", principal_id: principal,
+    name: "Muse", approval: null, connection_id: "00000000-0000-4000-8000-000000000002", grant_id: "00000000-0000-4000-8000-000000000003" }] } });
+  await f.load();
+  const paint = () => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(),
+    { selected: null, collapsed: new Set(), showAllAttention: false, query: "" },
+    { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {}, confirm: () => {} },
+    { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
+  const rowAllow = () => dom.root.descendants().find(node => node.tag === "button" && node.attributes["data-row-allow-agent-access"] === principal);
+  paint();
+  assert.ok(rowAllow(), "an own seat not yet allowed has the action on its row");
+  assert.equal(rowAllow()!.textContent, "Allow Lists & docs");
+  assert.equal(rowAllow()!.attributes["aria-label"], "Allow Lists & docs: Muse");
+  rowAllow()!.click();
+  assert.deepEqual(actions, [["allow", principal]], "one click sends the allow action");
+  f.ctx.agents[0].ownerUserId = "someone-else"; paint();
+  assert.equal(rowAllow(), undefined, "another person's agent has no allow");
+  f.ctx.agents[0].ownerUserId = "person";
+  f.ctx.sampleMode = true; paint(); assert.equal(rowAllow(), undefined, "never in a sample"); f.ctx.sampleMode = false;
 });
 
 // Run the actual read and dialog projection together; only transport and unrelated UI are stubbed.

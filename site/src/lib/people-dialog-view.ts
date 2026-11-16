@@ -469,6 +469,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const actions = node(doc, "span", "pd-agent-actions");
     const next = agent.status.attention ? fix(agent, notice) : null;
     if (next) { next.classList.add("pd-reconnect", "pd-row-repair"); next.setAttribute("aria-label", `${next.textContent}: ${agent.name}`); row.append(next); }
+    // One click per seat: an own agent not yet allowed into Lists & docs gets the action on its row, in the
+    // repair slot, unless a repair already holds it.
+    else if (!model.sample && peopleDialogCanAct(model, "allow", agent.id)) {
+      const allow = actionButton("allow", agent, "Allow Lists & docs", notice, "data-row-allow-agent-access");
+      allow.className = "pd-row-repair"; allow.setAttribute("aria-label", `Allow Lists & docs: ${agent.name}`);
+      allow.dataset.pdFocus = `row-allow-${agent.id}`; row.append(allow);
+    }
     const agentHref = options.page?.agentHref;
     // A row with a fix shows that one action, as the canvas does for a disconnected agent; its name still opens every detail.
     if (agentHref && agent.mayManage && !model.sample && !next) { const manage = link(doc, "Manage", agentHref(agent.id), "pd-pill-link", options.page?.navigate);
@@ -635,7 +642,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       fact("Model", agent.model ?? "Not set", edit); fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
       const accessFact = peopleDialogAccessUntil(agent);
       if (accessFact !== null) {
-        const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;
+        const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow", notice, "data-allow-agent-access") : undefined;
         accessAction?.classList.add("pd-quiet-link"); fact("Lists & docs", accessFact, accessAction);
       }
       if (agent.key !== null) fact("Key", agent.key, peopleDialogCanAct(model, "new-key", agent.id) ? actionButton("new-key", agent, "New key", notice, "data-get-agent-prompt") : undefined);

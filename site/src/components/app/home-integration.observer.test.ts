@@ -737,7 +737,8 @@ test('People Allow lands from settled access, continues after consent, and retir
   const code = await dashboardFunctions(['peopleDialogAction', 'navigateHome', 'applyHomePane', 'activateWorkspaceView',
     'showChannelView', 'focusHomeView', 'householdScope', 'householdCurrent', 'readHouseholdAccess',
     'refreshHouseholdAccess', 'renderHouseholdAccess', 'openHouseholdView', 'loadHouseholdConnections',
-    'renderAgentApprovals', 'connectionApproval', 'confirmOwnAccess', 'resetHouseholdSurface']);
+    'renderAgentApprovals', 'connectionApproval', 'confirmOwnAccess', 'resetHouseholdSurface',
+    'allowAgentFromPeople', 'approveAgent']);
   // Execute the widget's real event registration, not a duplicated navigation callback.
   const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
