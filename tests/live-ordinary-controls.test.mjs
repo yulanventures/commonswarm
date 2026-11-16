@@ -668,7 +668,8 @@ test('probe-credentials refuses unsafe or unavailable handoffs without secret ou
     await privateWrite(journalPath, journal);
     if (kind === 'short-exp') f.config.humanExp = Math.floor(Date.now() / 1000) + 45 * 60 - 1;
     if (kind === 'string-exp') f.config.humanExp = String(Math.floor(Date.now() / 1000) + 3600);
-    if (kind === 'fractional-exp') f.config.humanExp = Date.now() / 1000 + 3600.5;
+    // Whole seconds plus a half: Date.now() / 1000 + 3600.5 is a whole number when the clock reads x.500 s.
+    if (kind === 'fractional-exp') f.config.humanExp = Math.floor(Date.now() / 1000) + 3600.5;
     if (kind === 'bad-JWT') f.config.badHumanJWT = true;
     const out = kind === 'receipt-out' ? p.out : kind === 'profile-out' ? join(f.human, 'target.json') : join(f.root, 'probe.json');
     if (kind === 'existing-out') await privateWrite(out, '{}');

@@ -149,11 +149,12 @@ jobs:
           sudo install -m 0755 "$caddy_stage/caddy" /usr/local/bin/caddy
           echo C1_CADDY_BINARY=/usr/local/bin/caddy >> "$GITHUB_ENV"
       - name: Build the MCP auth management bundle
-        # The generated bundle is gitignored; any suite that can reach services/mcp-auth needs it first.
-        if: matrix.suite == 'server' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'
+        # The generated bundle is gitignored; any suite that can reach services/mcp-auth needs it first. server-repeat
+        # runs one server file, which may reach services/mcp-auth (hosted-authority does), so it installs them as server does.
+        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'
         run: |
           set -euo pipefail
-          if [ "${{ matrix.suite }}" = server ]; then
+          if [ "${{ matrix.suite }}" = server ] || [ "${{ matrix.suite }}" = server-repeat ]; then
             npm ci --prefix services/mcp-auth --ignore-scripts --no-audit --no-fund
           fi
           node services/mcp-auth/build-management.mjs
