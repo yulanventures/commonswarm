@@ -325,11 +325,11 @@ const ADDRESSED = ':has(.dashboard__message-target:is([data-target-kind="agent"]
 const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   /* Reactions: also gives these screens their desktop 1280x800 and 1440x900 captures, where the pills are compact
      (24px) and the picker's emoji buttons 32px, unlike the 44px touch sizes the phone and tablet widths show. */
-  "app.chat.reactions": [{ name: "reacted-row", rows: '[data-signal-id="{message.reacted}"]', max: 1, focus: true,
+  "app.chat.reactions": [{ name: "reacted-row", rows: '[data-signal-id="{message.reacted}"]', prefer: '[data-signal-id="{message.reacted}"]', max: 1, focus: true,
     focusTarget: "[data-reaction-emoji]", require: ['[data-signal-id="{message.reacted}"]'] }],
-  "menu.reactions": [{ name: "reaction-picker", rows: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]', max: 3,
+  "menu.reactions": [{ name: "reaction-picker", rows: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]', prefer: "[data-reaction-option]:first-child", max: 3,
     require: ['[data-reaction-picker="{message.reacted}"] > [data-reaction-option]'] }],
-  "menu.reactions.first": [{ name: "reaction-picker", rows: '[data-reaction-picker="{message.unreacted}"] > [data-reaction-option]', max: 3,
+  "menu.reactions.first": [{ name: "reaction-picker", rows: '[data-reaction-picker="{message.unreacted}"] > [data-reaction-option]', prefer: "[data-reaction-option]:first-child", max: 3,
     require: ['[data-reaction-picker="{message.unreacted}"] > [data-reaction-option]'] }],
   "app.chat.general": [
     { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, focus: true,
