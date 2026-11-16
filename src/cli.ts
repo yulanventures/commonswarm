@@ -299,7 +299,7 @@ import {
   runInboxFollow,
   settleSignalAuthorLabels,
   settleSignalStatus,
-  signalAddressesAgent,
+  signalReachesAgent,
   SIGNAL_READ_TIMEOUT_MS,
   SignalReadTimeoutError,
   signalReadJsonPayload,
@@ -4960,7 +4960,7 @@ async function runResume(args: Arguments): Promise<void> {
       const candidates = page.signals.filter((signal) =>
         (signal.kind === "ask" || signal.kind === "note") &&
         signal.workspace_id === workspaceId &&
-        signalAddressesAgent(signal, principalId)
+        signalReachesAgent(signal, principalId)
       ).map((signal) => ({ signalId: signal.id }));
       const unseen = await new FileHookSurfaceStore(instanceDirectory)
         .previewUnseen(candidates);

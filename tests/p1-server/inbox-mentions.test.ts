@@ -5,8 +5,9 @@
  * agent and then read back as an empty inbox.
  *
  * Driven against the served read and command functions and real Postgres, with SWARM_CHAT_MENTIONS
- * on, and through the CLI's own check (the 0.1.82 to 0.1.97 row predicate: to_agent or recipients
- * must name the agent, or the check throws and keeps its cursor).
+ * on. An installed client (0.1.82 to 0.1.97) reads without include_mentions and admits a row only
+ * when to_agent or recipients names it, or its check throws and keeps its cursor; this client asks
+ * for mentions and its check admits a row that mentions it.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -20,7 +21,7 @@ import postgres from "postgres";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { readSignals, signalAddressesAgent } from "../../src/cloud/signals.js";
+import { parseSignalRecord, readSignals, signalAddressesAgent, signalReachesAgent } from "../../src/cloud/signals.js";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
@@ -147,14 +148,27 @@ async function check(agent: Agent): Promise<string[]> {
   return result.messages.map((message) => message.id);
 }
 
-/** What an installed client does with the inbox: every row must be addressed to it, or check stops. */
+/**
+ * What an installed client (0.1.82 to 0.1.97) does with the inbox: it reads without include_mentions,
+ * and every row must be addressed to it, or its check stops.
+ */
 async function installedInbox(agent: Agent): Promise<string[]> {
-  const rows = await readSignals(cloudTarget(local.API_URL, local.ANON_KEY),
-    { kind: "agent", token: agent.token }, { workspaceId: workspace, inbox: true, limit: 100 });
+  const rows = (await read(agent, true)).map((row) => parseSignalRecord(row));
   for (const row of rows) {
     assert.ok(signalAddressesAgent(row, agent.principal), `inbox row ${row.id} must name the agent for 0.1.82 to 0.1.97`);
   }
   return rows.map((row) => row.id);
+}
+
+/** This client's inbox: it asks for mentions, and every row reaches it, addressed or mentioned, as stored. */
+async function cliInbox(agent: Agent): Promise<Map<string, ReturnType<typeof parseSignalRecord>>> {
+  const rows = await readSignals(cloudTarget(local.API_URL, local.ANON_KEY),
+    { kind: "agent", token: agent.token }, { workspaceId: workspace, inbox: true, limit: 100 });
+  for (const row of rows) {
+    assert.ok(signalReachesAgent(row, agent.principal), `inbox row ${row.id} reaches the agent`);
+    assert.ok(Array.isArray(row.mentions), "this client asked for mentions");
+  }
+  return new Map(rows.map((row) => [row.id, row]));
 }
 
 before(async () => {
@@ -257,9 +271,16 @@ test("an @tag in #general and in a channel reaches the agent's inbox, its check,
   assert.deepEqual(byId(truthful, directed)!.mentions, []);
   assert.equal(byId(truthful, directed)!.to_agent, mentioned.principal);
 
-  // The CLI's own reads.
+  // The CLI's own reads: an installed client's, and this one's, which keeps the row as stored.
   const installed = await installedInbox(mentioned);
   for (const id of [inGeneral, inChannel, directed]) assert.ok(installed.includes(id));
+  const current = await cliInbox(mentioned);
+  for (const id of [inGeneral, inChannel]) {
+    assert.equal(current.get(id)?.to_agent, null);
+    assert.equal(current.get(id)?.audience, "workspace");
+    assert.equal(signalAddressesAgent(current.get(id)!, mentioned.principal), false, "reached by its mention alone");
+  }
+  assert.equal(current.get(directed)?.to_agent, mentioned.principal);
   const checked = await check(mentioned);
   for (const id of [inGeneral, inChannel, directed]) assert.ok(checked.includes(id), `check returned ${id}`);
   assert.deepEqual(await check(mentioned), [], "a second check is empty: the cursor moved past every row");
@@ -307,6 +328,7 @@ test("with a lead set, a person's untagged post reaches the lead's inbox and che
     assert.deepEqual(row?.mentions, [{ position: 0, kind: "agent", id: lead.principal, source: "lead" }]);
     assert.equal(row?.to_agent, null);
     assert.ok((await installedInbox(lead)).includes(untagged));
+    assert.deepEqual(await cliInbox(lead).then((rows) => rows.get(untagged)?.mentions?.map((m) => m.source)), ["lead"]);
     assert.deepEqual(await check(lead), [untagged]);
     assert.equal(byId(await read(mentioned, true), untagged), undefined, "only the lead");
     assert.equal((await send(lead.token, post({ in_reply_to: untagged, body: "I can" }))).status, 200);

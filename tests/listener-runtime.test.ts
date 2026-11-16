@@ -3950,6 +3950,7 @@ test("foreign read responses retry with bounded sleep instead of a permanent sto
     const controller = new AbortController();
     let requests = 0;
     let sleeps = 0;
+    const mentionKeys: boolean[] = [];
     const stop = await runListenerRuntime({
       target: cloudTarget("https://cloud.example.test", "anon"),
       workspaceId: WORKSPACE_ID,
@@ -3958,8 +3959,9 @@ test("foreign read responses retry with bounded sleep instead of a permanent sto
       store: new MemoryStore(),
       model: new FakeModel(),
       signal: controller.signal,
-      fetcher: (async () => {
+      fetcher: (async (_input: unknown, init?: RequestInit) => {
         requests += 1;
+        mentionKeys.push(Object.hasOwn(JSON.parse(String(init?.body ?? "{}")) as object, "include_mentions"));
         return new Response(body, { status, headers: { "content-type": status === 200 ? "text/html" : "application/json" } });
       }) as typeof fetch,
       sleep: async (ms) => {
@@ -3969,7 +3971,9 @@ test("foreign read responses retry with bounded sleep instead of a permanent sto
       },
     });
     assert.equal(stop.reason, "cancelled", `HTTP ${status}`);
-    assert.equal(requests, 1);
+    // A 400 is asked once more without include_mentions, the key an older edge refuses.
+    assert.deepEqual(mentionKeys, status === 400 ? [true, false] : [true], `HTTP ${status}`);
+    assert.equal(requests, status === 400 ? 2 : 1);
     assert.equal(sleeps, 1);
   }
 });
@@ -4574,7 +4578,8 @@ test("each recognized read and command refusal is fatal while foreign answers re
       }) as typeof fetch,
     });
     assert.equal(stop.reason, "fatal", `read ${status} ${code}`);
-    assert.equal(reads, 1);
+    // A 400 is asked once more without include_mentions, the key an older edge refuses.
+    assert.equal(reads, status === 400 ? 2 : 1);
     assert.equal(isRestartableListenerStop(stop), false);
   }
   for (const [status, code] of commandPairs) {

@@ -364,11 +364,26 @@ export interface SignalRecord {
    */
   recipients?: SignalRecipientRef[];
   /**
-   * Who can read the message a DELIVERY is for: "workspace" when it has no recipient (the agent was
-   * woken by a mention), "private" when it was addressed. Only a hydrated delivery carries it; a
-   * feed read and an edge that predates it leave it absent, and absent is answered privately.
+   * Who can read the message: "workspace" when it has no recipient (an agent it reaches was
+   * mentioned), "private" when it was addressed. A delivery and an agent's signal read carry it; an
+   * edge that predates it leaves it absent, and absent is answered privately.
    */
   audience?: "workspace" | "private";
+  /**
+   * Who the message mentions, in order: the sender's @tags ("author"), the workspace lead on a
+   * person's untagged post ("lead"), and the agents already in a thread a person replied in
+   * ("thread"). Present only on an agent read that asked for it (include_mentions); absent is
+   * not "nobody", the same rule recipients carries.
+   */
+  mentions?: SignalMentionRef[];
+}
+
+export interface SignalMentionRef {
+  position: number;
+  kind: "user" | "agent";
+  id: string;
+  /** "author", "lead" or "thread" today; a value this client does not know is kept as sent. */
+  source: string;
 }
 
 export interface SignalRecipientRef {
