@@ -5,7 +5,7 @@
 import { SCHEMA_VERSION } from './events.js';
 import { StreamIntegrityError, UnknownEventTypeError } from './reducer.js';
 import {
-  HOUSEHOLD_LIVE_REVISION_LIMIT, HOUSEHOLD_OBJECT_LIMIT, HOUSEHOLD_STORAGE_BYTE_LIMIT,
+  HOUSEHOLD_LIVE_REVISION_LIMIT, HOUSEHOLD_OBJECT_LIMIT, HOUSEHOLD_STORAGE_BYTE_LIMIT, HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT,
   HOUSEHOLD_VERSION_BYTE_LIMIT, householdAccessRefusal, householdWriteLimitReached,
   type HouseholdAccessFacts, type HouseholdContentOperation,
 } from './household-object-policy.js';
@@ -311,7 +311,9 @@ export function decideHouseholdObject(
   const usage = householdObjectUsage(state, ctx.now);
   if (!nonnegative(ctx.other_storage_bytes) || !nonnegative(ctx.other_object_count)) return noEvent('quota_facts_invalid');
   const bytes = usage.storage_bytes + ctx.other_storage_bytes;
-  const count = usage.object_count + ctx.other_object_count;
+  // Two caps: the household's own objects, and every file name in the workspace. Chat attachments and
+  // brain topics count toward the second only.
+  const totalNames = usage.object_count + ctx.other_object_count;
   const currentFor = (objectId: string): HouseholdRevision | undefined => own(state.objects, objectId)?.history.at(-1);
   const preparedFor = (objectId: string): HouseholdVerifiedContent | null => {
     const prepared = ctx.prepared;
@@ -365,7 +367,8 @@ export function decideHouseholdObject(
       return conflict(reservation.object_id, reservation.base, reservation.proposed, reservation.reservation_id, reservation.title);
     }
     // Reserved bytes are already counted; recheck the entire locked quota.
-    if (bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT || count > HOUSEHOLD_OBJECT_LIMIT) return refuse('storage_quota_reached');
+    if (bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT || usage.object_count > HOUSEHOLD_OBJECT_LIMIT
+      || totalNames > HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT) return refuse('storage_quota_reached');
     return commit(reservation.object_id, reservation.title, reservation.kind, reservation.proposed,
       reservation.base, reservation.reservation_id);
   }
@@ -392,7 +395,7 @@ export function decideHouseholdObject(
   if (change.kind === 'create') {
     if (current || Object.values(state.reservations).some((pending) => pending.object_id === objectId
       && householdReservationLive(pending, ctx.now))) return refuse('object_already_exists');
-    if (count >= HOUSEHOLD_OBJECT_LIMIT) return refuse('object_quota_reached');
+    if (usage.object_count >= HOUSEHOLD_OBJECT_LIMIT || totalNames >= HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT) return refuse('object_quota_reached');
     if (!validContent(change.content) || !sameContent(change.content, prepared.content)) return refuse('verified_content_mismatch');
     title = change.title;
     if (prepared.revision !== null) return refuse('verified_content_mismatch');

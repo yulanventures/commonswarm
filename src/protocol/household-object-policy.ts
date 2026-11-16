@@ -1,4 +1,7 @@
+/** Lists, docs, definitions and files a workspace's household holds. */
 export const HOUSEHOLD_OBJECT_LIMIT = 500;
+/** File names in swarm.files, household and chat or brain alike, the cap file_version_create enforces. */
+export const HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT = 5000;
 export const HOUSEHOLD_STORAGE_BYTE_LIMIT = 1024 * 1024 * 1024;
 export const HOUSEHOLD_VERSION_BYTE_LIMIT = 25 * 1024 * 1024;
 export const HOUSEHOLD_LIVE_REVISION_LIMIT = 20;
