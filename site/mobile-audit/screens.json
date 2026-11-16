@@ -29,6 +29,12 @@
     "path": "/app?v=catchup",
     "setup": [
       {
+        "waitFor": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-catchup-show-more"
+      },
+      {
+        "click": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-catchup-show-more"
+      },
+      {
         "waitFor": "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] .hm-decision__option"
       },
       {
