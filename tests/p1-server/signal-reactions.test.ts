@@ -322,8 +322,10 @@ test("a private channel: only its members react or see reactions, and leaving it
 });
 
 test("a private message: only those it is addressed to react, and only their topics hear it", { timeout: 60_000 }, async () => {
-  const since = new Date(Date.now() - 1000);
   const direct = await posted(owner.jwt, { to_user_id: other.id });
+  // After the post: the post's own frame is the message trigger's business, not a reaction's.
+  await delay(1100);
+  const since = new Date();
   const unknown = await react(other.jwt, randomUUID(), "\u{1F44D}");
   assert.equal((await react(other.jwt, direct, "\u2705")).status, 200, "the recipient reacts");
   // swarm_read.signals admits a private message to those it is addressed to, not to its author, so
@@ -344,8 +346,9 @@ test("a private message: only those it is addressed to react, and only their top
 
   // A message addressed to an agent: that agent reacts, and its owner's topic hears it; its sibling does not react,
   // and reading the view directly under the sibling's claims shows nothing.
-  const since2 = new Date(Date.now() - 1000);
   const toAgent = await posted(other.jwt, { to_agent_principal_id: agentA.principal });
+  await delay(1100);
+  const since2 = new Date();
   assert.equal((await react(agentA.token, toAgent, "\u{1F440}", { source: "ack" })).status, 200);
   assert.equal((await react(agentB.token, toAgent, "\u{1F440}")).status, 404);
   assert.ok((await frames(memberTopic(owner.id), since2)).length >= 1, "the addressed agent's owner reads it, and hears it");
