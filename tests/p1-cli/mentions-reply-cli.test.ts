@@ -76,6 +76,12 @@ async function cloud(options: { twins?: boolean; legacyRead?: boolean } = {}) {
         }
         return reply(200, { signals: [], capabilities: {} });
       }
+      if (request.url === "/functions/v1/command" && body.command?.kind === "ask_choice") {
+        posts.push(body.command);
+        return reply(200, { status: "accepted", ok: true, event_ids: [], signal: row("56565656-5656-4656-8656-565656565656", {
+          from: SELF, from_kind: "agent", body: body.command.body, kind: "ask", to: body.command.to_user_id ?? null, to_agent: null,
+        }) });
+      }
       if (request.url === "/functions/v1/command" && body.command?.kind === "post_signal") {
         posts.push(body.command);
         const command = body.command;
@@ -283,3 +289,22 @@ test("--channel general posts unfiled and reads only unfiled messages, in any ca
     assert.match(reserved.stderr, /all-signals is reserved/);
   } finally { await fake.close(); }
 });
+
+test("a choice ask mentions nobody: --mention is refused, and an @Name in its body stays text", async () => {
+  const fake = await cloud();
+  try {
+    const refused = await cli(fake.url, ["ask", "pick one", "--option", "A", "--option", "B", "--mention", "Wren"]);
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /--mention can't be combined with --option or --choice: a choice ask mentions nobody/);
+    assert.equal(fake.posts.length, 0, "refused before anything is sent");
+    const readsBefore = fake.reads.filter((read) => read.resource === "members").length;
+    const sent = await cli(fake.url, ["ask", "@Wren pick one", "--option", "A", "--option", "B", "--channel", "General", "--json"]);
+    assert.equal(sent.code, 0, sent.stderr);
+    const command = fake.posts.at(-1)!;
+    assert.equal(command.kind, "ask_choice");
+    assert.equal(Object.hasOwn(command, "mentions"), false);
+    assert.equal(Object.hasOwn(command, "channel"), false, "general is unfiled for a choice ask too");
+    assert.equal(fake.reads.filter((read) => read.resource === "members").length, readsBefore, "no roster read for a choice ask's @tag");
+  } finally { await fake.close(); }
+});
+

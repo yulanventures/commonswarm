@@ -118,6 +118,13 @@ test("hosted note, ask and reply take mentions; ask needs recipients or mentions
   assert.equal(hostedAskNamesNobody("ask", { ...base, recipients: [{ kind: "user", id: USER }] }, []), false);
   assert.equal(hostedAskNamesNobody("note", base, []), false);
   assert.equal(hostedAskNamesNobody("ask", { ...base, body: "pick one", choices: ["A", "B"] }, []), false, "choices name the audience");
+  // A choice ask is one ask_choice: no roster read for its @tag, no mentions on the wire.
+  const choiceAsk = { ...base, choices: ["A", "B"] };
+  assert.equal(hostedNeedsRoster("ask", choiceAsk), false);
+  assert.deepEqual(hostedMentions("ask", choiceAsk, [{ kind: "agent", id: AGENT, name: "Wren" }], null), []);
+  const choiceCommand = hostedSignalCommand("ask", choiceAsk, WORKSPACE).command as Record<string, unknown>;
+  assert.equal(choiceCommand.kind, "ask_choice");
+  assert.equal(Object.hasOwn(choiceCommand, "mentions"), false);
   assert.deepEqual(validateHostedToolArguments("ask", { ...base, body: "pick one", choices: ["A", "B"] }).choices, ["A", "B"]);
   assert.throws(() => validateHostedToolArguments("ask", { ...base, choices: ["A", "B"], mentions: ["Wren"] }),
     (error: unknown) => error instanceof HostedToolInputError && /^Invalid mentions: an ask with options or choices mentions nobody/u.test(error.message));
@@ -273,7 +280,7 @@ test("the hosted reply adds the author the reply_target read names, and knows wh
   assert.deepEqual(hostedImplicitAuthor(reply, null, thread), { kind: "agent", id: AGENT });
   const roster: MentionRosterEntry[] = [{ kind: "agent", id: AGENT, name: "Wren" }];
   assert.equal(hostedImplicitAuthor({ ...reply, body: "done @Wren" }, roster, thread), null, "named explicitly: no second send without it");
-  assert.deepEqual(hostedSignalCommand("reply", reply, WORKSPACE, { mentions: hostedMentions("reply", reply, null, thread), placement: thread }).command.mentions,
+  assert.deepEqual((hostedSignalCommand("reply", reply, WORKSPACE, { mentions: hostedMentions("reply", reply, null, thread), placement: thread }).command as Record<string, unknown>).mentions,
     [{ kind: "agent", id: AGENT }]);
   assert.deepEqual(hostedMentions("reply", { ...reply, private: true }, null, hostedReplyPlacement({ ...reply, private: true }, ROOT, { kind: "agent", id: AGENT })), []);
 });
@@ -298,8 +305,8 @@ test("the hosted reply retries without the implicit author once, and says the au
   const sends: Array<{ command_id: unknown; mentions: unknown }> = [];
   const answers = [{ status: 409, body: { error: "mention_hop_limit" } }, { status: 200, body: { ok: true } }];
   const sent = await sendHostedSignal("reply", reply, WORKSPACE, { mentions: [author], placement, implicitAuthor: author },
-    async (input: { command_id: unknown; command: { mentions?: unknown } }) => {
-      sends.push({ command_id: input.command_id, mentions: input.command.mentions ?? null });
+    async (input) => {
+      sends.push({ command_id: input.command_id, mentions: (input.command as Record<string, unknown>).mentions ?? null });
       return answers[sends.length - 1]!;
     });
   assert.deepEqual(sends, [{ command_id: "request_0004", mentions: [author] }, { command_id: "request_0004_noauth", mentions: null }]);
