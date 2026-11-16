@@ -514,6 +514,32 @@ when you will deliver every message of the page you get. A page whose messages a
 larger than `max_bytes` (one oversized message) does not move it. An unknown channel
 is `404 channel_not_found`.
 
+**A person's unread** (human access token): `POST /rest/v1/rpc/channel_unread` with
+`content-profile: swarm_read` and `{ "p_workspace_id": "<uuid>" }`. Response:
+`workspace_id`, `generated_at` and `channels`, general first, then each channel the person
+can open that is not archived: `channel_id` (`null` for general), `slug`, `visibility`,
+`starred`, `star_rank`, `involvement`, `unread`, `unread_count`, `first_unread_id` and
+`first_unread_at`. A message is unread when it is someone else's, unexpired, from the last
+14 days, unseen, after the person's read position in that channel, and (unless
+`involvement` is `"everything"`) addressed to or mentioning them. `unread` is `null` until
+the person has seen a message or marked a channel read; `unread_count` counts the unread
+messages, and `first_unread_id` and `first_unread_at` name the oldest (`null` when none).
+A muted channel is never unread. The answer is `null` for a non-member or an agent's token.
+
+**Mark as read** (human access token only; an agent token gets `403`):
+
+| `command.kind` | fields |
+|---|---|
+| `mark_channel_read` | `channel_id` (a channel id, or `null` for general) and optional `through_signal_id`; or `all: true` alone |
+
+It moves the person's read position forward, never back: to `through_signal_id`, a message
+in that channel (a thread reply only when it was also sent to the channel) that the person
+can read, or without one to now. `all: true` does general and every channel the person can
+open that is not archived. An unknown channel and one the person cannot open both answer
+`404 channel_not_found`; an unknown message, one in another channel, and one the person
+cannot read all answer `404 signal_not_found`. The result carries `channels`, each target's
+`channel_id` and `read_through_at` after the command.
+
 ## Re-raising an ask, and choice asks
 
 **Re-raise.** `{"kind":"reraise_ask","signal_id":"<uuid>"}` re-sends an open ask you sent,

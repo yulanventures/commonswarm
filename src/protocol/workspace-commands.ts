@@ -422,7 +422,7 @@ export type WorkspaceDecision = WorkspaceDecisionAccepted | WorkspaceDecisionRej
 /** Workspace-reducer commands a seat admin agent executes in 2b (see SEAT_ADMIN_EXECUTED_KINDS). */
 export const SEAT_ADMIN_REDUCER_KINDS = new Set<string>(['rename_workspace', 'remove_member', 'revoke_invitation']);
 
-export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead' | 'rename_organization' | 'create_agent_seat'>([
+export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent_to_workspace' | 'remove_agent_from_workspace' | 'move_workspace_to_org' | 'set_workspace_lead' | 'rename_organization' | 'create_agent_seat' | 'mark_channel_read'>([
   'add_agent_to_workspace',
   // A seat admin agent creates a seat for its grantor through its own handler, never the reducer.
   'create_agent_seat',
@@ -448,6 +448,8 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent
   'enable_agent_management',
   'disable_agent_management',
   'recover_agent_session',
+  // A person's own channel read position (its own handler, not the reducer). Agents use channel_read.
+  'mark_channel_read',
 ]);
 
 /**
