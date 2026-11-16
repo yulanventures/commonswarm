@@ -108,13 +108,28 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
   const draft: ChoiceDraft = { ...(vm.draft ?? EMPTY_CHOICE_DRAFT) };
   draft.selected = [...draft.selected];
   const base = `hm-decision-${safeId(vm.scope ?? "feed")}-${safeId(vm.state.signalId)}`;
-  const root = node(doc, "form", "hm-decision");
+  // The card holds the question (the caller puts it first); the form holds only the rows, so no control
+  // in the question can submit an answer.
+  const root = node(doc, "div", "hm-decision");
   root.dataset.decision = vm.state.signalId; root.dataset.decisionState = status;
   root.dataset.decisionMode = multi ? "multi" : "single";
-  root.setAttribute("role", "group"); root.setAttribute("aria-label", "Choices"); root.noValidate = true;
+  root.setAttribute("role", "group"); root.setAttribute("aria-label", "Choices");
   if (pending) root.setAttribute("aria-busy", "true");
+  const form = node(doc, "form", "hm-decision__form"); form.noValidate = true;
   const emit = () => handlers.draft?.({ ...draft, selected: [...draft.selected] });
   const block = (control: HTMLElement) => { if (pending) control.setAttribute("aria-disabled", "true"); };
+  /* A native checkbox toggles on Space; Enter would submit the form instead, sending an answer that can't be
+     taken back. Here Enter toggles it too. */
+  const checkbox = (box: HTMLInputElement, toggled: () => void) => {
+    box.addEventListener("click", (event) => { if (pending) event.preventDefault(); });
+    box.addEventListener("change", toggled);
+    box.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      if (pending) return;
+      box.checked = !box.checked; toggled();
+    });
+  };
 
   const list = node(doc, "div", "hm-decision__options");
   for (const option of orderedChoiceOptions(vm.state.options)) {
@@ -122,14 +137,15 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
       const label = node(doc, "label", "hm-decision__option");
       const box = node(doc, "input", "hm-decision__check"); box.type = "checkbox";
       box.dataset.decisionOption = option.id; box.checked = draft.selected.includes(option.id); block(box);
-      box.addEventListener("click", (event) => { if (pending) event.preventDefault(); });
-      box.addEventListener("change", () => {
+      checkbox(box, () => {
         draft.selected = box.checked ? [...draft.selected.filter((id) => id !== option.id), option.id] : draft.selected.filter((id) => id !== option.id);
         sync(); emit();
       });
       label.append(box, optionCopy(doc, option)); list.append(label);
     } else {
       const button = node(doc, "button", "hm-decision__option"); button.type = "button";
+      // An id per row, so Waiting on you's rebuild returns focus to the same row.
+      button.id = `${base}-option-${safeId(option.id)}`;
       button.dataset.decisionOption = option.id; block(button);
       button.append(optionCopy(doc, option));
       button.addEventListener("click", () => { if (!pending) handlers.submit({ optionIds: [option.id], otherText: null }); });
@@ -151,12 +167,11 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
     const label = node(doc, "label", "hm-decision__option");
     const box = node(doc, "input", "hm-decision__check"); box.type = "checkbox"; box.dataset.decisionOtherTrigger = "";
     box.checked = draft.otherOpen; box.setAttribute("aria-controls", fieldId); block(box);
-    box.addEventListener("click", (event) => { if (pending) event.preventDefault(); });
-    box.addEventListener("change", () => { setOpen(box.checked, true); });
+    checkbox(box, () => { setOpen(box.checked, true); });
     label.append(box, optionCopy(doc, { label: "Other…" }));
     other.append(label); trigger = box;
   } else {
-    const button = node(doc, "button", "hm-decision__option"); button.type = "button";
+    const button = node(doc, "button", "hm-decision__option"); button.type = "button"; button.id = `${base}-other-row`;
     button.dataset.decisionOtherTrigger = ""; button.setAttribute("aria-controls", fieldId); block(button);
     button.append(optionCopy(doc, { label: "Other…" }));
     button.addEventListener("click", () => { if (!pending) setOpen(!draft.otherOpen, true); });
@@ -166,13 +181,14 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
   submit = node(doc, "button", "hm-button hm-decision__submit", "Submit"); submit.type = "submit";
   submit.dataset.primary = "true"; submit.dataset.decisionSubmit = ""; block(submit);
   if (!multi) field.append(submit);
-  other.append(field); list.append(other); root.append(list);
-  if (multi) root.append(submit);
-  if (vm.error) { const error = node(doc, "p", "hm-decision__error", vm.error); error.setAttribute("role", "alert"); root.append(error); }
-  if (pending) { const sending = node(doc, "p", "hm-decision__foot", "Sending…"); sending.setAttribute("role", "status"); root.append(sending); }
+  other.append(field); list.append(other); form.append(list);
+  if (multi) form.append(submit);
+  if (vm.error) { const error = node(doc, "p", "hm-decision__error", vm.error); error.setAttribute("role", "alert"); form.append(error); }
+  if (pending) { const sending = node(doc, "p", "hm-decision__foot", "Sending…"); sending.setAttribute("role", "status"); form.append(sending); }
+  root.append(form);
 
   function ready(): boolean {
-    return multi ? draftSubmission(vm.state, draft) !== null : cleanOtherText(draft.otherText) !== null;
+    return multi ? draftSubmission(vm.state, draft) !== null : draft.otherOpen && cleanOtherText(draft.otherText) !== null;
   }
   function sync(): void {
     field.hidden = !draft.otherOpen;
@@ -191,11 +207,11 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
     if (multi) (trigger as HTMLInputElement).checked = false;
     setOpen(false, true);
   });
-  root.addEventListener("submit", (event) => {
+  form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (pending) return;
     const submission = multi ? draftSubmission(vm.state, draft) : (() => {
-      const text = cleanOtherText(draft.otherText);
+      const text = draft.otherOpen ? cleanOtherText(draft.otherText) : null;
       return text === null ? null : { optionIds: [], otherText: text };
     })();
     if (submission) handlers.submit(submission);

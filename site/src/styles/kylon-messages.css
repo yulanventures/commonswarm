@@ -441,6 +441,12 @@ live-dashboard.dashboard[data-kylon-shell] .hm-decision:focus-visible {
 live-dashboard.dashboard[data-kylon-shell] .hm-decision > .dashboard__message-markdown {
   margin: 0;
 }
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
 /* On a Waiting on you card the card around it is already the box. */
 live-dashboard.dashboard[data-kylon-shell] .hm-needs-you .hm-decision {
   margin-block-start: 8px;

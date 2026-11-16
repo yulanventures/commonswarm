@@ -50,6 +50,7 @@ class FakeDocument {
 }
 const has = (cls: string) => (el: FakeElement) => el.className.split(" ").includes(cls);
 const asDoc = (doc: FakeDocument) => doc as unknown as Document;
+const form = (root: FakeElement) => root.one(el => el.tagName === "FORM");
 const asEl = (el: HTMLElement) => el as unknown as FakeElement;
 
 const SIGNAL = "44444444-4444-4444-8444-444444444444";
@@ -68,7 +69,8 @@ function card(vm: Partial<ChoiceCardVM> & { state: AskChoiceState }) {
 
 test("an open single-choice card: recommended first, descriptions as a second line, a tap answers", () => {
   const { root, submits } = card({ state: state() });
-  assert.equal(root.tagName, "FORM");
+  assert.equal(root.tagName, "DIV");
+  assert.equal(root.find(el => el.tagName === "FORM").length, 1, "one form, holding only the rows");
   assert.equal(root.dataset.decisionState, "open");
   const buttons = root.find(el => el.tagName === "BUTTON" && el.dataset.decisionOption !== undefined);
   assert.deepEqual(buttons.map(b => b.dataset.decisionOption), ["skip", "ship", "wait"], "recommended first, the rest in order");
@@ -97,13 +99,13 @@ test("Other expands to a labelled field, Enter or Submit sends its text, and Esc
   trigger.fire("click");
   assert.deepEqual([trigger.getAttribute("aria-expanded"), field.hidden, doc.activeElement === input], ["true", false, true]);
   assert.equal(submit.disabled, true, "nothing to send yet");
-  root.fire("submit");
+  form(root).fire("submit");
   assert.equal(submits.length, 0);
   input.value = "  Next week  "; input.fire("input");
   assert.equal(submit.disabled, false);
   assert.equal(drafts.at(-1)!.otherText, "  Next week  ");
   assert.equal(input.fire("keydown", { key: "Escape" }).defaultPrevented, false, "Escape keeps typed text");
-  assert.equal(root.fire("submit").defaultPrevented, true);
+  assert.equal(form(root).fire("submit").defaultPrevented, true);
   assert.deepEqual(submits, [{ optionIds: [], otherText: "Next week" }]);
   input.value = ""; input.fire("input");
   assert.equal(input.fire("keydown", { key: "Escape" }).defaultPrevented, true);
@@ -119,7 +121,7 @@ test("a multi-select card builds a draft with native checkboxes and sends it onc
   const submits_ = root.find(el => el.dataset.decisionSubmit !== undefined);
   assert.equal(submits_.length, 1, "one Submit for the card");
   const submit = submits_[0]!;
-  assert.equal(submit.parentElement, root);
+  assert.equal(submit.parentElement, form(root));
   assert.equal(submit.disabled, true);
   boxes[1]!.checked = true; boxes[1]!.fire("change");
   boxes[0]!.checked = true; boxes[0]!.fire("change");
@@ -131,11 +133,28 @@ test("a multi-select card builds a draft with native checkboxes and sends it onc
   const input = root.one(el => el.dataset.decisionOtherInput !== undefined);
   assert.equal(doc.activeElement, input);
   input.value = "and the flue test"; input.fire("input");
-  root.fire("submit");
+  form(root).fire("submit");
   assert.deepEqual(submits, [{ optionIds: ["ship", "skip"], otherText: "and the flue test" }]);
   boxes[0]!.checked = false; boxes[0]!.fire("change"); boxes[1]!.checked = false; boxes[1]!.fire("change");
   input.value = ""; input.fire("input");
   assert.equal(submit.disabled, true, "Other ticked but empty, nothing else: nothing to send");
+  // Enter on a checkbox toggles it like Space; it never submits the card.
+  const enter = boxes[2]!.fire("keydown", { key: "Enter" });
+  assert.deepEqual([enter.defaultPrevented, boxes[2]!.checked, submit.disabled, submits.length], [true, true, false, 1]);
+  boxes[2]!.fire("keydown", { key: "Enter" });
+  assert.equal(boxes[2]!.checked, false);
+});
+
+test("single choice: Other text sends only while its field is open", () => {
+  const { root, submits } = card({ state: state(), draft: { selected: [], otherOpen: false, otherText: "kept from before" } });
+  const submit = root.one(el => el.dataset.decisionSubmit !== undefined);
+  assert.equal(submit.disabled, true);
+  form(root).fire("submit");
+  assert.equal(submits.length, 0);
+  root.one(el => el.dataset.decisionOtherTrigger !== undefined).fire("click");
+  assert.equal(submit.disabled, false, "opening the field brings the kept text back");
+  form(root).fire("submit");
+  assert.deepEqual(submits, [{ optionIds: [], otherText: "kept from before" }]);
 });
 
 test("a rebuild puts the draft back; pending blocks every path but keeps focus targets; a refusal shows beside the card", () => {
@@ -153,7 +172,7 @@ test("a rebuild puts the draft back; pending blocks every path but keeps focus t
     assert.equal(control.getAttribute("aria-disabled"), "true"); assert.equal(control.disabled, false, "still focusable");
     control.fire("click");
   }
-  pending.root.fire("submit");
+  form(pending.root).fire("submit");
   assert.equal(pending.submits.length, 0, "a pending ask takes no second answer");
   assert.equal(pending.root.one(el => el.dataset.decisionOtherInput !== undefined).readOnly, true);
   assert.equal(pending.root.one(el => el.getAttribute("role") === "status").textContent, "Sending…");
@@ -264,6 +283,7 @@ test("in the feed the question moves into the card, and only the person it asks 
   const decision = body.children[0] as FakeElement;
   assert.ok(has("hm-decision")(decision), "the card takes the question's place");
   assert.equal((decision.children[0] as FakeElement).className, "dashboard__message-markdown", "the question is the card's first line");
+  assert.equal(form(decision).find(el => el.className === "dashboard__message-markdown").length, 0, "the question is outside the form: nothing in it can submit an answer");
   assert.equal(decision.dataset.decisionState, "open");
   decision.find(el => el.tagName === "BUTTON" && el.dataset.decisionOption === "wait")[0]!.fire("click");
   assert.deepEqual(f.sent, [[SIGNAL, { optionIds: ["wait"], otherText: null }]]);

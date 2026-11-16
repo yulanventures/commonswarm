@@ -7909,7 +7909,7 @@ import "../../styles/kylon-command-palette.css";
         submit: (submission) => void sendChoice(signal.id, submission),
         draft: (draft) => { choiceDrafts.set(draftKey, draft); },
       });
-      if (card.tagName !== "FORM") card.tabIndex = -1;
+      if (card.dataset.decisionState !== "open" && card.dataset.decisionState !== "pending") card.tabIndex = -1;
       if (question && question.parentElement === body) { question.replaceWith(card); card.prepend(question); }
       else body.append(card);
     };
