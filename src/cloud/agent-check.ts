@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SignalRecord } from "./command-client.js";
 import {
   compareSignalCursor, parseSignalRecord, readAgentSignalDirectory, readAgentSignalPage,
-  SignalReadTimeoutError, signalAddressesAgent, type SignalCursor, type SignalDirectory,
+  SignalReadTimeoutError, signalReachesAgent, type SignalCursor, type SignalDirectory,
 } from "./signals.js";
 import {
   FileLockTimeoutError,
@@ -255,7 +255,7 @@ export async function checkAgentMessages(options: {
         let cursor = state.cursor;
         let consumed = 0;
         for (const row of page.signals) {
-          if (row.workspace_id !== profile.workspace_id || !signalAddressesAgent(row, profile.principal_id)) {
+          if (row.workspace_id !== profile.workspace_id || !signalReachesAgent(row, profile.principal_id)) {
             throw new AgentSetupError("check_recipient_mismatch", "The service returned a message for another recipient. The cursor was not changed.");
           }
           const next = { id: row.id, created_at: row.created_at };
@@ -432,7 +432,7 @@ export async function cachedAgentMessage(profilePath: string, signalId: string, 
   if (!ONBOARDING_UUID.test(signalId)) throw new AgentSetupError("message_id_invalid", "Use the full signal ID from the check result.");
   const state = await readCheckState(checkStatePath(agentWorkspaceStatePath(profilePath,homeProfile.workspace_id,profile.workspace_id), hostSessionId));
   const row = state.messages.find(row => row.id === signalId.toLowerCase());
-  if (!row || row.workspace_id !== profile.workspace_id || !signalAddressesAgent(row, profile.principal_id)) {
+  if (!row || row.workspace_id !== profile.workspace_id || !signalReachesAgent(row, profile.principal_id)) {
     throw new AgentSetupError("message_not_cached", "That message is no longer in the local preview cache. Read the workspace inbox for the original.");
   }
   return row;

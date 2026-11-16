@@ -8,6 +8,7 @@ import {
   type PostSignalCommand,
   type SenderOwnerRelation,
   type SignalKind,
+  type SignalMentionRef,
   type SignalRecipientRef,
   type SignalRecord,
 } from "./command-client.js";
@@ -407,6 +408,37 @@ const SIGNAL_RECIPIENT_KINDS = new Set<SignalRecipientRef["kind"]>([
  * database enforces contiguity and the view orders by position; re-deriving
  * either here would refuse a valid row for a rule this reader does not own.
  */
+/**
+ * Parse a signal's mention list. Absent stays absent: only a read that asked for mentions gets
+ * them. Each entry needs a position, a kind and an id; a source this client does not know is kept.
+ * Keys beyond those four are ignored, so the server can add one without breaking this reader.
+ */
+function parseSignalMentions(value: unknown): { mentions?: SignalMentionRef[] } {
+  if (value === undefined) return {};
+  if (!Array.isArray(value)) throw new SignalMalformedError("signal read returned a malformed mentions list");
+  return {
+    mentions: value.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new SignalMalformedError("signal read returned a malformed mention");
+      }
+      const mention = entry as Record<string, unknown>;
+      if (
+        !Number.isSafeInteger(mention.position) || (mention.position as number) < 0 ||
+        !SIGNAL_RECIPIENT_KINDS.has(mention.kind as SignalMentionRef["kind"]) ||
+        typeof mention.source !== "string"
+      ) {
+        throw new SignalMalformedError("signal read returned a malformed mention");
+      }
+      return {
+        position: mention.position as number,
+        kind: mention.kind as SignalMentionRef["kind"],
+        id: checkedUuid(mention.id, "mention id"),
+        source: mention.source,
+      };
+    }),
+  };
+}
+
 function parseSignalRecipients(
   value: unknown,
 ): { recipients?: SignalRecipientRef[] } {
@@ -469,6 +501,25 @@ function parseSignalRecipients(
  * addressed, and no client-side rule can second-guess it without a second
  * source.
  */
+/** The message mentions this agent: an @tag, the lead rule, or a thread it is in. */
+export function signalMentionsAgent(
+  signal: Pick<SignalRecord, "mentions">,
+  principalId: string,
+): boolean {
+  return (signal.mentions ?? []).some((mention) => mention.kind === "agent" && mention.id === principalId);
+}
+
+/**
+ * The message is for this agent, addressed or mentioned. An inbox read returns exactly these rows,
+ * so a row that is neither came from the wrong place.
+ */
+export function signalReachesAgent(
+  signal: Pick<SignalRecord, "to_agent" | "recipients" | "mentions">,
+  principalId: string,
+): boolean {
+  return signalAddressesAgent(signal, principalId) || signalMentionsAgent(signal, principalId);
+}
+
 export function signalAddressesAgent(
   signal: Pick<SignalRecord, "to_agent" | "recipients">,
   principalId: string,
@@ -594,6 +645,7 @@ export function parseSignalRecord(
      * reason: an empty list is a real answer here (the signal is addressed to
      * nobody), so absence cannot be flattened into it. */
     ...parseSignalRecipients(row.recipients),
+    ...parseSignalMentions(row.mentions),
   };
 }
 
@@ -1213,6 +1265,7 @@ async function agentSignalPage(
   const cursorRequested = query.ascending === true || query.after !== undefined;
   const perform = async (
     includeCursor: boolean,
+    includeMentions: boolean,
   ): Promise<{ response: Response; body: unknown }> => {
     let result: { response: Response; body: unknown } | null;
     try {
@@ -1244,6 +1297,9 @@ async function agentSignalPage(
             : {}),
           limit: query.limit,
           include_stale: query.includeStale ?? false,
+          /* Each row's mentions, as stored. Without it the edge names this agent in to_agent on an
+           * inbox row that only mentions it, for clients that admit only addressed rows. */
+          ...(includeMentions ? { include_mentions: true } : {}),
         }),
         ...(options.signal ? { signal: options.signal } : {}),
       }, perReadTimeoutMs(options));
@@ -1256,7 +1312,10 @@ async function agentSignalPage(
     return result;
   };
 
-  let result = await perform(cursorRequested);
+  let result = await perform(cursorRequested, true);
+  /* An edge from before include_mentions refuses the key it does not know. Ask again without it:
+   * that edge returns no mention rows, so nothing is missed that it could have returned. */
+  if (result.response.status === 400) result = await perform(cursorRequested, false);
   let legacyCursorFallback = false;
   if (
     result.response.status === 400 &&
@@ -1264,7 +1323,7 @@ async function agentSignalPage(
     allowLegacyCursorFallback
   ) {
     const original = result;
-    result = await perform(false);
+    result = await perform(false, false);
     if (!result.response.ok) throwSignalHttp(result.response, result.body);
     const fallbackBody = result.body;
     const fallbackCapabilities = fallbackBody &&
@@ -2132,7 +2191,11 @@ export function renderSignals(
      * the obvious cue pastes the wrong one and gets a refusal that looks like their mistake.
      * Shown only for kinds that can BE replied to, so every other row stays quiet. */
     const replyable = signal.kind === "ask";
-    const idHint = replyable ? ` — reply with: cswarm reply ${signal.id}` : "";
+    // A message the workspace or channel reads is answered in its thread, as the hook and an arrival say.
+    const threadRoot = publicReplyThreadRoot(signal);
+    const idHint = !replyable ? ""
+      : threadRoot === null ? ` — reply with: cswarm reply ${signal.id}`
+      : ` — reply with: cswarm reply ${threadRoot} --thread`;
     const bodyClipped = signal.body.length > SIGNAL_BODY_DISPLAY_MAX;
     const displayedBody = bodyClipped
       ? signal.body.slice(0, SIGNAL_BODY_DISPLAY_MAX)

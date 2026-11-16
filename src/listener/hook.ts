@@ -25,7 +25,7 @@ import {
   readAgentSignalDirectory,
   publicReplyThreadRoot,
   readAgentSignalPage,
-  signalAddressesAgent,
+  signalReachesAgent,
   type SignalDirectory,
 } from "../cloud/signals.js";
 import {
@@ -821,7 +821,7 @@ async function inboxItems(
   const directed = page.signals.filter((signal) =>
     (signal.kind === "ask" || signal.kind === "note") &&
     signal.workspace_id === stored.workspaceId &&
-    signalAddressesAgent(signal, stored.principalId)
+    signalReachesAgent(signal, stored.principalId)
   );
   if (directed.length === 0) return [];
   let directory: SignalDirectory | null = null;

@@ -31,11 +31,14 @@ import {
   runInboxFollow,
   SIGNAL_FOLLOW_PAGE_LIMIT,
   SignalHttpError,
+  signalAddressesAgent,
+  signalReachesAgent,
   LocalCredentialSecretAbsentError,
   type FollowArmRequest,
   type FollowFrame,
   type SignalDirectory,
 } from "../../src/cloud/signals.js";
+import { arrivalNotification } from "../../src/cloud/arrival-watch.js";
 import {
   describeServerError,
   parseServerErrorEnvelope,
@@ -249,6 +252,37 @@ test("agent signal pages expose capabilities and fail closed on absent markers",
   assert.equal(old.signals[0]?.sender_owner_relation, "unknown");
 });
 
+test("an agent read asks for mentions, and a row that only mentions this agent reaches it and is answered in its thread", async () => {
+  const target = cloudTarget("https://cloud.example.test", "anon-key");
+  const bodies: Array<Record<string, unknown>> = [];
+  const served = (mentions: unknown) => (async (_url: string | URL | Request, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ signals: [{ ...row({ from: USER, from_kind: "user" }), recipients: [], audience: "workspace",
+      thread_root_id: null, mentions }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const credential = { kind: "agent" as const, token: "swm_agt_" + "A".repeat(43) };
+  const query = { workspaceId: WORKSPACE, inbox: true, limit: 10 };
+  const [mentioned] = await readSignals(target, credential, query,
+    served([{ position: 0, kind: "agent", id: AGENT, source: "lead", later_key: 1 }, { position: 1, kind: "user", id: USER, source: "a-new-source" }]));
+  assert.equal(bodies[0]!.include_mentions, true);
+  assert.deepEqual(mentioned!.mentions, [
+    { position: 0, kind: "agent", id: AGENT, source: "lead" },
+    { position: 1, kind: "user", id: USER, source: "a-new-source" },
+  ], "an unknown source is kept and an unknown key is dropped");
+  assert.equal(signalAddressesAgent(mentioned!, AGENT), false);
+  assert.equal(signalReachesAgent(mentioned!, AGENT), true);
+  assert.equal(signalReachesAgent(mentioned!, AGENT_B), false, "another agent is not reached");
+  assert.equal(arrivalNotification(mentioned!, WORKSPACE, target).reply_command,
+    `cswarm reply ${SIGNAL} "<answer>" --thread --workspace-id ${WORKSPACE}`);
+  assert.match(renderSignals([mentioned!], { inbox: true, includeStale: false }), new RegExp(`reply with: cswarm reply ${SIGNAL} --thread`));
+  // An addressed row keeps the private answer.
+  assert.equal(arrivalNotification(row({ to_agent: AGENT, audience: "private" }), WORKSPACE, target).reply_command,
+    `cswarm reply ${SIGNAL} "<answer>" --workspace-id ${WORKSPACE}`);
+  for (const bad of [{}, [{ position: 0, kind: "agent", id: "not-a-uuid", source: "author" }], [{ position: -1, kind: "agent", id: AGENT, source: "author" }]]) {
+    await assert.rejects(readSignals(target, credential, query, served(bad)), /mention/);
+  }
+});
+
 test("legacy cursor fallback is explicit and a capable 400 still fails", async () => {
   const target = cloudTarget("https://cloud.example.test", "anon-key");
   const requests: Array<Record<string, unknown>> = [];
@@ -279,8 +313,9 @@ test("legacy cursor fallback is explicit and a capable 400 still fails", async (
     { allowLegacyCursorFallback: true },
   );
   assert.equal(page.legacyCursorFallback, true);
-  assert.equal(requests.length, 2);
-  assert.equal(Object.hasOwn(requests[1]!, "after_created_at"), false);
+  // Such an edge also predates include_mentions: asked without it, then without the cursor.
+  assert.deepEqual(requests.map((body) => [Object.hasOwn(body, "include_mentions"), Object.hasOwn(body, "after_created_at")]),
+    [[true, true], [false, true], [false, false]]);
 
   await assert.rejects(
     readAgentSignalPage(

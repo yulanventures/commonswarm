@@ -12,7 +12,8 @@ import {
   followHttpDetails,
   isRetryableFollowError,
   nextFollowBackoffMs,
-  signalAddressesAgent,
+  publicReplyThreadRoot,
+  signalReachesAgent,
   SIGNAL_FOLLOW_PAGE_LIMIT,
   type AgentSignalPage,
   type SignalCursor,
@@ -636,8 +637,12 @@ function arrivalOneLine(body: string): string {
 export function arrivalReplyCommand(
   signalId: string,
   workspaceId: string,
+  /** The thread a message the workspace or channel reads is answered in (publicReplyThreadRoot). */
+  threadRootId: string | null = null,
 ): string {
-  return `cswarm reply ${signalId} "<answer>" --workspace-id ${workspaceId}`;
+  return threadRootId === null
+    ? `cswarm reply ${signalId} "<answer>" --workspace-id ${workspaceId}`
+    : `cswarm reply ${threadRootId} "<answer>" --thread --workspace-id ${workspaceId}`;
 }
 
 export function arrivalNotification(
@@ -655,7 +660,7 @@ export function arrivalNotification(
     snippet: arrivalSnippet(signal.body),
     body: signal.body,
     attachment_count: signal.attachments?.length ?? 0,
-    reply_command: arrivalReplyCommand(signal.id, workspaceId),
+    reply_command: arrivalReplyCommand(signal.id, workspaceId, publicReplyThreadRoot(signal)),
   };
 }
 
@@ -891,7 +896,7 @@ export async function runArrivalWatch(options: {
       if (page.signals.some((row) =>
         row.workspace_id !== options.workspaceId ||
         !(
-          signalAddressesAgent(row, options.principalId) ||
+          signalReachesAgent(row, options.principalId) ||
           (row.to === null && row.to_agent === null)
         )
       )) {
