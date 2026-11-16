@@ -300,6 +300,13 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing]' } },
   }],
+  // A decision card's Other field: Shift+Tab reaches the Other row, and Enter folds the field back with focus on that row.
+  "app.chat.choice-other": [{
+    name: "choice-other-row",
+    start: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-input]' },
+    keys: [{ key: "Shift+Tab", expect: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="true"]' }],
+    activate: { key: "Enter", expect: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="false"]' } },
+  }],
   "route.terms": [{
     name: "skip-link",
     start: "document",
@@ -360,6 +367,37 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // `prefer` names the jump button (one of the rows), which also photographs it at rest and on hover.
   "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
     prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
+  // Decision cards: hovering a card's message or focusing its first option row must not move anything.
+  "app.catchup.choice": [{ name: "catchup-choice", rows: "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you]",
+    prefer: '[data-needs-you="{message.choiceOpen}"]', require: ['[data-needs-you="{message.choiceOpen}"]'], max: 1, focus: true,
+    focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
+  "app.chat.choice-open": [{ name: "choice-open", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
+  "app.chat.choice-multi": [{ name: "choice-multi", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',
+    require: ['[data-signal-id="{message.choiceMulti}"]'], max: 1, focus: true, focusTarget: ".hm-decision [data-decision-option]" }],
+  "app.chat.choice-answered": [{ name: "choice-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceAnswered}"]',
+    require: ['[data-signal-id="{message.choiceAnswered}"]'], max: 1 }],
+  /* Hover only: the Other field keeps the focus its keyboard witness starts from (runHovers puts it back). Also what
+     admits these two screens to the 1280x800 and 1440x900 desktop pass. */
+  "app.chat.choice-other": [{ name: "choice-other", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]:has([data-decision-other-trigger][aria-expanded="true"])'], max: 1 }],
+  "app.chat.choice-expired": [{ name: "choice-expired", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceExpired}"]',
+    require: ['[data-signal-id="{message.choiceExpired}"]'], max: 1 }],
+  "app.chat.choice-multi-ticked": [{ name: "choice-multi-ticked", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',
+    require: ['[data-signal-id="{message.choiceMulti}"]:has(input[data-decision-option="kitchen"]:checked)'], max: 1, focus: true,
+    focusTarget: '.hm-decision input[data-decision-option="kitchen"]:checked' }],
+  "app.chat.choice-multi-answered": [{ name: "choice-multi-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMultiAnswered}"]',
+    require: ['[data-signal-id="{message.choiceMultiAnswered}"]:has(li[data-decision-other][data-chosen="true"])'], max: 1 }],
+  "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
+    require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
+  /* Typed Other text survives a real feed rebuild: the Other field is focused, a note in this channel makes the app's own
+     poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while the
+     field's Submit is enabled, which it is only while the draft still holds the typed text. Last on the page, and the
+     screen runs alone, because the note it posts rebuilds this channel's feed until the spec expires it. */
+  "app.chat.choice-other-redraw": [{ name: "choice-other-redraw", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true,
+    focusTarget: '.hm-decision [data-decision-other-input]:has(~ [data-decision-submit]:not([disabled]))',
+    focusAcrossRebuild: true, refreshChannel: "channel.private" }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
@@ -757,7 +795,7 @@ async function main(): Promise<void> {
             const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
-          } : undefined, spec.focusAcrossRebuild ? async () => { expireNote = await postRefreshNote(env, seed.ids); } : undefined));
+          } : undefined, spec.focusAcrossRebuild ? async () => { expireNote = await postRefreshNote(env, seed.ids, spec.refreshChannel); } : undefined));
           // The note this spec posted ends as soon as the spec does, before any later page can open with it showing.
           const expire = expireNote as (() => Promise<void>) | null; // assigned inside the callback above
           if (expire) { await expire(); expireNote = null; }

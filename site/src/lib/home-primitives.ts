@@ -2,6 +2,8 @@
 import type { AgentStateVM, AgentVM, CapsuleVM, ChoiceVM, NeedsYouVM, ObjectCardVM, PersonVM, QueueRowVM, SwitchRowVM } from "./home-types";
 import { IDENTITY_LABEL_SEPARATOR } from "./identity-label";
 import { agentLabel, ordinal, personTint } from "./home-names";
+import { buildChoiceCard } from "./choice-card";
+import type { ChoiceDraft, ChoiceSubmission } from "./choices";
 
 export type NoticeTone = "info" | "warning" | "danger" | "success";
 export type QueueAction = "up" | "down" | "start-now" | "not-yet" | "release";
@@ -139,11 +141,17 @@ export function objectCard(doc: Document, o: ObjectCardVM): HTMLElement {
   if (o.who) root.append("label" in o.who ? agentOrb(doc, o.who, { size: 28, badge: true }) : personAvatar(doc, o.who, 28));
   return root;
 }
-/** Needs you, with links or callback actions. */
-/** A needs-you action naming one of an ask's choices: the prefix, then the option id. */
+/** A needs-you action naming one of an ask's choices: the prefix, then the option id. Used when no choice handlers are given. */
 export const NEEDS_YOU_CHOICE_ACTION = "choice:";
-export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: string, n: NeedsYouVM) => void): HTMLElement {
-  const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id;
+/** An open ask's answer and draft changes, from its decision card. */
+export interface NeedsYouChoiceHandlers {
+  submit: (submission: ChoiceSubmission, n: NeedsYouVM) => void;
+  draft?: (draft: ChoiceDraft, n: NeedsYouVM) => void;
+}
+/** Needs you, with links or callback actions. An ask with choices shows its decision card in place of Reply. */
+export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: string, n: NeedsYouVM) => void,
+  onChoice?: NeedsYouChoiceHandlers): HTMLElement {
+  const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id; root.dataset.needsWorkspace = n.workspace.id;
   const heading = node(doc, "h3", "hm-needs-title", n.what); heading.id = `hm-needs-${encodeURIComponent(n.id)}`;
   root.setAttribute("aria-labelledby", heading.id);
   if (needsYouUnknownSender(n)) {
@@ -151,19 +159,22 @@ export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: st
     glyph.append(decorative(objectIcon(doc, n.kind === "ask" ? "ask" : "todo"))); root.append(glyph);
   } else root.append("label" in n.from ? agentOrb(doc, n.from, { size: 36, badge: true }) : personAvatar(doc, n.from, 36));
   const copy = node(doc, "div", "hm-needs-copy"); copy.append(node(doc, "p", "hm-eyebrow", ["Needs you", n.workspace.name, n.when].filter(Boolean).join(" · ")), heading);
-  // An ask's choices: one button per stored option, labels as text only. The server checks the answer.
-  if (n.choices && !isSample(n)) {
-    const group = node(doc, "div", "hm-needs-choices"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "Choices");
-    for (const option of n.choices.options) {
-      const control = button(doc, option.label, () => onAction(`${NEEDS_YOU_CHOICE_ACTION}${option.id}`, n));
-      control.dataset.primary = "false"; control.dataset.choice = option.id;
-      control.disabled = !!n.choices.pending; group.append(control);
-    }
-    copy.append(group);
-    if (n.choices.error) { const error = node(doc, "p", "hm-needs-choice-error", n.choices.error); error.setAttribute("role", "alert"); copy.append(error); }
+  // An ask's choices: the same decision card as in the message, with Other as its last row. The server checks the answer.
+  const choices = n.choices && !isSample(n) ? n.choices : null;
+  if (choices) {
+    copy.append(buildChoiceCard(doc, {
+      state: { signalId: n.id, multi: choices.multi, options: choices.options, answer: null },
+      interactive: true, ended: false, pending: !!choices.pending, error: choices.error ?? null, draft: choices.draft, scope: "needs",
+    }, {
+      submit: submission => {
+        if (onChoice) onChoice.submit(submission, n);
+        else if (!choices.multi && submission.otherText === null && submission.optionIds.length === 1) onAction(`${NEEDS_YOU_CHOICE_ACTION}${submission.optionIds[0]}`, n);
+      },
+      draft: draft => onChoice?.draft?.(draft, n),
+    }));
   }
   const actions = node(doc, "div", "hm-actions");
-  if (!isSample(n)) for (const [index, action] of [n.primary, n.secondary].entries()) {
+  if (!isSample(n) && !choices) for (const [index, action] of [n.primary, n.secondary].entries()) {
     if (!action) continue;
     const href = action.href ? safeHomeHref(action.href) : null;
     const control = href ? node(doc, "a", "hm-button", action.label) : action.action ? button(doc, action.label, () => onAction(action.action!, n)) : null;

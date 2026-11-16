@@ -1,5 +1,6 @@
 // Home UI view models (UI-owned). Frozen by UI-SPEC.md section 2.1 (lane/home-ui, 2026-10-05).
 // The integration layer (home-map.ts) maps server data into these; builders never see wire types.
+import type { ChoiceDraft, ChoiceOption } from "./choices";
 export type Id = string; export type Tint = 0 | 1 | 2 | 3;
 export interface PersonVM { id: Id; name: string; firstName: string; initials: string; you: boolean;
   role: "owner" | "admin" | "member"; dashed?: boolean /* invited, not joined */ }
@@ -20,8 +21,9 @@ export interface NeedsYouVM { id: Id; kind: "ask" | "agent-fix" | "todo" | "requ
   secondary?: { label: string; href?: string; action?: string };
   /** A read that couldn't load (shown with Retry). It is not a thing that needs the person, so it isn't counted. */
   unavailable?: true;
-  /** An ask's stored choices (interactive replies). Labels are untrusted plain text, rendered with textContent. */
-  choices?: { options: { id: string; label: string }[]; pending?: true; error?: string } }
+  /** An open ask's stored choices (interactive replies). Labels and descriptions are untrusted plain text, rendered with
+   *  textContent. The draft is what the person has picked or typed and not sent yet. */
+  choices?: { options: ChoiceOption[]; multi: boolean; pending?: true; error?: string; draft?: ChoiceDraft } }
 export interface ChoiceVM<V extends string> { name: string; legend: string; value: V | null;
   options: { value: V; label: string; hint?: string; disabled?: boolean }[] }
 export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on" | "off" | "always" | "never" | "unavailable"; busy?: boolean; disabled?: boolean }

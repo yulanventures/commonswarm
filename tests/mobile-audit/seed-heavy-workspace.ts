@@ -59,11 +59,11 @@ const BODIES = [
 ];
 
 /**
- * A real refresh for a witness: a note in #general, already seen by the viewer (so its receipt never changes), that the
- * app's own polling shows, rebuilding the feed. It lives long enough for any poll interval; the returned function
- * removes it at once, so no later page ever opens with it showing.
+ * A real refresh for a witness: a note in #general (or the channel `channel` names among the seed ids), already seen by
+ * the viewer (so its receipt never changes), that the app's own polling shows, rebuilding the feed. It lives long enough
+ * for any poll interval; the returned function removes it at once, so no later page ever opens with it showing.
  */
-export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, string>): Promise<() => Promise<void>> {
+export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, string>, channel = "channel.general"): Promise<() => Promise<void>> {
   assert.ok(loopback(env.dbUrl), "local stack only");
   const sql = postgres(env.dbUrl, { prepare: false, max: 1 });
   const id = randomUUID();
@@ -71,7 +71,7 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
     await sql.begin(async (tx) => {
       await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, created_at, channel_id, broadcast_to_channel)
         VALUES (${id}::uuid, ${ids.workspace!}::uuid, ${ids.agent!}::uuid, 'agent', 'note', 'Audit refresh note.',
-          statement_timestamp() + interval '120 seconds', statement_timestamp(), ${ids["channel.general"]!}::uuid, false)`;
+          statement_timestamp() + interval '120 seconds', statement_timestamp(), ${ids[channel]!}::uuid, false)`;
       await tx`INSERT INTO swarm.signal_human_receipts (workspace_id, signal_id, user_id)
         SELECT ${ids.workspace!}::uuid, ${id}::uuid, m.user_id FROM swarm.memberships m
         WHERE m.workspace_id = ${ids.workspace!}::uuid AND m.role = 'owner' AND m.revoked_at IS NULL ON CONFLICT DO NOTHING`;
@@ -630,6 +630,98 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.endedSelf"] = endedSelf;
         steps.push("seed_history");
       } catch (error) { note("seed_history", error); }
+      /* Choice asks (interactive replies) from the agent to the viewer, in the private channel so no other capture's feed
+         changes. Oldest first: one that expired unanswered; one the viewer answered with a v1 answer row (one option_id);
+         a multi-select ask the viewer answered with two options and Other text (a v2 row); an open ask whose labels are
+         80 characters and descriptions 200, the read's limits; an open single-choice ask with descriptions and a
+         recommended option; and an open multi-select ask. Each answered ask has the reply note answer_choice posts.
+         Written in SQL like the other history; the read (swarm_read.ask_choices) is what the page uses. */
+      if (ids["channel.private"]) {
+        try {
+          const channel = ids["channel.private"];
+          const open = randomUUID(), multi = randomUUID(), answered = randomUUID(), expired = randomUUID(), reply = randomUUID();
+          const multiAnswered = randomUUID(), multiReply = randomUUID(), long = randomUUID();
+          const quotes = [
+            { id: "harbor", label: "Harbor Heating, $240", description: "Includes the expansion vessel check and the flue test. Friday 9am.", recommended: true },
+            { id: "northside", label: "Northside Boilers, $215", description: "Flue test is extra ($35). Next Tuesday." },
+            { id: "wait", label: "Wait for the third quote" },
+          ];
+          const rooms = [
+            { id: "hallway", label: "Hallway" }, { id: "kitchen", label: "Kitchen" },
+            { id: "meter", label: "Meter cupboard", description: "The engineer needs the meter reading before and after." },
+            { id: "loft", label: "Loft hatch" },
+          ];
+          const plain = [{ id: "today", label: "Today" }, { id: "tomorrow", label: "Tomorrow" }];
+          // Labels of exactly 80 characters and descriptions of exactly 200; one description carries a long unbroken link.
+          const longest = [
+            { id: "full", recommended: true,
+              label: "Book the full annual service with the flue test, expansion vessel and CO checks.",
+              description: "Harbor Heating can come on Friday at 9am. The visit takes about two hours, and the engineer needs the meter cupboard open and the hallway clear before starting the pressure checks on our older boiler." },
+            { id: "basic",
+              label: "Book only the basic safety check now, and leave the flue test for spring visits.",
+              description: "Cheaper today, but the quote at https://example.test/quotes/northside-boilers-basic-safety-check-2026-11-without-flue-test says that the flue test costs extra if the engineer comes back in the spring." },
+            { id: "third", label: "Wait for the third quote from the company that serviced the boiler two years ago" },
+          ];
+          for (const option of longest) assert.equal(option.label.length, 80, "label at the read's 80-character limit");
+          for (const option of longest.slice(0, 2)) assert.equal(option.description!.length, 200, "description at the read's 200-character limit");
+          const multiOther = "The side gate as well, so they can bring the ladder through.";
+          await sql.begin(async (tx) => {
+            await tx`INSERT INTO swarm.signals (
+                id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+                about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+              ) VALUES (
+                ${expired}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Should I book the chimney sweep for this week?',
+                statement_timestamp() - interval '1 minute', statement_timestamp() - interval '7 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${answered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'When should I send the boiler quotes to everyone?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${reply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${answered}::uuid,
+                NULL, 'note', 'Selected: Tomorrow',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '350 seconds', ${channel}::uuid, NULL, false
+              ), (
+                ${multiAnswered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which doors should I leave unlocked for the delivery?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '5 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${multiReply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${multiAnswered}::uuid,
+                NULL, 'note', ${`Selected: Hallway, Meter cupboard\nOther: ${multiOther}`},
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '290 seconds', ${channel}::uuid, NULL, false
+              ), (
+                ${long}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which boiler visit should I book? The quotes differ in what they cover.',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '4 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${open}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which boiler service quote should I book?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${multi}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which spaces should be clear for the engineer?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', ${channel}::uuid, NULL, false
+              )`;
+            for (const row of [{ id: expired, options: plain, multi: false }, { id: answered, options: plain, multi: false },
+              { id: multiAnswered, options: rooms, multi: true }, { id: long, options: longest, multi: false },
+              { id: open, options: quotes, multi: false }, { id: multi, options: rooms, multi: true }]) {
+              await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options, multi)
+                VALUES (${row.id}::uuid, ${workspace}::uuid, ${tx.json(row.options)}::jsonb, ${row.multi})`;
+            }
+            // v1's answer row: one option_id, no option_ids or other_text.
+            await tx`INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, state, reply_signal_id, created_at, completed_at)
+              VALUES (${randomUUID()}::uuid, ${workspace}::uuid, ${answered}::uuid, ${owner.id}::uuid, 'tomorrow', 'completed', ${reply}::uuid,
+                statement_timestamp() - interval '350 seconds', statement_timestamp() - interval '350 seconds')`;
+            // v2's answer row: the chosen ids, the Other text, and option_id kept as the first chosen id.
+            await tx`INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, option_ids, other_text, state, reply_signal_id, created_at, completed_at)
+              VALUES (${randomUUID()}::uuid, ${workspace}::uuid, ${multiAnswered}::uuid, ${owner.id}::uuid, 'hallway', ${["hallway", "meter"]}::text[], ${multiOther},
+                'completed', ${multiReply}::uuid, statement_timestamp() - interval '290 seconds', statement_timestamp() - interval '290 seconds')`;
+          });
+          Object.assign(ids, { "message.choiceOpen": open, "message.choiceMulti": multi, "message.choiceAnswered": answered, "message.choiceExpired": expired,
+            "message.choiceMultiAnswered": multiAnswered, "message.choiceLong": long });
+          steps.push("seed_choice_asks");
+        } catch (error) { note("seed_choice_asks", error); }
+      }
       // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
       // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
       // The oldest one first, seen a minute after it was sent: the viewer's unread count starts there, so the

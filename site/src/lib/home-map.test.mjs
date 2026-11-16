@@ -365,16 +365,19 @@ test("Catch up's Retry on unavailable asks reloads Catch up; other actions follo
     catchUpData: [{ workspace: workspaces[0], state: "ready", detail }], homeViewerId: () => "zoe", greetingName: () => "Zoe",
     sampleMode: false, catchUpExpanded: false, SAMPLE_ROSTERS: {}, Date: { now: () => now }, mapCatchUp,
     homeStructureKey: () => "key", homeCatchUpKey: "", refreshHomeCatchUpTimes: () => {}, renderHomeRail: () => {},
-    document: {}, replaceHomeRegion: () => {}, ASKS_UNAVAILABLE_ACTION, NEEDS_YOU_CHOICE_ACTION: "choice:",
-    catchUpChoiceIsPending: () => false, catchUpChoiceErrors: new Map(), sendCatchUpChoice: (item, optionId) => choices.push([item.id, optionId]),
+    document: {}, replaceHomeRegion: () => {}, ASKS_UNAVAILABLE_ACTION, choiceDrafts: new Map(), choiceDraftKey: (w, s) => `${w}/${s}`,
+    catchUpChoiceIsPending: () => false, catchUpChoiceErrors: new Map(), sendCatchUpChoice: (item, submission) => choices.push([item.id, submission]),
     buildCatchUp: (_doc, _vm, given) => { callbacks = given; return { querySelector: () => null }; },
     loadHomeCatchUp: async () => { reloads.push(true); }, navigateHomeHref: href => navigations.push(href) };
   runInNewContext(script, context);
   const retry = detail.needsYou[0];
   callbacks.onNeedsYouAction(retry.primary.action, retry);
   assert.deepEqual([reloads.length, navigations], [1, []]);
-  callbacks.onNeedsYouAction("choice:ship", { id: "ask", primary: { label: "Reply", href: "/app?w=W&m=ask" } });
-  assert.deepEqual([choices, navigations], [[["ask", "ship"]], []], "a choice sends the answer and doesn't navigate");
+  const ask = { id: "ask", workspace: { id: "W" }, primary: { label: "Reply", href: "/app?w=W&m=ask" } };
+  callbacks.onNeedsYouChoice.submit({ optionIds: ["ship"], otherText: null }, ask);
+  assert.deepEqual([choices, navigations], [[["ask", { optionIds: ["ship"], otherText: null }]], []], "a choice sends the answer and doesn't navigate");
+  callbacks.onNeedsYouChoice.draft({ selected: [], otherOpen: true, otherText: "x" }, ask);
+  assert.deepEqual([...context.choiceDrafts], [["W/ask", { selected: [], otherOpen: true, otherText: "x" }]], "a draft is kept, not sent");
   callbacks.onNeedsYouAction("open", { primary: { label: "Reply", href: "/app?w=W&m=ask" } });
   assert.deepEqual([reloads.length, navigations], [1, ["/app?w=W&m=ask"]]);
 });

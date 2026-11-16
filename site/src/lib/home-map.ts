@@ -275,7 +275,7 @@ function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: N
   return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
     what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) },
-    ...(choice && choice.answer === null ? { choices: { options: choice.options.map(option => ({ id: option.id, label: option.label })) } } : {}) };
+    ...(choice && choice.answer === null ? { choices: { options: choice.options.map(option => ({ ...option })), multi: choice.multi } } : {}) };
 }
 /** The queue couldn't be read: say so, with Retry. Never an empty or resolved list, and never the overview's asks. */
 export const ASKS_UNAVAILABLE_ACTION = "retry-asks";
@@ -285,9 +285,9 @@ function asksUnavailableCard(workspace: NeedsYouVM["workspace"]): NeedsYouVM {
 }
 /** "loading": the queue hasn't arrived yet; "unavailable": it couldn't be read. Neither is a count of zero. */
 export type CatchUpAsks = DecisionQueue | "loading" | "unavailable";
-function countedNeedIds(row: WorkspaceCatchUp, queue: CatchUpAsks): Set<string> {
+function countedNeedIds(row: WorkspaceCatchUp, queue: CatchUpAsks, resolved: ReadonlySet<string>): Set<string> {
   return new Set([
-    ...(typeof queue === "string" ? [] : queue.asks.map(ask => ask.signal_id)),
+    ...(typeof queue === "string" ? [] : queue.asks.map(ask => ask.signal_id).filter(id => !resolved.has(id))),
     ...row.needs_you.assigned.map(todo => todo.todo_id),
     ...row.needs_you.waiting.map(todo => todo.todo_id),
   ]);
@@ -306,14 +306,21 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const people = mapHomePeople({ ...roster, agents: roster.agents.filter(agent => agent.work?.facts.connection !== "removed") });
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
+  /* A queued ask whose stored choice answer the later choices read already returned is resolved: it leaves the cards
+     and the count (its decision card stays in chat). Only a read row with an answer says so; a failed or missing read
+     resolves nothing. */
+  const resolved = new Set(typeof queue === "string" ? [] : queue.asks.map(ask => ask.signal_id)
+    .filter(id => { const choice = choices.get(id); return choice !== undefined && choice.answer !== null; }));
   if (queue === "unavailable") pushNeed(needsYou, asksUnavailableCard(workspace));
-  else if (queue !== "loading") for (const ask of queue.asks) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now, choices.get(ask.signal_id)));
+  else if (queue !== "loading") for (const ask of queue.asks) {
+    if (!resolved.has(ask.signal_id)) pushNeed(needsYou, queueAskNeedsYouCard(ask, historicalPeople, workspace, now, choices.get(ask.signal_id)));
+  }
   for (const todo of row.needs_you.assigned) pushNeed(needsYou, assignedNeedsYouCard(todo, workspace));
   for (const todo of row.needs_you.waiting) {
     const card = waitingNeedsYouCard(todo, historicalPeople, workspace);
     pushNeed(needsYou, card, card.kind === "request");
   }
-  const counted = countedNeedIds(row, queue);
+  const counted = countedNeedIds(row, queue, resolved);
   const unlisted = typeof queue === "string" ? 0 : queue.total - queue.asks.length;
   return { people, signals, openTodos: row.content?.open_todos ?? null, lists: row.content?.lists ?? null,
     files: row.content?.files ?? null, newMessages: row.last_seen_at === null ? null : row.new_messages, needsYou,

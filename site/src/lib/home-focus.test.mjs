@@ -59,3 +59,70 @@ test("a redrawn rail keeps focus on the same row or menu button, and leaves focu
   replaceHomeRegion(slot, "rail", [row("ch-2"), row("ch-1")]);
   assert.deepEqual(focused, [], "focus outside the rail is never taken");
 });
+
+test("Catch up's rebuild keeps focus on the same card's control, a later checkbox included, and the Other caret", () => {
+  /* Two needs-you cards (two workspaces' asks), each with two checkboxes and an Other field: elements that know their
+     ancestors, so the real markFocusKeys reads the card and the decision around each control. */
+  const element = (tag, dataset, parent, extra = {}) => {
+    const el = { tagName: tag.toUpperCase(), dataset: { ...dataset }, id: "", className: "", tabIndex: 0, parent, ...extra,
+      get attributes() { return Object.keys(this.dataset).map(key => ({ name: `data-${key.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}` })); },
+      hasAttribute(name) { return this.attributes.some(attribute => attribute.name === name); },
+      getAttribute() { return null; },
+      matches(selector) { return selector.split(",").some(part => part.trim().split(/[[ ]/)[0] === tag); },
+      closest(selector) {
+        const key = selector.match(/^\[data-([a-z-]+)\]$/)?.[1]?.replace(/-(.)/g, (_, c) => c.toUpperCase());
+        for (let at = this; at; at = at.parent) if (key && key in at.dataset) return at;
+        return null;
+      },
+      getClientRects() { return [{}]; },
+      focus() { doc.activeElement = this; focusLog.push(this); },
+      setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+    };
+    return el;
+  };
+  const doc = { activeElement: null }; const focusLog = [];
+  const card = (workspace, ask) => {
+    const root = element("article", { needsYou: ask, needsWorkspace: workspace }, null);
+    const decision = element("div", { decision: ask }, root);
+    const controls = [
+      element("input", { decisionOption: "kitchen" }, decision, { type: "checkbox" }),
+      element("input", { decisionOption: "meter" }, decision, { type: "checkbox" }),
+      element("input", { decisionOtherInput: "" }, decision, { type: "text", value: "", selectionStart: 0, selectionEnd: 0 }),
+    ];
+    return { root, controls, querySelectorAll: () => controls };
+  };
+  const slot = {
+    ownerDocument: doc, cards: [], tabIndex: 0,
+    all() { return this.cards.flatMap(item => item.controls); },
+    contains(node) { return this.all().includes(node); },
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector === "[data-home-focus-key]") return this.all().filter(node => node.dataset.homeFocusKey);
+      if (selector === "textarea, input[type=text]") return this.all().filter(node => node.type === "text");
+      return [];
+    },
+    replaceChildren(...cards) { this.cards = cards; },
+    matches: () => false, focus() { focusLog.push(this); },
+  };
+  const first = [card("W1", "ask-a"), card("W2", "ask-b")];
+  replaceHomeRegion(slot, "catchup", first);
+  const keys = slot.all().map(node => node.dataset.homeFocusKey);
+  assert.equal(new Set(keys).size, keys.length, "every control of both cards has its own key");
+
+  // A later checkbox on the second card.
+  doc.activeElement = first[1].controls[1];
+  const second = [card("W1", "ask-a"), card("W2", "ask-b")];
+  replaceHomeRegion(slot, "catchup", second);
+  assert.equal(doc.activeElement, second[1].controls[1], "the same card's meter checkbox, not the first card's first one");
+
+  // The second card's Other field, its caret in the middle of the text.
+  const field = second[1].controls[2];
+  Object.assign(field, { value: "the side gate", selectionStart: 4, selectionEnd: 4 });
+  doc.activeElement = field;
+  const third = [card("W1", "ask-a"), card("W2", "ask-b")];
+  third[1].controls[2].value = "the side gate"; // the card is rebuilt from its draft
+  replaceHomeRegion(slot, "catchup", third);
+  assert.equal(doc.activeElement, third[1].controls[2]);
+  assert.deepEqual([third[1].controls[2].selectionStart, third[1].controls[2].selectionEnd], [4, 4], "the caret stays where it was");
+  assert.equal(third[0].controls[2].selectionStart, 0, "the other card's field is untouched");
+});

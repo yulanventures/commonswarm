@@ -95,12 +95,16 @@
 }
 
 .hm-catchup-needs .hm-needs-you > .hm-needs-copy { display: contents; }
-.hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb) { grid-column: 1; grid-row: 1 / span 2; }
+.hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb, .hm-needs-glyph) { grid-column: 1; grid-row: 1 / span 2; }
 .hm-catchup-needs .hm-needs-you > .hm-agent-orb { inline-size: 32px; block-size: 32px; border-radius: 10px; font-size: 14px; }
 .hm-catchup-needs .hm-needs-you > .hm-person-avatar { inline-size: 32px; block-size: 32px; font-size: 14px; }
 .hm-catchup-needs .hm-needs-you .hm-eyebrow { grid-column: 2; grid-row: 1; align-self: end; }
 .hm-catchup-needs .hm-needs-you .hm-needs-title { grid-column: 2; grid-row: 2; align-self: start; margin: 0; }
 .hm-catchup-needs .hm-needs-you .hm-actions { grid-column: 3; grid-row: 1 / span 2; margin: 0; justify-content: flex-end; }
+/* A choice ask has no action pill: its options sit under the question across the copy width, and no empty
+   third column holds a gap open beside them. */
+.hm-catchup-needs .hm-needs-you:not(:has(.hm-actions)) { grid-template-columns: auto minmax(0, 1fr); }
+.hm-catchup-needs .hm-needs-you .hm-decision { grid-column: 2 / -1; grid-row: 3; }
 
 .hm-catchup-needs-preview { grid-template-columns: minmax(0, 1fr); }
 

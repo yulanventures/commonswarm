@@ -173,6 +173,9 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you {
   grid-template-columns: 32px minmax(0, 1fr) auto;
 }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you:not(:has(.hm-actions)) {
+  grid-template-columns: 32px minmax(0, 1fr);
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb, .hm-needs-glyph) {
   inline-size: 32px;
   block-size: 32px;
@@ -303,22 +306,4 @@ live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-catchup-latest-worksp
   live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-catchup-card {
     border-color: CanvasText;
   }
-}
-
-/* Interactive replies: an ask's choices on its Waiting on you card. Text only, at least 44px. */
-live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-needs-choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-block-start: 8px;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-needs-choices .hm-button {
-  min-block-size: 44px;
-  min-inline-size: 44px;
-  overflow-wrap: anywhere;
-}
-live-dashboard.dashboard[data-kylon-shell] .hm-catchup .hm-needs-choice-error {
-  margin: 6px 0 0;
-  color: var(--k-shell-danger, #b42318);
-  font-size: 13px;
 }

@@ -21,6 +21,8 @@ export interface StreamSignalVM {
   answered: boolean;
   /** The ask's `until` has passed. It stays in history; it can no longer be answered. */
   ended?: boolean;
+  /** The ask carries stored choices: its decision card is the whole ask, so no separate Reply card. */
+  choices?: boolean;
   attachments: StreamAttachmentVM[];
 }
 
@@ -102,9 +104,10 @@ export function isOpenAskToViewer(signal: Pick<StreamSignalVM, "kind" | "address
   return signal.kind === "ask" && signal.addressedToViewer && !signal.answered && signal.ended !== true;
 }
 
-/** The needs-you card for an open ask to the viewer; null otherwise. The only action is Reply. */
+/** The needs-you card for an open ask to the viewer; null otherwise. The only action is Reply.
+ *  An ask with choices gets none: its decision card answers it, Other included. */
 export function streamAskCard(signal: StreamSignalVM, workspace: StreamContext["workspace"]): NeedsYouVM | null {
-  if (!isOpenAskToViewer(signal)) return null;
+  if (!isOpenAskToViewer(signal) || signal.choices) return null;
   const who = isAgentAuthor(signal.author) ? signal.author.label : signal.author.firstName;
   return { id: signal.id, kind: "ask", workspace, from: signal.author, what: `${who} asked you: ‘${askExcerpt(signal.body)}’`, when: signal.when,
     primary: { label: "Reply", action: "reply" } };

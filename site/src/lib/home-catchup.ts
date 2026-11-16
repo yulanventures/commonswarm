@@ -1,5 +1,5 @@
 // Catch up view (UI-SPEC.md section 3.2). Lane C owns this file.
-import { agentOrb, capsule, needsYouCard, personAvatar } from "./home-primitives";
+import { agentOrb, capsule, needsYouCard, personAvatar, type NeedsYouChoiceHandlers } from "./home-primitives";
 import type { AgentVM, CapsuleVM, NeedsYouVM, PersonVM } from "./home-types";
 
 /** Local view model for Catch up; integration maps server rows into this shape. */
@@ -43,6 +43,8 @@ export interface CatchUpVM {
 export interface CatchUpCallbacks {
   onNeedsYouAction: (action: string, item: NeedsYouVM) => void;
   onShowMoreNeedsYou: () => void;
+  /** An ask's decision card: an answer to send, and draft changes to keep across repaints. */
+  onNeedsYouChoice?: NeedsYouChoiceHandlers;
 }
 
 const NEEDS_YOU_PREVIEW = 3;
@@ -316,7 +318,7 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
     for (const [index, item] of visibleNeedsYou.entries()) {
       const entry = vm.sample
         ? needsYouPreview(doc, item)
-        : needsYouCard(doc, item, (action, need) => callbacks.onNeedsYouAction(action, need));
+        : needsYouCard(doc, item, (action, need) => callbacks.onNeedsYouAction(action, need), callbacks.onNeedsYouChoice);
       const eyebrow = entry.querySelector(".hm-eyebrow, .hm-catchup-needs-eyebrow");
       if (eyebrow) eyebrow.textContent = [item.workspace.name, item.when].filter(Boolean).join(" · ");
       entry.dataset.needsRank = index === 0 ? "first" : "more";
