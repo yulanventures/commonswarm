@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
+import { parseSignalRecord, signalAddressesAgent } from "../../src/cloud/signals.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 type Person = { id: string; jwt: string };
@@ -94,6 +95,24 @@ const react = (bearer: string, signalId: string, emoji: string, extra: Row = {})
   send(bearer, { kind: "add_reaction", signal_id: signalId, emoji, ...extra });
 const unreact = (bearer: string, signalId: string, emoji: string) =>
   send(bearer, { kind: "remove_reaction", signal_id: signalId, emoji });
+
+async function agentInbox(agent: Agent, extra: Row = {}): Promise<Row[]> {
+  const response = await fetch(`${local.API_URL}/functions/v1/read`, {
+    method: "POST", signal: AbortSignal.timeout(15_000),
+    headers: { authorization: `Bearer ${agent.token}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "signals", workspace_id: workspace, inbox: true, about: null, kind: null,
+      since: null, in_reply_to: null, after_created_at: null, after_id: null, limit: 100, include_stale: false, ...extra }),
+  });
+  const body = await response.json() as Row;
+  assert.equal(response.status, 200, JSON.stringify(body) + functionLogs.slice(-3000));
+  return body.signals as Row[];
+}
+
+async function wakeFrames(agent: Agent, since: Date): Promise<Row[]> {
+  const [row] = await sql<{ wake_id: string }[]>`SELECT wake_id FROM swarm.agent_principals WHERE principal_id = ${agent.principal}::uuid`;
+  assert.ok(row?.wake_id, "the agent has a wake topic");
+  return await frames(`cswarm-wake:${row.wake_id}`, since);
+}
 
 async function agentRead(agent: Agent, includeReactions: boolean): Promise<Row[]> {
   const response = await fetch(`${local.API_URL}/functions/v1/read`, {
@@ -359,4 +378,68 @@ test("a private message: only those it is addressed to react, and only their top
   });
   assert.equal(seenBySibling.length, 0, "a sibling agent's claims read no reactions on a message addressed to another agent");
   assert.equal((await reactionsSeenBy(owner.id, toAgent)).length, 1, "while the owner, who reads it, sees the reaction");
+});
+
+test("a person's reaction on an agent's public message wakes it and reaches its inbox; agents' reactions wake nobody", { timeout: 60_000 }, async () => {
+  const message = await posted(agentA.token);
+  await delay(1100);
+  const since = new Date();
+  const liked = await react(other.jwt, message, "\u{1F44D}");
+  assert.equal(liked.status, 200, JSON.stringify(liked.body));
+  const woke = await wakeFrames(agentA, since);
+  assert.equal(woke.length, 1, `one wake for the agent: ${JSON.stringify(woke)}`);
+  assert.deepEqual(Object.keys(woke[0]!).sort(), ["enqueued_at", "signal_id", "v"], "content-free");
+
+  // Neither another agent's reaction, nor the agent's own, nor an automatic ack wakes it.
+  assert.equal((await react(agentB.token, message, "\u{1F680}")).status, 200);
+  assert.equal((await react(agentA.token, message, "\u{1F440}", { source: "ack" })).status, 200);
+  assert.equal((await react(agentA.token, message, "\u{1F389}")).status, 200);
+  assert.equal((await wakeFrames(agentA, since)).length, 1, "agents reacting never wake an agent");
+  assert.equal((await wakeFrames(agentB, since)).length, 0);
+  // A person's reaction on a person's message wakes no agent.
+  const personal = await posted(owner.jwt);
+  assert.equal((await react(other.jwt, personal, "\u{1F44D}")).status, 200);
+  assert.equal((await wakeFrames(agentA, since)).length, 1);
+
+  // The inbox as an installed client reads it: a note addressed to the agent, replying to its message.
+  const inbox = await agentInbox(agentA);
+  const reactionRows = inbox.filter((row) => row.in_reply_to === message && row.from === other.id);
+  assert.equal(reactionRows.length, 1, `only the person's reaction: ${JSON.stringify(inbox)}`);
+  const row = reactionRows[0]!;
+  assert.equal(row.kind, "note");
+  assert.equal(row.to_agent, agentA.principal);
+  assert.deepEqual(row.recipients, [{ kind: "agent", id: agentA.principal, position: 0 }]);
+  assert.match(String(row.body), new RegExp(`^Reacted \u{1F44D} to your message ${message}: `, "u"));
+  assert.equal("reaction" in row, false, "no new key unless asked");
+  const parsed = parseSignalRecord(row);
+  assert.equal(signalAddressesAgent(parsed, agentA.principal), true, "0.1.82 to 0.1.98 admit it");
+  const asked = (await agentInbox(agentA, { include_reactions: true })).find((r) => r.id === row.id)!;
+  assert.deepEqual(asked.reaction, { emoji: "\u{1F44D}", signal_id: message });
+  assert.equal((await agentInbox(agentB)).some((r) => r.in_reply_to === message && r.from === other.id), false,
+    "another agent's inbox does not hold it");
+  // Paging past it: the reaction row carries a cursor like any row.
+  const page = await agentInbox(agentA, { after_created_at: String(row.created_at), after_id: String(row.id) });
+  assert.equal(page.some((r) => r.id === row.id), false);
+
+  // Removed, it is gone from the inbox.
+  assert.equal((await unreact(other.jwt, message, "\u{1F44D}")).body.removed, true);
+  assert.equal((await agentInbox(agentA)).some((r) => r.id === row.id), false);
+});
+
+test("a reaction in a private channel reaches the agent only while it is in the channel", { timeout: 60_000 }, async () => {
+  const slug = `wake-${randomBytes(4).toString("hex")}`;
+  const created = await send(owner.jwt, { kind: "channel_create", slug, visibility: "private",
+    members: [{ kind: "agent", id: agentA.principal }] });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const lockId = String((created.body.channel as Row).channel_id);
+  const message = await posted(agentA.token, { channel: slug });
+  assert.equal((await react(owner.jwt, message, "\u{1F44D}")).status, 200);
+  assert.ok((await agentInbox(agentA)).some((r) => r.in_reply_to === message), "a member agent reads it");
+  const removed = await send(owner.jwt, { kind: "channel_member_remove", channel_id: lockId,
+    member: { kind: "agent", id: agentA.principal } });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal((await agentInbox(agentA)).some((r) => r.in_reply_to === message), false, "gone once it leaves");
+  const since = new Date();
+  assert.equal((await react(owner.jwt, message, "\u{1F389}")).status, 200);
+  assert.equal((await wakeFrames(agentA, since)).length, 0, "and a new reaction there wakes it no more");
 });

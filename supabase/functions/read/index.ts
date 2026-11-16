@@ -649,6 +649,24 @@ function parseBody(
   };
 }
 
+/** Two pages in the read's own order (millisecond created_at, then id), cut to the first `limit`. */
+function mergeSignalPages(
+  a: Record<string, unknown>[],
+  b: Record<string, unknown>[],
+  ascending: boolean,
+  limit: number,
+): Record<string, unknown>[] {
+  const key = (row: Record<string, unknown>): [number, string] =>
+    [new Date(row.created_at as string | Date).getTime(), String(row.id)];
+  const compare = (x: Record<string, unknown>, y: Record<string, unknown>): number => {
+    const [xt, xi] = key(x);
+    const [yt, yi] = key(y);
+    const order = xt !== yt ? xt - yt : xi < yi ? -1 : xi > yi ? 1 : 0;
+    return ascending ? order : -order;
+  };
+  return [...a, ...b].sort(compare).slice(0, limit);
+}
+
 /** Log allowlisted fields only; return a generic correlatable 500 body. */
 function readFailureResponse(
   error: unknown,
@@ -1467,8 +1485,74 @@ async function handle(
         CASE WHEN ${orderDesc} THEN s.id END DESC
       LIMIT ${body.limit}
     `;
+    /* A PERSON'S REACTION ON THIS AGENT'S OWN MESSAGE reaches the agent's inbox, as a note
+     * addressed to it: id is the reaction's, in_reply_to the message's, to_agent and recipients the
+     * agent, so an installed client (0.1.82 on) admits it, pages past it and wakes on it. Only a
+     * person's chosen reaction, on a message the whole channel reads (the wake's rule,
+     * swarm.wake_reacted_agent), through the reactions view under this agent's claims, so a channel
+     * the agent has left shows nothing. The same filters and order as the signals above; each page
+     * is the first `limit` rows after the cursor, so the merged first `limit` is exact. */
+    const reactionRows = !body.inbox ? [] : await tx<Record<string, unknown>[]>`
+      SELECT
+        r.reaction_id AS id, r.workspace_id, r.id AS "from", 'user' AS from_kind, NULL::uuid AS "to",
+        NULL::text AS about, 'note' AS kind,
+        format('Reacted %s to your message %s: %s', r.emoji, r.signal_id, left(s.body, 140)) AS body,
+        r.created_at + interval '7 days' AS until, r.created_at,
+        ${agent.principal_id}::uuid AS to_agent, r.signal_id AS in_reply_to, NULL::text AS reply_status,
+        0 AS chain_hop, '[]'::jsonb AS attachments, s.channel_id, NULL::uuid AS thread_root_id,
+        false AS broadcast_to_channel,
+        jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', ${agent.principal_id}::uuid, 'position', 0)) AS recipients,
+        'private' AS audience,
+        ${body.include_mentions ? tx`'[]'::jsonb AS mentions,` : tx``}
+        ${body.include_reactions
+          ? tx`'[]'::jsonb AS reactions, jsonb_build_object('emoji', r.emoji, 'signal_id', r.signal_id) AS reaction,`
+          : tx``}
+        CASE
+          WHEN reactor.user_id IS NOT NULL AND r.id = ${agent.owner_user_id}::uuid THEN 'same_owner'
+          WHEN reactor.user_id IS NOT NULL THEN 'cross_owner'
+          ELSE 'unknown'
+        END AS sender_owner_relation
+      FROM swarm_read.signal_reactions AS r
+      JOIN swarm_read.signals AS s
+        ON s.id = r.signal_id
+       AND s.workspace_id = r.workspace_id
+      LEFT JOIN swarm_read.member_profiles AS reactor
+        ON reactor.workspace_id = r.workspace_id
+       AND reactor.user_id = r.id
+      WHERE r.workspace_id = ${body.workspace_id}::uuid
+        AND r.kind = 'user'
+        AND r.source = 'manual'
+        AND s.from_kind = 'agent'
+        AND s."from" = ${agent.principal_id}::uuid
+        AND s."to" IS NULL
+        AND s.to_agent IS NULL
+        AND s.in_reply_to IS NULL
+        AND jsonb_array_length(COALESCE(s.recipients, '[]'::jsonb)) = 0
+        AND (${body.include_stale} = true OR r.created_at + interval '7 days' > statement_timestamp())
+        AND ${body.about}::text IS NULL
+        AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
+        AND (${inReplyTo}::uuid IS NULL OR r.signal_id = ${inReplyTo}::uuid)
+        AND (${channelId}::uuid IS NULL OR s.channel_id = ${channelId}::uuid)
+        AND (${body.since}::timestamptz IS NULL OR r.created_at >= ${body.since}::timestamptz)
+        AND (
+          ${useAfterCursor} = false
+          OR date_trunc('milliseconds', r.created_at) >
+            date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+          OR (
+            date_trunc('milliseconds', r.created_at) =
+              date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+            AND r.reaction_id > ${afterId}::uuid
+          )
+        )
+      ORDER BY
+        CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', r.created_at) END ASC,
+        CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', r.created_at) END DESC,
+        CASE WHEN ${orderAsc} THEN r.reaction_id END ASC,
+        CASE WHEN ${orderDesc} THEN r.reaction_id END DESC
+      LIMIT ${body.limit}
+    `;
     return json(200, {
-      signals: rows,
+      signals: reactionRows.length === 0 ? rows : mergeSignalPages(rows, reactionRows, orderAsc, body.limit),
       capabilities: body.inbox
         ? HOME_INBOX_SIGNAL_CAPABILITIES
         : SIGNAL_CAPABILITIES,

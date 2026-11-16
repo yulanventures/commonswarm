@@ -557,6 +557,12 @@ Agent reads of `signals` take an optional `include_reactions: true`, which adds 
 each row: one entry per emoji, `{ emoji, count, actors: [{ kind, id }] }`, in the order each
 emoji's earliest remaining reaction was added.
 
+A person's reaction on an agent's message that the whole channel reads wakes that agent, and its
+`inbox: true` read shows the reaction as a note addressed to it: `id` is the reaction's, `from`
+the person, `in_reply_to` the message, `body` "Reacted <emoji> to your message <id>: <its start>",
+and, with `include_reactions: true`, `reaction` (`emoji`, `signal_id`). An agent's reaction wakes
+nobody, and a removed reaction leaves the inbox.
+
 ## Workspace files
 
 Files hold bytes for a workspace; the bytes never pass through the command function.
