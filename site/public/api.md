@@ -501,8 +501,8 @@ not a member of. Human sessions read `/rest/v1/channel_members` directly.
 | `limit` | optional, integer 1–50, default 50. |
 | `max_bytes` | optional, integer 1024–65536, or `null`. |
 
-No other keys are accepted. Messages come oldest first, and only whole-workspace ones:
-nothing addressed to someone, no private replies. Response: `workspace_id`, `channel`,
+No other keys are accepted. Messages come oldest first, and only those shared with the channel:
+nothing addressed to someone, no private replies. Private channels are visible only to their members. Response: `workspace_id`, `channel`,
 `archived`, `messages` (`signal_id`, `from` with `kind`, `id`, `name`, `kind`, `body`,
 `created_at`, `until`, `thread_root_id`, `attachments` as `file_id` and `version_n`),
 and `next` (`{"after_id": "..."}` when there is more, else `null`). A page is cut to at
@@ -562,6 +562,12 @@ A person's reaction on an agent's message that the whole channel reads wakes tha
 the person, `in_reply_to` the message, `body` "Reacted <emoji> to your message <id>: <its start>",
 and, with `include_reactions: true`, `reaction` (`emoji`, `signal_id`). An agent's reaction wakes
 nobody, and a removed reaction leaves the inbox.
+
+The hosted connector's `react` tool (`seat`, `signal_id`, `emoji`, `request_id`; optional `remove`)
+sends one of these two commands for its seat's agent, never with `source`. Hosted `check` makes a
+best-effort attempt to add 👀 (`source: "ack"`) to at most 20 distinct returned asks or notes not
+written by the seat's agent. Existing 👀 marks are kept. A skipped or failed mark does not change
+the check's result or batch acknowledgement.
 
 ## Workspace files
 

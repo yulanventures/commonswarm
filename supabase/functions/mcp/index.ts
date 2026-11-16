@@ -36,6 +36,7 @@ import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { fitChannelPage } from "./channel-page.ts";
 import { fitMemoryRows, memorySaveCommand, memoryWriteOutput } from "./memory-tools.ts";
+import { reactionCommand, reactionOutput } from "./reaction-tools.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
 import {
   createMcpProtocolHandler,
@@ -493,6 +494,16 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     }, capability);
     const reraise = result.body.reraise as { count?: unknown; next_allowed_at?: unknown } | undefined;
     return { ...commandOutput(result), reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null };
+  }
+  if (call.name === "react") {
+    const command = reactionCommand(args);
+    return reactionOutput(await handleHostedCommand({
+      command_id: String(args.request_id),
+      client_version: "0.1.80",
+      workspace_id: binding.workspaceId,
+      stream: { kind: "workspace" },
+      command,
+    }, capability), command);
   }
   return commandOutput(await handleHostedCommand(
     hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),

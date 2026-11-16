@@ -10,6 +10,7 @@ import {
   normalizeReactionEmoji,
   SIGNAL_REACTION_EMOJI_RULE,
   SIGNAL_REACTION_MAX_PER_ACTOR,
+  SIGNAL_REACTION_SEEN,
 } from "../_shared/protocol.js";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
@@ -138,5 +139,85 @@ export async function applyReaction(
       };
     }
     throw error;
+  }
+}
+
+/** Seen marks one hosted check may write: the same courtesy bound as an agent client's. */
+export const HOSTED_SEEN_MARK_MAX = 20;
+
+/**
+ * The returned check rows a hosted seat marks seen with 👀: an ask or a note it did not write. Every
+ * row a hosted check returns already reaches the seat (addressed to it or mentioning it), and a
+ * reaction note is never one of them (only the read edge writes those). Unique, in order, bounded.
+ */
+export function hostedSeenAckTargets(
+  rows: readonly Record<string, unknown>[],
+  principalId: string,
+  limit = HOSTED_SEEN_MARK_MAX,
+): string[] {
+  const ids = rows.filter((row) =>
+    (row.kind === "ask" || row.kind === "note") &&
+    !(row.from_kind === "agent" && String(row.from).toLowerCase() === principalId.toLowerCase()) &&
+    typeof row.id === "string" && UUID_RE.test(row.id)
+  ).map((row) => String(row.id).toLowerCase());
+  return [...new Set(ids)].slice(0, limit);
+}
+
+/**
+ * Mark what a hosted check returned as seen: one 👀 (source "ack") by the seat's agent on each
+ * target, in the check's own transaction, after its batch is decided and read. Best effort: a
+ * savepoint holds the write, any failure rolls back only that and is logged by SQLSTATE alone, and
+ * the check's result and acknowledgement never change. The caller has installed the seat's claims
+ * (its owner's sub plus agent_principal_id), so swarm.signal_reactable() answers for this agent
+ * exactly as it does for its react command. A message already marked, or already at the 64 bound,
+ * is skipped rather than refused, so one full message never costs the others their mark.
+ */
+export async function markHostedCheckSeen(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string,
+  rows: readonly Record<string, unknown>[],
+  /** Called with the failure's SQLSTATE (or null), never with the error or any row. */
+  onFailure: (sqlstate: string | null) => void,
+): Promise<number> {
+  const ids = hostedSeenAckTargets(rows, principalId);
+  if (ids.length === 0) return 0;
+  try {
+    const [before] = await tx<{ lock_timeout: string }[]>`SELECT current_setting('lock_timeout') AS lock_timeout`;
+    const inserted = await tx.savepoint(async (sp) => {
+      // Never hold the check long behind a concurrent reaction by the same agent on the same message.
+      await sp`SELECT set_config('lock_timeout', '1s', true)`;
+      return await sp<{ reaction_id: string }[]>`
+        INSERT INTO swarm.signal_reactions (
+          workspace_id, signal_id, actor_agent_principal_id, emoji, source
+        )
+        SELECT ${workspaceId}::uuid, target.id, ${principalId}::uuid, ${SIGNAL_REACTION_SEEN}, 'ack'
+        FROM unnest(${ids}::uuid[]) AS target(id)
+        WHERE swarm.signal_reactable(${workspaceId}::uuid, target.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm.signal_reactions AS r
+            WHERE r.workspace_id = ${workspaceId}::uuid
+              AND r.signal_id = target.id
+              AND r.actor_agent_principal_id = ${principalId}::uuid
+              AND r.emoji = ${SIGNAL_REACTION_SEEN}
+          )
+          AND (
+            SELECT count(*) FROM swarm.signal_reactions AS r
+            WHERE r.workspace_id = ${workspaceId}::uuid
+              AND r.signal_id = target.id
+              AND r.actor_agent_principal_id = ${principalId}::uuid
+          ) < ${SIGNAL_REACTION_MAX_PER_ACTOR}
+        ON CONFLICT DO NOTHING
+        RETURNING reaction_id
+      `;
+    });
+    await tx`SELECT set_config('lock_timeout', ${before?.lock_timeout ?? "5s"}, true)`;
+    return inserted.length;
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    try {
+      onFailure(typeof code === "string" && /^[0-9A-Z]{5}$/u.test(code) ? code : null);
+    } catch { /* A log failure never fails the check either. */ }
+    return 0;
   }
 }

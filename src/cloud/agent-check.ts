@@ -40,6 +40,14 @@ export const AGENT_CHECK_ACK_RETRY_BASE_MS = 250;
 export const AGENT_CHECK_ACK_RETRY_MAX_MS = 60_000;
 export const AGENT_PRESENCE_TOUCH_INTERVAL_MS = 60_000;
 
+/**
+ * The shown rows whose delivery this check acknowledges: asks and notes. A reaction note is left
+ * out: its id is a reaction's, which has no delivery to acknowledge.
+ */
+export function deliveryAckIds(rows: readonly SignalRecord[]): string[] {
+  return rows.filter(row => (row.kind === "ask" || row.kind === "note") && row.reaction === undefined).map(row => row.id);
+}
+
 export interface AgentCheckMessage {
   id: string;
   from: string;
@@ -304,7 +312,7 @@ export async function checkAgentMessages(options: {
           await mergeHandledAsks(stateProfilePath, options.hostSessionId, askTurnGeneration,
             visible.filter(row => row.kind === "ask").map(row => row.id));
         };
-        const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
+        const directedIds = deliveryAckIds(presented);
         const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
         const ackPending = async () => {
           const committed = await readCheckState(path);
@@ -381,8 +389,7 @@ export async function checkAgentMessages(options: {
               if (candidate && (!current.cursor || compareSignalCursor(candidate, current.cursor) > 0)) {
                 // Re-read under the lock: another check may have advanced the cursor or
                 // cached additional full bodies since this response was prepared.
-                const visibleIds = presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1)
-                  .filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
+                const visibleIds = deliveryAckIds(presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1));
                 const pendingVisibleIds = [...new Set([...(current.pending_observed_ids ?? []), ...visibleIds])]
                   .slice(-AGENT_CHECK_CACHE_LIMIT);
                 await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate,

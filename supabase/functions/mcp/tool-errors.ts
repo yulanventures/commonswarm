@@ -60,6 +60,8 @@ const MESSAGES = {
   ask_answered: "That ask already has an answer, so there's nothing to re-raise. Call check to read replies to it.",
   reraise_too_soon: "This ask was re-raised in the last 24 hours. Try again after that.",
   reraise_unsupported: "Only an ask sent to someone can be re-raised; this one went to the whole workspace.",
+  signal_not_found: "No message this seat can read in this workspace has that signal_id. Use a signal_id from check or channel_read.",
+  reaction_limit_reached: "This seat's agent already has 64 emojis on that message. Remove one first.",
   channel_archived: "That channel is archived, so it takes no new messages. Call channel_ls to pick a live channel, or leave channel out to post to #general.",
   private_channel_attachments_unsupported: "File attachments aren't supported in private channels yet because workspace files are readable across the whole workspace. Send the message without attachments.",
   private_reply_channel_mismatch: "A reply to a message in a private channel must stay in that private channel. Omit channel or pass the same private channel.",
