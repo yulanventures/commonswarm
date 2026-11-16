@@ -7298,7 +7298,13 @@ import "../../styles/kylon-command-palette.css";
       // These three continue in the workspace: the key prompt and the consent card are channel views.
       if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id)); return; }
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
-      if (action === "allow") { await navigateHome({ view: "lists", workspaceId }, "push", true); return; }
+      if (action === "allow") {
+        const outcome = await allowAgentFromPeople(workspaceId, id, button, notice);
+        if (outcome === "setup" && activeWorkspaceId === workspaceId && session?.user.id === userId) {
+          await navigateHome({ view: "lists", workspaceId }, "push", true);
+        }
+        return;
+      }
       let receipt = "";
       if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
@@ -10943,6 +10949,25 @@ import "../../styles/kylon-command-palette.css";
       } finally {
         button.disabled = false;
       }
+    };
+
+    /** People → Allow: one click, in place, with the defaults the Lists & docs card uses, once this
+     *  workspace's Lists & docs are set up. Before that, or for an agent with no connection to approve,
+     *  the caller opens the page that sets them up. */
+    const allowAgentFromPeople = async (
+      workspaceId: string,
+      principalId: string,
+      button: HTMLButtonElement,
+      status: HTMLElement,
+    ): Promise<"approved" | "setup"> => {
+      const ready = householdAccess.workspaceId === workspaceId && householdAccess.status === "ok";
+      if (ready && householdConnectionsReadState !== "succeeded") await loadHouseholdConnections();
+      const connection = ready
+        ? householdConnections.find((entry) => String(entry.principal_id ?? "") === principalId)
+        : undefined;
+      if (!connection) return "setup";
+      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status);
+      return "approved";
     };
 
     /** Withdrawal leaves the agent connected and is audited by the command path. */
