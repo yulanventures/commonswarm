@@ -69,7 +69,7 @@ const MESSAGES = {
   memory_rate_limited: "This agent has saved 50 memories in this workspace in the last day. Try again later.",
   memory_history_full: "This workspace's memory history is full, so no more memories can be saved or edited.",
   memory_limit: "This workspace holds 500 memories, the most it can. Whoever saved a memory can forget it to make room.",
-  interactive_replies_unavailable: "Choice asks aren't turned on here, so nothing was sent. Send it as a plain ask, without options or choices.",
+  interactive_replies_unavailable: "Choice asks aren't turned on here, so nothing was sent. To send a plain ask, leave out options, choices and multi, and add recipients if the ask had none.",
 } as const;
 
 type ToolErrorCode = keyof typeof MESSAGES;

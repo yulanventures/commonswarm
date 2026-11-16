@@ -6,6 +6,9 @@ import { CommandHttpError, ThinCommandClient } from "../src/cloud/command-client
 import { askChoiceArguments, validateMcpArguments } from "../src/mcp/tools.js";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { hostedChoiceOptions, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
+// @ts-expect-error TS5097: this service-free test imports the Deno source directly.
+import { choiceOptionText } from "../supabase/functions/command/choice-text.ts";
+import { choiceOneLine } from "../src/protocol/choice-asks.js";
 
 test("choice labels become options with ids derived from the labels", () => {
   assert.deepEqual(choiceOptions(["Ship it", "  Wait   for\ttomorrow "]), [
@@ -144,4 +147,30 @@ test("sendSignal sends a v2 ask_choice with only the keys used", async () => {
   CommandHttpError);
   assert.deepEqual((sent[0] as { command: Record<string, unknown> }).command, { kind: "ask_choice", body: "Ship tonight?",
     to_user_id: null, about: null, options, multi: true, channel: "ops" });
+});
+
+test("a zero-width joiner survives only inside an emoji sequence, the same at the client and the edge", () => {
+  const zwj = String.fromCodePoint(0x200d);
+  const technologist = String.fromCodePoint(0x1f469, 0x200d, 0x1f4bb);
+  const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+  const toned = String.fromCodePoint(0x1f469, 0x1f3fd, 0x200d, 0x1f4bb);
+  const heart = String.fromCodePoint(0x2764, 0xfe0f, 0x200d, 0x1f525);
+  const cases: Array<[string, string, string]> = [
+    ["a joined emoji", `${technologist} Pair on it`, `${technologist} Pair on it`],
+    ["a family of three", `Ask ${family}`, `Ask ${family}`],
+    ["a skin tone before the joiner", toned, toned],
+    ["VS16 before the joiner", heart, heart],
+    ["a lone joiner", `Ship ${zwj} it`, "Ship it"],
+    ["a leading and a trailing joiner", `${zwj}Ship${zwj}`, "Ship"],
+    ["a joiner between letters", `Sh${zwj}ip`, "Ship"],
+    ["a joiner after an emoji, before a letter", `${String.fromCodePoint(0x1f469)}${zwj}a`, `${String.fromCodePoint(0x1f469)}a`],
+    ["other invisible characters", `Sh${String.fromCodePoint(0x200b)}ip${String.fromCodePoint(0xfeff)}`, "Ship"],
+  ];
+  for (const [name, input, stored] of cases) {
+    assert.equal(choiceOneLine(input), stored, `client: ${name}`);
+    assert.equal(choiceOptionText(input), stored, `edge: ${name}`);
+  }
+  const options = choiceOptions([{ label: `${technologist} Pair`, description: `With ${family}` }, "Solo"]);
+  assert.deepEqual(options[0], { id: "pair", label: `${technologist} Pair`, description: `With ${family}` });
+  assert.equal(choiceAnswerBody([options[0]!.label], null), `Selected: ${technologist} Pair`);
 });

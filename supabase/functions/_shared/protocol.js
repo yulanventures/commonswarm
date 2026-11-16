@@ -6192,8 +6192,19 @@ var CHOICE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u20
 function choiceTextUnsafe(text3) {
   return CHOICE_UNSAFE_RE.test(text3);
 }
+var EMOJI_JOINER_RE = /(?<=\p{Extended_Pictographic}[\u{fe0f}\u{1f3fb}-\u{1f3ff}]?)\u{200d}(?=\p{Extended_Pictographic})/u;
+var CHOICE_INVISIBLE_RE = /[\u{200b}-\u{200d}\u{2060}\u{feff}\u{e0000}-\u{e007f}]/gu;
+function keepEmojiJoiners(value, strip) {
+  return value.split(EMOJI_JOINER_RE).map(strip).join("\u200D");
+}
+function stripChoiceInvisible(part) {
+  return part.replace(CHOICE_INVISIBLE_RE, "");
+}
+function choiceOneLine(value, strip = stripChoiceInvisible) {
+  return keepEmojiJoiners(value, strip).replace(/\s+/gu, " ").trim();
+}
 function oneLine(value) {
-  return value.replace(/\s+/gu, " ").trim();
+  return choiceOneLine(value);
 }
 function derivedId(label, index, taken) {
   const slug = label.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+/u, "").slice(0, CHOICE_ID_MAX).replace(/-+$/u, "");
@@ -6463,6 +6474,7 @@ export {
   canonicalJson,
   canonicalPrincipal,
   choiceAnswerBody,
+  choiceOneLine,
   choiceOptions,
   choiceOtherText,
   choiceTextUnsafe,
@@ -6506,6 +6518,7 @@ export {
   isAgentScopeDenylisted,
   isBrainFileArtifactName,
   isFileVersionPrecondition,
+  keepEmojiJoiners,
   keepWorkspaceSkillSuggestion,
   leaseLive,
   legacyHouseholdAcceptRefusal,
@@ -6549,6 +6562,7 @@ export {
   seatAdminScopedCommands,
   seatAdminSeatCeilingRefusal,
   selectCoveringGrant,
+  stripChoiceInvisible,
   tidyWorkspaceSkills,
   todoNoticeAbout,
   upcastEnvelope,

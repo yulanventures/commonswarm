@@ -51,8 +51,36 @@ export function choiceTextUnsafe(text: string): boolean {
   return CHOICE_UNSAFE_RE.test(text);
 }
 
+/**
+ * A zero-width joiner that joins two emoji (an Extended_Pictographic character, optionally with
+ * VS16 or a skin tone, then another): the one invisible character a choice's text keeps, so a joined
+ * emoji such as woman-technologist stays one emoji. Any other joiner is stripped, as the signal sanitizer strips it.
+ */
+const EMOJI_JOINER_RE = /(?<=\p{Extended_Pictographic}[\u{fe0f}\u{1f3fb}-\u{1f3ff}]?)\u{200d}(?=\p{Extended_Pictographic})/u;
+/** Invisible format characters stripped from choice text (the signal sanitizer strips them too). */
+const CHOICE_INVISIBLE_RE = /[\u{200b}-\u{200d}\u{2060}\u{feff}\u{e0000}-\u{e007f}]/gu;
+
+/**
+ * Applies strip to the text between emoji joiners and joins the parts back with the joiners, so a
+ * sanitizer that removes every U+200D keeps the ones inside emoji sequences. The command edge
+ * passes the signal sanitizer; clients pass stripChoiceInvisible.
+ */
+export function keepEmojiJoiners(value: string, strip: (part: string) => string): string {
+  return value.split(EMOJI_JOINER_RE).map(strip).join("\u{200d}");
+}
+
+/** Removes the invisible format characters a choice's text drops. */
+export function stripChoiceInvisible(part: string): string {
+  return part.replace(CHOICE_INVISIBLE_RE, "");
+}
+
+/** A label or description as stored: emoji joiners kept, other invisible characters gone, one line. */
+export function choiceOneLine(value: string, strip: (part: string) => string = stripChoiceInvisible): string {
+  return keepEmojiJoiners(value, strip).replace(/\s+/gu, " ").trim();
+}
+
 function oneLine(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
+  return choiceOneLine(value);
 }
 
 function derivedId(label: string, index: number, taken: ReadonlySet<string>): string {

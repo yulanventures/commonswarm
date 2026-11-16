@@ -205,6 +205,7 @@ import {
   parseMarkChannelReadCommand,
   personCanAccessChannel,
 } from "./channel-reads.ts";
+import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
@@ -2743,7 +2744,8 @@ function validateCommand(
     const body = typeof cmd.body === "string" ? sanitizeSignalText(cmd.body).trim() : "";
     const about = typeof cmd.about === "string" ? sanitizeSignalText(cmd.about) || null : null;
     const options = Array.isArray(cmd.options) ? cmd.options : null;
-    const oneLine = (value: string) => sanitizeSignalText(value).replace(/\s+/g, " ").trim();
+    // The signal sanitizer's rules, keeping a joiner inside an emoji sequence (choice-text.ts).
+    const oneLine = choiceOptionText;
     const parsed: ChoiceOption[] = [];
     let recommended = 0;
     for (const option of options ?? []) {

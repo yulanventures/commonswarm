@@ -619,6 +619,24 @@ test("v2: a private channel's ask is not answerable from outside it; a directed 
   assert.equal((await answerWith(f.ownerJwt, directed, { option_id: "ship" })).status, 200);
 });
 
+test("v2: joined emoji in labels and descriptions survive storage, the Selected reply and the read-back", async () => {
+  const zwj = String.fromCodePoint(0x200d);
+  const technologist = String.fromCodePoint(0x1f469, 0x200d, 0x1f4bb);
+  const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+  const askId = await askV2({ to_user_id: f.ownerId, options: [
+    { id: "pair", label: `${technologist} Pair`, description: `With ${family}${zwj}` },
+    { id: "solo", label: `So${zwj}lo` },
+  ] });
+  const expected = [{ id: "pair", label: `${technologist} Pair`, description: `With ${family}` }, { id: "solo", label: "Solo" }];
+  const [stored] = (await sql`SELECT options FROM swarm.ask_choices WHERE signal_id = ${askId}::uuid`).map((row) => ({ ...row }));
+  assert.deepEqual(stored!.options, expected, "joiners kept inside emoji, stripped elsewhere");
+  const chose = await answer(f.ownerJwt, askId, "pair");
+  assert.equal(chose.status, 200, JSON.stringify(chose.body));
+  const replyId = (chose.body.choice_answer as { reply_signal_id: string }).reply_signal_id;
+  assert.equal((await replyRow(replyId)).body, `Selected: ${technologist} Pair`);
+  assert.deepEqual((await readChoices(f.ownerId, [askId])).asks[0]!.options, expected);
+});
+
 test("v2: a v1-shaped ask and answer still work, and readback adds keys only", async () => {
   const asked = await askOwner();
   assert.equal(asked.status, 200, JSON.stringify(asked.body));

@@ -62,7 +62,7 @@ Workspace Files and message attachments use file_ls, file_get and file_put. Read
 
 channel_ls reports each channel's unread state (null before the first channel read). channel_read pages messages shared with the channel, including general for unfiled messages; use next.after_id to continue. Private channels are visible only to their members. Addressed messages are read with check, not channel_read.
 
-ask takes options (2 to 6 {label, description?, recommended?}) or choices (labels), and multi, so a person answers with a click. With one person in recipients only they answer; with no recipients anyone who reads the ask may. The answer arrives through check as a reply reading "Selected: <labels>" and/or "Other: <text>".
+ask takes options (2 to 6 {label, description?, recommended?}) or choices (labels), and multi, so a person answers with a click; such an ask takes no attachments. With one person in recipients only they answer; with no recipients anyone who reads the ask may. The answer arrives through check as a reply reading "Selected: <labels>" and/or "Other: <text>".
 
 A person can add an existing hosted agent to another workspace. After that accepted addition, use claim_seat with agent_id, workspace_id and request_id; no extra OAuth reconnection is needed. Use a new name only for a new identity, and reuse request_id when retrying the same claim.
 
