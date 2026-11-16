@@ -10909,9 +10909,12 @@ import "../../styles/kylon-command-palette.css";
       operations: string[],
       button: HTMLButtonElement,
       status: HTMLElement,
+      /* From People & agents: the dialog already disabled the button for this click, and it shows a
+       * refusal itself, so a refusal is thrown to it rather than written here. */
+      fromPeople = false,
     ): Promise<void> => {
       const scope = householdScope();
-      if (!scope || button.disabled) return;
+      if (!scope || (!fromPeople && button.disabled)) return;
       button.disabled = true;
       status.textContent = "Saving…";
       const settle = (message: string): void => {
@@ -10938,13 +10941,20 @@ import "../../styles/kylon-command-palette.css";
         if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
           const message = approvalUntil(typeof result.body.expires_at === "string" ? result.body.expires_at : null);
-          householdReceipts.delete(String(connection.principal_id));
+          const principalId = String(connection.principal_id);
+          householdReceipts.delete(principalId);
+          // The roster is drawn again below; the receipt and focus have to survive that.
+          if (fromPeople) peopleDialogReceipts.set(`${scope.workspaceId}:${principalId}`, message);
           settle(message);
           await loadHouseholdConnections();
+          if (fromPeople && householdCurrent(scope)) peopleDialogFocusTarget("allow", principalId)?.focus({ preventScroll: true });
         } else {
-          settle(accessRefusalMessage(result.body.reason));
+          const refusal = accessRefusalMessage(result.body.reason);
+          settle(refusal);
+          if (fromPeople) throw new Error(refusal);
         }
-      } catch {
+      } catch (error) {
+        if (fromPeople) throw error;
         settle("The result is unknown. Reload Lists & docs before allowing again.");
       } finally {
         button.disabled = false;
@@ -10966,7 +10976,7 @@ import "../../styles/kylon-command-palette.css";
         ? householdConnections.find((entry) => String(entry.principal_id ?? "") === principalId)
         : undefined;
       if (!connection) return "setup";
-      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status);
+      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status, true);
       return "approved";
     };
 

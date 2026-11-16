@@ -324,10 +324,13 @@ test("People Allow approves in place with the Lists & docs defaults, and only fa
       calls.push(JSON.parse(JSON.stringify({ body, envelope })));
       return { status: 200, body: { status: "committed", expires_at: null } };
     };
+    const focused: string[] = [];
     Object.assign(f.ctx, { householdAccess: { workspaceId: "workspace", status: "ok", contentRole: role }, CONTENT_OPERATIONS,
-      approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load });
+      approvalUntil, accessRefusalMessage, loadHouseholdConnections: f.load,
+      peopleDialogFocusTarget: (_action: string, id: string) => ({ focus: () => focused.push(id) }) });
     const funcs = execute(`${section(script, "const approveAgent = async", "const withdrawAgent = async")}; ({ allowAgentFromPeople });`, f.ctx);
-    const button: any = { disabled: false }, status: any = { textContent: "" };
+    // The People dialog disables the button for the click before it calls the action, as here.
+    const button: any = { disabled: true }, status: any = { textContent: "" };
     // Connections not read yet: it reads them first, then approves the one seat, in place.
     assert.equal(await funcs.allowAgentFromPeople("workspace", principal, button, status), "approved");
     assert.equal(reads, 2, "read before approving, and again after");
@@ -335,10 +338,19 @@ test("People Allow approves in place with the Lists & docs defaults, and only fa
       kind: "local", principal_id: principal, connection_id: connection.connection_id, grant_id: connection.grant_id, operations } },
       envelope: { workspace_id: "workspace", stream: { kind: "workspace" } } }], role);
     assert.equal(status.textContent, "Allowed until you withdraw it.");
+    assert.equal(f.ctx.peopleDialogReceipts.get(`workspace:${principal}`), "Allowed until you withdraw it.",
+      "the receipt outlives the roster being drawn again");
+    assert.deepEqual(focused, [principal], "and focus returns to the seat");
     assert.equal(button.disabled, false);
     // No connection to approve for that seat: setup, and no command.
     assert.equal(await funcs.allowAgentFromPeople("workspace", "00000000-0000-4000-8000-00000000000f", button, status), "setup");
     assert.equal(calls.length, 1);
+    // A refusal goes back to the dialog, which shows it on the row.
+    f.ctx.postCommand = async (_session: any, _id: string, body: any) => body.kind === "household_connections"
+      ? { status: 200, body: { status: "ok", connections: [connection] } }
+      : { status: 200, body: { status: "refused", reason: "content_consent_required" } };
+    await assert.rejects(funcs.allowAgentFromPeople("workspace", principal, { disabled: true }, { textContent: "" }),
+      new RegExp(accessRefusalMessage("content_consent_required").slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   for (const access of [{ workspaceId: "workspace", status: "refused", contentRole: null }, { workspaceId: "other", status: "ok", contentRole: "editor" }]) {
     const f = dialogConnectionsFixture(), calls: any[] = [];
