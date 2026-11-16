@@ -319,6 +319,20 @@ def assert_owned_db(info, label, network):
     return address
 
 
+def normalize_ops_policy_role_order(ddl):
+    # pg_dump emits pg_policy.polroles in role-OID order. Restoring roles may
+    # change those OIDs; this one known SELECT policy still has the same role set.
+    # Match its pg_dump object header and complete statement; leave every other
+    # byte (including role additions/removals and predicate changes) untouched.
+    prefix = ('-- Name: migration_checksums checksum_runtime_read; Type: POLICY; '
+              'Schema: commonswarm_ops; Owner: swarm_admin\n--\n\n')
+    statement = ('CREATE POLICY checksum_runtime_read ON commonswarm_ops.migration_checksums '
+                 'FOR SELECT TO ')
+    before = prefix + statement + 'swarm_command, commonswarm_oauth_runtime USING (true);'
+    after = prefix + statement + 'commonswarm_oauth_runtime, swarm_command USING (true);'
+    return ddl.replace(before, after)
+
+
 def run_drill(workdir, unique_label, result, local_artifact=None):
     if local_artifact is None:
         destination, marker_data = find_backup(BACKUP_ROOT)
@@ -409,6 +423,8 @@ def run_drill(workdir, unique_label, result, local_artifact=None):
         ddl = re.sub(r'\A--\n-- PostgreSQL database dump\n--\n\n(?:\\restrict [A-Za-z0-9]+\n\n)?'
                      r'-- Dumped from database version [^\n]+\n-- Dumped by pg_dump version [^\n]+\n\n', '', ddl)
         ddl = re.sub(r'--\n-- PostgreSQL database dump complete\n--\n\n(?:\\unrestrict [A-Za-z0-9]+\n\n)?\Z', '', ddl)
+        if ops_only:
+            ddl = normalize_ops_policy_role_order(ddl)
         return hashlib.sha256(ddl.encode('utf-8')).hexdigest()
     # The verified archive, not expected migration hashes, owns observed history.
     # Restore only ops data into the existing independent schema reference.
