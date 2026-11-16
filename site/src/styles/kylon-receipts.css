@@ -1,4 +1,4 @@
-/* Row tools: the delivery receipt and "Reply in thread".
+/* Row tools: the delivery receipt, Add reaction and "Reply in thread".
  *
  * A settled (quiet) receipt and the reply control share one bar that floats over the row's
  * top-right corner. kylon-channel.css places it and shows it on hover, keyboard focus or a tap;
@@ -71,6 +71,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools .
  * its accessible name and its opened detail. The footer of a problem receipt keeps the full width. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
   max-inline-size: 16rem;
+}
+/* Closed, the bar is one line at every width: on a phone the receipt gives up width (its label ellipses) rather
+ * than wrap Add reaction and "Reply in thread" onto a second line over the message (the home sheet,
+ * home/workspace.css, lets the bar wrap). It keeps a 44px floor, the width of its own summary. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-body > .dashboard__message-tools:not(:has(> .dashboard__message-receipt[open])) {
+  flex-wrap: nowrap;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools:not(:has(> .dashboard__message-receipt:not([data-receipt-quiet]))) > .dashboard__message-receipt:not([open]) {
+  flex: 0 1 auto;
+  min-inline-size: 44px;
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-tools .dashboard__message-receipt > summary {
   padding-inline: 6px;

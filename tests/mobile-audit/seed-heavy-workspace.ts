@@ -542,6 +542,45 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.mentionViewer"] = mentionViewer;
         steps.push("seed_mentions");
       } catch (error) { note("seed_mentions", error); }
+      // Reactions (app.chat.reactions, menu.reactions): the admin's note, the newest in #general, carries the agent's
+      // automatic eyes and a thumbs up from the admin and from the viewer, so one pill shows pressed. Its own message, by
+      // its own author, so it groups under none of the rows other captures target.
+      try {
+        const reacted = randomUUID();
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.signals (
+              id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+              about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+            ) VALUES (
+              ${reacted}::uuid, ${workspace}::uuid, ${adminPerson.id}::uuid, 'user', NULL, NULL, NULL,
+              NULL, 'note', 'The engineer can come between 8 and 10am on Friday.',
+              statement_timestamp() + interval '25 days', statement_timestamp() - interval '4 seconds', ${channels.general}::uuid, NULL, false
+            )`;
+          await tx`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, actor_agent_principal_id, emoji, source, created_at) VALUES
+            (${workspace}::uuid, ${reacted}::uuid, NULL, ${ids.agent!}::uuid, ${"\u{1F440}"}, 'ack', statement_timestamp() - interval '3 seconds'),
+            (${workspace}::uuid, ${reacted}::uuid, ${adminPerson.id}::uuid, NULL, ${"\u{1F44D}"}, 'manual', statement_timestamp() - interval '2 seconds'),
+            (${workspace}::uuid, ${reacted}::uuid, ${owner.id}::uuid, NULL, ${"\u{1F44D}"}, 'manual', statement_timestamp() - interval '1 second')`;
+        });
+        ids["message.reacted"] = reacted;
+        steps.push("seed_reactions");
+      } catch (error) { note("seed_reactions", error); }
+      // The first reaction (menu.reactions.first): a member's note just after the admin's reacted one, with no reactions,
+      // so it has no pills and no + pill and its picker opens only from Add reaction in the row's tools. Neither the admin
+      // (the row before) nor the viewer (the picture note posted after it, below), so it groups with neither and moves no
+      // row's header; seen by the viewer like the others (seed_viewer_seen), so its tools hold a settled receipt.
+      try {
+        const unreacted = randomUUID(), member = people[3]!;
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) VALUES (
+            ${unreacted}::uuid, ${workspace}::uuid, ${member.id}::uuid, 'user', NULL, NULL, NULL,
+            NULL, 'note', 'I can let them in if they arrive before nine.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 seconds', ${channels.general}::uuid, NULL, false
+          )`;
+        ids["message.unreacted"] = unreacted;
+        steps.push("seed_unreacted");
+      } catch (error) { note("seed_unreacted", error); }
       // A message long enough to collapse behind Show more, for the witness that keeps that control focused across a
       // real feed rebuild.
       try {

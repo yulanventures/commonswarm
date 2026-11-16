@@ -4,5 +4,6 @@
  */
 @import "./kylon-messages.css";
 @import "./kylon-receipts.css";
+@import "./kylon-reactions.css";
 @import "./kylon-composer.css";
 @import "./kylon-conversation-responsive.css";

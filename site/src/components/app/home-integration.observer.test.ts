@@ -53,6 +53,11 @@ const MESSAGE_STATUS_STUBS = {
   syncChannelRead: () => undefined,
   refreshSignalMentions: async () => undefined,
   resetSignalMentions: () => undefined,
+  refreshSignalReactions: async () => undefined,
+  resetSignalReactions: () => undefined,
+  appendReactions: () => undefined,
+  reactionAddButton: () => null,
+  syncReactionPicker: () => undefined,
   mountSeatAdminPanel: () => undefined,
   resetSeatAdminState: () => undefined,
   disposeSeatAdminDialog: () => undefined,
@@ -1039,6 +1044,43 @@ test('chat pictures and file cards each open their own attachment through its si
   await click(pictures[0]!);
   assert.deepEqual(signed, ['report', 'shot'], 'each link signs its own attachment, not the one at the same index');
   assert.deepEqual(opened, ['https://storage.test/report', 'https://storage.test/shot'], 'the browser opens the signed URL itself');
+});
+test('reactions sit under the message and before its tools; Add reaction joins Reply in thread in the footer', async () => {
+  const document = { createElement: (tag: string) => new RowNode(tag), createElementNS: (_namespace: string, tag: string) => new RowNode(tag) };
+  let offered = true;
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras, signalHasEnded,
+    homeAskAnswered, THREAD_REPLY_CONTROL_LABEL, window: { requestAnimationFrame() {} },
+    setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
+    appendReactions: (body: RowNode) => { const line = new RowNode('div'); line.className = 'dashboard__message-reactions'; body.append(line); },
+    reactionAddButton: () => { if (!offered) return null; const button = new RowNode('button'); button.className = 'dashboard__message-react'; return button; },
+  });
+  runInContext(`
+    const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='viewer', now=0;
+    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map(), signalMentionRows=new Map();
+    const removedAgentOwners=new Map(), agents=[], channels=[], signals=[], expandedSignalIds=new Set(), expandedThreadIds=new Set(), MESSAGE_COLLAPSE_LINES=6;
+    const streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
+    const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'viewer',
+      ownerFirstName:'Owner',ownerInitial:'O',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
+    const signalIsDirectToViewer=()=>false, initials=()=>'', kindLabel=kind=>kind, routeHref=()=>'/app?w=W';
+    const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>[];
+    const appendDeliveryReceipt=()=>{}, threadReplyRoot=null; let replyable=true; const canStartThread=()=>replyable;
+  `, context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
+  const build = (reply: boolean) => runInContext(`buildMessageRow(${JSON.stringify({ id: 'S-react', from: 'claude', fromKind: 'agent', kind: 'note', body: 'Done',
+    to: null, toAgent: null, about: null, attachments: [], channelId: null, createdAt: '2026-10-05T12:00:00Z', threadRootId: reply ? 'root' : null })},${reply})`, context) as RowNode;
+  const body = (row: RowNode) => row.querySelector('.dashboard__message-body')!;
+  const root = build(false);
+  const children = body(root).children.map(node => node.className);
+  assert.ok(children.indexOf('dashboard__message-reactions') >= 0 && children.indexOf('dashboard__message-reactions') < children.indexOf('dashboard__message-tools'),
+    `the pills line comes before the tools footer: ${children.join(', ')}`);
+  const actions = body(root).querySelector('.dashboard__message-tools')!.querySelector('.dashboard__message-actions')!;
+  assert.deepEqual(actions.children.map(node => node.className.split(' ').at(-1)), ['dashboard__message-react', 'dashboard__message-reply']);
+  assert.equal(body(root).querySelector('.dashboard__message-tools')!.querySelector('.dashboard__message-reactions'), null, 'pills are never in the footer');
+  const reply = build(true);
+  assert.deepEqual(body(reply).querySelector('.dashboard__message-actions')!.children.map(node => node.className), ['dashboard__message-react'],
+    'a reply has no thread control but still offers Add reaction');
+  offered = false; runInContext('replyable=false', context);
+  assert.equal(body(build(true)).querySelector('.dashboard__message-tools'), null, 'nothing to offer: no footer at all');
 });
 test('an ask card keeps the full sanitized question, links, topic controls and Show more', async () => {
   const document = { createElement: (tag: string) => new RowNode(tag) };

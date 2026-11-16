@@ -41,6 +41,7 @@ import {
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
 import { ASK_CHOICES_BATCH, parseAskChoices, type AskChoiceState } from "./choices.js";
+import type { ReactionActor, ReactionGroup } from "./reactions";
 import {
   MESSAGE_STATUS_BATCH,
   parseAgentStatusEvent,
@@ -3875,6 +3876,115 @@ export async function signalMentions(workspaceId: string, signalIds: readonly st
     rows.push(...signalMentionsFromRows(data));
   }
   return rows;
+}
+
+export const SIGNAL_REACTIONS_BATCH = 50;
+
+/**
+ * Rows of `swarm_read.signal_reactions`, grouped per message and emoji. A message's emojis are in
+ * the order each was first added, and each emoji's reactors oldest first; `mine` is a row by the
+ * signed-in person. Malformed rows are dropped. An agent's automatic 👀 is an ordinary reaction.
+ */
+export function signalReactionGroupsFromRows(rows: unknown, viewerId: string): Map<string, ReactionGroup[]> {
+  const viewer = viewerId.toLowerCase();
+  type Row = { signalId: string; actor: ReactionActor; emoji: string; at: number; key: string };
+  const parsed: Row[] = [];
+  if (Array.isArray(rows)) {
+    for (const row of rows as Array<Record<string, unknown>>) {
+      if (row === null || typeof row !== "object") continue;
+      if (typeof row.signal_id !== "string" || typeof row.id !== "string" || typeof row.emoji !== "string" || !row.emoji) continue;
+      if (row.kind !== "user" && row.kind !== "agent") continue;
+      const at = typeof row.created_at === "string" ? Date.parse(row.created_at) : Number.NaN;
+      if (!Number.isFinite(at)) continue;
+      parsed.push({
+        signalId: row.signal_id.toLowerCase(),
+        actor: { kind: row.kind === "user" ? "person" : "agent", id: row.id.toLowerCase() },
+        emoji: row.emoji,
+        at,
+        key: typeof row.reaction_id === "string" ? row.reaction_id : "",
+      });
+    }
+  }
+  parsed.sort((left, right) => left.at - right.at || left.key.localeCompare(right.key));
+  const groups = new Map<string, ReactionGroup[]>();
+  for (const row of parsed) {
+    const list = groups.get(row.signalId) ?? [];
+    if (!groups.has(row.signalId)) groups.set(row.signalId, list);
+    let group = list.find((entry) => entry.emoji === row.emoji);
+    if (!group) { group = { emoji: row.emoji, count: 0, actors: [], mine: false }; list.push(group); }
+    if (group.actors.some((actor) => actor.kind === row.actor.kind && actor.id === row.actor.id)) continue;
+    group.actors.push(row.actor);
+    group.count += 1;
+    if (row.actor.kind === "person" && row.actor.id === viewer) group.mine = true;
+  }
+  return groups;
+}
+
+/**
+ * The reactions on these messages, grouped (signalReactionGroupsFromRows). A message without one is
+ * not in the result. `null` when the read is unavailable. The view shows a reaction only beside a
+ * message the reader can read.
+ */
+export async function signalReactions(
+  workspaceId: string,
+  signalIds: readonly string[],
+  viewerId: string,
+): Promise<Map<string, ReactionGroup[]> | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const rows: unknown[] = [];
+  for (let offset = 0; offset < signalIds.length; offset += SIGNAL_REACTIONS_BATCH) {
+    const { data, error } = await readWithDeadline("Reactions", signal => api.schema("swarm_read")
+      .from("signal_reactions").select("reaction_id,signal_id,kind,id,emoji,created_at").eq("workspace_id", workspaceId)
+      .in("signal_id", signalIds.slice(offset, offset + SIGNAL_REACTIONS_BATCH))
+      .order("created_at", { ascending: true }).order("reaction_id", { ascending: true }).abortSignal(signal));
+    if (error || !Array.isArray(data)) return null;
+    rows.push(...data);
+  }
+  return signalReactionGroupsFromRows(rows, viewerId);
+}
+
+export type ReactionResult = { ok: true; changed: boolean } | { ok: false; reason: string; message: string };
+
+const reactionRefusal = (status: number, body: Record<string, unknown>): ReactionResult => {
+  const reason = typeof body.error === "string" ? body.error : `status_${status}`;
+  const message = reason === "reaction_limit_reached"
+    ? "You have added as many reactions to this message as one person can."
+    : reason === "signal_not_found"
+    ? "That message is no longer here."
+    : "That reaction couldn't be saved.";
+  return { ok: false, reason, message };
+};
+
+async function postReaction(
+  kind: "add_reaction" | "remove_reaction",
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  signalId: string,
+  emoji: string,
+): Promise<ReactionResult> {
+  // A person's reaction is always "manual": source is left out, as the command expects.
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind, signal_id: signalId, emoji },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  if (status === 200 && body.status === "accepted") {
+    return { ok: true, changed: kind === "add_reaction" ? body.added === true : body.removed === true };
+  }
+  return reactionRefusal(status, body);
+}
+
+/** The signed-in person adds one emoji to a message they can read. */
+export function addReaction(session: Session, commandId: string, workspaceId: string, signalId: string, emoji: string): Promise<ReactionResult> {
+  return postReaction("add_reaction", session, commandId, workspaceId, signalId, emoji);
+}
+
+/** The signed-in person takes back their own emoji. */
+export function removeReaction(session: Session, commandId: string, workspaceId: string, signalId: string, emoji: string): Promise<ReactionResult> {
+  return postReaction("remove_reaction", session, commandId, workspaceId, signalId, emoji);
 }
 
 /** Interactive replies: the stored choices (and any answer) for up to 50 asks the signed-in person can read.
