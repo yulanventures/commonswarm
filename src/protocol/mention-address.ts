@@ -242,6 +242,62 @@ export const MENTION_REFUSAL_SENTENCES: Readonly<Record<MentionRefusal, string>>
   mention_choice: "An ask with options or choices mentions nobody. Leave out mentions.",
 };
 
+/* ────────────────────────────────────────────────────────────────────────────────────────
+ * A THREAD REPLY TELLS THE AUTHOR IT ANSWERS. A private reply always reached the author; the
+ * thread reply that replaced it for public messages does so by mentioning them. The author goes
+ * first, takes one of the eight places, and is never added twice. If the edge then refuses the
+ * post because of that implicit mention (the author left, or agents hit the thread's hop limit),
+ * the reply is sent once more without it: the reply matters more than the notification. An
+ * explicit @Name or --mention is never dropped this way.
+ * ──────────────────────────────────────────────────────────────────────────────────────── */
+
+/** The mention list for a thread reply: the author first, then the explicit mentions. */
+export function addReplyAuthorMention(
+  mentions: readonly WireMention[],
+  author: WireMention | null,
+): { mentions: WireMention[]; authorAdded: boolean } {
+  const list = mentions.map((row) => ({ kind: row.kind, id: row.id.toLowerCase() }));
+  if (author === null) return { mentions: list, authorAdded: false };
+  const id = author.id.toLowerCase();
+  if (list.some((row) => row.kind === author.kind && row.id === id)) return { mentions: list, authorAdded: false };
+  if (list.length >= MENTION_MAX_RECIPIENTS) {
+    throw new MentionResolutionError(
+      "mention_overflow",
+      `A message mentions at most ${MENTION_MAX_RECIPIENTS}, and a thread reply also mentions the author it answers. Mention fewer people or agents and send again.`,
+    );
+  }
+  return { mentions: [{ kind: author.kind, id }, ...list], authorAdded: true };
+}
+
+/** The list without the implicit author, for the second send. */
+export function withoutReplyAuthor(mentions: readonly WireMention[], author: WireMention): WireMention[] {
+  const id = author.id.toLowerCase();
+  return mentions.filter((row) => !(row.kind === author.kind && row.id === id));
+}
+
+/**
+ * True for the edge's refusals an implicit author mention can cause: the bare 403 a mention of
+ * someone no longer live gets, and the agent hop limit in a thread (409 mention_hop_limit).
+ */
+export function replyAuthorMentionRefused(status: number, code: string | null | undefined): boolean {
+  return code === "mention_hop_limit" || (status === 403 && (code === undefined || code === null || code === "forbidden"));
+}
+
+/** Why the author was not told, for the reply's output. */
+export function replyAuthorNotNotified(code: string | null | undefined): string {
+  return code === "mention_hop_limit"
+    ? "Agents have exchanged too many messages in a row in this thread, so the reply was sent without notifying its author."
+    : "The author could not be mentioned, so the reply was sent without notifying them.";
+}
+
+/**
+ * The command id of the second send. The first was refused and may be recorded under its own id,
+ * so the second needs another; derived, so a retried request takes the same two ids.
+ */
+export function replyRetryCommandId(commandId: string): string {
+  return `${commandId.slice(0, 65)}_noauth`;
+}
+
 export class MentionResolutionError extends Error {
   readonly code: MentionRefusal;
   constructor(code: MentionRefusal, message: string = MENTION_REFUSAL_SENTENCES[code]) {

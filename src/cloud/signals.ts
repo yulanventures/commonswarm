@@ -1793,7 +1793,7 @@ export async function readReplyTarget(
       }, perReadTimeoutMs(options));
     } else {
       const url = new URL("/rest/v1/signals", target.url);
-      url.searchParams.set("select", "id,to,to_agent,in_reply_to,thread_root_id");
+      url.searchParams.set("select", "id,from,from_kind,to,to_agent,in_reply_to,thread_root_id");
       url.searchParams.set("workspace_id", `eq.${workspaceId.toLowerCase()}`);
       url.searchParams.set("id", `eq.${id}`);
       url.searchParams.set("limit", "1");
@@ -1829,6 +1829,8 @@ export async function readReplyTarget(
     thread_root_id: text(row.thread_root_id),
     recipients: Array.isArray(row.recipients) ? row.recipients : null,
     audience: text(row.audience),
+    from: text(row.from),
+    from_kind: text(row.from_kind),
   };
 }
 

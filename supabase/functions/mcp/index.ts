@@ -50,10 +50,11 @@ import type {
 } from "./tools.ts";
 import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, HostedToolInputError } from "./tools.ts";
 import {
-  hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
   MentionResolutionError, type HostedSignalTool,
 } from "./signal-tools.ts";
-import { MENTION_REFUSAL_SENTENCES } from "../../../src/protocol/mention-address.ts";
+import { MENTION_REFUSAL_SENTENCES, replyAuthorMentionRefused, replyRetryCommandId, withoutReplyAuthor } from "../../../src/protocol/mention-address.ts";
+import type { ReplyAuthor } from "../../../src/protocol/reply-placement.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -478,15 +479,20 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
   let placement = null;
   if (tool === "reply") {
     let threadRootId: string | null = null;
+    let author: ReplyAuthor | null = null;
     if (hostedNeedsReplyTarget(tool, args)) {
       const reader = await seatCapability(call.token, binding, "channel_read");
       if (reader !== null) {
         const target = await handleHostedRead({ resource: "reply_target", workspace_id: binding.workspaceId,
           signal_id: String(args.signal_id).toLowerCase() }, reader);
-        if (target.status === 200 && typeof target.body.thread_root_id === "string") threadRootId = target.body.thread_root_id;
+        if (target.status === 200 && typeof target.body.thread_root_id === "string") {
+          threadRootId = target.body.thread_root_id;
+          const row = target.body.author as { kind?: unknown; id?: unknown } | null | undefined;
+          if (row && (row.kind === "user" || row.kind === "agent") && typeof row.id === "string") author = { kind: row.kind, id: row.id };
+        }
       }
     }
-    placement = hostedReplyPlacement(args, threadRootId);
+    placement = hostedReplyPlacement(args, threadRootId, author);
   }
   let roster = null;
   if (hostedNeedsRoster(tool, args) && (tool !== "reply" || placement?.placement === "thread")) {
@@ -502,10 +508,16 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     if (error instanceof MentionResolutionError) throw new HostedToolInputError(MENTION_REFUSAL_SENTENCES[error.code]);
     throw error;
   }
-  return commandOutput(await handleHostedCommand(
-    hostedSignalCommand(tool, args, binding.workspaceId, { mentions, placement }),
-    capability,
-  ));
+  let result = await handleHostedCommand(hostedSignalCommand(tool, args, binding.workspaceId, { mentions, placement }), capability);
+  /* Refused because of the implicit author mention (the author left, or the thread's agent hop
+   * limit): send the reply once more without it, under a derived id so a retried request takes
+   * the same two ids. Explicit mentions stay. */
+  const implicitAuthor = tool === "reply" ? hostedImplicitAuthor(args, roster, placement) : null;
+  if (implicitAuthor !== null && replyAuthorMentionRefused(result.status, typeof result.body.error === "string" ? result.body.error : null)) {
+    result = await handleHostedCommand(hostedSignalCommand(tool, { ...args, request_id: replyRetryCommandId(String(args.request_id)) },
+      binding.workspaceId, { mentions: withoutReplyAuthor(mentions, implicitAuthor), placement }), capability);
+  }
+  return commandOutput(result);
 }
 
 const verifier = new McpJwtVerifier({

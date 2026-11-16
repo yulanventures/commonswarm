@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 import {bindSessionProof} from './cloud/session-proof.js';
-import { bodyMayMention, resolveMentions, type WireMention } from "./protocol/mention-address.js";
-import { decideReplyPlacement, replyFlagProblem, replyNeedsTarget, ReplyPlacementError, REPLY_BROADCAST_NEEDS_THREAD, type ReplyPlacement } from "./protocol/reply-placement.js";
+import {
+  addReplyAuthorMention, bodyMayMention, replyAuthorMentionRefused, replyAuthorNotNotified, resolveMentions, withoutReplyAuthor,
+  type WireMention,
+} from "./protocol/mention-address.js";
+import {
+  decideReplyPlacement, replyFlagProblem, replyNeedsTarget, ReplyPlacementError, replyTargetAuthor, replyTargetIsPublic,
+  REPLY_BROADCAST_NEEDS_THREAD, type ReplyAuthor, type ReplyPlacement,
+} from "./protocol/reply-placement.js";
 import {agentWorkspaces} from './cloud/agent-workspaces.js';
 
 import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
@@ -1035,7 +1041,8 @@ A channel is where a message is FILED, not who may read it. Everyone in the
 workspace reads every channel, and --channel changes nothing about who sees a
 signal. Archiving a channel keeps its history and its permalinks and refuses new
 messages. cswarm reply answers a message everyone in its channel can read in
-its thread, and answers an addressed message privately to its author. --private
+its thread and notifies the author, and answers an addressed message privately
+to its author. --private
 answers the author privately instead; --broadcast-to-channel sends a thread reply
 to the thread's channel as well. --thread is accepted and changes nothing.
 
@@ -4320,6 +4327,18 @@ async function runReply(args: Arguments): Promise<void> {
   const replyTarget = needsTarget
     ? await readReplyTarget(cloud, signalCredentialOf(credential), credential.selectedWorkspace, signalId)
     : null;
+  /* The replier, so a thread reply never mentions its own author. An agent credential that does
+   * not carry its principal id learns it from the directory, read only when it can matter. */
+  let directory: SignalDirectory | null = null;
+  const loadDirectory = async (): Promise<SignalDirectory> =>
+    directory ??= await signalDirectory(cloud, credential.selectedWorkspace, credential);
+  let self: ReplyAuthor | null = credential.kind === "agent"
+    ? credential.agent?.principalId ? { kind: "agent", id: credential.agent.principalId } : null
+    : { kind: "user", id: credential.human!.userId };
+  if (self === null && replyTarget !== null && replyTargetIsPublic(replyTarget) && replyTargetAuthor(replyTarget)?.kind === "agent") {
+    const identity = (await loadDirectory()).identity?.principal_id;
+    self = identity ? { kind: "agent", id: identity } : null;
+  }
   let placement: ReplyPlacement;
   try {
     placement = decideReplyPlacement({
@@ -4329,6 +4348,7 @@ async function runReply(args: Arguments): Promise<void> {
       status: requestedStatus !== undefined,
       thread: threadFlag,
       broadcastToChannel,
+      self,
     });
   } catch (error) {
     if (error instanceof ReplyPlacementError) throw new UsageError(error.message);
@@ -4340,11 +4360,13 @@ async function runReply(args: Arguments): Promise<void> {
   }
   let mentions: WireMention[] = [];
   if (inThread && (mentionSelectors.length > 0 || bodyMayMention(body))) {
-    const roster = mentionRosterFromDirectory(
-      await signalDirectory(cloud, credential.selectedWorkspace, credential),
-    );
+    const roster = mentionRosterFromDirectory(await loadDirectory());
     mentions = resolveMentions({ body, selectors: mentionSelectors, roster });
   }
+  /* A thread reply notifies the author it answers, as the private reply it replaces did. */
+  const replyAuthor = placement.placement === "thread" ? placement.author : null;
+  const withAuthor = addReplyAuthorMention(mentions, replyAuthor);
+  mentions = withAuthor.mentions;
   const replyStatus: ReplyStatus | undefined = inThread
     ? undefined
     : requestedStatus as ReplyStatus | undefined ?? "answered";
@@ -4363,7 +4385,7 @@ async function runReply(args: Arguments): Promise<void> {
    * exclusive on the wire, because the audience would be ambiguous at the exact point addressing
    * is decided, so `in_reply_to` goes to null here. A thread reply carries no recipient, which
    * the null targets already satisfy, and may carry mentions. */
-  const command: PostSignalCommand = {
+  let command: PostSignalCommand = {
     kind: "post_signal",
     signal_kind: "note",
     body,
@@ -4379,8 +4401,21 @@ async function runReply(args: Arguments): Promise<void> {
     ...(mentions.length === 0 ? {} : { mentions }),
   };
   let result;
+  let authorNotNotified: string | null = null;
   try {
-    result = await postSignalCommand(cloud, credential, command);
+    try {
+      result = await postSignalCommand(cloud, credential, command);
+    } catch (error) {
+      /* Refused because of the implicit author mention: send the reply without it. An explicit
+       * mention stays, so a refusal it causes is the reply's refusal. */
+      if (!withAuthor.authorAdded || replyAuthor === null || !(error instanceof CommandHttpError) ||
+          !replyAuthorMentionRefused(error.status, error.code)) throw error;
+      authorNotNotified = replyAuthorNotNotified(error.code);
+      mentions = withoutReplyAuthor(mentions, replyAuthor);
+      const { mentions: _dropped, ...rest } = command;
+      command = { ...rest, ...(mentions.length === 0 ? {} : { mentions }) };
+      result = await postSignalCommand(cloud, credential, command);
+    }
   } catch (error) {
     /* A 403 on a PRIVATE reply means the referenced signal is not one this caller may answer:
      * the audience is derived server-side and a reply is accepted only when the referenced
@@ -4406,6 +4441,7 @@ async function runReply(args: Arguments): Promise<void> {
         : "Reply shared. It is immutable, tenancy-scoped, and will quietly expire at its horizon.",
       placement: placement.placement,
       ...(advisory === null ? {} : { advisory }),
+      ...(authorNotNotified === null ? {} : { author_not_notified: authorNotNotified }),
       signal,
       ...(mentions.length === 0 ? {} : { mentions }),
       ...(formatAdvisory !== null ? { [FORMAT_ADVISORY_FIELD]: formatAdvisory } : {}),
@@ -4422,7 +4458,7 @@ async function runReply(args: Arguments): Promise<void> {
     ),
   );
   process.stdout.write(
-    `${replyMessage}${advisory === null ? "" : ` ${advisory}`}\n${
+    `${replyMessage}${advisory === null ? "" : ` ${advisory}`}${authorNotNotified === null ? "" : ` ${authorNotNotified}`}\n${
       renderSignals([signal], {
         inbox: false,
         includeStale: true,

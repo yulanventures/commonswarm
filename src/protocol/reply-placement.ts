@@ -10,7 +10,16 @@
  *   privately whatever the message is.
  * - When the message could not be read, the flags decide, exactly as before this rule existed,
  *   so a message the caller can't see is refused the same way it always was.
+ * - A thread reply names the answered message's author (unless that is the replier), so the
+ *   author is told as a private reply would have told them (addReplyAuthorMention in
+ *   mention-address.ts puts it on the wire).
  */
+
+/** Who wrote the answered message, as a mention names them. */
+export interface ReplyAuthor {
+  kind: "user" | "agent";
+  id: string;
+}
 
 /** The fields of the answered message this rule reads. */
 export interface ReplyTarget {
@@ -22,6 +31,9 @@ export interface ReplyTarget {
   recipients?: readonly unknown[] | null;
   /** "workspace" or "private" when the read edge says so; otherwise derived from the columns. */
   audience?: string | null;
+  /** The author's user or principal id, and which it is. */
+  from?: string | null;
+  from_kind?: string | null;
 }
 
 export interface ReplyPlacementInput {
@@ -33,10 +45,12 @@ export interface ReplyPlacementInput {
   status: boolean;
   thread: boolean;
   broadcastToChannel: boolean;
+  /** The replier. The author is not named when it is the replier; null when not known. */
+  self?: ReplyAuthor | null;
 }
 
 export type ReplyPlacement =
-  | { placement: "thread"; threadRootId: string }
+  | { placement: "thread"; threadRootId: string; author: ReplyAuthor | null }
   | { placement: "private"; inReplyTo: string; advisory: string | null };
 
 export class ReplyPlacementError extends Error {
@@ -67,6 +81,13 @@ export function replyTargetIsPublic(target: ReplyTarget): boolean {
     (target.in_reply_to ?? null) === null && (target.recipients ?? []).length === 0;
 }
 
+/** The answered message's author, or null when the read did not say. */
+export function replyTargetAuthor(target: ReplyTarget | null): ReplyAuthor | null {
+  if (target === null || typeof target.from !== "string" || target.from === "") return null;
+  if (target.from_kind !== "user" && target.from_kind !== "agent") return null;
+  return { kind: target.from_kind, id: target.from.toLowerCase() };
+}
+
 /** Refusals that need no network. Call before reading anything. */
 export function replyFlagProblem(input: { private: boolean; thread: boolean; broadcastToChannel: boolean }): string | null {
   return input.private && (input.thread || input.broadcastToChannel) ? REPLY_PRIVATE_CONFLICT : null;
@@ -87,13 +108,16 @@ export function decideReplyPlacement(input: ReplyPlacementInput): ReplyPlacement
     return privately();
   }
   if (input.target === null) {
-    if (input.thread) return { placement: "thread", threadRootId: signalId };
+    if (input.thread) return { placement: "thread", threadRootId: signalId, author: null };
     if (input.broadcastToChannel) throw new ReplyPlacementError(REPLY_BROADCAST_NEEDS_THREAD);
     return privately();
   }
   if (replyTargetIsPublic(input.target)) {
     const root = input.target.thread_root_id ?? input.target.id;
-    return { placement: "thread", threadRootId: root.toLowerCase() };
+    const author = replyTargetAuthor(input.target);
+    const self = input.self ?? null;
+    const isSelf = author !== null && self !== null && author.kind === self.kind && author.id === self.id.toLowerCase();
+    return { placement: "thread", threadRootId: root.toLowerCase(), author: isSelf ? null : author };
   }
   if (input.broadcastToChannel) throw new ReplyPlacementError(REPLY_BROADCAST_ADDRESSED);
   return privately(input.thread ? REPLY_THREAD_ADVISORY : null);

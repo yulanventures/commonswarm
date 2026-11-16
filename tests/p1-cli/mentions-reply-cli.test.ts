@@ -18,6 +18,10 @@ const ROOT = "11111111-1111-4111-8111-111111111111";
 const CHILD = "22222222-2222-4222-8222-222222222222";
 const DIRECT = "33333333-3333-4333-8333-333333333333";
 const HIDDEN = "44444444-4444-4444-8444-444444444444";
+const OWN = "66666666-6666-4666-8666-666666666666";
+const BY_GONE = "77777777-7777-4777-8777-777777777777";
+const BY_WREN = "88888888-8888-4888-8888-888888888888";
+const GONE = "99999999-9999-4999-8999-999999999999";
 const TOKEN = `swm_agt_${"c".repeat(43)}`;
 
 const scratch = mkdtempSync(join(tmpdir(), "cswarm-mentions-"));
@@ -39,6 +43,9 @@ const MESSAGES = new Map([
   [ROOT, row(ROOT)],
   [CHILD, row(CHILD, { thread_root_id: ROOT })],
   [DIRECT, row(DIRECT, { to_agent: SELF, recipients: [{ kind: "agent", id: SELF }], audience: "private" })],
+  [OWN, row(OWN, { from: SELF, from_kind: "agent" })],
+  [BY_GONE, row(BY_GONE, { from: GONE, from_kind: "agent" })],
+  [BY_WREN, row(BY_WREN, { from: WREN, from_kind: "agent" })],
 ]);
 
 async function cloud(options: { twins?: boolean; legacyRead?: boolean } = {}) {
@@ -59,6 +66,7 @@ async function cloud(options: { twins?: boolean; legacyRead?: boolean } = {}) {
           return reply(200, {
             members: [{ user_id: DANA, display_name: "Dana" }, ...(options.twins ? [{ user_id: TWIN, display_name: "Wren" }] : [])],
             agents: [{ principal_id: SELF, name: "Self" }, { principal_id: WREN, name: "Wren" }],
+            identity: { credential_valid: true, principal_id: SELF, workspace_id: WORKSPACE, workspace_name: "Test", owner_user_id: DANA },
           });
         }
         if (body.resource === "signals" && Object.hasOwn(body, "signal_id")) {
@@ -71,7 +79,13 @@ async function cloud(options: { twins?: boolean; legacyRead?: boolean } = {}) {
       if (request.url === "/functions/v1/command" && body.command?.kind === "post_signal") {
         posts.push(body.command);
         const command = body.command;
-        if (command.in_reply_to === HIDDEN) return reply(403, { error: "forbidden", message: "forbidden" });
+        if (command.in_reply_to === HIDDEN) return reply(403, { error: "forbidden" });
+        const mentioned = (command.mentions ?? []) as Array<{ kind: string; id: string }>;
+        // A mention of an agent no longer live: the bare 403. Agents in BY_WREN's thread: the hop limit.
+        if (mentioned.some((m) => m.id === GONE)) return reply(403, { error: "forbidden" });
+        if (command.thread_root_id === BY_WREN && mentioned.some((m) => m.kind === "agent")) {
+          return reply(409, { error: "mention_hop_limit", message: "Agents have exchanged 6 messages in a row in this thread." });
+        }
         return reply(200, { status: "accepted", ok: true, event_ids: [], signal: row("55555555-5555-4555-8555-555555555555", {
           from: SELF, from_kind: "agent", body: command.body, kind: command.signal_kind,
           in_reply_to: command.in_reply_to, thread_root_id: command.thread_root_id ?? null,
@@ -154,7 +168,7 @@ test("reply lands in the thread of a channel message and privately on an address
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(fake.posts.at(-1), { kind: "post_signal", signal_kind: "note", body: "on it @Wren",
       to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: ROOT,
-      mentions: [{ kind: "agent", id: WREN }] });
+      mentions: [{ kind: "user", id: DANA }, { kind: "agent", id: WREN }] }, "the author it answers comes first");
     assert.equal(JSON.parse(result.stdout).placement, "thread");
     assert.deepEqual(fake.reads.find((read) => read.signal_id === ROOT), { resource: "signals", workspace_id: WORKSPACE,
       inbox: false, about: null, kind: null, in_reply_to: null, since: null, limit: 1, include_stale: true, signal_id: ROOT });
@@ -162,6 +176,7 @@ test("reply lands in the thread of a channel message and privately on an address
     result = await cli(fake.url, ["reply", CHILD, "same thread", "--thread", "--broadcast-to-channel", "--json"]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(fake.posts.at(-1)!.thread_root_id, ROOT, "a reply to a message inside a thread roots on the thread");
+    assert.deepEqual(fake.posts.at(-1)!.mentions, [{ kind: "user", id: DANA }], "and notifies that message's author");
     assert.equal(fake.posts.at(-1)!.broadcast_to_channel, true);
 
     result = await cli(fake.url, ["reply", ROOT, "just you", "--private", "--json"]);
@@ -209,3 +224,39 @@ test("a deployment that can't look a message up by id keeps the flags in charge"
     assert.equal(fake.posts.at(-1)!.thread_root_id, ROOT);
   } finally { await fake.close(); }
 });
+
+test("a thread reply notifies its author, never itself, and still lands when that mention is refused", async () => {
+  const fake = await cloud();
+  try {
+    let result = await cli(fake.url, ["reply", ROOT, "noted @Dana", "--json"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(fake.posts.at(-1)!.mentions, [{ kind: "user", id: DANA }], "the author named explicitly is mentioned once");
+
+    result = await cli(fake.url, ["reply", OWN, "following up on my own post", "--json"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.posts.at(-1)!.thread_root_id, OWN);
+    assert.equal(Object.hasOwn(fake.posts.at(-1)!, "mentions"), false, "no self-mention");
+
+    // The author is no longer live: the edge answers a bare 403, and the reply is sent without the mention.
+    const before = fake.posts.length;
+    result = await cli(fake.url, ["reply", BY_GONE, "done", "--json"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(fake.posts.slice(before).map((post) => post.mentions ?? null), [[{ kind: "agent", id: GONE }], null]);
+    assert.match(JSON.parse(result.stdout).author_not_notified, /could not be mentioned/);
+
+    // The thread's agent hop limit: the same, keeping a person who was named explicitly.
+    const hop = fake.posts.length;
+    result = await cli(fake.url, ["reply", BY_WREN, "done @Dana"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(fake.posts.slice(hop).map((post) => post.mentions),
+      [[{ kind: "agent", id: WREN }, { kind: "user", id: DANA }], [{ kind: "user", id: DANA }]]);
+    assert.match(result.stdout, /without notifying its author/);
+
+    // Named explicitly, the agent's refusal is the reply's refusal: nothing is dropped.
+    const explicit = fake.posts.length;
+    result = await cli(fake.url, ["reply", BY_WREN, "done @Wren"]);
+    assert.notEqual(result.code, 0);
+    assert.equal(fake.posts.length, explicit + 1);
+  } finally { await fake.close(); }
+});
+

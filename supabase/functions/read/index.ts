@@ -1745,8 +1745,8 @@ export async function handleHostedRead(
        * Only such a message is answered here, through the same view and claims channel_read reads
        * with, so this tells the seat nothing channel_read could not. Anything else, including a
        * message the seat can't read, answers null and the reply stays private, refused as before. */
-      const [row] = await tx<{ id: string; thread_root_id: string | null }[]>`
-        SELECT s.id, s.thread_root_id
+      const [row] = await tx<{ id: string; thread_root_id: string | null; from: string; from_kind: string }[]>`
+        SELECT s.id, s.thread_root_id, s."from", s.from_kind
         FROM swarm_read.signals AS s
         WHERE s.workspace_id = ${seat.workspace_id}::uuid
           AND s.id = ${input.signal_id.toLowerCase()}::uuid
@@ -1758,6 +1758,10 @@ export async function handleHostedRead(
         context,
         signal_id: input.signal_id.toLowerCase(),
         thread_root_id: row === undefined ? null : row.thread_root_id ?? row.id,
+        // Who a thread reply notifies. The seat's own agent is left out: it does not mention itself.
+        author: row === undefined || (row.from_kind === "agent" && row.from === seat.principal_id)
+          ? null
+          : { kind: row.from_kind, id: row.from },
       } };
     }
     if (input.resource === "channels") {

@@ -14,7 +14,10 @@ import {
   replyTargetIsPublic,
   type ReplyTarget,
 } from "../src/protocol/reply-placement.js";
-import { MENTION_REFUSAL_SENTENCES, MentionResolutionError, type MentionRosterEntry } from "../src/protocol/mention-address.js";
+import {
+  addReplyAuthorMention, MENTION_REFUSAL_SENTENCES, MentionResolutionError, replyAuthorMentionRefused, replyRetryCommandId,
+  withoutReplyAuthor, type MentionRosterEntry,
+} from "../src/protocol/mention-address.js";
 import { MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
 import { mapMcpError } from "../src/mcp/errors.js";
 import { readReplyTarget } from "../src/cloud/signals.js";
@@ -22,7 +25,7 @@ import { cloudTarget } from "../src/cloud/config.js";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
 import {
-  hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 } from "../supabase/functions/mcp/signal-tools.ts";
 
@@ -41,11 +44,11 @@ const privateReply: ReplyTarget = { id: DM, to: USER, to_agent: null, in_reply_t
 const flags = { private: false, status: false, thread: false, broadcastToChannel: false };
 
 test("a channel post gets a thread reply; a message inside a thread replies on its root", () => {
-  assert.deepEqual(decideReplyPlacement({ ...flags, target: channelPost, signalId: ROOT }), { placement: "thread", threadRootId: ROOT });
-  assert.deepEqual(decideReplyPlacement({ ...flags, target: threadChild, signalId: CHILD }), { placement: "thread", threadRootId: ROOT });
+  assert.deepEqual(decideReplyPlacement({ ...flags, target: channelPost, signalId: ROOT }), { placement: "thread", threadRootId: ROOT, author: null });
+  assert.deepEqual(decideReplyPlacement({ ...flags, target: threadChild, signalId: CHILD }), { placement: "thread", threadRootId: ROOT, author: null });
   // --thread on a channel message is a no-op confirmation; --broadcast-to-channel is allowed there.
   assert.deepEqual(decideReplyPlacement({ ...flags, thread: true, broadcastToChannel: true, target: channelPost, signalId: ROOT }),
-    { placement: "thread", threadRootId: ROOT });
+    { placement: "thread", threadRootId: ROOT, author: null });
   // The read edge's audience field wins over the columns.
   assert.equal(replyTargetIsPublic({ id: ROOT, audience: "private" }), false);
   assert.equal(replyTargetIsPublic({ id: ROOT, audience: "workspace", to: USER }), true);
@@ -75,7 +78,7 @@ test("--private or a status answers privately without reading, and --private ref
 
 test("a message the caller can't read leaves the flags in charge, as before", () => {
   assert.deepEqual(decideReplyPlacement({ ...flags, target: null, signalId: ROOT }), { placement: "private", inReplyTo: ROOT, advisory: null });
-  assert.deepEqual(decideReplyPlacement({ ...flags, thread: true, target: null, signalId: ROOT }), { placement: "thread", threadRootId: ROOT });
+  assert.deepEqual(decideReplyPlacement({ ...flags, thread: true, target: null, signalId: ROOT }), { placement: "thread", threadRootId: ROOT, author: null });
   assert.throws(() => decideReplyPlacement({ ...flags, broadcastToChannel: true, target: null, signalId: ROOT }),
     (error: unknown) => error instanceof ReplyPlacementError && error.message === REPLY_BROADCAST_NEEDS_THREAD);
 });
@@ -143,7 +146,7 @@ test("hosted tools send the placed reply and the resolved mentions", () => {
   assert.equal(hostedNeedsReplyTarget("reply", reply), true);
   assert.equal(hostedNeedsReplyTarget("reply", { ...reply, private: true }), false);
   const thread = hostedReplyPlacement(reply, ROOT);
-  assert.deepEqual(thread, { placement: "thread", threadRootId: ROOT });
+  assert.deepEqual(thread, { placement: "thread", threadRootId: ROOT, author: null });
   const threadMentions = hostedMentions("reply", reply, roster, thread);
   assert.deepEqual(hostedSignalCommand("reply", reply, WORKSPACE, { mentions: threadMentions, placement: thread }).command, {
     kind: "post_signal", signal_kind: "note", body: "@Wren done", to_user_id: null, to_agent_principal_id: null,
@@ -174,7 +177,7 @@ test("the reply target read: one row by id for an agent and for a person, and wh
 
   const row = { id: CHILD, to: null, to_agent: null, in_reply_to: null, thread_root_id: ROOT, recipients: [], audience: "workspace" };
   assert.deepEqual(await readReplyTarget(target, agent, WORKSPACE, CHILD.toUpperCase(), answer(200, { signals: [row] })),
-    { id: CHILD, to: null, to_agent: null, in_reply_to: null, thread_root_id: ROOT, recipients: [], audience: "workspace" });
+    { id: CHILD, to: null, to_agent: null, in_reply_to: null, thread_root_id: ROOT, recipients: [], audience: "workspace", from: null, from_kind: null });
   assert.deepEqual(JSON.parse(String(seen.at(-1)!.init.body)), { resource: "signals", workspace_id: WORKSPACE, inbox: false,
     about: null, kind: null, in_reply_to: null, since: null, limit: 1, include_stale: true, signal_id: CHILD });
   assert.equal(await readReplyTarget(target, agent, WORKSPACE, CHILD, answer(200, { signals: [] })), null);
@@ -187,12 +190,62 @@ test("the reply target read: one row by id for an agent and for a person, and wh
   assert.equal(url.pathname, "/rest/v1/signals");
   assert.equal(url.searchParams.get("id"), `eq.${DM}`);
   assert.equal(url.searchParams.get("workspace_id"), `eq.${WORKSPACE}`);
-  assert.equal(url.searchParams.get("select"), "id,to,to_agent,in_reply_to,thread_root_id");
+  assert.equal(url.searchParams.get("select"), "id,from,from_kind,to,to_agent,in_reply_to,thread_root_id");
   assert.equal((seen.at(-1)!.init.headers as Record<string, string>)["accept-profile"], "swarm_read");
 
   for (const status of [400, 401, 403, 404]) {
     assert.equal(await readReplyTarget(target, agent, WORKSPACE, ROOT, answer(status, { error: "x" })), null, String(status));
   }
   await assert.rejects(readReplyTarget(target, agent, WORKSPACE, ROOT, answer(429, { error: "rate_limited" })), /HTTP 429/);
+});
+
+test("a thread reply notifies the author it answers: not the replier, never twice, first, and within the cap", () => {
+  const byAgent = { ...threadChild, from: AGENT.toUpperCase(), from_kind: "agent" };
+  const byPerson = { ...channelPost, from: USER, from_kind: "user" };
+  assert.deepEqual(decideReplyPlacement({ ...flags, target: byAgent, signalId: CHILD }),
+    { placement: "thread", threadRootId: ROOT, author: { kind: "agent", id: AGENT } });
+  assert.deepEqual(decideReplyPlacement({ ...flags, target: byPerson, signalId: ROOT, self: { kind: "agent", id: AGENT } }),
+    { placement: "thread", threadRootId: ROOT, author: { kind: "user", id: USER } }, "a person author is notified too");
+  assert.equal((decideReplyPlacement({ ...flags, target: byAgent, signalId: CHILD, self: { kind: "agent", id: AGENT } }) as { author: unknown }).author,
+    null, "an agent replying to itself mentions nobody");
+  assert.equal((decideReplyPlacement({ ...flags, target: byPerson, signalId: ROOT, self: { kind: "user", id: USER } }) as { author: unknown }).author, null);
+  // Addressed or --private: still the private reply to the author, nothing added.
+  assert.deepEqual(decideReplyPlacement({ ...flags, target: { ...direct, from: AGENT, from_kind: "agent" }, signalId: DM }),
+    { placement: "private", inReplyTo: DM, advisory: null });
+  assert.deepEqual(decideReplyPlacement({ ...flags, private: true, target: byAgent, signalId: CHILD }),
+    { placement: "private", inReplyTo: CHILD, advisory: null });
+
+  const author = { kind: "agent" as const, id: AGENT };
+  const wren = { kind: "agent" as const, id: DM };
+  assert.deepEqual(addReplyAuthorMention([wren], author), { mentions: [author, wren], authorAdded: true });
+  assert.deepEqual(addReplyAuthorMention([wren, { kind: "agent", id: AGENT.toUpperCase() }], author),
+    { mentions: [wren, author], authorAdded: false }, "named explicitly: kept where it was, and not implicit");
+  assert.deepEqual(addReplyAuthorMention([], null), { mentions: [], authorAdded: false });
+  const seven = Array.from({ length: 7 }, (_, n) => ({ kind: "user" as const, id: `0000000${n}-0000-4000-8000-000000000000` }));
+  assert.equal(addReplyAuthorMention(seven, author).mentions.length, 8);
+  assert.throws(() => addReplyAuthorMention([...seven, wren], author),
+    (error: unknown) => error instanceof MentionResolutionError && error.code === "mention_overflow");
+  assert.deepEqual(withoutReplyAuthor([author, wren], author), [wren]);
+
+  // The refusals the implicit mention can cause, and the derived id of the second send.
+  assert.equal(replyAuthorMentionRefused(403, "forbidden"), true);
+  assert.equal(replyAuthorMentionRefused(409, "mention_hop_limit"), true);
+  assert.equal(replyAuthorMentionRefused(404, "thread_root_not_found"), false);
+  assert.equal(replyAuthorMentionRefused(429, "rate_limited"), false);
+  assert.equal(replyRetryCommandId("request_0001"), "request_0001_noauth");
+  assert.match(replyRetryCommandId("x".repeat(72)), /^[A-Za-z0-9_-]{8,72}$/);
+});
+
+test("the hosted reply adds the author the reply_target read names, and knows when it was implicit", () => {
+  const reply = { seat, signal_id: CHILD, body: "done", request_id: "request_0003" };
+  const thread = hostedReplyPlacement(reply, ROOT, { kind: "agent", id: AGENT });
+  assert.deepEqual(thread, { placement: "thread", threadRootId: ROOT, author: { kind: "agent", id: AGENT } });
+  assert.deepEqual(hostedMentions("reply", reply, null, thread), [{ kind: "agent", id: AGENT }]);
+  assert.deepEqual(hostedImplicitAuthor(reply, null, thread), { kind: "agent", id: AGENT });
+  const roster: MentionRosterEntry[] = [{ kind: "agent", id: AGENT, name: "Wren" }];
+  assert.equal(hostedImplicitAuthor({ ...reply, body: "done @Wren" }, roster, thread), null, "named explicitly: no second send without it");
+  assert.deepEqual(hostedSignalCommand("reply", reply, WORKSPACE, { mentions: hostedMentions("reply", reply, null, thread), placement: thread }).command.mentions,
+    [{ kind: "agent", id: AGENT }]);
+  assert.deepEqual(hostedMentions("reply", { ...reply, private: true }, null, hostedReplyPlacement({ ...reply, private: true }, ROOT, { kind: "agent", id: AGENT })), []);
 });
 

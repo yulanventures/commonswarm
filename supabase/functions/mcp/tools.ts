@@ -115,7 +115,7 @@ export const CORE_TOOL_TABLE = [
   {
     name: "reply", effect: "write", title: "Reply to a signal",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Reply to a signal: in its thread when everyone in the channel can read it, otherwise privately to its author. Set private to true to answer the author privately. A thread reply takes mentions (@Name in the body counts). Optionally attach files from file_put or file_ls. Retry with the same request_id.",
+    description: "Reply to a signal: in its thread when everyone in the channel can read it, notifying its author, otherwise privately to its author. Set private to true to answer the author privately. A thread reply takes mentions (@Name in the body counts). Optionally attach files from file_put or file_ls. Retry with the same request_id.",
     annotations: { title: "Reply to a signal", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), mentions, private: { type: "boolean" }, attachments, request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
   },

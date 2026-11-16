@@ -4,9 +4,9 @@
  * roster when a mention has to be resolved, and the reply's target when a reply has to be placed.
  */
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
-import { bodyMayMention, MentionResolutionError, resolveMentions, type MentionRosterEntry, type WireMention } from "../../../src/protocol/mention-address.ts";
+import { addReplyAuthorMention, bodyMayMention, MentionResolutionError, resolveMentions, type MentionRosterEntry, type WireMention } from "../../../src/protocol/mention-address.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
-import { decideReplyPlacement, type ReplyPlacement } from "../../../src/protocol/reply-placement.ts";
+import { decideReplyPlacement, type ReplyAuthor, type ReplyPlacement } from "../../../src/protocol/reply-placement.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { hostedChoiceOptions, type HostedToolArguments } from "./tools.ts";
 
@@ -62,14 +62,19 @@ export function hostedRoster(output: Record<string, unknown>): MentionRosterEntr
 /**
  * Where a hosted reply goes. `threadRootId` is what the reply_target read answered: the thread's
  * root for a message everyone in its channel can read, or null for anything else, including a
- * message the seat can't read. null keeps the reply private, refused exactly as before.
+ * message the seat can't read. null keeps the reply private, refused exactly as before. `author` is
+ * the message's author as the read answered it; the read leaves out the seat's own agent.
  */
-export function hostedReplyPlacement(args: HostedToolArguments, threadRootId: string | null): ReplyPlacement {
+export function hostedReplyPlacement(
+  args: HostedToolArguments,
+  threadRootId: string | null,
+  author: ReplyAuthor | null = null,
+): ReplyPlacement {
   const signalId = String(args.signal_id).toLowerCase();
   return decideReplyPlacement({
     target: args.private === true || threadRootId === null
       ? null
-      : { id: signalId, thread_root_id: threadRootId, audience: "workspace" },
+      : { id: signalId, thread_root_id: threadRootId, audience: "workspace", from: author?.id ?? null, from_kind: author?.kind ?? null },
     signalId,
     private: args.private === true,
     status: false,
@@ -79,8 +84,9 @@ export function hostedReplyPlacement(args: HostedToolArguments, threadRootId: st
 }
 
 /**
- * The mentions a call sends. Throws MentionResolutionError when a mention can't be honoured, and
- * when explicit mentions were given on a reply that turned out private.
+ * The mentions a call sends: a thread reply's author first (see addReplyAuthorMention), then the
+ * resolved ones. Throws MentionResolutionError when a mention can't be honoured, and when explicit
+ * mentions were given on a reply that turned out private.
  */
 export function hostedMentions(
   name: HostedSignalTool,
@@ -95,8 +101,20 @@ export function hostedMentions(
     }
     return [];
   }
-  if (roster === null) return [];
-  return resolveMentions({ body: String(args.body ?? ""), selectors: mentionSelectors(args), roster });
+  const explicit = roster === null ? [] : resolveMentions({ body: String(args.body ?? ""), selectors: mentionSelectors(args), roster });
+  if (name !== "reply" || placement?.placement !== "thread") return explicit;
+  return addReplyAuthorMention(explicit, placement.author).mentions;
+}
+
+/** The implicit author the reply added, or null when it added none (absent, or also named explicitly). */
+export function hostedImplicitAuthor(
+  args: HostedToolArguments,
+  roster: readonly MentionRosterEntry[] | null,
+  placement: ReplyPlacement | null,
+): ReplyAuthor | null {
+  if (placement?.placement !== "thread" || placement.author === null) return null;
+  const explicit = roster === null ? [] : resolveMentions({ body: String(args.body ?? ""), selectors: mentionSelectors(args), roster });
+  return addReplyAuthorMention(explicit, placement.author).authorAdded ? placement.author : null;
 }
 
 export function hostedSignalCommand(

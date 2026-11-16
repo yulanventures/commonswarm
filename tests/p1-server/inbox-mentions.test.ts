@@ -437,3 +437,21 @@ test("cswarm reply answers a channel message in its thread, and an addressed one
   assert.deepEqual(await byIdRead(mentioned, direct), [direct]);
 });
 
+test("an agent's cswarm reply to another agent's channel post lands in the thread and wakes that agent", { timeout: 120_000 }, async () => {
+  const handoff = await posted(bystander.token, { body: `handoff ${randomUUID()}` });
+  await check(bystander);
+  const result = await cswarm(mentioned, ["reply", handoff, "picked it up"]);
+  assert.equal(result.code, 0, result.stderr + functionLogs.slice(-3000));
+  const id = String((JSON.parse(result.stdout).signal as Row).id);
+  const [stored] = await sql<{ thread_root_id: string | null; in_reply_to: string | null }[]>`
+    SELECT thread_root_id, in_reply_to FROM swarm.signals WHERE id = ${id}::uuid`;
+  assert.deepEqual({ thread_root_id: stored!.thread_root_id, in_reply_to: stored!.in_reply_to }, { thread_root_id: handoff, in_reply_to: null });
+  const named = await sql<{ mentioned_agent_principal_id: string | null }[]>`
+    SELECT mentioned_agent_principal_id FROM swarm.signal_mentions WHERE signal_id = ${id}::uuid ORDER BY position`;
+  assert.deepEqual(Array.from(named, (row) => String(row.mentioned_agent_principal_id)), [bystander.principal]);
+  const woken = await sql`SELECT 1 FROM swarm.signal_deliveries
+    WHERE signal_id = ${id}::uuid AND recipient_agent_principal_id = ${bystander.principal}::uuid`;
+  assert.equal(woken.length, 1, "the author it answers is woken");
+  assert.ok((await check(bystander)).includes(id), "and reads the reply in its inbox");
+});
+
