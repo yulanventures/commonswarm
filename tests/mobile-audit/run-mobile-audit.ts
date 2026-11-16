@@ -303,6 +303,12 @@ const settle = (page: Settleable) => page.waitForFunction(() => {
 const FEED_ROWS = ".dashboard__feed > .dashboard__message";
 const ADDRESSED = ':has(.dashboard__message-target:is([data-target-kind="agent"], [data-target-kind="person"]))';
 const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
+  /* Reactions: also gives these screens their desktop 1280x800 and 1440x900 captures, where the pills are compact
+     (24px) and the picker's emoji buttons 32px, unlike the 44px touch sizes the phone and tablet widths show. */
+  "app.chat.reactions": [{ name: "reacted-row", rows: '[data-signal-id="{message.reacted}"]', max: 1, focus: true,
+    focusTarget: "[data-reaction-emoji]", require: ['[data-signal-id="{message.reacted}"]'] }],
+  "menu.reactions": [{ name: "reaction-picker", rows: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]', max: 3,
+    require: ['[data-reaction-picker="{message.reacted}"] > [data-reaction-option]'] }],
   "app.chat.general": [
     { name: "feed", rows: FEED_ROWS, prefer: ADDRESSED, focus: true,
       require: ['[data-signal-id="{message.addressedAgent}"]', '[data-signal-id="{message.addressedOwn}"]'] },
