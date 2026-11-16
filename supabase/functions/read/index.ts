@@ -1347,7 +1347,8 @@ async function handle(
         s.id, s.workspace_id, s."from", s.from_kind, s."to",
         s.about, s.kind, s.body, s.until, s.created_at,
         CASE
-          WHEN ${nameThisAgent} AND NOT ${addressedToThisAgent} THEN ${agent.principal_id}::uuid
+          -- COALESCE: on a public row s.to_agent is NULL, so the test is NULL, and NOT NULL is not true.
+          WHEN ${nameThisAgent} AND NOT COALESCE(${addressedToThisAgent}, false) THEN ${agent.principal_id}::uuid
           ELSE s.to_agent
         END AS to_agent,
         s.in_reply_to, s.reply_status, s.chain_hop, s.attachments,
