@@ -662,7 +662,9 @@ function entryFromSignal(
       : {}),
     createdAt: signal.created_at,
     queuedAt: new Date(now).toISOString(),
-    ...(publicReplyThreadRoot(signal) === null ? {} : { replyThreadRootId: publicReplyThreadRoot(signal)! }),
+    ...(signal.reaction !== undefined
+      ? { reactedTo: signal.reaction.signal_id }
+      : publicReplyThreadRoot(signal) === null ? {} : { replyThreadRootId: publicReplyThreadRoot(signal)! }),
     ...(signal.channel_visibility === "open" || signal.channel_visibility === "private"
       ? { channelVisibility: signal.channel_visibility }
       : {}),
@@ -696,7 +698,9 @@ export function renderHookSignal(
   const readableWhere = item.channelVisibility === "private"
     ? "members of that private channel can read"
     : "everyone in the workspace can read";
-  const intent = item.replyThreadRootId !== undefined
+  const intent = item.reactedTo !== undefined
+    ? "reacted to your message:"
+    : item.replyThreadRootId !== undefined
     ? `mentioned you in a message ${readableWhere}:`
     : item.kind === "ask"
     ? "is asking you:"
@@ -707,7 +711,9 @@ export function renderHookSignal(
    * says who can read that thread so the agent knows its answer is not a 1:1 DM before writing.
    * The same line names the private way, which a mentioned agent may still use. */
   const optional = item.kind === "note" ? " (optional)" : "";
-  const replyLine = item.replyThreadRootId === undefined
+  const replyLine = item.reactedTo !== undefined
+    ? `reply (optional), in your message's thread: cswarm reply ${item.reactedTo} "<answer>" --thread --workspace-id ${item.workspaceId}`
+    : item.replyThreadRootId === undefined
     ? `reply${optional}: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId}`
     : `reply in the thread${optional}, where ${readableWhere} it: cswarm reply ${item.replyThreadRootId} "<answer>" --thread --workspace-id ${item.workspaceId} (to answer only the author: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId})`;
   const header = `[CommonSwarm] ${senderKind} ${JSON.stringify(sender)} ${intent}`;

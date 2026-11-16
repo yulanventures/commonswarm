@@ -10,6 +10,8 @@ import { CommandHttpError, ThinCommandClient, type SignalRecord } from "../src/c
 import { cloudTarget } from "../src/cloud/config.js";
 import { parseSignalRecord, readAgentSignalPage, renderSignals, SignalMalformedError } from "../src/cloud/signals.js";
 import { mapReaction, validateMcpArguments, MCP_TOOLS } from "../src/mcp/tools.js";
+import { arrivalNotification } from "../src/cloud/arrival-watch.js";
+import { renderHookSignal } from "../src/listener/hook.js";
 import { SIGNAL_REACTION_SEEN } from "../src/protocol/signal-reactions.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
@@ -180,4 +182,16 @@ test("the local react tool takes one emoji, an optional boolean remove and a req
   assert.equal((mapReaction({ signal_id: MESSAGE, emoji: "👍", added: false }) as { outcome: string }).outcome, "already_there");
   assert.equal((mapReaction({ signal_id: MESSAGE, emoji: "👍", removed: true }) as { outcome: string }).outcome, "removed");
   assert.equal((mapReaction({ signal_id: MESSAGE, emoji: "👍", removed: false }) as { outcome: string }).outcome, "not_there");
+});
+
+test("a reaction note is answered in the reacted message's thread, never at the reaction's id", () => {
+  const note = parseSignalRecord(reactionNote());
+  const target = cloudTarget("https://cloud.example.test", "anon");
+  assert.equal(arrivalNotification(note, WORKSPACE, target).reply_command,
+    `cswarm reply ${MESSAGE} "<answer>" --thread --workspace-id ${WORKSPACE}`);
+  const rendered = renderHookSignal({ workspaceId: WORKSPACE, signalId: REACTION_ID, fromId: USER, fromKind: "user", kind: "note",
+    senderName: "Quill", body: note.body, createdAt: note.created_at, queuedAt: note.created_at, reactedTo: MESSAGE } as never);
+  assert.match(rendered, /reacted to your message:/);
+  assert.match(rendered, new RegExp(`cswarm reply ${MESSAGE} "<answer>" --thread`));
+  assert.doesNotMatch(rendered, new RegExp(`cswarm reply ${REACTION_ID}`));
 });
