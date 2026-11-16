@@ -7,6 +7,7 @@ import { buildChoiceCard, type ChoiceCardVM } from "../../lib/choice-card";
 import { parseAskChoices, type AskChoiceState, type ChoiceDraft, type ChoiceSubmission } from "../../lib/choices";
 import { needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "../../lib/home-primitives";
 import { signalHasEnded } from "../../lib/signal-history";
+import { deriveStreamExtras } from "../../lib/home-stream";
 import type { NeedsYouVM } from "../../lib/home-types";
 
 /* The decision card (lib/choice-card.ts) and the feed's use of it (LiveDashboard appendChoices), run against a small
@@ -335,4 +336,110 @@ test("in the feed a draft survives a rebuild, and the answer names its chooser f
   rows_.set(SIGNAL, state({ answer: { optionId: "wait", optionIds: ["wait"], otherText: null, byViewer: false, actorUserId: null, at: null } }));
   assert.equal((f.row({ to: "amy" }).children[0] as FakeElement).one(has("hm-decision__foot")).textContent, "Chosen by Amy", "a v1 answer is its addressee's");
   assert.equal((f.row({}).children[0] as FakeElement).tabIndex, -1, "an answered card can hold focus after its rows are gone");
+});
+
+// Live arrivals: refreshChoices, its batch and the waiting state lifted from the dashboard, with a stub read.
+const ASK_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ASK_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const askSignal = (id: string, createdAt: string, extra: Record<string, unknown> = {}) =>
+  ({ id, kind: "ask", from: "agent-1", fromKind: "agent", to: "zoe", toAgent: null, threadRootId: null, inReplyTo: null,
+    until: "2999-01-01T00:00:00Z", createdAt, ...extra });
+function live() {
+  let clock = 1_000_000;
+  const reads: string[][] = []; const paints: number[] = [];
+  const pending: Array<{ ids: string[]; settle: (rows: unknown) => void }> = [];
+  const context: Record<string, unknown> = {
+    Date: { now: () => clock, parse: Date.parse }, sampleMode: false, session: { user: { id: "zoe" } }, activeWorkspaceId: "W", requestVersion: 1,
+    signals: [askSignal(ASK_A, "2026-11-16T10:00:00Z")], choiceRows: new Map(), choiceDrafts: new Map(),
+    choiceCheckedAt: 0, choiceGeneration: 0, ASK_CHOICES_BATCH: 50,
+    choiceCheckedIds: new Set(), choiceCheckedReplyIds: new Set(), choiceFailedIds: new Set(), choiceInFlight: { ids: new Set(), replies: new Set() },
+    choiceBatchMemo: null, addAgentViewOpen: () => false, renderFeed: () => paints.push(1),
+    askChoices: (_workspace: string, ids: string[]) => { reads.push([...ids]); return new Promise(settle => pending.push({ ids, settle })); },
+  };
+  runInNewContext(lift(["choiceDraftKey", "choiceBatchIds", "choiceRepliesToOpen", "choiceAwaitsCheck", "refreshChoices"]), context);
+  const refresh = () => (context.refreshChoices as (w: string, v: number) => Promise<void>)("W", 1);
+  const awaits = (id: string) => (context.choiceAwaitsCheck as (id: string) => boolean)(id);
+  // The stub resolves the read with parsed rows, as askChoices does.
+  const settle = async (data: unknown) => { pending.shift()!.settle(data === null ? null : parseAskChoices(data)); await new Promise(done => setImmediate(done)); };
+  return { context, reads, paints, refresh, awaits, settle, tick: (ms: number) => { clock += ms; } };
+}
+const choiceRow = (id: string, answer: unknown = null) => ({ signal_id: id, options: [{ id: "ship", label: "Ship" }, { id: "wait", label: "Wait" }], answer });
+
+test("a new ask inside the 20 s window is read at once; nothing new waits for the throttle", async () => {
+  const l = live();
+  const first = l.refresh(); await l.settle({ asks: [] }); await first;
+  assert.deepEqual(l.reads, [[ASK_A]]);
+  l.tick(2_000);
+  await l.refresh();
+  assert.equal(l.reads.length, 1, "nothing new: throttled");
+  l.context.signals = [...(l.context.signals as unknown[]), askSignal(ASK_B, "2026-11-16T10:00:05Z")];
+  const second = l.refresh();
+  assert.deepEqual(l.reads[1], [ASK_B, ASK_A], "the new ask is read at once, two seconds after the last read");
+  void l.refresh();
+  assert.equal(l.reads.length, 2, "an ask already in the read on its way is not news");
+  await l.settle({ asks: [choiceRow(ASK_B)] }); await second;
+  assert.equal((l.context.choiceRows as Map<string, AskChoiceState>).has(ASK_B), true);
+  l.tick(21_000);
+  void l.refresh();
+  assert.equal(l.reads.length, 3, "after 20 s the ordinary re-read still runs");
+});
+
+test("a reply to an open choice ask is read at once, once", async () => {
+  const l = live();
+  const first = l.refresh(); await l.settle({ asks: [choiceRow(ASK_A)] }); await first;
+  l.tick(1_000);
+  l.context.signals = [...(l.context.signals as unknown[]), { id: "reply-1", kind: "note", from: "amy", fromKind: "user", to: null, toAgent: "agent-1",
+    threadRootId: null, inReplyTo: ASK_A, until: "2999-01-01T00:00:00Z", createdAt: "2026-11-16T10:00:09Z" }];
+  const again = l.refresh();
+  assert.equal(l.reads.length, 2, "a teammate's answer re-reads without waiting");
+  await l.settle({ asks: [choiceRow(ASK_A, { option_id: "wait", option_ids: ["wait"], other_text: null,
+    actor_user_id: "11111111-1111-4111-8111-111111111111", by_viewer: false, at: "2026-11-16T10:00:09Z" })] });
+  await again;
+  assert.equal((l.context.choiceRows as Map<string, AskChoiceState>).get(ASK_A)!.answer!.optionIds[0], "wait");
+  assert.ok(l.paints.length > 0, "the answered card is painted");
+  l.tick(1_000);
+  await l.refresh();
+  assert.equal(l.reads.length, 2, "a reply already seen is not news");
+});
+
+test("an ask waits, without a Reply card, until its first read settles; a choice ask then paints its card", async () => {
+  const l = live();
+  assert.equal(l.awaits(ASK_A), true, "unchecked: waiting");
+  const extras = deriveStreamExtras({ id: ASK_A, kind: "ask", body: "Ship?", about: null, createdAt: "2026-11-16T10:00:00Z", when: "10:00",
+    author: { id: "amy", name: "Amy", firstName: "Amy", initials: "A", you: false, role: "member" }, addressedToViewer: true, answered: false,
+    choices: l.awaits(ASK_A), attachments: [] }, { workspace: { id: "W", name: "Home", href: "/app?w=W" }, todos: new Map() });
+  assert.equal(extras.ask, null, "no Reply card while the first read is out");
+  const f = feed();
+  const body = f.doc.createElement("div"); const question = f.doc.createElement("div"); question.className = "dashboard__message-markdown"; body.append(question);
+  (f.context.appendChoices as (...args: unknown[]) => void)(body, askSignal(SIGNAL, "2026-11-16T10:00:00Z"), question, false, true);
+  const shell = body.children[0] as FakeElement;
+  assert.deepEqual([shell.className, shell.dataset.decisionState, shell.textContent, shell.children.length], ["hm-decision", "checking", "", 1],
+    "a quiet box around the question: no words, no controls");
+  const run = l.refresh();
+  assert.equal(l.awaits(ASK_A), true, "still waiting while the read is out");
+  const paintsBefore = l.paints.length;
+  await l.settle({ asks: [choiceRow(ASK_A)] }); await run;
+  assert.equal(l.awaits(ASK_A), false);
+  assert.equal(l.paints.length, paintsBefore + 1, "painted once the read lands");
+});
+
+test("a plain ask gets its Reply card when the read settles, a failed read included, and a failure doesn't loop", async () => {
+  const l = live();
+  const ok = l.refresh(); await l.settle({ asks: [] }); await ok;
+  assert.equal(l.awaits(ASK_A), false, "no choices: Reply paints");
+  assert.equal(l.paints.length, 1, "the waiting ask is repainted even though no rows changed");
+
+  const broken = live();
+  const run = broken.refresh(); await broken.settle(null); await run;
+  assert.equal(broken.awaits(ASK_A), false, "a failed read still lets Reply paint");
+  assert.equal(broken.paints.length, 1);
+  assert.equal((broken.context.choiceCheckedIds as Set<string>).has(ASK_A), false, "a failed read checks nothing");
+  broken.tick(2_000);
+  await broken.refresh();
+  assert.equal(broken.reads.length, 1, "a failed ask is not news: it waits for the throttle");
+  broken.tick(19_000);
+  const retry = broken.refresh();
+  assert.equal(broken.reads.length, 2, "and retries after it");
+  await broken.settle({ asks: [choiceRow(ASK_A)] }); await retry;
+  assert.equal((broken.context.choiceRows as Map<string, AskChoiceState>).has(ASK_A), true);
 });

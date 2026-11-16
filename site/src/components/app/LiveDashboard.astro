@@ -2202,6 +2202,13 @@ import "../../styles/kylon-command-palette.css";
       const ticket = choiceTickets.get(signalId);
       return ticket !== undefined && choiceTicketLive(ticket);
     };
+    /* LIVE ARRIVALS SKIP THE THROTTLE. The asks whose choices a read has answered, and the replies to open choice
+       asks a read has seen: an ask or reply outside these (and not in the read already on its way) is news, and
+       is read at once. A failed read marks nothing checked; its asks wait for the throttle, so it never loops. */
+    const choiceCheckedIds = new Set<string>();
+    const choiceCheckedReplyIds = new Set<string>();
+    const choiceFailedIds = new Set<string>();
+    let choiceInFlight: { ids: Set<string>; replies: Set<string> } = { ids: new Set(), replies: new Set() };
     const resetChoices = (): void => {
       choiceRows = new Map();
       choiceCheckedAt = 0;
@@ -2209,6 +2216,10 @@ import "../../styles/kylon-command-palette.css";
       choiceEpoch += 1;
       choiceTickets = new Map();
       choiceErrors.clear();
+      choiceCheckedIds.clear();
+      choiceCheckedReplyIds.clear();
+      choiceFailedIds.clear();
+      choiceInFlight = { ids: new Set(), replies: new Set() };
     };
     const resetMessageStatus = (): void => {
       messageStatusRows = new Map();
@@ -7895,9 +7906,19 @@ import "../../styles/kylon-command-palette.css";
     };
     /* Moves the message's question into the card, in the question's place. Nothing happens for an
        ask without stored choices (or before they are read): it keeps its ordinary rendering. */
-    const appendChoices = (body: HTMLElement, signal: Signal, question?: HTMLElement, repliedInWords = false): void => {
+    const appendChoices = (body: HTMLElement, signal: Signal, question?: HTMLElement, repliedInWords = false, checking = false): void => {
       const state = choiceRows.get(signal.id);
-      if (!state) return;
+      if (!state) {
+        // Waiting for the first choices read: the card's box around the question, and nothing else.
+        if (checking && question && question.parentElement === body) {
+          const shell = document.createElement("div");
+          shell.className = "hm-decision";
+          shell.dataset.decision = signal.id; shell.dataset.decisionState = "checking";
+          shell.setAttribute("aria-busy", "true");
+          question.replaceWith(shell); shell.prepend(question);
+        }
+        return;
+      }
       const workspaceId = activeWorkspaceId;
       const viewerId = session?.user.id ?? "";
       const draftKey = choiceDraftKey(workspaceId, signal.id);
@@ -7954,34 +7975,67 @@ import "../../styles/kylon-command-palette.css";
       void refreshChoices(workspaceId, ticket.version, true);
     };
 
-    const refreshChoices = async (workspaceId: string, version: number, force = false): Promise<void> => {
-      const viewerId = session?.user.id ?? "";
-      if (sampleMode || !viewerId) return;
-      const now = Date.now();
-      if (!force && now - choiceCheckedAt < 20_000) return;
-      // Every loaded ask: directed to anyone, or to a channel. The read returns only the ones this person may read.
+    /* The asks one read covers: every loaded ask, directed to anyone or to a channel, newest first, up to the
+       read's cap. The read returns only the ones this person may read. Kept per loaded list, since every row asks. */
+    let choiceBatchMemo: { from: Signal[]; length: number; ids: string[]; set: Set<string> } | null = null;
+    const choiceBatchIds = (): { ids: string[]; set: Set<string> } => {
+      if (choiceBatchMemo?.from === signals && choiceBatchMemo.length === signals.length) return choiceBatchMemo;
       const ids = signals
         .filter((signal) => signal.kind === "ask" && !signal.id.startsWith("composer-pending-"))
         .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
         .slice(0, ASK_CHOICES_BATCH)
         .map((signal) => signal.id);
+      choiceBatchMemo = { from: signals, length: signals.length, ids, set: new Set(ids) };
+      return choiceBatchMemo;
+    };
+    /** Loaded replies to choice asks still open: an answer from someone else arrives as one of these. */
+    const choiceRepliesToOpen = (): string[] => signals
+      .filter((signal) => [signal.inReplyTo, signal.threadRootId].some((root) =>
+        typeof root === "string" && root !== signal.id && choiceRows.get(root)?.answer === null))
+      .map((signal) => signal.id);
+    /* An ask whose first choices read hasn't settled. Until it has, the ask paints neither a Reply card nor a
+       decision card, so a choice ask never flashes Reply first; a failed read settles it too, so Reply comes back. */
+    const choiceAwaitsCheck = (signalId: string): boolean =>
+      !sampleMode && !!session && !choiceRows.has(signalId) && !choiceCheckedIds.has(signalId) &&
+      !choiceFailedIds.has(signalId) && choiceBatchIds().set.has(signalId);
+
+    const refreshChoices = async (workspaceId: string, version: number, force = false): Promise<void> => {
+      const viewerId = session?.user.id ?? "";
+      if (sampleMode || !viewerId) return;
+      const { ids } = choiceBatchIds();
       if (ids.length === 0) return;
+      const replies = choiceRepliesToOpen();
+      const news = ids.some((id) => !choiceCheckedIds.has(id) && !choiceFailedIds.has(id) && !choiceInFlight.ids.has(id)) ||
+        replies.some((id) => !choiceCheckedReplyIds.has(id) && !choiceInFlight.replies.has(id));
+      const now = Date.now();
+      if (!force && !news && now - choiceCheckedAt < 20_000) return;
       choiceCheckedAt = now;
       const generation = ++choiceGeneration;
+      choiceInFlight = { ids: new Set(ids), replies: new Set(replies) };
       let rows: AskChoiceState[] | null;
       try {
         rows = await askChoices(workspaceId, ids);
       } catch {
         rows = null;
       }
-      if (generation !== choiceGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-      if (rows === null) return;
+      if (generation !== choiceGeneration) return;
+      choiceInFlight = { ids: new Set(), replies: new Set() };
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+      // Asks painted as waiting for this read: they need a repaint whatever it says.
+      const deferred = ids.some((id) => choiceAwaitsCheck(id));
+      if (rows === null) {
+        for (const id of ids) if (!choiceCheckedIds.has(id)) choiceFailedIds.add(id);
+        if (deferred && !addAgentViewOpen()) renderFeed();
+        return;
+      }
+      for (const id of ids) { choiceCheckedIds.add(id); choiceFailedIds.delete(id); }
+      for (const id of replies) choiceCheckedReplyIds.add(id);
       const next = new Map(rows.map((row) => [row.signalId, row]));
       // An answer, whoever made it, replaces the draft: first wins.
       for (const row of rows) if (row.answer !== null) choiceDrafts.delete(choiceDraftKey(workspaceId, row.signalId));
       const changed = JSON.stringify([...next]) !== JSON.stringify([...choiceRows]);
       choiceRows = next;
-      if (changed && !addAgentViewOpen()) renderFeed();
+      if ((changed || deferred) && !addAgentViewOpen()) renderFeed();
     };
 
     /** Read the mentions of loaded messages not asked about yet, and repaint when any has one. */
@@ -9496,9 +9550,13 @@ import "../../styles/kylon-command-palette.css";
           meta.append(author, identityBadge, ...recipient, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: clockTime,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), ended: signalHasEnded(signal, now), choices: choiceRows.has(signal.id), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), ended: signalHasEnded(signal, now), choices: choiceRows.has(signal.id) || choiceAwaitsCheck(signal.id), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
+        /* An ask that would get a Reply card waits, quietly boxed, for its first choices read: a choice ask then paints
+           its decision card in the same box and a plain one its Reply card, never Reply first. */
+        const choiceChecking = !!streamSignal && choiceAwaitsCheck(signal.id) && streamSignal.kind === "ask" &&
+          streamSignal.addressedToViewer && !streamSignal.answered && streamSignal.ended !== true;
         if (streamSignal) {
           const authorLine = buildAuthorLine(document, streamSignal, isReply ? 28 : 36);
           const mark = authorLine.firstElementChild; if (mark instanceof HTMLElement) { avatar = mark; avatar.classList.add("dashboard__message-avatar"); }
@@ -9618,7 +9676,7 @@ import "../../styles/kylon-command-palette.css";
            the receipt says yet, so touch layouts can give its status badge room without the row changing height later. */
         if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
-        appendChoices(body, signal, markdown, streamSignal?.answered ?? false);
+        appendChoices(body, signal, markdown, streamSignal?.answered ?? false, choiceChecking);
         /* Reactions sit under the message, before the row's tools; they are never in the floating footer. */
         appendReactions(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.
