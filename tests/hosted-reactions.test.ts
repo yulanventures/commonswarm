@@ -59,18 +59,25 @@ test("the hosted react tool sends exactly add_reaction or remove_reaction, never
 });
 
 test("the hosted react tool reports the same outcomes as the local tool, and its refusals have their own copy", () => {
-  const ok = (body: Record<string, unknown>) => reactionOutput({ status: 200, body: { status: "accepted", ok: true, event_ids: [], signal_id: MESSAGE, emoji: "👍", ...body } });
-  assert.deepEqual(ok({ added: true }), { signal_id: MESSAGE, emoji: "👍", outcome: "added" });
-  assert.deepEqual(ok({ added: false }), { signal_id: MESSAGE, emoji: "👍", outcome: "already_there" });
-  assert.deepEqual(ok({ removed: true }), { signal_id: MESSAGE, emoji: "👍", outcome: "removed" });
-  assert.deepEqual(ok({ removed: false }), { signal_id: MESSAGE, emoji: "👍", outcome: "not_there" });
-  assert.throws(() => ok({}), (error: unknown) => error instanceof HostedToolFailure && error.code === "tool_failed");
+  const add = { kind: "add_reaction", signal_id: MESSAGE, emoji: "👍" } as const;
+  const remove = { ...add, kind: "remove_reaction" } as const;
+  const ok = (body: Record<string, unknown>, sent: typeof add | typeof remove = add) =>
+    reactionOutput({ status: 200, body: { status: "accepted", ok: true, event_ids: [], ...body } }, sent);
+  assert.deepEqual(ok({ signal_id: MESSAGE, emoji: "👍", added: true }), { signal_id: MESSAGE, emoji: "👍", outcome: "added" });
+  assert.deepEqual(ok({ added: false }), { signal_id: MESSAGE, emoji: "👍", outcome: "already_there" },
+    "an answer without signal_id or emoji (a replay) still reports what was sent");
+  assert.deepEqual(ok({ removed: true }, remove), { signal_id: MESSAGE, emoji: "👍", outcome: "removed" });
+  assert.deepEqual(ok({ removed: false }, remove), { signal_id: MESSAGE, emoji: "👍", outcome: "not_there" });
+  for (const [body, sent] of [[{}, add], [{ removed: true }, add], [{ added: true }, remove]] as const) {
+    assert.throws(() => ok(body, sent), (error: unknown) => error instanceof HostedToolFailure && error.code === "tool_failed",
+      JSON.stringify([body, sent.kind]));
+  }
   for (const [status, code, copy] of [
     [404, "signal_not_found", /^No message this seat can read in this workspace has that signal_id\./u],
     [409, "reaction_limit_reached", /64 emojis on that message\. Remove one first\.$/u],
   ] as const) {
     let thrown: unknown;
-    try { reactionOutput({ status, body: { error: code, message: "backend prose" } }); } catch (error) { thrown = error; }
+    try { reactionOutput({ status, body: { error: code, message: "backend prose" } }, add); } catch (error) { thrown = error; }
     assert.ok(thrown instanceof HostedToolFailure);
     const failure = hostedToolError(thrown, "react");
     assert.equal(failure.error, code);

@@ -19203,7 +19203,9 @@ async function handleHostedCheck(
       }
     }
     // 👀 on what this check returns, under the seat's claims installed above. Never fails the check.
-    await markHostedCheckSeen(tx, seat.workspace_id, seat.principal_id, signals);
+    await markHostedCheckSeen(tx, seat.workspace_id, seat.principal_id, signals, (sqlstate) =>
+      logCommandFailure("command_request_failure", input.command.kind, "best_effort", "hosted_check_seen_mark_failed",
+        undefined, sqlstate));
     return { status: 200, body: {
       context,
       batch_id: batch.batch_id,

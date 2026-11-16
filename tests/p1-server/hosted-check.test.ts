@@ -598,7 +598,9 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
     ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
   const selfAsk = asSeat("ask", { kind: "post_signal", signal_kind: "ask", body: `self ${randomUUID()}`,
     ...unaddressed, to: [{ kind: "agent", id: fixture.principalA }] });
-  const optional = [working, selfAsk].filter((result) => result.status === 200).map(idOf);
+  const selfMention = asSeat("note", { kind: "post_signal", signal_kind: "note", body: `self mention ${randomUUID()}`,
+    ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
+  const optional = [working, selfAsk, selfMention].filter((result) => result.status === 200).map(idOf);
 
   const marks = async () => await sql<{ signal_id: string; emoji: string; source: string }[]>`
     SELECT signal_id, emoji, source FROM swarm.signal_reactions
@@ -614,8 +616,9 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
   const returned = (first.body.signals as Array<{ id: string }>).map((signal) => signal.id);
   assert.ok(returned.includes(ask) && returned.includes(mentioned), JSON.stringify(returned));
   assert.ok(!returned.includes(own), "the seat's own public note is not in its check");
-  // A working-on and the seat's own message get no mark whether or not the check returned them.
-  assert.ok(optional.every((id) => ![ask, mentioned].includes(id)));
+  // A working-on and the seat's own messages get no mark whether or not the check returned them
+  // (the marks below are exactly the ask and the mentioning note).
+  console.log(`optional rows posted ${optional.length}, returned ${optional.filter((id) => returned.includes(id)).length}`);
   const expected = [ask, mentioned].sort().map((signal_id) => ({ signal_id, emoji: "\u{1F440}", source: "ack" }));
   assert.deepEqual(await marks(), expected, "one 👀 by the seat's agent on the addressed ask and the mentioning note only");
   const [onOwn] = await sql<{ count: string }[]>`

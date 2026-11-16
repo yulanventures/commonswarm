@@ -314,7 +314,7 @@ async function seatCommand(spec) {
   }, "command"));
   if (cap === null) return { status: 403, body: { error: "hosted_seat_forbidden" } };
   return await handleHostedCommand({
-    command_id: crypto.randomUUID(), client_version: "0.1.80",
+    command_id: input.seatCommandId ?? crypto.randomUUID(), client_version: "0.1.80",
     workspace_id: spec.workspaceId, stream: { kind: "workspace" },
     command: input.command ?? (spec.tool === "check" ? { kind: "open_hosted_mcp_check_batch", seat: spec.handle } : {
       kind: "post_signal", signal_kind: "note",
@@ -4264,8 +4264,8 @@ test("hosted react sends only add_reaction or remove_reaction, as its seat's age
   const member = claimSeat(fixture, fixture.grantA, `react-member-${randomUUID()}`);
   const handle = String(seat.body.handle);
   const principal = String(seat.body.principal_id);
-  const call = (tool: string, command: Record<string, unknown>, seatHandle = handle) =>
-    runHostedHarness<HarnessResult>({ operation: "seat-command",
+  const call = (tool: string, command: Record<string, unknown>, seatHandle = handle, seatCommandId?: string) =>
+    runHostedHarness<HarnessResult>({ operation: "seat-command", ...(seatCommandId === undefined ? {} : { seatCommandId }),
       seat: { grantId: fixture.grantA, handle: seatHandle, workspaceId: fixture.workspaceA, tool }, command });
   const asOwner = (command: Record<string, unknown>) => runHostedHarness<HarnessResult>({ operation: "public",
     ownerJwt: fixture.ownerJwt, workspaceId: fixture.workspaceA, command });
@@ -4291,11 +4291,18 @@ test("hosted react sends only add_reaction or remove_reaction, as its seat's age
   assert.equal(call("react", { ...add, source: "manual" }).status, 403, "react sends no source at all");
   assert.deepEqual(await reactions(message), [], "no refused call wrote a reaction");
 
-  const added = call("react", add);
+  const requestId = `react_${randomUUID()}`;
+  const added = call("react", add, handle, requestId);
   assert.equal(added.status, 200, JSON.stringify(added.body));
   assert.equal(added.body.signal_id, message);
   assert.equal(added.body.emoji, "\u{1F44D}");
   assert.equal(added.body.added, true);
+  const retried = call("react", add, handle, requestId);
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.deepEqual([retried.body.signal_id, retried.body.emoji, retried.body.added], [message, "\u{1F44D}", true],
+    "an exact retry with the same request_id replays the first answer");
+  assert.equal(call("react", { kind: "remove_reaction", signal_id: message, emoji: "\u{1F44D}" }, handle, requestId).status, 409,
+    "the same request_id with different arguments is refused");
   assert.deepEqual(await reactions(message), [{ actor_user_id: null, actor_agent_principal_id: principal,
     emoji: "\u{1F44D}", source: "manual" }], "the seat's agent is the reactor");
   assert.equal(call("react", add).body.added, false, "a repeat changes nothing");

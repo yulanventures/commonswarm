@@ -177,6 +177,8 @@ export async function markHostedCheckSeen(
   workspaceId: string,
   principalId: string,
   rows: readonly Record<string, unknown>[],
+  /** Called with the failure's SQLSTATE (or null), never with the error or any row. */
+  onFailure: (sqlstate: string | null) => void,
 ): Promise<number> {
   const ids = hostedSeenAckTargets(rows, principalId);
   if (ids.length === 0) return 0;
@@ -213,10 +215,9 @@ export async function markHostedCheckSeen(
     return inserted.length;
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
-    console.error(JSON.stringify({
-      event: "hosted_check_seen_mark_failed",
-      sqlstate: typeof code === "string" && /^[0-9A-Z]{5}$/u.test(code) ? code : null,
-    }));
+    try {
+      onFailure(typeof code === "string" && /^[0-9A-Z]{5}$/u.test(code) ? code : null);
+    } catch { /* A log failure never fails the check either. */ }
     return 0;
   }
 }

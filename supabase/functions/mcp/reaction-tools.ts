@@ -25,16 +25,21 @@ export function reactionCommand(args: HostedToolArguments): {
   };
 }
 
-/** added or already_there, removed or not_there; the same outcomes the local react tool reports. */
-export function reactionOutput(result: CommandResult): Record<string, unknown> {
+/**
+ * added or already_there, removed or not_there; the same outcomes the local react tool reports.
+ * The message and emoji are the ones sent; only the outcome comes from the answer.
+ */
+export function reactionOutput(
+  result: CommandResult,
+  sent: { kind: "add_reaction" | "remove_reaction"; signal_id: string; emoji: string },
+): Record<string, unknown> {
   if (result.status < 200 || result.status >= 300) {
     throw new HostedToolFailure(result.body.error, result.body.resets_at);
   }
   const body = result.body;
-  const outcome = body.added === true ? "added" : body.added === false ? "already_there"
+  const outcome = sent.kind === "add_reaction"
+    ? body.added === true ? "added" : body.added === false ? "already_there" : null
     : body.removed === true ? "removed" : body.removed === false ? "not_there" : null;
-  if (outcome === null || typeof body.signal_id !== "string" || typeof body.emoji !== "string") {
-    throw new HostedToolFailure("tool_failed");
-  }
-  return { signal_id: body.signal_id, emoji: body.emoji, outcome };
+  if (outcome === null) throw new HostedToolFailure("tool_failed");
+  return { signal_id: sent.signal_id, emoji: sent.emoji, outcome };
 }

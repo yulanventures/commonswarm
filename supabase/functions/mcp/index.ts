@@ -496,13 +496,14 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     return { ...commandOutput(result), reraise_count: reraise?.count ?? null, next_allowed_at: reraise?.next_allowed_at ?? null };
   }
   if (call.name === "react") {
+    const command = reactionCommand(args);
     return reactionOutput(await handleHostedCommand({
       command_id: String(args.request_id),
       client_version: "0.1.80",
       workspace_id: binding.workspaceId,
       stream: { kind: "workspace" },
-      command: reactionCommand(args),
-    }, capability));
+      command,
+    }, capability), command);
   }
   return commandOutput(await handleHostedCommand(
     hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
