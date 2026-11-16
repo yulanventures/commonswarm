@@ -1585,7 +1585,7 @@ export class ThinCommandClient {
   }
 
   private async sendWithReason(request: {
-    workspaceId: string; command: SeatAdminCommand | ReactionCommand; credential: string; commandId: string; signal?: AbortSignal;
+    workspaceId: string; command: SeatAdminCommand | SeatAdminCreateSeatCommand | ReactionCommand; credential: string; commandId: string; signal?: AbortSignal;
   }): Promise<{ httpStatus: number; response: CommandHttpResponse }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);
