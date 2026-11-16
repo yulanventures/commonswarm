@@ -577,7 +577,7 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
   const fixture = await seedFixture();
   const unaddressed = { to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null };
   const asOwner = (command: Record<string, unknown>) =>
-    runHarness<HarnessResult>(fixture, { operation: "public", command });
+    runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
   const asSeat = (tool: string, command: Record<string, unknown>) =>
     runHarness<HarnessResult>(fixture, { operation: "seat-post", tool, command });
   const idOf = (result: HarnessResult): string => {
