@@ -679,7 +679,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
                 statement_timestamp() + interval '25 days', statement_timestamp() - interval '6 minutes', ${channel}::uuid, NULL, false
               ), (
                 ${reply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${answered}::uuid,
-                NULL, 'note', 'Chose: Tomorrow',
+                NULL, 'note', 'Selected: Tomorrow',
                 statement_timestamp() + interval '25 days', statement_timestamp() - interval '350 seconds', ${channel}::uuid, NULL, false
               ), (
                 ${multiAnswered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
