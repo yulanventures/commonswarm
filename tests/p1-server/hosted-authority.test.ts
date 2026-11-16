@@ -4275,9 +4275,11 @@ test("hosted react sends only add_reaction or remove_reaction, as its seat's age
     assert.equal(posted.status, 200, JSON.stringify(posted.body));
     return String((posted.body.signal as Record<string, unknown>).id);
   };
-  const reactions = async (signalId: string) => await sql<Record<string, unknown>[]>`
-    SELECT actor_user_id, actor_agent_principal_id, emoji, source FROM swarm.signal_reactions
-    WHERE signal_id = ${signalId}::uuid ORDER BY created_at, reaction_id`;
+  // Plain rows: the driver's Result array is its own class, which a strict deepEqual tells apart from an array.
+  const reactions = async (signalId: string) => (await sql<Record<string, unknown>[]>`
+    SELECT actor_user_id::text AS actor_user_id, actor_agent_principal_id::text AS actor_agent_principal_id, emoji, source
+    FROM swarm.signal_reactions
+    WHERE signal_id = ${signalId}::uuid ORDER BY created_at, reaction_id`).map((row) => ({ ...row }));
   const message = post();
   const add = { kind: "add_reaction", signal_id: message, emoji: "\u{1F44D}" };
 
