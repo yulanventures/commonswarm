@@ -196,7 +196,7 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     activate: { key: "Escape", expect: { active: '[data-rail-agent="{agent}"]', inView: '[data-rail-agent="{agent}"]' } },
   }],
   // The reaction picker focuses its first emoji; arrows move through the grid, and Escape closes it and returns focus to
-  // the row's Add reaction control. No emoji is picked.
+  // the add pill that opened it. No emoji is picked.
   "menu.reactions": [{
     name: "reaction-picker-escape-returns-to-add",
     start: { active: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:first-child' },
@@ -204,7 +204,7 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       { key: "ArrowRight", expect: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:nth-child(2)' },
       { key: "ArrowLeft", expect: '[data-reaction-picker="{message.reacted}"] > [data-reaction-option]:first-child' },
     ],
-    activate: { key: "Escape", expect: { active: '[data-reaction-add="{message.reacted}"]', inView: '[data-reaction-add="{message.reacted}"]' } },
+    activate: { key: "Escape", expect: { active: '[data-reaction-more="{message.reacted}"]', inView: '[data-reaction-more="{message.reacted}"]' } },
   }],
   // The review dialog opens on its heading; Tab reaches the first role, then leaves the radio group for the consent checkbox,
   // which must be revealed (not under the Join and Not now bar). Escape (like Not now) closes it without joining; the inbox then

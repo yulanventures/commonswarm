@@ -1680,15 +1680,7 @@
         "scroll": "[data-signal-id=\"{message.reacted}\"]"
       },
       {
-        "media": "(hover: hover)",
-        "hover": "[data-signal-id=\"{message.reacted}\"]"
-      },
-      {
-        "media": "(hover: none)",
-        "click": "[data-signal-id=\"{message.reacted}\"] .dashboard__message-markdown"
-      },
-      {
-        "click": "[data-reaction-add=\"{message.reacted}\"]"
+        "click": "[data-reaction-more=\"{message.reacted}\"]"
       },
       {
         "waitFor": "[data-reaction-picker=\"{message.reacted}\"] [data-reaction-option]"
