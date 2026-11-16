@@ -432,7 +432,9 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "revoke_agent_join_credential",
   "enable_agent_management",
   "disable_agent_management",
-  "recover_agent_session"
+  "recover_agent_session",
+  // A person's own channel read position (its own handler, not the reducer). Agents use channel_read.
+  "mark_channel_read"
 ]);
 function isAgentScopeDenylisted(scope) {
   const words = scopeWords(scope);

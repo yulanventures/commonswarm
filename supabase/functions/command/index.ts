@@ -197,6 +197,14 @@ import {
   type Reactor,
   signalReactable,
 } from "./signal-reactions.ts";
+import {
+  advanceChannelReads,
+  channelFeedMessage,
+  type ChannelReadPosition,
+  type MarkChannelReadCommand,
+  parseMarkChannelReadCommand,
+  personCanAccessChannel,
+} from "./channel-reads.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
@@ -553,6 +561,7 @@ type ValidatedCommand =
   | ChannelCommand
   | SignalsSeenCommand
   | ReactionCommand
+  | MarkChannelReadCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -820,6 +829,8 @@ interface StoredResponse {
   emoji?: string;
   added?: boolean;
   removed?: boolean;
+  /** mark_channel_read: each target's read position after the command. */
+  channels?: ChannelReadPosition[];
 }
 
 interface EventEnvelope {
@@ -1317,6 +1328,7 @@ const COMMAND_KINDS = [
   ...CHANNEL_COMMAND_KINDS,
   SIGNALS_SEEN_KIND,
   ...REACTION_COMMAND_KINDS,
+  "mark_channel_read",
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2175,6 +2187,10 @@ function validateCommand(
 
   if ((REACTION_COMMAND_KINDS as readonly string[]).includes(cmd.kind)) {
     return parseReactionCommand(cmd);
+  }
+
+  if (cmd.kind === "mark_channel_read") {
+    return parseMarkChannelReadCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -3916,6 +3932,18 @@ function storedResponse(value: unknown): StoredResponse {
     ...(typeof response.emoji === "string" ? { emoji: response.emoji } : {}),
     ...(typeof response.added === "boolean" ? { added: response.added } : {}),
     ...(typeof response.removed === "boolean" ? { removed: response.removed } : {}),
+    ...(Array.isArray(response.channels) && response.channels.every((position) => {
+        const row = record(position);
+        return row !== null && (row.channel_id === null || typeof row.channel_id === "string") &&
+          typeof row.read_through_at === "string";
+      })
+      ? {
+        channels: (response.channels as Record<string, unknown>[]).map((position) => ({
+          channel_id: position.channel_id as string | null,
+          read_through_at: position.read_through_at as string,
+        })),
+      }
+      : {}),
   };
 }
 
@@ -12890,6 +12918,12 @@ async function replayAuditChannelIds(
   if (typeof stored?.emoji === "string" && typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.signal_id]));
   }
+  /* A stored mark_channel_read names the channels it moved, and its success proves the person could
+   * open them then. Tag every later use of the command id with them, matching or not. */
+  if (Array.isArray(stored?.channels)) {
+    addAll((stored.channels as unknown[]).map((position) => record(position)?.channel_id)
+      .filter((id): id is string => typeof id === "string"));
+  }
   const ledger = parseClaimLedger(rawResponse);
   if (ledger !== null && ledger.delivery_refs.length > 0) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(
@@ -16457,6 +16491,81 @@ async function handleTransaction(
       await insertAudit(tx, {
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash, channelIds: reactionAuditChannelIds,
+      });
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
+
+    if (command.kind === "mark_channel_read") {
+      // A person's own read position: no agent or hosted seat, whatever its scopes.
+      const viewer = auth.credentialKind === "user" ? auth.actor.user : null;
+      if (viewer === null) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "authz", reason: "credential_kind_forbidden", detail: ignoredIdentity, hash,
+        });
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      const single = "all" in command ? null : command;
+      // An unknown channel and one the person cannot open get the same answer, untagged.
+      if (single?.channel_id && !await personCanAccessChannel(tx, route.workspaceId, single.channel_id, viewer)) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "authz", reason: "channel_not_found", detail: ignoredIdentity, hash,
+        });
+        return {
+          status: 404,
+          body: { error: "channel_not_found", message: "There is no channel with that id that you can open in this workspace." },
+        };
+      }
+      // An unknown message, one in another channel, and one the person cannot read (the read policy,
+      // swarm_read.signals, under the person's claims) get the same answer.
+      if (
+        single?.through_signal_id && !(
+          await channelFeedMessage(tx, route.workspaceId, single.channel_id, single.through_signal_id) &&
+          await signalReactable(tx, route.workspaceId, single.through_signal_id, { kind: "user", userId: viewer })
+        )
+      ) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "authz", reason: "signal_not_found", detail: ignoredIdentity, hash,
+          channelIds: single.channel_id ? [single.channel_id] : undefined,
+        });
+        return {
+          status: 404,
+          body: { error: "signal_not_found", message: "There is no message with that id in that channel that you can read." },
+        };
+      }
+      const channels = await advanceChannelReads(
+        tx, route.workspaceId, viewer,
+        single === null
+          ? { all: true }
+          : { channelId: single.channel_id, throughSignalId: single.through_signal_id },
+      );
+      const readAuditChannelIds = channels.map((position) => position.channel_id)
+        .filter((id): id is string => id !== null);
+      const response: StoredResponse = { ok: true, event_ids: [], channels };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash, channelIds: readAuditChannelIds,
       });
       return { status: 200, body: { status: "accepted", ...response } };
     }

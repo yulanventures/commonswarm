@@ -58,6 +58,10 @@ const literal = JSON.stringify([
   ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'SELECT', false],
   ['swarm_command', 'FUNCTION', 'swarm.signal_reactable(uuid,uuid)', 'EXECUTE', false],
+  // A person's channel read position: mark_channel_read writes it forward, never back.
+  ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'INSERT', false],
+  ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'SELECT', false],
+  ['swarm_command', 'TABLE', 'swarm.human_channel_reads', 'UPDATE', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'UPDATE', false],
