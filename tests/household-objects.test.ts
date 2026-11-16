@@ -364,8 +364,25 @@ test('proposed quota and attempt ceilings use inclusive boundaries without delet
   ] as const) assert.deepEqual(decideHouseholdObject(command, state, { ...allowed, ...overrides }).outcome, { status: 'refused', reason });
   const newCommand: HouseholdObjectCommand = { kind: 'create_household_object', object_id: 'doc', title: 'Notes', content: { kind: 'doc', markdown: 'hello' } };
   const newPrepared = artifact({ kind: 'doc', markdown: 'hello' }, 'doc');
-  assert.equal(decideHouseholdObject(newCommand, state, context(state, newCommand, newPrepared, { other_object_count: 498 })).outcome.status, 'committed');
-  assert.deepEqual(decideHouseholdObject(newCommand, state, context(state, newCommand, newPrepared, { other_object_count: 499 })).outcome,
+  // Other file names (chat attachments, brain topics) count only toward the workspace's 5,000 file names:
+  // 925 of them once refused every new list while the household held one object.
+  for (const [other, status] of [[925, 'committed'], [4998, 'committed'], [4999, 'refused']] as const) {
+    assert.equal(decideHouseholdObject(newCommand, state, context(state, newCommand, newPrepared, { other_object_count: other })).outcome.status,
+      status, `1 household object and ${other} other file names`);
+  }
+  assert.deepEqual(decideHouseholdObject(newCommand, state, context(state, newCommand, newPrepared, { other_object_count: 4999 })).outcome,
+    { status: 'refused', reason: 'object_quota_reached' });
+  // The household's own cap stays 500, whatever else the workspace holds.
+  const withObjects = (total: number): HouseholdObjectState => {
+    const objects = { ...state.objects };
+    for (let i = 1; i < total; i += 1) objects[`object-${i}`] = { ...state.objects.shopping!, object_id: `object-${i}` };
+    return { ...state, objects };
+  };
+  const at499 = withObjects(499);
+  assert.equal(householdObjectUsage(at499, 100).object_count, 499);
+  assert.equal(decideHouseholdObject(newCommand, at499, context(at499, newCommand, newPrepared)).outcome.status, 'committed');
+  const at500 = withObjects(500);
+  assert.deepEqual(decideHouseholdObject(newCommand, at500, context(at500, newCommand, newPrepared)).outcome,
     { status: 'refused', reason: 'object_quota_reached' });
   assert.equal(state.objects.shopping!.history.length, 1);
 });

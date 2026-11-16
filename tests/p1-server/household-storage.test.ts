@@ -216,16 +216,26 @@ test('quota and name reservations serialize with legacy storage and retained exp
   assert.deepEqual(pending.map(r => r.outcome.status).sort(), ['pending','refused']);
 });
 
-test('the five-hundred-name cap includes tombstones and serializes distinct creates', async () => {
+test("chat and brain file names do not count against the household's own 500 objects", async () => {
+  // 925 other names, some tombstoned: the shape that refused every new list in a workspace with none.
+  const workspace = await fixture();
+  await sql`INSERT INTO swarm.files(file_id,workspace_id,name,created_by_kind,created_by,tombstoned_at)
+    SELECT gen_random_uuid(),${workspace}::uuid,'chat-'||n||'.txt','user',${owner}::uuid,
+      CASE WHEN n <= 6 THEN clock_timestamp() END
+    FROM generate_series(1,925) AS n`;
+  committed(await write(workspace, newDoc(randomUUID()), proposal('base')));
+});
+
+test('the five-thousand-name cap includes tombstones and serializes distinct creates', async () => {
   const workspace = await fixture();
   await sql`INSERT INTO swarm.files(file_id,workspace_id,name,created_by_kind,created_by,tombstoned_at)
     SELECT gen_random_uuid(),${workspace}::uuid,'held-'||n||'.txt','user',${owner}::uuid,clock_timestamp()
-    FROM generate_series(1,499) AS n`;
+    FROM generate_series(1,${policy.HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT - 1}) AS n`;
   const results = await Promise.all([randomUUID(),randomUUID()].map(id => write(workspace,newDoc(id),proposal('base'))));
   assert.deepEqual(results.map(r=>r.outcome.status).sort(),['committed','refused']);
   assert.ok(results.some(r=>r.outcome.status==='refused' && r.outcome.reason==='object_quota_reached'));
   const [count] = await sql`SELECT count(*) AS n FROM swarm.files WHERE workspace_id=${workspace}::uuid AND purged_at IS NULL`;
-  assert.equal(Number(count!.n),500);
+  assert.equal(Number(count!.n),5000);
 });
 
 test('durable shared write ceilings refuse new revisions while exact retry and reservation release remain available', async () => {
@@ -264,10 +274,11 @@ test('an expired reservation releases its rows, name and slot on the next write;
     { status: 'refused', reason: 'object_already_exists' }, 'a live reservation holds its name');
   assert.deepEqual(await rows(workspace, reservation), ['reserved', 'pending', 0]);
 
-  // A full workspace: 499 other names plus the abandoned create.
+  // A full workspace: 4,999 other names plus the abandoned create.
   const full = await fixture();
   await sql`INSERT INTO swarm.files(file_id,workspace_id,name,created_by_kind,created_by)
-    SELECT gen_random_uuid(),${full}::uuid,'held-'||n||'.txt','user',${owner}::uuid FROM generate_series(1,499) AS n`;
+    SELECT gen_random_uuid(),${full}::uuid,'held-'||n||'.txt','user',${owner}::uuid
+    FROM generate_series(1,${policy.HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT - 1}) AS n`;
   await abandon(full, randomUUID());
   assert.deepEqual((await write(full, newDoc(randomUUID()), proposal('base'))).outcome, { status: 'refused', reason: 'object_quota_reached' });
 

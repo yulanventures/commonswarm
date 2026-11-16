@@ -3803,6 +3803,7 @@ var HOUSEHOLD_OBJECT_EVENT_TYPES = [
 
 // src/protocol/household-object-policy.ts
 var HOUSEHOLD_OBJECT_LIMIT = 500;
+var HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT = 5e3;
 var HOUSEHOLD_STORAGE_BYTE_LIMIT = 1024 * 1024 * 1024;
 var HOUSEHOLD_VERSION_BYTE_LIMIT = 25 * 1024 * 1024;
 var HOUSEHOLD_LIVE_REVISION_LIMIT = 20;
@@ -4029,7 +4030,7 @@ function decideHouseholdObject(command, state, ctx) {
   const usage = householdObjectUsage(state, ctx.now);
   if (!nonnegative(ctx.other_storage_bytes) || !nonnegative(ctx.other_object_count)) return noEvent("quota_facts_invalid");
   const bytes = usage.storage_bytes + ctx.other_storage_bytes;
-  const count = usage.object_count + ctx.other_object_count;
+  const totalNames = usage.object_count + ctx.other_object_count;
   const currentFor = (objectId3) => own(state.objects, objectId3)?.history.at(-1);
   const preparedFor = (objectId3) => {
     const prepared2 = ctx.prepared;
@@ -4099,7 +4100,7 @@ function decideHouseholdObject(command, state, ctx) {
     if (reservation.base !== null && !sameRevision(reservation.base, current2?.revision ?? null)) {
       return conflict(reservation.object_id, reservation.base, reservation.proposed, reservation.reservation_id, reservation.title);
     }
-    if (bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT || count > HOUSEHOLD_OBJECT_LIMIT) return refuse2("storage_quota_reached");
+    if (bytes > HOUSEHOLD_STORAGE_BYTE_LIMIT || usage.object_count > HOUSEHOLD_OBJECT_LIMIT || totalNames > HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT) return refuse2("storage_quota_reached");
     return commit(
       reservation.object_id,
       reservation.title,
@@ -4131,7 +4132,7 @@ function decideHouseholdObject(command, state, ctx) {
   let title;
   if (change.kind === "create") {
     if (current || Object.values(state.reservations).some((pending) => pending.object_id === objectId2 && householdReservationLive(pending, ctx.now))) return refuse2("object_already_exists");
-    if (count >= HOUSEHOLD_OBJECT_LIMIT) return refuse2("object_quota_reached");
+    if (usage.object_count >= HOUSEHOLD_OBJECT_LIMIT || totalNames >= HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT) return refuse2("object_quota_reached");
     if (!validContent(change.content) || !sameContent(change.content, prepared.content)) return refuse2("verified_content_mismatch");
     title = change.title;
     if (prepared.revision !== null) return refuse2("verified_content_mismatch");
@@ -6192,6 +6193,7 @@ export {
   HOUSEHOLD_TOOLS,
   HOUSEHOLD_TOOL_REGISTRY,
   HOUSEHOLD_VERSION_BYTE_LIMIT,
+  HOUSEHOLD_WORKSPACE_FILE_NAME_LIMIT,
   HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT,
   HUMAN_ONLY_COMMANDS,
   HouseholdToolInputError,
