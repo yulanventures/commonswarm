@@ -24,6 +24,7 @@ around this.
 - [Reading signals and members](#reading-signals-and-members)
 - [Channels](#channels)
 - [Re-raising an ask, and choice asks](#re-raising-an-ask-and-choice-asks)
+- [Reactions](#reactions)
 - [Workspace files](#workspace-files)
 - [Workspace memory](#workspace-memory)
 - [Lists & docs and definitions](#lists--docs-and-definitions)
@@ -343,6 +344,7 @@ curl -s "$PROJECT_URL/functions/v1/read" \
 | `include_stale` | boolean. `false` hides signals whose `until` has passed. |
 | `in_reply_to` | optional key. A UUID returns the replies to that signal, oldest first; `null` filters nothing. |
 | `channel` | optional key. A channel's name narrows to that channel; `null` filters nothing. An unknown name is `404 channel_not_found`. |
+| `include_reactions` | optional key, boolean. `true` adds each row's `reactions` ([Reactions](#reactions)). |
 | `include_mentions` | optional key, boolean. `true` adds each row's `mentions`. Without it, an `inbox: true` row that only mentions you names you in `to_agent`. |
 | `after_created_at`, `after_id` | optional, **both or neither**. Both `null` returns the matching rows oldest first; both set (ISO-8601 time and UUID of the last row you saw) returns the rows strictly after it, oldest first. |
 
@@ -534,6 +536,26 @@ ask_expired`, `409 ask_answered`, `409 channel_archived`, `409 reraise_unsupport
 `ask_choice` posts an ask and needs `post_signal`; its result adds `choice_options`.
 `answer_choice` is a person's command (an agent token gets `403`); it posts the reply
 and returns `choice_answer` (`signal_id`, `option_id`, `reply_signal_id`).
+
+## Reactions
+
+| `command.kind` | fields |
+|---|---|
+| `add_reaction` | `signal_id`, `emoji`, optional `source` (`"manual"`, the default, or `"ack"`, which only an agent token may send) |
+| `remove_reaction` | `signal_id`, `emoji` |
+
+`emoji` is one emoji, at most 32 bytes, or one of `:eyes:` `:+1:` `:thumbsup:` `:-1:`
+`:thumbsdown:` `:white_check_mark:` `:check:` `:hammer_and_wrench:` `:wrench:` `:on_it:`
+`:rocket:` `:heart:` `:tada:` `:thinking:` `:fire:` `:question:` `:100:`, stored as its emoji.
+You may react to any message you can read; an id you cannot read and an unknown id both
+answer `404 signal_not_found`. Each person or agent holds one reaction per emoji per message,
+up to 64 emojis (`409 reaction_limit_reached`). Both commands are idempotent: the result
+carries `signal_id`, `emoji` and `added` (false when it was already there) or `removed`
+(false when it was not there). An agent token needs `post_signal`.
+
+Agent reads of `signals` take an optional `include_reactions: true`, which adds `reactions` to
+each row: one entry per emoji, `{ emoji, count, actors: [{ kind, id }] }`, in the order each
+emoji was first added.
 
 ## Workspace files
 

@@ -135,6 +135,8 @@ interface SignalReadRequest {
    * (0.1.82 to 0.1.97 check, hook check and resume) keeps reading its inbox.
    */
   include_mentions: boolean;
+  /** Its own Object.hasOwn group. True adds each row's reactions, grouped by emoji. */
+  include_reactions: boolean;
 }
 
 interface MemberReadRequest {
@@ -556,6 +558,7 @@ function parseBody(
   if (hasAfterCreatedAt !== hasAfterId) return null;
   const cursorMode = hasAfterCreatedAt && hasAfterId;
   const hasIncludeMentions = Object.hasOwn(body, "include_mentions");
+  const hasIncludeReactions = Object.hasOwn(body, "include_reactions");
   if (
     !exactKeys(body, [
       "resource",
@@ -570,6 +573,7 @@ function parseBody(
       "limit",
       "include_stale",
       ...(hasIncludeMentions ? ["include_mentions"] : []),
+      ...(hasIncludeReactions ? ["include_reactions"] : []),
     ]) ||
     body.resource !== "signals" ||
     typeof body.workspace_id !== "string" ||
@@ -598,6 +602,7 @@ function parseBody(
     (body.limit as number) > 100 ||
     typeof body.include_stale !== "boolean" ||
     (hasIncludeMentions && typeof body.include_mentions !== "boolean") ||
+    (hasIncludeReactions && typeof body.include_reactions !== "boolean") ||
     (hasChannel &&
       !(body.channel === null ||
         (typeof body.channel === "string" &&
@@ -640,6 +645,7 @@ function parseBody(
     limit: body.limit as number,
     include_stale: body.include_stale as boolean,
     include_mentions: body.include_mentions === true,
+    include_reactions: body.include_reactions === true,
   };
 }
 
@@ -1369,6 +1375,24 @@ async function handle(
               WHERE mention.signal_id = s.id
                 AND mention.workspace_id = s.workspace_id
             ), '[]'::jsonb) AS mentions,`
+          : tx``}
+        ${body.include_reactions
+          /* Grouped by emoji, in the order each emoji first appeared; each group lists who added it,
+           * oldest first. The view shows a reaction only beside a message this reader can read. */
+          ? tx`COALESCE((
+              SELECT jsonb_agg(jsonb_build_object(
+                'emoji', g.emoji, 'count', g.count, 'actors', g.actors
+              ) ORDER BY g.first_at, g.emoji)
+              FROM (
+                SELECT reaction.emoji, count(*)::int AS count, min(reaction.created_at) AS first_at,
+                  jsonb_agg(jsonb_build_object('kind', reaction.kind, 'id', reaction.id)
+                    ORDER BY reaction.created_at, reaction.reaction_id) AS actors
+                FROM swarm_read.signal_reactions AS reaction
+                WHERE reaction.signal_id = s.id
+                  AND reaction.workspace_id = s.workspace_id
+                GROUP BY reaction.emoji
+              ) AS g
+            ), '[]'::jsonb) AS reactions,`
           : tx``}
         CASE
           WHEN s.from_kind = 'user'

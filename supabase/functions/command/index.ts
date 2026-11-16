@@ -188,6 +188,14 @@ import {
   SIGNALS_SEEN_MAX_IDS,
   type SignalsSeenCommand,
 } from "./human-receipts.ts";
+import {
+  applyReaction,
+  parseReactionCommand,
+  REACTION_COMMAND_KINDS,
+  type ReactionCommand,
+  type Reactor,
+  signalReactable,
+} from "./signal-reactions.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
@@ -542,6 +550,7 @@ type ValidatedCommand =
   | AnswerChoiceCommand
   | ChannelCommand
   | SignalsSeenCommand
+  | ReactionCommand
   | DeliveryCommand
   | TouchPresenceCommand
   | FileCommand;
@@ -805,6 +814,10 @@ interface StoredResponse {
   connection_expired_at?: string | null;
   connection_expires_at?: string | null;
   previous_connection_expires_at?: string | null;
+  signal_id?: string;
+  emoji?: string;
+  added?: boolean;
+  removed?: boolean;
 }
 
 interface EventEnvelope {
@@ -1301,6 +1314,7 @@ const COMMAND_KINDS = [
   "answer_choice",
   ...CHANNEL_COMMAND_KINDS,
   SIGNALS_SEEN_KIND,
+  ...REACTION_COMMAND_KINDS,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
   "claim_wake_lease",
@@ -2155,6 +2169,10 @@ function validateCommand(
         status: 400,
         reason: "ack_agent_delivery fields are malformed",
       };
+  }
+
+  if ((REACTION_COMMAND_KINDS as readonly string[]).includes(cmd.kind)) {
+    return parseReactionCommand(cmd);
   }
 
   if (cmd.kind === SIGNALS_SEEN_KIND) {
@@ -3617,7 +3635,8 @@ async function isPrivateChannelAgentCommand(
   localBody: Record<string, unknown> | null,
 ): Promise<boolean> {
   if (!UUID_RE.test(workspaceId)) return false;
-  if (kind === "channel_leave" || kind === "signals_seen") return true;
+  if (kind === "channel_leave" || kind === "signals_seen" ||
+    (REACTION_COMMAND_KINDS as readonly string[]).includes(kind)) return true;
   const channelObj = record(localBody?.channel);
   if (channelObj && channelObj.visibility === "private") return true;
   const signalObj = record(localBody?.signal);
@@ -3892,6 +3911,9 @@ function storedResponse(value: unknown): StoredResponse {
       : {}),
     ...(typeof response.note === "string" ? { note: response.note } : {}),
     ...(typeof response.restored === "boolean" ? { restored: response.restored } : {}),
+    ...(typeof response.emoji === "string" ? { emoji: response.emoji } : {}),
+    ...(typeof response.added === "boolean" ? { added: response.added } : {}),
+    ...(typeof response.removed === "boolean" ? { removed: response.removed } : {}),
   };
 }
 
@@ -12609,6 +12631,7 @@ async function replayAuditChannelIds(
     readonly kind: string;
     readonly channel_id?: string | null;
     readonly signal_ids?: readonly string[];
+    readonly signal_id?: string;
     readonly channel_ids?: readonly (string | null)[];
   },
   matches: boolean,
@@ -12663,6 +12686,12 @@ async function replayAuditChannelIds(
       auth.agent?.principal_id ?? null,
       stored.signal_id,
     ));
+  }
+  if (
+    (REACTION_COMMAND_KINDS as readonly string[]).includes(String(command.kind)) &&
+    typeof command.signal_id === "string" && UUID_RE.test(command.signal_id)
+  ) {
+    addAll(await accessibleSignalBatchChannelIds(tx, workspaceId, auth, [command.signal_id]));
   }
   if (matches) {
     if (command.kind === SIGNALS_SEEN_KIND && Array.isArray(command.signal_ids)) {
@@ -15819,7 +15848,9 @@ async function handleTransaction(
          * person's command and never reaches an agent credential path with a scope. */
         !auth.agent.scopes.includes(
           validation.command.kind === "reraise_ask" || validation.command.kind === "memory_save" ||
-            validation.command.kind === "memory_forget" || validation.command.kind === "ask_choice"
+            validation.command.kind === "memory_forget" || validation.command.kind === "ask_choice" ||
+            /* A reaction is visible content on a message, like a post. */
+            (REACTION_COMMAND_KINDS as readonly string[]).includes(validation.command.kind)
             ? "post_signal"
             : validation.command.kind,
         )
@@ -16128,6 +16159,79 @@ async function handleTransaction(
       return { status: 200, body: { ok: true } };
     }
     await afterStep(7);
+
+    if (command.kind === "add_reaction" || command.kind === "remove_reaction") {
+      const reactor: Reactor | null = auth.credentialKind === "user"
+        ? auth.actor.user === null ? null : { kind: "user", userId: auth.actor.user }
+        : auth.agent === null
+        ? null
+        : { kind: "agent", principalId: auth.agent.principal_id, ownerUserId: auth.agent.owner_user_id };
+      if (reactor === null) return { status: 403, body: { error: "forbidden" } };
+      if (command.kind === "add_reaction" && command.source === "ack" && reactor.kind !== "agent") {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "validation", reason: "ack_reaction_from_person", detail: ignoredIdentity, hash,
+        });
+        return { status: 400, body: { error: "invalid_request", message: 'source "ack" is for an agent\'s client' } };
+      }
+      const reactionAuditChannelIds = await accessibleSignalBatchChannelIds(
+        tx, route.workspaceId, auth, [command.signal_id],
+      );
+      // An unknown id and a message the reactor cannot read get the same answer.
+      if (!await signalReactable(tx, route.workspaceId, command.signal_id, reactor)) {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "authz", reason: "signal_not_found", detail: ignoredIdentity, hash,
+          channelIds: reactionAuditChannelIds,
+        });
+        return {
+          status: 404,
+          body: { error: "signal_not_found", message: "There is no message with that id that you can read in this workspace." },
+        };
+      }
+      const outcome = await applyReaction(tx, route.workspaceId, command, reactor);
+      if (outcome.status === "limit") {
+        await insertAudit(tx, {
+          auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: "domain", reason: "reaction_limit_reached", detail: ignoredIdentity, hash,
+          channelIds: reactionAuditChannelIds,
+        });
+        return { status: 409, body: { error: "reaction_limit_reached", message: outcome.message } };
+      }
+      const response: StoredResponse = {
+        ok: true,
+        event_ids: [],
+        signal_id: command.signal_id,
+        emoji: command.emoji,
+        ...(command.kind === "add_reaction"
+          ? { added: outcome.status === "added" }
+          : { removed: outcome.status === "removed" }),
+      };
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+        outcome: "accepted", detail: ignoredIdentity, hash, channelIds: reactionAuditChannelIds,
+      });
+      return { status: 200, body: { status: "accepted", ...response } };
+    }
 
     if (command.kind === SIGNALS_SEEN_KIND) {
       const userId = auth.actor.user;

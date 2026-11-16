@@ -37,6 +37,7 @@ tests/release-proof-format.test.ts
 tests/support/wake-lease.test.ts
 tests/brain-namespace.test.ts
 tests/signal-attachments.test.ts
+tests/signal-reactions.test.ts
 tests/host-version-floor.test.ts
 tests/protocol-next.test.ts
 tests/protocol-workspace.test.ts
