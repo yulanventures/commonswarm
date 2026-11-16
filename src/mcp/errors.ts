@@ -44,6 +44,8 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   profile_other_session: entry("This profile belongs to another session. Stop and tell the operator.", STOP_OPERATOR),
   profile_conflict: entry("The profile belongs to another agent or workspace.", PERSON),
   profile_exists: entry("The profile path already holds a connection.", PERSON),
+  seat_destination_exists: entry("The new seat's file path already exists; no seat was created.", FIX),
+  seat_destination_required: entry("Name exactly one place for the new seat's connection.", FIX),
   setup_connect_pending: entry("This profile directory has a connect in progress.", PERSON),
   connection_invalid: entry("The connection is invalid.", PERSON),
   connection_target_invalid: entry("The connection target is invalid.", PERSON),
