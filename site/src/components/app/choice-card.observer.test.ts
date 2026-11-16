@@ -300,6 +300,25 @@ test("in the feed the question moves into the card, and only the person it asks 
   assert.equal((plainBody.children[0] as FakeElement).className, "dashboard__message-markdown", "no stored choices, no card");
 });
 
+test("in the feed, Other text typed before a rebuild is in the rebuilt card, and its Submit sends that text", () => {
+  const f = feed();
+  (f.context.choiceRows as Map<string, AskChoiceState>).set(SIGNAL, state());
+  const first = f.row({}).children[0] as FakeElement;
+  first.one(el => el.dataset.decisionOtherTrigger !== undefined).fire("click");
+  const typed = first.one(el => el.dataset.decisionOtherInput !== undefined);
+  typed.value = "Harbor, but after 10am"; typed.fire("input");
+  // The feed's poll rebuilds every row: the old card is gone, the new one is built from the draft.
+  const rebuilt = f.row({}).children[0] as FakeElement;
+  assert.notEqual(rebuilt, first);
+  const input = rebuilt.one(el => el.dataset.decisionOtherInput !== undefined);
+  const trigger = rebuilt.one(el => el.dataset.decisionOtherTrigger !== undefined);
+  const submit = rebuilt.one(el => el.dataset.decisionSubmit !== undefined);
+  assert.deepEqual([input.value, trigger.getAttribute("aria-expanded"), rebuilt.one(has("hm-decision__other-field")).hidden, submit.disabled],
+    ["Harbor, but after 10am", "true", false, false]);
+  form(rebuilt).fire("submit");
+  assert.deepEqual(f.sent, [[SIGNAL, { optionIds: [], otherText: "Harbor, but after 10am" }]]);
+});
+
 test("in the feed a draft survives a rebuild, and the answer names its chooser from the server", () => {
   const f = feed();
   const rows_ = f.context.choiceRows as Map<string, AskChoiceState>;

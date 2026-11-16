@@ -28,6 +28,8 @@ export type HoverSpec = {
   /** In focus mode, wait for the app to rebuild the focused row (a real poll), then require the same control in the
    *  new row to hold focus. No rebuild within the wait is an error, so the case is never passed vacuously. */
   focusAcrossRebuild?: boolean;
+  /** focusAcrossRebuild in a feed other than #general: the seed id key of the channel the refresh note goes to. */
+  refreshChannel?: string;
   /** Override FOCUS_REBUILD_TIMEOUT_MS in fast fixture matrix cases. */
   rebuildTimeoutMs?: number;
 };

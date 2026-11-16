@@ -374,6 +374,21 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     require: ['[data-signal-id="{message.choiceMulti}"]'], max: 1, focus: true, focusTarget: ".hm-decision [data-decision-option]" }],
   "app.chat.choice-answered": [{ name: "choice-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceAnswered}"]',
     require: ['[data-signal-id="{message.choiceAnswered}"]'], max: 1 }],
+  "app.chat.choice-multi-ticked": [{ name: "choice-multi-ticked", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',
+    require: ['[data-signal-id="{message.choiceMulti}"]:has(input[data-decision-option="kitchen"]:checked)'], max: 1, focus: true,
+    focusTarget: '.hm-decision input[data-decision-option="kitchen"]:checked' }],
+  "app.chat.choice-multi-answered": [{ name: "choice-multi-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMultiAnswered}"]',
+    require: ['[data-signal-id="{message.choiceMultiAnswered}"]:has(li[data-decision-other][data-chosen="true"])'], max: 1 }],
+  "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
+    require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
+  /* Typed Other text survives a real feed rebuild: the Other field is focused, a note in this channel makes the app's own
+     poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while the
+     field's Submit is enabled, which it is only while the draft still holds the typed text. Last on the page, and the
+     screen runs alone, because the note it posts rebuilds this channel's feed until the spec expires it. */
+  "app.chat.choice-other-redraw": [{ name: "choice-other-redraw", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true,
+    focusTarget: '.hm-decision [data-decision-other-input]:has(~ [data-decision-submit]:not([disabled]))',
+    focusAcrossRebuild: true, refreshChannel: "channel.private" }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
@@ -771,7 +786,7 @@ async function main(): Promise<void> {
             const shot = `shots/${id}--${state}--${size}--${theme}${variant}--${label}.png`;
             await page.screenshot({ path: join(OUT, shot) });
             hoverShots.push(shot);
-          } : undefined, spec.focusAcrossRebuild ? async () => { expireNote = await postRefreshNote(env, seed.ids); } : undefined));
+          } : undefined, spec.focusAcrossRebuild ? async () => { expireNote = await postRefreshNote(env, seed.ids, spec.refreshChannel); } : undefined));
           // The note this spec posted ends as soon as the spec does, before any later page can open with it showing.
           const expire = expireNote as (() => Promise<void>) | null; // assigned inside the callback above
           if (expire) { await expire(); expireNote = null; }
