@@ -73,11 +73,11 @@ async function createAgent(name: string): Promise<Agent> {
   return { principal, token };
 }
 
-async function send(bearer: string, command: Row): Promise<{ status: number; body: Row }> {
+async function send(bearer: string, command: Row, commandId: string = randomUUID()): Promise<{ status: number; body: Row }> {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST", signal: AbortSignal.timeout(15_000),
     headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-    body: JSON.stringify({ command_id: randomUUID(), client_version: "0.1.0",
+    body: JSON.stringify({ command_id: commandId, client_version: "0.1.0",
       workspace_id: workspace, stream: { kind: "workspace" }, command }),
   });
   return { status: response.status, body: await response.json() as Row };
@@ -115,6 +115,18 @@ async function reactionsSeenBy(userId: string, signalId: string): Promise<Array<
     const rows = await tx<{ kind: string; id: string; emoji: string }[]>`
       SELECT kind, id::text AS id, emoji FROM swarm_read.signal_reactions
       WHERE signal_id = ${signalId}::uuid ORDER BY created_at, reaction_id`;
+    return rows.map((row) => ({ ...row }));
+  });
+}
+
+/** Audit rows a person reads through the client audit view, which hides rows tagged with a private channel. */
+async function auditSeenBy(userId: string): Promise<Array<{ command_kind: string; actor_agent_principal: string | null; outcome: string }>> {
+  return await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    const rows = await tx<{ command_kind: string; actor_agent_principal: string | null; outcome: string }[]>`
+      SELECT command_kind, actor_agent_principal::text AS actor_agent_principal, outcome
+      FROM swarm_read.audit_log WHERE workspace_id = ${workspace}::uuid`;
     return rows.map((row) => ({ ...row }));
   });
 }
@@ -247,7 +259,9 @@ test("a private channel: only its members react or see reactions, and leaving it
   const lockId = String((created.body.channel as Row).channel_id);
   const message = await posted(owner.jwt, { channel: slug });
   const since = new Date(Date.now() - 1000);
-  assert.equal((await react(agentA.token, message, "\u{1F440}")).status, 200, "a member agent reacts");
+  const reactionCommand = randomUUID();
+  const reacted = await send(agentA.token, { kind: "add_reaction", signal_id: message, emoji: "\u{1F440}" }, reactionCommand);
+  assert.equal(reacted.status, 200, "a member agent reacts");
   assert.equal((await react(owner.jwt, message, "\u{1F44D}")).status, 200);
 
   // Outside the channel, the message does not exist: the same answer as an unknown id.
@@ -274,6 +288,31 @@ test("a private channel: only its members react or see reactions, and leaving it
   assert.equal(late.status, 404, "removed: the message is gone for it, though its owner stays");
   assert.deepEqual(late.body, unknown.body);
   assert.equal((await unreact(agentA.token, message, "\u{1F440}")).status, 404);
+
+  // Its earlier command id, replayed after removal and again with another payload: the audit rows keep
+  // the channel's tag from the stored success, so an admin outside the channel reads neither.
+  await sql`UPDATE swarm.memberships SET role = 'admin' WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
+  try {
+    const replayed = await send(agentA.token, { kind: "add_reaction", signal_id: message, emoji: "\u{1F440}" }, reactionCommand);
+    assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+    assert.deepEqual(replayed.body, reacted.body, "a replay answers what the first call did");
+    const conflicting = await send(agentA.token, { kind: "add_reaction", signal_id: message, emoji: "\u{1F680}" }, reactionCommand);
+    assert.equal(conflicting.status, 409);
+    const changedKind = await send(agentA.token, { kind: "remove_reaction", signal_id: message, emoji: "\u{1F440}" }, reactionCommand);
+    assert.equal(changedKind.status, 409);
+    const outsideAudit = await auditSeenBy(other.id);
+    assert.deepEqual(outsideAudit.filter((row) => row.actor_agent_principal === agentA.principal &&
+      ["replayed", "conflict"].includes(row.outcome)), [], "no replay or conflict row reaches an admin outside the channel");
+    // Control: the same replay on a public message is an ordinary row the admin reads.
+    const publicMessage = await posted(owner.jwt);
+    const publicCommand = randomUUID();
+    assert.equal((await send(agentA.token, { kind: "add_reaction", signal_id: publicMessage, emoji: "\u{1F440}" }, publicCommand)).status, 200);
+    assert.equal((await send(agentA.token, { kind: "add_reaction", signal_id: publicMessage, emoji: "\u{1F440}" }, publicCommand)).status, 200);
+    assert.ok((await auditSeenBy(other.id)).some((row) => row.actor_agent_principal === agentA.principal && row.outcome === "replayed"),
+      "the public replay is visible, so the empty result above is the tag, not the view");
+  } finally {
+    await sql`UPDATE swarm.memberships SET role = 'member' WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
+  }
 });
 
 test("a private message: only its parties react, and only their topics hear it", { timeout: 60_000 }, async () => {

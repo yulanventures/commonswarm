@@ -12671,6 +12671,13 @@ async function replayAuditChannelIds(
   if (typeof choiceAnswer?.signal_id === "string" && UUID_RE.test(choiceAnswer.signal_id)) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [choiceAnswer.signal_id]));
   }
+  /* A stored reaction names the message it was on, and its success proves the reactor could read
+   * that message then. Tag every later use of the command id with that message's channel, whatever
+   * the replay's kind or payload, so a reactor removed from a private channel since cannot write an
+   * untagged row that the channel's non-members would read. */
+  if (typeof stored?.emoji === "string" && typeof stored?.signal_id === "string" && UUID_RE.test(stored.signal_id)) {
+    addAll(await signalBatchChannelIdsForAuthorizedRefs(tx, workspaceId, [stored.signal_id]));
+  }
   const ledger = parseClaimLedger(rawResponse);
   if (ledger !== null && ledger.delivery_refs.length > 0) {
     addAll(await signalBatchChannelIdsForAuthorizedRefs(
