@@ -776,7 +776,9 @@ test("create a seat, replayed after the grant ends or expires: refused, and no c
   accepted(await createSeat("Expired grant seat", { commandId: expiringId }), "before expiry");
   await sql.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role = replica`;
-    await tx`UPDATE swarm.seat_admin_grants SET expires_at = clock_timestamp() - interval '1 second' WHERE grant_id = ${expiring}::uuid`;
+    // expires_at must stay after created_at (a CHECK), so the grant is moved back in time whole.
+    await tx`UPDATE swarm.seat_admin_grants SET created_at = clock_timestamp() - interval '1 hour',
+      expires_at = clock_timestamp() - interval '1 second' WHERE grant_id = ${expiring}::uuid`;
   });
   refused(await createSeat("Expired grant seat", { commandId: expiringId }), "seat_admin_inactive", "replay after expiry");
   refused(await createSeat("After expiry seat"), "seat_admin_inactive", "a new call after expiry");
@@ -836,7 +838,7 @@ test("create a seat: no seat credential is stored or logged anywhere", async () 
     assert.equal(n, 0, `${table} holds no seat credential`);
   }
   const [{ hashed }] = await sql<{ hashed: number }[]>`SELECT count(*)::int AS hashed FROM swarm.agent_tokens
-    WHERE token_hash = ANY(${seatTokens.map((t) => createHash("sha256").update(t).digest())}::bytea[])`;
+    WHERE encode(token_hash, 'hex') = ANY(${seatTokens.map((t) => createHash("sha256").update(t).digest("hex"))}::text[])`;
   assert.equal(hashed, seatTokens.length, "each credential is stored as its hash");
   for (const token of seatTokens) assert.ok(!allFunctionLogs.includes(token), "no function log line carries a seat credential");
 });
