@@ -982,6 +982,11 @@ test("MCP reply goes in the thread of a channel message, privately otherwise, an
     assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "mentions"), false);
     const addressed = await f.call("note", { body: "hi", to: "Owner", mentions: ["Owner"], request_id: "mention03" });
     assert.equal(addressed.value.code, "mention_addressed");
+    for (const [index, audience] of [{ to: "Owner" }, {}].entries()) {
+      const choice = await f.call("ask", { body: "pick", ...audience, choices: ["a", "b"], mentions: ["Owner"], request_id: `mention05${index}` });
+      assert.equal(choice.value.code, "mention_choice", "a choice ask, addressed or open, refuses mentions");
+      assert.equal(choice.value.message, MCP_ERROR_SENTENCES.mention_choice!.message);
+    }
     f.setAmbiguousRecipient(true);
     const ambiguous = await f.call("note", { body: "@Owner look", request_id: "mention04" });
     assert.equal(ambiguous.value.code, "mention_ambiguous");

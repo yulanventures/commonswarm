@@ -408,6 +408,8 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
            * member (to) or to anyone who reads it, in general or channel. */
           const choiceAsk = tool.name === "ask" ? askChoiceArguments(args as Record<string, unknown>) : null;
           if (choiceAsk !== null) {
+            // ask_choice carries no mentions on the command edge; an @Name in its body stays text.
+            if ((args as Record<string, unknown>).mentions !== undefined) throw new MentionResolutionError("mention_choice");
             let toUserId: string | null = null;
             if (args.to !== undefined) {
               const recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));

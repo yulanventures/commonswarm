@@ -225,7 +225,8 @@ export type MentionRefusal =
   | "mention_overflow"
   | "mention_addressed"
   | "mention_private_reply"
-  | "mention_ask_chain";
+  | "mention_ask_chain"
+  | "mention_choice";
 
 /**
  * Fixed sentences for the MCP surfaces, which show a model no producer prose. The CLI prints the
@@ -238,6 +239,7 @@ export const MENTION_REFUSAL_SENTENCES: Readonly<Record<MentionRefusal, string>>
   mention_addressed: "Mentions go on a message everyone in the channel can read, so they can't be combined with recipients.",
   mention_private_reply: "That message was addressed, so the reply goes privately to its author and can't mention anyone. Leave out mentions.",
   mention_ask_chain: "An ask with a parent continues a private ask chain, so it can't mention anyone. Leave out the parent or the mentions.",
+  mention_choice: "An ask with options or choices mentions nobody. Leave out mentions.",
 };
 
 export class MentionResolutionError extends Error {

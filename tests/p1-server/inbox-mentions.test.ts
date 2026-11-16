@@ -397,7 +397,7 @@ test("cswarm note from an agent token turns @Name into a mention that wakes the 
   const id = String((JSON.parse(result.stdout).signal as Row).id);
   const stored = await sql<{ mentioned_agent_principal_id: string }[]>`
     SELECT mentioned_agent_principal_id FROM swarm.signal_mentions WHERE signal_id = ${id}::uuid ORDER BY position`;
-  assert.deepEqual(stored.map((row) => row.mentioned_agent_principal_id), [mentioned.principal]);
+  assert.deepEqual(Array.from(stored, (row) => String(row.mentioned_agent_principal_id)), [mentioned.principal]);
   const woken = await sql`SELECT 1 FROM swarm.signal_deliveries
     WHERE signal_id = ${id}::uuid AND recipient_agent_principal_id = ${mentioned.principal}::uuid`;
   assert.equal(woken.length, 1, "the mention enqueued a delivery for the named agent");
@@ -414,7 +414,7 @@ test("cswarm reply answers a channel message in its thread, and an addressed one
     const id = String((JSON.parse(result.stdout).signal as Row).id);
     const [row] = await sql<{ thread_root_id: string | null; in_reply_to: string | null }[]>`
       SELECT thread_root_id, in_reply_to FROM swarm.signals WHERE id = ${id}::uuid`;
-    return row!;
+    return { thread_root_id: row!.thread_root_id, in_reply_to: row!.in_reply_to };
   };
   assert.deepEqual(await placed([rootId, "answer in the open"]), { thread_root_id: rootId, in_reply_to: null });
   assert.deepEqual(await placed([child, "same thread"]), { thread_root_id: rootId, in_reply_to: null });
@@ -430,7 +430,7 @@ test("cswarm reply answers a channel message in its thread, and an addressed one
     });
     const body = await response.json() as Row;
     assert.equal(response.status, 200, JSON.stringify(body));
-    return (body.signals as Row[]).map((row) => row.id);
+    return Array.from(body.signals as Row[], (row) => String(row.id));
   };
   assert.deepEqual(await byIdRead(bystander, child), [child]);
   assert.deepEqual(await byIdRead(bystander, direct), [], "a message addressed to another agent is not returned");

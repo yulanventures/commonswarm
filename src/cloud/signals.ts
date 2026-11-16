@@ -1807,9 +1807,10 @@ export async function readReplyTarget(
   }
   if (result === null) throw plainTransportError();
   const { response, body } = result;
-  /* A 4xx leaves the flags in charge: an edge from before `signal_id` answers 400, and a refused
-   * read is refused again, with the reply's own sentence, when the reply is sent. */
-  if (response.status >= 400 && response.status < 500) return null;
+  /* These leave the flags in charge: an edge from before `signal_id` answers 400, and a refused or
+   * missing read is refused again, with the reply's own sentence, when the reply is sent. Anything
+   * else (a rate limit, a timeout) is an error: guessing would send a thread reply privately. */
+  if ([400, 401, 403, 404].includes(response.status)) return null;
   if (!response.ok) throwSignalHttp(response, body);
   const rows = credential.kind === "agent"
     ? (body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).signals : undefined)

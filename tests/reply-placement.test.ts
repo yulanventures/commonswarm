@@ -17,6 +17,8 @@ import {
 import { MENTION_REFUSAL_SENTENCES, MentionResolutionError, type MentionRosterEntry } from "../src/protocol/mention-address.js";
 import { MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
 import { mapMcpError } from "../src/mcp/errors.js";
+import { readReplyTarget } from "../src/cloud/signals.js";
+import { cloudTarget } from "../src/cloud/config.js";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
 import {
@@ -159,3 +161,38 @@ test("hosted tools send the placed reply and the resolved mentions", () => {
   });
   assert.deepEqual(hostedReplyPlacement({ ...reply, private: true }, ROOT), { placement: "private", inReplyTo: CHILD, advisory: null });
 });
+
+test("the reply target read: one row by id for an agent and for a person, and which answers leave the flags in charge", async () => {
+  const target = cloudTarget("http://127.0.0.1:1", "anon-key");
+  const seen: Array<{ url: string; init: RequestInit }> = [];
+  const answer = (status: number, body: unknown): typeof fetch => (async (url: string | URL | Request, init?: RequestInit) => {
+    seen.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const agent = { kind: "agent" as const, token: "agent-token" };
+  const person = { kind: "human" as const, accessToken: "person-jwt", userId: USER };
+
+  const row = { id: CHILD, to: null, to_agent: null, in_reply_to: null, thread_root_id: ROOT, recipients: [], audience: "workspace" };
+  assert.deepEqual(await readReplyTarget(target, agent, WORKSPACE, CHILD.toUpperCase(), answer(200, { signals: [row] })),
+    { id: CHILD, to: null, to_agent: null, in_reply_to: null, thread_root_id: ROOT, recipients: [], audience: "workspace" });
+  assert.deepEqual(JSON.parse(String(seen.at(-1)!.init.body)), { resource: "signals", workspace_id: WORKSPACE, inbox: false,
+    about: null, kind: null, in_reply_to: null, since: null, limit: 1, include_stale: true, signal_id: CHILD });
+  assert.equal(await readReplyTarget(target, agent, WORKSPACE, CHILD, answer(200, { signals: [] })), null);
+  assert.equal(await readReplyTarget(target, agent, WORKSPACE, CHILD, answer(200, { signals: [{ ...row, id: ROOT }] })), null,
+    "a row that is not the one asked for is never taken for it");
+
+  const placed = await readReplyTarget(target, person, WORKSPACE, DM, answer(200, [{ id: DM, to: USER, to_agent: null, in_reply_to: null, thread_root_id: null }]));
+  assert.equal(placed?.to, USER);
+  const url = new URL(seen.at(-1)!.url);
+  assert.equal(url.pathname, "/rest/v1/signals");
+  assert.equal(url.searchParams.get("id"), `eq.${DM}`);
+  assert.equal(url.searchParams.get("workspace_id"), `eq.${WORKSPACE}`);
+  assert.equal(url.searchParams.get("select"), "id,to,to_agent,in_reply_to,thread_root_id");
+  assert.equal((seen.at(-1)!.init.headers as Record<string, string>)["accept-profile"], "swarm_read");
+
+  for (const status of [400, 401, 403, 404]) {
+    assert.equal(await readReplyTarget(target, agent, WORKSPACE, ROOT, answer(status, { error: "x" })), null, String(status));
+  }
+  await assert.rejects(readReplyTarget(target, agent, WORKSPACE, ROOT, answer(429, { error: "rate_limited" })), /HTTP 429/);
+});
+
