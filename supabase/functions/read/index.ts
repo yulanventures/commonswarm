@@ -28,6 +28,7 @@ import {
 } from "../_shared/channels.ts";
 import { optionalWake } from "../_shared/wake.ts";
 import { channelPageDeliverable, fitChannelPage } from "../mcp/channel-page.ts";
+import { replyTargetAnswer, type ReplyTargetRow } from "./reply-target.ts";
 import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
@@ -1742,27 +1743,28 @@ export async function handleHostedRead(
     }
     if (input.resource === "reply_target") {
       /* A hosted reply to a message everyone in its channel can read goes in that message's thread.
-       * Only such a message is answered here, through the same view and claims channel_read reads
-       * with, so this tells the seat nothing channel_read could not. Anything else, including a
-       * message the seat can't read, answers null and the reply stays private, refused as before. */
-      const [row] = await tx<{ id: string; thread_root_id: string | null; from: string; from_kind: string }[]>`
-        SELECT s.id, s.thread_root_id, s."from", s.from_kind
+       * ELIGIBILITY IS channel_read's OWN, not a copy of it: the target is admitted only when
+       * swarm_read.channel_messages accepts it as the cursor of its channel, which applies every
+       * rule a channel_read page does (the caller's channel access, the message still live, no
+       * addressee, recipient, private reply or ask chain, and the same for its thread root). The view
+       * row only names the channel to ask and, once admitted, the author and root. Expired, hidden,
+       * addressed and unknown targets all answer the same null, and the reply stays private. */
+      const targetId = input.signal_id.toLowerCase();
+      const [row] = await tx<ReplyTargetRow[]>`
+        SELECT s.id, s.thread_root_id, s."from", s.from_kind,
+          swarm_read.channel_messages(
+            s.workspace_id,
+            CASE WHEN s.channel_id IS NULL THEN 'general'
+              ELSE (SELECT c.slug FROM swarm_read.channels AS c
+                WHERE c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id) END,
+            s.id,
+            1
+          ) AS page
         FROM swarm_read.signals AS s
-        WHERE s.workspace_id = ${seat.workspace_id}::uuid
-          AND s.id = ${input.signal_id.toLowerCase()}::uuid
-          AND s."to" IS NULL AND s.to_agent IS NULL AND s.in_reply_to IS NULL
-          AND jsonb_array_length(COALESCE(s.recipients, '[]'::jsonb)) = 0
+        WHERE s.workspace_id = ${seat.workspace_id}::uuid AND s.id = ${targetId}::uuid
         LIMIT 1
       `;
-      return { status: 200, body: {
-        context,
-        signal_id: input.signal_id.toLowerCase(),
-        thread_root_id: row === undefined ? null : row.thread_root_id ?? row.id,
-        // Who a thread reply notifies. The seat's own agent is left out: it does not mention itself.
-        author: row === undefined || (row.from_kind === "agent" && row.from === seat.principal_id)
-          ? null
-          : { kind: row.from_kind, id: row.from },
-      } };
+      return { status: 200, body: { context, signal_id: targetId, ...replyTargetAnswer(row, seat.principal_id) } };
     }
     if (input.resource === "channels") {
       // The read role's view, gated by the seat owner's membership; no new grant.

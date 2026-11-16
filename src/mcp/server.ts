@@ -12,7 +12,7 @@ import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
 import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
 import {
-  addReplyAuthorMention, bodyMayMention, MentionResolutionError, replyAuthorMentionRefused, replyRetryCommandId, resolveMentions,
+  addReplyAuthorMention, bodyMayMention, MentionResolutionError, replyAuthorMentionRefused, replyAuthorNotNotified, replyRetryCommandId, resolveMentions,
   withoutReplyAuthor, type WireMention,
 } from "../protocol/mention-address.js";
 import { decideReplyPlacement, type ReplyPlacement } from "../protocol/reply-placement.js";
@@ -490,6 +490,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           };
           const client = new ThinCommandClient(profileTarget(profile), fetcher);
           let sent;
+          let authorNotNotified: string | null = null;
           try {
             try {
               sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
@@ -499,13 +500,15 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
                * derived id, so a retried request takes the same two ids. */
               if (!withAuthor.authorAdded || replyAuthor === null || !(error instanceof CommandHttpError) ||
                   !replyAuthorMentionRefused(error.status, error.code)) throw error;
+              authorNotNotified = replyAuthorNotNotified(error.code);
               const remaining = withoutReplyAuthor(mentions, replyAuthor);
               const { mentions: _dropped, ...rest } = command;
               command = { ...rest, ...(remaining.length === 0 ? {} : { mentions: remaining }) };
               sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
                 commandId: replyRetryCommandId(args.request_id!), signal: extra.signal });
             }
-            output = { ...tool.mapResult(sent), ...(parentContextSentence === undefined ? {} : { parent_context: parentContextSentence }) };
+            output = { ...tool.mapResult(sent), ...(parentContextSentence === undefined ? {} : { parent_context: parentContextSentence }),
+              ...(authorNotNotified === null ? {} : { author_not_notified: authorNotNotified }) };
             unknownOnce.delete(`${tool.name}:${args.request_id}`);
           } catch (error) {
             if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {

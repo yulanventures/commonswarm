@@ -4,7 +4,7 @@
  * roster when a mention has to be resolved, and the reply's target when a reply has to be placed.
  */
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
-import { addReplyAuthorMention, bodyMayMention, MentionResolutionError, resolveMentions, type MentionRosterEntry, type WireMention } from "../../../src/protocol/mention-address.ts";
+import { addReplyAuthorMention, bodyMayMention, MentionResolutionError, replyAuthorMentionRefused, replyAuthorNotNotified, replyRetryCommandId, resolveMentions, withoutReplyAuthor, type MentionRosterEntry, type WireMention } from "../../../src/protocol/mention-address.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { decideReplyPlacement, type ReplyAuthor, type ReplyPlacement } from "../../../src/protocol/reply-placement.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
@@ -115,6 +115,28 @@ export function hostedImplicitAuthor(
   if (placement?.placement !== "thread" || placement.author === null) return null;
   const explicit = roster === null ? [] : resolveMentions({ body: String(args.body ?? ""), selectors: mentionSelectors(args), roster });
   return addReplyAuthorMention(explicit, placement.author).authorAdded ? placement.author : null;
+}
+
+/**
+ * Send a hosted signal, and for a thread reply whose implicit author mention the edge refused (a
+ * bare 403 for an author no longer live, or 409 mention_hop_limit), send it once more without that
+ * mention under a derived request id. The answer then says the author was not notified.
+ */
+export async function sendHostedSignal<R extends { status: number; body: Record<string, unknown> }>(
+  name: HostedSignalTool,
+  args: HostedToolArguments,
+  workspaceId: string,
+  resolved: { mentions: readonly WireMention[]; placement: ReplyPlacement | null; implicitAuthor: ReplyAuthor | null },
+  send: (input: ReturnType<typeof hostedSignalCommand>) => Promise<R>,
+): Promise<{ result: R; authorNotNotified: string | null }> {
+  const first = await send(hostedSignalCommand(name, args, workspaceId, resolved));
+  const code = typeof first.body.error === "string" ? first.body.error : null;
+  if (resolved.implicitAuthor === null || !replyAuthorMentionRefused(first.status, code)) {
+    return { result: first, authorNotNotified: null };
+  }
+  const result = await send(hostedSignalCommand(name, { ...args, request_id: replyRetryCommandId(String(args.request_id)) }, workspaceId,
+    { mentions: withoutReplyAuthor(resolved.mentions, resolved.implicitAuthor), placement: resolved.placement }));
+  return { result, authorNotNotified: replyAuthorNotNotified(code) };
 }
 
 export function hostedSignalCommand(

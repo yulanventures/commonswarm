@@ -21,11 +21,13 @@ import {
 import { MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
 import { mapMcpError } from "../src/mcp/errors.js";
 import { readReplyTarget } from "../src/cloud/signals.js";
+// @ts-expect-error TS5097: exercise the Deno source through tsx.
+import { replyTargetAnswer } from "../supabase/functions/read/reply-target.ts";
 import { cloudTarget } from "../src/cloud/config.js";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
 import {
-  hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, sendHostedSignal, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 } from "../supabase/functions/mcp/signal-tools.ts";
 
@@ -247,5 +249,44 @@ test("the hosted reply adds the author the reply_target read names, and knows wh
   assert.deepEqual(hostedSignalCommand("reply", reply, WORKSPACE, { mentions: hostedMentions("reply", reply, null, thread), placement: thread }).command.mentions,
     [{ kind: "agent", id: AGENT }]);
   assert.deepEqual(hostedMentions("reply", { ...reply, private: true }, null, hostedReplyPlacement({ ...reply, private: true }, ROOT, { kind: "agent", id: AGENT })), []);
+});
+
+test("reply_target answers only what channel_read would show, and every other target alike", () => {
+  const SEAT = AGENT;
+  const row = { id: CHILD, thread_root_id: ROOT, from: USER, from_kind: "user", page: { messages: [], next: null } };
+  assert.deepEqual(replyTargetAnswer(row, SEAT), { thread_root_id: ROOT, author: { kind: "user", id: USER } });
+  assert.deepEqual(replyTargetAnswer({ ...row, thread_root_id: null }, SEAT), { thread_root_id: CHILD, author: { kind: "user", id: USER } });
+  assert.deepEqual(replyTargetAnswer({ ...row, from: SEAT, from_kind: "agent" }, SEAT), { thread_root_id: ROOT, author: null });
+  const none = { thread_root_id: null, author: null };
+  for (const page of [null, { error: "cursor_not_found" }, { error: "channel_not_found" }]) {
+    assert.deepEqual(replyTargetAnswer({ ...row, page }, SEAT), none, JSON.stringify(page));
+  }
+  assert.deepEqual(replyTargetAnswer(undefined, SEAT), none);
+});
+
+test("the hosted reply retries without the implicit author once, and says the author was not notified", async () => {
+  const reply = { seat, signal_id: CHILD, body: "done", request_id: "request_0004" };
+  const author = { kind: "agent" as const, id: AGENT };
+  const placement = hostedReplyPlacement(reply, ROOT, author);
+  const sends: Array<{ command_id: unknown; mentions: unknown }> = [];
+  const answers = [{ status: 409, body: { error: "mention_hop_limit" } }, { status: 200, body: { ok: true } }];
+  const sent = await sendHostedSignal("reply", reply, WORKSPACE, { mentions: [author], placement, implicitAuthor: author },
+    async (input: { command_id: unknown; command: { mentions?: unknown } }) => {
+      sends.push({ command_id: input.command_id, mentions: input.command.mentions ?? null });
+      return answers[sends.length - 1]!;
+    });
+  assert.deepEqual(sends, [{ command_id: "request_0004", mentions: [author] }, { command_id: "request_0004_noauth", mentions: null }]);
+  assert.equal(sent.result.status, 200);
+  assert.match(sent.authorNotNotified!, /without notifying its author/);
+
+  // Not implicit, or another refusal: one send, its answer as it is.
+  for (const [implicitAuthor, answer] of [[null, { status: 403, body: { error: "forbidden" } }], [author, { status: 404, body: { error: "thread_root_not_found" } }]] as const) {
+    let count = 0;
+    const once = await sendHostedSignal("reply", reply, WORKSPACE, { mentions: [author], placement, implicitAuthor },
+      async () => { count += 1; return answer; });
+    assert.equal(count, 1);
+    assert.equal(once.authorNotNotified, null);
+    assert.equal(once.result.status, answer.status);
+  }
 });
 

@@ -68,6 +68,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   let serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
   let workspaceName = "Test workspace";
   let ambiguousRecipient = false, malformedRead = false, renewalReason: string | null = null;
+  let refusedMention: string | null = null;
   let incoming = [signal(incomingBody, "ask")];
   const edge = createServer((req, res) => {
     let raw = "";
@@ -153,6 +154,10 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
           ...(sendError.message === undefined ? {} : { message: sendError.message }) });
         if (serverConflict) { serverConflict = false; return send(409, { error: "command_id_conflict", message: "Request ID conflicts with another command." }); }
         if (sendRefusal) return send(403, { error: "signal_refused", message: "Signal refused." });
+        // A mention of someone no longer live: the edge's bare 403.
+        if (refusedMention !== null && (body.command.mentions ?? []).some((m: { id: string }) => m.id === refusedMention)) {
+          return send(403, { error: "forbidden" });
+        }
         const previous = committed.get(body.command_id);
         const response = { status: "accepted", ok: true, event_ids: [], events: [], signal: {
           ...signal(body.command.body, body.command.signal_kind), from: AGENT, from_kind: "agent",
@@ -238,6 +243,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setIncoming: (rows: ReturnType<typeof signal>[]) => { incoming = rows; },
     setWorkspaceName: (name: string) => { workspaceName = name; },
     setAmbiguousRecipient: (value: boolean) => { ambiguousRecipient = value; },
+    refuseMentionOf: (id: string | null) => { refusedMention = id; },
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
     setFilePrecondition: (value: number | null) => { filePrecondition = value; },
@@ -988,6 +994,16 @@ test("MCP reply goes in the thread of a channel message, privately otherwise, an
       assert.equal(choice.value.message, MCP_ERROR_SENTENCES.mention_choice!.message);
     }
     f.setAmbiguousRecipient(true);
+    // The implicit author mention refused (the author left): sent again without it, and said so.
+    f.setIncoming([{ ...signal("in the open", "note"), to_agent: null, thread_root_id: ROOT, audience: "workspace" } as unknown as ReturnType<typeof signal>]);
+    f.refuseMentionOf(OWNER);
+    const fallback = f.posts.length;
+    const unnotified = await f.call("reply", { signal_id: ID, body: "done", request_id: "authorgone1" });
+    assert.deepEqual(f.posts.slice(fallback).map((post) => [post.command_id, post.command.mentions ?? null]),
+      [["authorgone1", [{ kind: "user", id: OWNER }]], ["authorgone1_noauth", null]]);
+    assert.notEqual(unnotified.result.isError, true);
+    assert.match(unnotified.value.author_not_notified, /could not be mentioned/);
+    f.refuseMentionOf(null);
     const ambiguous = await f.call("note", { body: "@Owner look", request_id: "mention04" });
     assert.equal(ambiguous.value.code, "mention_ambiguous");
     assert.equal(ambiguous.value.message, MCP_ERROR_SENTENCES.mention_ambiguous!.message);
