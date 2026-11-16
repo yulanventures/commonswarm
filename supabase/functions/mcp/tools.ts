@@ -8,7 +8,7 @@ import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannel
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { contentTypeForName } from "../../../src/protocol/file-types.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
-import { MENTION_MAX_RECIPIENTS } from "../../../src/protocol/mention-address.ts";
+import { bodyMayMention, MENTION_MAX_RECIPIENTS } from "../../../src/protocol/mention-address.ts";
 
 import {
   HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError,
@@ -101,9 +101,8 @@ export const CORE_TOOL_TABLE = [
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Ask workspace participants: privately with recipients, or in a channel with mentions (@Name in the body counts as a mention). Optionally attach files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may, and attachments and mentions are not allowed. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    // An ask names its audience: recipients, mentions, or options/choices (then anyone who reads it may answer).
-    inputSchema: { ...objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
-      anyOf: [{ required: ["recipients"] }, { required: ["mentions"] }, { required: ["options"] }, { required: ["choices"] }] },
+    // No anyOf: recipients, mentions, an @Name in the body, or options/choices name the audience (validateHostedToolArguments).
+    inputSchema: objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",
@@ -392,6 +391,11 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   memory_forget: { allowed: ["seat", "memory_id", "request_id"], required: ["seat", "memory_id", "request_id"] },
 };
 
+/** The refusal for an ask that names nobody, in the argument validator's own format. */
+export function askAudienceRefusal(): HostedToolInputError {
+  return new HostedToolInputError(`Invalid ask_audience: ${EXPECTED.ask_audience}.`);
+}
+
 export class HostedToolInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -412,7 +416,7 @@ const EXPECTED: Record<string, string> = {
   ack: "provide the batch UUID returned by check, or omit ack to open the inbox",
   body: "provide 1 to 8000 characters with non-whitespace text; only tab, newline and carriage return are allowed control characters",
   recipients: "provide 1 to 20 objects with only kind (user or agent) and id (UUID); use members to find recipients",
-  ask_audience: "provide recipients for a private ask, mentions for an ask in a channel, or options or choices for an ask anyone who reads it may answer",
+  ask_audience: "provide recipients for a private ask, mentions or an @Name in the body for an ask in a channel, or options or choices for an ask anyone who reads it may answer",
   choice_mentions: "an ask with options or choices mentions nobody; leave out mentions",
   mentions: `provide 1 to ${MENTION_MAX_RECIPIENTS} names or UUIDs from members, each once; mentions go on a message everyone in the channel can read, so leave out recipients`,
   private: "provide true to reply privately to the author, or omit it",
@@ -589,7 +593,10 @@ export function validateHostedToolArguments(
     if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
     return args;
   }
-  if (name === "ask" && args.recipients === undefined && args.mentions === undefined) invalid("ask_audience");
+  // An ask names someone: recipients, mentions, or an @tag in the body (resolved later; see askAudienceRefusal).
+  if (name === "ask" && args.recipients === undefined && args.mentions === undefined && !bodyMayMention(String(args.body))) {
+    invalid("ask_audience");
+  }
   if ((name === "ask" || name === "note") && args.recipients !== undefined && !validRecipients(args.recipients)) invalid("recipients");
   if (args.mentions !== undefined && !validMentions(args.mentions)) invalid("mentions");
   if (args.mentions !== undefined && args.recipients !== undefined) invalid("mentions");

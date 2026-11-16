@@ -25,9 +25,9 @@ import { readReplyTarget } from "../src/cloud/signals.js";
 import { replyTargetAnswer } from "../supabase/functions/read/reply-target.ts";
 import { cloudTarget } from "../src/cloud/config.js";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
-import { HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
+import { askAudienceRefusal, HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
 import {
-  hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, sendHostedSignal, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  hostedAskNamesNobody, hostedImplicitAuthor, hostedMentions, hostedNeedsReplyTarget, sendHostedSignal, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 } from "../supabase/functions/mcp/signal-tools.ts";
 
@@ -105,14 +105,25 @@ test("local MCP note, ask and reply take mentions; reply takes private; mention 
 test("hosted note, ask and reply take mentions; ask needs recipients or mentions; reply takes private", () => {
   const schema = (name: string) => (HOSTED_TOOL_TABLE.find((row: { name: string }) => row.name === name) as { inputSchema: Record<string, any> }).inputSchema;
   assert.deepEqual(schema("ask").required, ["seat", "body", "request_id"]);
-  assert.deepEqual(schema("ask").anyOf, [{ required: ["recipients"] }, { required: ["mentions"] }, { required: ["options"] }, { required: ["choices"] }]);
+  assert.equal(schema("ask").anyOf, undefined, "an @tag in the body is enough, as on note and the local ask");
   assert.ok(schema("note").properties.mentions);
   assert.ok(schema("reply").properties.private);
   const base = { seat, body: "hello @Wren", request_id: "request_0001" };
   assert.deepEqual(validateHostedToolArguments("ask", { ...base, mentions: ["Wren"] }), { ...base, mentions: ["Wren"] });
+  assert.deepEqual(validateHostedToolArguments("ask", base), base, "@Wren in the body passes validation and is resolved later");
+  // After resolution an ask that names nobody (the body's @ was an address) is refused in the same format.
+  assert.equal(hostedAskNamesNobody("ask", { ...base, body: "mail user@example.com" }, []), true);
+  assert.equal(hostedAskNamesNobody("ask", base, [{ kind: "agent", id: AGENT }]), false);
+  assert.equal(hostedAskNamesNobody("ask", { ...base, recipients: [{ kind: "user", id: USER }] }, []), false);
+  assert.equal(hostedAskNamesNobody("note", base, []), false);
+  assert.equal(hostedAskNamesNobody("ask", { ...base, body: "pick one", choices: ["A", "B"] }, []), false, "choices name the audience");
+  assert.deepEqual(validateHostedToolArguments("ask", { ...base, body: "pick one", choices: ["A", "B"] }).choices, ["A", "B"]);
+  assert.throws(() => validateHostedToolArguments("ask", { ...base, choices: ["A", "B"], mentions: ["Wren"] }),
+    (error: unknown) => error instanceof HostedToolInputError && /^Invalid mentions: an ask with options or choices mentions nobody/u.test(error.message));
+  assert.match(askAudienceRefusal().message, /^Invalid ask_audience: provide recipients for a private ask, mentions or an @Name/u);
   assert.deepEqual(validateHostedToolArguments("reply", { ...base, signal_id: ROOT, private: true }), { ...base, signal_id: ROOT, private: true });
   const refused: Array<[string, Record<string, unknown>, RegExp]> = [
-    ["ask", base, /^Invalid ask_audience: provide recipients for a private ask, mentions for an ask in a channel/u],
+    ["ask", { ...base, body: "anyone around?" }, /^Invalid ask_audience: provide recipients for a private ask, mentions or an @Name/u],
     ["note", { ...base, mentions: ["Wren"], recipients: [{ kind: "user", id: USER }] }, /^Invalid mentions/u],
     ["note", { ...base, mentions: ["Wren", "wren"] }, /^Invalid mentions/u],
     ["note", { ...base, mentions: [] }, /^Invalid mentions/u],

@@ -40,6 +40,15 @@ export function hostedNeedsRoster(name: HostedSignalTool, args: HostedToolArgume
   return mentionSelectors(args).length > 0 || bodyMayMention(String(args.body ?? ""));
 }
 
+/**
+ * True for an ask that ends up naming nobody: no recipients and no resolved mention, as when the
+ * body's only "@" was in an address such as user@example.com. It is refused, not sent as a broadcast.
+ * An ask with options or choices names its audience by them: anyone who reads it may answer.
+ */
+export function hostedAskNamesNobody(name: HostedSignalTool, args: HostedToolArguments, mentions: readonly WireMention[]): boolean {
+  return name === "ask" && !hostedChoiceAsk(name, args) && recipientsOf(args) === null && mentions.length === 0;
+}
+
 /** True when a reply's target must be read to place it. */
 export function hostedNeedsReplyTarget(name: HostedSignalTool, args: HostedToolArguments): boolean {
   return name === "reply" && args.private !== true;

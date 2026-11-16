@@ -48,9 +48,9 @@ import type {
   HostedToolCall,
   HostedToolName,
 } from "./tools.ts";
-import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, HostedToolInputError } from "./tools.ts";
+import { askAudienceRefusal, FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, HostedToolInputError } from "./tools.ts";
 import {
-  hostedImplicitAuthor, hostedMentions, sendHostedSignal, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  hostedAskNamesNobody, hostedImplicitAuthor, hostedMentions, sendHostedSignal, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
   MentionResolutionError, type HostedSignalTool,
 } from "./signal-tools.ts";
 import { MENTION_REFUSAL_SENTENCES } from "../../../src/protocol/mention-address.ts";
@@ -508,6 +508,7 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
     if (error instanceof MentionResolutionError) throw new HostedToolInputError(MENTION_REFUSAL_SENTENCES[error.code]);
     throw error;
   }
+  if (hostedAskNamesNobody(tool, args, mentions)) throw askAudienceRefusal();
   /* Refused because of the implicit author mention (the author left, or the thread's agent hop
    * limit): the reply goes once more without it, under a derived id. Explicit mentions stay. */
   const implicitAuthor = tool === "reply" ? hostedImplicitAuthor(args, roster, placement) : null;
