@@ -24,6 +24,32 @@
     ]
   },
   {
+    "id": "app.catchup.choice",
+    "kind": "view",
+    "path": "/app?v=catchup",
+    "setup": [
+      {
+        "waitFor": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+      },
+      {
+        "scroll": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+      }
+    ],
+    "ready": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"]) .hm-decision__option",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+    ]
+  },
+  {
     "id": "app.chat.general",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",

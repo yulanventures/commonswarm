@@ -173,6 +173,9 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you {
   grid-template-columns: 32px minmax(0, 1fr) auto;
 }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you:not(:has(.hm-actions)) {
+  grid-template-columns: 32px minmax(0, 1fr);
+}
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .hm-catchup .hm-catchup-needs .hm-needs-you > :is(.hm-person-avatar, .hm-agent-orb, .hm-needs-glyph) {
   inline-size: 32px;
   block-size: 32px;
