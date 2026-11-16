@@ -15,7 +15,7 @@ import {
   type ReplyTarget,
 } from "../src/protocol/reply-placement.js";
 import {
-  addReplyAuthorMention, MENTION_REFUSAL_SENTENCES, MentionResolutionError, replyAuthorMentionRefused, replyRetryCommandId,
+  addReplyAuthorMention, MENTION_REFUSAL_SENTENCES, MentionResolutionError, replyAuthorMentionRefused, replyRetryCommandId, sha256Hex,
   withoutReplyAuthor, type MentionRosterEntry,
 } from "../src/protocol/mention-address.js";
 import { MCP_TOOLS, validateMcpArguments } from "../src/mcp/tools.js";
@@ -24,6 +24,7 @@ import { readReplyTarget } from "../src/cloud/signals.js";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { replyTargetAnswer } from "../supabase/functions/read/reply-target.ts";
 import { cloudTarget } from "../src/cloud/config.js";
+import { createHash } from "node:crypto";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { askAudienceRefusal, HOSTED_TOOL_TABLE, HostedToolInputError, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
 import {
@@ -248,17 +249,20 @@ test("a thread reply notifies the author it answers: not the replier, never twic
   assert.equal(replyRetryCommandId("request_0001"), "request_0001_noauth");
   const ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
   assert.equal(replyRetryCommandId("a".repeat(65)), `${"a".repeat(65)}_noauth`);
-  for (const length of [66, 72]) {
-    const derived = replyRetryCommandId("a".repeat(length));
+  for (const [length, expected] of [[65, 72], [66, 68], [72, 68]] as const) {
+    const id = "a".repeat(length);
+    const derived = replyRetryCommandId(id);
+    assert.equal(derived.length, expected, String(length));
     assert.match(derived, ID_RE, String(length));
-    assert.match(derived, /^a{56}_[0-9a-f]{8}_na$/);
+    assert.equal(replyRetryCommandId(id), derived, "the same id always derives the same retry id");
   }
-  assert.match(replyRetryCommandId("a".repeat(65)), ID_RE);
+  assert.equal(replyRetryCommandId("b".repeat(72)), `${"b".repeat(32)}_${createHash("sha256").update("b".repeat(72)).digest("hex").slice(0, 32)}_na`);
+  // The collision the 32-bit digest had: two valid 72-character ids that must retry under different ids.
+  const prefix = "x".repeat(56);
+  const [a, b] = [`${prefix}937af85842425260`, `${prefix}6d39c3a6fce80900`];
+  assert.notEqual(replyRetryCommandId(a), replyRetryCommandId(b));
   const shared = "r".repeat(65);
-  const [one, two] = [`${shared}_try1`, `${shared}_try2`];
-  assert.equal(one.length, 70);
-  assert.notEqual(replyRetryCommandId(one), replyRetryCommandId(two), "ids sharing 65 characters still retry under different ids");
-  assert.equal(replyRetryCommandId(one), replyRetryCommandId(one), "and the same id always derives the same one");
+  assert.notEqual(replyRetryCommandId(`${shared}_try1`), replyRetryCommandId(`${shared}_try2`));
 });
 
 test("the hosted reply adds the author the reply_target read names, and knows when it was implicit", () => {
@@ -310,6 +314,16 @@ test("the hosted reply retries without the implicit author once, and says the au
     assert.equal(count, 1);
     assert.equal(once.authorNotNotified, null);
     assert.equal(once.result.status, answer.status);
+  }
+});
+
+test("sha256Hex matches the FIPS vectors and node:crypto", () => {
+  assert.equal(sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert.equal(sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  assert.equal(sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  for (const value of ["x".repeat(55), "x".repeat(56), "x".repeat(64), "x".repeat(1000), "request_0001", "naïve ✓ 🐝"]) {
+    assert.equal(sha256Hex(value), createHash("sha256").update(value, "utf8").digest("hex"), JSON.stringify(value.slice(0, 20)));
   }
 });
 
