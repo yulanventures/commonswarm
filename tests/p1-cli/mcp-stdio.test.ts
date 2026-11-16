@@ -954,6 +954,41 @@ test("MCP react adds or removes one emoji with request_id as its command id, and
   } finally { await f.close(); }
 });
 
+test("MCP reply goes in the thread of a channel message, privately otherwise, and @Name becomes a mention", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  const ROOT = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    // A message inside a thread everyone in the channel reads: the reply roots on the thread.
+    f.setIncoming([{ ...signal("in the open", "note"), to_agent: null, thread_root_id: ROOT, audience: "workspace" } as unknown as ReturnType<typeof signal>]);
+    await f.call("reply", { signal_id: ID, body: "done @Owner", request_id: "thread001" });
+    assert.deepEqual(f.posts.at(-1)!.command, { kind: "post_signal", signal_kind: "note", body: "done @Owner",
+      to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: ROOT,
+      mentions: [{ kind: "user", id: OWNER }] });
+    // private: true answers the author whatever the message is, and leaves the body's tag as text.
+    await f.call("reply", { signal_id: ID, body: "just you @Owner", private: true, request_id: "private01" });
+    assert.deepEqual(f.posts.at(-1)!.command, { kind: "post_signal", signal_kind: "note", body: "just you @Owner",
+      to_user_id: null, to_agent_principal_id: null, in_reply_to: ID, about: null });
+    // An addressed message is answered privately; an explicit mention there is refused before sending.
+    f.setIncoming([signal("for you", "ask")]);
+    const sent = f.posts.length;
+    const refused = await f.call("reply", { signal_id: ID, body: "ok", mentions: ["Owner"], request_id: "private02" });
+    assert.equal(refused.result.isError, true);
+    assert.equal(refused.value.code, "mention_private_reply");
+    assert.equal(f.posts.length, sent);
+    // A public note resolves @Name and mentions; the mention key is absent when nobody is named.
+    await f.call("note", { body: "heads up @owner", mentions: ["Test agent"], request_id: "mention01" });
+    assert.deepEqual(f.posts.at(-1)!.command.mentions, [{ kind: "user", id: OWNER }, { kind: "agent", id: AGENT }]);
+    await f.call("note", { body: "mail me@owner.example", request_id: "mention02" });
+    assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "mentions"), false);
+    const addressed = await f.call("note", { body: "hi", to: "Owner", mentions: ["Owner"], request_id: "mention03" });
+    assert.equal(addressed.value.code, "mention_addressed");
+    f.setAmbiguousRecipient(true);
+    const ambiguous = await f.call("note", { body: "@Owner look", request_id: "mention04" });
+    assert.equal(ambiguous.value.code, "mention_ambiguous");
+    assert.equal(ambiguous.value.message, MCP_ERROR_SENTENCES.mention_ambiguous!.message);
+  } finally { await f.close(); }
+});
+
 test("re-raise refusals name the ask's state and what can still be done", () => {
   for (const [code, next] of [["ask_expired", "send a new ask if it still matters"], ["ask_answered", "call check to read the replies"],
     ["reraise_too_soon", "wait until 24 hours after the last re-raise, then use a new request_id"], ["reraise_unsupported", "send a new ask if it still matters"]] as const) {

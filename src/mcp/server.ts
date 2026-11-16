@@ -10,7 +10,9 @@ import { AgentSetupError, openProfileCredential, privatePath, profileSessionCont
 import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
-import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
+import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
+import { bodyMayMention, MentionResolutionError, resolveMentions, type WireMention } from "../protocol/mention-address.js";
+import { decideReplyPlacement, type ReplyPlacement } from "../protocol/reply-placement.js";
 import { listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
@@ -426,11 +428,37 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             }
             break;
           }
+          const raw = args as Record<string, unknown>;
+          const selectors = Array.isArray(raw.mentions) ? (raw.mentions as string[]) : [];
+          /* A reply goes in the thread of a message everyone in its channel can read, and privately
+           * otherwise (src/protocol/reply-placement.ts). A message this agent can't read leaves the
+           * reply private, refused exactly as before. */
+          let placement: ReplyPlacement | null = null;
+          if (tool.name === "reply") {
+            const signalId = args.signal_id!.toLowerCase();
+            const privately = raw.private === true;
+            const target = privately ? null
+              : await readReplyTarget(profileTarget(profile), { kind: "agent", token }, profile.workspace_id, signalId, fetcher);
+            placement = decideReplyPlacement({ target, signalId, private: privately, status: false, thread: false, broadcastToChannel: false });
+          }
+          const publicPost = (tool.name === "ask" || tool.name === "note") && args.to === undefined;
+          if (selectors.length > 0 && (tool.name === "ask" || tool.name === "note") && !publicPost) {
+            throw new MentionResolutionError("mention_addressed");
+          }
+          if (selectors.length > 0 && placement?.placement === "private") throw new MentionResolutionError("mention_private_reply");
+          let mentions: WireMention[] = [];
+          if ((publicPost || placement?.placement === "thread") && (selectors.length > 0 || bodyMayMention(args.body!))) {
+            mentions = resolveMentions({ body: args.body!, selectors,
+              roster: mentionRosterFromDirectory(await directory({ fetcher, token })) });
+          }
           let parentSignalId: string | undefined;
           let parentContextSentence: string | undefined;
           if (tool.name === "ask") {
             parentSignalId = args.parent_signal_id?.toLowerCase();
-            if (parentSignalId === undefined) {
+            /* An ask chain is private, so a mentioned ask has no parent: an explicit one is refused,
+             * and the one this session would have filled in is left off. */
+            if (parentSignalId !== undefined && mentions.length > 0) throw new MentionResolutionError("mention_ask_chain");
+            if (parentSignalId === undefined && mentions.length === 0) {
               parentSignalId = await defaultAskParent(stateProfilePath, options.hostSessionId);
               if (parentSignalId === undefined) parentContextSentence = ASK_PARENT_CONTEXT_SENTENCE;
             }
@@ -442,7 +470,9 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           const command: PostSignalCommand = { kind: "post_signal", signal_kind: tool.name === "working_on" ? "working-on" : tool.name === "reply" ? "note" : tool.name,
             body: args.body!, to_user_id: recipient?.kind === "user" ? recipient.id : null,
             to_agent_principal_id: recipient?.kind === "agent" ? recipient.id : null,
-            in_reply_to: tool.name === "reply" ? args.signal_id!.toLowerCase() : null,
+            in_reply_to: placement?.placement === "private" ? placement.inReplyTo : null,
+            ...(placement?.placement === "thread" ? { thread_root_id: placement.threadRootId } : {}),
+            ...(mentions.length === 0 ? {} : { mentions }),
             ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
             about: args.about ?? null,
             ...(args.channel === undefined ? {} : { channel: args.channel }),

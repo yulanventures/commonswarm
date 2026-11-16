@@ -119,7 +119,8 @@ test("the hosted ask tool takes options or choices, to one person or to nobody",
   assert.deepEqual(hostedChoiceOptions({ ...base, options }), [
     { id: "wait", label: "Wait", description: "Until Monday", recommended: true }, { id: "ship-it", label: "Ship it" }]);
   const refusals: Array<[Record<string, unknown>, RegExp]> = [
-    [{ ...base }, /Missing recipients/],
+    [{ ...base }, /Invalid ask_audience: provide recipients for a private ask/],
+    [{ ...base, options, mentions: ["Wren"] }, /Invalid mentions: an ask with options or choices mentions nobody/],
     [{ ...base, options, recipients: [{ kind: "agent", id: person[0]!.id }] }, /Invalid recipients: provide one object with kind user/],
     [{ ...base, options, recipients: [...person, { kind: "user", id: "33333333-3333-4333-8333-333333333333" }] }, /Invalid recipients/],
     [{ ...base, options, attachments: [{ file_id: person[0]!.id, version_n: 1 }] }, /Invalid attachments/],

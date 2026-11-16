@@ -334,6 +334,12 @@ export interface PostSignalCommand {
   channel?: string;
   thread_root_id?: string;
   broadcast_to_channel?: boolean;
+  /**
+   * Who a public message mentions (src/protocol/mention-address.ts). Its own Object.hasOwn group on
+   * the edge, sent only when it names someone: a deployment with mentions off refuses the key, so
+   * a post that mentions nobody must not carry it.
+   */
+  mentions?: Array<{ kind: "user" | "agent"; id: string }>;
 }
 
 export type SenderOwnerRelation = "same_owner" | "cross_owner" | "unknown";
@@ -1397,6 +1403,9 @@ export class ThinCommandClient {
       ...(request.command.broadcast_to_channel === undefined
         ? {}
         : { broadcast_to_channel: request.command.broadcast_to_channel }),
+      ...(request.command.mentions === undefined || request.command.mentions.length === 0
+        ? {}
+        : { mentions: request.command.mentions.map(({ kind, id }) => ({ kind, id })) }),
     };
     const callerSignal = request.signal;
     if (callerSignal?.aborted) {

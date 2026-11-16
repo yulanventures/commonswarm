@@ -9,6 +9,7 @@ import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/stora
 import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
 import { FilePutPreflightError, RequestIdConflict } from "../cloud/exact-file-put.js";
 import { isAskChainRefusalCode, printableAskRefusalMessage } from "../cloud/ask-chain-constants.js";
+import { MENTION_REFUSAL_SENTENCES, MentionResolutionError } from "../protocol/mention-address.js";
 
 type Action = "retry the same call" | "retry this call with the same request_id" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "use a new request_id for new content" | "read the topic again and use a NEW request_id for new content" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id" | "send a new ask if it still matters" | "call check to read the replies" | "wait until 24 hours after the last re-raise, then use a new request_id" | "send it as a plain ask, without options, choices or multi";
 type Sentence = { message: string; next_step: Action };
@@ -27,6 +28,7 @@ const entry = (message: string, next_step: Action): Sentence => ({ message, next
 
 /** The only model-visible error prose. No producer message is copied here. */
 export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
+  ...Object.fromEntries(Object.entries(MENTION_REFUSAL_SENTENCES).map(([code, message]) => [code, entry(message, FIX)])),
   profile_path_invalid: entry("The profile path is invalid.", PERSON),
   profile_registry_invalid: entry("The saved profile inventory is damaged.", PERSON),
   agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
@@ -180,6 +182,7 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : error instanceof FilePutPreflightError ? error.code
     : error instanceof FileTransportError ? "file_transport"
     : error instanceof SignalRecipientError ? error.code
+    : error instanceof MentionResolutionError ? error.code
     : readHttp ? (readCode && (AGENT_SESSION_PROOF_REFUSAL_CODES as readonly string[]).includes(readCode) ? readCode
       : [401, 403, 426].includes(readHttp.status) ? "read_refused"
       : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed")

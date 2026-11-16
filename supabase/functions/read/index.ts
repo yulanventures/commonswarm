@@ -137,6 +137,12 @@ interface SignalReadRequest {
   include_mentions: boolean;
   /** Its own Object.hasOwn group. True adds each row's reactions, grouped by emoji. */
   include_reactions: boolean;
+  /**
+   * Its own Object.hasOwn group, absent from installed clients' bodies. One message by id, from the
+   * same rows the read returns without it: a client reads the message it is replying to, to decide
+   * whether the reply goes in the thread or privately. It narrows; it never widens.
+   */
+  signal_id: string | null;
 }
 
 interface MemberReadRequest {
@@ -559,6 +565,7 @@ function parseBody(
   const cursorMode = hasAfterCreatedAt && hasAfterId;
   const hasIncludeMentions = Object.hasOwn(body, "include_mentions");
   const hasIncludeReactions = Object.hasOwn(body, "include_reactions");
+  const hasSignalId = Object.hasOwn(body, "signal_id");
   if (
     !exactKeys(body, [
       "resource",
@@ -574,6 +581,7 @@ function parseBody(
       "include_stale",
       ...(hasIncludeMentions ? ["include_mentions"] : []),
       ...(hasIncludeReactions ? ["include_reactions"] : []),
+      ...(hasSignalId ? ["signal_id"] : []),
     ]) ||
     body.resource !== "signals" ||
     typeof body.workspace_id !== "string" ||
@@ -603,6 +611,7 @@ function parseBody(
     typeof body.include_stale !== "boolean" ||
     (hasIncludeMentions && typeof body.include_mentions !== "boolean") ||
     (hasIncludeReactions && typeof body.include_reactions !== "boolean") ||
+    (hasSignalId && !(typeof body.signal_id === "string" && UUID_RE.test(body.signal_id))) ||
     (hasChannel &&
       !(body.channel === null ||
         (typeof body.channel === "string" &&
@@ -646,6 +655,7 @@ function parseBody(
     include_stale: body.include_stale as boolean,
     include_mentions: body.include_mentions === true,
     include_reactions: body.include_reactions === true,
+    signal_id: hasSignalId ? (body.signal_id as string).toLowerCase() : null,
   };
 }
 
@@ -1454,6 +1464,7 @@ async function handle(
           ${inReplyTo}::uuid IS NULL
           OR s.in_reply_to = ${inReplyTo}::uuid
         )
+        AND (${body.signal_id}::uuid IS NULL OR s.id = ${body.signal_id}::uuid)
         AND (
           ${channelId}::uuid IS NULL
           OR s.channel_id = ${channelId}::uuid
@@ -1570,6 +1581,8 @@ export type HostedReadInput =
   | { resource: "members"; workspace_id: string }
   | { resource: "roster"; workspace_id: string }
   | { resource: "channels"; workspace_id: string }
+  /** Where a hosted reply goes. Read with a channel_read capability: it answers only for public messages. */
+  | { resource: "reply_target"; workspace_id: string; signal_id: string }
   | { resource: "channel_members"; workspace_id: string; channel_id: string }
   | (Omit<ChannelMessagesReadRequest, "max_bytes"> & { fit_bytes?: number })
   | MemorySearchReadRequest
@@ -1617,6 +1630,7 @@ export interface ReadResult {
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
   if (input.resource === "channel_members") return UUID_RE.test(input.channel_id);
+  if (input.resource === "reply_target") return UUID_RE.test(input.signal_id);
   if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
   if (input.resource === "channel_messages" && input.fit_bytes !== undefined) {
     return Number.isSafeInteger(input.fit_bytes) && input.fit_bytes >= CHANNEL_PAGE_MIN_BYTES;
@@ -1661,6 +1675,7 @@ export async function handleHostedRead(
       (input.resource === "channels" && tool !== "channel_ls") ||
       (input.resource === "channel_members" && tool !== "channel_members") ||
       (input.resource === "channel_messages" && tool !== "channel_read") ||
+      (input.resource === "reply_target" && tool !== "channel_read") ||
       (input.resource === "memory_search" && tool !== "memory_search") ||
       (input.resource === "memory_get" && tool !== "memory_get") ||
       (input.resource === "files" && tool !== "file_ls") ||
@@ -1724,6 +1739,26 @@ export async function handleHostedRead(
     }
     if (input.resource === "roster") {
       return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
+    }
+    if (input.resource === "reply_target") {
+      /* A hosted reply to a message everyone in its channel can read goes in that message's thread.
+       * Only such a message is answered here, through the same view and claims channel_read reads
+       * with, so this tells the seat nothing channel_read could not. Anything else, including a
+       * message the seat can't read, answers null and the reply stays private, refused as before. */
+      const [row] = await tx<{ id: string; thread_root_id: string | null }[]>`
+        SELECT s.id, s.thread_root_id
+        FROM swarm_read.signals AS s
+        WHERE s.workspace_id = ${seat.workspace_id}::uuid
+          AND s.id = ${input.signal_id.toLowerCase()}::uuid
+          AND s."to" IS NULL AND s.to_agent IS NULL AND s.in_reply_to IS NULL
+          AND jsonb_array_length(COALESCE(s.recipients, '[]'::jsonb)) = 0
+        LIMIT 1
+      `;
+      return { status: 200, body: {
+        context,
+        signal_id: input.signal_id.toLowerCase(),
+        thread_root_id: row === undefined ? null : row.thread_root_id ?? row.id,
+      } };
     }
     if (input.resource === "channels") {
       // The read role's view, gated by the seat owner's membership; no new grant.

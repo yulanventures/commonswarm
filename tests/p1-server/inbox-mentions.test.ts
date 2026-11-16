@@ -368,3 +368,72 @@ test("a read that names include_mentions takes only a boolean", async () => {
   assert.equal(response.status, 400);
   await response.body?.cancel();
 });
+
+/** The CLI itself, as an agent token, against the served functions. */
+async function cswarm(agent: Agent, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const tokenFile = join(root, `token-${agent.principal}`);
+  writeFileSync(tokenFile, agent.token, { mode: 0o600 });
+  const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", ...args, "--url", local.API_URL,
+    "--anon-key", local.ANON_KEY, "--workspace-id", workspace, "--agent-token-file", tokenFile, "--json"], {
+    cwd: process.cwd(), env: { ...process.env, HOME: root, SWARM_AGENT_STATE_DIR: join(root, "cli-state") },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => stdout += chunk);
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => stderr += chunk);
+  const code = await new Promise<number>((resolve) => child.on("close", (value) => resolve(value ?? -1)));
+  return { code, stdout, stderr };
+}
+
+async function agentName(agent: Agent): Promise<string> {
+  const [row] = await sql<{ name: string }[]>`SELECT name FROM swarm.agent_principals WHERE principal_id = ${agent.principal}::uuid`;
+  return row!.name;
+}
+
+test("cswarm note from an agent token turns @Name into a mention that wakes the named agent", { timeout: 120_000 }, async () => {
+  const name = await agentName(mentioned);
+  const result = await cswarm(bystander, ["note", `@${name} can you take the build?`]);
+  assert.equal(result.code, 0, result.stderr + functionLogs.slice(-3000));
+  const id = String((JSON.parse(result.stdout).signal as Row).id);
+  const stored = await sql<{ mentioned_agent_principal_id: string }[]>`
+    SELECT mentioned_agent_principal_id FROM swarm.signal_mentions WHERE signal_id = ${id}::uuid ORDER BY position`;
+  assert.deepEqual(stored.map((row) => row.mentioned_agent_principal_id), [mentioned.principal]);
+  const woken = await sql`SELECT 1 FROM swarm.signal_deliveries
+    WHERE signal_id = ${id}::uuid AND recipient_agent_principal_id = ${mentioned.principal}::uuid`;
+  assert.equal(woken.length, 1, "the mention enqueued a delivery for the named agent");
+  assert.ok((await check(mentioned)).includes(id));
+});
+
+test("cswarm reply answers a channel message in its thread, and an addressed one privately", { timeout: 120_000 }, async () => {
+  const rootId = await posted(owner.jwt, { body: "open question" });
+  const child = await posted(other.jwt, { thread_root_id: rootId, body: "me too" });
+  const direct = await posted(owner.jwt, { to_agent_principal_id: mentioned.principal, body: "just you" });
+  const placed = async (args: string[]) => {
+    const result = await cswarm(mentioned, ["reply", ...args]);
+    assert.equal(result.code, 0, result.stderr + functionLogs.slice(-3000));
+    const id = String((JSON.parse(result.stdout).signal as Row).id);
+    const [row] = await sql<{ thread_root_id: string | null; in_reply_to: string | null }[]>`
+      SELECT thread_root_id, in_reply_to FROM swarm.signals WHERE id = ${id}::uuid`;
+    return row!;
+  };
+  assert.deepEqual(await placed([rootId, "answer in the open"]), { thread_root_id: rootId, in_reply_to: null });
+  assert.deepEqual(await placed([child, "same thread"]), { thread_root_id: rootId, in_reply_to: null });
+  assert.deepEqual(await placed([direct, "privately", "--thread"]), { thread_root_id: null, in_reply_to: direct });
+
+  // The read the CLI places a reply with: one row by id, only from what this agent can read.
+  const byIdRead = async (agent: Agent, signalId: string) => {
+    const response = await fetch(`${local.API_URL}/functions/v1/read`, {
+      method: "POST", signal: AbortSignal.timeout(15_000),
+      headers: { authorization: `Bearer ${agent.token}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+      body: JSON.stringify({ resource: "signals", workspace_id: workspace, inbox: false, about: null, kind: null,
+        since: null, in_reply_to: null, limit: 1, include_stale: true, signal_id: signalId }),
+    });
+    const body = await response.json() as Row;
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return (body.signals as Row[]).map((row) => row.id);
+  };
+  assert.deepEqual(await byIdRead(bystander, child), [child]);
+  assert.deepEqual(await byIdRead(bystander, direct), [], "a message addressed to another agent is not returned");
+  assert.deepEqual(await byIdRead(mentioned, direct), [direct]);
+});
+

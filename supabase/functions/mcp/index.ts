@@ -48,7 +48,12 @@ import type {
   HostedToolCall,
   HostedToolName,
 } from "./tools.ts";
-import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, hostedChoiceOptions } from "./tools.ts";
+import { FILE_GET_IMAGE_MAX_BYTES, HostedToolImage, HostedToolInputError } from "./tools.ts";
+import {
+  hostedMentions, hostedNeedsReplyTarget, hostedNeedsRoster, hostedReplyPlacement, hostedRoster, hostedSignalCommand,
+  MentionResolutionError, type HostedSignalTool,
+} from "./signal-tools.ts";
+import { MENTION_REFUSAL_SENTENCES } from "../../../src/protocol/mention-address.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -233,64 +238,6 @@ async function seatCapability(
       providerStatus,
     }, use);
   }) as unknown as HostedSeatCapability | null;
-}
-
-function recipients(args: HostedToolArguments) {
-  return Array.isArray(args.recipients)
-    ? args.recipients as Array<{ kind: "user" | "agent"; id: string }>
-    : null;
-}
-
-function hostedCommand(
-  name: "ask" | "note" | "reply" | "working_on",
-  args: HostedToolArguments,
-  workspaceId: string,
-) {
-  const addressed = recipients(args);
-  /* An ask with choices is one ask_choice: to the one person named, or to nobody so that anyone
-   * who reads it may answer. The command edge admits it only from this tool. */
-  if (name === "ask" && (args.options !== undefined || args.choices !== undefined)) {
-    return {
-      command_id: args.request_id,
-      client_version: "0.1.80",
-      workspace_id: workspaceId,
-      stream: { kind: "workspace" },
-      command: {
-        kind: "ask_choice",
-        body: args.body,
-        to_user_id: addressed === null ? null : addressed[0]!.id.toLowerCase(),
-        about: null,
-        options: hostedChoiceOptions(args),
-        ...(args.multi === true ? { multi: true } : {}),
-        ...(typeof args.channel === "string" && args.channel.toLowerCase() !== "general"
-          ? { channel: args.channel.toLowerCase() } : {}),
-      },
-    };
-  }
-  const attached = name !== "working_on" && Array.isArray(args.attachments)
-    ? (args.attachments as Array<{ file_id: string; version_n: number }>)
-      .map((row) => ({ file_id: row.file_id.toLowerCase(), version_n: row.version_n }))
-    : null;
-  return {
-    command_id: args.request_id,
-    client_version: "0.1.80",
-    workspace_id: workspaceId,
-    stream: { kind: "workspace" },
-    command: {
-      kind: "post_signal",
-      signal_kind: name === "working_on" ? "working-on" : name === "reply" ? "note" : name,
-      body: args.body,
-      to_user_id: null,
-      to_agent_principal_id: null,
-      in_reply_to: name === "reply" ? args.signal_id : null,
-      about: null,
-      // "general" is the unfiled main channel: no channel key at all.
-      ...(name !== "reply" && typeof args.channel === "string" && args.channel.toLowerCase() !== "general"
-        ? { channel: args.channel.toLowerCase() } : {}),
-      ...(addressed === null ? {} : { to: addressed }),
-      ...(attached === null ? {} : { attachments: attached }),
-    },
-  };
 }
 
 async function executeTool(call: HostedToolCall): Promise<Record<string, unknown> | HostedToolImage> {
@@ -525,8 +472,38 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       command,
     }, capability), command);
   }
+  const tool = call.name as HostedSignalTool;
+  /* A reply is placed from the message it answers, read with the seat's channel_read authority:
+   * a message everyone in its channel can read gets a thread reply, anything else a private one. */
+  let placement = null;
+  if (tool === "reply") {
+    let threadRootId: string | null = null;
+    if (hostedNeedsReplyTarget(tool, args)) {
+      const reader = await seatCapability(call.token, binding, "channel_read");
+      if (reader !== null) {
+        const target = await handleHostedRead({ resource: "reply_target", workspace_id: binding.workspaceId,
+          signal_id: String(args.signal_id).toLowerCase() }, reader);
+        if (target.status === 200 && typeof target.body.thread_root_id === "string") threadRootId = target.body.thread_root_id;
+      }
+    }
+    placement = hostedReplyPlacement(args, threadRootId);
+  }
+  let roster = null;
+  if (hostedNeedsRoster(tool, args) && (tool !== "reply" || placement?.placement === "thread")) {
+    const reader = await seatCapability(call.token, binding, "members");
+    if (reader === null) throw new HostedToolFailure("hosted_seat_forbidden");
+    roster = hostedRoster(readOutput(await handleHostedRead({ resource: "members", workspace_id: binding.workspaceId }, reader)));
+  }
+  let mentions;
+  try {
+    mentions = hostedMentions(tool, args, roster, placement);
+  } catch (error) {
+    // A fixed sentence: roster names are workspace content and never reach the model as prose here.
+    if (error instanceof MentionResolutionError) throw new HostedToolInputError(MENTION_REFUSAL_SENTENCES[error.code]);
+    throw error;
+  }
   return commandOutput(await handleHostedCommand(
-    hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
+    hostedSignalCommand(tool, args, binding.workspaceId, { mentions, placement }),
     capability,
   ));
 }
