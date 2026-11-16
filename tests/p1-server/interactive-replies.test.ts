@@ -637,3 +637,133 @@ test("v2: a v1-shaped ask and answer still work, and readback adds keys only", a
   await sql`UPDATE swarm.ui_actions SET option_ids = NULL WHERE signal_id = ${askId}::uuid AND state = 'completed'`;
   assert.deepEqual(((await readChoices(f.ownerId, [askId])).asks[0]!.answer as Record<string, unknown>).option_ids, ["wait"]);
 });
+
+/* Audit tags on choice replays. The choice kinds replay inside their own handlers, so their replay,
+ * conflict and reuse rows must carry the private channel of the stored success, or the client audit
+ * view (swarm_read.audit_log) would show them to workspace owners and admins outside that channel. */
+
+let outsideAdminUser: { id: string; jwt: string } | undefined;
+/** A workspace admin in no private channel: the client audit view shows them only untagged and open rows. */
+async function outsideAdmin(): Promise<{ id: string; jwt: string }> {
+  if (outsideAdminUser) return outsideAdminUser;
+  const created = await createUser("choice-admin");
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${created.id}::uuid, 'ChoiceAdmin')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${f.workspaceA}::uuid, ${created.id}::uuid, 'admin')`;
+  outsideAdminUser = created;
+  return created;
+}
+
+async function auditMark(): Promise<string> {
+  const [row] = await sql<{ mark: string }[]>`SELECT coalesce(max(audit_id), 0)::text AS mark FROM swarm.audit_log`;
+  return row!.mark;
+}
+
+/** Raw rows in workspace A since the mark, as stored. */
+async function rawAudit(mark: string): Promise<Array<{ command_kind: string; outcome: string; reason: string | null;
+  channel_ids: string[] | null }>> {
+  const rows = await sql<{ command_kind: string; outcome: string; reason: string | null; channel_ids: string[] | null }[]>`
+    SELECT command_kind, outcome, reason, channel_ids::text[] AS channel_ids FROM swarm.audit_log
+    WHERE workspace_id = ${f.workspaceA}::uuid AND audit_id > ${mark}::bigint ORDER BY audit_id`;
+  return rows.map((row) => ({ ...row }));
+}
+
+/** The same window through the client audit view, under this person's own claims. */
+async function auditSeenBy(userId: string, mark: string): Promise<Array<{ command_kind: string; outcome: string;
+  reason: string | null }>> {
+  return await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    const rows = await tx<{ command_kind: string; outcome: string; reason: string | null }[]>`
+      SELECT command_kind, outcome, reason FROM swarm_read.audit_log
+      WHERE workspace_id = ${f.workspaceA}::uuid AND audit_id > ${mark}::bigint ORDER BY audit_id`;
+    return rows.map((row) => ({ ...row }));
+  });
+}
+
+async function agentPrivateChannel(prefix: string): Promise<{ channel_id: string; slug: string }> {
+  const created = await postCommand(f.agentToken, f.workspaceA, {
+    kind: "channel_create", slug: `${prefix}-${randomBytes(4).toString("hex")}`, visibility: "private",
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  return created.body.channel as { channel_id: string; slug: string };
+}
+
+function assertAllTagged(rows: Array<{ outcome: string; channel_ids: string[] | null }>, channelId: string, name: string) {
+  assert.ok(rows.length > 0, `${name}: rows were written`);
+  for (const row of rows) {
+    assert.ok(row.channel_ids?.includes(channelId), `${name}: every row keeps the private channel tag: ${JSON.stringify(rows)}`);
+  }
+}
+
+test("audit: an ask_choice id's replay, conflict and reuse keep its private channel tag, also after the asker leaves the channel", async () => {
+  const outsider = await outsideAdmin();
+  const lock = await agentPrivateChannel("audit-ask");
+  const commandId = randomUUID();
+  const ask = { kind: "ask_choice", body: "Private release plan?", to_user_id: null, about: null, options: V2_OPTIONS,
+    channel: lock.slug };
+  const mark = await auditMark();
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, ask, commandId)).status, 200);
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, ask, commandId)).status, 200, "a matching replay");
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, { ...ask, body: "Changed" }, commandId)).status, 409,
+    "a conflicting payload");
+  // The asker leaves the channel and stays in the workspace.
+  await sql`DELETE FROM swarm.channel_members WHERE workspace_id = ${f.workspaceA}::uuid
+    AND channel_id = ${lock.channel_id}::uuid AND member_kind = 'agent' AND agent_principal_id = ${f.principal}::uuid`;
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, ask, commandId)).status, 200, "a replay from outside the channel");
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, { ...ask, body: "Changed" }, commandId)).status, 409);
+  const reused = await postCommand(f.agentToken, f.workspaceA, { kind: "post_signal", signal_kind: "note", body: "Other kind",
+    to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null }, commandId);
+  assert.equal(reused.status, 409, `the id reused for another kind: ${JSON.stringify(reused.body)}`);
+
+  const raw = await rawAudit(mark);
+  assert.deepEqual(raw.map((row) => row.outcome), ["accepted", "replayed", "conflict", "replayed", "conflict", "conflict"]);
+  assertAllTagged(raw, lock.channel_id, "ask_choice");
+  assert.deepEqual(await auditSeenBy(outsider.id, mark), [], "an admin outside the channel sees none of them");
+  assert.equal((await auditSeenBy(f.ownerId, mark)).length, raw.length, "the owner, in the channel, sees them all");
+});
+
+test("audit: an answer_choice id's replay, conflict and reuse keep its private channel tag, also after the person leaves the channel", async () => {
+  const outsider = await outsideAdmin();
+  const lock = await agentPrivateChannel("audit-answer");
+  const privateAsk = await askV2({ channel: lock.slug });
+  const publicAsk = await askV2({});
+  const commandId = randomUUID();
+  const mark = await auditMark();
+  assert.equal((await answerWith(f.ownerJwt, privateAsk, { option_id: "ship" }, commandId)).status, 200);
+  assert.equal((await answerWith(f.ownerJwt, privateAsk, { option_id: "ship" }, commandId)).status, 200, "a matching replay");
+  const conflict = await answerWith(f.ownerJwt, privateAsk, { option_id: "wait" }, commandId);
+  assert.deepEqual({ status: conflict.status, error: conflict.body.error }, { status: 409, error: "command_id_conflict" });
+  const asAsk = await postCommand(f.ownerJwt, f.workspaceA, { kind: "ask_choice", body: "Reused id", to_user_id: null,
+    about: null, options: V2_OPTIONS }, commandId);
+  assert.equal(asAsk.status, 409, `the id reused as ask_choice: ${JSON.stringify(asAsk.body)}`);
+  const onPublic = await answerWith(f.ownerJwt, publicAsk, { option_id: "ship" }, commandId);
+  assert.equal(onPublic.status, 409, `the id reused on an open ask: ${JSON.stringify(onPublic.body)}`);
+  // The person leaves the channel and stays in the workspace: the ask is now unreadable to them.
+  await sql`DELETE FROM swarm.channel_members WHERE workspace_id = ${f.workspaceA}::uuid
+    AND channel_id = ${lock.channel_id}::uuid AND member_kind = 'user' AND user_id = ${f.ownerId}::uuid`;
+  assert.equal((await answerWith(f.ownerJwt, privateAsk, { option_id: "ship" }, commandId)).status, 404,
+    "a replay from outside the channel");
+  assert.equal((await answerWith(f.ownerJwt, publicAsk, { option_id: "wait" }, commandId)).status, 409);
+
+  const raw = await rawAudit(mark);
+  assert.deepEqual(raw.map((row) => [row.command_kind, row.outcome]), [
+    ["answer_choice", "accepted"], ["answer_choice", "replayed"], ["answer_choice", "conflict"], ["ask_choice", "conflict"],
+    ["answer_choice", "conflict"], ["answer_choice", "authz"], ["answer_choice", "conflict"]]);
+  assertAllTagged(raw, lock.channel_id, "answer_choice");
+  assert.deepEqual(await auditSeenBy(outsider.id, mark), [], "an admin outside the channel sees none of them");
+});
+
+test("audit: an open ask's replay stays visible to an admin", async () => {
+  const outsider = await outsideAdmin();
+  const commandId = randomUUID();
+  const ask = { kind: "ask_choice", body: "Open release plan?", to_user_id: null, about: null, options: V2_OPTIONS };
+  const mark = await auditMark();
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, ask, commandId)).status, 200);
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, ask, commandId)).status, 200);
+  const raw = await rawAudit(mark);
+  assert.deepEqual(raw.map((row) => [row.outcome, row.channel_ids]), [["accepted", null], ["replayed", null]]);
+  assert.deepEqual(await auditSeenBy(outsider.id, mark), [
+    { command_kind: "ask_choice", outcome: "accepted", reason: null },
+    { command_kind: "ask_choice", outcome: "replayed", reason: null },
+  ]);
+});

@@ -13611,8 +13611,38 @@ type ChoiceCtx = {
   decided: (result: HttpResult) => HttpResult;
 };
 
+function unionChannelIds(
+  ...lists: Array<readonly string[] | undefined>
+): string[] | undefined {
+  const ids = [...new Set(lists.flatMap((list) => list ?? []))];
+  return ids.length > 0 ? ids : undefined;
+}
+
+/** The channels a stored success under this command id touched, by the shared replay rule; none without one. */
+async function storedChoiceChannelIds(tx: Sql, auth: AuthContext, ctx: ChoiceCtx,
+  command: AskChoiceCommand | AnswerChoiceCommand): Promise<string[] | undefined> {
+  const [prior] = await tx<{ workspace_id: string; response: unknown }[]>`
+    SELECT workspace_id, response FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.ledgerCredentialKind} AND principal_id = ${auth.ledgerPrincipalId}
+      AND command_id = ${ctx.commandId}
+    LIMIT 1
+  `;
+  return prior === undefined
+    ? undefined
+    : await replayAuditChannelIds(tx, prior.workspace_id, auth, command, false, prior.response);
+}
+
+/**
+ * A choice command's own replay: the choice kinds skip the shared replay branch so that nothing
+ * replays before the current ask and person checks. Its audit row carries every channel the
+ * stored success touched (replayAuditChannelIds, the shared branch's rule), whatever the incoming
+ * kind or payload and whatever the caller can access now, unioned with the channel the caller
+ * has already been checked against. So a private channel's replay or conflict row stays hidden
+ * from owners and admins outside that channel.
+ */
 async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx: ChoiceCtx,
-  audit: (outcome: string, reason: string | null) => Promise<unknown>): Promise<HttpResult | null> {
+  command: AskChoiceCommand | AnswerChoiceCommand,
+  currentChannelIds: readonly string[] | undefined): Promise<HttpResult | null> {
   const [prior] = await tx<{ request_hash: string; workspace_id: string; stream_id: string; response: unknown }[]>`
     SELECT request_hash, workspace_id, stream_id, response FROM swarm.idempotency_keys
     WHERE principal_kind = ${auth.ledgerCredentialKind} AND principal_id = ${auth.ledgerPrincipalId}
@@ -13622,7 +13652,10 @@ async function choiceLedgerReplay(tx: Sql, route: Route, auth: AuthContext, ctx:
   if (prior === undefined) return null;
   const matches = prior.request_hash === ctx.hash &&
     prior.workspace_id === route.workspaceId && prior.stream_id === route.streamId;
-  await audit(matches ? "replayed" : "conflict", matches ? null : "command_id_conflict");
+  const storedChannelIds = await replayAuditChannelIds(tx, prior.workspace_id, auth, command, matches, prior.response);
+  await insertAudit(tx, { auth, commandKind: ctx.kind, workspaceId: route.workspaceId, streamId: route.streamId,
+    outcome: matches ? "replayed" : "conflict", reason: matches ? null : "command_id_conflict",
+    detail: ctx.ignoredIdentity, hash: ctx.hash, channelIds: unionChannelIds(storedChannelIds, currentChannelIds) });
   return ctx.decided(matches
     ? replayResult(storedResponse(prior.response), ctx.kind)
     : { status: 409, body: { error: "command_id_conflict" } });
@@ -13665,7 +13698,8 @@ async function askChoice(tx: Sql, route: Route, auth: AuthContext, command: AskC
       message: "Choice asks aren't turned on here." } };
   }
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ask_choice:${auth.ledgerPrincipalId}:${ctx.commandId}`}, 0))`;
-  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  // No channel is resolved yet: the replay row takes its tags from the stored success.
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, command, undefined);
   if (replay !== null) return replay;
   const ask: SignalCommand = {
     kind: "post_signal", signal_kind: "ask", body: command.body, to_user_id: command.to_user_id,
@@ -13736,6 +13770,10 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     return { status: 404, body: { error: "interactive_replies_unavailable",
       message: "Choice answers aren't turned on here." } };
   }
+  /* A refusal before the replay still reuses this command id: tag it with the stored success's
+   * channels, so a reused private id never writes a row outside-channel admins can read. */
+  const storedChannelIds = await storedChoiceChannelIds(tx, auth, ctx, command);
+  auditChannelIds = storedChannelIds;
   if (auth.credentialKind !== "user" || auth.actor.user === null) {
     await audit("authz", "answer_choice_person_only");
     return { status: 403, body: { error: "forbidden" } };
@@ -13780,9 +13818,9 @@ async function answerChoice(tx: Sql, route: Route, auth: AuthContext, command: A
     await audit("authz", "answer_choice_not_addressed");
     return { status: 404, body: { error: "not_found", message: "No choice ask for you has that id." } };
   }
-  auditChannelIds = ask.channel_id !== null ? [ask.channel_id] : undefined;
+  auditChannelIds = unionChannelIds(storedChannelIds, ask.channel_id !== null ? [ask.channel_id] : undefined);
   // A settled answer outlives the ask: a retry after expiry gets this person's answer, not ask_expired.
-  const replay = await choiceLedgerReplay(tx, route, auth, ctx, audit);
+  const replay = await choiceLedgerReplay(tx, route, auth, ctx, command, auditChannelIds);
   if (replay !== null) return replay;
   const [mine] = await tx<{ option_id: string; option_ids: string[] | null; other_text: string | null;
     reply_signal_id: string }[]>`
