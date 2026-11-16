@@ -6121,6 +6121,46 @@ var SEAT_ADMIN_REFUSAL_COPY = Object.freeze({
   seat_admin_workspace_not_covered: "This agent's admin access doesn't cover this workspace.",
   seat_admin_target_protected: "Admin agents can't change owners, admins, the person who granted access, other admin agents or themselves."
 });
+
+// src/protocol/signal-reactions.ts
+var SIGNAL_REACTION_MAX_PER_ACTOR = 64;
+var SIGNAL_REACTION_MAX_BYTES = 32;
+var SIGNAL_REACTION_SOURCES = ["manual", "ack"];
+var SIGNAL_REACTION_SEEN = "\u{1F440}";
+var SIGNAL_REACTION_SHORTCODES = Object.freeze({
+  ":eyes:": "\u{1F440}",
+  ":+1:": "\u{1F44D}",
+  ":thumbsup:": "\u{1F44D}",
+  ":-1:": "\u{1F44E}",
+  ":thumbsdown:": "\u{1F44E}",
+  ":white_check_mark:": "\u2705",
+  ":check:": "\u2705",
+  ":hammer_and_wrench:": "\u{1F6E0}\uFE0F",
+  ":wrench:": "\u{1F6E0}\uFE0F",
+  ":on_it:": "\u{1F6E0}\uFE0F",
+  ":rocket:": "\u{1F680}",
+  ":heart:": "\u2764\uFE0F",
+  ":tada:": "\u{1F389}",
+  ":thinking:": "\u{1F914}",
+  ":fire:": "\u{1F525}",
+  ":question:": "\u2753",
+  ":100:": "\u{1F4AF}"
+});
+var PICTOGRAPH = String.raw`\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier})?`;
+var ONE_EMOJI = new RegExp(
+  String.raw`^(?:\p{Regional_Indicator}{2}|[#*0-9]️?⃣|${PICTOGRAPH}(?:‍${PICTOGRAPH})*(?:[\u{E0020}-\u{E007E}]+\u{E007F})?)$`,
+  "u"
+);
+var encoder3 = new TextEncoder();
+function normalizeReactionEmoji(input) {
+  if (typeof input !== "string") return null;
+  const shortcode = Object.hasOwn(SIGNAL_REACTION_SHORTCODES, input.toLowerCase()) ? SIGNAL_REACTION_SHORTCODES[input.toLowerCase()] : null;
+  const emoji = (shortcode ?? input).normalize("NFC");
+  const bytes = encoder3.encode(emoji).length;
+  if (bytes < 1 || bytes > SIGNAL_REACTION_MAX_BYTES || !ONE_EMOJI.test(emoji)) return null;
+  return emoji;
+}
+var SIGNAL_REACTION_EMOJI_RULE = `emoji must be one emoji (at most ${SIGNAL_REACTION_MAX_BYTES} bytes) or one of ${Object.keys(SIGNAL_REACTION_SHORTCODES).join(" ")}`;
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -6219,6 +6259,12 @@ export {
   SEAT_ADMIN_ROLE_BUNDLES,
   SEAT_ADMIN_ROLE_COPY,
   SEAT_ADMIN_SCOPED_SCOPES,
+  SIGNAL_REACTION_EMOJI_RULE,
+  SIGNAL_REACTION_MAX_BYTES,
+  SIGNAL_REACTION_MAX_PER_ACTOR,
+  SIGNAL_REACTION_SEEN,
+  SIGNAL_REACTION_SHORTCODES,
+  SIGNAL_REACTION_SOURCES,
   SKILL_BODY_MAX,
   SKILL_DISMISSED_KEYS_CAP,
   SKILL_SUGGESTIONS_CAP,
@@ -6317,6 +6363,7 @@ export {
   leaseLive,
   legacyHouseholdAcceptRefusal,
   legacyRemovalRejoinRefusal,
+  normalizeReactionEmoji,
   normalizeWorkspaceSkillsState,
   normalizedFeedbackBody,
   normalizedFeedbackContext,

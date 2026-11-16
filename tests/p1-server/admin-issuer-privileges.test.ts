@@ -53,6 +53,11 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.ask_answered(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.signal_mentions', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.signal_mentions', 'SELECT', false],
+  // Reactions: the command edge adds and removes rows, and asks the read rule before either.
+  ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'DELETE', false],
+  ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'INSERT', false],
+  ['swarm_command', 'TABLE', 'swarm.signal_reactions', 'SELECT', false],
+  ['swarm_command', 'FUNCTION', 'swarm.signal_reactable(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'INSERT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_preferences', 'UPDATE', false],

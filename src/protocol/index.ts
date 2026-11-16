@@ -24,3 +24,4 @@ export * from './household-todos.js';
 export * from './household-todo-policy.js';
 export * from './workspace-skills.js';
 export * from './seat-admin.js';
+export * from './signal-reactions.js';
