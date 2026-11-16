@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHomeServer, parseDecisionQueue, HomeToolsUnavailable } from "./home/client.ts";
 import { ASKS_UNAVAILABLE_ACTION, catchUpDetailFromOverview, homeNeedsYouCount, mapCatchUp } from "./home-map.ts";
-import { needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "./home-primitives.ts";
+import { needsYouCard } from "./home-primitives.ts";
 import { catchUpSubline } from "./home-catchup.ts";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -133,8 +133,8 @@ test("the live Catch up loader takes asks from the queue; when the queue can't b
   assert.deepEqual(queued.choiceReads, [["W", ["old", "new"]]], "the queued asks' stored choices are read once");
   assert.equal(queued.vm.needsYou.some(item => item.choices), false, "no stored choices, no buttons");
   const chosen = await load(async () => queue([ask("old", "2026-11-01T09:00:00Z")]),
-    [{ signalId: "old", options: [{ id: "ship", label: "Ship it" }, { id: "wait", label: "Wait" }], answer: null }]);
-  assert.deepEqual(chosen.vm.needsYou[0].choices, { options: [{ id: "ship", label: "Ship it" }, { id: "wait", label: "Wait" }] });
+    [{ signalId: "old", multi: false, options: [{ id: "ship", label: "Ship it", description: "Today" }, { id: "wait", label: "Wait", recommended: true }], answer: null }]);
+  assert.deepEqual(chosen.vm.needsYou[0].choices, { options: [{ id: "ship", label: "Ship it", description: "Today" }, { id: "wait", label: "Wait", recommended: true }], multi: false });
   assert.equal(chosen.count, 1, "choices don't change the count");
   for (const missing of [async () => { throw new HomeToolsUnavailable(); }, async () => null]) {
     const failed = await load(missing);
@@ -165,25 +165,12 @@ test("the Retry card isn't counted as a thing that needs you, and unread asks ne
   assert.equal(catchUpSubline(read), "1 thing needs you across 1 workspace.");
 });
 
-test("Waiting on you shows an ask's stored choices as text-only buttons that send the option id", () => {
-  const label = "<img src=x onerror=alert(1)> ship";
-  const options = [{ id: "ship", label }, { id: "wait", label: "Wait" }];
-  const choices = new Map([["x", { signalId: "x", options, answer: null }], ["done", { signalId: "done", options, answer: { optionId: "ship", byViewer: true } }]]);
+
+test("Waiting on you gives a decision card only to an unanswered ask with stored choices, with descriptions, recommended and multi", () => {
+  const options = [{ id: "ship", label: "Ship", description: "Today" }, { id: "wait", label: "Wait", recommended: true }];
+  const choices = new Map([["x", { signalId: "x", multi: true, options, answer: null }],
+    ["done", { signalId: "done", multi: false, options, answer: { optionId: "ship", optionIds: ["ship"], otherText: null, byViewer: true, actorUserId: null, at: null } }]]);
   const detail = catchUpDetailFromOverview(row, "zoe", now, false, [], queue([ask("x", "2026-11-04T11:00:00Z"), ask("done", "2026-11-04T11:00:00Z"), ask("plain", "2026-11-04T11:00:00Z")]), choices);
-  assert.deepEqual(detail.needsYou.map(item => Boolean(item.choices)), [true, false, false], "only an unanswered ask with stored choices gets buttons");
-  const doc = fakeDocument(); const clicks = []; const actions = [];
-  const base = doc.createElement;
-  doc.createElement = tag => { const el = base(tag); el.addEventListener = (type, fn) => { if (type === "click") clicks.push({ el, fn }); }; return el; };
-  const card = needsYouCard(doc, detail.needsYou[0], action => actions.push(action));
-  const find = (node, cls) => node.className === cls ? node : node.children?.map(child => typeof child === "object" ? find(child, cls) : null).find(Boolean);
-  const group = find(card, "hm-needs-choices");
-  assert.equal(group.attrs.role, "group");
-  assert.deepEqual(group.children.map(button => [button.tag, button.textContent, button.dataset.choice]), [["button", label, "ship"], ["button", "Wait", "wait"]]);
-  for (const { el, fn } of clicks) if (el.dataset.choice) fn();
-  assert.deepEqual(actions, [`${NEEDS_YOU_CHOICE_ACTION}ship`, `${NEEDS_YOU_CHOICE_ACTION}wait`]);
-  assert.ok(find(card, "hm-actions"), "Reply stays");
-  const pending = needsYouCard(fakeDocument(), { ...detail.needsYou[0], choices: { ...detail.needsYou[0].choices, pending: true, error: "That ask was already answered." } }, () => {});
-  assert.ok(find(pending, "hm-needs-choices").children.every(button => button.disabled === true));
-  assert.equal(find(pending, "hm-needs-choice-error").textContent, "That ask was already answered.");
-  assert.equal(find(needsYouCard(fakeDocument(), { ...detail.needsYou[0], sample: true }, () => {}), "hm-needs-choices"), undefined, "samples get no buttons");
+  assert.deepEqual(detail.needsYou.map(item => item.choices ?? null), [{ options, multi: true }, null, null]);
+  assert.notEqual(detail.needsYou[0].choices.options[0], options[0], "the card gets its own copy of each option");
 });

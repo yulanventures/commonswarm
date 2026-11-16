@@ -416,33 +416,206 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   line-height: 1.5;
 }
 
-/* Choice buttons on an agent's ask: plain text, at least 44px square, wrapping on narrow screens. */
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choices {
+/* The decision card on a choice ask (lib/choice-card.ts), in a message and on Waiting on you: the question,
+   one full-width row per option, Other last, then who chose and when. Rows are at least 44px everywhere. A
+   chosen row carries a check mark as well as its edge, so selection never rests on colour alone. */
+live-dashboard.dashboard[data-kylon-shell] .hm-decision {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
-  margin: 8px 0 0;
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 560px;
+  margin: 6px 0 0;
+  padding: 12px;
+  border: 1px solid var(--k-shell-line);
+  border-radius: var(--k-shell-row-radius);
+  background: var(--k-shell-subtle);
+  color: var(--k-shell-ink);
+  font-family: var(--k-shell-font);
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choice {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 8px 14px;
-  border: 1px solid var(--k-shell-border, currentColor);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
+live-dashboard.dashboard[data-kylon-shell] .hm-decision:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision > .dashboard__message-markdown {
+  margin: 0;
+}
+/* On a Waiting on you card the card around it is already the box. */
+live-dashboard.dashboard[data-kylon-shell] .hm-needs-you .hm-decision {
+  margin-block-start: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 44px;
+  margin: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: var(--k-shell-radius);
+  box-shadow: inset 0 0 0 1px var(--k-shell-control);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
   font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision :is(button, label).hm-decision__option {
   cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__choice:disabled {
-  opacity: .6;
+live-dashboard.dashboard[data-kylon-shell] .hm-decision :is(button, label).hm-decision__option:hover {
+  background: var(--k-shell-selected);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision :is(button.hm-decision__option:focus-visible, label.hm-decision__option:has(input:focus-visible)) {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 2px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__check:focus-visible {
+  outline: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision[aria-busy="true"] :is(.hm-decision__option, .hm-decision__submit) {
   cursor: progress;
 }
-live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message :is(.dashboard__choice-answer, .dashboard__choice-error) {
-  margin: 6px 0 0;
+/* Read-only rows keep their words at full strength; only their edge is quieter. */
+live-dashboard.dashboard[data-kylon-shell] .hm-decision li.hm-decision__option {
+  box-shadow: inset 0 0 0 1px var(--k-shell-line);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision :is(label.hm-decision__option:has(input:checked), li.hm-decision__option[data-chosen="true"]) {
+  box-shadow: inset 0 0 0 1.5px var(--k-shell-selection-edge);
+  background: var(--k-shell-selected);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__check {
+  flex: none;
+  inline-size: 18px;
+  block-size: 18px;
+  min-inline-size: 0;
+  min-block-size: 0;
+  margin: 1px 0 0;
+  accent-color: var(--k-shell-selection-edge);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__mark {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  inline-size: 18px;
+  block-size: 18px;
+  margin-block-start: 1px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-chosen="true"] > .hm-decision__mark {
+  background: var(--k-shell-selection-edge);
+  color: var(--k-shell-surface);
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__label {
+  font-weight: 500;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--k-shell-line);
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__description {
+  color: var(--k-shell-secondary);
+  font-size: 13px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__other {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__other-field {
+  display: flex;
+  gap: 6px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__other-field[hidden] {
+  display: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__input {
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--k-shell-control);
+  border-radius: var(--k-shell-radius);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-ink);
+  font: inherit;
+  font-size: 16px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision__input:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: 1px;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-button.hm-decision__submit {
+  flex: none;
+  align-self: flex-start;
+  min-block-size: 44px;
+  border-radius: var(--k-shell-radius);
+  font-family: var(--k-shell-font);
+  font-size: 14px;
+  font-weight: 600;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-button.hm-decision__submit:disabled {
+  box-shadow: inset 0 0 0 1px var(--k-shell-line);
+  background: var(--k-shell-surface);
+  color: var(--k-shell-secondary);
+  cursor: default;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__error {
+  margin: 0;
+  color: var(--k-shell-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__foot {
+  margin: 0;
   color: var(--k-shell-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__option {
+    border: 1px solid CanvasText;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .hm-decision :is(label.hm-decision__option:has(input:checked), li.hm-decision__option[data-chosen="true"]) {
+    border: 2px solid Highlight;
+  }
 }
 
 /* A mention in a message body: the name, tinted, in the line. It is text, not a control, so it

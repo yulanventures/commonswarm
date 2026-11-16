@@ -1244,7 +1244,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildSideCards } from "../../lib/home-side-cards";
   import { buildAuthorLine, groupStreamMessage, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
-  import { statusLine, needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "../../lib/home-primitives";
+  import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
@@ -1425,7 +1425,8 @@ import "../../styles/kylon-command-palette.css";
     type AgentStatusEvent,
     type MessageStatus,
   } from "../../lib/message-status";
-  import { choiceAnswerText, ASK_CHOICES_BATCH, type AskChoiceState } from "../../lib/choices";
+  import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, type AskChoiceState, type ChoiceDraft, type ChoiceSubmission } from "../../lib/choices";
+  import { buildChoiceCard } from "../../lib/choice-card";
   import { REACTION_PICKER_EMOJIS, pickerMove, reactionNames, reactionPillLabel, type ReactionGroup } from "../../lib/reactions";
   import {
     agentActivityFrameIsNewer,
@@ -2176,13 +2177,18 @@ import "../../styles/kylon-command-palette.css";
     let messageStatusGeneration = 0;
     let messageStatusExpiryTimer: number | undefined;
     const agentStatusEvents = new Map<string, AgentStatusEvent>();
-    /* Interactive replies: the stored choices on asks addressed to the signed-in person. Choices are
-       created only while the server's flag is on; ones created earlier stay readable after it is
+    /* Interactive replies: the stored choices on the loaded asks the signed-in person can read. Choices
+       are created only while the server's flag is on; ones created earlier stay readable after it is
        turned off, while every choice command is refused. */
     let choiceRows = new Map<string, AskChoiceState>();
     let choiceCheckedAt = 0;
     let choiceGeneration = 0;
     const choiceErrors = new Map<string, string>();
+    /* What the person has ticked or typed on an open ask and not sent: by account, workspace and ask,
+       so a repaint, a poll or a visit elsewhere rebuilds the card as they left it. Only an answer clears it. */
+    const choiceDrafts = new Map<string, ChoiceDraft>();
+    const choiceDraftKey = (workspaceId: string, signalId: string): string =>
+      JSON.stringify([session?.user.id ?? "", workspaceId, signalId]);
     /* A click's ticket: the account, workspace, request and reset epoch it was made in. Its
        completion changes nothing unless the ticket is still the ask's own and all four still hold;
        a stale ticket is never pending, so it can't hold a button disabled either. */
@@ -5709,23 +5715,33 @@ import "../../styles/kylon-command-palette.css";
       const viewerName = members.find(member => member.userId === homeViewerId())?.name ||
         catchUpData.flatMap(entry => entry.detail?.people.groups ?? []).find(group => group.person.id === homeViewerId())?.person.name;
       const vm = mapCatchUp(catchUpData, homeViewerId(), greetingName(session?.user, viewerName || (sampleMode ? Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name : undefined)), Date.now(), sampleMode, catchUpExpanded);
-      for (const item of vm.needsYou) {
-        if (!item.choices) continue;
-        if (catchUpChoiceIsPending(item.id)) item.choices.pending = true;
+      /* The cards are the loaded data's own objects, so this render's pending, error and draft go on copies:
+         a refusal that ends a pending answer must not leave the next render still pending. */
+      vm.needsYou = vm.needsYou.map(item => {
+        if (!item.choices) return item;
         const error = catchUpChoiceErrors.get(item.id);
-        if (error) item.choices.error = error;
-      }
+        return { ...item, choices: { options: item.choices.options, multi: item.choices.multi,
+          ...(catchUpChoiceIsPending(item.id) ? { pending: true as const } : {}), ...(error ? { error } : {}) } };
+      });
       const key = homeStructureKey(vm);
       if (key === homeCatchUpKey && slot.childElementCount) {
         refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
       }
+      // Drafts are not structure: typing never rebuilds the card, and a rebuild puts the draft back.
+      for (const item of vm.needsYou) {
+        const draft = item.choices ? choiceDrafts.get(choiceDraftKey(item.workspace.id, item.id)) : undefined;
+        if (item.choices && draft) item.choices.draft = draft;
+      }
       const view = buildCatchUp(document, vm, {
         onNeedsYouAction: (action, item) => {
           if (action === ASKS_UNAVAILABLE_ACTION) { void loadHomeCatchUp(); return; }
-          if (action.startsWith(NEEDS_YOU_CHOICE_ACTION)) { void sendCatchUpChoice(item, action.slice(NEEDS_YOU_CHOICE_ACTION.length)); return; }
           if (item.primary.href) navigateHomeHref(item.primary.href);
         },
         onShowMoreNeedsYou: () => { catchUpExpanded = true; renderHomeCatchUp(); },
+        onNeedsYouChoice: {
+          submit: (submission, item) => void sendCatchUpChoice(item, submission),
+          draft: (draft, item) => { choiceDrafts.set(choiceDraftKey(item.workspace.id, item.id), draft); },
+        },
       });
       // A chat/roster fallback has no complete to-do/ask read, so it cannot claim all is clear.
       if (vm.needsYou.length === 0 && vm.emptySummary) {
@@ -5749,22 +5765,22 @@ import "../../styles/kylon-command-palette.css";
       const ticket = catchUpChoiceTickets.get(id);
       return ticket !== undefined && catchUpChoiceTicketLive(ticket);
     };
-    const sendCatchUpChoice = async (item: NeedsYouVM, optionId: string): Promise<void> => {
+    const sendCatchUpChoice = async (item: NeedsYouVM, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
-      if (!activeSession || sampleMode || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
+      if (!activeSession || sampleMode || !item.choices || catchUpChoiceIsPending(item.id) || activeSession.user.id !== homeViewerId()) return;
       const ticket: CatchUpChoiceTicket = { viewer: activeSession.user.id, generation: catchUpGeneration };
       catchUpChoiceTickets.set(item.id, ticket);
       catchUpChoiceErrors.delete(item.id);
       renderHomeCatchUp();
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, optionId);
+        result = await answerChoice(activeSession, uuid(), item.workspace.id, item.id, item.choices.multi, submission);
       } catch {
-        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+        result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
       if (catchUpChoiceTickets.get(item.id) !== ticket || !catchUpChoiceTicketLive(ticket)) return;
       catchUpChoiceTickets.delete(item.id);
-      if (result.ok) { void loadHomeCatchUp(); return; }
+      if (result.ok) { choiceDrafts.delete(choiceDraftKey(item.workspace.id, item.id)); void loadHomeCatchUp(); return; }
       catchUpChoiceErrors.set(item.id, result.message);
       renderHomeCatchUp();
     };
@@ -7857,76 +7873,84 @@ import "../../styles/kylon-command-palette.css";
 
     /* Repaint when the soonest Working expires, so a crashed agent stops looking busy even if no
        idle event arrives. */
-    /* Choice buttons under an ask addressed to the signed-in person: text only, at least 44px.
-       A click sends answer_choice; the server checks everything and records an ordinary reply. */
-    const appendChoices = (body: HTMLElement, signal: Signal): void => {
+    /* THE DECISION CARD. An ask with stored choices is one box in its message: the question, every
+       option as a full-width row, Other last, then who chose and when. It stays after an answer or
+       expiry, read-only. Only the person it asks (or, for a channel ask, any person reading it, never
+       its asker) gets live rows; everyone else reads the same card. The server checks every answer. */
+    const choiceViewerMayAnswer = (signal: Signal, viewerId: string): boolean =>
+      !sampleMode && viewerId !== "" && !(signal.fromKind === "user" && signal.from === viewerId) &&
+      (signal.to === viewerId || (signal.to === null && signal.toAgent === null));
+    const choiceChooserName = (signal: Signal, state: AskChoiceState): string | null => {
+      const answer = state.answer;
+      if (!answer) return null;
+      if (answer.byViewer) return "you";
+      // v1 reads name no chooser; only the addressee could answer there.
+      const who = answer.actorUserId ?? signal.to;
+      return who ? entityName({ kind: "person", id: who }) : null;
+    };
+    const choiceAnsweredAt = (iso: string | null): { text: string; iso: string } | null => {
+      const at = iso === null ? NaN : Date.parse(iso);
+      if (!Number.isFinite(at)) return null;
+      return { iso: iso!, text: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(at)) };
+    };
+    /* Moves the message's question into the card, in the question's place. Nothing happens for an
+       ask without stored choices (or before they are read): it keeps its ordinary rendering. */
+    const appendChoices = (body: HTMLElement, signal: Signal, question?: HTMLElement, repliedInWords = false): void => {
       const state = choiceRows.get(signal.id);
       if (!state) return;
-      const answered = choiceAnswerText(state);
-      if (answered !== null) {
-        const line = document.createElement("p");
-        line.className = "dashboard__choice-answer";
-        line.textContent = answered;
-        body.append(line);
-        return;
-      }
-      /* An ask past its `until` stays in history, and the server refuses a choice on it
-         (`ask_expired`). It keeps its options as a plain line of what was offered. */
-      if (signalHasEnded(signal, Date.now())) {
-        const line = document.createElement("p");
-        line.className = "dashboard__choice-answer";
-        line.textContent = `Not answered: ${state.options.map((option) => option.label).join(", ")}`;
-        body.append(line);
-        return;
-      }
-      const group = document.createElement("div");
-      group.className = "dashboard__choices";
-      group.setAttribute("role", "group");
-      group.setAttribute("aria-label", "Choices");
-      for (const option of state.options) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "dashboard__choice";
-        button.textContent = option.label;
-        button.disabled = choiceIsPending(signal.id);
-        button.addEventListener("click", () => void sendChoice(signal.id, option.id));
-        group.append(button);
-      }
-      body.append(group);
-      const error = choiceErrors.get(signal.id);
-      if (error) {
-        const note = document.createElement("p");
-        note.className = "dashboard__choice-error";
-        note.setAttribute("role", "alert");
-        note.textContent = error;
-        body.append(note);
-      }
+      const workspaceId = activeWorkspaceId;
+      const viewerId = session?.user.id ?? "";
+      const draftKey = choiceDraftKey(workspaceId, signal.id);
+      const card = buildChoiceCard(document, {
+        state, interactive: choiceViewerMayAnswer(signal, viewerId), ended: signalHasEnded(signal, Date.now()),
+        repliedInWords, pending: choiceIsPending(signal.id), error: choiceErrors.get(signal.id) ?? null,
+        draft: choiceDrafts.get(draftKey), chooser: choiceChooserName(signal, state), answeredAt: choiceAnsweredAt(state.answer?.at ?? null),
+      }, {
+        submit: (submission) => void sendChoice(signal.id, submission),
+        draft: (draft) => { choiceDrafts.set(draftKey, draft); },
+      });
+      if (card.tagName !== "FORM") card.tabIndex = -1;
+      if (question && question.parentElement === body) { question.replaceWith(card); card.prepend(question); }
+      else body.append(card);
     };
 
-    const sendChoice = async (signalId: string, optionId: string): Promise<void> => {
+    const sendChoice = async (signalId: string, submission: ChoiceSubmission): Promise<void> => {
       const activeSession = session;
       const workspaceId = activeWorkspaceId;
-      if (!activeSession || !workspaceId || choiceIsPending(signalId)) return;
+      const state = choiceRows.get(signalId);
+      if (!activeSession || !workspaceId || !state || state.answer !== null || choiceIsPending(signalId)) return;
       const ticket: ChoiceTicket = { viewer: activeSession.user.id, workspaceId, version: requestVersion, epoch: choiceEpoch };
       choiceTickets.set(signalId, ticket);
       choiceErrors.delete(signalId);
       renderFeed();
       let result: Awaited<ReturnType<typeof answerChoice>>;
       try {
-        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, optionId);
+        result = await answerChoice(activeSession, uuid(), workspaceId, signalId, state.multi, submission);
       } catch {
-        result = { ok: false, message: "That choice couldn't be sent. Reply in words instead." };
+        result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
       // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
       if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
       choiceTickets.delete(signalId);
-      const state = choiceRows.get(signalId);
-      if (result.ok && state) {
-        choiceRows.set(signalId, { ...state, answer: { optionId: result.optionId, byViewer: true } });
+      const current = choiceRows.get(signalId);
+      /* The server accepted this person's answer: theirs, with the options it names. Its time comes
+         from the read that follows, never from the click. */
+      const focusCard = result.ok && document.activeElement instanceof Element &&
+        document.activeElement.closest(`[data-decision="${CSS.escape(signalId)}"]`) !== null;
+      if (result.ok && current) {
+        choiceRows.set(signalId, { ...current, answer: { optionId: result.optionIds[0] ?? "other", optionIds: result.optionIds,
+          otherText: result.otherText, byViewer: true, actorUserId: ticket.viewer, at: null } });
+        choiceDrafts.delete(choiceDraftKey(workspaceId, signalId));
       } else if (!result.ok) {
         choiceErrors.set(signalId, result.message);
       }
       renderFeed();
+      // The answered card has no controls; focus that was on its rows lands on the card itself.
+      if (focusCard) queueMicrotask(() => window.requestAnimationFrame(() => {
+        const now = document.activeElement;
+        if (now !== null && now !== document.body) return;
+        one<HTMLElement>(`[data-feed-list] [data-decision="${CSS.escape(signalId)}"]`)?.focus({ preventScroll: true });
+      }));
       void refreshChoices(workspaceId, ticket.version, true);
     };
 
@@ -7935,10 +7959,11 @@ import "../../styles/kylon-command-palette.css";
       if (sampleMode || !viewerId) return;
       const now = Date.now();
       if (!force && now - choiceCheckedAt < 20_000) return;
+      // Every loaded ask: directed to anyone, or to a channel. The read returns only the ones this person may read.
       const ids = signals
-        .filter((signal) => signal.kind === "ask" && signal.to === viewerId && signal.threadRootId === null)
+        .filter((signal) => signal.kind === "ask" && !signal.id.startsWith("composer-pending-"))
         .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-        .slice(0, 50)
+        .slice(0, ASK_CHOICES_BATCH)
         .map((signal) => signal.id);
       if (ids.length === 0) return;
       choiceCheckedAt = now;
@@ -7952,6 +7977,8 @@ import "../../styles/kylon-command-palette.css";
       if (generation !== choiceGeneration || version !== requestVersion || workspaceId !== activeWorkspaceId) return;
       if (rows === null) return;
       const next = new Map(rows.map((row) => [row.signalId, row]));
+      // An answer, whoever made it, replaces the draft: first wins.
+      for (const row of rows) if (row.answer !== null) choiceDrafts.delete(choiceDraftKey(workspaceId, row.signalId));
       const changed = JSON.stringify([...next]) !== JSON.stringify([...choiceRows]);
       choiceRows = next;
       if (changed && !addAgentViewOpen()) renderFeed();
@@ -9128,7 +9155,9 @@ import "../../styles/kylon-command-palette.css";
        frame in which that rebuild adds its deferred controls. A remembered control survives a
        rebuild that runs while focus is still on nothing, and is forgotten as soon as focus is
        anywhere else. */
-    let feedFocus: { id: string; copy: number; identity: string | null; ordinal: number; feed: string } | null = null;
+    /* A text field (a decision card's Other answer) also keeps its caret, and comes back as soon as the
+       rebuild returns rather than a frame later, so typing never lands on the page. */
+    let feedFocus: { id: string; copy: number; identity: string | null; ordinal: number; feed: string; selection: [number, number] | null } | null = null;
     let feedRenderGeneration = 0;
     const keepFeedFocus = (list: HTMLElement): void => {
       const generation = ++feedRenderGeneration;
@@ -9139,12 +9168,13 @@ import "../../styles/kylon-command-palette.css";
         if (!row || !id) { feedFocus = null; return; }
         const identity = active === row ? null : controlIdentity(active);
         const alike = [...row.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => identity !== null && controlIdentity(el) === identity);
+        const field = active instanceof HTMLInputElement && active.type === "text" ? active : null;
         feedFocus = { id, copy: [...list.querySelectorAll<HTMLElement>(`[data-signal-id="${CSS.escape(id)}"]`)].indexOf(row),
-          identity, ordinal: identity === null ? -1 : alike.indexOf(active), feed: feedIdentity() };
+          identity, ordinal: identity === null ? -1 : alike.indexOf(active), feed: feedIdentity(),
+          selection: field && field.selectionStart !== null && field.selectionEnd !== null ? [field.selectionStart, field.selectionEnd] : null };
       } else if (active !== null && active !== document.body) feedFocus = null;
       if (!feedFocus) return;
-      // After the rebuild returns, then after the frame its deferred controls are added in.
-      queueMicrotask(() => window.requestAnimationFrame(() => {
+      const restore = (): void => {
         if (generation !== feedRenderGeneration || !feedFocus) return;
         const pending = feedFocus;
         feedFocus = null;
@@ -9156,7 +9186,13 @@ import "../../styles/kylon-command-palette.css";
         const target = pending.identity === null ? next
           : [...next.querySelectorAll<HTMLElement>(FEED_FOCUSABLE)].filter(el => controlIdentity(el) === pending.identity)[pending.ordinal] ?? null;
         target?.focus({ preventScroll: true });
-      }));
+        if (pending.selection && target instanceof HTMLInputElement) {
+          const end = target.value.length;
+          target.setSelectionRange(Math.min(pending.selection[0], end), Math.min(pending.selection[1], end));
+        }
+      };
+      // After the rebuild returns, then (for anything but a text field) after the frame its deferred controls are added in.
+      queueMicrotask(() => { if (feedFocus?.selection) restore(); else window.requestAnimationFrame(restore); });
     };
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
@@ -9460,7 +9496,7 @@ import "../../styles/kylon-command-palette.css";
           meta.append(author, identityBadge, ...recipient, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: clockTime,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), ended: signalHasEnded(signal, now), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), ended: signalHasEnded(signal, now), choices: choiceRows.has(signal.id), answered: homeAskAnswered(signal, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {
@@ -9582,7 +9618,7 @@ import "../../styles/kylon-command-palette.css";
            the receipt says yet, so touch layouts can give its status badge room without the row changing height later. */
         if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
-        appendChoices(body, signal);
+        appendChoices(body, signal, markdown, streamSignal?.answered ?? false);
         /* Reactions sit under the message, before the row's tools; they are never in the floating footer. */
         appendReactions(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.

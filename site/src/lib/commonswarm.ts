@@ -40,7 +40,7 @@ import {
   type ComposerRecipient,
 } from "./composer-address.js";
 import { HUMAN_SEEN_BATCH_MAX } from "./human-seen-reporter.js";
-import { ASK_CHOICES_BATCH, parseAskChoices, type AskChoiceState } from "./choices.js";
+import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, CHOICE_ANSWER_UNSUPPORTED, answerChoiceCommand, answerNeedsV2, parseAskChoices, type AskChoiceState, type ChoiceSubmission } from "./choices.js";
 import type { ReactionActor, ReactionGroup } from "./reactions";
 import {
   MESSAGE_STATUS_BATCH,
@@ -4002,30 +4002,40 @@ export async function askChoices(workspaceId: string, signalIds: readonly string
   return parseAskChoices(result.data);
 }
 
-export type AnswerChoiceResult = { ok: true; optionId: string } | { ok: false; message: string };
+export type AnswerChoiceResult =
+  | { ok: true; optionIds: string[]; otherText: string | null }
+  | { ok: false; status: number; error: string | null; message: string };
 
-/** A person's click on one of an ask's choices: the server checks everything and records an ordinary reply. */
+/** A person's answer to an ask's choices: the server checks everything and records an ordinary reply.
+ * A single fixed option goes in v1's exact shape. Multi-select and Other text need the v2 server; one
+ * without it refuses them as invalid input, which reads as a neutral line rather than its own wording. */
 export async function answerChoice(
   session: Session,
   commandId: string,
   workspaceId: string,
   signalId: string,
-  optionId: string,
+  multi: boolean,
+  submission: ChoiceSubmission,
 ): Promise<AnswerChoiceResult> {
-  const { status, body } = await postCommand(
-    session,
-    commandId,
-    { kind: "answer_choice", signal_id: signalId, option_id: optionId },
-    { workspace_id: workspaceId, stream: { kind: "workspace" } },
-  );
+  const command = answerChoiceCommand(signalId, multi, submission);
+  const { status, body } = await postCommand(session, commandId, command, { workspace_id: workspaceId, stream: { kind: "workspace" } });
   if (status === 200 && body.status === "accepted") {
-    const answer = (body as { choice_answer?: { option_id?: unknown } }).choice_answer;
-    return { ok: true, optionId: typeof answer?.option_id === "string" ? answer.option_id : optionId };
+    const answer = (body as { choice_answer?: { option_id?: unknown; option_ids?: unknown; other_text?: unknown } }).choice_answer;
+    const optionIds = Array.isArray(answer?.option_ids) && answer.option_ids.every(id => typeof id === "string")
+      ? answer.option_ids as string[]
+      : typeof answer?.option_id === "string" && submission.optionIds.includes(answer.option_id) ? [answer.option_id] : submission.optionIds;
+    const otherText = typeof answer?.other_text === "string" ? answer.other_text
+      : answer?.other_text === null ? null : submission.otherText;
+    return { ok: true, optionIds, otherText };
+  }
+  const error = typeof body.error === "string" ? body.error : null;
+  if (status === 400 && (error === "invalid_request" || error === null)) {
+    return { ok: false, status, error, message: answerNeedsV2(command) ? CHOICE_ANSWER_UNSUPPORTED : CHOICE_ANSWER_FAILED };
   }
   const message = typeof (body as { message?: unknown }).message === "string"
     ? (body as { message: string }).message
-    : "That choice couldn't be sent. Reply in words instead.";
-  return { ok: false, message };
+    : CHOICE_ANSWER_FAILED;
+  return { ok: false, status, error, message };
 }
 
 /** Ask previews use immutable bodies from the selected workspace, including older messages. */

@@ -630,6 +630,68 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         ids["message.endedSelf"] = endedSelf;
         steps.push("seed_history");
       } catch (error) { note("seed_history", error); }
+      /* Choice asks (interactive replies) from the agent to the viewer, in the private channel so no other capture's feed
+         changes: an open single-choice ask with descriptions and a recommended option, an open multi-select ask, one the
+         viewer answered (a v1 answer row plus the reply note answer_choice posts), and one that expired unanswered.
+         Written in SQL like the other history; the read (swarm_read.ask_choices) is what the page uses. A stack without
+         the v2 column (swarm.ask_choices.multi) gets the multi ask as a single-choice one and notes it. */
+      if (ids["channel.private"]) {
+        try {
+          const channel = ids["channel.private"];
+          const [column] = await sql<{ v2: boolean }[]>`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'swarm' AND table_name = 'ask_choices' AND column_name = 'multi') AS v2`;
+          const v2 = column?.v2 === true;
+          const open = randomUUID(), multi = randomUUID(), answered = randomUUID(), expired = randomUUID(), reply = randomUUID();
+          const quotes = [
+            { id: "harbor", label: "Harbor Heating, $240", description: "Includes the expansion vessel check and the flue test. Friday 9am.", recommended: true },
+            { id: "northside", label: "Northside Boilers, $215", description: "Flue test is extra ($35). Next Tuesday." },
+            { id: "wait", label: "Wait for the third quote" },
+          ];
+          const rooms = [
+            { id: "hallway", label: "Hallway" }, { id: "kitchen", label: "Kitchen" },
+            { id: "meter", label: "Meter cupboard", description: "The engineer needs the meter reading before and after." },
+            { id: "loft", label: "Loft hatch" },
+          ];
+          const plain = [{ id: "today", label: "Today" }, { id: "tomorrow", label: "Tomorrow" }];
+          await sql.begin(async (tx) => {
+            await tx`INSERT INTO swarm.signals (
+                id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+                about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+              ) VALUES (
+                ${expired}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Should I book the chimney sweep for this week?',
+                statement_timestamp() - interval '1 minute', statement_timestamp() - interval '5 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${answered}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'When should I send the boiler quotes to everyone?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '4 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${reply}::uuid, ${workspace}::uuid, ${owner.id}::uuid, 'user', NULL, ${ids.agent!}::uuid, ${answered}::uuid,
+                NULL, 'note', 'Chose: Tomorrow',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '230 seconds', ${channel}::uuid, NULL, false
+              ), (
+                ${open}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which boiler service quote should I book?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', ${channel}::uuid, NULL, false
+              ), (
+                ${multi}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+                NULL, 'ask', 'Which spaces should be clear for the engineer?',
+                statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', ${channel}::uuid, NULL, false
+              )`;
+            for (const row of [{ id: expired, options: plain }, { id: answered, options: plain }, { id: open, options: quotes }]) {
+              await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options) VALUES (${row.id}::uuid, ${workspace}::uuid, ${tx.json(row.options)}::jsonb)`;
+            }
+            if (v2) await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options, multi) VALUES (${multi}::uuid, ${workspace}::uuid, ${tx.json(rooms)}::jsonb, true)`;
+            else await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options) VALUES (${multi}::uuid, ${workspace}::uuid, ${tx.json(rooms)}::jsonb)`;
+            await tx`INSERT INTO swarm.ui_actions (action_id, workspace_id, signal_id, actor_user_id, option_id, state, reply_signal_id, created_at, completed_at)
+              VALUES (${randomUUID()}::uuid, ${workspace}::uuid, ${answered}::uuid, ${owner.id}::uuid, 'tomorrow', 'completed', ${reply}::uuid,
+                statement_timestamp() - interval '230 seconds', statement_timestamp() - interval '230 seconds')`;
+          });
+          Object.assign(ids, { "message.choiceOpen": open, "message.choiceMulti": multi, "message.choiceAnswered": answered, "message.choiceExpired": expired });
+          steps.push("seed_choice_asks");
+          if (v2) steps.push("seed_choice_multi"); else note("seed_choice_asks", "no swarm.ask_choices.multi column: the multi ask is single-choice on this stack");
+        } catch (error) { note("seed_choice_asks", error); }
+      }
       // Every message the viewer can see starts already seen by them. Otherwise the first capture of the run marks
       // them seen, and the next receipt poll turns "Sent" into "Seen" in the middle of a hover measurement.
       // The oldest one first, seen a minute after it was sent: the viewer's unread count starts there, so the

@@ -126,6 +126,146 @@
     ]
   },
   {
+    "id": "app.chat.choice-open",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] [data-decision-option=\"harbor\"]"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] [data-decision-option=\"harbor\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision [data-decision-option=\"harbor\"]"
+    ]
+  },
+  {
+    "id": "app.chat.choice-other",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] [data-decision-other-trigger]"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision"
+      },
+      {
+        "click": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-trigger]"
+      },
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-input]"
+      },
+      {
+        "type": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-input]",
+        "text": "Book Harbor, but ask them to come after 10am because the school run takes until then."
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-trigger][aria-expanded=\"true\"] ~ .hm-decision__other-field [data-decision-submit]:not([disabled])",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-input]"
+    ]
+  },
+  {
+    "id": "app.chat.choice-multi",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceMulti}\"] .hm-decision[data-decision-state=\"open\"]"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.choiceMulti}\"] .hm-decision"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.choiceMulti}\"] .hm-decision[data-decision-state=\"open\"] [data-decision-submit]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.choiceMulti}\"] .hm-decision .hm-decision__options > :first-child"
+    ]
+  },
+  {
+    "id": "app.chat.choice-answered",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceAnswered}\"] .hm-decision[data-decision-state=\"answered\"] .hm-decision__foot time"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.choiceAnswered}\"] .hm-decision"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.choiceAnswered}\"] .hm-decision[data-decision-state=\"answered\"] [data-chosen=\"true\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.choiceAnswered}\"] .hm-decision .hm-decision__foot"
+    ]
+  },
+  {
+    "id": "app.chat.choice-expired",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.private}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.choiceExpired}\"] .hm-decision[data-decision-state=\"expired\"]"
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.choiceExpired}\"] .hm-decision"
+      }
+    ],
+    "ready": "[data-signal-id=\"{message.choiceExpired}\"] .hm-decision[data-decision-state=\"expired\"] .hm-decision__foot",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "private_channel",
+      "seed_choice_asks"
+    ],
+    "frame": [
+      "[data-signal-id=\"{message.choiceExpired}\"] .hm-decision .hm-decision__foot"
+    ]
+  },
+  {
     "id": "app.chat.unread-bar",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.unread}",

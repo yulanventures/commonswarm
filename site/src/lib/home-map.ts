@@ -275,7 +275,7 @@ function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: N
   return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
     what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) },
-    ...(choice && choice.answer === null ? { choices: { options: choice.options.map(option => ({ id: option.id, label: option.label })) } } : {}) };
+    ...(choice && choice.answer === null ? { choices: { options: choice.options.map(option => ({ ...option })), multi: choice.multi } } : {}) };
 }
 /** The queue couldn't be read: say so, with Retry. Never an empty or resolved list, and never the overview's asks. */
 export const ASKS_UNAVAILABLE_ACTION = "retry-asks";

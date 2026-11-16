@@ -47,6 +47,7 @@ const MESSAGE_STATUS_STUBS = {
   resetMessageStatus: () => undefined,
   refreshChoices: async () => undefined,
   appendChoices: () => undefined,
+  choiceRows: new Map(),
   resetChoices: () => undefined,
   // Read positions have their own test (channel-reads.observer.test.ts).
   paintUnreadDivider: () => undefined,

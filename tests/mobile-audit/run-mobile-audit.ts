@@ -300,6 +300,13 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing]' } },
   }],
+  // A decision card's Other field: Shift+Tab reaches the Other row, and Enter folds the field back with focus on that row.
+  "app.chat.choice-other": [{
+    name: "choice-other-row",
+    start: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-input]' },
+    keys: [{ key: "Shift+Tab", expect: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="true"]' }],
+    activate: { key: "Enter", expect: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-trigger][aria-expanded="false"]' } },
+  }],
   "route.terms": [{
     name: "skip-link",
     start: "document",
@@ -360,6 +367,13 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // `prefer` names the jump button (one of the rows), which also photographs it at rest and on hover.
   "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
     prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
+  // Decision cards: hovering a card's message or focusing its first option row must not move anything.
+  "app.chat.choice-open": [{ name: "choice-open", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
+    require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
+  "app.chat.choice-multi": [{ name: "choice-multi", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',
+    require: ['[data-signal-id="{message.choiceMulti}"]'], max: 1, focus: true, focusTarget: ".hm-decision [data-decision-option]" }],
+  "app.chat.choice-answered": [{ name: "choice-answered", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceAnswered}"]',
+    require: ['[data-signal-id="{message.choiceAnswered}"]'], max: 1 }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],
   "app.files": [{ name: "files", rows: ".dashboard__file-row", max: 6, focus: true }],
