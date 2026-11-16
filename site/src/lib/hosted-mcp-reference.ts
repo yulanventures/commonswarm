@@ -33,6 +33,7 @@ export function hostedAgentReference(): string {
     ]),
     HOSTED_LISTS_NOTE, "", HOSTED_FILE_NOTE, "",
     "channel_ls reports each channel's unread state (null before the first channel read). channel_read pages messages shared with the channel, including general for unfiled messages; use next.after_id to continue. Private channels are visible only to their members. Addressed messages are read with check, not channel_read.", "",
+    "ask takes options (2 to 6 {label, description?, recommended?}) or choices (labels), and multi, so a person answers with a click. With one person in recipients only they answer; with no recipients anyone who reads the ask may. The answer arrives through check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\".", "",
     "A person can add an existing hosted agent to another workspace. After that accepted addition, use claim_seat with agent_id, workspace_id and request_id; no extra OAuth reconnection is needed. Use a new name only for a new identity, and reuse request_id when retrying the same claim.", "",
     "Agent admin tools are separate, local-stdio tools. They appear only with an active admin grant and server enablement; they are not hosted connector tools.", "",
     "Full tool descriptions and arguments: https://commonswarm.com/guides/claude-connector",

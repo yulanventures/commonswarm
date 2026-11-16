@@ -6177,6 +6177,123 @@ function normalizeReactionEmoji(input) {
   return emoji;
 }
 var SIGNAL_REACTION_EMOJI_RULE = `emoji must be one emoji (at most ${SIGNAL_REACTION_MAX_BYTES} bytes) or one of ${Object.keys(SIGNAL_REACTION_SHORTCODES).join(" ")}`;
+
+// src/protocol/choice-asks.ts
+var CHOICE_MIN = 2;
+var CHOICE_MAX = 6;
+var CHOICE_LABEL_MAX = 80;
+var CHOICE_DESCRIPTION_MAX = 200;
+var CHOICE_OTHER_TEXT_MAX = 500;
+var CHOICE_ID_MAX = 32;
+var CHOICE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+var CHOICE_OTHER_OPTION_ID = "other";
+var CHOICE_OPTIONS_MAX_BYTES = 3840;
+var CHOICE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+function choiceTextUnsafe(text3) {
+  return CHOICE_UNSAFE_RE.test(text3);
+}
+function oneLine(value) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+function derivedId(label, index, taken) {
+  const slug = label.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+/u, "").slice(0, CHOICE_ID_MAX).replace(/-+$/u, "");
+  const base = slug || `option-${index + 1}`;
+  let id2 = base;
+  for (let n = 2; taken.has(id2); n += 1) {
+    id2 = `${base.slice(0, CHOICE_ID_MAX - String(n).length - 1).replace(/-+$/u, "")}-${n}`;
+  }
+  return id2;
+}
+function choiceOptions(inputs) {
+  if (inputs.length < CHOICE_MIN || inputs.length > CHOICE_MAX) {
+    throw new Error(`An ask takes ${CHOICE_MIN} to ${CHOICE_MAX} choices; got ${inputs.length}.`);
+  }
+  const rows = inputs.map((input) => typeof input === "string" ? { label: input } : input);
+  const explicit = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    if (row.id === void 0) continue;
+    if (typeof row.id !== "string" || !CHOICE_ID_RE.test(row.id)) {
+      throw new Error(`Each choice id must be 1 to ${CHOICE_ID_MAX} of a-z, 0-9, _ or -, starting with a letter or digit.`);
+    }
+    if (explicit.has(row.id)) throw new Error(`Each choice id must be different; "${row.id}" repeats.`);
+    explicit.add(row.id);
+  }
+  const options = [];
+  const seenLabels = /* @__PURE__ */ new Set();
+  const taken = new Set(explicit);
+  let recommended = 0;
+  for (const [index, row] of rows.entries()) {
+    const label = typeof row.label === "string" ? oneLine(row.label) : "";
+    if (label.length < 1 || label.length > CHOICE_LABEL_MAX || CHOICE_UNSAFE_RE.test(label)) {
+      throw new Error(`Each choice must be 1 to ${CHOICE_LABEL_MAX} characters of plain text.`);
+    }
+    const folded = label.toLocaleLowerCase();
+    if (seenLabels.has(folded)) throw new Error(`Each choice must be different; "${label}" repeats.`);
+    seenLabels.add(folded);
+    let description;
+    if (row.description !== void 0) {
+      description = typeof row.description === "string" ? oneLine(row.description) : "";
+      if (description.length < 1 || description.length > CHOICE_DESCRIPTION_MAX || CHOICE_UNSAFE_RE.test(description)) {
+        throw new Error(`A choice's description must be 1 to ${CHOICE_DESCRIPTION_MAX} characters of plain text.`);
+      }
+    }
+    if (row.recommended !== void 0 && typeof row.recommended !== "boolean") {
+      throw new Error("A choice's recommended is true or false.");
+    }
+    if (row.recommended === true) recommended += 1;
+    const id2 = row.id ?? derivedId(label, index, taken);
+    taken.add(id2);
+    options.push({
+      id: id2,
+      label,
+      ...description === void 0 ? {} : { description },
+      ...row.recommended === true ? { recommended: true } : {}
+    });
+  }
+  if (recommended > 1) throw new Error("At most one choice can be recommended.");
+  const ordered = recommendedFirst(options);
+  if (new TextEncoder().encode(JSON.stringify(ordered)).length > CHOICE_OPTIONS_MAX_BYTES) {
+    throw new Error("These choices are too long together; shorten the labels or descriptions.");
+  }
+  return ordered;
+}
+function recommendedFirst(options) {
+  return [
+    ...options.filter((option) => option.recommended === true),
+    ...options.filter((option) => option.recommended !== true)
+  ];
+}
+function parseChoiceOptionFlag(raw) {
+  const split = raw.indexOf("::");
+  if (split < 0) return { label: raw };
+  return { label: raw.slice(0, split), description: raw.slice(split + 2) };
+}
+function markRecommended(inputs, selector) {
+  const rows = inputs.map((input) => typeof input === "string" ? { label: input } : { ...input });
+  let index = -1;
+  if (/^[1-9][0-9]*$/u.test(selector)) {
+    index = Number(selector) - 1;
+  } else {
+    index = choiceOptions(rows.map(({ recommended: _recommended, ...row }) => row)).map((option) => option.id).indexOf(selector);
+  }
+  if (index < 0 || index >= rows.length) {
+    throw new Error(`--recommended names a choice by its number (1 to ${rows.length}) or its id.`);
+  }
+  return rows.map((row, position) => position === index ? { ...row, recommended: true } : row);
+}
+function choiceOtherText(value) {
+  const text3 = value.trim();
+  if (Array.from(text3).length < 1 || Array.from(text3).length > CHOICE_OTHER_TEXT_MAX || CHOICE_UNSAFE_RE.test(text3)) {
+    throw new Error(`Other text must be 1 to ${CHOICE_OTHER_TEXT_MAX} characters on one line, with no control characters.`);
+  }
+  return text3;
+}
+function choiceAnswerBody(labels, otherText) {
+  const lines = [];
+  if (labels.length > 0) lines.push(`Selected: ${labels.join(", ")}`);
+  if (otherText !== null) lines.push(`Other: ${otherText}`);
+  return lines.join("\n");
+}
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -6213,6 +6330,15 @@ export {
   BRAIN_FILE_SUFFIX,
   BRAIN_LIVE_VERSION_LIMIT,
   BRAIN_TOPIC_MAX_LENGTH,
+  CHOICE_DESCRIPTION_MAX,
+  CHOICE_ID_MAX,
+  CHOICE_ID_RE,
+  CHOICE_LABEL_MAX,
+  CHOICE_MAX,
+  CHOICE_MIN,
+  CHOICE_OPTIONS_MAX_BYTES,
+  CHOICE_OTHER_OPTION_ID,
+  CHOICE_OTHER_TEXT_MAX,
   DISPOSITIONS,
   EVENT_TYPES,
   FEEDBACK_BODY_MAX,
@@ -6336,6 +6462,10 @@ export {
   canonicalAdminJson,
   canonicalJson,
   canonicalPrincipal,
+  choiceAnswerBody,
+  choiceOptions,
+  choiceOtherText,
+  choiceTextUnsafe,
   compareHostedCheckCursor,
   decide,
   decideAdminAuthority,
@@ -6380,12 +6510,14 @@ export {
   leaseLive,
   legacyHouseholdAcceptRefusal,
   legacyRemovalRejoinRefusal,
+  markRecommended,
   normalizeReactionEmoji,
   normalizeWorkspaceSkillsState,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   parseAdminClientApprovalCommand,
   parseAdminRoutineCommand,
+  parseChoiceOptionFlag,
   parseHumanInviteCommand,
   parseSeatAdminCommand,
   planFileVersionWindow,
@@ -6393,6 +6525,7 @@ export {
   proposeWorkspaceSkillSuggestion,
   publicHostedCommandForbidden,
   readHouseholdObjects,
+  recommendedFirst,
   reduceAdminAuthority,
   reduceAdminRoutine,
   reduceHostedAuthority,

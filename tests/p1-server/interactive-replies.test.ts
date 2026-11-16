@@ -307,7 +307,7 @@ test("an agent's choice ask stores its options once; the addressed person's clic
   const chose = await answer(f.ownerJwt, askId, "ship");
   assert.equal(chose.status, 200, JSON.stringify(chose.body));
   const reply = chose.body.signal as { id: string; body: string; in_reply_to: string | null };
-  assert.equal(reply.body, "Chose: Ship it", "the reply text comes from the stored label");
+  assert.equal(reply.body, "Selected: Ship it", "the reply text comes from the stored label");
   assert.equal(reply.in_reply_to, askId);
   assert.deepEqual((await actions(askId)).map((a) => [a.state, a.error_code]), [["failed", "unknown_option"], ["completed", null]]);
 
@@ -386,7 +386,8 @@ test("a typed reply first means a later click is too late; after expiry an answe
     const retry = await answer(f.ownerJwt, askId, option, commandId);
     assert.equal(retry.status, status, `${name}: ${JSON.stringify(retry.body)}`);
     if (error === null) {
-      assert.deepEqual(retry.body.choice_answer, { signal_id: answeredId, option_id: "ship", reply_signal_id: replyId }, name);
+      assert.deepEqual(retry.body.choice_answer, { signal_id: answeredId, option_id: "ship", option_ids: ["ship"],
+        other_text: null, reply_signal_id: replyId }, name);
     } else {
       assert.equal(retry.body.error, error, name);
     }
@@ -428,4 +429,208 @@ test("with mentions off, a post that sends mentions is refused and nothing else 
   assert.equal(emptyRefused.status, 400, JSON.stringify(emptyRefused.body));
   assert.match(String(emptyRefused.body.message), /mentions are not enabled/);
   assert.equal((await postCommand(f.ownerJwt, f.workspaceA, base)).status, 200);
+});
+
+/* Choice questions v2: descriptions and one recommended option, multi-select, "Other" text, and
+ * asks addressed to nobody that any person who can read them may answer. */
+
+const V2_OPTIONS = [
+  { id: "ship", label: "Ship it", description: "Tonight, after CI" },
+  { id: "wait", label: "Wait for tomorrow" },
+  { id: "cancel", label: "Cancel the release", recommended: true },
+];
+
+let secondMember: { id: string; jwt: string } | undefined;
+/** A second person in workspace A who is in no private channel. */
+async function member(): Promise<{ id: string; jwt: string }> {
+  if (secondMember) return secondMember;
+  const created = await createUser("choice-member");
+  await sql`INSERT INTO swarm.users (user_id, display_name) VALUES (${created.id}::uuid, 'ChoiceMember')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${f.workspaceA}::uuid, ${created.id}::uuid, 'member')`;
+  secondMember = created;
+  return created;
+}
+
+async function askV2(fields: Record<string, unknown>): Promise<string> {
+  const asked = await postCommand(f.agentToken, f.workspaceA, {
+    kind: "ask_choice", body: "Which release plan?", to_user_id: null, about: null, options: V2_OPTIONS, ...fields,
+  });
+  assert.equal(asked.status, 200, JSON.stringify(asked.body) + functionLogs.slice(-2000));
+  return (asked.body.signal as { id: string }).id;
+}
+
+const answerWith = (bearer: string, signalId: string, fields: Record<string, unknown>, commandId?: ReturnType<typeof randomUUID>) =>
+  postCommand(bearer, f.workspaceA, { kind: "answer_choice", signal_id: signalId, ...fields }, commandId);
+
+async function readChoices(userId: string, signalIds: string[]): Promise<{ asks: Array<Record<string, unknown>> }> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    return (await tx<{ r: { asks: Array<Record<string, unknown>> } }[]>`
+      SELECT swarm_read.ask_choices(${f.workspaceA}::uuid, ${signalIds}::uuid[]) AS r`)[0]!.r;
+  });
+}
+
+async function replyRow(replyId: string): Promise<Record<string, unknown>> {
+  const rows = (await sql`
+    SELECT body, in_reply_to, to_user_id, to_agent_principal_id, channel_id
+    FROM swarm.signals WHERE id = ${replyId}::uuid`).map((row) => ({ ...row }));
+  assert.equal(rows.length, 1);
+  return rows[0]!;
+}
+
+test("v2: options keep descriptions and the recommended one first; a multi answer takes several ids and Other text", async () => {
+  const askId = await askV2({ to_user_id: f.ownerId, multi: true });
+  const stored = (await sql`SELECT options, multi FROM swarm.ask_choices WHERE signal_id = ${askId}::uuid`)
+    .map((row) => ({ ...row }));
+  assert.deepEqual(stored, [{ multi: true, options: [V2_OPTIONS[2], V2_OPTIONS[0], V2_OPTIONS[1]] }],
+    "the recommended option is stored first");
+
+  const chose = await answerWith(f.ownerJwt, askId, { option_ids: ["wait", "ship"], other_text: "  Ping me first  " });
+  assert.equal(chose.status, 200, JSON.stringify(chose.body));
+  const answer = chose.body.choice_answer as Record<string, unknown>;
+  assert.deepEqual(answer, { signal_id: askId, option_id: "ship", option_ids: ["ship", "wait"], other_text: "Ping me first",
+    reply_signal_id: answer.reply_signal_id }, "ids in the ask's order; option_id is the first for v1 readers");
+  assert.deepEqual(await replyRow(String(answer.reply_signal_id)), { body: "Selected: Ship it, Wait for tomorrow\nOther: Ping me first",
+    in_reply_to: askId, to_user_id: null, to_agent_principal_id: f.principal, channel_id: null });
+
+  const again = await answerWith(f.ownerJwt, askId, { option_ids: ["ship", "wait"], other_text: "Ping me first" });
+  assert.equal(again.status, 200, "the same answer again, in another order, is the person's answer");
+  const different = await answerWith(f.ownerJwt, askId, { option_ids: ["ship"], other_text: "Ping me first" });
+  assert.equal(different.status, 409);
+  assert.equal(different.body.error, "choice_conflict");
+
+  const read = await readChoices(f.ownerId, [askId]);
+  assert.deepEqual(read.asks.map((row) => ({ ...row, answer: { ...(row.answer as Record<string, unknown>), at: "at" } })), [{
+    signal_id: askId, options: [V2_OPTIONS[2], V2_OPTIONS[0], V2_OPTIONS[1]], multi: true,
+    answer: { option_id: "ship", option_ids: ["ship", "wait"], other_text: "Ping me first", actor_user_id: f.ownerId,
+      by_viewer: true, reply_signal_id: answer.reply_signal_id, at: "at" },
+  }]);
+});
+
+test("v2: a single-choice ask takes one option or Other text alone", async () => {
+  const askId = await askV2({ to_user_id: f.ownerId });
+  const two = await answerWith(f.ownerJwt, askId, { option_ids: ["ship", "wait"] });
+  assert.equal(two.status, 400);
+  assert.equal(two.body.error, "one_answer_only");
+  const both = await answerWith(f.ownerJwt, askId, { option_ids: ["ship"], other_text: "and more" });
+  assert.equal(both.status, 400);
+  assert.equal(both.body.error, "one_answer_only");
+  const other = await answerWith(f.ownerJwt, askId, { other_text: "Neither; ship on Friday" });
+  assert.equal(other.status, 200, JSON.stringify(other.body));
+  const answer = other.body.choice_answer as Record<string, unknown>;
+  assert.deepEqual({ ...answer, reply_signal_id: null }, { signal_id: askId, option_id: "other", option_ids: [],
+    other_text: "Neither; ship on Friday", reply_signal_id: null });
+  assert.equal((await replyRow(String(answer.reply_signal_id))).body, "Other: Neither; ship on Friday");
+  const rows = (await sql`SELECT state, option_id, option_ids, other_text FROM swarm.ui_actions
+    WHERE signal_id = ${askId}::uuid AND state = 'completed'`).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [{ state: "completed", option_id: "other", option_ids: [], other_text: "Neither; ship on Friday" }]);
+  const read = await readChoices(f.ownerId, [askId]);
+  assert.deepEqual((read.asks[0]!.answer as Record<string, unknown>).option_ids, [], "a text-only answer chose no option");
+});
+
+test("v2: malformed asks and answers are refused before any attempt is recorded; an unknown id is a recorded attempt", async () => {
+  for (const options of [
+    [{ ...V2_OPTIONS[0], recommended: true }, V2_OPTIONS[1], V2_OPTIONS[2]],
+    [{ ...V2_OPTIONS[0], description: "x".repeat(201) }, V2_OPTIONS[1]],
+    [{ ...V2_OPTIONS[0], description: "" }, V2_OPTIONS[1]],
+    [{ ...V2_OPTIONS[0], recommended: "yes" }, V2_OPTIONS[1]],
+  ]) {
+    const refused = await postCommand(f.agentToken, f.workspaceA, {
+      kind: "ask_choice", body: "Which?", to_user_id: f.ownerId, about: null, options,
+    });
+    assert.equal(refused.status, 400, JSON.stringify(options).slice(0, 120));
+  }
+  assert.equal((await postCommand(f.agentToken, f.workspaceA, {
+    kind: "ask_choice", body: "Which?", to_user_id: f.ownerId, about: null, options: V2_OPTIONS, multi: "yes",
+  })).status, 400, "multi is a boolean");
+
+  const askId = await askV2({ to_user_id: f.ownerId, multi: true });
+  for (const [name, fields] of [
+    ["control characters in other text", { other_text: "ship\u0007it" }],
+    ["a newline in other text", { other_text: "ship\nit" }],
+    ["other text past 500", { other_text: "x".repeat(501) }],
+    ["blank other text", { other_text: "   " }],
+    ["seven ids", { option_ids: ["a", "b", "c", "d", "e", "f", "g"] }],
+    ["a repeated id", { option_ids: ["ship", "ship"] }],
+    ["an empty multi answer", { option_ids: [] }],
+    ["nothing at all", {}],
+    ["option_id beside option_ids", { option_id: "ship", option_ids: ["wait"] }],
+  ] as const) {
+    const refused = await answerWith(f.ownerJwt, askId, fields);
+    assert.equal(refused.status, 400, `${name}: ${JSON.stringify(refused.body)}`);
+  }
+  assert.deepEqual(await actions(askId), [], "a malformed answer records no attempt");
+  const unknown = await answerWith(f.ownerJwt, askId, { option_ids: ["ship", "nope"] });
+  assert.equal(unknown.status, 400);
+  assert.equal(unknown.body.error, "unknown_option");
+  assert.deepEqual((await actions(askId)).map((a) => [a.state, a.error_code]), [["failed", "unknown_option"]]);
+});
+
+test("v2: an ask addressed to nobody in a channel is answered by any person who reads it, first answer wins", async () => {
+  const reader = await member();
+  const created = await postCommand(f.agentToken, f.workspaceA, { kind: "channel_create", slug: `rel-${randomBytes(4).toString("hex")}` });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channel = created.body.channel as { channel_id: string; slug: string };
+  const askId = await askV2({ channel: channel.slug });
+  const [asked] = (await sql`SELECT channel_id, to_user_id, to_agent_principal_id FROM swarm.signals WHERE id = ${askId}::uuid`)
+    .map((row) => ({ ...row }));
+  assert.deepEqual(asked, { channel_id: channel.channel_id, to_user_id: null, to_agent_principal_id: null });
+
+  assert.equal((await answerWith(f.agentToken, askId, { option_id: "ship" })).status, 403, "an agent never answers");
+  const chose = await answerWith(reader.jwt, askId, { option_id: "wait" });
+  assert.equal(chose.status, 200, JSON.stringify(chose.body));
+  const answer = chose.body.choice_answer as Record<string, unknown>;
+  assert.deepEqual(await replyRow(String(answer.reply_signal_id)), { body: "Selected: Wait for tomorrow", in_reply_to: askId,
+    to_user_id: null, to_agent_principal_id: f.principal, channel_id: channel.channel_id }, "the answer wakes the asking agent");
+
+  const late = await answerWith(f.ownerJwt, askId, { option_id: "ship" });
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, "ask_answered");
+  const read = await readChoices(f.ownerId, [askId]);
+  const seen = read.asks[0]!.answer as Record<string, unknown>;
+  assert.deepEqual({ by: seen.actor_user_id, mine: seen.by_viewer, ids: seen.option_ids }, { by: reader.id, mine: false, ids: ["wait"] });
+});
+
+test("v2: a private channel's ask is not answerable from outside it; a directed ask only by its addressee", async () => {
+  const outsider = await member();
+  const created = await postCommand(f.agentToken, f.workspaceA, {
+    kind: "channel_create", slug: `lock-${randomBytes(4).toString("hex")}`, visibility: "private",
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const channel = created.body.channel as { slug: string };
+  const privateAsk = await askV2({ channel: channel.slug });
+  const unknownAsk = await answerWith(outsider.jwt, randomUUID(), { option_id: "ship" });
+  const hidden = await answerWith(outsider.jwt, privateAsk, { option_id: "ship" });
+  assert.deepEqual({ status: hidden.status, body: hidden.body }, { status: unknownAsk.status, body: unknownAsk.body },
+    "outside the channel, the ask is the same as one that doesn't exist");
+  assert.equal(hidden.status, 404);
+  assert.deepEqual(await actions(privateAsk), [], "an unreadable ask records no attempt");
+  const inside = await answerWith(f.ownerJwt, privateAsk, { option_id: "ship" });
+  assert.equal(inside.status, 200, JSON.stringify(inside.body));
+
+  const directed = await askV2({ to_user_id: f.ownerId });
+  const notYours = await answerWith(outsider.jwt, directed, { option_id: "ship" });
+  assert.deepEqual({ status: notYours.status, body: notYours.body }, { status: unknownAsk.status, body: unknownAsk.body });
+  assert.deepEqual(await actions(directed), []);
+  assert.equal((await answerWith(f.ownerJwt, directed, { option_id: "ship" })).status, 200);
+});
+
+test("v2: a v1-shaped ask and answer still work, and readback adds keys only", async () => {
+  const asked = await askOwner();
+  assert.equal(asked.status, 200, JSON.stringify(asked.body));
+  const askId = (asked.body.signal as { id: string }).id;
+  const chose = await answer(f.ownerJwt, askId, "wait");
+  assert.equal(chose.status, 200, JSON.stringify(chose.body));
+  assert.equal((chose.body.choice_answer as { option_id: string }).option_id, "wait");
+  const read = await readChoices(f.ownerId, [askId]);
+  const row = read.asks[0]!;
+  assert.deepEqual(row.options, OPTIONS);
+  assert.equal(row.multi, false);
+  const readAnswer = row.answer as Record<string, unknown>;
+  assert.deepEqual({ option_id: readAnswer.option_id, option_ids: readAnswer.option_ids, other_text: readAnswer.other_text,
+    by_viewer: readAnswer.by_viewer }, { option_id: "wait", option_ids: ["wait"], other_text: null, by_viewer: true });
+  // A row written before v2 has no option_ids; its one option_id stands in.
+  await sql`UPDATE swarm.ui_actions SET option_ids = NULL WHERE signal_id = ${askId}::uuid AND state = 'completed'`;
+  assert.deepEqual(((await readChoices(f.ownerId, [askId])).asks[0]!.answer as Record<string, unknown>).option_ids, ["wait"]);
 });

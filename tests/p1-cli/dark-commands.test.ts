@@ -26,6 +26,7 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 /** The production answers with both switches off (command/index.ts and read/index.ts). */
 async function switchOffCloud() {
   const seen: string[] = [];
+  const commands: Record<string, unknown>[] = [];
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -46,6 +47,7 @@ async function switchOffCloud() {
       if (request.url === "/functions/v1/command") {
         const kind = String((body.command as Record<string, unknown> | undefined)?.kind);
         seen.push(`command:${kind}`);
+        commands.push(body.command as Record<string, unknown>);
         if (kind === "memory_save" || kind === "memory_forget") return reply(404, MEMORY_OFF);
         if (kind === "ask_choice") return reply(404, CHOICES_OFF);
         return reply(400, { error: "invalid_request" });
@@ -56,7 +58,7 @@ async function switchOffCloud() {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
-  return { url: `http://127.0.0.1:${address.port}`, seen,
+  return { url: `http://127.0.0.1:${address.port}`, seen, commands,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
@@ -88,6 +90,9 @@ const CASES: { name: string; args: string[]; sentence: string; error: string; ca
     sentence: MEMORY_OFF.message, error: MEMORY_OFF.error, calls: ["command:memory_forget"] },
   { name: "ask --choice", args: ["ask", "Ship tonight?", "--to", MEMBER, "--choice", "Ship it", "--choice", "Wait"],
     sentence: CHOICES_OFF.message, error: CHOICES_OFF.error, calls: ["read:members", "command:ask_choice"] },
+  { name: "ask --option", args: ["ask", "Which release?", "--option", "Ship it::Tonight after CI", "--option", "Wait",
+    "--recommended", "2", "--multi", "--channel", "ops"],
+  sentence: CHOICES_OFF.message, error: CHOICES_OFF.error, calls: ["command:ask_choice"] },
 ];
 
 for (const item of CASES) {
@@ -109,3 +114,20 @@ for (const item of CASES) {
     }
   });
 }
+
+test("ask --option sends one ask_choice: descriptions, the recommended option first, multi and channel, to nobody", { timeout: 90_000 }, async () => {
+  const cloud = await switchOffCloud();
+  try {
+    await cli(cloud.url, ["ask", "Which release?", "--option", "Ship it::Tonight after CI", "--choice", "Wait",
+      "--recommended", "wait", "--multi", "--channel", "ops"]);
+    assert.deepEqual(cloud.commands, [{ kind: "ask_choice", body: "Which release?", to_user_id: null, about: null,
+      options: [{ id: "wait", label: "Wait", recommended: true }, { id: "ship-it", label: "Ship it", description: "Tonight after CI" }],
+      multi: true, channel: "ops" }]);
+    const plain = await cli(cloud.url, ["ask", "Ship tonight?", "--to", MEMBER, "--choice", "Ship it", "--choice", "Wait"]);
+    assert.equal(plain.code, 1);
+    assert.deepEqual(cloud.commands[1], { kind: "ask_choice", body: "Ship tonight?", to_user_id: MEMBER, about: null,
+      options: [{ id: "ship-it", label: "Ship it" }, { id: "wait", label: "Wait" }] }, "a v1-shaped ask stays the v1 shape");
+  } finally {
+    await cloud.close();
+  }
+});

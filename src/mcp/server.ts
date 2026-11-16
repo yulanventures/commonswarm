@@ -17,10 +17,9 @@ import {
   type MemoryKind, type MemorySaveInput,
 } from "../cloud/memory.js";
 import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../cloud/command-client.js";
-import { choiceOptions } from "../cloud/choices.js";
 import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
 import { signalDuration } from "../cloud/signal-duration.js";
-import { STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, MCP_CHANNEL_PAGE_MAX_BYTES, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
+import { askChoiceArguments, STDIO_MCP_TOOLS, stdioWorkspaceArguments, MCP_TOOL_TABLE, MCP_CHANNEL_PAGE_MAX_BYTES, capFreshCheck, capMcpResult, validateMcpArguments, validateSkillMcpArguments, withSkillTrustWarning } from "./tools.js";
 import { mapMcpError, OutcomeStillUnknown } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
 import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
@@ -403,22 +402,24 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         }
         default: {
           const { fetcher, token } = await authenticated();
-          // Interactive replies: an ask to one person with fixed choices (server flag SWARM_INTERACTIVE_REPLIES).
-          const choiceLabels = tool.name === "ask" ? (args as Record<string, unknown>).choices as string[] | undefined : undefined;
-          if (choiceLabels !== undefined) {
-            for (const key of ["channel", "until", "parent_signal_id"]) {
-              if (args[key] !== undefined) throw new Error(`Invalid argument: choices can't be combined with ${key}.`);
+          /* Interactive replies: an ask with fixed choices (server flag SWARM_INTERACTIVE_REPLIES), to one
+           * member (to) or to anyone who reads it, in general or channel. */
+          const choiceAsk = tool.name === "ask" ? askChoiceArguments(args as Record<string, unknown>) : null;
+          if (choiceAsk !== null) {
+            let toUserId: string | null = null;
+            if (args.to !== undefined) {
+              const recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));
+              if (recipient.kind !== "user") throw new Error("Invalid argument: choices ask a person; to must name a workspace member, not an agent.");
+              toUserId = recipient.id;
             }
-            if (args.to === undefined) throw new Error("Invalid argument: choices require to (the member who chooses).");
-            const options = choiceOptions(choiceLabels);
-            const recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));
-            if (recipient.kind !== "user") throw new Error("Invalid argument: choices ask a person; to must name a workspace member, not an agent.");
             const client = new ThinCommandClient(profileTarget(profile), fetcher);
             try {
               const sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
-                command: { kind: "ask_choice", body: args.body!, to_user_id: recipient.id, about: args.about ?? null, options },
+                command: { kind: "ask_choice", body: args.body!, to_user_id: toUserId, about: args.about ?? null,
+                  options: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}),
+                  ...(args.channel === undefined ? {} : { channel: args.channel }) },
                 commandId: args.request_id!, signal: extra.signal });
-              output = { ...tool.mapResult(sent), choices: options };
+              output = { ...tool.mapResult(sent), choices: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}) };
             } catch (error) {
               if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) throw error;
               output = { outcome: "unknown", retry_with_same_request_id: true };

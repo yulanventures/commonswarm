@@ -11,6 +11,7 @@ import { contentTypeForName } from "../../../src/protocol/file-types.ts";
 import {
   HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError,
   normalizeReactionEmoji, SIGNAL_REACTION_MAX_BYTES,
+  CHOICE_DESCRIPTION_MAX, CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN, choiceOptions,
 } from "../_shared/protocol.js";
 import type { HouseholdToolName } from "../_shared/household-tool-registry.d.ts";
 // @ts-ignore TS5097: Node tests import this Deno module through tsx.
@@ -46,6 +47,13 @@ const channel = text(1, CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE.source);
 const recipient = objectSchema({ kind: { type: "string", enum: ["user", "agent"] }, id: uuid }, ["kind", "id"]);
 const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 };
 const integer = (minimum: number, maximum: number): JsonSchema => ({ type: "integer", minimum, maximum });
+// A choice ask's options: bare labels (choices) or objects (options), 2 to 6 either way.
+const choiceLabels = { type: "array", items: text(1, CHOICE_LABEL_MAX), minItems: CHOICE_MIN, maxItems: CHOICE_MAX };
+const choiceOptionList = {
+  type: "array", minItems: CHOICE_MIN, maxItems: CHOICE_MAX,
+  items: objectSchema({ id: text(1, 32, "^[a-z0-9][a-z0-9_-]{0,31}$"), label: text(1, CHOICE_LABEL_MAX),
+    description: text(1, CHOICE_DESCRIPTION_MAX), recommended: { type: "boolean" } }, ["label"]),
+};
 export const FILE_LS_MAX_LIMIT = 50;
 export const FILE_LS_MAX_OFFSET = 100_000;
 export const FILE_GET_MAX_OFFSET = 25 * 1024 * 1024;
@@ -86,9 +94,9 @@ export const CORE_TOOL_TABLE = [
   {
     name: "ask", effect: "write", title: "Ask workspace participants",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Ask one or more workspace participants, optionally attaching files from file_put or file_ls. Retry with the same request_id.",
+    description: "Ask one or more workspace participants, optionally attaching files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, request_id: requestId }, ["seat", "recipients", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",
@@ -354,7 +362,8 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   claim_seat: { allowed: ["workspace_id", "agent_id", "name", "request_id"], required: ["request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
-  ask: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
+  // recipients is required unless the ask has choices (validateHostedToolArguments).
+  ask: { allowed: ["seat", "recipients", "body", "attachments", "channel", "options", "choices", "multi", "request_id"], required: ["seat", "body", "request_id"] },
   note: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
   reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
@@ -416,6 +425,10 @@ const EXPECTED: Record<string, string> = {
   emoji: "provide one emoji, or a shortcode such as :+1:, :eyes: or :white_check_mark:",
   remove: "provide true to take the reaction off, or omit it to add one",
   reaction_signal_id: "provide the signal UUID from check or channel_read that you want to react to",
+  options: `provide ${CHOICE_MIN} to ${CHOICE_MAX} objects with label (1 to ${CHOICE_LABEL_MAX} characters, each different), optional description (1 to ${CHOICE_DESCRIPTION_MAX}), optional id (a-z, 0-9, _ or -) and recommended true on at most one`,
+  choices: `provide ${CHOICE_MIN} to ${CHOICE_MAX} different labels of 1 to ${CHOICE_LABEL_MAX} characters, or use options`,
+  multi: "provide true to let the person pick several, or omit it for one",
+  choice_recipients: "provide one object with kind user and that person's id (UUID), or omit recipients so anyone who reads the ask may answer; choices can't take attachments",
 };
 
 /** A subject as the server stores it: lowercase, single spaces, trimmed. */
@@ -552,12 +565,52 @@ export function validateHostedToolArguments(
   }
   if (!validBody(args.body)) invalid("body");
   if (!validRequestId(args.request_id)) invalid("request_id");
+  if (name === "ask" && (args.options !== undefined || args.choices !== undefined || args.multi !== undefined)) {
+    hostedChoiceOptions(args);
+    if (args.multi !== undefined && typeof args.multi !== "boolean") invalid("multi");
+    if (args.attachments !== undefined) throw new HostedToolInputError("Invalid attachments: an ask with choices takes no attachments.");
+    if (args.recipients !== undefined && (!validRecipients(args.recipients) ||
+        (args.recipients as unknown[]).length !== 1 || record((args.recipients as unknown[])[0])?.kind !== "user")) {
+      throw new HostedToolInputError(`Invalid recipients: ${EXPECTED.choice_recipients}.`);
+    }
+    if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
+    return args;
+  }
+  if (name === "ask" && args.recipients === undefined) {
+    throw new HostedToolInputError(`Missing recipients: ${EXPECTED.recipients}.`);
+  }
   if ((name === "ask" && !validRecipients(args.recipients)) ||
       (name === "note" && args.recipients !== undefined && !validRecipients(args.recipients))) invalid("recipients");
   if (name === "reply" && !validUuid(args.signal_id)) invalid("signal_id");
   if (args.attachments !== undefined && !validAttachments(args.attachments)) invalid("attachments");
   if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
   return args;
+}
+
+/**
+ * The hosted ask tool's options or choices as stored options (ids derived, recommended first), by
+ * the same rule the CLI and local MCP use. Throws HostedToolInputError naming the argument.
+ */
+export function hostedChoiceOptions(args: HostedToolArguments): Array<{ id: string; label: string;
+  description?: string; recommended?: true }> {
+  const key = args.options !== undefined ? "options" : "choices";
+  if (args.options !== undefined && args.choices !== undefined) {
+    throw new HostedToolInputError("Invalid options: give options or choices, not both.");
+  }
+  const value = args[key];
+  if (value === undefined) {
+    throw new HostedToolInputError(`Invalid multi: ${EXPECTED.multi}, with options or choices.`);
+  }
+  const shapeOk = Array.isArray(value) && value.every((item) => key === "choices"
+    ? typeof item === "string"
+    : record(item) !== null && Object.keys(item as object).every((field) =>
+      ["id", "label", "description", "recommended"].includes(field)));
+  try {
+    if (!shapeOk) throw new Error("shape");
+    return choiceOptions(value as never);
+  } catch {
+    throw new HostedToolInputError(`Invalid ${key}: ${EXPECTED[key]}.`);
+  }
 }
 
 function validChannel(value: unknown): boolean {

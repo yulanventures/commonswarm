@@ -452,13 +452,18 @@ export interface ReraiseAskCommand {
   signal_id: string;
 }
 
-/** Interactive replies: an ask to one person with fixed choices (server flag SWARM_INTERACTIVE_REPLIES). */
+/**
+ * Interactive replies: an ask with fixed choices (server flag SWARM_INTERACTIVE_REPLIES), to one
+ * person (to_user_id) or to anyone who can read it (null). multi and channel are sent only when used.
+ */
 export interface AskChoiceCommand {
   kind: "ask_choice";
   body: string;
-  to_user_id: string;
+  to_user_id: string | null;
   about: string | null;
   options: import("./choices.js").ChoiceOption[];
+  multi?: boolean;
+  channel?: string;
 }
 
 /** Every command sendSignal sends. */
@@ -1351,7 +1356,11 @@ export class ThinCommandClient {
       ? { kind: "reraise_ask", signal_id: request.command.signal_id }
       : request.command.kind === "ask_choice"
       ? { kind: "ask_choice", body: request.command.body, to_user_id: request.command.to_user_id,
-        about: request.command.about, options: request.command.options.map(({ id, label }) => ({ id, label })) }
+        about: request.command.about,
+        options: request.command.options.map(({ id, label, description, recommended }) => ({ id, label,
+          ...(description === undefined ? {} : { description }), ...(recommended === true ? { recommended } : {}) })),
+        ...(request.command.multi === true ? { multi: true } : {}),
+        ...(request.command.channel === undefined ? {} : { channel: request.command.channel }) }
       : {
       kind: "post_signal",
       signal_kind: request.command.signal_kind,
