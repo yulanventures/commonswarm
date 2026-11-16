@@ -185,3 +185,14 @@ test("Waiting on you gives a decision card only to an unanswered ask with stored
   const unread = catchUpDetailFromOverview(row, "zoe", now, false, [], queue(asks), new Map());
   assert.deepEqual([unread.needsYou.map(item => item.id), homeNeedsYouCount(entry(unread))], [["x", "done", "plain"], 3]);
 });
+
+test("a choice ask whose body is prose then a plain question is headed by that question in Waiting on you", () => {
+  const options = [{ id: "ship", label: "Ship" }, { id: "wait", label: "Wait" }];
+  const body = "All seven Intercom replies are drafted, and two need a refund.\n\nWhich Intercom replies should I send?";
+  const choices = new Map([["x", { signalId: "x", multi: true, options, answer: null }]]);
+  const what = (asks, read) => catchUpDetailFromOverview(row, "zoe", now, false, [], queue(asks), read).needsYou.map(item => item.what);
+  assert.deepEqual(what([ask("x", "2026-11-04T11:00:00Z", { body })], choices), ["Claude asked you: ‘Which Intercom replies should I send?’"]);
+  // No choices read, or a body kept whole: the body's start, as before.
+  assert.match(what([ask("x", "2026-11-04T11:00:00Z", { body })], new Map())[0], /^Claude asked you: ‘All seven Intercom replies are drafted/u);
+  assert.deepEqual(what([ask("x", "2026-11-04T11:00:00Z", { body: "Context.\n\n- a list?" })], choices), ["Claude asked you: ‘Context. - a list?’"]);
+});

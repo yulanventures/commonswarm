@@ -206,7 +206,7 @@
         "text": "Book Harbor, but ask them to come after 10am because the school run takes until then."
       }
     ],
-    "ready": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-trigger][aria-expanded=\"true\"] ~ .hm-decision__other-field [data-decision-submit]:not([disabled])",
+    "ready": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision:has([data-decision-other-trigger][aria-expanded=\"true\"]) [data-decision-submit]:not([disabled]):not([hidden])",
     "states": [
       "dense"
     ],
@@ -378,7 +378,7 @@
         "text": "Harbor, but after 10am"
       }
     ],
-    "ready": "[data-signal-id=\"{message.choiceOpen}\"] [data-decision-other-trigger][aria-expanded=\"true\"] ~ .hm-decision__other-field [data-decision-submit]:not([disabled])",
+    "ready": "[data-signal-id=\"{message.choiceOpen}\"] .hm-decision:has([data-decision-other-trigger][aria-expanded=\"true\"]) [data-decision-submit]:not([disabled]):not([hidden])",
     "states": [
       "dense"
     ],

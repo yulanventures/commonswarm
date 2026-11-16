@@ -12,7 +12,7 @@ import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } fro
 import { railAgentOwnerPhrase, type HomeRailVM } from "./home-rail";
 import { askExcerpt } from "./home-stream";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
-import type { AskChoiceState } from "./choices";
+import { splitChoicePrompt, type AskChoiceState } from "./choices";
 import type { AgentWorkStatus, DecisionAsk, DecisionQueue, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
 
@@ -271,7 +271,9 @@ function queueAskNeedsYouCard(ask: DecisionAsk, people: HomePeople, workspace: N
   const from = author ?? (ask.from.name ? { ...unnamedMember(), name: ask.from.name, firstName: ask.from.name } : unnamedMember());
   const name = "label" in from ? from.label : from.name;
   const raised = ask.reraised ? `re-raised ×${ask.reraised.count}` : "";
-  const excerpt = askExcerpt(ask.body);
+  // A choice ask whose body is prose and then a plain question is headed by that question, not the prose's start.
+  const prompt = choice ? splitChoicePrompt(ask.body) : null;
+  const excerpt = askExcerpt(prompt?.prose && prompt.question ? prompt.question : ask.body);
   return { id: ask.signal_id, kind: "ask", workspace, from, when: [peopleAgentActivityTime(ask.created_at, now), raised].filter(Boolean).join(" · "),
     what: excerpt ? `${name} asked you: ‘${excerpt}’` : `${name} asked you.`,
     primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) },

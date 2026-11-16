@@ -634,7 +634,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
          changes. Oldest first: one that expired unanswered; one the viewer answered with a v1 answer row (one option_id);
          a multi-select ask the viewer answered with two options and Other text (a v2 row); an open ask whose labels are
          80 characters and descriptions 200, the read's limits; an open single-choice ask with descriptions and a
-         recommended option; and an open multi-select ask. Each answered ask has the reply note answer_choice posts.
+         recommended option; and an open multi-select ask whose body is a paragraph of prose and then its question, so
+         the prose stays in the message and the question titles the card. Each answered ask has the reply note
+         answer_choice posts.
          Written in SQL like the other history; the read (swarm_read.ask_choices) is what the page uses. */
       if (ids["channel.private"]) {
         try {
@@ -699,7 +701,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
                 statement_timestamp() + interval '25 days', statement_timestamp() - interval '3 minutes', ${channel}::uuid, NULL, false
               ), (
                 ${multi}::uuid, ${workspace}::uuid, ${ids.agent!}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
-                NULL, 'ask', 'Which spaces should be clear for the engineer?',
+                NULL, 'ask', ${"The engineer arrives on Friday at 9am and needs room to work around the pipes.\n\nWhich spaces should be clear for the engineer?"},
                 statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 minutes', ${channel}::uuid, NULL, false
               )`;
             for (const row of [{ id: expired, options: plain, multi: false }, { id: answered, options: plain, multi: false },

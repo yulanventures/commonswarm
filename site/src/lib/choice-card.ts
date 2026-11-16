@@ -1,5 +1,6 @@
 // The decision card on an agent's choice ask: one box in the message, open, pending, answered or expired.
-// Pure DOM. Labels, descriptions and Other text are untrusted and enter only through textContent.
+// Pure DOM. Labels, descriptions and Something else text are untrusted and enter only through textContent.
+// Every row has a letter (A, B, C…) in display order; Something else is always the last row, with the next letter.
 import { EMPTY_CHOICE_DRAFT, OTHER_TEXT_MAX, cleanOtherText, draftSubmission, orderedChoiceOptions,
   type AskChoiceState, type ChoiceDraft, type ChoiceOption, type ChoiceSubmission } from "./choices";
 
@@ -30,6 +31,13 @@ export interface ChoiceCardHandlers {
   draft?: (draft: ChoiceDraft) => void;
 }
 
+/** The free-text row's label: the last row of every card, open or completed. */
+export const CHOICE_OTHER_LABEL = "Something else";
+/** The muted line under a multi-select card's question. Single choice has none: a tap answers. */
+export const CHOICE_MULTI_HINT = "Choose all that apply";
+/** The letter of the row at this display position: A for the first. */
+export const choiceLetter = (index: number): string => String.fromCharCode(65 + index);
+
 export function choiceCardStatus(vm: Pick<ChoiceCardVM, "state" | "interactive" | "ended" | "repliedInWords" | "pending">): ChoiceCardStatus {
   // Any known answer outlives the ask's `until`: Expired is only for one nobody answered.
   if (vm.state.answer !== null) return "answered";
@@ -55,6 +63,16 @@ function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, clas
 }
 const safeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]/gu, "-");
 
+function letterBadge(doc: Document, index: number): HTMLElement {
+  const badge = node(doc, "span", "hm-decision__letter", choiceLetter(index)); badge.setAttribute("aria-hidden", "true");
+  return badge;
+}
+/** The check on a ticked or chosen row, beside its filled letter, so selection never rests on colour alone. */
+function checkMark(doc: Document): HTMLElement {
+  const mark = node(doc, "span", "hm-decision__mark", "✓"); mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
 /** The option's words: label, a quiet Recommended tag, and its description as a second line. */
 function optionCopy(doc: Document, option: Pick<ChoiceOption, "label" | "description" | "recommended">): HTMLElement {
   const copy = node(doc, "span", "hm-decision__copy");
@@ -76,7 +94,7 @@ function footer(doc: Document, text: string, at: ChoiceCardVM["answeredAt"]): HT
   return foot;
 }
 
-/** Every offered row, read-only: chosen rows carry a check and the word "chosen" for screen readers. */
+/** Every offered row, read-only, Something else last: chosen rows carry a check and the word "chosen" for screen readers. */
 function staticCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus): HTMLElement {
   const root = node(doc, "div", "hm-decision");
   root.dataset.decision = vm.state.signalId; root.dataset.decisionState = status;
@@ -85,37 +103,40 @@ function staticCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus): 
   const list = node(doc, "ul", "hm-decision__options");
   const answer = vm.state.answer;
   const chosen = new Set(answer?.optionIds ?? []);
-  const row = (option: Pick<ChoiceOption, "label" | "description" | "recommended">, id: string | null, picked: boolean) => {
-    const item = node(doc, "li", "hm-decision__option");
+  const options = orderedChoiceOptions(vm.state.options);
+  const row = (option: Pick<ChoiceOption, "label" | "description" | "recommended">, id: string | null, picked: boolean, index: number) => {
+    const item = node(doc, "li", id === null ? "hm-decision__option hm-decision__option--other" : "hm-decision__option");
     if (id !== null) item.dataset.decisionOption = id; else item.dataset.decisionOther = "";
     item.dataset.chosen = String(picked);
-    const mark = node(doc, "span", "hm-decision__mark", picked ? "✓" : ""); mark.setAttribute("aria-hidden", "true");
-    item.append(mark, optionCopy(doc, option));
-    if (picked) item.append(node(doc, "span", "hm-sr-only", ", chosen"));
+    item.append(letterBadge(doc, index), optionCopy(doc, option));
+    if (picked) item.append(checkMark(doc), node(doc, "span", "hm-sr-only", ", chosen"));
     list.append(item);
   };
-  for (const option of orderedChoiceOptions(vm.state.options)) row(option, option.id, chosen.has(option.id));
-  if (answer?.otherText) row({ label: "Other", description: answer.otherText }, null, true);
+  for (const [index, option] of options.entries()) row(option, option.id, chosen.has(option.id), index);
+  // Something else stays the last row: chosen, with the typed text under it, or quiet when it wasn't used.
+  const otherText = answer?.otherText ?? null;
+  row({ label: CHOICE_OTHER_LABEL, ...(otherText ? { description: otherText } : {}) }, null, otherText !== null, options.length);
   root.append(list);
   const text = choiceCardFooter(vm);
   if (text) root.append(footer(doc, text, status === "answered" ? vm.answeredAt ?? null : null));
   return root;
 }
 
-/** Open card: rows that answer (single) or build a draft (multi), Other last, one pending answer at a time. */
+/** Open card: rows that answer (single) or build a draft (multi), Something else last, one pending answer at a time. */
 function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, handlers: ChoiceCardHandlers): HTMLElement {
   const multi = vm.state.multi;
   const pending = status === "pending";
   const draft: ChoiceDraft = { ...(vm.draft ?? EMPTY_CHOICE_DRAFT) };
   draft.selected = [...draft.selected];
   const base = `hm-decision-${safeId(vm.scope ?? "feed")}-${safeId(vm.state.signalId)}`;
-  // The card holds the question (the caller puts it first); the form holds only the rows, so no control
+  // The card holds the question (the caller puts it first); the form holds only the rows and Done, so no control
   // in the question can submit an answer.
   const root = node(doc, "div", "hm-decision");
   root.dataset.decision = vm.state.signalId; root.dataset.decisionState = status;
   root.dataset.decisionMode = multi ? "multi" : "single";
   root.setAttribute("role", "group"); root.setAttribute("aria-label", "Choices");
   if (pending) root.setAttribute("aria-busy", "true");
+  if (multi) root.append(node(doc, "p", "hm-decision__hint", CHOICE_MULTI_HINT));
   const form = node(doc, "form", "hm-decision__form"); form.noValidate = true;
   const emit = () => handlers.draft?.({ ...draft, selected: [...draft.selected] });
   const block = (control: HTMLElement) => { if (pending) control.setAttribute("aria-disabled", "true"); };
@@ -131,61 +152,70 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
       box.checked = !box.checked; toggled();
     });
   };
+  /* A multi-select row: the native checkbox stays first in its label (focusable, laid over the letter); the letter
+     fills and the check shows while it is ticked. */
+  const checkRow = (box: HTMLInputElement, index: number, copy: HTMLElement, className = "hm-decision__option") => {
+    const label = node(doc, "label", className);
+    label.append(box, letterBadge(doc, index), copy, checkMark(doc));
+    return label;
+  };
 
+  const options = orderedChoiceOptions(vm.state.options);
   const list = node(doc, "div", "hm-decision__options");
-  for (const option of orderedChoiceOptions(vm.state.options)) {
+  for (const [index, option] of options.entries()) {
     if (multi) {
-      const label = node(doc, "label", "hm-decision__option");
       const box = node(doc, "input", "hm-decision__check"); box.type = "checkbox";
       box.dataset.decisionOption = option.id; box.checked = draft.selected.includes(option.id); block(box);
       checkbox(box, () => {
         draft.selected = box.checked ? [...draft.selected.filter((id) => id !== option.id), option.id] : draft.selected.filter((id) => id !== option.id);
         sync(); emit();
       });
-      label.append(box, optionCopy(doc, option)); list.append(label);
+      list.append(checkRow(box, index, optionCopy(doc, option)));
     } else {
       const button = node(doc, "button", "hm-decision__option"); button.type = "button";
       // An id per row, so Waiting on you's rebuild returns focus to the same row.
       button.id = `${base}-option-${safeId(option.id)}`;
       button.dataset.decisionOption = option.id; block(button);
-      button.append(optionCopy(doc, option));
+      button.append(letterBadge(doc, index), optionCopy(doc, option));
       button.addEventListener("click", () => { if (!pending) handlers.submit({ optionIds: [option.id], otherText: null }); });
       list.append(button);
     }
   }
 
-  // Other: a trigger row and, beside it, the field it opens. Never an input inside a button or checkbox.
+  // Something else: a trigger row and, under it, the field it opens. Never an input inside a button or checkbox.
   const other = node(doc, "div", "hm-decision__other"); other.dataset.decisionOther = "";
   const fieldId = `${base}-other`;
   const field = node(doc, "div", "hm-decision__other-field"); field.id = fieldId;
   const input = node(doc, "input", "hm-decision__input"); input.type = "text"; input.maxLength = OTHER_TEXT_MAX;
-  input.autocomplete = "off"; input.dataset.decisionOtherInput = ""; input.setAttribute("aria-label", "Other answer");
+  input.autocomplete = "off"; input.dataset.decisionOtherInput = ""; input.setAttribute("aria-label", CHOICE_OTHER_LABEL);
+  input.placeholder = "Type your answer…";
   input.value = draft.otherText; if (pending) input.readOnly = true;
   field.append(input);
   let trigger: HTMLButtonElement | HTMLInputElement;
-  let submit: HTMLButtonElement;
   if (multi) {
-    const label = node(doc, "label", "hm-decision__option");
     const box = node(doc, "input", "hm-decision__check"); box.type = "checkbox"; box.dataset.decisionOtherTrigger = "";
     box.checked = draft.otherOpen; box.setAttribute("aria-controls", fieldId); block(box);
     checkbox(box, () => { setOpen(box.checked, true); });
-    label.append(box, optionCopy(doc, { label: "Other…" }));
-    other.append(label); trigger = box;
+    other.append(checkRow(box, options.length, optionCopy(doc, { label: CHOICE_OTHER_LABEL }), "hm-decision__option hm-decision__option--other"));
+    trigger = box;
   } else {
-    const button = node(doc, "button", "hm-decision__option"); button.type = "button"; button.id = `${base}-other-row`;
+    const button = node(doc, "button", "hm-decision__option hm-decision__option--other"); button.type = "button"; button.id = `${base}-other-row`;
     button.dataset.decisionOtherTrigger = ""; button.setAttribute("aria-controls", fieldId); block(button);
-    button.append(optionCopy(doc, { label: "Other…" }));
+    // Open, it reads as picked: filled letter and a check (shown by its aria-expanded), like a ticked row.
+    button.append(letterBadge(doc, options.length), optionCopy(doc, { label: CHOICE_OTHER_LABEL }), checkMark(doc));
     button.addEventListener("click", () => { if (!pending) setOpen(!draft.otherOpen, true); });
     other.append(button); trigger = button;
   }
-  // Single choice: Submit sits beside Other's field. Multi-select: one Submit for the whole card.
-  submit = node(doc, "button", "hm-button hm-decision__submit", "Submit"); submit.type = "submit";
-  submit.dataset.primary = "true"; submit.dataset.decisionSubmit = ""; block(submit);
-  if (!multi) field.append(submit);
   other.append(field); list.append(other); form.append(list);
-  if (multi) form.append(submit);
   if (vm.error) { const error = node(doc, "p", "hm-decision__error", vm.error); error.setAttribute("role", "alert"); form.append(error); }
-  if (pending) { const sending = node(doc, "p", "hm-decision__foot", "Sending…"); sending.setAttribute("role", "status"); form.append(sending); }
+  /* One Done, last and at the right, only where an answer needs it: always on multi-select, and on single choice while
+     Something else is open (a lettered row answers on its own tap). */
+  const submit = node(doc, "button", "hm-button hm-decision__submit", pending ? "Sending…" : "Done"); submit.type = "submit";
+  submit.dataset.primary = "true"; submit.dataset.decisionSubmit = ""; block(submit);
+  form.append(submit);
+  // An answer on its way is shown once (on Done when Done shows, else on this line) and always announced.
+  const sending = pending ? node(doc, "p", "hm-decision__foot", "Sending…") : null;
+  if (sending) { sending.setAttribute("role", "status"); form.append(sending); }
   root.append(form);
 
   function ready(): boolean {
@@ -194,7 +224,9 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
   function sync(): void {
     field.hidden = !draft.otherOpen;
     if (!multi) trigger.setAttribute("aria-expanded", String(draft.otherOpen));
-    // Submit stays focusable while an answer is on its way; it is disabled only when there is nothing to send.
+    submit.hidden = !multi && !draft.otherOpen;
+    if (sending) sending.className = submit.hidden ? "hm-decision__foot" : "hm-sr-only";
+    // Done stays focusable while an answer is on its way; it is disabled only when there is nothing to send.
     submit.disabled = !pending && !ready();
   }
   function setOpen(open: boolean, focus: boolean): void {
@@ -225,4 +257,15 @@ function openCard(doc: Document, vm: ChoiceCardVM, status: ChoiceCardStatus, han
 export function buildChoiceCard(doc: Document, vm: ChoiceCardVM, handlers: ChoiceCardHandlers): HTMLElement {
   const status = choiceCardStatus(vm);
   return status === "open" || status === "pending" ? openCard(doc, vm, status, handlers) : staticCard(doc, vm, status);
+}
+
+/**
+ * Puts the question at the top of a card as its bold title, and names the card's group by it. The title is the
+ * caller's own node (the feed's sanitized Markdown), outside the form, so nothing in it can send an answer.
+ */
+export function setChoiceCardTitle(card: HTMLElement, title: HTMLElement, scope = "feed"): void {
+  title.className = `${title.className} hm-decision__title`.trim();
+  title.id = `hm-decision-${safeId(scope)}-${safeId(card.dataset.decision ?? "")}-title`;
+  card.prepend(title);
+  card.removeAttribute("aria-label"); card.setAttribute("aria-labelledby", title.id);
 }
