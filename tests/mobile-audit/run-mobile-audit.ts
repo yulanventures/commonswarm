@@ -368,6 +368,9 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
     prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
   // Decision cards: hovering a card's message or focusing its first option row must not move anything.
+  "app.catchup.choice": [{ name: "catchup-choice", rows: "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you]",
+    prefer: '[data-needs-you="{message.choiceOpen}"]', require: ['[data-needs-you="{message.choiceOpen}"]'], max: 1, focus: true,
+    focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
   "app.chat.choice-open": [{ name: "choice-open", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
     require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="harbor"]' }],
   "app.chat.choice-multi": [{ name: "choice-multi", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceMulti}"]',

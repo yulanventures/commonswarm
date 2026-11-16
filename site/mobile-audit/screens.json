@@ -29,13 +29,13 @@
     "path": "/app?v=catchup",
     "setup": [
       {
-        "waitFor": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+        "waitFor": "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] .hm-decision__option"
       },
       {
-        "scroll": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+        "scroll": "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"]"
       }
     ],
-    "ready": "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"]) .hm-decision__option",
+    "ready": "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"] .hm-decision[data-decision-state=\"open\"] .hm-decision__option",
     "states": [
       "dense"
     ],
@@ -46,7 +46,8 @@
       "seed_choice_asks"
     ],
     "frame": [
-      "[data-home-catchup]:not([hidden]) .hm-catchup-needs .hm-needs-you:has(.hm-decision[data-decision-state=\"open\"])"
+      "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"] .hm-needs-title",
+      "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you=\"{message.choiceOpen}\"] .hm-decision__options > :first-child"
     ]
   },
   {
