@@ -179,8 +179,8 @@ GRANT SELECT ON swarm_read.signal_reactions TO authenticated, swarm_read;
 -- Open tabs learn that a message's reactions changed, on the topics its new messages already use
 -- (20261114000001): the workspace topic for an unfiled or open-channel message that the whole
 -- workspace reads, and a bare {"v": 1} on the member topic of each person who can read anything else
--- -- each member of a private channel, and each person party to a private message (its author,
--- its person recipients, and the owners of its agent author and agent recipients, who read it too).
+-- -- each member of a private channel, and each person a private message is addressed to (its person
+-- recipients, and the owners of its agent recipients), the same people swarm_read.signals admits.
 -- Access is read now, so a person who has left a private channel learns nothing. A Realtime failure
 -- never fails the reaction.
 CREATE FUNCTION swarm.push_signal_reaction()
@@ -238,16 +238,14 @@ BEGIN
     FOR v_user_id IN
       SELECT DISTINCT party.user_id
         FROM (
-          SELECT s.from_principal AS user_id WHERE s.from_kind = 'user'
-          UNION ALL SELECT s.to_user_id
+          SELECT s.to_user_id AS user_id
           UNION ALL SELECT sr.recipient_user_id
                       FROM swarm.signal_recipients AS sr
                      WHERE sr.signal_id = s.id AND sr.workspace_id = s.workspace_id
           UNION ALL SELECT p.owner_user_id
                       FROM swarm.agent_principals AS p
                      WHERE p.principal_id IN (
-                       SELECT s.from_principal WHERE s.from_kind = 'agent'
-                       UNION ALL SELECT s.to_agent_principal_id
+                       SELECT s.to_agent_principal_id
                        UNION ALL SELECT sr.recipient_agent_principal_id
                                    FROM swarm.signal_recipients AS sr
                                   WHERE sr.signal_id = s.id AND sr.workspace_id = s.workspace_id)

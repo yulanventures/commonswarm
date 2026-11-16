@@ -321,28 +321,39 @@ test("a private channel: only its members react or see reactions, and leaving it
   }
 });
 
-test("a private message: only its parties react, and only their topics hear it", { timeout: 60_000 }, async () => {
+test("a private message: only those it is addressed to react, and only their topics hear it", { timeout: 60_000 }, async () => {
   const since = new Date(Date.now() - 1000);
   const direct = await posted(owner.jwt, { to_user_id: other.id });
-  assert.equal((await react(other.jwt, direct, "✅")).status, 200, "the recipient reacts");
-  assert.equal((await react(owner.jwt, direct, "\u{1F44D}")).status, 200, "the author reacts");
+  const unknown = await react(other.jwt, randomUUID(), "\u{1F44D}");
+  assert.equal((await react(other.jwt, direct, "\u2705")).status, 200, "the recipient reacts");
+  // swarm_read.signals admits a private message to those it is addressed to, not to its author, so
+  // the author's reaction answers as an unknown id does, like their read.
+  const byAuthor = await react(owner.jwt, direct, "\u{1F44D}");
+  assert.equal(byAuthor.status, 404);
+  assert.deepEqual(byAuthor.body, unknown.body);
   const sibling = await react(agentB.token, direct, "\u{1F44D}");
-  assert.equal(sibling.status, 404, "an agent of the author's is not a party");
-  // Read directly, the reactions view under that agent's claims hides the owner's private message too.
-  const seenByAgent = await sql.begin(async (tx) => {
-    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner.id, role: "authenticated", agent_principal_id: agentB.principal })}, true)`;
-    await tx.unsafe("SET LOCAL ROLE authenticated");
-    return await tx`SELECT 1 FROM swarm_read.signal_reactions WHERE signal_id = ${direct}::uuid`;
-  });
-  assert.equal(seenByAgent.length, 0, "an agent's claims read no reactions on its owner's private message");
-  assert.equal((await reactionsSeenBy(owner.id, direct)).length, 2, "while the owner reads both");
+  assert.equal(sibling.status, 404, "an agent of the author's is not addressed");
+  assert.deepEqual(sibling.body, unknown.body);
   assert.equal((await frames(workspaceTopic(), since)).some((p) => p.signal_id === direct), false);
-  assert.ok((await frames(memberTopic(other.id), since)).length >= 2);
-  assert.ok((await frames(memberTopic(owner.id), since)).length >= 2);
-  for (const payload of await frames(memberTopic(other.id), since)) assert.deepEqual(payload, { v: 1 });
+  const toRecipient = await frames(memberTopic(other.id), since);
+  assert.ok(toRecipient.length >= 1);
+  for (const payload of toRecipient) assert.deepEqual(payload, { v: 1 });
+  assert.equal((await frames(memberTopic(owner.id), since)).length, 0, "the author's topic hears nothing it could not read");
+  assert.deepEqual((await reactionsSeenBy(other.id, direct)).map((r) => r.emoji), ["\u2705"]);
+  assert.deepEqual(await reactionsSeenBy(owner.id, direct), []);
 
-  // A message addressed to an agent: that agent reacts; its sibling does not.
+  // A message addressed to an agent: that agent reacts, and its owner's topic hears it; its sibling does not react,
+  // and reading the view directly under the sibling's claims shows nothing.
+  const since2 = new Date(Date.now() - 1000);
   const toAgent = await posted(other.jwt, { to_agent_principal_id: agentA.principal });
   assert.equal((await react(agentA.token, toAgent, "\u{1F440}", { source: "ack" })).status, 200);
   assert.equal((await react(agentB.token, toAgent, "\u{1F440}")).status, 404);
+  assert.ok((await frames(memberTopic(owner.id), since2)).length >= 1, "the addressed agent's owner reads it, and hears it");
+  const seenBySibling = await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: owner.id, role: "authenticated", agent_principal_id: agentB.principal })}, true)`;
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    return await tx`SELECT 1 FROM swarm_read.signal_reactions WHERE signal_id = ${toAgent}::uuid`;
+  });
+  assert.equal(seenBySibling.length, 0, "a sibling agent's claims read no reactions on a message addressed to another agent");
+  assert.equal((await reactionsSeenBy(owner.id, toAgent)).length, 1, "while the owner, who reads it, sees the reaction");
 });
