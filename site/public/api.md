@@ -924,7 +924,17 @@ Requires a verified identity. `label` is 1–80 characters.
 ```
 
 Returns `principal_id`. The name is 1–80 characters and must be unique in the
-workspace.
+workspace, ignoring case (`Lead` and `lead` are the same name).
+
+To rename an agent later, a person sends
+`{"kind":"rename_agent","principal_id":"<uuid>","name":"RidgeHQ Lead"}`. The agent's
+owner, or a workspace Owner or Admin, may rename it. The new name follows the same rule:
+1–80 characters, no spaces at either end, no control characters, and unused (ignoring
+case) in every workspace the agent belongs to; a taken name is refused with
+`principal_name_taken`. The agent keeps its `principal_id`, so its mentions, messages
+and history stay attached, and hosted agents read the new name from `whoami`, `check`
+and each tool's `context.agent` on their next call. Renaming is audited and replays by
+`command_id` like any other command. Agent credentials cannot rename.
 
 **3. Mint the token.**
 

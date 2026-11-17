@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createMcpProtocolHandler } from "../supabase/functions/mcp/protocol.ts";
 
 // @ts-expect-error TS5097: exercise the production adapter through tsx.
-import { commandOutput, readOutput, HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
+import { commandOutput, readOutput, HostedToolFailure, hostedToolError } from "../supabase/functions/mcp/tool-errors.ts";
 import type { HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
 // @ts-expect-error TS5097: exercise the enforcing Deno catalog through tsx.
 import { HOSTED_TOOL_TABLE } from "../supabase/functions/mcp/tools.ts";
@@ -73,10 +73,10 @@ test("hosted command and read failures return exact stable codes and safe recove
     ["unauthenticated", "Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry."],
     ["hosted_seat_forbidden", "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect."],
     ["hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name."],
-    ["hosted_seat_name_invalid", "The seat name is invalid. Use 1 to 80 characters with no surrounding spaces or control characters."],
-    ["hosted_seat_name_taken", "That seat name is taken in this workspace. Call claim_seat with another name and a new request_id."],
-    ["hosted_seat_limit_reached", "This connection has reached its seat limit. Reuse a seat returned by claim_seat, or ask a workspace admin to revoke an unused seat."],
-    ["principal_limit_reached", "This workspace has reached its agent limit. Reuse an existing seat, or ask a workspace admin to revoke an unused agent."],
+    ["hosted_seat_name_invalid", "That agent name can't be used. Use 1 to 80 characters with no spaces at either end and no control characters."],
+    ["hosted_seat_name_taken", "Another agent in this workspace already uses that name. Call claim_seat again with suggested_name and a new request_id, or ask the person which name to use. If existing_agent_id is this chat's own agent, reconnect with claim_seat agent_id instead. Never share another chat's agent."],
+    ["hosted_seat_limit_reached", "This connection already has 10 agents. Reuse one of them (seat_list shows them; reconnect with claim_seat agent_id), or ask the person to retire one they no longer use."],
+    ["principal_limit_reached", "This workspace has reached its agent limit. Reuse an agent you already have, or ask a workspace admin to retire one that's no longer used."],
     ["hosted_check_batch_forbidden", "This inbox batch is unavailable to this seat. Call check without ack, then acknowledge only the batch_id returned for the same seat."],
     ["command_id_conflict", "This request_id was already used for different arguments. Retry the original request unchanged, or use a new request_id for a different request."],
     ["invalid_request", "The request arguments were rejected. Check the tool's input schema and correct the arguments before retrying."],
@@ -104,6 +104,33 @@ test("hosted command and read failures return exact stable codes and safe recove
   const read = handler(async () => readOutput({ status: 403, body: { error: "forbidden", message: "private-token" } }));
   const response = await read(request("members", { seat }));
   assert.deepEqual(JSON.parse((await response.json()).result.content[0].text), { error: "forbidden", message: accessMessage });
+});
+
+test("a taken name returns only a valid suggestion and a well-formed agent id beside its message", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  const message = JSON.parse(JSON.stringify(hostedToolError(new HostedToolFailure("hosted_seat_name_taken"), "claim_seat"))).message;
+  const agent = "33333333-3333-4333-8333-333333333333";
+  const cases: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+    [{ suggested_name: "RidgeHQ Lead 2", existing_agent_id: agent.toUpperCase() },
+      { suggested_name: "RidgeHQ Lead 2", existing_agent_id: agent }],
+    [{ suggested_name: "RidgeHQ Lead 2" }, { suggested_name: "RidgeHQ Lead 2" }],
+    // Malformed values are dropped, never forwarded.
+    [{ suggested_name: " padded ", existing_agent_id: "not-a-uuid" }, {}],
+    [{ suggested_name: "x".repeat(81), existing_agent_id: 7 }, {}],
+    [{ suggested_name: "bad\u0007bell" }, {}],
+  ];
+  for (const [body, help] of cases) {
+    const serve = handler(async () => commandOutput({ status: 409, body: {
+      error: "hosted_seat_name_taken", message: "backend prose", ...body } }));
+    const response = await serve(request("claim_seat", { name: "RidgeHQ Lead", request_id: uuid }));
+    assert.deepEqual(JSON.parse((await response.json()).result.content[0].text),
+      { error: "hosted_seat_name_taken", message, ...help });
+  }
+  // Other codes never carry the fields, even when the backend sends them.
+  const serve = handler(async () => commandOutput({ status: 403, body: {
+    error: "forbidden", suggested_name: "Leak", existing_agent_id: agent } }));
+  const response = await serve(request("claim_seat", { name: "RidgeHQ Lead", request_id: uuid }));
+  assert.deepEqual(Object.keys(JSON.parse((await response.json()).result.content[0].text)).sort(), ["error", "message"]);
 });
 
 test("reply and recipient denials do not distinguish missing resources from inaccessible ones", async (t) => {

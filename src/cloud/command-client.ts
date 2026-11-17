@@ -101,6 +101,7 @@ export type ConnectCommand =
   | { kind: "disable_agent_management"; principal_id: string }
   | { kind: "recover_agent_session"; principal_id: string }
   | { kind: "revoke_agent_principal"; principal_id: string }
+  | { kind: "rename_agent"; principal_id: string; name: string }
   | {
     kind: "mint_agent_token";
     principal_id: string;

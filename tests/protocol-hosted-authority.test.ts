@@ -4,7 +4,11 @@ import {
   decideHostedAuthority,
   HOSTED_MCP_RESOURCE,
   HOSTED_MCP_SEAT_LIMIT,
+  HOSTED_NAME_SUGGESTION_TRIES,
+  HOSTED_SEAT_LIMIT_MESSAGE,
   HOSTED_SEAT_NAME_TAKEN,
+  hostedNameCandidates,
+  hostedSeatNameValid,
   reduceHostedAuthorityStream,
   type DecideHostedAuthorityCtx,
   type HostedAuthorityFacts,
@@ -168,7 +172,7 @@ test("claim emits hosted turn-only identity and folds deterministically", () => 
   }
 });
 
-test("stable reuse never adopts a collision or resurrects a revoked seat", () => {
+test("a name alone never reuses a seat; only an explicit reconnect by agent_id does", () => {
   const liveSeat = {
     seat_id: seatId, grant_id: grantId, workspace_id: workspace,
     owner_user_id: owner, principal_id: principal, name: "Claude",
@@ -176,25 +180,37 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
     turn_only: true as const, created_at: 100,
     revoked_at: null, handle_revoked_at: null, principal_revoked_at: null,
   };
-  const reuse = decideHostedAuthority(
-    claim,
-    facts({ seat: liveSeat, exact_name_principals: [namePrincipal()] }),
-    context("hosted_grant"),
-  );
-  assert.equal(reuse.ok, true);
-  if (reuse.ok) {
-    assert.equal(reuse.reuse, liveSeat);
-    assert.deepEqual(reuse.events, []);
+  // A second chat on the same connection asking for the same name gets a refusal with a
+  // suggestion, never the first chat's seat.
+  for (const reconnect of [undefined, null, "other-agent"]) {
+    const byName = decideHostedAuthority(claim, facts({ seat: liveSeat,
+      exact_name_principals: [namePrincipal()], reconnect_agent_id: reconnect }), context("hosted_grant"));
+    assert.equal(byName.ok, false, `reconnect=${String(reconnect)}`);
+    if (!byName.ok) {
+      assert.equal(byName.reason, HOSTED_SEAT_NAME_TAKEN.code);
+      assert.equal(byName.detail, HOSTED_SEAT_NAME_TAKEN.message);
+    }
+  }
+  const reconnect = { reconnect_agent_id: principal };
+  // The command adapter leaves the reconnecting agent itself out of the name rows; both shapes reuse.
+  for (const rows of [[], [namePrincipal()]]) {
+    const reuse = decideHostedAuthority(claim, facts({ seat: liveSeat, exact_name_principals: rows, ...reconnect }),
+      context("hosted_grant"));
+    assert.equal(reuse.ok, true);
+    if (reuse.ok) {
+      assert.equal(reuse.reuse, liveSeat);
+      assert.deepEqual(reuse.events, []);
+    }
   }
   const historical = decideHostedAuthority(claim, facts({ seat: liveSeat,
-    exact_name_principals: [namePrincipal(), namePrincipal("old", true, "foreign")],
-    live_seat_count: HOSTED_MCP_SEAT_LIMIT,
+    exact_name_principals: [namePrincipal("old", true, "foreign")],
+    live_seat_count: HOSTED_MCP_SEAT_LIMIT, ...reconnect,
   }), context("hosted_grant"));
-  assert.equal(historical.ok, true, "live reuse precedes historical reservations and the cap");
+  assert.equal(historical.ok, true, "a reconnect precedes historical reservations and the cap");
   if (historical.ok) assert.equal(historical.reuse, liveSeat);
   const collision = decideHostedAuthority(
     claim,
-    facts({ seat: liveSeat, exact_name_principals: [namePrincipal(), namePrincipal("other")] }),
+    facts({ seat: liveSeat, exact_name_principals: [namePrincipal(), namePrincipal("other")], ...reconnect }),
     context("hosted_grant"),
   );
   assert.equal(collision.ok, false);
@@ -207,11 +223,44 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
   ]) {
     const revoked = decideHostedAuthority(
       claim,
-      facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()] }),
+      facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()], ...reconnect }),
       context("hosted_grant"),
     );
     assert.equal(revoked.ok, false);
     if (!revoked.ok) assert.equal(revoked.reason, "hosted_seat_revoked");
+  }
+});
+
+test("a taken name's suggestions are the name plus the next numbers, within 80 characters", () => {
+  assert.deepEqual(hostedNameCandidates("RidgeHQ Lead", 3), ["RidgeHQ Lead 2", "RidgeHQ Lead 3", "RidgeHQ Lead 4"]);
+  assert.equal(hostedNameCandidates("Lead").length, HOSTED_NAME_SUGGESTION_TRIES);
+  assert.equal(hostedNameCandidates("Lead").at(-1), `Lead ${HOSTED_NAME_SUGGESTION_TRIES + 1}`);
+  const long = "\u00e9".repeat(80);
+  const cut = hostedNameCandidates(long, 9);
+  for (const candidate of cut) {
+    assert.ok(Array.from(candidate).length <= 80, candidate);
+    assert.ok(hostedSeatNameValid(candidate), candidate);
+  }
+  assert.equal(cut[0], `${"\u00e9".repeat(78)} 2`);
+  assert.equal(cut[8], `${"\u00e9".repeat(77)} 10`, "a longer number takes one more character");
+  // A cut that would end in a space drops the space rather than doubling it.
+  assert.equal(hostedNameCandidates(`${"a".repeat(77)} bc`, 1)[0], `${"a".repeat(77)} 2`);
+  // Every candidate is distinct and valid, so the first free one is always a usable name.
+  const all = hostedNameCandidates("Claude");
+  assert.equal(new Set(all.map((name) => name.toLowerCase())).size, all.length);
+  assert.ok(all.every((name) => hostedSeatNameValid(name)));
+});
+
+test("the connection limit says agents, offers reuse or retiring, and keeps its size", () => {
+  assert.equal(HOSTED_MCP_SEAT_LIMIT, 10);
+  const capped = decideHostedAuthority(claim, facts({ live_seat_count: HOSTED_MCP_SEAT_LIMIT }), context("hosted_grant"));
+  assert.equal(capped.ok, false);
+  if (!capped.ok) {
+    assert.equal(capped.detail, HOSTED_SEAT_LIMIT_MESSAGE);
+    assert.doesNotMatch(capped.detail, /seat/iu);
+    assert.match(capped.detail, /10 agents/u);
+    assert.match(capped.detail, /Reuse/u);
+    assert.match(capped.detail, /retire/u);
   }
 });
 

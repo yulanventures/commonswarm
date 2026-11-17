@@ -54,6 +54,7 @@ interface ApplyOptions {
   humanRights?: readonly string[];
   landingResolved?: boolean;
   pendingInvitationIds?: (user_id: string) => readonly string[];
+  agentNameTaken?: (principal_id: string, name: string) => boolean;
 }
 
 function makeWorld() {
@@ -98,6 +99,7 @@ function makeWorld() {
       ...(options.pendingInvitationIds
         ? { pendingInvitationIds: options.pendingInvitationIds }
         : {}),
+      ...(options.agentNameTaken ? { agentNameTaken: options.agentNameTaken } : {}),
       nextSeq: () => ++seq,
       nextEventId: () => `we-${++eventId}`,
     };
@@ -1592,6 +1594,116 @@ describe('set_agent_model', () => {
     );
     assert.equal(decision.ok, false);
     if (!decision.ok) assert.equal(decision.reason, 'principal_not_found');
+  });
+});
+
+describe('rename_agent', () => {
+  /* Same gate as set_agent_model and revoke_agent_principal. The name check across every
+   * workspace the agent belongs to is the adapter's (agentNameTaken); without it, fail closed. */
+  function seeded() {
+    const world = makeWorld();
+    world.create();               // alice owns ws-1
+    world.join('bob');            // plain member
+    world.join('carol');          // plain member
+    world.createPrincipal('bob'); // principal-bob owned by bob
+    return world;
+  }
+  const free = () => false;
+
+  it('the owner of the agent renames it; the id and owner stay and history keeps the old name', () => {
+    const world = seeded();
+    const before = world.state()?.principals['principal-bob'];
+    const decision = world.apply(
+      { kind: 'rename_agent', principal_id: 'principal-bob', name: 'RidgeHQ Lead' },
+      { actor: human('bob'), agentNameTaken: free },
+    );
+    assert.equal(decision.ok, true);
+    const after = world.state()?.principals['principal-bob'];
+    assert.equal(after?.name, 'RidgeHQ Lead');
+    assert.equal(after?.owner_user_id, before?.owner_user_id);
+    if (decision.ok) {
+      assert.equal(decision.events.length, 1);
+      assert.equal(decision.events[0]?.type, 'AgentRenamed');
+      assert.deepEqual(decision.events[0]?.payload, {
+        principal_id: 'principal-bob', name: 'RidgeHQ Lead', previous_name: before?.name, renamed_at: NOW,
+      });
+      assert.equal(decision.events[0]?.actor_user, 'bob');
+      assert.equal(decision.events[0]?.actor_agent_principal, null);
+    }
+  });
+
+  it('a workspace owner or admin renames any agent; another plain member is refused', () => {
+    const world = seeded();
+    world.join('dave', 'admin');
+    assert.equal(world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'By owner' },
+      { actor: human('alice'), agentNameTaken: free }).ok, true);
+    assert.equal(world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'By admin' },
+      { actor: human('dave'), agentNameTaken: free }).ok, true);
+    const refused = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'By carol' },
+      { actor: human('carol'), agentNameTaken: free });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.reason, 'principal_not_owned');
+    assert.equal(world.state()?.principals['principal-bob']?.name, 'By admin');
+  });
+
+  it('an agent credential is refused, even for itself', () => {
+    const world = seeded();
+    const decision = world.apply(
+      { kind: 'rename_agent', principal_id: 'principal-bob', name: 'Self' },
+      { actor: agent('bob', 'principal-bob'), credential_kind: 'agent', presenting_token_id: 'token-bob', agentNameTaken: free },
+    );
+    assert.equal(decision.ok, false);
+    if (!decision.ok) assert.equal(decision.reason, 'credential_kind_forbidden');
+  });
+
+  it('a taken name, or a missing name check, is refused as taken; the gate runs first', () => {
+    const world = seeded();
+    for (const options of [{ agentNameTaken: () => true }, {}]) {
+      const decision = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'Lead' },
+        { actor: human('bob'), ...options });
+      assert.equal(decision.ok, false);
+      if (!decision.ok) {
+        assert.equal(decision.reason, 'principal_name_taken');
+        assert.match(decision.detail, /ignoring case/u);
+      }
+    }
+    // A member who may not rename learns nothing about the name.
+    const probe = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'Lead' },
+      { actor: human('carol'), agentNameTaken: () => true });
+    assert.equal(probe.ok, false);
+    if (!probe.ok) assert.equal(probe.reason, 'principal_not_owned');
+  });
+
+  it('names follow the agent-name rule; the same name is an accepted no-op; a case change is a rename', () => {
+    const world = seeded();
+    for (const name of ['', ' padded', 'padded ', 'bell\u0007', 'x'.repeat(81)]) {
+      const decision = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name },
+        { actor: human('bob'), agentNameTaken: free });
+      assert.equal(decision.ok, false, JSON.stringify(name));
+      if (!decision.ok) assert.equal(decision.reason, 'principal_name_invalid');
+    }
+    const current = world.state()!.principals['principal-bob']!.name;
+    const same = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: current },
+      { actor: human('bob'), agentNameTaken: () => true });
+    assert.equal(same.ok, true);
+    if (same.ok) assert.deepEqual(same.events, []);
+    const recased = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: current.toUpperCase() },
+      { actor: human('bob'), agentNameTaken: free });
+    assert.equal(recased.ok, true);
+    assert.equal(world.state()?.principals['principal-bob']?.name, current.toUpperCase());
+  });
+
+  it('a revoked or missing agent is refused', () => {
+    const world = seeded();
+    const ghost = world.apply({ kind: 'rename_agent', principal_id: 'principal-ghost', name: 'Ghost' },
+      { actor: human('alice'), agentNameTaken: free });
+    assert.equal(ghost.ok, false);
+    if (!ghost.ok) assert.equal(ghost.reason, 'principal_not_found');
+    assert.equal(world.apply({ kind: 'revoke_agent_principal', principal_id: 'principal-bob' }, { actor: human('bob') }).ok, true);
+    const revoked = world.apply({ kind: 'rename_agent', principal_id: 'principal-bob', name: 'After' },
+      { actor: human('alice'), agentNameTaken: free });
+    assert.equal(revoked.ok, false);
+    if (!revoked.ok) assert.equal(revoked.reason, 'principal_revoked');
   });
 });
 

@@ -2617,6 +2617,7 @@ async function runAccept(args: Arguments): Promise<void> {
 }
 
 export const RUN_PRINCIPAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"] as const;
+export const RUN_PRINCIPAL_3_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "name", "json"] as const;
 
 export const RUN_PRINCIPAL_1_ACCEPTED_FLAGS = [
       ...TARGET_FLAGS,
@@ -2686,6 +2687,41 @@ async function runPrincipal(args: Arguments): Promise<void> {
         "Agent identity revoked. Its credentials can no longer post or renew, and collaborators will no longer see it as active.",
       status: response.status,
       principal_id: principalId,
+      command_event_ids: response.event_ids,
+    };
+    if (args.has("json")) {
+      printJson(output);
+    } else {
+      process.stdout.write(`${output.message}\n`);
+    }
+    return;
+  }
+  if (action === "rename") {
+    args.assertShape(RUN_PRINCIPAL_3_ACCEPTED_FLAGS, 2);
+    const cloud = await target(args);
+    const human = await humanCredential(args, cloud);
+    const workspace = await workspaceId(args, cloud, human);
+    const principalId = args.required("principal-id");
+    const name = args.required("name");
+    const response = (
+      await sendConnectWithPending(
+        new ThinCommandClient(cloud, human.fetcher),
+        human,
+        workspace,
+        { kind: "rename_agent", principal_id: principalId, name },
+      )
+    ).response;
+    if (response.status !== "accepted") {
+      const reason = String(response.reason ?? "");
+      throw new Error(reason === "principal_name_taken"
+        ? `Another agent in this workspace already uses the name "${name}", ignoring case. Choose another name.`
+        : `The rename was refused: ${reason || "required condition not met"}. The agent keeps its name.`);
+    }
+    const output = {
+      message: `Agent renamed to "${name}". It keeps its identity, mentions and history, and sees the new name on its next turn.`,
+      status: response.status,
+      principal_id: principalId,
+      name,
       command_event_ids: response.event_ids,
     };
     if (args.has("json")) {
@@ -11147,6 +11183,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   principal: group({
     create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]"] }),
     revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>"] }),
+    rename: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Rename an agent.", mutates: true, flags: [...humanFlags, "principal-id", "name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal rename [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid> --name <new name>"] }),
   }, (args) => args.positionals[1], (args) => new Error(`unknown principal command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
     refusalTrace: "runPrincipal",
@@ -11261,6 +11298,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   accept: mergeHelpFlags(RUN_ACCEPT_1_ACCEPTED_FLAGS, RUN_ACCEPT_2_ACCEPTED_FLAGS, INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS),
   "principal.create": RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
   "principal.revoke": RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
+  "principal.rename": RUN_PRINCIPAL_3_ACCEPTED_FLAGS,
   "token.mint": RUN_TOKEN_1_ACCEPTED_FLAGS,
   "token.revoke": mergeHelpFlags(RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS, RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS),
   "grant.resume": RUN_GRANT_1_ACCEPTED_FLAGS,

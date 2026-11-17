@@ -30,6 +30,7 @@ export type WorkspaceEventType = AdminRoutineEventType
   | 'AgentPrincipalCreated'
   | 'AgentPrincipalRevoked'
   | 'AgentModelDeclared'
+  | 'AgentRenamed'
   | 'FeedbackSubmitted'
   | 'AgentTokenMinted'
   | 'AgentTokenRevoked'
@@ -58,6 +59,7 @@ export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   'AgentPrincipalCreated',
   'AgentPrincipalRevoked',
   'AgentModelDeclared',
+  'AgentRenamed',
   'FeedbackSubmitted',
   'AgentTokenMinted',
   'AgentTokenRevoked',
@@ -227,6 +229,17 @@ export interface AgentModelDeclared {
 }
 
 /**
+ * rename_agent: a person renamed an agent. The principal id is unchanged; the envelope's
+ * actor_user says who renamed it. previous_name keeps the old label in history.
+ */
+export interface AgentRenamed {
+  principal_id: string;
+  name: string;
+  previous_name: string;
+  renamed_at: number;
+}
+
+/**
  * Product feedback from a member or an agent — inert data about the product,
  * never workspace authority. reporter_kind/reporter_id are server-derived from
  * the presenting credential (submit_feedback carries no reporter fields), so
@@ -295,6 +308,7 @@ export type WorkspaceRejectionReason =
   | 'last_owner'
   | 'landing_authority_unresolved'
   | 'principal_name_taken'
+  | 'principal_name_invalid'
   | 'principal_not_found'
   | 'principal_not_owned'
   | 'principal_revoked'

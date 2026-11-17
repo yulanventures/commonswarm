@@ -12,7 +12,7 @@ import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { emptyHouseholdObjectState } from "../../src/protocol/household-objects.js";
-import { HOSTED_MCP_SEAT_LIMIT } from "../../src/protocol/hosted-authority.js";
+import { HOSTED_MCP_SEAT_LIMIT, HOSTED_SEAT_LIMIT_MESSAGE } from "../../src/protocol/hosted-authority.js";
 import { emptyApplicationSchema, localClusterAdminUrl, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 import { adminEdgeDatabase } from "../support/admin-edge-database.js";
@@ -1396,11 +1396,9 @@ test("all five hosted-name races enter the real command paths", { timeout: 180_0
         hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
       });
       assert.equal(results.length, 2, caseLabel);
-      if (label === "same-grant") {
-        assert.deepEqual(results.map((result) => result.status), [200, 200], caseLabel);
-        assert.equal(results[0]?.body.seat_id, results[1]?.body.seat_id,
-          "the same grant/workspace/name reuses one seat");
-      } else {
+      // A second claim of a live name is refused, on the same grant too: a new chat is a new
+      // agent, never the first chat's seat.
+      {
         const winner = order === "hosted-first" ? results[0] : results[1];
         const loser = order === "hosted-first" ? results[1] : results[0];
         assert.equal(winner?.status, 200, `${caseLabel}: winner status`);
@@ -1415,9 +1413,19 @@ test("all five hosted-name races enter the real command paths", { timeout: 180_0
           );
           assert.equal(
             loser?.body.message,
-            "That name is taken in this workspace; choose another.",
+            "Another agent in this workspace already uses that name; choose another.",
             `${caseLabel}: hosted loser message`,
           );
+          if (competitor === "hosted" || order === "competitor-first") {
+            assert.equal(loser?.body.suggested_name, `${name} 2`, `${caseLabel}: suggestion`);
+          }
+          if (label === "same-grant") {
+            assert.equal(loser?.body.existing_agent_id, winner?.body.principal_id,
+              `${caseLabel}: the holder is this connection's own agent, so its id is returned`);
+          } else if (competitor === "hosted") {
+            assert.equal(Object.hasOwn(loser?.body ?? {}, "existing_agent_id"), false,
+              `${caseLabel}: another connection's agent id is never returned`);
+          }
           if (competitor === "h0" && order === "hosted-first") {
             assert.equal(
               loser?.body.reason,
@@ -1460,8 +1468,8 @@ test("claim path keeps every creation path on the shared locks", async () => {
   );
   assert.equal(
     [...source.matchAll(/await lockPrincipalName\(/gu)].length,
-    5,
-    "registration, join mint, ordinary creation, a seat admin's created seat, and hosted claim all take the shared name lock",
+    6,
+    "registration, join mint, ordinary creation, a seat admin's created seat, hosted claim and rename_agent all take the shared name lock",
   );
   assert.equal(
     [...source.matchAll(/await hostedNameReserved\(/gu)].length,
@@ -1751,9 +1759,12 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   for (const field of ["seat", "handle"]) assert.ok(oldRevoked[0]![field].revoked_at);
   assert.equal(oldRevoked[0]!.principal.revoked_at,null,"account identity survives target seat removal");
   const sameGrant = claimSeat(fixture, fixture.grantA, name);
-  const reused = claimSeat(fixture, fixture.grantA, name);
-  for (const field of ["seat_id", "principal_id", "handle"]) assert.equal(reused.body[field], sameGrant.body[field]);
-  assert.deepEqual(reused.body.event_ids, [], "live replacement reuses despite revoked same-name history");
+  const second = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name) });
+  assert.equal(second.status, 409, "a new request for a live name never reuses its seat");
+  assert.equal(second.body.error, "hosted_seat_name_taken");
+  assert.equal(second.body.suggested_name, `${name} 2`);
+  assert.equal(second.body.existing_agent_id, sameGrant.body.principal_id);
   for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(sameGrant.body[field], old.body[field]);
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked, "reclaim never edits removed identity rows");
   const signalsAfter = await sql`
@@ -1902,6 +1913,8 @@ test("historical orphan is reclaimable at the hosted seat limit while new names 
     claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, `new-at-cap-${randomUUID()}`) });
   assert.equal(refused.status, 403, JSON.stringify(refused.body));
   assert.equal(refused.body.error, "hosted_seat_limit_reached", "a new name gets no reclaim discount");
+  assert.equal(refused.body.message, HOSTED_SEAT_LIMIT_MESSAGE, "the limit is said in plain words");
+  assert.doesNotMatch(String(refused.body.message), /seat/iu);
   assert.deepEqual(await liveSeatIds(), afterSeatIds, "refused creation leaves the grant at the cap");
   const audits = await sql<{ outcome: string; detail: string }[]>`
     SELECT outcome, detail FROM swarm.audit_log
@@ -2071,7 +2084,7 @@ test("accepted removal fences concurrent same-name and new-name claims", { timeo
       claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, sameName ? name : `race-new-${randomUUID()}`),
     });
     assert.equal(result.removed.status, 200, JSON.stringify(result.removed.body));
-    assert.ok([200, 403].includes(result.claimed.status), JSON.stringify(result.claimed));
+    assert.ok((sameName ? [403, 409] : [200, 403]).includes(result.claimed.status), JSON.stringify(result.claimed));
     const newIdentitySurvived = !sameName && result.claimed.status === 200;
     assert.equal(result.refused.status, newIdentitySurvived ? 200 : 403, "no cached capability survives committed removal");
     if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, newIdentitySurvived ? 200 : 403);
@@ -2192,7 +2205,9 @@ test("foreign-owner revoked name is refused with a same-owner positive control",
   } });
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, "hosted_seat_name_taken");
-  assert.equal(refused.body.message, "That name is taken in this workspace; choose another.");
+  assert.equal(refused.body.message, "Another agent in this workspace already uses that name; choose another.");
+  assert.equal(refused.body.suggested_name, `${name} 2`);
+  assert.equal(Object.hasOwn(refused.body, "existing_agent_id"), false, "a removed agent's id is never returned");
   claimSeat(fixture, fixture.grantA, name);
 });
 
@@ -2234,13 +2249,8 @@ test("concurrent claims of a revoked name yield exactly one new live identity", 
       competitor: "hosted", competingGrantId,
       hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
     });
-    if (competingGrantId === fixture.grantA) {
-      assert.deepEqual(results.map(row => row.status), [200, 200]);
-      assert.equal(results[0]!.body.seat_id, results[1]!.body.seat_id);
-    } else {
-      assert.deepEqual(results.map(row => row.status).sort(), [200, 409]);
-      assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
-    }
+    assert.deepEqual(results.map(row => row.status).sort(), [200, 409]);
+    assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
     const principals = await sql<{ principal_id: string; revoked_at: Date | null }[]>`
       SELECT p.principal_id, coalesce(p.revoked_at, am.revoked_at) AS revoked_at
       FROM swarm.agent_principals p
@@ -3248,7 +3258,9 @@ test("hosted context survives actual MCP check ACK and advances the stored batch
 for (const change of ["consent", "archive", "membership"] as const) {
   test("hosted context HTTP filters withdrawn " + change + " then refuses the current workspace without effects", { timeout: 180_000 }, async () => {
     const fixture = await contextFixture();
-    const initial = contextHttp(fixture);
+    const claimRequest = randomUUID();
+    const initial = contextHttp(fixture, { calls: [{ name: "claim_seat", request_id: claimRequest },
+      ...["whoami", "members", "check"].map(name => ({ name }))] });
     initial.forEach(row => assertContext(row, fixture));
     const handle = String(initial[0]!.body.handle);
     const withdraw = async (workspaceId: string) => {
@@ -3259,7 +3271,8 @@ for (const change of ["consent", "archive", "membership"] as const) {
         WHERE user_id = ${fixture.owner}::uuid AND workspace_id = ${workspaceId}::uuid`;
     };
     await withdraw(fixture.workspaceB);
-    const live = contextHttp(fixture, { handle, calls: ["whoami", "members", "check", "claim_seat"].map(name => ({ name })) });
+    const live = contextHttp(fixture, { handle, calls: [...["whoami", "members", "check"].map(name => ({ name })),
+      { name: "claim_seat", request_id: claimRequest }] });
     live.forEach(row => assertContext(row, fixture, [fixture.workspaceA]));
     await withdraw(fixture.workspaceA);
     const [before] = await sql`SELECT
@@ -4401,4 +4414,218 @@ test("seat_release ends only that seat: the sibling seat works, the agent stays,
   assert.equal(after?.live_in_a, 0, "no seat in workspace A comes back on reconnect");
   assert.ok(after?.released, "the release stayed committed through later commands and the reconnect");
   assert.equal(after?.released?.getTime(), committed?.revoked_at?.getTime(), "and was not rewritten");
+});
+
+/* Add-an-agent redesign, server half. A new chat is a new agent: claim_seat returns an existing
+ * seat only for the same request_id or an explicit agent_id. A taken name, compared ignoring
+ * case, gets 409 with the name plus the lowest free number, and the holder's id only when it is
+ * this connection's own agent. */
+const NAME_TAKEN_MESSAGE = "Another agent in this workspace already uses that name; choose another.";
+function claimAs(fixture: HostedFixture, name: string | undefined, options: {
+  grantId?: string; ownerUserId?: string; commandId?: string; agentId?: unknown; workspaceId?: string;
+} = {}): HarnessResult {
+  return runHostedHarness<HarnessResult>({ operation: "claim", claim: {
+    grantId: options.grantId ?? fixture.grantA, ownerUserId: options.ownerUserId ?? fixture.owner,
+    workspaceId: options.workspaceId ?? fixture.workspaceA, commandId: options.commandId ?? randomUUID(),
+    ...(name === undefined ? {} : { name }), ...(options.agentId === undefined ? {} : { agentId: options.agentId }),
+  } });
+}
+function assertNameTaken(result: HarnessResult, suggested: string, existing: unknown | null) {
+  assert.equal(result.status, 409, JSON.stringify(result.body));
+  assert.equal(result.body.error, "hosted_seat_name_taken");
+  assert.equal(result.body.message, NAME_TAKEN_MESSAGE);
+  assert.equal(result.body.suggested_name, suggested);
+  if (existing === null) assert.equal(Object.hasOwn(result.body, "existing_agent_id"), false, "no other connection's agent id");
+  else assert.equal(result.body.existing_agent_id, existing);
+}
+
+test("claim_seat replays only the same request_id or agent_id; a taken name, ignoring case, gets the next free number", { timeout: 180_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const name = `Lead ${randomUUID().slice(0, 8)}`;
+  const requestId = randomUUID();
+  const first = claimAs(fixture, name, { commandId: requestId });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const replay = claimAs(fixture, name, { commandId: requestId });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.replayed, true);
+  for (const field of ["seat_id", "principal_id", "handle", "name"]) assert.equal(replay.body[field], first.body[field]);
+
+  // A second chat with the same name, or the same name in other letters, never gets the first chat's seat.
+  assertNameTaken(claimAs(fixture, name), `${name} 2`, first.body.principal_id);
+  assertNameTaken(claimAs(fixture, name.toUpperCase()), `${name.toUpperCase()} 2`, first.body.principal_id);
+  // The suggestion is claimable, and the next refusal moves on to the next number.
+  const second = claimAs(fixture, `${name} 2`);
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.notEqual(second.body.principal_id, first.body.principal_id);
+  assertNameTaken(claimAs(fixture, name), `${name} 3`, first.body.principal_id);
+  // Another person's connection is refused the same way, without the holder's id.
+  assertNameTaken(claimAs(fixture, name.toLowerCase(), { grantId: fixture.grantB, ownerUserId: fixture.other }),
+    `${name.toLowerCase()} 3`, null);
+
+  // An explicit reconnect by agent_id returns the live seat, with no new event, even with a stale name.
+  for (const staleName of [undefined, "Some old name"]) {
+    const reconnect = claimAs(fixture, staleName, { agentId: first.body.principal_id });
+    assert.equal(reconnect.status, 200, JSON.stringify(reconnect.body));
+    assert.equal(reconnect.body.handle, first.body.handle);
+    assert.equal(reconnect.body.name, name, "the agent's current name, never the one sent beside agent_id");
+    assert.deepEqual(reconnect.body.event_ids, []);
+  }
+  const live = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.agent_principals
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND lower(name) = lower(${name}) AND revoked_at IS NULL`;
+  assert.equal(live[0]?.n, 1, "one live agent per name, ignoring case");
+  const refusals = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.audit_log
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
+      AND outcome = 'domain' AND reason = 'hosted_seat_name_taken'`;
+  assert.equal(refusals[0]?.n, 4, "every refused claim is audited");
+});
+
+test("a local agent's name blocks a hosted claim of the same name in other letters, and the other way round", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const name = `local-${randomUUID().slice(0, 8)}`;
+  const created = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "create_agent_principal", name } });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.status, "accepted");
+  assertNameTaken(claimAs(fixture, name.toUpperCase()), `${name.toUpperCase()} 2`, null);
+  const hosted = claimAs(fixture, `Hosted ${name}`);
+  assert.equal(hosted.status, 200, JSON.stringify(hosted.body));
+  const local = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "create_agent_principal", name: `hosted ${name}`.toUpperCase() } });
+  assert.notEqual(local.body.status, "accepted", JSON.stringify(local.body));
+});
+
+test("rename_agent: owner or admin only, unique ignoring case, audited, replayed by command_id, echoed in whoami, check and context", { timeout: 240_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const original = `Claude ${randomUUID().slice(0, 8)}`;
+  const claimRequest = randomUUID();
+  const agent = claimAs(fixture, original, { commandId: claimRequest });
+  assert.equal(agent.status, 200, JSON.stringify(agent.body));
+  const neighbour = claimAs(fixture, `Neighbour ${randomUUID().slice(0, 8)}`);
+  assert.equal(neighbour.status, 200, JSON.stringify(neighbour.body));
+  const rename = (jwt: string, name: string, commandId = randomUUID(), principalId = agent.body.principal_id) =>
+    runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: jwt, workspaceId: fixture.workspaceA, commandId,
+      command: { kind: "rename_agent", principal_id: principalId, name } });
+
+  // A plain member who does not own the agent is refused.
+  const member = rename(fixture.otherJwt, "Member pick");
+  assert.equal(member.status, 200, JSON.stringify(member.body));
+  assert.equal(member.body.status, "rejected");
+  assert.equal(member.body.reason, "principal_not_owned");
+  // Another agent's name, in other letters, is refused.
+  const taken = rename(fixture.ownerJwt, String(neighbour.body.name).toLowerCase());
+  assert.equal(taken.body.status, "rejected", JSON.stringify(taken.body));
+  assert.equal(taken.body.reason, "principal_name_taken");
+  // A name outside the rule is refused at the edge.
+  assert.equal(rename(fixture.ownerJwt, " padded").status, 400);
+
+  // The owner renames it; the same command_id replays the same answer and appends nothing.
+  const renamed = `RidgeHQ Lead ${randomUUID().slice(0, 8)}`;
+  const commandId = randomUUID();
+  const accepted = rename(fixture.ownerJwt, renamed, commandId);
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.status, "accepted");
+  const again = rename(fixture.ownerJwt, renamed, commandId);
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.deepEqual(again.body.event_ids, accepted.body.event_ids);
+  const events = await sql<{ payload: Record<string, unknown>; actor_user: string }[]>`
+    SELECT payload, actor_user FROM swarm.events
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND type = 'AgentRenamed'
+      AND payload->>'principal_id' = ${String(agent.body.principal_id)}`;
+  assert.deepEqual(events.map(row => ({ name: row.payload.name, previous: row.payload.previous_name, actor: row.actor_user })),
+    [{ name: renamed, previous: original, actor: fixture.owner }]);
+
+  // An admin who does not own the agent may rename it too.
+  await sql`UPDATE swarm.memberships SET role = 'admin'
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND user_id = ${fixture.other}::uuid`;
+  const byAdmin = rename(fixture.otherJwt, `${renamed} B`);
+  assert.equal(byAdmin.body.status, "accepted", JSON.stringify(byAdmin.body));
+  const recased = rename(fixture.ownerJwt, renamed.toUpperCase());
+  assert.equal(recased.body.status, "accepted", "a former name of its own, in other letters, is free");
+  const current = renamed.toUpperCase();
+
+  const audits = await sql<{ actor_user: string; outcome: string; reason: string | null }[]>`
+    SELECT actor_user, outcome, reason FROM swarm.audit_log
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'rename_agent'
+      AND outcome IN ('accepted', 'domain')
+    ORDER BY occurred_at, audit_id`;
+  assert.deepEqual(audits.map(row => ({ actor_user: row.actor_user, outcome: row.outcome, reason: row.reason })), [
+    { actor_user: fixture.other, outcome: "domain", reason: "principal_not_owned" },
+    { actor_user: fixture.owner, outcome: "domain", reason: "principal_name_taken" },
+    { actor_user: fixture.owner, outcome: "accepted", reason: null },
+    { actor_user: fixture.other, outcome: "accepted", reason: null },
+    { actor_user: fixture.owner, outcome: "accepted", reason: null },
+  ]);
+
+  // Identity, seat and history are kept; only the name changed.
+  const [row] = await sql<{ name: string; seat_name: string; seat_live: boolean }[]>`
+    SELECT p.name, hs.name AS seat_name, hs.revoked_at IS NULL AS seat_live
+    FROM swarm.agent_principals p JOIN swarm.hosted_mcp_seats hs USING (principal_id)
+    WHERE p.principal_id = ${String(agent.body.principal_id)}::uuid`;
+  assert.deepEqual({ name: row?.name, seat_name: row?.seat_name, seat_live: row?.seat_live },
+    { name: current, seat_name: current, seat_live: true });
+
+  // The agent learns its name on its next turn: whoami, check, the hosted context and a claim replay.
+  const spec = { grantId: fixture.grantA, workspaceId: fixture.workspaceA, handle: agent.body.handle };
+  const whoami = runHostedHarness<HarnessResult>({ operation: "seat-read", seat: spec });
+  assert.equal(whoami.status, 200, JSON.stringify(whoami.body));
+  assert.equal(whoami.body.name, current);
+  assert.equal(whoami.body.principal_id, agent.body.principal_id);
+  const context = whoami.body.context as { agent?: { name: string; principal_id: string }; summary: string };
+  assert.deepEqual(context.agent, { principal_id: agent.body.principal_id, name: current });
+  assert.ok(context.summary.includes(`"${current}"`), context.summary);
+  const check = runHostedHarness<HarnessResult>({ operation: "seat-command", seat: { ...spec, tool: "check" } });
+  assert.equal(check.status, 200, JSON.stringify(check.body));
+  assert.deepEqual((check.body.context as { agent?: unknown }).agent, { principal_id: agent.body.principal_id, name: current });
+  const replay = claimAs(fixture, original, { commandId: claimRequest });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.handle, agent.body.handle);
+  assert.equal(replay.body.name, current, "a claim replay answers with the current name");
+  assert.equal((replay.body.context as { agent?: { name: string } }).agent?.name, current);
+
+  // The old name is free again; the new one is taken, ignoring case, by this connection's agent.
+  const reuseOld = claimAs(fixture, original);
+  assert.equal(reuseOld.status, 200, JSON.stringify(reuseOld.body));
+  assert.notEqual(reuseOld.body.principal_id, agent.body.principal_id);
+  assertNameTaken(claimAs(fixture, current.toLowerCase()), `${current.toLowerCase()} 2`, agent.body.principal_id);
+  const clash = rename(fixture.ownerJwt, original.toLowerCase());
+  assert.equal(clash.body.reason, "principal_name_taken", JSON.stringify(clash.body));
+});
+
+test("the case-insensitive name migration stops on live hosted collisions and names them", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const name = `Collide ${randomUUID().slice(0, 8)}`;
+  const first = claimAs(fixture, name);
+  const second = claimAs(fixture, `${name} other`);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  const migration = repoSql("supabase/migrations/20261116000006_agent_names_ignore_case.sql");
+  const [index] = await sql<{ def: string }[]>`SELECT pg_get_indexdef('swarm.hosted_mcp_seats_live_name_ci'::regclass) AS def`;
+  assert.equal(index?.def, "CREATE UNIQUE INDEX hosted_mcp_seats_live_name_ci ON swarm.hosted_mcp_seats USING btree (workspace_id, lower(name)) WHERE (revoked_at IS NULL)");
+  const drill = new Error("NAME_CASE_DRILL");
+  await releaseSql.begin(async (tx) => {
+    // Clean data: the migration applies again once its index is dropped.
+    await tx.unsafe("DROP INDEX swarm.hosted_mcp_seats_live_name_ci");
+    await tx.unsafe(migration);
+    await tx.unsafe("DROP INDEX swarm.hosted_mcp_seats_live_name_ci");
+    // A pre-migration collision: two live seats whose names differ only in case.
+    await tx`UPDATE swarm.hosted_mcp_seats SET name = ${name.toUpperCase()} WHERE seat_id = ${String(second.body.seat_id)}::uuid`;
+    const failure = await tx.savepoint(async (sp) => { await sp.unsafe(migration); })
+      .then(() => null, (error: unknown) => error);
+    assert.ok(failure instanceof postgres.PostgresError, String(failure));
+    assert.equal(failure.code, "55000");
+    assert.match(failure.message, /AGENT_NAME_CASE_COLLISION/u);
+    assert.ok(failure.message.includes(fixture.workspaceA), failure.message);
+    assert.ok(failure.message.includes(name) && failure.message.includes(name.toUpperCase()), failure.message);
+    // A removed seat does not count.
+    await tx`UPDATE swarm.hosted_mcp_seats SET revoked_at = statement_timestamp() WHERE seat_id = ${String(second.body.seat_id)}::uuid`;
+    await tx.unsafe(migration);
+    throw drill;
+  }).catch((error) => { if (error !== drill) throw error; });
+  // The backstop: a live seat cannot take another live seat's name in other letters.
+  const backstop = await sql.begin(async (tx) => {
+    await tx`UPDATE swarm.hosted_mcp_seats SET name = ${name.toLowerCase()} WHERE seat_id = ${String(second.body.seat_id)}::uuid`;
+  }).then(() => null, (error: unknown) => error);
+  assert.ok(backstop instanceof postgres.PostgresError, String(backstop));
+  assert.equal(backstop.code, "23505");
+  assert.equal(backstop.constraint_name, "hosted_mcp_seats_live_name_ci");
 });

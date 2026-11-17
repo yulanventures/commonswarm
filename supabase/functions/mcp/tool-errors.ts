@@ -1,6 +1,6 @@
 import type { CommandResult } from "../command/contract.d.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
-import { HOSTED_TOOL_TABLE, type HostedToolName } from "./tools.ts";
+import { HOSTED_TOOL_TABLE, type HostedToolName, validSeatName, validUuid } from "./tools.ts";
 
 const ACCESS_MESSAGE = "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace.";
 const SEAT_MESSAGE = "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect.";
@@ -19,10 +19,10 @@ const MESSAGES = {
   unauthenticated: "Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry.",
   hosted_seat_forbidden: SEAT_MESSAGE,
   hosted_seat_revoked: "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.",
-  hosted_seat_name_invalid: "The seat name is invalid. Use 1 to 80 characters with no surrounding spaces or control characters.",
-  hosted_seat_name_taken: "That seat name is taken in this workspace. Call claim_seat with another name and a new request_id.",
-  hosted_seat_limit_reached: "This connection has reached its seat limit. Reuse a seat returned by claim_seat, or ask a workspace admin to revoke an unused seat.",
-  principal_limit_reached: "This workspace has reached its agent limit. Reuse an existing seat, or ask a workspace admin to revoke an unused agent.",
+  hosted_seat_name_invalid: "That agent name can't be used. Use 1 to 80 characters with no spaces at either end and no control characters.",
+  hosted_seat_name_taken: "Another agent in this workspace already uses that name. Call claim_seat again with suggested_name and a new request_id, or ask the person which name to use. If existing_agent_id is this chat's own agent, reconnect with claim_seat agent_id instead. Never share another chat's agent.",
+  hosted_seat_limit_reached: "This connection already has 10 agents. Reuse one of them (seat_list shows them; reconnect with claim_seat agent_id), or ask the person to retire one they no longer use.",
+  principal_limit_reached: "This workspace has reached its agent limit. Reuse an agent you already have, or ask a workspace admin to retire one that's no longer used.",
   hosted_check_batch_forbidden: "This inbox batch is unavailable to this seat. Call check without ack, then acknowledge only the batch_id returned for the same seat.",
   command_id_conflict: "This request_id was already used for different arguments. Retry the original request unchanged, or use a new request_id for a different request.",
   invalid_request: "The request arguments were rejected. Check the tool's input schema and correct the arguments before retrying.",
@@ -81,10 +81,17 @@ function knownCode(value: unknown): value is ToolErrorCode {
 export class HostedToolFailure extends Error {
   readonly code: ToolErrorCode | "tool_failed";
   readonly retryAt: string | null;
-  constructor(code: unknown, resetsAt?: unknown) {
+  /** A taken name's validated suggestion and, when it is this connection's own, the agent's id. */
+  readonly nameHelp: { suggested_name?: string; existing_agent_id?: string };
+  constructor(code: unknown, resetsAt?: unknown, body?: Record<string, unknown>) {
     super("Hosted tool failed");
     this.name = "HostedToolFailure";
     this.code = knownCode(code) ? code : "tool_failed";
+    const suggested = body?.suggested_name, existing = body?.existing_agent_id;
+    this.nameHelp = this.code === "hosted_seat_name_taken" ? {
+      ...(validSeatName(suggested) ? { suggested_name: suggested } : {}),
+      ...(validUuid(existing) ? { existing_agent_id: existing.toLowerCase() } : {}),
+    } : {};
     // Rate metadata is the only backend value allowed into failure copy. Accept
     // an ISO timestamp and canonicalize it so arbitrary strings cannot leak.
     const millis = typeof resetsAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(resetsAt)
@@ -108,7 +115,9 @@ const READ_TOOL_MESSAGES: Partial<Record<ToolErrorCode, string>> = {
   upgrade_required: "This hosted connection needs a service update. Contact support@commonswarm.com, then retry.",
 };
 
-export function hostedToolError(error: unknown, tool: HostedToolName): { error: string; message: string } {
+export function hostedToolError(error: unknown, tool: HostedToolName): {
+  error: string; message: string; suggested_name?: string; existing_agent_id?: string;
+} {
   const write = takesRequestId(tool);
   if (!(error instanceof HostedToolFailure) || error.code === "tool_failed") {
     return { error: "tool_failed", message: write ? TOOL_FAILURE_MESSAGE : READ_TOOL_FAILURE_MESSAGE };
@@ -127,12 +136,12 @@ export function hostedToolError(error: unknown, tool: HostedToolName): { error: 
     : code === "forbidden" && (tool === "ask" || tool === "note")
     ? "Workspace access or recipient access is missing. Ask a workspace admin to restore access, reconnect, and use members to select current recipients."
     : (!write && READ_TOOL_MESSAGES[code]) || MESSAGES[code];
-  return { error: code, message };
+  return { error: code, message, ...error.nameHelp };
 }
 
 export function commandOutput(result: CommandResult): Record<string, unknown> {
   if (result.status < 200 || result.status >= 300) {
-    throw new HostedToolFailure(result.body.error, result.body.resets_at);
+    throw new HostedToolFailure(result.body.error, result.body.resets_at, result.body);
   }
   const signal = result.body.signal;
   if (signal !== null && typeof signal === "object" && !Array.isArray(signal)) {

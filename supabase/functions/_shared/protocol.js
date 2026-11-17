@@ -377,6 +377,7 @@ var WORKSPACE_EVENT_TYPES = [
   "AgentPrincipalCreated",
   "AgentPrincipalRevoked",
   "AgentModelDeclared",
+  "AgentRenamed",
   "FeedbackSubmitted",
   "AgentTokenMinted",
   "AgentTokenRevoked",
@@ -393,6 +394,392 @@ var WORKSPACE_EVENT_TYPES = [
 // src/protocol/admin-policy.ts
 import { createHash as createHash2 } from "node:crypto";
 
+// src/protocol/hosted-authority.ts
+var HOSTED_MCP_RESOURCE = "https://mcp.commonswarm.com/mcp";
+var HOSTED_MCP_SEAT_LIMIT = 10;
+var HOSTED_SEAT_NAME_TAKEN = {
+  code: "hosted_seat_name_taken",
+  message: "Another agent in this workspace already uses that name; choose another."
+};
+var HOSTED_SEAT_LIMIT_MESSAGE = `This connection already has ${HOSTED_MCP_SEAT_LIMIT} agents. Reuse one of them, or ask the person to retire one they no longer use.`;
+var HOSTED_NAME_SUGGESTION_TRIES = 200;
+function hostedNameCandidates(name, count = HOSTED_NAME_SUGGESTION_TRIES) {
+  const chars = Array.from(name);
+  const out = [];
+  for (let n = 2; out.length < count; n++) {
+    const suffix = ` ${n}`;
+    const base = chars.slice(0, 80 - suffix.length).join("").replace(/ +$/u, "");
+    if (base === "") break;
+    out.push(base + suffix);
+  }
+  return out;
+}
+var PUBLIC_HOSTED_ONLY_COMMANDS = /* @__PURE__ */ new Set([
+  "begin_hosted_mcp_grant",
+  "consent_hosted_mcp_workspace",
+  "activate_hosted_mcp_grant",
+  "claim_hosted_seat",
+  "open_hosted_mcp_check_batch",
+  "ack_hosted_mcp_check_batch"
+]);
+function publicHostedCommandForbidden(kind) {
+  return PUBLIC_HOSTED_ONLY_COMMANDS.has(kind);
+}
+var HUMAN_COMMANDS = /* @__PURE__ */ new Set([
+  "begin_hosted_mcp_grant",
+  "consent_hosted_mcp_workspace",
+  "activate_hosted_mcp_grant",
+  "revoke_hosted_mcp_grant",
+  "revoke_hosted_mcp_seat"
+]);
+var HOSTED_SEAT_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
+function hostedSeatNameValid(value) {
+  return typeof value === "string" && Array.from(value).length >= 1 && Array.from(value).length <= 80 && value === value.replace(/^ +| +$/gu, "") && !HOSTED_SEAT_CONTROL_RE.test(value);
+}
+function event(ctx, type, payload) {
+  return {
+    workspace_id: ctx.workspace_id,
+    stream_id: ctx.stream_id,
+    seq: ctx.nextSeq(),
+    event_id: ctx.nextEventId(),
+    command_id: ctx.command_id,
+    type,
+    schema_version: SCHEMA_VERSION,
+    actor_user: ctx.actor.user,
+    actor_agent_principal: ctx.actor.agent_principal,
+    actor_run: ctx.actor.run,
+    occurred_at_server: ctx.now,
+    payload
+  };
+}
+function refuse(className, reason, detail) {
+  return { ok: false, class: className, reason, detail, events: [] };
+}
+function decideHostedAuthority(command, facts, ctx) {
+  if (command.kind === "claim_hosted_seat") {
+    if (ctx.credential_kind !== "hosted_grant") {
+      return refuse("authz", "credential_kind_forbidden", "claim_hosted_seat requires a hosted grant credential");
+    }
+  } else if (command.kind === "release_hosted_mcp_seat") {
+    if (ctx.credential_kind !== "hosted_seat") {
+      return refuse("authz", "credential_kind_forbidden", "release_hosted_mcp_seat requires the hosted seat itself");
+    }
+  } else if (HUMAN_COMMANDS.has(command.kind) && ctx.credential_kind !== "human") {
+    return refuse("authz", "credential_kind_forbidden", "hosted connection management requires a human credential");
+  }
+  if (command.kind === "begin_hosted_mcp_grant") {
+    if (ctx.actor.user !== command.owner_user_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may begin only their own hosted grant");
+    }
+    if (facts.grant !== null) return refuse("domain", "hosted_grant_exists", "hosted grant already exists");
+    if (command.home_workspace_id !== ctx.workspace_id) {
+      return refuse("authz", "workspace_mismatch", "grant creation must address its home workspace");
+    }
+    if (!facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("authz", "membership_required", "grant owner is not a live member of the home workspace");
+    }
+    const selected = [...new Set(command.selected_workspace_ids)];
+    if (selected.length !== command.selected_workspace_ids.length || selected.length < 1 || selected.length > 100 || !selected.includes(command.home_workspace_id)) {
+      return refuse("domain", "hosted_manifest_invalid", "hosted grant workspace manifest is invalid");
+    }
+    if (command.resource !== HOSTED_MCP_RESOURCE) {
+      return refuse("domain", "resource_mismatch", "hosted grant resource is not supported");
+    }
+    return { ok: true, events: [event(ctx, "HostedMcpGrantBegun", { ...command, created_at: ctx.now })] };
+  }
+  const grant = facts.grant;
+  if (grant === null || grant.grant_id !== command.grant_id) {
+    return refuse("authz", "hosted_grant_unavailable", "hosted grant is unavailable");
+  }
+  if (command.kind === "consent_hosted_mcp_workspace") {
+    if (grant.state !== "pending" || command.workspace_id !== ctx.workspace_id) {
+      return refuse("domain", "hosted_grant_not_pending", "workspace consent requires a pending grant");
+    }
+    if (ctx.actor.user !== grant.owner_user_id || command.owner_user_id !== grant.owner_user_id || command.manifest_digest !== grant.manifest_digest || !grant.selected_workspace_ids.includes(ctx.workspace_id)) {
+      return refuse("authz", "manifest_mismatch", "workspace is not bound to this grant manifest");
+    }
+    if (!facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("authz", "membership_required", "grant owner is not a live member of this workspace");
+    }
+    if (facts.workspace_consented) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpWorkspaceConsented", { ...command, consented_at: ctx.now })] };
+  }
+  if (command.kind === "activate_hosted_mcp_grant") {
+    if (ctx.workspace_id !== grant.home_workspace_id) {
+      return refuse("authz", "workspace_mismatch", "grant activation must address its home workspace");
+    }
+    if (ctx.actor.user !== grant.owner_user_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may activate only their own hosted grant");
+    }
+    if (!facts.all_required_consents || !facts.all_required_memberships || !facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
+    }
+    if (grant.state === "active") return { ok: true, events: [] };
+    if (grant.state !== "pending") {
+      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
+    }
+    return { ok: true, events: [event(ctx, "HostedMcpGrantActivated", { grant_id: grant.grant_id, activated_at: ctx.now })] };
+  }
+  if (command.kind === "revoke_hosted_mcp_grant") {
+    if (ctx.actor.user !== grant.owner_user_id || ctx.workspace_id !== grant.home_workspace_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may revoke only their own hosted grant");
+    }
+    if (grant.state === "revoked") return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpGrantRevoked", { grant_id: grant.grant_id, revoked_at: ctx.now })] };
+  }
+  if (command.kind === "revoke_hosted_mcp_seat") {
+    const seat2 = facts.seat;
+    if (seat2 === null || seat2.grant_id !== grant.grant_id || seat2.workspace_id !== ctx.workspace_id) {
+      return refuse("authz", "hosted_seat_unavailable", "hosted seat is unavailable");
+    }
+    if (ctx.actor.user !== grant.owner_user_id) {
+      return refuse("authz", "hosted_seat_not_owned", "a person may revoke only their own hosted seat");
+    }
+    if (seat2.revoked_at !== null) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpSeatRevoked", {
+      grant_id: grant.grant_id,
+      seat_id: seat2.seat_id,
+      principal_id: seat2.principal_id,
+      revoked_at: ctx.now
+    })] };
+  }
+  if (command.kind === "release_hosted_mcp_seat") {
+    const seat2 = facts.seat;
+    if (seat2 === null || seat2.grant_id !== grant.grant_id || seat2.workspace_id !== ctx.workspace_id || seat2.seat_id !== command.seat_id || ctx.actor.agent_principal !== seat2.principal_id || ctx.actor.user !== grant.owner_user_id) {
+      return refuse("authz", "hosted_seat_unavailable", "hosted seat is unavailable");
+    }
+    if (seat2.revoked_at !== null) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpSeatReleased", {
+      grant_id: grant.grant_id,
+      seat_id: seat2.seat_id,
+      principal_id: seat2.principal_id,
+      released_at: ctx.now
+    })] };
+  }
+  if (grant.state !== "active" || !facts.workspace_consented || !facts.owner_is_live_member || facts.workspace_archived) {
+    return refuse("authz", "hosted_grant_unavailable", "hosted grant is not active for this workspace");
+  }
+  if (command.owner_user_id !== grant.owner_user_id || command.workspace_id !== ctx.workspace_id) {
+    return refuse("authz", "hosted_grant_binding_mismatch", "seat claim does not match the grant binding");
+  }
+  if (!hostedSeatNameValid(command.name)) {
+    return refuse("domain", "hosted_seat_name_invalid", "Agent names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.");
+  }
+  const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
+  if (facts.seat !== null) {
+    const seat2 = facts.seat;
+    const reconnect = facts.reconnect_agent_id ?? null;
+    if (reconnect === null || reconnect !== seat2.principal_id) {
+      return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+    }
+    if (seat2.revoked_at !== null || seat2.handle_revoked_at !== null || seat2.principal_revoked_at !== null || seat2.transport !== "hosted_mcp" || seat2.turn_only !== true) {
+      return refuse("domain", "hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.");
+    }
+    if (liveNamePrincipals.some((p) => p.principal_id !== seat2.principal_id)) {
+      return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+    }
+    return { ok: true, events: [], reuse: seat2 };
+  }
+  if (liveNamePrincipals.length !== 0 || facts.exact_name_principals.some(
+    (p) => p.revoked && p.owner_user_id !== grant.owner_user_id
+  )) {
+    return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+  }
+  if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
+    return refuse("domain", "hosted_seat_limit_reached", HOSTED_SEAT_LIMIT_MESSAGE);
+  }
+  return {
+    ok: true,
+    reclaimed_principal_ids: facts.exact_name_principals.map((p) => p.principal_id),
+    events: [event(ctx, "HostedMcpSeatClaimed", {
+      ...command,
+      transport: "hosted_mcp",
+      turn_only: true,
+      created_at: ctx.now
+    })]
+  };
+}
+function requiredPayload(event2, keys) {
+  const payload = event2.payload;
+  for (const key2 of keys) {
+    if (payload[key2] === void 0) {
+      throw new Error(`event "${event2.type}" at seq ${event2.seq} is missing payload field "${key2}"`);
+    }
+  }
+  return payload;
+}
+function reduceHostedAuthority(previous, event2) {
+  if (event2.schema_version !== SCHEMA_VERSION) {
+    throw new Error(`event "${event2.type}" has unsupported schema version`);
+  }
+  const state = previous ?? {
+    grants: {},
+    consents: {},
+    seats: {},
+    principals: {}
+  };
+  if (event2.type === "HostedMcpGrantBegun") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      "provider_grant_id",
+      "owner_user_id",
+      "home_workspace_id",
+      "client_id",
+      "resource",
+      "selected_workspace_ids",
+      "manifest_digest",
+      "interaction_ref",
+      "created_at"
+    ]);
+    const id3 = String(p2.grant_id);
+    if (state.grants[id3]) throw new Error(`duplicate hosted grant "${id3}"`);
+    return { ...state, grants: { ...state.grants, [id3]: {
+      grant_id: id3,
+      provider_grant_id: String(p2.provider_grant_id),
+      owner_user_id: String(p2.owner_user_id),
+      home_workspace_id: String(p2.home_workspace_id),
+      client_id: String(p2.client_id),
+      resource: String(p2.resource),
+      selected_workspace_ids: [...p2.selected_workspace_ids],
+      manifest_digest: String(p2.manifest_digest),
+      interaction_ref: String(p2.interaction_ref),
+      state: "pending",
+      created_at: Number(p2.created_at),
+      activated_at: null,
+      revoked_at: null
+    } } };
+  }
+  if (event2.type === "HostedMcpWorkspaceConsented") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      "workspace_id",
+      "owner_user_id",
+      "consent_receipt_id",
+      "consented_at",
+      "manifest_digest"
+    ]);
+    const key2 = `${String(p2.grant_id)}:${String(p2.workspace_id)}`;
+    if (state.consents[key2]) throw new Error(`duplicate hosted workspace consent "${key2}"`);
+    return { ...state, consents: { ...state.consents, [key2]: {
+      grant_id: String(p2.grant_id),
+      workspace_id: String(p2.workspace_id),
+      owner_user_id: String(p2.owner_user_id),
+      manifest_digest: String(p2.manifest_digest),
+      consent_receipt_id: String(p2.consent_receipt_id),
+      consented_at: Number(p2.consented_at),
+      revoked_at: null
+    } } };
+  }
+  if (event2.type === "HostedMcpGrantActivated" || event2.type === "HostedMcpGrantRevoked") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      event2.type === "HostedMcpGrantActivated" ? "activated_at" : "revoked_at"
+    ]);
+    const id3 = String(p2.grant_id);
+    const grant = state.grants[id3];
+    if (!grant) throw new Error(`unknown hosted grant "${id3}"`);
+    return { ...state, grants: {
+      ...state.grants,
+      [id3]: event2.type === "HostedMcpGrantActivated" ? { ...grant, state: "active", activated_at: Number(p2.activated_at), revoked_at: null } : { ...grant, state: "revoked", revoked_at: Number(p2.revoked_at) }
+    } };
+  }
+  if (event2.type === "HostedMcpSeatClaimed") {
+    const p2 = requiredPayload(event2, [
+      "seat_id",
+      "grant_id",
+      "workspace_id",
+      "owner_user_id",
+      "principal_id",
+      "name",
+      "handle",
+      "created_at",
+      "transport",
+      "turn_only"
+    ]);
+    const id3 = String(p2.seat_id);
+    if (state.seats[id3]) throw new Error(`duplicate hosted seat "${id3}"`);
+    if (p2.transport !== "hosted_mcp" || p2.turn_only !== true) {
+      throw new Error("hosted seat event must be hosted_mcp and turn_only");
+    }
+    const principalId = String(p2.principal_id);
+    const seat3 = {
+      seat_id: id3,
+      grant_id: String(p2.grant_id),
+      workspace_id: String(p2.workspace_id),
+      owner_user_id: String(p2.owner_user_id),
+      principal_id: principalId,
+      name: String(p2.name),
+      handle: String(p2.handle),
+      transport: "hosted_mcp",
+      turn_only: true,
+      created_at: Number(p2.created_at),
+      revoked_at: null,
+      handle_revoked_at: null,
+      principal_revoked_at: null
+    };
+    return {
+      ...state,
+      seats: { ...state.seats, [id3]: seat3 },
+      principals: { ...state.principals, [principalId]: {
+        principal_id: principalId,
+        workspace_id: seat3.workspace_id,
+        owner_user_id: seat3.owner_user_id,
+        name: seat3.name,
+        transport: "hosted_mcp",
+        turn_only: true,
+        created_at: seat3.created_at,
+        revoked_at: null
+      } }
+    };
+  }
+  if (event2.type === "HostedMcpSeatReleased") {
+    const p2 = requiredPayload(event2, ["grant_id", "seat_id", "principal_id", "released_at"]);
+    const id3 = String(p2.seat_id);
+    const seat3 = state.seats[id3];
+    if (!seat3) throw new Error(`unknown hosted seat "${id3}"`);
+    if (seat3.principal_id !== String(p2.principal_id)) throw new Error(`hosted seat "${id3}" principal mismatch`);
+    const releasedAt = Number(p2.released_at);
+    return { ...state, seats: { ...state.seats, [id3]: {
+      ...seat3,
+      revoked_at: releasedAt,
+      handle_revoked_at: releasedAt
+    } } };
+  }
+  const p = requiredPayload(event2, ["seat_id", "revoked_at"]);
+  const id2 = String(p.seat_id);
+  const seat2 = state.seats[id2];
+  if (!seat2) throw new Error(`unknown hosted seat "${id2}"`);
+  const revokedAt = Number(p.revoked_at);
+  const principal = state.principals[seat2.principal_id];
+  if (!principal) throw new Error(`unknown hosted principal "${seat2.principal_id}"`);
+  return {
+    ...state,
+    seats: {
+      ...state.seats,
+      [id2]: {
+        ...seat2,
+        revoked_at: revokedAt,
+        handle_revoked_at: revokedAt,
+        principal_revoked_at: revokedAt
+      }
+    },
+    principals: {
+      ...state.principals,
+      [seat2.principal_id]: { ...principal, revoked_at: revokedAt }
+    }
+  };
+}
+function reduceHostedAuthorityStream(events) {
+  let state = null;
+  let lastSeq = -Infinity;
+  for (const event2 of events) {
+    if (event2.seq <= lastSeq) throw new Error("hosted authority events are out of order");
+    state = reduceHostedAuthority(state, event2);
+    lastSeq = event2.seq;
+  }
+  return state ?? { grants: {}, consents: {}, seats: {}, principals: {} };
+}
+
 // src/protocol/workspace-commands.ts
 var INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1e3;
@@ -400,6 +787,8 @@ var PRINCIPAL_NAME_TAKEN = {
   code: "principal_name_taken",
   message: "principal id or name already exists"
 };
+var AGENT_NAME_RULE = "Agent names are 1 to 80 characters, with no spaces at either end and no control characters.";
+var AGENT_NAME_TAKEN_MESSAGE = "Another agent in this workspace already uses that name, ignoring case. Choose another.";
 var AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 var H0_SEAT_TOKEN_TTL_MS = AGENT_TOKEN_MAX_TTL_MS;
 var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
@@ -426,6 +815,7 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "change_role",
   "create_agent_principal",
   "revoke_agent_principal",
+  "rename_agent",
   "set_agent_model",
   "mint_agent_token",
   "mint_agent_join_credential",
@@ -946,6 +1336,33 @@ function decideWorkspace(state, cmd, ctx) {
         env2(ctx, "AgentPrincipalRevoked", {
           principal_id: cmd.principal_id,
           revoked_at: ctx.now
+        })
+      ]);
+    }
+    case "rename_agent": {
+      const principal = state.principals[cmd.principal_id];
+      if (!principal) {
+        return domain2(ctx, cmd.kind, "principal_not_found", "agent principal does not exist");
+      }
+      if (principal.revoked_at !== null) {
+        return domain2(ctx, cmd.kind, "principal_revoked", "agent principal is revoked");
+      }
+      if (!ownerOrAdmin(actorRole) && principal.owner_user_id !== user_id) {
+        return domain2(ctx, cmd.kind, "principal_not_owned", "Member may rename only their own agent");
+      }
+      if (!hostedSeatNameValid(cmd.name)) {
+        return domain2(ctx, cmd.kind, "principal_name_invalid", AGENT_NAME_RULE);
+      }
+      if (cmd.name === principal.name) return accept2([]);
+      if (ctx.agentNameTaken?.(cmd.principal_id, cmd.name) !== false) {
+        return domain2(ctx, cmd.kind, PRINCIPAL_NAME_TAKEN.code, AGENT_NAME_TAKEN_MESSAGE);
+      }
+      return accept2([
+        env2(ctx, "AgentRenamed", {
+          principal_id: cmd.principal_id,
+          name: cmd.name,
+          previous_name: principal.name,
+          renamed_at: ctx.now
         })
       ]);
     }
@@ -3129,6 +3546,26 @@ function reduceWorkspace(prev, env3) {
       };
       break;
     }
+    case "AgentRenamed": {
+      const p = req2(
+        env3.payload,
+        ["principal_id", "name", "previous_name", "renamed_at"],
+        env3.type,
+        env3.seq
+      );
+      const renamed = s.principals[p.principal_id];
+      if (!renamed) {
+        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...renamed, name: p.name }
+        }
+      };
+      break;
+    }
     case "AgentPrincipalRevoked": {
       const p = req2(
         env3.payload,
@@ -3284,375 +3721,6 @@ function reduceWorkspaceStream(events) {
     state = reduceWorkspace(state, event2);
   }
   return state;
-}
-
-// src/protocol/hosted-authority.ts
-var HOSTED_MCP_RESOURCE = "https://mcp.commonswarm.com/mcp";
-var HOSTED_MCP_SEAT_LIMIT = 10;
-var HOSTED_SEAT_NAME_TAKEN = {
-  code: "hosted_seat_name_taken",
-  message: "That name is taken in this workspace; choose another."
-};
-var PUBLIC_HOSTED_ONLY_COMMANDS = /* @__PURE__ */ new Set([
-  "begin_hosted_mcp_grant",
-  "consent_hosted_mcp_workspace",
-  "activate_hosted_mcp_grant",
-  "claim_hosted_seat",
-  "open_hosted_mcp_check_batch",
-  "ack_hosted_mcp_check_batch"
-]);
-function publicHostedCommandForbidden(kind) {
-  return PUBLIC_HOSTED_ONLY_COMMANDS.has(kind);
-}
-var HUMAN_COMMANDS = /* @__PURE__ */ new Set([
-  "begin_hosted_mcp_grant",
-  "consent_hosted_mcp_workspace",
-  "activate_hosted_mcp_grant",
-  "revoke_hosted_mcp_grant",
-  "revoke_hosted_mcp_seat"
-]);
-var HOSTED_SEAT_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
-function hostedSeatNameValid(value) {
-  return typeof value === "string" && Array.from(value).length >= 1 && Array.from(value).length <= 80 && value === value.replace(/^ +| +$/gu, "") && !HOSTED_SEAT_CONTROL_RE.test(value);
-}
-function event(ctx, type, payload) {
-  return {
-    workspace_id: ctx.workspace_id,
-    stream_id: ctx.stream_id,
-    seq: ctx.nextSeq(),
-    event_id: ctx.nextEventId(),
-    command_id: ctx.command_id,
-    type,
-    schema_version: SCHEMA_VERSION,
-    actor_user: ctx.actor.user,
-    actor_agent_principal: ctx.actor.agent_principal,
-    actor_run: ctx.actor.run,
-    occurred_at_server: ctx.now,
-    payload
-  };
-}
-function refuse(className, reason, detail) {
-  return { ok: false, class: className, reason, detail, events: [] };
-}
-function decideHostedAuthority(command, facts, ctx) {
-  if (command.kind === "claim_hosted_seat") {
-    if (ctx.credential_kind !== "hosted_grant") {
-      return refuse("authz", "credential_kind_forbidden", "claim_hosted_seat requires a hosted grant credential");
-    }
-  } else if (command.kind === "release_hosted_mcp_seat") {
-    if (ctx.credential_kind !== "hosted_seat") {
-      return refuse("authz", "credential_kind_forbidden", "release_hosted_mcp_seat requires the hosted seat itself");
-    }
-  } else if (HUMAN_COMMANDS.has(command.kind) && ctx.credential_kind !== "human") {
-    return refuse("authz", "credential_kind_forbidden", "hosted connection management requires a human credential");
-  }
-  if (command.kind === "begin_hosted_mcp_grant") {
-    if (ctx.actor.user !== command.owner_user_id) {
-      return refuse("authz", "hosted_grant_not_owned", "a person may begin only their own hosted grant");
-    }
-    if (facts.grant !== null) return refuse("domain", "hosted_grant_exists", "hosted grant already exists");
-    if (command.home_workspace_id !== ctx.workspace_id) {
-      return refuse("authz", "workspace_mismatch", "grant creation must address its home workspace");
-    }
-    if (!facts.owner_is_live_member || facts.workspace_archived) {
-      return refuse("authz", "membership_required", "grant owner is not a live member of the home workspace");
-    }
-    const selected = [...new Set(command.selected_workspace_ids)];
-    if (selected.length !== command.selected_workspace_ids.length || selected.length < 1 || selected.length > 100 || !selected.includes(command.home_workspace_id)) {
-      return refuse("domain", "hosted_manifest_invalid", "hosted grant workspace manifest is invalid");
-    }
-    if (command.resource !== HOSTED_MCP_RESOURCE) {
-      return refuse("domain", "resource_mismatch", "hosted grant resource is not supported");
-    }
-    return { ok: true, events: [event(ctx, "HostedMcpGrantBegun", { ...command, created_at: ctx.now })] };
-  }
-  const grant = facts.grant;
-  if (grant === null || grant.grant_id !== command.grant_id) {
-    return refuse("authz", "hosted_grant_unavailable", "hosted grant is unavailable");
-  }
-  if (command.kind === "consent_hosted_mcp_workspace") {
-    if (grant.state !== "pending" || command.workspace_id !== ctx.workspace_id) {
-      return refuse("domain", "hosted_grant_not_pending", "workspace consent requires a pending grant");
-    }
-    if (ctx.actor.user !== grant.owner_user_id || command.owner_user_id !== grant.owner_user_id || command.manifest_digest !== grant.manifest_digest || !grant.selected_workspace_ids.includes(ctx.workspace_id)) {
-      return refuse("authz", "manifest_mismatch", "workspace is not bound to this grant manifest");
-    }
-    if (!facts.owner_is_live_member || facts.workspace_archived) {
-      return refuse("authz", "membership_required", "grant owner is not a live member of this workspace");
-    }
-    if (facts.workspace_consented) return { ok: true, events: [] };
-    return { ok: true, events: [event(ctx, "HostedMcpWorkspaceConsented", { ...command, consented_at: ctx.now })] };
-  }
-  if (command.kind === "activate_hosted_mcp_grant") {
-    if (ctx.workspace_id !== grant.home_workspace_id) {
-      return refuse("authz", "workspace_mismatch", "grant activation must address its home workspace");
-    }
-    if (ctx.actor.user !== grant.owner_user_id) {
-      return refuse("authz", "hosted_grant_not_owned", "a person may activate only their own hosted grant");
-    }
-    if (!facts.all_required_consents || !facts.all_required_memberships || !facts.owner_is_live_member || facts.workspace_archived) {
-      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
-    }
-    if (grant.state === "active") return { ok: true, events: [] };
-    if (grant.state !== "pending") {
-      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
-    }
-    return { ok: true, events: [event(ctx, "HostedMcpGrantActivated", { grant_id: grant.grant_id, activated_at: ctx.now })] };
-  }
-  if (command.kind === "revoke_hosted_mcp_grant") {
-    if (ctx.actor.user !== grant.owner_user_id || ctx.workspace_id !== grant.home_workspace_id) {
-      return refuse("authz", "hosted_grant_not_owned", "a person may revoke only their own hosted grant");
-    }
-    if (grant.state === "revoked") return { ok: true, events: [] };
-    return { ok: true, events: [event(ctx, "HostedMcpGrantRevoked", { grant_id: grant.grant_id, revoked_at: ctx.now })] };
-  }
-  if (command.kind === "revoke_hosted_mcp_seat") {
-    const seat2 = facts.seat;
-    if (seat2 === null || seat2.grant_id !== grant.grant_id || seat2.workspace_id !== ctx.workspace_id) {
-      return refuse("authz", "hosted_seat_unavailable", "hosted seat is unavailable");
-    }
-    if (ctx.actor.user !== grant.owner_user_id) {
-      return refuse("authz", "hosted_seat_not_owned", "a person may revoke only their own hosted seat");
-    }
-    if (seat2.revoked_at !== null) return { ok: true, events: [] };
-    return { ok: true, events: [event(ctx, "HostedMcpSeatRevoked", {
-      grant_id: grant.grant_id,
-      seat_id: seat2.seat_id,
-      principal_id: seat2.principal_id,
-      revoked_at: ctx.now
-    })] };
-  }
-  if (command.kind === "release_hosted_mcp_seat") {
-    const seat2 = facts.seat;
-    if (seat2 === null || seat2.grant_id !== grant.grant_id || seat2.workspace_id !== ctx.workspace_id || seat2.seat_id !== command.seat_id || ctx.actor.agent_principal !== seat2.principal_id || ctx.actor.user !== grant.owner_user_id) {
-      return refuse("authz", "hosted_seat_unavailable", "hosted seat is unavailable");
-    }
-    if (seat2.revoked_at !== null) return { ok: true, events: [] };
-    return { ok: true, events: [event(ctx, "HostedMcpSeatReleased", {
-      grant_id: grant.grant_id,
-      seat_id: seat2.seat_id,
-      principal_id: seat2.principal_id,
-      released_at: ctx.now
-    })] };
-  }
-  if (grant.state !== "active" || !facts.workspace_consented || !facts.owner_is_live_member || facts.workspace_archived) {
-    return refuse("authz", "hosted_grant_unavailable", "hosted grant is not active for this workspace");
-  }
-  if (command.owner_user_id !== grant.owner_user_id || command.workspace_id !== ctx.workspace_id) {
-    return refuse("authz", "hosted_grant_binding_mismatch", "seat claim does not match the grant binding");
-  }
-  if (!hostedSeatNameValid(command.name)) {
-    return refuse("domain", "hosted_seat_name_invalid", "Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.");
-  }
-  const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
-  if (facts.seat !== null) {
-    const seat2 = facts.seat;
-    if (seat2.revoked_at !== null || seat2.handle_revoked_at !== null || seat2.principal_revoked_at !== null || seat2.transport !== "hosted_mcp" || seat2.turn_only !== true) {
-      return refuse("domain", "hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.");
-    }
-    if (liveNamePrincipals.length !== 1 || liveNamePrincipals[0].principal_id !== seat2.principal_id) {
-      return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
-    }
-    return { ok: true, events: [], reuse: seat2 };
-  }
-  if (liveNamePrincipals.length !== 0 || facts.exact_name_principals.some(
-    (p) => p.revoked && p.owner_user_id !== grant.owner_user_id
-  )) {
-    return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
-  }
-  if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
-    return refuse("domain", "hosted_seat_limit_reached", `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
-  }
-  return {
-    ok: true,
-    reclaimed_principal_ids: facts.exact_name_principals.map((p) => p.principal_id),
-    events: [event(ctx, "HostedMcpSeatClaimed", {
-      ...command,
-      transport: "hosted_mcp",
-      turn_only: true,
-      created_at: ctx.now
-    })]
-  };
-}
-function requiredPayload(event2, keys) {
-  const payload = event2.payload;
-  for (const key2 of keys) {
-    if (payload[key2] === void 0) {
-      throw new Error(`event "${event2.type}" at seq ${event2.seq} is missing payload field "${key2}"`);
-    }
-  }
-  return payload;
-}
-function reduceHostedAuthority(previous, event2) {
-  if (event2.schema_version !== SCHEMA_VERSION) {
-    throw new Error(`event "${event2.type}" has unsupported schema version`);
-  }
-  const state = previous ?? {
-    grants: {},
-    consents: {},
-    seats: {},
-    principals: {}
-  };
-  if (event2.type === "HostedMcpGrantBegun") {
-    const p2 = requiredPayload(event2, [
-      "grant_id",
-      "provider_grant_id",
-      "owner_user_id",
-      "home_workspace_id",
-      "client_id",
-      "resource",
-      "selected_workspace_ids",
-      "manifest_digest",
-      "interaction_ref",
-      "created_at"
-    ]);
-    const id3 = String(p2.grant_id);
-    if (state.grants[id3]) throw new Error(`duplicate hosted grant "${id3}"`);
-    return { ...state, grants: { ...state.grants, [id3]: {
-      grant_id: id3,
-      provider_grant_id: String(p2.provider_grant_id),
-      owner_user_id: String(p2.owner_user_id),
-      home_workspace_id: String(p2.home_workspace_id),
-      client_id: String(p2.client_id),
-      resource: String(p2.resource),
-      selected_workspace_ids: [...p2.selected_workspace_ids],
-      manifest_digest: String(p2.manifest_digest),
-      interaction_ref: String(p2.interaction_ref),
-      state: "pending",
-      created_at: Number(p2.created_at),
-      activated_at: null,
-      revoked_at: null
-    } } };
-  }
-  if (event2.type === "HostedMcpWorkspaceConsented") {
-    const p2 = requiredPayload(event2, [
-      "grant_id",
-      "workspace_id",
-      "owner_user_id",
-      "consent_receipt_id",
-      "consented_at",
-      "manifest_digest"
-    ]);
-    const key2 = `${String(p2.grant_id)}:${String(p2.workspace_id)}`;
-    if (state.consents[key2]) throw new Error(`duplicate hosted workspace consent "${key2}"`);
-    return { ...state, consents: { ...state.consents, [key2]: {
-      grant_id: String(p2.grant_id),
-      workspace_id: String(p2.workspace_id),
-      owner_user_id: String(p2.owner_user_id),
-      manifest_digest: String(p2.manifest_digest),
-      consent_receipt_id: String(p2.consent_receipt_id),
-      consented_at: Number(p2.consented_at),
-      revoked_at: null
-    } } };
-  }
-  if (event2.type === "HostedMcpGrantActivated" || event2.type === "HostedMcpGrantRevoked") {
-    const p2 = requiredPayload(event2, [
-      "grant_id",
-      event2.type === "HostedMcpGrantActivated" ? "activated_at" : "revoked_at"
-    ]);
-    const id3 = String(p2.grant_id);
-    const grant = state.grants[id3];
-    if (!grant) throw new Error(`unknown hosted grant "${id3}"`);
-    return { ...state, grants: {
-      ...state.grants,
-      [id3]: event2.type === "HostedMcpGrantActivated" ? { ...grant, state: "active", activated_at: Number(p2.activated_at), revoked_at: null } : { ...grant, state: "revoked", revoked_at: Number(p2.revoked_at) }
-    } };
-  }
-  if (event2.type === "HostedMcpSeatClaimed") {
-    const p2 = requiredPayload(event2, [
-      "seat_id",
-      "grant_id",
-      "workspace_id",
-      "owner_user_id",
-      "principal_id",
-      "name",
-      "handle",
-      "created_at",
-      "transport",
-      "turn_only"
-    ]);
-    const id3 = String(p2.seat_id);
-    if (state.seats[id3]) throw new Error(`duplicate hosted seat "${id3}"`);
-    if (p2.transport !== "hosted_mcp" || p2.turn_only !== true) {
-      throw new Error("hosted seat event must be hosted_mcp and turn_only");
-    }
-    const principalId = String(p2.principal_id);
-    const seat3 = {
-      seat_id: id3,
-      grant_id: String(p2.grant_id),
-      workspace_id: String(p2.workspace_id),
-      owner_user_id: String(p2.owner_user_id),
-      principal_id: principalId,
-      name: String(p2.name),
-      handle: String(p2.handle),
-      transport: "hosted_mcp",
-      turn_only: true,
-      created_at: Number(p2.created_at),
-      revoked_at: null,
-      handle_revoked_at: null,
-      principal_revoked_at: null
-    };
-    return {
-      ...state,
-      seats: { ...state.seats, [id3]: seat3 },
-      principals: { ...state.principals, [principalId]: {
-        principal_id: principalId,
-        workspace_id: seat3.workspace_id,
-        owner_user_id: seat3.owner_user_id,
-        name: seat3.name,
-        transport: "hosted_mcp",
-        turn_only: true,
-        created_at: seat3.created_at,
-        revoked_at: null
-      } }
-    };
-  }
-  if (event2.type === "HostedMcpSeatReleased") {
-    const p2 = requiredPayload(event2, ["grant_id", "seat_id", "principal_id", "released_at"]);
-    const id3 = String(p2.seat_id);
-    const seat3 = state.seats[id3];
-    if (!seat3) throw new Error(`unknown hosted seat "${id3}"`);
-    if (seat3.principal_id !== String(p2.principal_id)) throw new Error(`hosted seat "${id3}" principal mismatch`);
-    const releasedAt = Number(p2.released_at);
-    return { ...state, seats: { ...state.seats, [id3]: {
-      ...seat3,
-      revoked_at: releasedAt,
-      handle_revoked_at: releasedAt
-    } } };
-  }
-  const p = requiredPayload(event2, ["seat_id", "revoked_at"]);
-  const id2 = String(p.seat_id);
-  const seat2 = state.seats[id2];
-  if (!seat2) throw new Error(`unknown hosted seat "${id2}"`);
-  const revokedAt = Number(p.revoked_at);
-  const principal = state.principals[seat2.principal_id];
-  if (!principal) throw new Error(`unknown hosted principal "${seat2.principal_id}"`);
-  return {
-    ...state,
-    seats: {
-      ...state.seats,
-      [id2]: {
-        ...seat2,
-        revoked_at: revokedAt,
-        handle_revoked_at: revokedAt,
-        principal_revoked_at: revokedAt
-      }
-    },
-    principals: {
-      ...state.principals,
-      [seat2.principal_id]: { ...principal, revoked_at: revokedAt }
-    }
-  };
-}
-function reduceHostedAuthorityStream(events) {
-  let state = null;
-  let lastSeq = -Infinity;
-  for (const event2 of events) {
-    if (event2.seq <= lastSeq) throw new Error("hosted authority events are out of order");
-    state = reduceHostedAuthority(state, event2);
-    lastSeq = event2.seq;
-  }
-  return state ?? { grants: {}, consents: {}, seats: {}, principals: {} };
 }
 
 // src/protocol/hosted-check.ts
@@ -6334,6 +6402,8 @@ export {
   ADMIN_WORKER_RENEWAL_LIMITS,
   ADMIN_WORKSPACES_CREATED_PER_GRANT,
   ADMIN_WORKSPACE_CREATE_PER_DAY,
+  AGENT_NAME_RULE,
+  AGENT_NAME_TAKEN_MESSAGE,
   AGENT_TOKEN_DEFAULT_TTL_MS,
   AGENT_TOKEN_MAX_TTL_MS,
   AGENT_TRANSPORTS,
@@ -6360,6 +6430,8 @@ export {
   HOSTED_CHECK_BATCH_LIMIT,
   HOSTED_MCP_RESOURCE,
   HOSTED_MCP_SEAT_LIMIT,
+  HOSTED_NAME_SUGGESTION_TRIES,
+  HOSTED_SEAT_LIMIT_MESSAGE,
   HOSTED_SEAT_NAME_TAKEN,
   HOSTED_TODO_LIST_TOOLS,
   HOUSEHOLD_ANSWERABLE_QUESTION_MAX,
@@ -6505,6 +6577,7 @@ export {
   formatWorkspaceSkillView,
   hasGeneralSkillWording,
   hostedCheckMillisecondTimestamp,
+  hostedNameCandidates,
   hostedSeatNameValid,
   householdAccessRefusal,
   householdDefinitionKey,
