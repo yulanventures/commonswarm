@@ -422,6 +422,13 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "app.people.rename": [{ name: "rename-row", rows: "[data-people-context] .pd-agent", max: 1,
     prefer: ".pd-agent:has(form[data-agent-rename])", focus: true, focusTarget: "input[data-rename-input]",
     require: [".pd-agent:has(form[data-agent-rename])"] }],
+  /* A channel's own lead in its header: hovering or focusing the pill must not move the title or the header. Nothing
+     is required: the pill is not shown at 52rem and below, where the main pass also runs this witness. */
+  "app.chat.channel-lead": [{ name: "channel-lead-pill", rows: "[data-home-workspace-shell] [data-channel-lead-pill]", max: 1,
+    prefer: '[data-lead-agent="{agent.channelLead}"]', focus: true }],
+  // The Channel lead select in a channel's settings: hovering or focusing it must not move the dialog.
+  "dialog.channel-lead": [{ name: "channel-lead-select", rows: "dialog[data-channel-dialog][open] [data-channel-lead-select]", max: 1,
+    prefer: "[data-channel-lead-select]", focus: true, require: ["[data-channel-lead-select]"] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;

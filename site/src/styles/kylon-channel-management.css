@@ -32,6 +32,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
   padding: 10px 12px; border: 1px solid var(--k-shell-control); border-radius: var(--k-shell-radius);
   color: var(--k-shell-ink); background: var(--k-shell-surface); font: 400 14px/22px var(--k-shell-font);
 }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form select {
+  border: 1px solid var(--k-shell-control); text-overflow: ellipsis; cursor: pointer;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(input, textarea)[readonly] {
   border-color: var(--k-shell-line); background: var(--k-shell-subtle);
 }

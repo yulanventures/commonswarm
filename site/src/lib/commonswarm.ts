@@ -64,6 +64,7 @@ import {
   type WorkspaceChannel,
 } from "./channels.js";
 import { parseChannelVisibility } from "./private-channels.js";
+import { parseChannelLeadColumns, setChannelLeadCommand, type ChannelLead } from "./channel-lead.js";
 import {
   attachFeedChannels,
   type FeedPushSubscription,
@@ -3210,9 +3211,9 @@ export async function workspaceChannels(
       c
         .schema("swarm_read")
         .from("channels")
-        .select(
-          "channel_id,workspace_id,slug,purpose,created_by_principal,created_by_kind,created_at,archived_at,sort_rank,visibility",
-        )
+        /* Every column, as the workspace reads do: a server older than a column (lead_mode,
+         * lead_agent_principal_id) still answers, and the row reads that column's default. */
+        .select("*")
         .eq("workspace_id", workspaceId)
         .order("slug", { ascending: true })
         .abortSignal(signal),
@@ -3253,6 +3254,7 @@ function browserChannelFromRow(row: Record<string, unknown>): WorkspaceChannel {
       : String(row.archived_at),
     sortRank: Number.isInteger(row.sort_rank) && (row.sort_rank as number) > 0 ? row.sort_rank as number : 0,
     visibility: parseChannelVisibility(row.visibility),
+    ...parseChannelLeadColumns(row),
   };
 }
 
@@ -3422,6 +3424,51 @@ export async function workspaceChannelPolicy(workspaceId: string): Promise<Chann
   if (error) throw new Error(error.message);
   const row = (data ?? [])[0];
   return row ? parseChannelCreationPolicy(row.channel_creation_policy) : undefined;
+}
+
+/**
+ * Chooses who an untagged post from a person in this channel wakes (set_channel_lead). A decided
+ * answer comes back as a result, a refusal with the server's own sentence (404 channel_not_found,
+ * 403 channel_forbidden or channel_lead_not_eligible, ...). An outcome nobody can read throws
+ * CommandOutcomeUnknown, so the caller keeps the command id and a retry replays the first answer.
+ */
+export async function setChannelLead(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  channelId: string,
+  lead: ChannelLead,
+): Promise<{ ok: true; channel: WorkspaceChannel } | { ok: false; status: number; message: string }> {
+  const { status, body } = await postCommand(session, commandId, setChannelLeadCommand(channelId, lead),
+    { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 200 && body.status === "accepted") {
+    const row = body.channel as Record<string, unknown> | undefined;
+    if (!row || typeof row.channel_id !== "string") {
+      throw new CommandOutcomeUnknown("CommonSwarm accepted the change without returning the channel. Reload to see what it did.");
+    }
+    return { ok: true, channel: browserChannelFromRow(row) };
+  }
+  if ([400, 403, 404, 409, 429].includes(status)) {
+    return { ok: false, status, message: channelRefusalMessage(status, body, "CommonSwarm did not change the channel's lead") };
+  }
+  throw new CommandOutcomeUnknown(
+    `CommonSwarm did not confirm the channel's lead (HTTP ${status}). Reload to see it before trying again.`,
+  );
+}
+
+/**
+ * The agents admitted to one private channel, read now. Members of the workspace read its private
+ * channels' members only when they can read the channel.
+ */
+export async function channelAgentMemberIds(workspaceId: string, channelId: string): Promise<string[]> {
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline("the channel's members", signal => c
+    .schema("swarm_read").from("channel_members").select("kind,id")
+    .eq("workspace_id", workspaceId).eq("channel_id", channelId).eq("kind", "agent")
+    .limit(1000).abortSignal(signal));
+  if (error) throw new Error(error.message);
+  return (data ?? []).flatMap(row => typeof row.id === "string" && row.id ? [row.id] : []);
 }
 
 export async function unarchiveChannel(

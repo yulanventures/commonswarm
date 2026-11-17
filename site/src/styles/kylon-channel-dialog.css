@@ -39,7 +39,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
   color: var(--k-shell-secondary);
   font: 500 13px/20px var(--k-shell-font);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form input[type="text"] {
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form :is(input[type="text"], select) {
   min-inline-size: 0;
   inline-size: 100%;
   min-block-size: 44px;
@@ -96,7 +96,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
   border-color: var(--k-shell-accent-hover);
 }
 @media not (forced-colors: active) {
-  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(button, input):focus-visible {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(button, input, select):focus-visible {
     outline: 2px solid var(--k-shell-focus);
     outline-offset: 2px;
     box-shadow: none;
@@ -109,13 +109,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__cha
     border-end-start-radius: 0;
     border-end-end-radius: 0;
   }
-  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form input[type="text"] {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form :is(input[type="text"], select) {
     font-size: 16px;
     line-height: 24px;
   }
 }
 @media (pointer: coarse) {
-  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form input[type="text"] {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form :is(input[type="text"], select) {
     font-size: 16px;
     line-height: 24px;
   }
