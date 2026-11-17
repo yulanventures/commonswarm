@@ -1255,8 +1255,8 @@
       "create_workspace"
     ],
     "frame": [
-      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]",
-      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-copy-sentence]"
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-copy-sentence]",
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]"
     ]
   },
   {
@@ -1301,8 +1301,8 @@
       "create_workspace"
     ],
     "frame": [
-      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]",
-      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-mint]"
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-mint]",
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]"
     ]
   },
   {
