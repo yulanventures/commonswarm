@@ -3337,6 +3337,15 @@ test("context resolver runs under migrated read/command roles and denies forged 
     FROM pg_proc p WHERE p.oid = 'swarm.resolve_hosted_mcp_connection_context(uuid,text,text,uuid,text)'::regprocedure`;
   assert.deepEqual(acl, { definer: true, config: ["search_path=pg_catalog"], owner: "swarm_admin",
     read: true, command: true, human: false, anon: false, oauth: false, direct_email: false });
+  // The SQL resolver is unchanged and pinned by release catalogs. The served context is its
+  // output plus the seat's agent and one summary line, added at the edge
+  // (resolveHostedConnectionContext in _shared/hosted-seat-auth.ts). Every direct SQL call
+  // below is compared with the served context minus those two additions.
+  const { agent: servedAgent, ...served } = initial[0]!.body.context as ConnectionContext & { agent?: { principal_id: string; name: string } };
+  assert.deepEqual(servedAgent, { principal_id: seat.principal_id, name: seat.name }, "the served agent is the seat's");
+  const suffix = ` This chat's agent is "${String(seat.name)}".`;
+  assert.ok(served.summary.endsWith(suffix), served.summary);
+  const sqlContext = { ...served, summary: served.summary.slice(0, -suffix.length) };
   for (const role of ["swarm_read", "swarm_command"]) {
     await sql.begin(async tx => {
       await tx`SELECT set_config('role', ${role}, true)`;
@@ -3348,13 +3357,7 @@ test("context resolver runs under migrated read/command roles and denies forged 
           ${options.workspace ?? fixture.workspaceA}::uuid, ${options.handle ?? String(seat.handle)}) AS context`;
         return row!.context;
       };
-      // The SQL resolver is unchanged and pinned by release catalogs. The edge adds the seat's
-      // agent and one summary line (resolveHostedConnectionContext in _shared/hosted-seat-auth.ts).
-      const { agent, ...served } = initial[0]!.body.context as ConnectionContext & { agent?: { principal_id: string; name: string } };
-      assert.deepEqual(agent, { principal_id: seat.principal_id, name: seat.name }, role + " served agent is the seat's");
-      const suffix = ` This chat's agent is "${String(seat.name)}".`;
-      assert.ok(served.summary.endsWith(suffix), served.summary);
-      assert.deepEqual(await resolve(), { ...served, summary: served.summary.slice(0, -suffix.length) }, role + " positive control");
+      assert.deepEqual(await resolve(), sqlContext, role + " positive control");
       for (const options of [{ owner: fixture.other }, { principal: randomUUID() }, { provider: `provider-${fixture.grantB}` },
         { handle: "seat_" + "Z".repeat(22) }, { tool: "note" }, { grant: fixture.grantB }, { workspace: fixture.workspaceB }]) {
         assert.equal(await resolve(options), null, role + " mismatched binding refuses metadata");
@@ -3378,7 +3381,7 @@ test("context resolver runs under migrated read/command roles and denies forged 
         await tx`SET LOCAL ROLE NONE`;
         return row!.context;
       };
-      assert.deepEqual(await resolve(), initial[0]!.body.context, change + " live positive control");
+      assert.deepEqual(await resolve(), sqlContext, change + " live positive control");
       if (change === "principal") await tx`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp()
         WHERE principal_id = ${String(seat.principal_id)}::uuid`;
       else if (change === "handle") await tx`UPDATE swarm.hosted_mcp_seat_handles SET revoked_at = statement_timestamp()
