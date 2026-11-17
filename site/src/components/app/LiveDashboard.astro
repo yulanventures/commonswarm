@@ -1222,7 +1222,8 @@ import "../../styles/kylon-command-palette.css";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, renameAgent } from "../../lib/commonswarm";
+  import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
@@ -1672,6 +1673,7 @@ import "../../styles/kylon-command-palette.css";
     showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }): void;
     mintFailed(message: string): void;
     mintSettled(): void;
+    renameAgent: ((principalId: string, name: string) => Promise<RenameOutcome>) | null | undefined;
   }
 
   interface CreateIntent {
@@ -2017,6 +2019,11 @@ import "../../styles/kylon-command-palette.css";
     /* The key the Add an agent panel minted for a named Terminal agent or Grok Bot, until its
        first use brings the panel back with the joined card (or the person leaves it). */
     let panelKeyMint: { workspaceId: string; userId: string; principalId: string; name: string } | null = null;
+    /* The agent that key created, from the accepted mint. The panel's duplicate check counts it until
+       the roster read includes it, so a slow or failed read never drops a name just confirmed. */
+    let panelKnownAgent: { workspaceId: string; userId: string; principalId: string; name: string } | null = null;
+    /* rename_agent command ids: a fresh one per attempt, the same one to retry an unanswered attempt. */
+    const renameAttempts = new RenameAttempts();
     let freshInviteLink = "";
     let freshInviteId = "";
     let freshInviteWorkspaceId = "";
@@ -7265,7 +7272,7 @@ import "../../styles/kylon-command-palette.css";
               newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? (tokenMatches ? grant.revokedAt : null) });
             if (risk) { grantRisk = risk; technical.push(risk); }
           }
-          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames),
+          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames), rawName: agent.name,
             ownerId: agent.ownerUserId, ownerName, model: agent.model, app: null, hosted: agent.transport === "hosted_mcp", status, receive,
             lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? peopleAgentActivityTime(agent.presence.last_command_at, now) : "Not active yet",
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
@@ -7373,6 +7380,14 @@ import "../../styles/kylon-command-palette.css";
           await setAgentModel(session, uuid(), scope.workspaceId, principalId, modelValue);
           if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
           await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
+        },
+        rename: async (principalId, name) => {
+          const workspaceId = activeWorkspaceId;
+          if (!peopleDialogCanAct(peopleDialogModel(), "rename", principalId)) return { ok: false, message: "This action is no longer available. Go back and check the details." };
+          const outcome = await renameAgentHere(workspaceId, principalId, name);
+          // The accepted name is already applied in place; the reload brings every surface in line.
+          if (outcome.ok && workspaceId === activeWorkspaceId) void reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`).catch(() => undefined);
+          return outcome;
         } }, { layout: "page", focus: peopleDialogFocus, tintFor: (agentId) => {
           // An agent wears its owner's colour, the same rule the rail and the capsules use. An owner
           // who left has no colour: null is the neutral form.
@@ -10371,6 +10386,7 @@ import "../../styles/kylon-command-palette.css";
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
       panelKeyMint = null;
+      panelKnownAgent = null;
       disposeCleanup();
       resetSeatAdminState();
       listsAllowLanding = null;
@@ -11388,10 +11404,42 @@ import "../../styles/kylon-command-palette.css";
     let existingAgentChoiceIsCurrent: (() => boolean) | undefined;
     /** What the panel checks a name against and which apps it marks: this workspace's agents now. */
     const refreshAddAgentPanel = (picker: AddAgentPanel | null, workspaceId: string): void => {
-      picker?.setRoster?.(agents.map((agent) => agent.name));
+      // The agent a panel key just created counts until the roster read includes it (474 R2 deferred P2).
+      const known = panelKnownAgent;
+      if (known && agents.some((agent) => agent.principalId === known.principalId)) panelKnownAgent = null;
+      const extra = known && panelKnownAgent && known.workspaceId === workspaceId && known.userId === session?.user.id ? [known] : [];
+      const roster = [...agents, ...extra];
+      picker?.setRoster?.(roster.map((agent) => agent.name));
       picker?.setConnected?.(workspaceId && session
-        ? connectedHosts(addAgentStore(), session.user.id, workspaceId, agents.map((agent) => agent.principalId))
+        ? connectedHosts(addAgentStore(), session.user.id, workspaceId, roster.map((agent) => agent.principalId))
         : []);
+    };
+    /** An accepted rename, applied where this page already holds the name. */
+    const applyAgentRename = (principalId: string, name: string): void => {
+      agents = agents.map((agent) => agent.principalId === principalId ? { ...agent, name } : agent);
+      if (panelKnownAgent?.principalId === principalId) panelKnownAgent = { ...panelKnownAgent, name };
+      renderRoster();
+      refreshAddAgentPanel(one<AddAgentPanel>("agent-host-picker"), activeWorkspaceId);
+    };
+    /** rename_agent for this workspace and account, pinned at the click. The server decides who may
+        rename and which names are free; its refusal comes back as its own sentence. */
+    const renameAgentHere = async (workspaceId: string, principalId: string, name: string): Promise<RenameOutcome> => {
+      const value = session;
+      if (!value || !workspaceId || sampleMode) return { ok: false, message: "Sign in to rename this agent." };
+      const userId = value.user.id;
+      const key = `${userId}:${workspaceId}:${principalId}`;
+      const commandId = renameAttempts.commandId(key, name, uuid);
+      let result: Awaited<ReturnType<typeof renameAgent>>;
+      try {
+        result = await renameAgent(value, commandId, workspaceId, principalId, name);
+      } catch (error) {
+        // No answer: the same name sends the same command id again, so the server replays its answer.
+        return { ok: false, message: readableError(error) };
+      }
+      renameAttempts.settle(key);
+      if (!result.ok) return { ok: false, message: result.message };
+      if (session?.user.id === userId && activeWorkspaceId === workspaceId) applyAgentRename(principalId, name);
+      return { ok: true };
     };
     /** "Already yours": the person's agents that can join this workspace, each with Add. The
         section stays hidden unless there is one to add (or the list could not load). */
@@ -15570,6 +15618,8 @@ import "../../styles/kylon-command-palette.css";
       if (hostPicker.watchable) startHostJoinWatch();
       else stopHostJoinWatch();
     });
+    /* The joined card's Rename: the workspace on screen when Save is pressed, pinned until the answer. */
+    if (hostPicker) hostPicker.renameAgent = (principalId, name) => renameAgentHere(activeWorkspaceId, principalId, name);
     hostPicker?.addEventListener("agent-host-home", () => {
       leaveAddAgentForHome();
     });
@@ -15961,6 +16011,7 @@ import "../../styles/kylon-command-palette.css";
         && typeof detail.principalId === "string" && typeof detail.name === "string"
         ? { workspaceId, userId: session.user.id, principalId: detail.principalId, name: detail.name }
         : null;
+      if (panelKeyMint) panelKnownAgent = { ...panelKeyMint };
       const version = requestVersion;
       try {
         const [nextAgents, nextStatuses, nextPending] = await Promise.all([

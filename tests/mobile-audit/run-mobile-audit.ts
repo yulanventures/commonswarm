@@ -415,6 +415,10 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "nav.workspace-picker": [{ name: "workspace-rows", rows: "[data-workspace-picker][open] .cs-workspace-picker__row", max: 4,
     prefer: '.cs-workspace-picker__row:has(> .cs-workspace-picker__item[aria-current="page"])', focus: true, focusTarget: ".cs-workspace-picker__settings",
     require: ['.cs-workspace-picker__row:has(> .cs-workspace-picker__item[aria-current="page"])'] }],
+  // The People row holding the rename field: hovering it or focusing its field must not move the roster.
+  "app.people.rename": [{ name: "rename-row", rows: "[data-people-context] .pd-agent", max: 1,
+    prefer: ".pd-agent:has(form[data-agent-rename])", focus: true, focusTarget: "input[data-rename-input]",
+    require: [".pd-agent:has(form[data-agent-rename])"] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;

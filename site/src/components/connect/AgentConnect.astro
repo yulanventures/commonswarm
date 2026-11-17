@@ -184,6 +184,8 @@ const {
     #workspaceName = "";
     #agents: AgentIdentity[] = [];
     #busy = false;
+    /* The intent generation of the key mint in flight; null for none, or for an invite mint. */
+    #busyIntent: number | null = null;
     #copyTimer: number | undefined;
     #pollTimer: number | undefined;
     #loadQueued = false;
@@ -381,11 +383,21 @@ const {
       if (!userId) return;
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
-      let blocked = this.#busy || this.#prompt !== null;
+      /* A mint retired by a reset (sign-out, account switch, abandonment) may still be unwinding: it
+         creates and shows nothing more, but holds the single-mint guard until its current step
+         returns. A new request waits for it, bound like any other, and #mint's finally loads and runs
+         it, so every check before create, mint and reveal still applies (474 R2 deferred P2). */
+      const unwinding = this.#busy && this.#busyIntent !== null && this.#busyIntent !== this.#intentGeneration;
+      let blocked = (this.#busy && !unwinding) || this.#prompt !== null;
       if (h0LinkJoinEnabled) {
         blocked = blocked || this.#joinActive;
       }
-      if (blocked) return;
+      if (blocked) {
+        /* The open prompt, or the one still being made, stays on screen. The asker hears that this
+           request was not taken, so the panel's Copy setup prompt is ready again. */
+        this.dispatchEvent(new CustomEvent("commonswarm:agent-prompt-retired", { bubbles: true }));
+        return;
+      }
       /* Bound to the workspace and the account it was asked in: a load that lands elsewhere, or
          a session that belongs to someone else, mints nothing. */
       this.#request = {
@@ -394,6 +406,7 @@ const {
         userId,
         intent: this.#intentGeneration,
       };
+      if (unwinding) return;
       if (
         this.dataset.state === "ready" &&
         this.#workspaceId === (this.getAttribute("workspace-id")?.trim() ?? "")
@@ -590,14 +603,20 @@ const {
          setting it this early safe — every early return still clears it. */
       if (this.#busy) return;
       this.#busy = true;
+      this.#busyIntent = request.intent;
       this.toggleAttribute("data-mint-busy", true);
       try {
         await this.#mintGuarded(request);
       } finally {
         this.#busy = false;
+        this.#busyIntent = null;
         this.toggleAttribute("data-mint-busy", false);
         if (this.#retargetPending && this.dataset.state !== "done") {
           this.#retargetPending = false;
+          this.#queueLoad();
+        } else if (this.#request && this.dataset.state !== "done") {
+          /* A request that waited for this retired mint to unwind: a fresh load reads the session
+             and the workspace again, then runs it through #mintRequestedPrompt. */
           this.#queueLoad();
         }
       }

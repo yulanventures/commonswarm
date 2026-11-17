@@ -1750,6 +1750,42 @@ export async function setAgentModel(
   }
 }
 
+/**
+ * Renames an agent (rename_agent). The server decides: the agent's owner or a workspace owner or
+ * admin, and a name no other agent uses, ignoring case, in any workspace the agent belongs to. A
+ * decided answer comes back as a result, with the server's own sentence for a refusal; an outcome
+ * nobody can read throws CommandOutcomeUnknown, so the caller keeps the command id for a retry.
+ */
+export async function renameAgent(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  principalId: string,
+  name: string,
+): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "rename_agent", principal_id: principalId, name },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+  );
+  const said = (value: unknown): string => typeof value === "string" ? value.trim() : "";
+  if (status === 200 && body.status === "accepted") return { ok: true };
+  if (status === 200 && body.status === "rejected") {
+    return { ok: false, reason: said(body.reason), message: said(body.detail) || "The rename was refused. The agent keeps its name." };
+  }
+  if (status === 403) {
+    return { ok: false, reason: "forbidden", message: "Your current role cannot rename this agent. Nothing changed." };
+  }
+  if (status === 400) {
+    return { ok: false, reason: "invalid", message: said(body.reason) || said(body.message) || "That name can't be used. The agent keeps its name." };
+  }
+  if (status === 429) {
+    return { ok: false, reason: "rate_limited", message: "Too many changes just now. Nothing changed; try again later." };
+  }
+  throw new CommandOutcomeUnknown(`CommonSwarm did not confirm the rename (HTTP ${status}). Reload to see the agent's name before trying again.`);
+}
+
 export interface WorkspaceFile {
   fileId: string;
   name: string;

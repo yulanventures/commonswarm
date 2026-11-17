@@ -205,6 +205,73 @@ test("a reset mid-mint stops before create, and a reset after the mint shows and
   assert.notEqual(beforeReveal.element.dataset.state, "done");
 });
 
+/* 474 R2 deferred P2: B asks while A's retired mint is still unwinding (held in ensureBrowserDevice).
+   The single-mint guard stays; B's request waits for the old operation, then runs for B alone. */
+test("a request made while a retired mint is still busy waits for it, then runs for its own account", async () => {
+  const f = fixture();
+  f.element.connectedCallback();
+  await f.settle();
+  f.hold.device = true;
+  f.element.requestPromptNamed("Scout", "A");
+  await f.settle();
+  f.element.clearPrompt(false); // the auth reset retires A
+  f.signIn("B");
+  f.element.requestPromptNamed("Planner", "B"); // before A's held device call settles
+  await f.settle();
+  assert.deepEqual(writes(f.calls), [], "nothing is created while A's retired operation still holds the guard");
+  f.hold.device = false;
+  await f.release();
+  assert.deepEqual(writes(f.calls), [["create", "B", "W", "Planner"], ["mint", "B", "W", "agent-Planner"]],
+    "A's request created nothing; B's ran once the old operation settled, under B's session");
+  assert.equal(f.shown(), "SECRET PROMPT token-B");
+  assert.deepEqual(f.copied, ["SECRET PROMPT token-B"]);
+  assert.equal(f.element.dataset.state, "done");
+  const ready = f.element.events.filter((event) => event.type === "commonswarm:agent-prompt-ready");
+  assert.equal(ready.length, 1, "B's panel hears its result");
+  assert.equal((ready[0]!.detail as { name: string }).name, "Planner");
+
+  // A reset while B's request waits retires it too: still nothing is created, and the panel hears it.
+  const g = fixture();
+  g.element.connectedCallback();
+  await g.settle();
+  g.hold.device = true;
+  g.element.requestPromptNamed("Scout", "A");
+  await g.settle();
+  g.element.clearPrompt(false);
+  g.signIn("B");
+  g.element.requestPromptNamed("Planner", "B");
+  const before = g.element.events.length;
+  g.element.clearPrompt(false);
+  assert.equal(g.element.events.slice(before).some((event) => event.type === "commonswarm:agent-prompt-retired"), true);
+  g.hold.device = false;
+  await g.release();
+  assert.deepEqual(writes(g.calls), []);
+  assert.equal(g.shown(), "");
+});
+
+test("a request while a live prompt is open, or a live mint is running, is answered, never left waiting", async () => {
+  const f = fixture();
+  f.element.connectedCallback();
+  await f.settle();
+  f.hold.mint = true;
+  f.element.requestPromptNamed("Scout", "A");
+  await f.settle();
+  const before = f.element.events.length;
+  f.element.requestPromptNamed("Planner", "A"); // the live mint is still running
+  assert.deepEqual(f.element.events.slice(before).map((event) => event.type), ["commonswarm:agent-prompt-retired"],
+    "the second request is turned away at once, so its Copy setup prompt is usable again");
+  f.hold.mint = false;
+  await f.release();
+  assert.deepEqual(writes(f.calls), [["create", "A", "W", "Scout"], ["mint", "A", "W", "agent-Scout"]], "only the live request mints");
+  assert.equal(f.shown(), "SECRET PROMPT token-A");
+  const shown = f.element.events.length;
+  f.element.requestPromptNamed("Planner", "A"); // the prompt is still on screen
+  await f.settle();
+  assert.deepEqual(f.element.events.slice(shown).map((event) => event.type), ["commonswarm:agent-prompt-retired"]);
+  assert.equal(f.shown(), "SECRET PROMPT token-A", "the open prompt is never replaced");
+  assert.equal(writes(f.calls).length, 2);
+});
+
 test("abandoning the request, or a blocked load, retires it for good; a later load does not revive it", async () => {
   const abandoned = fixture();
   abandoned.hold.roster = true;
