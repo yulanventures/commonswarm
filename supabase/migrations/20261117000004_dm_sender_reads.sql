@@ -178,13 +178,15 @@ SELECT swarm.assert_view_clauses_preserved(
 SELECT set_config('swarm.signals_view_before', '', false);
 
 -- Positive control: the author arm is present once, beside the scalar test it was spliced to, and
--- every invariant 20261116000005 left for the next splice still holds.
+-- every invariant 20261116000005 left for the next splice still holds. pg_get_viewdef(..., true)
+-- prints this single-relation view's columns without the s. prefix (WHERE swarm.is_member(workspace_id,
+-- auth.uid()) ...), so every pattern here takes the prefix as optional, as scalar_arm does.
 DO $$
 DECLARE
   after_def text := pg_get_viewdef('swarm_read.signals'::regclass, true);
 BEGIN
   IF (SELECT count(*) FROM regexp_matches(after_def,
-        'claims_is_signal_sender\(s\.workspace_id,\s*s\.from_kind,\s*s\.from_principal\)', 'g')) <> 1
+        'claims_is_signal_sender\((?:s\.)?workspace_id,\s*(?:s\.)?from_kind,\s*(?:s\.)?from_principal\)', 'g')) <> 1
      OR (SELECT count(*) FROM regexp_matches(after_def, 'claims_is_signal_sender', 'g')) <> 1 THEN
     RAISE EXCEPTION 'swarm_read.signals: expected one author arm';
   END IF;
