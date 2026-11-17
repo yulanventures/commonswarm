@@ -284,21 +284,21 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
       },
     },
   ],
-  "menu.provider": [{
-    name: "provider-back",
-    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] .hm-ahp__title-anchor' },
-    keys: [{ key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"] > [data-ahp-back]' }],
-    activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-host="claude"]' } },
-  }],
+  // The panel opens on its title; Already yours comes first, so Tab reaches its first Add before any app.
   "app.add-agent.existing": [{
-    name: "existing-back",
-    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-title]' },
+    name: "existing-first",
+    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-grid-title]' },
     keys: [
-      { key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) > [data-ahp-existing-back]' },
       { key: "Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-list] .pd-agent-choice:first-child .pd-choice-add' },
-      { key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) > [data-ahp-existing-back]' },
+      { key: "Shift+Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-home-back]' },
     ],
-    activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing]' } },
+  }],
+  // From the name to the one sentence to copy, with nothing in between; Copy keeps focus.
+  "app.add-agent.panel": [{
+    name: "name-to-copy",
+    start: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-name]' },
+    keys: [{ key: "Tab", expect: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-copy-sentence]' }],
+    activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-copy-sentence]' } },
   }],
   // A decision card's Something else field: Shift+Tab reaches its row, and Enter folds the field back with focus on that row.
   "app.chat.choice-other": [{
@@ -406,11 +406,11 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // The composer's text inset and controls must not change when it takes focus.
   "app.composer": [{ name: "composer", rows: ".dashboard__composer", max: 1, focus: true, focusTarget: "[data-composer-input]",
     require: [".dashboard__composer"] }],
-  // The provider detail's Back control is visually hidden until focused; focusing it must not move the detail.
-  "menu.provider": [{ name: "provider-back", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-detail="claude"]', max: 1,
-    focus: true, focusTarget: ":scope > [data-ahp-back]", require: ['[data-ahp-detail="claude"]'] }],
   "app.add-agent.existing": [{ name: "existing-agents", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing-list] .pd-agent-choice', max: 6,
-    focus: true, focusTarget: ".pd-choice-add", require: ['[data-ahp-existing-list] .pd-agent-choice'] }],
+    prefer: ".pd-agent-choice:first-child", focus: true, focusTarget: ".pd-choice-add", require: ['[data-ahp-existing-list] .pd-agent-choice'] }],
+  // The app pills: hovering or focusing one, the chosen one included, must not move the panel.
+  "app.add-agent.panel": [{ name: "app-pills", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-host]', max: 6,
+    prefer: '[data-ahp-host="claude"]', focus: true, require: ['[data-ahp-host="claude"]'] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
@@ -773,7 +773,26 @@ async function main(): Promise<void> {
             await settle(page);
             missing = await outside();
           }
-          if (missing.length) throw new Error(`not in frame after settling: ${missing.join(" | ")}`);
+          if (missing.length) {
+            // Say where each missing part and its scroller ended up, so a failure tells clipping from a near miss.
+            const where = await page.evaluate((list: string[]) => list.map(selector => {
+              const el = document.querySelector(selector);
+              if (!el) return `${selector}: absent`;
+              const r = el.getBoundingClientRect();
+              let box = "";
+              for (let node = el.parentElement; node; node = node.parentElement) {
+                const style = getComputedStyle(node);
+                if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+                  const s = node.getBoundingClientRect();
+                  box = ` scroller=${node.tagName.toLowerCase()}.${[...node.classList].join(".")} top=${s.top.toFixed(1)} bottom=${s.bottom.toFixed(1)}`
+                    + ` scrollTop=${node.scrollTop} scrollHeight=${node.scrollHeight} clientHeight=${node.clientHeight}`;
+                  break;
+                }
+              }
+              return `${selector}: top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} innerHeight=${window.innerHeight}${box}`;
+            }), missing) as string[];
+            throw new Error(`not in frame after settling: ${missing.join(" | ")} [${where.join(" ; ")}]`);
+          }
         }
         return settled;
       };

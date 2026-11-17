@@ -16,6 +16,10 @@
  * the live installer, workspace, connection details, one credential, and the rule not to echo
  * that credential back. The person does one thing with the result: Copy, paste, done.
  *
+ * NO FORM OF ITS OWN. The Add an agent panel names the agent (Terminal agent, Grok Bot) and calls
+ * requestPromptNamed; People & agents asks for a new key with requestPromptFor. This element
+ * checks the session, mints, and shows the one-time result.
+ *
  * NO SSR AND NO STATE IN THE MARKUP. Every state this element can be in is rendered here at
  * build time and switched with `data-state` on the host, because Astro scopes styles to
  * elements present in this template — markup created later by script would render unstyled.
@@ -26,29 +30,15 @@ interface Props {
   /** Optional: the host page may pin the workspace. Left off, the element finds one itself. */
   workspaceId?: string;
   workspaceName?: string;
-  /**
-   * The micro-label above the title. A prop and not a literal because where this sits in an
-   * onboarding flow is the host page's decision, and a hardcoded "Step 3" is wrong the moment
-   * somebody drops this on a settings screen.
-   */
-  eyebrow?: string;
   class?: string;
 }
 
-import { STANDING_GRANT_COPY } from "../../lib/standing-grants";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
 import { joinInviteLimitSentence } from "../../../../src/protocol/agent-join-limits";
-import { dashboardMcpPrompt } from "./agent-prompt";
-import { AGENT_HOSTS } from "../../lib/agent-hosts";
-import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
-
-// Reuse the catalog's verified public commands; never include a credential here.
-const hostedCodingHosts = AGENT_HOSTS.filter(host => host.id === "claude-code" || host.id === "codex");
 
 const {
   workspaceId,
   workspaceName,
-  eyebrow = "Agent access",
   class: className,
 } = Astro.props;
 ---
@@ -59,16 +49,8 @@ const {
   workspace-id={workspaceId}
   workspace-name={workspaceName}
 >
-  <header class="ac__head">
-    {eyebrow && <p class="ac__eyebrow">{eyebrow}</p>}
-    <h2 class="ac__title">Name your agent.</h2>
-    <p class="ac__lead">
-      Name the agent you want to connect.
-    </p>
-  </header>
-
   <div class="ac__panel" data-panel="loading">
-    <h2 class="ac__muted ac__loading-title">Checking your session…</h2>
+    <h2 class="ac__muted ac__loading-title" data-slot="loading-title">Checking your session…</h2>
   </div>
 
   <div class="ac__panel ac__panel--state" data-panel="state">
@@ -79,79 +61,8 @@ const {
     </button>
   </div>
 
-  <form class="ac__panel ac__form" data-panel="form" data-has-agents="no">
-    <details class="ac__advanced">
-      <summary>Claude Code or Codex: hosted connector</summary>
-      <p class="ac__hint">
-        These public commands keep credentials out of the conversation. Create or select
-        your workspace first. These CommonSwarm routes are not tested with these hosts yet.
-      </p>
-      {hostedCodingHosts.map(host => (
-        <div>
-          <h3>{host.name}</h3>
-          {host.steps.filter(step => step.code).map(step => <pre class="ac__pre">{step.code}</pre>)}
-          <p class="ac__hint">
-            {host.id === "claude-code"
-              ? "Start a new Claude Code session, type /mcp, select commonswarm, and follow the browser sign-in steps."
-              : "Complete the browser sign-in opened by codex mcp login commonswarm. If the tools are not available, start a new Codex session."}
-            {" "}Use the same CommonSwarm account as here, choose your workspace, and select Allow connection.
-            Then ask your agent to join under its name and post a short note.
-          </p>
-        </div>
-      ))}
-      <p class="ac__hint">
-        The host saves the connector configuration. You do not need a new generated prompt
-        for each session. The connector reports whether a named workspace identity still
-        needs to join. {HOSTED_LISTS_NOTE}
-      </p>
-    </details>
-
-    <div class="ac__field" data-field-wrap="identity">
-      <label class="ac__label" for="ac-identity">AI assistant</label>
-      <select class="ac__control" id="ac-identity" data-field="identity">
-        <option value="">Add a new assistant</option>
-      </select>
-      <p class="ac__hint">
-        Choose an assistant you connected before to keep its activity together. The key
-        is shown once. {STANDING_GRANT_COPY}
-      </p>
-    </div>
-
-    <div class="ac__field" data-field-wrap="name">
-      <label class="ac__label" for="ac-name">Name it</label>
-      <input
-        class="ac__control"
-        id="ac-name"
-        data-field="name"
-        type="text"
-        maxlength="80"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder="claude-code"
-      />
-      <p class="ac__hint">
-        Whatever you would call it out loud.
-      </p>
-    </div>
-
+  <div class="ac__panel ac__form" data-panel="form">
     <p class="ac__form-error" data-slot="form-error" role="alert" hidden></p>
-    <button
-      class="ac__btn ac__btn--quiet"
-      type="button"
-      data-action="create-another"
-      hidden
-    >
-      Create another with this name
-    </button>
-
-    <button class="ac__btn ac__btn--primary" type="submit" data-action="mint">
-      Generate prompt
-    </button>
-    <details class="ac__advanced">
-      <summary>Optional local stdio connector</summary>
-      <p class="ac__hint">This terminal flow keeps the connection key out of the agent's conversation.</p>
-      <pre class="ac__pre">{dashboardMcpPrompt()}</pre>
-    </details>
     {h0LinkJoinEnabled && (
       <div class="ac__field" data-h0-link-join>
         <p class="ac__hint">
@@ -162,23 +73,6 @@ const {
         </button>
       </div>
     )}
-  </form>
-
-  <div class="ac__panel" data-panel="working">
-    <h2 class="ac__working-title">Creating your agent prompt.</h2>
-    <ol class="ac__steps" data-slot="steps">
-      <li class="ac__step" data-step="register-device">
-        <span class="ac__dot" aria-hidden="true"></span>Registering this browser
-      </li>
-      <li class="ac__step" data-step="create-identity">
-        <span class="ac__dot" aria-hidden="true"></span>Adding the AI assistant<span
-          class="ac__step-note"
-          data-slot="identity-note"></span>
-      </li>
-      <li class="ac__step" data-step="mint-credential">
-        <span class="ac__dot" aria-hidden="true"></span>Creating the key
-      </li>
-    </ol>
   </div>
 
   <div class="ac__panel ac__result" data-panel="result">
@@ -252,7 +146,6 @@ const {
     type AgentIdentity,
   } from "../../lib/agent-connect";
   import { connectionPolicyCopy } from "../../lib/standing-grants";
-  import { identityDisplayLabel } from "../../lib/identity-label";
   import {
     NoDeployment,
     agentAccessStatuses,
@@ -276,6 +169,8 @@ const {
    * the page it lands on. Pages that own the workspace choice set workspace-id; pages that
    * don't let the element find one.
    */
+  type MintRequest = ({ principalId: string } | { name: string }) & { workspaceId: string; userId: string; intent: number };
+
   class AgentConnectElement extends HTMLElement {
     static observedAttributes = ["workspace-id", "workspace-name"];
 
@@ -293,10 +188,14 @@ const {
     #pollTimer: number | undefined;
     #loadQueued = false;
     #loadVersion = 0;
-    #requestedPrincipalId = "";
+    /* What the page asked to mint once the element is ready: a new key for an agent that exists,
+       or a new agent with the name the Add an agent panel took. It is bound to the workspace and
+       the account that asked, and to the intent generation it was asked in. */
+    #request: MintRequest | null = null;
+    /* Raised by every reset (auth change, sign-out, abandonment, disposal). A request or an
+       in-flight mint from an older generation creates, mints, shows and copies nothing more. */
+    #intentGeneration = 0;
     #retargetPending = false;
-    #pendingDuplicateName = "";
-    #createAnotherChosen = false;
     #inviteId: string | null = null;
     #joinActive = false;
     #copyLabel = "Copy prompt";
@@ -314,11 +213,16 @@ const {
     }
 
     disconnectedCallback() {
+      this.retirePending();
       window.clearTimeout(this.#copyTimer);
       window.clearInterval(this.#pollTimer);
     }
 
     attributeChangedCallback() {
+      /* A queued request belongs to the workspace it was asked in; another workspace drops it. */
+      if (this.#request && this.#request.workspaceId !== (this.getAttribute("workspace-id")?.trim() ?? "")) {
+        this.#request = null;
+      }
       if (!this.#ready || !this.isConnected) return;
       if (this.#busy || this.dataset.state === "done") {
         this.#retargetPending = true;
@@ -355,6 +259,10 @@ const {
       const button = this.#q<HTMLButtonElement>('[data-action="retry"]');
       if (button) button.hidden = !retry;
       this.#state("blocked");
+      /* A request waiting on this load is dropped, never carried to a later load. */
+      const request = this.#request;
+      this.#request = null;
+      if (request && "name" in request) this.#failed(body, true);
     }
 
     #wire() {
@@ -369,27 +277,6 @@ const {
         event.preventDefault();
       });
       this.#q<HTMLButtonElement>('[data-action="download-connection"]')?.addEventListener("click", () => this.#downloadConnection());
-      this.#q<HTMLFormElement>('[data-panel="form"]')?.addEventListener("submit", (event) => {
-        event.preventDefault();
-        void this.#mint();
-      });
-      this.#q<HTMLSelectElement>('[data-field="identity"]')?.addEventListener("change", () => {
-        this.#syncNameField();
-        this.#clearDuplicateChoice();
-      });
-      this.#q<HTMLInputElement>('[data-field="name"]')?.addEventListener("input", () => {
-        const name = (this.#q<HTMLInputElement>('[data-field="name"]')?.value ?? "").trim();
-        if (name !== this.#pendingDuplicateName) this.#clearDuplicateChoice();
-      });
-      this.#q<HTMLButtonElement>('[data-action="create-another"]')?.addEventListener(
-        "click",
-        () => {
-          const name = (this.#q<HTMLInputElement>('[data-field="name"]')?.value ?? "").trim();
-          if (!name || name !== this.#pendingDuplicateName) return;
-          this.#createAnotherChosen = true;
-          void this.#mint();
-        },
-      );
       this.#q<HTMLButtonElement>('[data-action="retry"]')?.addEventListener("click", () => {
         void this.#load();
       });
@@ -460,20 +347,53 @@ const {
       }
     }
 
+    /**
+     * Retire whatever was asked for and not yet shown: the queued request, an in-flight mint
+     * (which stops at its next step) and any load still running for it. Called on every auth
+     * reset (through clearPrompt), on sign-out, and when the person abandons the request.
+     */
+    retirePending() {
+      const pending = this.#request !== null || this.#busy;
+      this.#intentGeneration += 1;
+      this.#request = null;
+      if (this.dataset.state === "loading") this.#loadVersion += 1;
+      /* The panel's Copy setup prompt waits on this request; tell it the request is gone. */
+      if (pending) this.dispatchEvent(new CustomEvent("commonswarm:agent-prompt-retired", { bubbles: true }));
+    }
+
     clearPrompt(notify = true) {
+      this.retirePending();
       this.finishPrompt("done", notify);
     }
 
     /** Re-onboard one existing identity through the same mint and prompt path as Add an agent. */
-    requestPromptFor(principalId: string) {
+    requestPromptFor(principalId: string, userId: string) {
+      if (principalId) this.#requestPrompt({ principalId }, userId);
+    }
+
+    /** Create a new agent with this name and mint its prompt (the Add an agent panel's key routes). */
+    requestPromptNamed(name: string, userId: string) {
+      const trimmed = name.trim();
+      if (trimmed) this.#requestPrompt({ name: trimmed }, userId);
+    }
+
+    #requestPrompt(request: { principalId: string } | { name: string }, userId: string) {
+      if (!userId) return;
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
-      let blocked = !principalId || this.#busy || this.#prompt !== null;
+      let blocked = this.#busy || this.#prompt !== null;
       if (h0LinkJoinEnabled) {
         blocked = blocked || this.#joinActive;
       }
       if (blocked) return;
-      this.#requestedPrincipalId = principalId;
+      /* Bound to the workspace and the account it was asked in: a load that lands elsewhere, or
+         a session that belongs to someone else, mints nothing. */
+      this.#request = {
+        ...request,
+        workspaceId: this.getAttribute("workspace-id")?.trim() ?? "",
+        userId,
+        intent: this.#intentGeneration,
+      };
       if (
         this.dataset.state === "ready" &&
         this.#workspaceId === (this.getAttribute("workspace-id")?.trim() ?? "")
@@ -621,75 +541,24 @@ const {
         return;
       }
 
-      this.#fillIdentities();
       this.#state("ready");
       this.#mintRequestedPrompt();
     }
 
     #mintRequestedPrompt() {
-      const principalId = this.#requestedPrincipalId;
-      if (!principalId || this.dataset.state !== "ready") return;
-      const select = this.#q<HTMLSelectElement>('[data-field="identity"]');
-      const identity = this.#agents.find((agent) => agent.principalId === principalId);
-      this.#requestedPrincipalId = "";
-      if (!select || !identity) {
-        this.#formError("That AI assistant is no longer available. Reload the roster and try again.");
+      const request = this.#request;
+      if (!request || this.dataset.state !== "ready") return;
+      this.#request = null;
+      if (request.intent !== this.#intentGeneration) return;
+      if (request.workspaceId !== this.#workspaceId) {
+        this.#failed("The workspace changed before the prompt was created. Nothing was created.", "name" in request);
         return;
       }
-      select.value = identity.principalId;
-      this.#syncNameField();
-      void this.#mint();
-    }
-
-    #fillIdentities() {
-      const select = this.#q<HTMLSelectElement>('[data-field="identity"]');
-      const form = this.#q<HTMLElement>('[data-panel="form"]');
-      if (!select || !form) return;
-      while (select.options.length > 1) select.remove(1);
-      const roster = this.#agents.map((agent) => ({
-        id: agent.principalId,
-        name: agent.name,
-      }));
-      for (const agent of this.#agents) {
-        const option = document.createElement("option");
-        option.value = agent.principalId;
-        const label = identityDisplayLabel(
-          { id: agent.principalId, name: agent.name },
-          roster,
-        );
-        option.textContent = `${label} · ${agent.model ?? "Model not specified"}`;
-        select.append(option);
-      }
-      form.dataset.hasAgents = this.#agents.length > 0 ? "yes" : "no";
-      select.value = "";
-      this.#syncNameField();
-    }
-
-    #clearDuplicateChoice() {
-      this.#createAnotherChosen = false;
-      this.#showCreateAnother(null);
-    }
-
-    #showCreateAnother(name: string | null) {
-      const button = this.#q<HTMLButtonElement>('[data-action="create-another"]');
-      if (!button) return;
-      if (name === null || name.length === 0) {
-        button.hidden = true;
-        button.textContent = "Create another with this name";
+      if ("principalId" in request && !this.#agents.some((agent) => agent.principalId === request.principalId)) {
+        this.#failed("That AI assistant is no longer available. Reload the roster and try again.", false);
         return;
       }
-      this.#pendingDuplicateName = name;
-      button.hidden = false;
-      button.textContent = `Create another called ${name}`;
-    }
-
-    /** The name field is only meaningful when a new identity is being created. */
-    #syncNameField() {
-      const select = this.#q<HTMLSelectElement>('[data-field="identity"]');
-      const nameWrap = this.#q<HTMLElement>('[data-field-wrap="name"]');
-      if (!select || !nameWrap) return;
-      const existing = select.value !== "";
-      nameWrap.hidden = existing;
+      void this.#mint(request);
     }
 
     #formError(message: string | null) {
@@ -697,21 +566,19 @@ const {
       if (!node) return;
       node.textContent = message ?? "";
       node.hidden = message === null;
-      if (message === null) this.#showCreateAnother(null);
     }
 
-    #step(step: string, status: "doing" | "done" | "skipped") {
-      const node = this.#q<HTMLElement>(`[data-step="${step}"]`);
-      if (node) node.dataset.status = status;
+    /* A refusal is shown here, and the page is told: a name typed in the Add an agent panel is
+       fixed there, beside the name. */
+    #failed(message: string, named: boolean) {
+      this.#formError(message);
+      this.dispatchEvent(new CustomEvent("commonswarm:agent-prompt-failed", {
+        bubbles: true,
+        detail: { message, named },
+      }));
     }
 
-    #resetSteps() {
-      for (const node of this.querySelectorAll<HTMLElement>("[data-step]")) {
-        delete node.dataset.status;
-      }
-    }
-
-    async #mint() {
+    async #mint(request: MintRequest) {
       /* ★ THE GUARD IS SET HERE, NOT 30 LINES DOWN, AND THE GAP WAS A DOUBLE-MINT.
          `#busy` used to be checked here and assigned only after `await currentSession()`
          and the validation below. Two submits inside that window — a double-click, or
@@ -725,7 +592,7 @@ const {
       this.#busy = true;
       this.toggleAttribute("data-mint-busy", true);
       try {
-        await this.#mintGuarded();
+        await this.#mintGuarded(request);
       } finally {
         this.#busy = false;
         this.toggleAttribute("data-mint-busy", false);
@@ -736,35 +603,45 @@ const {
       }
     }
 
-    async #mintGuarded() {
+    /* Every step that creates, mints or shows something first checks that its request is still
+       the live one and that the signed-in account is the one that asked. Leaving says nothing:
+       the person who asked has gone, and the person now here did not ask. */
+    #stillAsked(request: MintRequest, userId: string | undefined): boolean {
+      return request.intent === this.#intentGeneration && userId === request.userId
+        && request.workspaceId === this.#workspaceId;
+    }
+
+    #abandon() {
       this.#formError(null);
+      this.#state("ready");
+    }
+
+    async #mintGuarded(request: MintRequest) {
+      this.#formError(null);
+      const named = "name" in request;
 
       const session = await currentSession();
+      if (request.intent !== this.#intentGeneration) {
+        this.#abandon();
+        return;
+      }
+      if (session && session.user.id !== request.userId) {
+        this.#abandon();
+        return;
+      }
       if (!session) {
         this.#blocked(
           "Your sign-in expired",
           "No key was created. Sign in again and come back to this step.",
         );
+        this.#failed("Your sign-in expired. No key was created.", named);
         return;
       }
 
-      const select = this.#q<HTMLSelectElement>('[data-field="identity"]');
-      const nameField = this.#q<HTMLInputElement>('[data-field="name"]');
-      const existingId = select?.value ?? "";
-      const name = (nameField?.value ?? "").trim();
-      const allowDuplicateName = this.#createAnotherChosen &&
-        name.length > 0 &&
-        name === this.#pendingDuplicateName;
-      this.#createAnotherChosen = false;
-      if (!existingId && name.length === 0) {
-        this.#formError("Name the AI assistant first — collaborators will see this name.");
-        nameField?.focus();
-        return;
-      }
       /* #busy is owned by #mint()'s wrapper now — it is set before the first await and
          cleared in a finally there, so assigning it again here would be a second source of
          truth for one flag. */
-      this.#resetSteps();
+      this.#text("loading-title", "Creating the key…");
       this.#state("working");
 
       /*
@@ -777,40 +654,24 @@ const {
       const mintCommandId = `web_${uuid()}`;
 
       try {
-        // The three steps are the three commands, in the order they are actually sent — the
-        // device has to exist before the mint will be accepted at all.
-        this.#step("register-device", "doing");
+        // The device has to exist before the mint will be accepted at all.
         const deviceId = await ensureBrowserDevice(session);
-        this.#step("register-device", "done");
+        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
 
-        let identity: AgentIdentity;
-        if (existingId) {
-          identity = this.#agents.find((agent) => agent.principalId === existingId) ?? {
-            principalId: existingId,
+        const identity: AgentIdentity = "principalId" in request
+          ? this.#agents.find((agent) => agent.principalId === request.principalId) ?? {
+            principalId: request.principalId,
             name: "your agent",
             model: null,
-          };
-          this.#text("identity-note", " — reusing the one you already have");
-          this.#step("create-identity", "skipped");
-        } else {
-          this.#text("identity-note", "");
-          this.#step("create-identity", "doing");
-          identity = await createAgentIdentity(
-            session,
-            identityCommandId,
-            this.#workspaceId,
-            name,
-            undefined,
-            allowDuplicateName,
-          );
-          this.#step("create-identity", "done");
-        }
+          }
+          : await createAgentIdentity(session, identityCommandId, this.#workspaceId, request.name);
+        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
 
-        this.#step("mint-credential", "doing");
         const credential = await mintAgentCredential(
           session, mintCommandId, this.#workspaceId, identity, deviceId, AGENT_TOKEN_MAX_TTL_MS,
         );
-        this.#step("mint-credential", "done");
+        /* Before the secret is shown or copied: the same request, and the same account signed in. */
+        if (!this.#stillAsked(request, (await currentSession())?.user.id)) return this.#abandon();
 
         const target = deployment();
         if (!target) throw new NoDeployment();
@@ -844,13 +705,20 @@ const {
               model: identity.model,
               tokenId: credential.tokenId,
               workspaceId: this.#workspaceId,
+              /* Created from the Add an agent panel's name, not a new key for an agent that exists. */
+              named,
             },
           }),
         );
         this.#watchForFirstUse(credential.tokenId);
+        /* "Copy setup prompt" copies when the browser still allows it after the mint; when it
+           does not, the Copy prompt button under the result does it. */
+        if (named) void this.#copy(true);
       } catch (error) {
         this.#state("ready");
-        this.#formError(this.#explain(error));
+        if (request.intent === this.#intentGeneration) this.#failed(this.#explain(error), named);
+      } finally {
+        this.#text("loading-title", "Checking your session…");
       }
       /* No `finally { #busy = false }` here: #mint()'s wrapper clears it, and clearing it
          twice would let a second submit through while this call was still unwinding. */
@@ -881,10 +749,8 @@ const {
      */
     #explain(error: unknown): string {
       if (error instanceof AgentNameTaken) {
-        this.#showCreateAnother(error.agentName);
-        return "That assistant name is already in use. Choose it from the list, or pick another name.";
+        return `“${error.agentName}” is already in this workspace. Choose another name.`;
       }
-      this.#showCreateAnother(null);
       if (error instanceof CredentialNotShown) {
         return "That key was created during an earlier attempt and cannot be shown again. Create a new key.";
       }
@@ -1009,12 +875,13 @@ const {
      * the button holds a copied state for a moment, and the live region says it out loud for
      * anyone not watching the button.
      */
-    async #copy() {
+    async #copy(quiet = false) {
       if (!this.#prompt) return;
       const button = this.#q<HTMLButtonElement>('[data-action="copy"]');
       try {
         await navigator.clipboard.writeText(this.#prompt);
       } catch {
+        if (quiet) return;
         // Clipboard access can be refused outright (permissions, or a non-secure origin). The
         // honest fallback is to select the text so the reader's own copy shortcut works.
         const pre = this.#q<HTMLElement>('[data-slot="prompt"]');
@@ -1057,13 +924,6 @@ const {
     max-inline-size: var(--measure-wide);
   }
 
-  .ac__head {
-    display: flex;
-    flex-direction: column;
-    gap: var(--stack-sm);
-    margin-block-end: var(--stack-xl);
-  }
-
   .ac__eyebrow {
     font-size: var(--t-2xs);
     line-height: var(--lh-2xs);
@@ -1071,20 +931,6 @@ const {
     text-transform: uppercase;
     font-weight: var(--weight-semibold);
     color: var(--accent-bright);
-  }
-
-  .ac__title {
-    font-size: var(--t-2xl);
-    line-height: var(--lh-2xl);
-    letter-spacing: var(--track-head);
-    font-weight: var(--weight-head);
-    color: var(--text);
-  }
-
-  .ac__lead {
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-    color: var(--text-muted);
   }
 
   .ac__muted {
@@ -1102,27 +948,13 @@ const {
     gap: var(--stack-lg);
   }
 
+  /* Working shares the loading line ("Creating the key…"): one quiet line, not a progress screen. */
   .ac[data-state="loading"] [data-panel="loading"],
+  .ac[data-state="working"] [data-panel="loading"],
   .ac[data-state="blocked"] [data-panel="state"],
   .ac[data-state="ready"] [data-panel="form"],
-  .ac[data-state="working"] [data-panel="working"],
   .ac[data-state="done"] [data-panel="result"] {
     display: flex;
-  }
-
-  /* The head is the question the form asks ("Name your agent."). Every other state
-     carries its own h2 — the blocked reason, "Creating your agent prompt.", "Your
-     agent prompt is ready.", "Checking your session…" — so the question would sit
-     above the answer as a stale, contradictory heading, and the a11y tree would
-     read H1-workspace then H3-result. Loading hides it too: the terminal state
-     after a session check is often blocked, and a head that shows for the loading
-     frame only to vanish a beat later is a flash, not context. The head survives
-     exactly one state: ready, where it is the live question. */
-  .ac[data-state="done"] .ac__head,
-  .ac[data-state="blocked"] .ac__head,
-  .ac[data-state="working"] .ac__head,
-  .ac[data-state="loading"] .ac__head {
-    display: none;
   }
 
   .ac__panel--state {
@@ -1131,16 +963,6 @@ const {
   }
 
   .ac__state-title {
-    font-size: var(--t-lg);
-    line-height: var(--lh-lg);
-    font-weight: var(--weight-semibold);
-    color: var(--text);
-  }
-
-  /* The working and loading h2s match the other state headings' placement; the
-     visual voice stays quiet because the steps below carry the progress. */
-  .ac__working-title {
-    margin: 0;
     font-size: var(--t-lg);
     line-height: var(--lh-lg);
     font-weight: var(--weight-semibold);
@@ -1158,60 +980,10 @@ const {
     color: var(--text-muted);
   }
 
-  .ac__advanced > summary {
-    cursor: pointer;
-    padding-block: 0.5rem;
-  }
-
-  .ac__advanced[open] > summary {
-    margin-bottom: 0.75rem;
-  }
-
   .ac__field {
     display: flex;
     flex-direction: column;
     gap: var(--stack-xs);
-  }
-
-  /* An author `display` beats the UA's `[hidden] { display: none }`, so hiding this field from
-     script silently does nothing without this line. The name field is hidden whenever an
-     existing identity is selected, so "silently does nothing" would mean asking for a name the
-     command never sends. */
-  .ac__field[hidden] {
-    display: none;
-  }
-
-  /* With no existing identities there is nothing to choose between, so the select is a control
-     with one option — noise in front of the only field that matters. */
-  .ac__form[data-has-agents="no"] [data-field-wrap="identity"] {
-    display: none;
-  }
-
-  .ac__label {
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    font-weight: var(--weight-medium);
-    color: var(--text);
-  }
-
-  .ac__control {
-    inline-size: 100%;
-    padding: var(--s-3) var(--s-4);
-    font-family: inherit;
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-    color: var(--text);
-    background: var(--elev-1);
-    /* --border-interactive is the only hairline that clears 1.4.11's 3:1, and a form control's
-       edge is the case that rule is actually about. */
-    border: 1px solid var(--border-interactive);
-    border-radius: var(--radius);
-    transition: box-shadow var(--dur-2) var(--ease-standard);
-  }
-
-  .ac__control:focus-visible {
-    outline: none;
-    box-shadow: var(--focus-ring);
   }
 
   .ac__hint {
@@ -1285,53 +1057,6 @@ const {
     background: transparent;
     font-weight: var(--weight-medium);
     color: var(--text-muted);
-  }
-
-  .ac__steps {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-3);
-    list-style: none;
-  }
-
-  .ac__step {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    color: var(--text-faint);
-  }
-
-  .ac__step[data-status] {
-    color: var(--text);
-  }
-
-  .ac__dot {
-    inline-size: 0.55rem;
-    block-size: 0.55rem;
-    flex: none;
-    border-radius: var(--radius-pill);
-    background: var(--border-strong);
-  }
-
-  .ac__step[data-status="doing"] .ac__dot {
-    background: var(--accent);
-  }
-
-  .ac__step[data-status="done"] .ac__dot {
-    background: var(--accent);
-    opacity: 0.55;
-  }
-
-  /* A step that did not need to run is not a step that succeeded, and it should not wear the
-     same green as one that did. */
-  .ac__step[data-status="skipped"] {
-    color: var(--text-faint);
-  }
-
-  .ac__step-note {
-    color: var(--text-faint);
   }
 
   .ac__result-copy {
@@ -1434,8 +1159,7 @@ const {
   }
 
   @media (width <= 64rem) {
-    .ac__btn, .ac__control, .ac__advanced > summary { min-inline-size: 44px; min-block-size: 44px; }
-    .ac__control { font-size: 16px; }
+    .ac__btn { min-inline-size: 44px; min-block-size: 44px; }
   }
 
   @media (max-width: 30rem) {

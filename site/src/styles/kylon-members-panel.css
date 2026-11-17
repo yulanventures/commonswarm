@@ -21,7 +21,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-pag
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-context { gap: 0; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail [data-people-context] > :is(.pd-page-main,.pd-context-footer),
-  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters,.pd-agent-picker),
+  live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-head > :is(.pd-page-actions,.pd-page-search,.pd-page-filters),
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-back { display: none; }
   live-dashboard.dashboard[data-kylon-shell] [data-people-page].has-detail .pd-page-title-row h1 {
     position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
@@ -103,15 +103,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-actions
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > * { padding-inline: 12px; font-size: 15px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > :hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-actions > .pd-member-remove { color: var(--home-danger); }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-picker {
-  padding: 8px; border: 1px solid var(--k-shell-line); border-radius: 8px; background: var(--k-shell-subtle);
-}
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-picker p:empty { display: none; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-choice { display: flex; align-items: center; gap: 12px; min-block-size: 44px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-choice-add {
-  min-block-size: 44px; min-inline-size: 52px; padding: 4px 12px; border: 1px solid var(--k-shell-control); border-radius: 6px;
-  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 500 15px/1.4 var(--k-shell-font); cursor: pointer;
-}
 live-dashboard.dashboard[data-kylon-shell] [data-people-page] .pd-profile-empty { display: none; }
 @media (max-width: 52rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-people-page] { max-inline-size: none; margin: 0; padding: 8px 0 24px; border: 0; border-radius: 0; box-shadow: none; }

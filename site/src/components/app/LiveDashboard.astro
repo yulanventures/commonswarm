@@ -416,16 +416,13 @@ import "../../styles/kylon-command-palette.css";
               </ol>
             </section>
 
-            {/* ADD AN AGENT, BY APP (redesign, 2026-10-04). "Who runs this agent? I do / A
-                teammate does" is gone: a person's agents live in apps (Claude, Muse, ChatGPT,
-                Codex...), so the person picks the app and gets that app's steps and the one
-                connector address. The one-time key flow is the "Terminal agent" tile under
-                Other; it carries data-agent-owner-self, so it opens AgentConnect exactly as the
-                "I do" choice did. Inviting a person is the picker's footer link, which carries
-                data-agent-owner-teammate and opens the person invite as before. */}
-            {/* Add-Agent.dc.html has one way back: the picker's own breadcrumb, which sends agent-host-home. */}
+            {/* ADD AN AGENT: ONE PANEL (2026-11-16). Every door opens this route: the person's
+                own agents first, then the app, an optional name and the one sentence to paste.
+                Terminal agent and Grok Bot mint a one-time prompt through AgentConnect below.
+                Inviting a person is the panel's footer link (data-agent-owner-teammate). The
+                one way back is the panel's own breadcrumb, which sends agent-host-home. */}
             <section class="dashboard__connect-view dashboard__choice-view dashboard__host-view" data-channel-view="agent-choice" hidden>
-              <AgentHostPicker audience="setter" class="dashboard__host-picker" />
+              <AgentHostPicker class="dashboard__host-picker" />
             </section>
 
             <section class="dashboard__connect-view dashboard__invite-view" data-channel-view="invite" hidden>
@@ -496,7 +493,7 @@ import "../../styles/kylon-command-palette.css";
                 data-connect-exit-status
                 hidden
               ></p>
-              <AgentConnect eyebrow="Terminal agent · one-time key" class="dashboard__connect" />
+              <AgentConnect class="dashboard__connect" />
             </section>
 
             <section
@@ -1229,6 +1226,7 @@ import "../../styles/kylon-command-palette.css";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
+  import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
   import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
@@ -1248,7 +1246,7 @@ import "../../styles/kylon-command-palette.css";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
-  import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
+  import { agentLabelInSentence, personTint } from "../../lib/home-names";
   import { homeAskAnswered, ASKS_UNAVAILABLE_ACTION } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import { mountWorkspaceSkills } from "../../lib/workspace-skills-view";
@@ -1658,7 +1656,22 @@ import "../../styles/kylon-command-palette.css";
   interface SecretHoldingAgentConnect extends HTMLElement {
     clearPrompt(notify?: boolean): void;
     finishPrompt(reason: "done" | "back" | "consumed", notify?: boolean): void;
-    requestPromptFor(principalId: string): void;
+    requestPromptFor(principalId: string, userId: string): void;
+    requestPromptNamed(name: string, userId: string): void;
+    retirePending(): void;
+  }
+
+  interface AddAgentPanel extends HTMLElement {
+    readonly hostId: string;
+    readonly agentName: string;
+    readonly watchable: boolean;
+    reset(hostId?: string): void;
+    setContext(context: { workspaceName?: string; accountEmail?: string; viewerId?: string }): void;
+    setRoster(names: readonly string[]): void;
+    setConnected(hostIds: readonly string[]): void;
+    showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }): void;
+    mintFailed(message: string): void;
+    mintSettled(): void;
   }
 
   interface CreateIntent {
@@ -1996,6 +2009,9 @@ import "../../styles/kylon-command-palette.css";
     let activeCreate: { version: number; userId: string } | null = null;
     /** Principal whose live Copy-prompt secret is still on screen, if any. */
     let livePromptPrincipalId = "";
+    /* The key the Add an agent panel minted for a named Terminal agent or Grok Bot, until its
+       first use brings the panel back with the joined card (or the person leaves it). */
+    let panelKeyMint: { workspaceId: string; userId: string; principalId: string; name: string } | null = null;
     let freshInviteLink = "";
     let freshInviteId = "";
     let freshInviteWorkspaceId = "";
@@ -5330,9 +5346,12 @@ import "../../styles/kylon-command-palette.css";
             });
           },
           onFix: action => {
-            if (action === "new-key") void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
-              openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id));
-            });
+            if (action === "new-key") {
+              const userId = session?.user.id ?? "";
+              void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
+                openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id, userId));
+              });
+            }
             else void manage().then(() => pressOnPage(`resume-${id}`));
           },
           onRemove: () => { void manage().then(() => pressOnPage(`remove-agent-${id}`)); },
@@ -7346,28 +7365,6 @@ import "../../styles/kylon-command-palette.css";
           invite: () => { void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => openInvite("channel")); },
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
-      const actions=list.querySelector<HTMLElement>('.pd-page-actions');
-      if(actions && session && !sampleMode) {
-        const add=document.createElement('button'); add.type='button'; add.className='pd-page-primary'; add.textContent='Add your agents';
-        const picker=document.createElement('section'); picker.hidden=true; picker.className='pd-agent-picker'; picker.id='pd-agent-picker'; picker.setAttribute('aria-label','Add your agents');
-        add.setAttribute('aria-expanded','false'); add.setAttribute('aria-controls',picker.id);
-        actions.append(add); actions.after(picker);
-        add.addEventListener('click',()=>{
-          if(!session || !activeWorkspaceId) return;
-          if(!picker.hidden) { picker.hidden=true; add.setAttribute('aria-expanded','false'); return; }
-          const value=session,workspaceId=activeWorkspaceId,navigation=homeNavigation;
-          picker.hidden=false; add.setAttribute('aria-expanded','true');
-          mountWorkspaceAgentPicker(picker, {
-            session: value, workspaceId, orgId: workspace.orgId,
-            isCurrent: () => activeWorkspaceId === workspaceId && session?.user.id === value.user.id && navigation === homeNavigation && !picker.hidden && peopleDialogOpen(),
-            added: async agent => {
-              if (activeWorkspaceId === workspaceId && session?.user.id === value.user.id && peopleDialogOpen()) {
-                await reloadPeopleDialog(workspaceId, agent.id, `${agent.name} added.`);
-              }
-            },
-          });
-        });
-      }
       if (peopleDialogState.selected?.type === "agent") {
         mountRenewalEndDate(detail, peopleDialogState.selected.id);
         mountSeatAdminPanel(detail, peopleDialogState.selected.id, "people");
@@ -7405,7 +7402,7 @@ import "../../styles/kylon-command-palette.css";
       const agent = agents.find((entry) => entry.principalId === id);
       const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
       // These three continue in the workspace: the key prompt and the consent card are channel views.
-      if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id)); return; }
+      if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id, userId)); return; }
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
       if (action === "allow") {
         const outcome = await allowAgentFromPeople(workspaceId, id, button, notice);
@@ -10327,6 +10324,7 @@ import "../../styles/kylon-command-palette.css";
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      panelKeyMint = null;
       disposeCleanup();
       resetSeatAdminState();
       listsAllowLanding = null;
@@ -11341,31 +11339,77 @@ import "../../styles/kylon-command-palette.css";
     };
 
     let existingAgentChoiceIsCurrent: (() => boolean) | undefined;
+    /** What the panel checks a name against and which apps it marks: this workspace's agents now. */
+    const refreshAddAgentPanel = (picker: AddAgentPanel | null, workspaceId: string): void => {
+      picker?.setRoster?.(agents.map((agent) => agent.name));
+      picker?.setConnected?.(workspaceId && session
+        ? connectedHosts(addAgentStore(), session.user.id, workspaceId, agents.map((agent) => agent.principalId))
+        : []);
+    };
+    /** "Already yours": the person's agents that can join this workspace, each with Add. The
+        section stays hidden unless there is one to add (or the list could not load). */
+    const mountAlreadyYours = (): void => {
+      const picker = one<AddAgentPanel>("agent-host-picker");
+      const section = picker?.querySelector<HTMLElement>("[data-ahp-yours]");
+      const host = picker?.querySelector<HTMLElement>("[data-ahp-existing-list]");
+      const workspace = workspaces.find(item => item.id === activeWorkspaceId);
+      if (section) section.hidden = true;
+      existingAgentChoiceIsCurrent = undefined;
+      if (!session || !section || !host || !workspace || sampleMode) return;
+      const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
+      const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
+        version === requestVersion && navigation === homeNavigation && homeRoute.view === "add-agent";
+      existingAgentChoiceIsCurrent = current;
+      mountWorkspaceAgentPicker(host, {
+        session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
+        shown: (show) => { section.hidden = !show; },
+        added: async agent => {
+          // An agent added here is not the one the panel's waiting line is waiting for.
+          hostJoinKnown.add(agent.id);
+          const next = await roster(workspaceId);
+          if (!current()) return;
+          if (!next.some(item => item.principalId === agent.id)) throw new Error("Added agent not yet in the roster");
+          agents = next;
+          removedAgents.delete(agent.id);
+          removedAgentOwners.delete(agent.id);
+          renderRoster();
+          refreshAddAgentPanel(picker ?? null, workspaceId);
+        },
+      });
+    };
     const openAgentChoice = (): void => {
       if (sampleMode) return;
       if (homeRoute.view !== "add-agent" && activeWorkspaceId) {
         void navigateHome({ view: "add-agent", workspaceId: activeWorkspaceId }, "push");
         return;
       }
-      const picker = one<HTMLElement & {
-        reset?: () => void;
-        setContext?: (context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }) => void;
-      }>("agent-host-picker");
+      const picker = one<AddAgentPanel>("agent-host-picker");
       const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
-      const rosterName = members.find((member) => member.userId === session?.user.id)?.name ?? "";
-      const account = session ? accountName(session) : "";
-      // Finishing a workspace read may apply this pane again after the person has
-      // already chosen an identity. Keep that live choice; a new navigation retires it.
-      const keepExistingChoice = existingAgentChoiceIsCurrent?.() === true;
-      if (!keepExistingChoice) picker?.reset?.();
+      // Finishing a workspace read may apply this pane again while the person is mid-attempt
+      // (a name typed, an agent being added). Keep that attempt; a new navigation retires it.
+      const keepAttempt = existingAgentChoiceIsCurrent?.() === true;
+      const returning = app.dataset.channelView !== "agent-choice";
       picker?.setContext?.({
         workspaceName: selected?.name ?? "",
-        accountEmail: session?.user.email ?? account,
-        viewerFirstName: personFirstName(rosterName) || personFirstName(account),
+        accountEmail: session?.user.email ?? (session ? accountName(session) : ""),
+        viewerId: session?.user.id ?? "",
       });
-      stopHostJoinWatch();
+      refreshAddAgentPanel(picker, activeWorkspaceId);
       showChannelView("agent-choice");
-      if (!keepExistingChoice) window.requestAnimationFrame(() => {
+      if (keepAttempt) {
+        // Back from the invite or key view: the watch stopped when the panel left the screen.
+        if (!returning) return;
+        if (picker?.watchable) startHostJoinWatch();
+        window.requestAnimationFrame(() => {
+          one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
+        });
+        return;
+      }
+      stopHostJoinWatch();
+      // Choosing the last app used again starts that app's watch.
+      picker?.reset?.();
+      mountAlreadyYours();
+      window.requestAnimationFrame(() => {
         one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
       });
     };
@@ -11464,14 +11508,18 @@ import "../../styles/kylon-command-palette.css";
       if (exitStatus) exitStatus.hidden = true;
       showChannelView("connect");
       connectFocusObserver?.disconnect();
+      /* Focus follows the element to where it settles: the prompt's Copy button, the reason it
+         stopped, or the invite button when that is all the ready view holds. */
       const focusField = (): boolean => {
-        if (connect.dataset.state !== "ready") return false;
-        const form = connect.querySelector<HTMLFormElement>("[data-panel='form']");
-        const target = form?.dataset.hasAgents === "yes"
-          ? connect.querySelector<HTMLSelectElement>("[data-field='identity']")
-          : connect.querySelector<HTMLInputElement>("[data-field='name']");
-        target?.focus({ preventScroll: true });
-        return Boolean(target);
+        const state = connect.dataset.state;
+        const target = state === "done" ? connect.querySelector<HTMLButtonElement>("[data-action='copy']")
+          : state === "blocked" ? connect.querySelector<HTMLElement>("[data-panel='state'] h2")
+            : state === "ready" ? connect.querySelector<HTMLElement>("[data-action='mint-join'], [data-slot='form-error']:not([hidden])")
+              : null;
+        if (!target) return false;
+        if (target.tagName === "H2" || target.tagName === "P") target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        return true;
       };
       window.requestAnimationFrame(() => {
         if (focusField()) return;
@@ -11819,9 +11867,13 @@ import "../../styles/kylon-command-palette.css";
       /* From People & agents: the dialog already disabled the button for this click, and it shows a
        * refusal itself, so a refusal is thrown to it rather than written here. */
       fromPeople = false,
+      /* The scope the click was made in. A caller that awaited before approving passes it, so the
+       * approval is sent to that workspace with that session, or not at all; never to whichever
+       * workspace happens to be open now. */
+      pinned: HouseholdScope | null = null,
     ): Promise<void> => {
-      const scope = householdScope();
-      if (!scope || (!fromPeople && button.disabled)) return;
+      const scope = pinned ?? householdScope();
+      if (!scope || !householdCurrent(scope) || (!fromPeople && button.disabled)) return;
       button.disabled = true;
       status.textContent = "Saving…";
       const settle = (message: string): void => {
@@ -11868,23 +11920,31 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
-    /** People → Allow: one click, in place, with the defaults the Lists & docs card uses, once this
-     *  workspace's Lists & docs are set up. Before that, or for an agent with no connection to approve,
-     *  the caller opens the page that sets them up. */
+    /** People → Allow and the Add an agent joined card's Allow: one click, in place, with the defaults
+     *  the Lists & docs card uses, once this workspace's Lists & docs are set up. Before that, or for an
+     *  agent with no connection to approve, the caller opens the page that sets them up.
+     *
+     *  PINNED TO THE CLICK (HezSec C2 on #474). The workspace, account, boot version and household
+     *  generation are taken when the person clicks. After the connections read, the click goes on
+     *  only if that scope is still current; the connection and the role are read for it then, and the
+     *  approval is sent with it. A click in one workspace never approves in another ("stale"). */
     const allowAgentFromPeople = async (
       workspaceId: string,
       principalId: string,
       button: HTMLButtonElement,
       status: HTMLElement,
-    ): Promise<"approved" | "setup"> => {
+    ): Promise<"approved" | "setup" | "stale"> => {
+      const scope = householdScope();
+      if (!scope || scope.workspaceId !== workspaceId) return "stale";
       const ready = householdAccess.workspaceId === workspaceId && householdAccess.status === "ok";
       if (ready && householdConnectionsReadState !== "succeeded") await loadHouseholdConnections();
-      const connection = ready
+      if (!householdCurrent(scope)) return "stale";
+      const connection = ready && householdAccess.workspaceId === workspaceId
         ? householdConnections.find((entry) => String(entry.principal_id ?? "") === principalId)
         : undefined;
       if (!connection) return "setup";
-      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status, true);
-      return "approved";
+      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status, true, scope);
+      return householdCurrent(scope) ? "approved" : "stale";
     };
 
     /** Withdrawal leaves the agent connected and is audited by the command path. */
@@ -12149,8 +12209,9 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
-    /** Notice the agent the person is connecting, while its host page is open. Each host page
-        starts its own watch; a reply from an older watch is ignored (R2 review). */
+    /** Notice the agent this attempt is connecting, while the panel shows a connector app. Each
+        choice of app starts its own watch; a reply from an older watch is ignored (R2 review).
+        The name is read on every poll, so a name typed after choosing the app still counts. */
     const startHostJoinWatch = (): void => {
       stopHostJoinWatch();
       const me = session?.user.id ?? "";
@@ -12174,16 +12235,17 @@ import "../../styles/kylon-command-palette.css";
         if (document.visibilityState !== "visible") return;
         void roster(workspaceId).then((nextAgents) => {
           if (!live()) return;
-          const joined = nextAgents.find(
-            (agent) => agent.ownerUserId === me && !hostJoinKnown.has(agent.principalId),
-          );
+          const picker = one<AddAgentPanel>("agent-host-picker");
+          const joined = joinAttemptMatch(nextAgents, { ownerUserId: me, known: hostJoinKnown, name: picker?.agentName ?? "" });
           agents = nextAgents;
           renderRoster();
           if (!joined) return;
           stopHostJoinWatch();
-          const picker = one<HTMLElement & {
-            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }) => void;
-          }>("agent-host-picker");
+          if (picker?.hostId) {
+            rememberJoinedHost(addAgentStore(), { userId: me, workspaceId, hostId: picker.hostId, principalId: joined.principalId });
+          }
+          // Add another starts from the roster and the connected apps as they are now.
+          refreshAddAgentPanel(picker, workspaceId);
           picker?.showJoined?.({
             name: joined.name,
             joinedAt: joined.joinedAt ?? undefined,
@@ -13165,6 +13227,8 @@ import "../../styles/kylon-command-palette.css";
         connect.finishPrompt("back");
         return;
       }
+      // Leaving before the prompt exists abandons the request that would have made it.
+      connect?.retirePending();
       returnToChannel();
     };
 
@@ -13815,6 +13879,7 @@ import "../../styles/kylon-command-palette.css";
         passwordChangeNotice = null;
         clearSeatAdminReauthIntent();
         if (session) clearCreateIntent(session.user.id);
+        if (session) forgetAddAgent(addAgentStore(), session.user.id);
         requestVersion += 1;
         householdDashboard?.clear();
         renderedAuthUserId = "";
@@ -14285,14 +14350,9 @@ import "../../styles/kylon-command-palette.css";
         }
         return;
       }
+      /* "Add an agent" opens the one panel, like every other door. */
       if (action.type === "connect-agent") {
-        const go = async () => {
-          if (homeRoute.view !== "chat" && activeWorkspaceId) {
-            await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
-          }
-          openConnect();
-        };
-        void go();
+        openAgentChoice();
         return;
       }
       if (action.type === "new-channel") {
@@ -15451,6 +15511,7 @@ import "../../styles/kylon-command-palette.css";
     one<HTMLButtonElement>("[data-add-agent-objects]")?.addEventListener("click", openAgentChoice);
     const leaveAddAgentForHome = (): void => {
       stopHostJoinWatch();
+      one<SecretHoldingAgentConnect>("agent-connect")?.retirePending();
       homeBack();
     };
     const finishJoinedAgent = (agentId: string): void => {
@@ -15458,38 +15519,33 @@ import "../../styles/kylon-command-palette.css";
       if (!agentId || !activeWorkspaceId) return;
       void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId }, "push");
     };
-    const openExistingAgentChoice = (): void => {
-      stopHostJoinWatch();
-      const picker = one<HTMLElement & { hostId?: string }>("agent-host-picker");
-      const host = picker?.querySelector<HTMLElement>("[data-ahp-existing-list]");
-      const workspace = workspaces.find(item => item.id === activeWorkspaceId);
-      if (!session || !host || !workspace || sampleMode) return;
-      const value = session, workspaceId = workspace.id, version = requestVersion, navigation = homeNavigation;
-      const current = () => session?.user.id === value.user.id && activeWorkspaceId === workspaceId &&
-        version === requestVersion && navigation === homeNavigation && homeRoute.view === "add-agent" && picker?.hostId === "existing";
-      existingAgentChoiceIsCurrent = current;
-      mountWorkspaceAgentPicker(host, {
-        session: value, workspaceId, orgId: workspace.orgId, isCurrent: current,
-        added: async agent => {
-          const next = await roster(workspaceId);
-          if (!current()) return;
-          if (!next.some(item => item.principalId === agent.id)) throw new Error("Added agent not yet in the roster");
-          agents = next;
-          removedAgents.delete(agent.id);
-          removedAgentOwners.delete(agent.id);
-          renderRoster();
-        },
-      });
-    };
-    const hostPicker = one<HTMLElement>("agent-host-picker");
-    hostPicker?.addEventListener("agent-host-existing", openExistingAgentChoice);
-    hostPicker?.addEventListener("agent-host-selected", () => startHostJoinWatch());
-    hostPicker?.addEventListener("agent-host-back", () => stopHostJoinWatch());
+    const hostPicker = one<AddAgentPanel>("agent-host-picker");
+    /* Only a connector app is watched; a key route's agent is the one its own prompt creates.
+       Choosing an app abandons any key request still waiting from an earlier choice. */
+    hostPicker?.addEventListener("agent-host-selected", () => {
+      one<SecretHoldingAgentConnect>("agent-connect")?.retirePending();
+      if (hostPicker.watchable) startHostJoinWatch();
+      else stopHostJoinWatch();
+    });
     hostPicker?.addEventListener("agent-host-home", () => {
       leaveAddAgentForHome();
     });
-    hostPicker?.addEventListener("agent-host-approve", () => {
-      if (activeWorkspaceId) void navigateHome({ view: "lists", workspaceId: activeWorkspaceId }, "push", true);
+    hostPicker?.addEventListener("agent-host-mint", (event: Event) => {
+      const name = (event as CustomEvent<{ name?: unknown }>).detail?.name;
+      const connect = one<SecretHoldingAgentConnect>("agent-connect");
+      if (typeof name !== "string" || !connect || !session) return;
+      openConnect();
+      connect.requestPromptNamed(name, session.user.id);
+    });
+    /* One-click Allow. Lists & docs opens only when it is not set up for this workspace yet. */
+    hostPicker?.addEventListener("agent-host-approve", (event: Event) => {
+      const detail = (event as CustomEvent<{ principalId?: string; button?: HTMLButtonElement; status?: HTMLElement }>).detail;
+      const workspaceId = activeWorkspaceId;
+      const { principalId, button, status } = detail ?? {};
+      if (!workspaceId || !principalId || !button || !status) return;
+      void allowAgentFromPeople(workspaceId, principalId, button, status).then((outcome) => {
+        if (outcome === "setup" && activeWorkspaceId === workspaceId) void navigateHome({ view: "lists", workspaceId }, "push", true);
+      }).catch((error: unknown) => { status.textContent = readableError(error); button.disabled = false; });
     });
     hostPicker?.addEventListener("agent-host-done", (event: Event) => {
       const principalId = (event as CustomEvent<{ principalId?: unknown }>).detail?.principalId;
@@ -15841,8 +15897,11 @@ import "../../styles/kylon-command-palette.css";
       const detail = (event as CustomEvent<{
         workspaceId?: unknown;
         principalId?: unknown;
+        name?: unknown;
+        named?: unknown;
       }>).detail;
       const workspaceId = detail?.workspaceId;
+      one<AddAgentPanel>("agent-host-picker")?.mintSettled();
       if (
         typeof workspaceId !== "string" ||
         workspaceId !== activeWorkspaceId ||
@@ -15851,6 +15910,11 @@ import "../../styles/kylon-command-palette.css";
       if (typeof detail?.principalId === "string") {
         livePromptPrincipalId = detail.principalId;
       }
+      // A new agent named in the panel; a new key for an agent that exists is not one.
+      panelKeyMint = detail?.named === true && homeRoute.view === "add-agent" && session
+        && typeof detail.principalId === "string" && typeof detail.name === "string"
+        ? { workspaceId, userId: session.user.id, principalId: detail.principalId, name: detail.name }
+        : null;
       const version = requestVersion;
       try {
         const [nextAgents, nextStatuses, nextPending] = await Promise.all([
@@ -15878,9 +15942,49 @@ import "../../styles/kylon-command-palette.css";
       }
     });
 
+    /** A key the panel minted was used: its agent has joined, so the panel shows the joined card
+        (Done, Add another, Allow) instead of returning to the channel. Done, Back or an auth
+        reset forgets the mint; a new key for an agent that exists never comes here. */
+    const finishPanelKeyMint = (reason: unknown): boolean => {
+      const mint = panelKeyMint;
+      panelKeyMint = null;
+      if (reason !== "consumed" || !mint || mint.workspaceId !== activeWorkspaceId || mint.userId !== session?.user.id
+        || homeRoute.view !== "add-agent" || app.dataset.channelView !== "connect" || pendingWorkspaceId || pendingWorkspaceCreate) return false;
+      const picker = one<AddAgentPanel>("agent-host-picker");
+      if (!picker) return false;
+      showChannelView("agent-choice");
+      refreshAddAgentPanel(picker, mint.workspaceId);
+      // A minted agent of the person's is usually allowed already (approveMintedOwnAgent); offer Allow only when it is not.
+      const allowed = householdConnections.some((entry) =>
+        String(entry.principal_id ?? "") === mint.principalId && connectionApproval(entry) !== null);
+      picker.showJoined({
+        name: mint.name,
+        principalId: mint.principalId,
+        hosted: false,
+        canApprove: householdAccess.status === "ok" && householdAccess.workspaceId === mint.workspaceId && !allowed,
+      });
+      return true;
+    };
+    /* A retired request (auth reset, abandonment) leaves the panel's Copy setup prompt ready again. */
+    app.addEventListener("commonswarm:agent-prompt-retired", () => {
+      one<AddAgentPanel>("agent-host-picker")?.mintSettled();
+    });
+
+    /* A name typed in the Add an agent panel is fixed there: back to the panel, reason beside the name. */
+    app.addEventListener("commonswarm:agent-prompt-failed", (event) => {
+      const detail = (event as CustomEvent<{ message?: unknown; named?: unknown }>).detail;
+      const picker = one<AddAgentPanel>("agent-host-picker");
+      if (detail?.named !== true || typeof detail.message !== "string" || homeRoute.view !== "add-agent" || !picker) return;
+      connectFocusObserver?.disconnect();
+      connectFocusObserver = null;
+      showChannelView("agent-choice");
+      picker.mintFailed(detail.message);
+    });
+
     app.addEventListener("commonswarm:agent-secret-cleared", (event) => {
       const detail = (event as CustomEvent<{ reason?: unknown }>).detail;
       livePromptPrincipalId = "";
+      if (finishPanelKeyMint(detail?.reason)) return;
       const nextWorkspaceId = pendingWorkspaceId;
       pendingWorkspaceId = "";
       const createWorkspaceNext = pendingWorkspaceCreate;

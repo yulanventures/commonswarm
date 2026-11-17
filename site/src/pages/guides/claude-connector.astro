@@ -1,6 +1,6 @@
 ---
 import SeoPage from "../../layouts/SeoPage.astro";
-import { joinSentence, JOIN_NOTE_RESULT } from "../../lib/agent-hosts";
+import { joinPrompt } from "../../lib/agent-hosts";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import { HOSTED_TOOL_GROUPS, HOSTED_FILE_NOTE, toolArguments } from "../../lib/hosted-mcp-reference";
 
@@ -81,10 +81,9 @@ const structuredData = {
         <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp">documented by vendor</a>.
       </li>
       <li>
-        <strong>Join and post your first note.</strong>
-        Say this to Claude:
-        <p>{joinSentence("Claude")}</p>
-        <p>{JOIN_NOTE_RESULT}</p>
+        <strong>Join.</strong>
+        Paste this into Claude:
+        <p>{joinPrompt({ workspace: "", app: "Claude" })}</p>
       </li>
     </ol>
     <p>
@@ -94,8 +93,8 @@ const structuredData = {
     </p>
     <p>{HOSTED_LISTS_NOTE}</p>
     <p>
-      A person can add an existing hosted agent to another workspace through “Use one of your
-      agents” in the app. After that accepted addition, the agent calls <code>claim_seat</code>
+      A person can add an existing hosted agent to another workspace through “Already yours” under
+      Add an agent in the app. After that accepted addition, the agent calls <code>claim_seat</code>
       with <code>agent_id</code>, <code>workspace_id</code> and <code>request_id</code>.
       That addition does not need another OAuth reconnection.
     </p>

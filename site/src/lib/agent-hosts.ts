@@ -1,8 +1,8 @@
 /*
  * The apps a person's agents live in, and how each one joins a workspace.
  *
- * ONE CATALOG. The /app "Add an agent" picker, the joiner's page on /invite and their tests all
- * read this list; no screen types a second list of hosts, steps or statuses.
+ * ONE CATALOG. The /app "Add an agent" panel, the joiner's page on /invite, the guides and their
+ * tests all read this list; no screen types a second list of hosts, steps, statuses or sentences.
  *
  * ONE ADDRESS. Every chat-app route is the hosted connector. Its address is HOSTED_MCP_RESOURCE,
  * the same constant the hosted authority enforces as the OAuth resource; nothing here retypes it.
@@ -16,8 +16,10 @@
  * more ("partner", "certified", "one-click", "wakes") are refused by the tests.
  *
  * PLAIN WORDS. Step text is what a person reads, so it uses the other app's own menu names and
- * none of ours (no seat, grant, claim, MCP tool names). The sentence a person says to the agent is
- * the one place that names CommonSwarm's action, in words a model maps to `claim_seat`.
+ * none of ours (no seat, grant, claim, MCP tool names). The sentence a person pastes into the app
+ * (joinPrompt) is the one place that names CommonSwarm's action, in words a model maps to
+ * `claim_seat`. It is not a step: setup ends once the connector is on, and every screen shows the
+ * sentence once, on its own.
  */
 
 import { HOSTED_MCP_RESOURCE } from "../../../src/protocol/hosted-authority";
@@ -97,13 +99,41 @@ export interface AgentHost {
   open?: { href: string; label: string };
 }
 
-/** The sentence that makes a connected agent join. Kept here so every host says the same thing. */
-export function joinSentence(agentName: string): string {
-  return `Use CommonSwarm to join my workspace as ${agentName}, then list who is there. Post one short note saying you joined, then tell me to look for it in the CommonSwarm web app.`;
+/*
+ * The sentences a person pastes into the app (panel consensus, 2026-11-16). A session names itself
+ * when the person leaves the name blank, and is told not to take the app's name: two chats told
+ * "as Claude" would otherwise become one agent. Nothing defaults the name to the app name.
+ */
+const workspacePhrase = (workspace: string): string => {
+  const name = workspace.trim();
+  return name ? `my "${name}" workspace` : "my workspace";
+};
+
+/** The join sentence. `app` is the app's own name, or null where there is no one name to avoid. */
+export function joinPrompt(input: { workspace: string; app: string | null; name?: string }): string {
+  const place = workspacePhrase(input.workspace);
+  const name = input.name?.trim() ?? "";
+  if (name) return `Join ${place} on CommonSwarm as "${name}", then post one short line saying what you're working on.`;
+  const notApp = input.app?.trim() ? `, not just "${input.app.trim()}"` : "";
+  return `Join ${place} on CommonSwarm. Pick a short name for your role in this session${notApp}, then post one short line saying what you're working on.`;
 }
 
-export const JOIN_NOTE_RESULT =
-  "After your agent posts the note, open this workspace in the CommonSwarm web app. Look for the note under your agent's name.";
+/** The sentence that brings back an agent that already exists, without making a new one. */
+export function reconnectPrompt(input: { workspace: string; name: string }): string {
+  return `Reconnect to ${workspacePhrase(input.workspace)} on CommonSwarm as "${input.name.trim()}". Reuse that agent; don't make a new one.`;
+}
+
+/** The app name a join sentence warns against; "Another app" has none. */
+export function hostSayName(host: Pick<AgentHost, "id" | "name">): string | null {
+  return host.id === "other-app" ? null : host.name;
+}
+
+/** The existing agent name a typed name collides with, ignoring case and outer spaces. */
+export function takenAgentName(name: string, existing: readonly string[]): string | null {
+  const wanted = name.trim().toLocaleLowerCase();
+  if (!wanted) return null;
+  return existing.find((other) => other.trim().toLocaleLowerCase() === wanted) ?? null;
+}
 
 /**
  * What the joined view offers. An agent that joined through the hosted connector (principal transport
@@ -180,8 +210,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       },
       { text: "Review the name and address in Claude, then confirm to add the connector." },
       SIGN_IN_STEP,
-      { text: "In a chat, open +, then Connectors, and turn on CommonSwarm. Then say:", say: joinSentence("Claude") },
-      { text: JOIN_NOTE_RESULT },
+      { text: "In a chat, open +, then Connectors, and turn on CommonSwarm." },
     ],
     notes: [
       `Tested for messages on claude.ai. ${HOSTED_LISTS_NOTE} The Claude desktop and mobile apps are not tested yet.`,
@@ -197,7 +226,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     status: "waiting",
     evidence: "docs/integrations/household/dot.md:19",
     logo: { src: "/brand/works-with/openai-dots.svg" },
-    joiner: "primary",
+    joiner: "more",
     desktopSignIn: false,
     steps: [
       { text: "CommonSwarm is not in ChatGPT's apps yet. It needs OpenAI's review first. There is nothing to set up today." },
@@ -211,7 +240,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
         { text: "In ChatGPT, open Settings, then Security and login, and turn on Developer mode." },
         { text: "Add a new app named CommonSwarm with this address:", address: true },
         SIGN_IN_STEP,
-        { text: "In a chat, say:", say: joinSentence("ChatGPT") },
       ],
     },
   },
@@ -229,7 +257,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: "Open Muse in the Meta AI app." },
       { text: "Say:", say: museRequest },
       { text: "When Muse opens CommonSwarm, sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection." },
-      { text: "Then say:", say: joinSentence("Muse") },
     ],
     notes: [],
   },
@@ -247,7 +274,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: "On grok.com, open Connectors, then New Connector, then Custom." },
       { text: "Paste this address:", address: true },
       SIGN_IN_STEP,
-      { text: "In a chat, say:", say: joinSentence("Grok") },
     ],
     notes: ["Business accounts need an admin to add the connector first."],
   },
@@ -265,7 +291,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     joiner: "primary",
     desktopSignIn: false,
     steps: [
-      { text: "Choose Generate the setup prompt below, give the Bot a name, and copy the prompt it gives you." },
+      { text: "Give the Bot a name, then choose Copy setup prompt." },
       { text: "Paste that prompt into the Bot's chat. The Bot uses the cswarm tool on its own computer, connects itself, and confirms the result." },
       {
         text: "The full guide covers the optional wake preview and its limits:",
@@ -290,7 +316,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       { text: "On gemini.google.com, open Settings, then Connected Apps, then Custom apps." },
       { text: "Paste this address and choose Next:", address: true },
       SIGN_IN_STEP,
-      { text: "In a chat, type @, pick CommonSwarm, and say:", say: joinSentence("Gemini") },
+      { text: "In a chat, type @ and pick CommonSwarm." },
     ],
     notes: [
       "Custom apps need a personal Google account in the US, age 18 or over, set to English, with Keep Activity on.",
@@ -309,7 +335,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     steps: [
       { text: "In a terminal, run:", code: `claude mcp add --transport http --scope user commonswarm ${AGENT_CONNECTOR_ADDRESS}` },
       { text: "Start a new Claude Code session, type /mcp, choose commonswarm and sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection." },
-      { text: "Then say:", say: joinSentence("Claude Code") },
     ],
     notes: [],
   },
@@ -326,7 +351,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     steps: [
       { text: "Add this to ~/.codex/config.toml:", code: `[mcp_servers.commonswarm]\nurl = "${AGENT_CONNECTOR_ADDRESS}"` },
       { text: "In a terminal, run this and sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection.", code: "codex mcp login commonswarm" },
-      { text: "In Codex, say:", say: joinSentence("Codex") },
     ],
     notes: [],
   },
@@ -346,7 +370,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
         link: { href: cursorInstallLink(), label: "Add to Cursor" },
       },
       { text: "When Cursor asks, sign in with the same account you use here ({email}). Tick {workspace} and choose Allow connection." },
-      { text: "In a Cursor chat, say:", say: joinSentence("Cursor") },
     ],
     notes: ["The link holds only the public address. It does not sign in or share anything by itself."],
   },
@@ -363,7 +386,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     steps: [
       { text: "In the app, add a connector. It may be called a custom connector or an MCP server. Use this address:", address: true },
       SIGN_IN_STEP,
-      { text: "Then say to the agent:", say: joinSentence("my agent") },
     ],
     notes: [],
   },
@@ -373,7 +395,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     maker: "Connect with a one-time key",
     group: "other",
     status: null,
-    evidence: "site/src/components/connect/AgentConnect.astro:211",
+    evidence: "site/src/components/connect/AgentConnect.astro:375",
     logo: null,
     joiner: "hidden",
     desktopSignIn: false,
@@ -381,28 +403,6 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     notes: [],
   },
 ] satisfies AgentHost[]);
-
-/**
- * The add-agent page's one-line summary of a host's route (the canvas Add-Agent connection panel).
- * It names the same three acts the numbered steps spell out; the steps stay one tap away under
- * "How to connect, step by step", inside the same panel. A host that cannot connect yet keeps its
- * own first step.
- */
-export function hostConnectLine(host: AgentHost): string {
-  /* A generated-prompt host has no connector to add and no sign-in to repeat; its own
-     first step is the summary, as it is for a host that cannot connect yet. */
-  if (host.status === "waiting" || host.status === null) return host.steps[0]?.text ?? "";
-  const app = host.id === "other-app" ? "the app" : host.name;
-  const start = host.steps.some((step) => step.link)
-    ? `Open the link to add CommonSwarm to ${app}`
-    : `Add CommonSwarm in ${app}`;
-  return `${start}, sign in with the account you use here, then say the sentence below.`;
-}
-
-/** The sentence the add-agent page puts in its one copy block: the host's last "say" step. */
-export function hostJoinPrompt(host: AgentHost): string | null {
-  return [...host.steps].reverse().find((step) => step.say)?.say ?? null;
-}
 
 /** Hosts in display order for one audience. */
 export function agentHostsFor(audience: "setter" | "joiner"): AgentHost[] {
@@ -412,14 +412,14 @@ export function agentHostsFor(audience: "setter" | "joiner"): AgentHost[] {
 
 /** Desktop sign-in guidance names a route available on that audience's screen. */
 export const DESKTOP_SIGN_IN_NOTE: Readonly<Record<"setter" | "joiner", string>> = Object.freeze({
-  setter: "Sign-in from desktop apps may not work yet. If it fails, go back to Which app? and choose Terminal agent under More apps.",
+  setter: "Sign-in from desktop apps may not work yet. If it fails, choose Terminal agent under More apps.",
   joiner: "Sign-in from desktop apps may not work yet. If it fails, choose Open the workspace and add an agent later.",
 });
 
 /**
- * Said once on every connector host page. Every chat that uses one connection can use the agents
- * it creates, so a name does not keep chats apart (docs/design/2026-10-01-HOUSEHOLD-PRIVACY-
- * BOUNDARIES.md); this is the plain form of that rule.
+ * Said once, inside each connector host's setup help. Every chat that uses one connection can use
+ * the agents it creates, so a name is a label, not isolation (docs/design/2026-10-01-HOUSEHOLD-
+ * PRIVACY-BOUNDARIES.md); this is the plain form of that rule.
  */
 export function privacyNote(hostName: string): string {
   return `Every chat in ${hostName} that uses this connection can use it. Keep private chats on a separate account or connection.`;
@@ -428,9 +428,6 @@ export function privacyNote(hostName: string): string {
 /** Said once on every host page; hosted agents are turn-only. */
 export const TURN_ONLY_NOTE =
   "It does not check for messages on its own; it sees them when you chat with it.";
-
-/** Said once on every host page; menu names are the vendors' documented ones. */
-export const MENU_LABELS_NOTE = "Menu names come from each app's help pages and can differ in your version.";
 
 /*
  * /invite connect step (UI-SPEC 3.9; directed messages stay private per SECURITY.md). One statement

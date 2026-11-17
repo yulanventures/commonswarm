@@ -1232,24 +1232,43 @@
     ]
   },
   {
+    "id": "app.add-agent.panel",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=add-agent",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
+      },
+      {
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
+      },
+      {
+        "type": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]",
+        "text": "RidgeHQ Lead"
+      }
+    ],
+    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-paste]:not([hidden]) [data-ahp-sentence]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-copy-sentence]",
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]"
+    ]
+  },
+  {
     "id": "app.add-agent.existing",
     "kind": "view",
     "path": "/app?w={emptyWorkspace}&v=add-agent",
     "setup": [
       {
-        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) agent-host-picker [data-ahp-existing]"
-      },
-      {
-        "settle": true
-      },
-      {
-        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) agent-host-picker [data-ahp-existing]"
-      },
-      {
-        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add"
+        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-yours]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add"
       }
     ],
-    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-existing-view]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add",
+    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-yours]:not([hidden]) [data-ahp-existing-list][data-agent-picker-state=\"ready\"] .pd-agent-choice .pd-choice-add",
     "states": [
       "dense"
     ],
@@ -1271,15 +1290,19 @@
         "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) details.hm-ahp__more > summary"
       },
       {
-        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) button[data-ahp-host=\"terminal\"][data-agent-owner-self]"
+        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) button[data-ahp-host=\"terminal\"]"
       }
     ],
-    "ready": "[data-channel-view=\"connect\"]:not([hidden]) agent-connect [data-panel=\"form\"]",
+    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-mint-wrap]:not([hidden]) [data-ahp-mint]",
     "states": [
       "dense"
     ],
     "requiresSeed": [
       "create_workspace"
+    ],
+    "frame": [
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-mint]",
+      "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-name]"
     ]
   },
   {
@@ -2108,26 +2131,6 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
-    ]
-  },
-  {
-    "id": "menu.provider",
-    "kind": "view",
-    "path": "/app?w={workspace}&v=add-agent",
-    "setup": [
-      {
-        "waitFor": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
-      },
-      {
-        "click": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-host=\"claude\"]"
-      }
-    ],
-    "ready": "[data-channel-view=\"agent-choice\"]:not([hidden]) [data-ahp-detail=\"claude\"]:not([hidden])",
-    "states": [
-      "dense"
-    ],
-    "requiresSeed": [
-      "create_workspace"
     ]
   },
   {

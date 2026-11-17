@@ -492,7 +492,7 @@
   border: 1.5px dashed var(--home-rail-soft);
 }
 
-/* --- Add an agent (UI-SPEC 3.7; ref Add-Agent): one continuous page, max 720px, 26px rhythm --- */
+/* --- Add an agent: one panel, max 720px, 26px rhythm (skinned in kylon-onboarding.css) --- */
 
 .hm-ahp {
   display: flex;
@@ -553,9 +553,6 @@
 .hm-ahp__back:hover { color: var(--home-ink); }
 .hm-ahp__back[hidden] { display: none; }
 
-/* Back is consistently visible and laid out; focusing it never inserts a row. */
-.hm-ahp__detail > .hm-ahp__back:focus { color: var(--home-ink); background: var(--home-card); }
-
 .hm-ahp__title {
   margin: 4px 0 0;
   font-family: var(--home-font-display);
@@ -568,19 +565,10 @@
 }
 
 .hm-ahp__title:focus,
-.hm-ahp__title-anchor:focus,
 .hm-ahp__joined-title:focus { outline: none; }
 
-.hm-ahp__lead {
-  margin: 8px 0 0;
-  font-size: 17px;
-  color: var(--home-ink-muted);
-  text-wrap: pretty;
-}
-
-.hm-ahp__lead:empty { display: none; }
-
 .hm-ahp__section { display: block; }
+.hm-ahp__section[hidden] { display: none; }
 
 .hm-ahp__step-title {
   margin: 0;
@@ -590,13 +578,6 @@
   line-height: 1.45;
   letter-spacing: -0.01em;
   color: var(--home-ink);
-}
-
-.hm-ahp__detail-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
 }
 
 /* The app pills: one wrapping row; "More apps" is the last pill and opens a second row. */
@@ -677,7 +658,6 @@
 .hm-ahp__crumb:focus-visible,
 .hm-ahp__link:focus-visible,
 .hm-ahp__button:focus-visible,
-.hm-ahp__connect-action:focus-visible,
 .hm-ahp__how > summary:focus-visible,
 .hm-ahp__testing > summary:focus-visible {
   outline: none;
@@ -699,49 +679,7 @@
   white-space: nowrap;
 }
 
-/* The connection panel: a compact canvas panel, an ink action pill inline when the app has a link. */
-.hm-ahp__connect {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 18px;
-  margin-block-start: 12px;
-  padding: 16px 18px;
-  background: var(--home-canvas);
-  border-radius: 16px;
-}
-
-.hm-ahp__connect-line {
-  flex: 1 1 320px;
-  min-inline-size: 0;
-  margin: 0;
-  text-wrap: pretty;
-}
-
-.hm-ahp__connect-action {
-  min-block-size: 48px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 22px;
-  color: var(--home-accent-ink);
-  font-size: 15px;
-  font-weight: 700;
-  text-decoration: none;
-  background: var(--home-accent);
-  border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1.5px var(--home-focus);
-}
-
-.hm-ahp__connect-action:hover { color: var(--home-accent-ink); background: var(--home-accent-hover); }
-
-.hm-ahp__prompt { margin-block-start: 14px; }
-
-.hm-ahp__caption {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--home-ink-muted);
-}
+.hm-ahp__prompt { margin: 0; }
 
 /* Copyable values use a neutral panel and a top-aligned Copy pill. */
 .hm-ahp__copyable {
@@ -859,8 +797,7 @@
 
 .hm-ahp__waiting-hint { font-weight: 400; color: var(--home-ink-muted); }
 
-.hm-ahp__pulse,
-:is(.hm-ahp__waiting--done)::before {
+.hm-ahp__pulse {
   inline-size: 10px;
   block-size: 10px;
   box-sizing: border-box;
@@ -872,42 +809,13 @@
 
 .hm-ahp__pulse { animation: hm-ahp-pulse 1.6s ease-in-out infinite; }
 
-/* Joined: the blue line with a filled dot (the canvas "Connected" state). */
-.hm-ahp__waiting--done {
-  color: var(--home-blue-deep);
-  background: var(--home-accent-soft);
-}
-
-:is(.hm-ahp__waiting--done)::before {
-  content: "";
-  border-color: var(--home-blue-deep);
-  background: var(--home-blue-deep);
-}
-
 @keyframes hm-ahp-pulse {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
 
-/* Everything else about the route, one tap away: a compact toggle at the end of the step title's
-   line (the panel keeps the canvas 80px); open, the steps and notes take the full width under the
-   title. The details box joins the title row, so its summary and its content are row items. */
-.hm-ahp__detail-title > .hm-ahp__how { display: contents; }
-/* The 36px toggle does not make the title row taller than the 21px/1.45 title (canvas 12px to the
-   panel); closed, its empty content row adds no gap. */
-.hm-ahp__detail-title > .hm-ahp__how > summary { margin-inline-start: auto; margin-block: -3px; }
-.hm-ahp__detail-title:has(> .hm-ahp__how:not([open])) { row-gap: 0; }
-.hm-ahp__detail-title > .hm-ahp__how > :not(summary) { flex: 1 1 100%; min-inline-size: 0; }
-.hm-ahp__detail-title > .hm-ahp__how::details-content { flex: 1 1 100%; min-inline-size: 0; }
-.hm-ahp__detail-title > .hm-ahp__how > .hm-ahp__steps { margin-block-start: 8px; }
-/* Quiet: secondary text beside the 21px title, not a competing action (weight 400, light chevron). */
-.hm-ahp__detail-title > .hm-ahp__how > summary { gap: 6px; font-size: 13px; font-weight: 400; }
-.hm-ahp__detail-title > .hm-ahp__how > summary::before {
-  inline-size: 5px;
-  block-size: 5px;
-  border-inline-end-width: 1.2px;
-  border-block-end-width: 1.2px;
-}
+.hm-ahp__how[hidden] { display: none; }
+.hm-ahp__how[open] > summary { margin-block-end: 8px; }
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
@@ -1003,16 +911,12 @@
   list-style: none;
 }
 
-/* Joined: the canvas footer, a 1px rule, then the blue action and a muted line. */
-.hm-ahp__joined { display: block; }
-
+/* Joined: the card that replaces the form, its sentence above the actions. */
 .hm-ahp__joined:not([hidden]) {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 20px;
-  padding-block-start: 20px;
-  border-block-start: 1px solid var(--home-card-border);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
 }
 
 .hm-ahp__actions {
@@ -1020,13 +924,6 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-}
-
-.hm-ahp__joined-lead {
-  flex: 1 1 240px;
-  margin: 0;
-  font-size: 14px;
-  color: var(--home-ink-muted);
 }
 
 /* The person invite: a quiet line at the foot of the page, out of the header (canvas header is the
@@ -1437,7 +1334,7 @@
 }
 }
 
-.hm-new-workspace__preview-title, .hm-new-workspace__preview-list, .hm-ahp__title, .hm-ahp__lead { overflow-wrap: anywhere; }
+.hm-new-workspace__preview-title, .hm-new-workspace__preview-list, .hm-ahp__title { overflow-wrap: anywhere; }
 
 /* Keep the phone header in flow after the legacy component's scoped styles. */
 @media (width <= 52rem) {
@@ -1484,7 +1381,5 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard
 .hm-new-workspace__purpose-check { visibility: hidden; }
 .hm-new-workspace__purpose-card input:checked ~ .hm-new-workspace__purpose-check { visibility: visible; }
 
-/* Joined hints share the readable blue foreground of their pastel status panel. */
-.hm-ahp__waiting--done .hm-ahp__waiting-hint { color: var(--home-blue-deep); }
 
 .hm-ahp__chip-btn[aria-pressed="true"]:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }

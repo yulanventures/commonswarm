@@ -5,13 +5,18 @@ import { identityDisplayLabel } from "./identity-label";
 
 const mounts = new WeakMap<HTMLElement, () => void>();
 
-/** The existing human membership flow, shared by onboarding and People & agents. */
+/**
+ * The existing human membership flow: the Add an agent panel's "Already yours". `shown` hears
+ * whether there is anything to show: nothing while loading or when no agent can be added, so the
+ * panel can leave the section out; a list or a load error is shown.
+ */
 export function mountWorkspaceAgentPicker(host: HTMLElement, options: {
   session: Session;
   workspaceId: string;
   orgId: string;
   isCurrent: () => boolean;
   added: (agent: AccountAgent) => Promise<void>;
+  shown?: (show: boolean) => void;
 }): void {
   mounts.get(host)?.();
   let disposed = false;
@@ -59,11 +64,13 @@ export function mountWorkspaceAgentPicker(host: HTMLElement, options: {
     host.dataset.agentPickerState = "loading";
     notice.textContent = "Loading your agents…";
     list.replaceChildren();
+    options.shown?.(false);
     try {
       const choices = addableAccountAgents(await myAccountAgents(), options.workspaceId, options.orgId);
       if (!current()) return;
-      host.dataset.agentPickerState = "ready";
-      notice.textContent = choices.length ? "" : "No agents to add to this workspace.";
+      host.dataset.agentPickerState = choices.length ? "ready" : "empty";
+      notice.textContent = "";
+      options.shown?.(choices.length > 0);
       for (const agent of choices) {
         const label = identityDisplayLabel(agent, choices);
         // Retain the command identity if a response is lost; a new list load creates a new attempt.
@@ -96,6 +103,7 @@ export function mountWorkspaceAgentPicker(host: HTMLElement, options: {
       if (!current()) return;
       host.dataset.agentPickerState = "error";
       notice.textContent = "Couldn't load your agents.";
+      options.shown?.(true);
       notice.append(" ", action("Retry", () => { void load(); }));
     }
   };

@@ -36,7 +36,7 @@ async function observeExistingAgent() {
     await wait("workspace choice", () => visible(one(`.cs-workspace-picker__item[value="${f.other}"]`)));
     one<HTMLButtonElement>(`.cs-workspace-picker__item[value="${f.other}"]`)!.click();
     await wait("new workspace", () => document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") === f.other
-      && !visible(one("[data-ahp-existing-view]")));
+      && !visible(one("[data-ahp-yours]")));
   };
   try {
     const width = Number(new URL(location.href).searchParams.get("width")), desktop = width >= 1024;
@@ -44,14 +44,11 @@ async function observeExistingAgent() {
     check(matchMedia("(hover: hover) and (pointer: fine)").matches === desktop, "wrong mouse/touch media");
     await wait("Add an agent entry", () => visible(one("[data-add-agent]")));
     one<HTMLButtonElement>("[data-add-agent]")!.click(); // action 1, existing route navigation
-    await wait("host picker", () => visible(one("[data-ahp-existing]")));
-    one<HTMLButtonElement>("[data-ahp-existing]")!.click(); // action 2
-    await wait("existing view", () => visible(one("[data-ahp-existing-view]")));
+    await wait("add agent panel", () => visible(one("[data-ahp-grid-title]")));
     if (f.scenario === "empty") {
-      await wait("empty directory", () => notice()?.textContent === "No agents to add to this workspace.");
+      await wait("empty directory", () => one<HTMLElement>("[data-ahp-existing-list]")?.dataset.agentPickerState === "empty");
       check(!add() && f.commands.length === 0, "an empty directory offered an add");
-      one<HTMLButtonElement>("[data-ahp-existing-back]")!.click();
-      check(!visible(one("[data-ahp-existing-view]")) && document.activeElement === one("[data-ahp-existing]"), "Back did not restore the opener");
+      check(!visible(one("[data-ahp-yours]")), "Already yours showed with nothing to add");
     } else if (f.scenario === "stale-read" || f.scenario === "stale-account") {
       await wait("held directory", () => f.held);
       if (f.scenario === "stale-account") {
@@ -61,16 +58,16 @@ async function observeExistingAgent() {
         await wait("signed out", () => visible(one('[data-panel="signed-out"]')));
       } else await switchWorkspace();
       f.release(); await fetch("/__observer-tick");
-      check(f.commands.length === 0 && !visible(one("[data-ahp-existing-view]")) && !add()
+      check(f.commands.length === 0 && !visible(one("[data-ahp-yours]")) && !add()
         && one<HTMLElement>("[data-ahp-existing-list]")?.dataset.agentPickerState === "loading", "a stale read painted the old picker");
     } else {
       if (f.scenario === "read-error") {
         await wait("directory retry", () => visible(one("[data-ahp-existing-list] .workspace-agent-picker__retry")));
         one<HTMLButtonElement>("[data-ahp-existing-list] .workspace-agent-picker__retry")!.click();
       }
-      await wait("eligible identity", () => visible(add()));
+      await wait("eligible identity", () => visible(add()) && visible(one("[data-ahp-yours]")));
       await fetch("/__observer-tick");
-      check(one("[data-ahp-existing-view]")?.contains(document.activeElement), "a background render stole the picker focus");
+      check(one("agent-host-picker")?.contains(document.activeElement), "a background render stole the panel focus");
       check(f.commands.length === 0, "opening the list submitted a command");
       const rect = add().getBoundingClientRect();
       check(rect.width >= 44 && rect.height >= 44, "Add target is under 44px");
@@ -82,7 +79,7 @@ async function observeExistingAgent() {
       if (f.scenario === "stale-write") {
         await wait("held add", () => f.held);
         await switchWorkspace(); f.release(); await fetch("/__observer-tick");
-        check(!visible(one("[data-ahp-existing-view]")) && add().textContent !== "Added"
+        check(!visible(one("[data-ahp-yours]")) && add().textContent !== "Added"
           && !notice().textContent?.includes("added."), "a stale accepted add painted the old picker");
       } else if (f.scenario === "refused") {
         await wait("refusal", () => notice().textContent?.includes("Couldn't add") && !add().disabled);

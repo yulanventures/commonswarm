@@ -82,8 +82,8 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | V14 | Files | `site/src/lib/file-list.ts:82` | /app?w=W&v=files; [data-file-list] | pending/empty/error/retry/stale; long filename/MIME/size/uploader; many versions; download failure; no access |
 | V15 | Wiki/topic reader | `site/src/lib/brain-view.ts:79` | /app?w=W&v=wiki; [data-brain-detail] | index empty/dense; selected long Markdown/table/code; raw toggle; version history; pending/timeout/retry; missing topic |
 | V16 | Wiki editor | `site/src/lib/brain-view.ts:207` | [data-brain-edit], [data-brain-form] | long editable text with keyboard; unsaved draft; save busy/error/unknown; permission loss; switched topic/workspace |
-| V17 | Agent connection chooser | `site/src/components/connect/AgentHostPicker.astro:52` | /app?w=W&v=add-agent; [data-channel-view=agent-choice] | provider choice; self vs teammate; supported/preview labels; existing/new agent |
-| V18 | Agent connect procedure | `site/src/components/connect/AgentConnect.astro:69` | [data-channel-view=connect] / agent-connect | loading/blocked/form/working/result; name validation; prompt copy; waiting/joined; error/reset; one-time secret fake only |
+| V17 | Add an agent panel | `site/src/components/connect/AgentHostPicker.astro:68` | /app?w=W&v=add-agent; [data-channel-view=agent-choice] | Already yours (shown only with an agent to add); app pills and More apps; connected mark; optional name with duplicate note; the one sentence to paste; collapsed setup help; waiting line; joined card |
+| V18 | Agent connect procedure | `site/src/components/connect/AgentConnect.astro:46` | [data-channel-view=connect] / agent-connect | loading/working line/blocked/result; prompt copy; error/reset; one-time secret fake only |
 | V19 | Invite person/link | `site/src/components/app/LiveDashboard.astro:422` | [data-channel-view=invite] | email/name inputs; invalid/pending/success/expired link; viewer/editor; fake invitees only |
 | V20 | Workspace/entity side detail | `site/src/components/app/LiveDashboard.astro:869` | [data-entity-panel], [data-home-side-slot] | member/agent/message entity; dense activity/access; mobile sheet; empty/refusal; close and retained main selection |
 | V21 | Invitation inbox overlay | `site/src/components/invite/HumanInvitationInbox.astro:41` | [data-invitations], [data-failure], [data-joined] | 0 hidden; many cards; checking failed/retry/dismiss; joined CTA; create-screen flow vs composer clearance |
@@ -102,7 +102,7 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | M06 | Receipt disclosure | `site/src/components/app/LiveDashboard.astro:6133` | .dashboard__message-receipt > summary | closed/open; seen/delivered/no-recipient/failed/unavailable; long recipient names; >50 recipient truncation; Reply same row |
 | M07 | Wiki version disclosure | `site/src/components/app/LiveDashboard.astro:684` | .dashboard__brain-history > summary | many versions, long updater names, selected older revision, keyboard/open edge |
 | M08 | Member row actions | `site/src/lib/people-dialog-view.ts:259` | .pd-* action controls; exact generated selector HR | owner/member variants; remove/revoke/role/model actions; dense row overflow |
-| M09 | Provider picker and result disclosure | `site/src/components/connect/AgentHostPicker.astro:52` | agent-host-picker; buttons generated per host | long host names; device method choice; instructions, copy failure/result; preview distinction |
+| M09 | Provider picker and result disclosure | `site/src/components/connect/AgentHostPicker.astro:68` | agent-host-picker; buttons generated per host | retired as a separate page: the app's setup help and sentence are part of V17 (`app.add-agent.panel`) |
 | M10 | Landing interactive preview | `site/src/components/landing/WorkspacePreview.astro:7` | [data-preview-tab], [data-open-preview], [data-example-item] | all tabs, synchronized checkboxes, narrow scrolling, long text; not real backend data |
 | M11 | Download install disclosures | `site/src/components/download/InstallPanel.astro:6` | platform controls and details/summary within InstallPanel | all OS instructions, copied/error commands, long command line; HR selector mapping |
 | M12 | Workspace resize separators | `site/src/lib/kylon-shell/resizers.ts:208` | .cs-resizer | five separators; small viewport clamps, keyboard/reset, orientation; not tooltips or dialogs |
@@ -294,8 +294,8 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
 | V16 | `app.wiki.editor` — candidate (`app.wiki-editor` superseded duplicate removed) |
-| V17 | `app.agent-chooser` — candidate; `app.add-agent.existing` existing-agent picker candidate on `{emptyWorkspace}` |
-| V18 | `app.agent-connect` — pending |
+| V17 | `app.agent-chooser` — candidate; `app.add-agent.panel` candidate: Claude chosen and a name typed, the name field and the sentence's Copy wholly in frame, Tab from the name reaches Copy, a desktop hover witness over the app pills; `app.add-agent.existing` Already yours candidate on `{emptyWorkspace}`, opened with the panel, Tab from the title reaches its first Add |
+| V18 | `app.agent-connect` — candidate: Terminal agent chosen under More apps, the name field and Copy setup prompt in frame; nothing is minted |
 | V19 | `app.invite-person` — pending |
 | V20 | `app.entity-detail` — pending |
 | V21 | `app.invitation-inbox` — candidate, as a second viewer: a member of `{workspace}` who holds one delegated invitation to `{inviteWorkspace}` (issued by the admin person through the real admin routine), so the inbox is the corner card above the composer (`data-placement="corner"`), not the create-screen placement. Many cards, failure/retry and joined states stay pending |
@@ -328,7 +328,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M06 | `menu.receipt` — candidate; seeded `{message.addressedOwn}` with its `<details class="dashboard__message-receipt">` opened in `#general`: a card over the message, from the row's floating tool bar when the receipt is settled and from its avatar badge when it is a problem |
 | M07 | `menu.wiki-version` — pending |
 | M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action |
-| M09 | `menu.provider` — pending |
+| M09 | `menu.provider` — retired: the provider page and its Back control are gone; see `app.add-agent.panel` |
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |
 | M12 | `menu.resizers` — retired as a standalone entry; see Manifest closure below |
@@ -373,7 +373,7 @@ The account trigger is inside the phone drawer and remains separate at the deskt
 
 ## People & agents modal restoration (2026-11-11)
 
-V08 is now a native `dialog[data-roster-dialog]`, opened with `showModal()` through existing doors. The compact roster, filter, row menus, persistent detail column, spoken receipt, Add your agents and admin controls live inside it. Desktop uses a bounded modal; <=52rem uses a bottom sheet with a pushed detail view. The app route remains behind it. A cold `?v=people` opens over workspace chat; close clears the overlay URL and returns focus. Esc closes the outer modal, while native nested confirmation cancel closes only that confirmation.
+V08 is now a native `dialog[data-roster-dialog]`, opened with `showModal()` through existing doors. The compact roster, filter, row menus, persistent detail column, spoken receipt, Add an agent link and admin controls live inside it. Desktop uses a bounded modal; <=52rem uses a bottom sheet with a pushed detail view. The app route remains behind it. A cold `?v=people` opens over workspace chat; close clears the overlay URL and returns focus. Esc closes the outer modal, while native nested confirmation cancel closes only that confirmation.
 
 `app.people` now waits for the native modal and seeded agent. `dialog.people-detail` selects that agent. `dialog.people-confirm` and `menu.member-actions` remain within the outer modal. `dialog.people-admin-access` opens admin confirmation above the selected agent without submitting. Native foreground detection already handles stacked dialogs; raw measurement arrays are unchanged. Keyboard and mounted browser proof cover native containment, closing, return focus, preserved detail, spoken receipt after refresh and direct links. No coverage is claimed until CI artifacts land.
 

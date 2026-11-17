@@ -1,150 +1,164 @@
 ---
 /*
- * ADD AN AGENT, BY THE APP IT LIVES IN (UI-SPEC 3.7; canvas Add-Agent artboard).
+ * ADD AN AGENT: ONE PANEL (panel consensus, 2026-11-16). Every door opens it: the setup checklist,
+ * the empty channel, Lists & docs, the command palette and People & agents (the add-agent route).
+ * Host copy, steps and sentences come from agent-hosts.ts. Styles: styles/home/onboarding.css,
+ * skinned by styles/kylon-onboarding.css.
  *
- * Setter: /app add-agent pane. Joiner: legacy embed; /invite uses its own connect step.
- * Host copy and steps come from agent-hosts.ts. Styles live in styles/home/onboarding.css.
+ * TOP TO BOTTOM. Already yours (the person's agents that can join here, each with Add; shown only
+ * when there are any). The app pills, More apps for coding tools, ChatGPT and Terminal; an app an
+ * agent joined through from this browser carries a mark, and the last app used is chosen again.
+ * An optional name, checked live against this workspace's agents. One sentence to paste, which
+ * follows the name as it is typed. "First time with {App}? Set it up": the numbered steps,
+ * collapsed, and gone once the app is connected. Then the waiting line for this attempt.
  *
- * ONE PAGE. The breadcrumb, the title, the app pills and the chosen app's connection stay on
- * screen together: choosing a pill fills in the panel under it (the pills stay, the chosen one
- * ink-filled). The panel is the canvas one: a short summary with an action pill only when the
- * app has a real address (Claude's web app, Cursor's install link); "How to connect, step by
- * step" is a compact toggle on the step title's line that opens every numbered step, the testing
- * steps and the notes under that title; then the one sentence to copy and the waiting line. A host
- * status other than Ready is quiet text beside the step title. The person invite is a quiet line
- * at the foot of the page, so the header is the canvas title and lead only.
+ * KEY ROUTES. Terminal and Grok Bot have no connector: the same name field (required there, since
+ * the person creates the identity) and Copy setup prompt, which mints through <agent-connect>.
  *
- * NOT BUILT (RULINGS.md 5). The canvas "Name its seat" field: on the hosted route the agent names
- * itself when it joins (the sentence it is told to say); no command lets this page name or hold
- * a place for it first. The lime "Add to Home" footer: there is nothing to submit before the
- * agent joins, so the lime action is the joined step's Done, which opens the agent that joined.
+ * NOT BUILT HERE. Renaming the agent from the joined card, and the nudge to rename an agent that
+ * took its app's name, wait for the server's rename command.
  */
 import "../../styles/home/onboarding.css";
+import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
 import {
   AGENT_CONNECTOR_ADDRESS,
   AGENT_HOST_STATUS_LABELS,
   DESKTOP_SIGN_IN_NOTE,
-  MENU_LABELS_NOTE,
   TURN_ONLY_NOTE,
-  JOIN_NOTE_RESULT,
   agentHostsFor,
-  hostConnectLine,
-  hostJoinPrompt,
+  hostSayName,
   privacyNote,
   type AgentHost,
-  type AgentHostGroup,
-  type AgentHostStep,
 } from "../../lib/agent-hosts";
 
 interface Props {
-  audience?: "setter" | "joiner";
   class?: string;
 }
 
-const { audience = "setter", class: className } = Astro.props;
-const hosts = agentHostsFor(audience);
+const { class: className } = Astro.props;
+const hosts = agentHostsFor("setter");
 const primaryHosts = hosts.filter((host) => host.joiner === "primary");
-const more = hosts.filter(
-  (host) => host.joiner === "more" || (audience === "setter" && host.id === "terminal"),
-);
-const detailHosts = hosts.filter((host) => host.id !== "terminal");
+const moreHosts = hosts.filter((host) => host.joiner !== "primary");
+const setupHosts = hosts.filter((host) => host.steps.length > 0);
 
+const route = (host: AgentHost): "connector" | "waiting" | "key" =>
+  host.status === null ? "key" : host.status === "waiting" ? "waiting" : "connector";
 const pieces = (text: string): Array<{ kind: "text" | "workspace" | "email"; value: string }> =>
   text.split(/(\{workspace\}|\{email\})/u).filter(Boolean).map((part) =>
     part === "{workspace}" ? { kind: "workspace", value: "this workspace" }
       : part === "{email}" ? { kind: "email", value: "your account" }
         : { kind: "text", value: part });
-
-const stepsOf = (host: AgentHost): readonly AgentHostStep[] => host.steps;
-const connects = (host: AgentHost): boolean => (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
+/* What the script reads off a pill: the route, the app name a sentence warns against, a status
+   other than Ready, and the app's own address where its status was measured there. */
+const chipData = (host: AgentHost): Record<string, string> => ({
+  "data-ahp-host": host.id,
+  "data-ahp-route": route(host),
+  "data-ahp-say": hostSayName(host) ?? "",
+  ...(host.status && host.status !== "ready" ? { "data-ahp-status-label": AGENT_HOST_STATUS_LABELS[host.status] } : {}),
+  ...(host.open ? { "data-ahp-open-href": host.open.href, "data-ahp-open-label": host.open.label } : {}),
+});
+const connects = (host: AgentHost): boolean => route(host) === "connector" || Boolean(host.testing);
 const notesOf = (host: AgentHost): string[] => [
   ...(connects(host) ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
-  ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE[audience]] : []),
+  ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE.setter] : []),
   ...host.notes,
-  MENU_LABELS_NOTE,
 ];
-/* Claude setup opens separately so this page can keep watching for the join.
-   Cursor's native install link and the Grok Bot guide retain their navigation. */
-const linkOf = (host: AgentHost) => host.steps.find((step) => step.link)?.link ?? null;
-/* The panel's pill: the app's own web address, else the step link (Cursor's install link). */
-const actionOf = (host: AgentHost) => host.open ?? linkOf(host);
-const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent" : host.name;
 ---
 
-<agent-host-picker class:list={["hm-ahp", className]} data-audience={audience}>
-  <div class="hm-ahp__view hm-ahp__grid" data-ahp-view="grid">
+<agent-host-picker class:list={["hm-ahp", className]}>
+  <div class="hm-ahp__view" data-ahp-view="form">
     <header class="hm-ahp__head">
-      <button class="hm-ahp__crumb" type="button" data-ahp-home-back hidden={audience === "joiner"}>
+      <button class="hm-ahp__crumb" type="button" data-ahp-home-back>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"></path></svg>
         <span>Home</span>
       </button>
       <h1 class="hm-ahp__title" tabindex="-1" data-ahp-grid-title>
-        Add one of your agents to <span data-ahp-slot="workspace-plain">this workspace</span>
+        Add an agent to <span data-ahp-slot="workspace-plain">this workspace</span>
       </h1>
-      <p class="hm-ahp__lead" data-ahp-ownership-line></p>
-      {audience === "setter" && (
-        <button class="hm-ahp__button hm-ahp__button--quiet hm-ahp__existing" type="button" data-ahp-existing aria-expanded="false" aria-controls={`ahp-${audience}-existing`}>
-          Use one of your agents
-        </button>
-      )}
     </header>
 
-    <section class="hm-ahp__section" aria-labelledby={`hm-ahp-${audience}-which`}>
-      <h2 class="hm-ahp__step-title" id={`hm-ahp-${audience}-which`}>1. Which app?</h2>
+    <section class="hm-ahp__section hm-ahp__yours" data-ahp-yours aria-labelledby="ahp-yours-title" hidden>
+      <h2 class="hm-ahp__step-title" id="ahp-yours-title">Already yours</h2>
+      <div data-ahp-existing-list></div>
+    </section>
+
+    <section class="hm-ahp__section" aria-label="App">
       <div class="hm-ahp__chip-row">
         <ul class="hm-ahp__chips" role="list">
           {primaryHosts.map((host) => (
             <li>
-              <button
-                class="hm-ahp__chip-btn"
-                type="button"
-                data-ahp-host={host.id}
-                data-agent-owner-self={host.id === "terminal" ? "" : undefined}
-                aria-pressed="false"
-              >
+              <button class="hm-ahp__chip-btn" type="button" aria-pressed="false" {...chipData(host)}>
                 <span data-ahp-host-name>{host.name}</span>
+                <span class="hm-ahp__chip-mark" data-ahp-connected hidden>
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"></path></svg>
+                  <span class="visually-hidden">, connected</span>
+                </span>
               </button>
             </li>
           ))}
         </ul>
-        {more.length > 0 && (
-          <details class="hm-ahp__more">
-            <summary>More apps</summary>
-            <ul class="hm-ahp__chips" role="list">
-              {more.map((host) => (
-                <li>
-                  <button
-                    class="hm-ahp__chip-btn"
-                    type="button"
-                    data-ahp-host={host.id}
-                    data-agent-owner-self={host.id === "terminal" ? "" : undefined}
-                    aria-pressed="false"
-                  >
-                    <span data-ahp-host-name>{host.name}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+        <details class="hm-ahp__more" data-ahp-more>
+          <summary>More apps</summary>
+          <ul class="hm-ahp__chips" role="list">
+            {moreHosts.map((host) => (
+              <li>
+                <button class="hm-ahp__chip-btn" type="button" aria-pressed="false" {...chipData(host)}>
+                  <span data-ahp-host-name>{host.name}</span>
+                  <span class="hm-ahp__chip-mark" data-ahp-connected hidden>
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"></path></svg>
+                    <span class="visually-hidden">, connected</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
       </div>
     </section>
-  </div>
 
-  {detailHosts.map((host) => (
-    <section class="hm-ahp__view hm-ahp__section hm-ahp__detail" data-ahp-detail={host.id} aria-labelledby={`ahp-${audience}-${host.id}-title`} hidden>
-      <button class="hm-ahp__back" type="button" data-ahp-back>
-        <span aria-hidden="true">←</span> Which app?
-      </button>
-      <div class="hm-ahp__detail-title">
-        <h2 class="hm-ahp__step-title hm-ahp__title-anchor" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">2. Connect {host.name}</h2>
-        {host.status && host.status !== "ready" && (
-          <span class="hm-ahp__status-note" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+    <div class="hm-ahp__compose" data-ahp-compose hidden>
+      <div class="hm-ahp__field" data-ahp-name-field>
+        <label class="hm-ahp__step-title" for="ahp-name">Name<span data-ahp-optional> (optional)</span></label>
+        <input
+          class="hm-ahp__input"
+          id="ahp-name"
+          type="text"
+          maxlength="80"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Leave blank so it names itself (e.g. RidgeHQ Lead)"
+          aria-describedby="ahp-name-note"
+          data-ahp-name
+        />
+        <p class="hm-ahp__field-note" id="ahp-name-note" aria-live="polite" data-ahp-name-note hidden></p>
+      </div>
+
+      <div class="hm-ahp__prompt" data-ahp-paste hidden>
+        <div class="hm-ahp__prompt-head">
+          <h2 class="hm-ahp__step-title">Paste this into <span data-ahp-slot="app">your app</span></h2>
+          <span class="hm-ahp__status-note" data-ahp-status-note hidden></span>
+        </div>
+        <div class="hm-ahp__copyable hm-ahp__copyable--prompt">
+          <p class="hm-ahp__value" data-ahp-sentence></p>
+          <button class="hm-ahp__copy" type="button" data-ahp-copy-sentence aria-label="Copy the sentence">Copy</button>
+        </div>
+        <a class="hm-ahp__link" target="_blank" rel="noopener noreferrer" data-ahp-open hidden></a>
+      </div>
+
+      <div class="hm-ahp__mint" data-ahp-mint-wrap hidden>
+        <button class="hm-ahp__button" type="button" data-ahp-mint>Copy setup prompt</button>
+        {/* The invite route lets the joining agent choose its name; it lives in <agent-connect>. */}
+        {h0LinkJoinEnabled && (
+          <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-agent-owner-self>Create an invite</button>
         )}
-        <details class="hm-ahp__how" open={host.status === "waiting" ? true : undefined}>
-          <summary>How to connect, step by step</summary>
+        <p class="hm-ahp__field-note hm-ahp__field-note--error" role="alert" data-ahp-error hidden></p>
+      </div>
+
+      {setupHosts.map((host) => (
+        <details class="hm-ahp__how" data-ahp-setup={host.id} open={route(host) === "waiting" ? true : undefined} hidden>
+          <summary>First time with {host.name}? Set it up</summary>
           <ol class="hm-ahp__steps">
-            {stepsOf(host).map((step) => (
+            {host.steps.map((step) => (
               <li class="hm-ahp__step">
                 <p>
                   {pieces(step.text).map((piece) =>
@@ -167,7 +181,7 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
                 {step.say && (
                   <div class="hm-ahp__copyable">
                     <p class="hm-ahp__value">{step.say}</p>
-                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the request">Copy</button>
                   </div>
                 )}
                 {step.link && (
@@ -182,7 +196,6 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
               </li>
             ))}
           </ol>
-
           {host.testing && (
             <details class="hm-ahp__testing">
               <summary>{host.testing.heading}</summary>
@@ -201,146 +214,71 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
                         <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
                       </div>
                     )}
-                    {step.say && (
-                      <div class="hm-ahp__copyable">
-                        <p class="hm-ahp__value">{step.say}</p>
-                        <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
-                      </div>
-                    )}
                   </li>
                 ))}
               </ol>
             </details>
           )}
-
-          <ul class="hm-ahp__notes" role="list">
-            {notesOf(host).map((note) => <li>{note}</li>)}
-          </ul>
+          {notesOf(host).length > 0 && (
+            <ul class="hm-ahp__notes" role="list">
+              {notesOf(host).map((note) => <li>{note}</li>)}
+            </ul>
+          )}
         </details>
-      </div>
+      ))}
 
-      <div class="hm-ahp__connect">
-        <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
-        {linkOf(host) && (
-          <a
-            class="hm-ahp__connect-action"
-            href={linkOf(host)!.href}
-            target={host.id === "claude" ? "_blank" : undefined}
-            rel="nofollow noopener noreferrer"
-            aria-label={host.id === "claude" ? `${linkOf(host)!.label} (opens in a new tab)` : undefined}
-          >{linkOf(host)!.label}</a>
-        )}
-        {host.open && (
-          <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
-        )}
-      </div>
-
-      {hostJoinPrompt(host) && (
-        <div class="hm-ahp__prompt">
-          <p class="hm-ahp__caption">Then say this to {sayTo(host)}</p>
-          <div class="hm-ahp__copyable hm-ahp__copyable--prompt">
-            <p class="hm-ahp__value">{hostJoinPrompt(host)}</p>
-            <button class="hm-ahp__copy" type="button" data-ahp-copy={hostJoinPrompt(host)!} aria-label="Copy the sentence">Copy</button>
-          </div>
-          <p class="hm-ahp__caption">{JOIN_NOTE_RESULT}</p>
-        </div>
-      )}
-
-      {/* A generated-prompt host (Grok Bot): the prompt is minted per person, so there is
-          no sentence to copy here. This button carries the same hook as the Terminal
-          agent chip, and the dashboard opens the same prompt flow for both. */}
-      {host.status === null && (
-        <div class="hm-ahp__prompt">
-          <button class="hm-ahp__button" type="button" data-agent-owner-self>Generate the setup prompt</button>
-        </div>
-      )}
-
-      {host.status && host.status !== "waiting" && audience === "setter" && (
-        <p class="hm-ahp__waiting" data-ahp-waiting role="status" aria-live="polite" hidden>
-          <span class="hm-ahp__pulse" aria-hidden="true"></span>
-          <span data-ahp-waiting-text></span>
-        </p>
-      )}
-      <p class="hm-ahp__waiting hm-ahp__waiting--done" data-ahp-joined-line role="status" aria-live="polite" hidden></p>
-    </section>
-  ))}
-
-  {audience === "setter" && (
-    <section class="hm-ahp__view hm-ahp__section" id={`ahp-${audience}-existing`} data-ahp-existing-view aria-labelledby={`ahp-${audience}-existing-title`} hidden>
-      <button class="hm-ahp__back" type="button" data-ahp-existing-back>← Choose an app</button>
-      <h2 class="hm-ahp__step-title" id={`ahp-${audience}-existing-title`} tabindex="-1" data-ahp-existing-title>Your agents</h2>
-      <div data-ahp-existing-list></div>
-    </section>
-  )}
-
-  <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
-    <h2 class="hm-ahp__joined-title visually-hidden" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h2>
-    <div class="hm-ahp__actions">
-      <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done hidden={audience === "joiner"}>Done</button>
-      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
-      <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another agent</button>
+      <p class="hm-ahp__waiting" data-ahp-waiting role="status" aria-live="polite" hidden>
+        <span class="hm-ahp__pulse" aria-hidden="true"></span>
+        <span data-ahp-waiting-text></span>
+      </p>
     </div>
-    <p class="hm-ahp__joined-lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
+  </div>
+
+  <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby="ahp-joined-title" hidden>
+    <h2 class="hm-ahp__joined-title" id="ahp-joined-title" tabindex="-1" data-ahp-joined-title></h2>
+    <div class="hm-ahp__actions">
+      <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done>Done</button>
+      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
+      <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another</button>
+    </div>
+    <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
   </section>
 
-
-  {audience === "setter" && (
-    <p class="hm-ahp__footer">
-      Someone else's agent? Invite the person; they connect it themselves.
-      <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
-    </p>
-  )}
+  <p class="hm-ahp__footer">
+    Someone else's agent? Invite the person; they connect it themselves.
+    <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
+  </p>
 
   <p class="hm-ahp__status" role="status" aria-live="polite" data-ahp-status></p>
 </agent-host-picker>
 
 <script>
-  import { addAgentOwnershipLine } from "../../lib/home-names";
-  import { agentJoinedSentence, joinedListsOffer } from "../../lib/agent-hosts";
+  import { agentJoinedSentence, joinPrompt, joinedListsOffer, takenAgentName } from "../../lib/agent-hosts";
+  import { addAgentStore, lastHost, rememberLastHost } from "../../lib/add-agent";
   const WAITING_HINT_MS = 120_000;
-  const JOIN_POLL_MS = 5_000;
 
   class AgentHostPickerElement extends HTMLElement {
-    static observedAttributes = ["workspace-name", "account-email", "viewer-first-name"];
+    static observedAttributes = ["workspace-name", "account-email"];
 
     #hostId = "";
-    /* The app whose panel is on screen; it stays on screen after its agent joins. */
-    #shownHost = "";
     #joinedPrincipalId = "";
+    #agentNames: string[] = [];
+    /* The signed-in account: what this browser remembers for the panel is kept under it. */
+    #viewerId = "";
+    #connected = new Set<string>();
+    #minting = false;
     #waitingTimer: number | undefined;
     #copyTimer: number | undefined;
 
     connectedCallback(): void {
       if (this.dataset.wired === "true") return;
       this.dataset.wired = "true";
-      for (const tile of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
-        const id = tile.dataset.ahpHost ?? "";
-        if (id === "terminal") continue;
-        tile.addEventListener("click", () => this.showHost(id));
+      for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
+        chip.addEventListener("click", () => this.showHost(chip.dataset.ahpHost ?? ""));
       }
-      for (const back of this.querySelectorAll<HTMLButtonElement>("[data-ahp-back]")) {
-        back.addEventListener("click", () => {
-          const from = this.#hostId;
-          this.reset();
-          this.#focusGrid(from);
-          this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
-        });
-      }
-      this.querySelector<HTMLButtonElement>("[data-ahp-existing]")?.addEventListener("click", () => {
-        this.reset();
-        this.#hostId = "existing";
-        this.#show("existing");
-        this.querySelector<HTMLElement>("[data-ahp-existing-title]")?.focus({ preventScroll: true });
-        const view = this.querySelector<HTMLElement>("[data-ahp-existing-view]");
-        if (view) this.#scrollToTop(view);
-        this.dispatchEvent(new CustomEvent("agent-host-existing", { bubbles: true }));
-      });
-      this.querySelector<HTMLButtonElement>("[data-ahp-existing-back]")?.addEventListener("click", () => {
-        this.reset();
-        const button = this.querySelector<HTMLElement>("[data-ahp-existing]");
-        button?.focus({ preventScroll: true });
-        if (button) this.#scrollToTop(button);
-        this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
+      this.#nameInput()?.addEventListener("input", () => {
+        this.#error("");
+        this.#render();
       });
       this.querySelector<HTMLButtonElement>("[data-ahp-home-back]")?.addEventListener("click", () => {
         this.dispatchEvent(new CustomEvent("agent-host-home", { bubbles: true }));
@@ -352,18 +290,27 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         }));
       });
       for (const button of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy]")) {
-        button.addEventListener("click", () => void this.#copy(button));
+        button.addEventListener("click", () => void this.#copy(button, button.dataset.ahpCopy ?? ""));
       }
-      this.querySelector<HTMLButtonElement>("[data-ahp-approve]")?.addEventListener("click", () => {
+      const copySentence = this.querySelector<HTMLButtonElement>("[data-ahp-copy-sentence]");
+      copySentence?.addEventListener("click", () =>
+        void this.#copy(copySentence, this.querySelector("[data-ahp-sentence]")?.textContent ?? ""));
+      this.querySelector<HTMLButtonElement>("[data-ahp-mint]")?.addEventListener("click", () => this.#mint());
+      const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
+      approve?.addEventListener("click", () => {
         this.dispatchEvent(new CustomEvent("agent-host-approve", {
           bubbles: true,
-          detail: { principalId: this.#joinedPrincipalId },
+          detail: {
+            principalId: this.#joinedPrincipalId,
+            button: approve,
+            status: this.querySelector<HTMLElement>("[data-ahp-approve-status]"),
+          },
         }));
       });
       this.querySelector<HTMLButtonElement>("[data-ahp-another]")?.addEventListener("click", () => {
-        this.reset();
-        this.#focusGrid("");
-        this.dispatchEvent(new CustomEvent("agent-host-another", { bubbles: true }));
+        const host = this.#hostId;
+        this.reset(host);
+        this.#nameInput()?.focus({ preventScroll: true });
       });
       this.#render();
     }
@@ -381,167 +328,234 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       return this.#hostId;
     }
 
-    setContext(context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }): void {
-      if (context.workspaceName !== undefined) this.setAttribute("workspace-name", context.workspaceName);
-      if (context.accountEmail !== undefined) this.setAttribute("account-email", context.accountEmail);
-      if (context.viewerFirstName !== undefined) this.setAttribute("viewer-first-name", context.viewerFirstName);
+    /** The name typed for this attempt; blank means the agent names itself. */
+    get agentName(): string {
+      return this.#nameInput()?.value.trim() ?? "";
     }
 
-    reset(): void {
-      this.#hostId = "";
-      this.#shownHost = "";
-      this.#joinedPrincipalId = "";
+    /** Whether the chosen app joins over a connector, so its agent is watched for. */
+    get watchable(): boolean {
+      return this.#chip(this.#hostId)?.dataset.ahpRoute === "connector";
+    }
+
+    setContext(context: { workspaceName?: string; accountEmail?: string; viewerId?: string }): void {
+      if (context.viewerId !== undefined) this.#viewerId = context.viewerId;
+      if (context.workspaceName !== undefined) this.setAttribute("workspace-name", context.workspaceName);
+      if (context.accountEmail !== undefined) this.setAttribute("account-email", context.accountEmail);
+    }
+
+    /** The names of the agents already in this workspace, for the duplicate check. */
+    setRoster(names: readonly string[]): void {
+      this.#agentNames = [...names];
+      this.#render();
+    }
+
+    /** Apps an agent in this workspace joined through; their setup help is not needed again. */
+    setConnected(hostIds: readonly string[]): void {
+      this.#connected = new Set(hostIds);
+      this.#render();
+    }
+
+    /** Back to the form. With no app given, the last app used is chosen again. */
+    reset(hostId?: string): void {
       window.clearTimeout(this.#waitingTimer);
-      this.#show("grid");
-      this.#status("");
-      for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
-        chip.setAttribute("aria-pressed", "false");
-      }
-      for (const line of this.querySelectorAll<HTMLElement>("[data-ahp-waiting], [data-ahp-joined-line]")) {
-        line.hidden = true;
-      }
+      this.#joinedPrincipalId = "";
+      this.#minting = false;
+      const name = this.#nameInput();
+      if (name) name.value = "";
+      this.#error("");
+      this.#show("form");
+      const approveStatus = this.querySelector<HTMLElement>("[data-ahp-approve-status]");
+      if (approveStatus) approveStatus.textContent = "";
+      const next = hostId ?? lastHost(addAgentStore(), this.#viewerId);
+      this.#hostId = "";
+      if (next && this.#chip(next)) this.showHost(next);
+      else this.#render();
     }
 
     showHost(id: string): void {
-      const panel = this.querySelector<HTMLElement>(`[data-ahp-detail="${CSS.escape(id)}"]`);
-      if (!panel) return;
+      const chip = this.#chip(id);
+      if (!chip) return;
       this.#hostId = id;
-      this.#shownHost = id;
-      for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
-        chip.setAttribute("aria-pressed", chip.dataset.ahpHost === id ? "true" : "false");
-      }
-      this.#show(id);
-      this.#resetWaiting(panel, id);
+      rememberLastHost(addAgentStore(), this.#viewerId, id);
+      if (chip.closest("[data-ahp-more]")) this.querySelector<HTMLDetailsElement>("[data-ahp-more]")!.open = true;
+      this.#error("");
+      this.#show("form");
       this.#render();
-      panel.querySelector<HTMLElement>(".hm-ahp__title-anchor")?.focus({ preventScroll: true });
-      this.#scrollToTop(panel);
+      this.#restartWaitingHint();
       this.dispatchEvent(new CustomEvent("agent-host-selected", { bubbles: true, detail: { host: id } }));
+    }
+
+    /** A key route's mint failed; the reason belongs beside the name it was for. */
+    mintFailed(message: string): void {
+      this.#minting = false;
+      this.#show("form");
+      this.#error(message);
+      this.#render();
+      this.#nameInput()?.focus({ preventScroll: true });
+    }
+
+    mintSettled(): void {
+      this.#minting = false;
+      this.#render();
     }
 
     showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted?: boolean; joinedAt?: string }): void {
       window.clearTimeout(this.#waitingTimer);
       this.#joinedPrincipalId = agent.principalId;
-      const workspace = this.getAttribute("workspace-name")?.trim() || "Home";
-      const joinedText = agentJoinedSentence(agent.name, workspace, agent.joinedAt);
+      const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
-      const lead = this.querySelector<HTMLElement>("[data-ahp-joined-lead]");
+      if (title) title.textContent = agentJoinedSentence(agent.name, workspace, agent.joinedAt);
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
-      const panel = this.#shownHost
-        ? this.querySelector<HTMLElement>(`[data-ahp-detail="${CSS.escape(this.#shownHost)}"]`)
-        : null;
-      const joinedLine = panel?.querySelector<HTMLElement>("[data-ahp-joined-line]") ?? null;
-      if (title) title.textContent = joinedText;
-      const offer = joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove });
-      if (lead) lead.textContent = offer.lead;
       if (approve) {
-        approve.textContent = `Let ${agent.name} use Lists & docs`;
-        approve.hidden = !offer.showApprove;
+        approve.hidden = !joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
+        approve.disabled = false;
+        approve.textContent = "Allow Lists & docs";
       }
-      if (joinedLine) {
-        joinedLine.textContent = joinedText;
-        joinedLine.hidden = false;
-      }
-      for (const waiting of this.querySelectorAll<HTMLElement>("[data-ahp-waiting]")) waiting.hidden = true;
-      this.#hostId = "";
       this.#show("joined");
       title?.focus({ preventScroll: true });
     }
 
-    #focusGrid(fromHost: string): void {
-      const tile = fromHost
-        ? this.querySelector<HTMLElement>(`[data-ahp-host="${CSS.escape(fromHost)}"]`)
-        : null;
-      const target = tile && tile.offsetParent !== null
-        ? tile
-        : this.querySelector<HTMLElement>("[data-ahp-grid-title]");
-      target?.focus({ preventScroll: true });
-      if (target) this.#scrollToTop(target === tile ? tile : this);
+    #chip(id: string): HTMLButtonElement | null {
+      return id ? this.querySelector<HTMLButtonElement>(`[data-ahp-host="${CSS.escape(id)}"]`) : null;
     }
 
-    #scrollToTop(node: HTMLElement): void {
-      let scroller: HTMLElement | null = this.parentElement;
-      while (scroller) {
-        const overflow = getComputedStyle(scroller).overflowY;
-        if ((overflow === "auto" || overflow === "scroll") && scroller.scrollHeight > scroller.clientHeight) break;
-        scroller = scroller.parentElement;
-      }
-      const top = node.getBoundingClientRect().top;
-      if (scroller) {
-        const delta = top - scroller.getBoundingClientRect().top - 16;
-        if (delta < 0 || delta > scroller.clientHeight / 2) scroller.scrollTop += delta;
-      } else if (top < 0 || top > window.innerHeight / 2) {
-        window.scrollTo({ top: Math.max(0, top + window.scrollY - 16) });
-      }
+    #nameInput(): HTMLInputElement | null {
+      return this.querySelector<HTMLInputElement>("[data-ahp-name]");
     }
 
-    /* Cold setup keeps its app pills. Existing identities have their own short list
-       with a return to app selection, keeping the third action in view on phones. */
-    #show(view: string): void {
-      this.querySelector<HTMLElement>("[data-ahp-view='grid']")!.hidden = view === "existing";
-      const panelId = view === "joined" ? this.#shownHost : view;
-      for (const panel of this.querySelectorAll<HTMLElement>("[data-ahp-detail]")) {
-        panel.hidden = panel.dataset.ahpDetail !== panelId;
-      }
+    #show(view: "form" | "joined"): void {
+      const form = this.querySelector<HTMLElement>("[data-ahp-view='form']");
       const joined = this.querySelector<HTMLElement>("[data-ahp-joined]");
+      if (form) form.hidden = view !== "form";
       if (joined) joined.hidden = view !== "joined";
-      const existing = this.querySelector<HTMLElement>("[data-ahp-existing-view]");
-      if (existing) existing.hidden = view !== "existing";
-      this.querySelector<HTMLElement>("[data-ahp-existing]")?.setAttribute("aria-expanded", String(view === "existing"));
     }
 
-    #hostName(id: string): string {
-      const chip = this.querySelector<HTMLButtonElement>(`[data-ahp-host="${CSS.escape(id)}"]`);
-      const label = chip?.querySelector("[data-ahp-host-name]")?.textContent?.trim();
-      return label && label.length > 0 ? label : "your agent";
+    #error(message: string): void {
+      const node = this.querySelector<HTMLElement>("[data-ahp-error]");
+      if (!node) return;
+      node.textContent = message;
+      node.hidden = message === "";
     }
 
-    #resetWaiting(panel: HTMLElement, hostId: string): void {
+    #mint(): void {
+      if (this.#minting) return;
+      const chip = this.#chip(this.#hostId);
+      if (chip?.dataset.ahpRoute !== "key") return;
+      const name = this.agentName;
+      const input = this.#nameInput();
+      if (!name) {
+        this.#error("Give it a name first.");
+        input?.focus({ preventScroll: true });
+        return;
+      }
+      if (takenAgentName(name, this.#agentNames)) {
+        input?.focus({ preventScroll: true });
+        return;
+      }
+      this.#minting = true;
+      this.#error("");
+      this.#render();
+      this.dispatchEvent(new CustomEvent("agent-host-mint", { bubbles: true, detail: { host: this.#hostId, name } }));
+    }
+
+    #restartWaitingHint(): void {
       window.clearTimeout(this.#waitingTimer);
-      const waiting = panel.querySelector<HTMLElement>("[data-ahp-waiting]");
-      const text = panel.querySelector<HTMLElement>("[data-ahp-waiting-text]");
-      const joinedLine = panel.querySelector<HTMLElement>("[data-ahp-joined-line]");
-      panel.querySelector<HTMLElement>("[data-ahp-waiting-hint]")?.remove();
-      if (joinedLine) joinedLine.hidden = true;
-      if (!waiting || !text) return;
-      const hostName = this.#hostName(hostId);
-      const workspace = this.getAttribute("workspace-name")?.trim() || "Home";
-      text.textContent =
-        `Waiting for an agent from ${hostName} to join ${workspace}. Checking every ${JOIN_POLL_MS / 1000} seconds.`;
-      waiting.hidden = false;
+      this.querySelector<HTMLElement>("[data-ahp-waiting-hint]")?.remove();
+      if (this.#chip(this.#hostId)?.dataset.ahpRoute !== "connector") return;
       this.#waitingTimer = window.setTimeout(() => {
+        const text = this.querySelector<HTMLElement>("[data-ahp-waiting-text]");
+        if (!text) return;
+        const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
         const extra = document.createElement("span");
         extra.dataset.ahpWaitingHint = "";
         extra.className = "hm-ahp__waiting-hint";
-        extra.textContent =
-          ` Not there yet? Check that you allowed ${workspace} on the approval page, then say the sentence again.`;
+        extra.textContent = ` Not there yet? Check that you allowed ${workspace} on the approval page, then paste the sentence again.`;
         text.after(extra);
       }, WAITING_HINT_MS);
     }
 
     #render(): void {
-      const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
+      const workspace = this.getAttribute("workspace-name")?.trim() || "";
       const email = this.getAttribute("account-email")?.trim() || "your account";
-      const first = this.getAttribute("viewer-first-name")?.trim() || "";
       for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='workspace'], [data-ahp-slot='workspace-plain']")) {
-        node.textContent = workspace;
+        node.textContent = workspace || "this workspace";
       }
-      for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='email']")) {
-        node.textContent = email;
+      for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='email']")) node.textContent = email;
+
+      const chip = this.#chip(this.#hostId);
+      const route = chip?.dataset.ahpRoute ?? "";
+      const appName = chip?.querySelector("[data-ahp-host-name]")?.textContent?.trim() ?? "";
+      for (const other of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
+        const id = other.dataset.ahpHost ?? "";
+        other.setAttribute("aria-pressed", String(id === this.#hostId));
+        const mark = other.querySelector<HTMLElement>("[data-ahp-connected]");
+        if (mark) mark.hidden = !this.#connected.has(id);
       }
-      const ownership = this.querySelector<HTMLElement>("[data-ahp-ownership-line]");
-      if (ownership) {
-        const agentName = this.#hostId ? this.#hostName(this.#hostId) : "agent";
-        ownership.textContent = addAgentOwnershipLine(workspace, first, agentName);
+
+      const compose = this.querySelector<HTMLElement>("[data-ahp-compose]");
+      if (compose) compose.hidden = !chip;
+      const nameField = this.querySelector<HTMLElement>("[data-ahp-name-field]");
+      const input = this.#nameInput();
+      if (nameField) nameField.hidden = route === "waiting";
+      if (input) {
+        input.required = route === "key";
+        input.placeholder = route === "key" ? "e.g. RidgeHQ Lead" : "Leave blank so it names itself (e.g. RidgeHQ Lead)";
       }
+      const optional = this.querySelector<HTMLElement>("[data-ahp-optional]");
+      if (optional) optional.hidden = route === "key";
+
+      const name = this.agentName;
+      const taken = takenAgentName(name, this.#agentNames);
+      const note = this.querySelector<HTMLElement>("[data-ahp-name-note]");
+      if (note) {
+        note.textContent = taken ? `“${taken}” is already in ${workspace || "this workspace"}.` : "";
+        note.hidden = !taken;
+      }
+      input?.setAttribute("aria-invalid", String(Boolean(taken)));
+
+      const paste = this.querySelector<HTMLElement>("[data-ahp-paste]");
+      if (paste) paste.hidden = route !== "connector";
+      for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='app']")) node.textContent = appName || "your app";
+      const sentence = this.querySelector<HTMLElement>("[data-ahp-sentence]");
+      if (sentence && route === "connector") {
+        sentence.textContent = joinPrompt({ workspace, app: chip?.dataset.ahpSay || null, name });
+      }
+      const status = this.querySelector<HTMLElement>("[data-ahp-status-note]");
+      if (status) {
+        status.textContent = chip?.dataset.ahpStatusLabel ?? "";
+        status.hidden = !chip?.dataset.ahpStatusLabel;
+      }
+      const open = this.querySelector<HTMLAnchorElement>("[data-ahp-open]");
+      if (open) {
+        const href = chip?.dataset.ahpOpenHref ?? "";
+        open.hidden = !href;
+        if (href) {
+          open.href = href;
+          open.textContent = chip?.dataset.ahpOpenLabel ?? "";
+        }
+      }
+
+      const mintWrap = this.querySelector<HTMLElement>("[data-ahp-mint-wrap]");
+      if (mintWrap) mintWrap.hidden = route !== "key";
+      const mint = this.querySelector<HTMLButtonElement>("[data-ahp-mint]");
+      if (mint) {
+        mint.disabled = this.#minting || Boolean(taken);
+        mint.textContent = this.#minting ? "Creating…" : "Copy setup prompt";
+      }
+
+      for (const setup of this.querySelectorAll<HTMLDetailsElement>("[data-ahp-setup]")) {
+        const id = setup.dataset.ahpSetup ?? "";
+        setup.hidden = id !== this.#hostId || this.#connected.has(id);
+      }
+
+      const waiting = this.querySelector<HTMLElement>("[data-ahp-waiting]");
+      const waitingText = this.querySelector<HTMLElement>("[data-ahp-waiting-text]");
+      if (waiting) waiting.hidden = route !== "connector";
+      if (waitingText) waitingText.textContent = `Waiting for ${name || "your agent"}…`;
     }
 
-    #status(message: string): void {
-      const status = this.querySelector<HTMLElement>("[data-ahp-status]");
-      if (status) status.textContent = message;
-    }
-
-    async #copy(button: HTMLButtonElement): Promise<void> {
-      const value = button.dataset.ahpCopy ?? "";
+    async #copy(button: HTMLButtonElement, value: string): Promise<void> {
       let copied = false;
       try {
         await navigator.clipboard.writeText(value);
@@ -557,9 +571,10 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         }
       }
       window.clearTimeout(this.#copyTimer);
-      for (const other of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy]")) other.textContent = "Copy";
+      for (const other of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy], [data-ahp-copy-sentence]")) other.textContent = "Copy";
       button.textContent = copied ? "Copied" : "Selected";
-      this.#status(copied ? "Copied." : "Copy is blocked here. The text is selected; press Command or Control and C.");
+      const status = this.querySelector<HTMLElement>("[data-ahp-status]");
+      if (status) status.textContent = copied ? "Copied." : "Copy is blocked here. The text is selected; press Command or Control and C.";
       this.#copyTimer = window.setTimeout(() => {
         button.textContent = "Copy";
       }, 2_000);
