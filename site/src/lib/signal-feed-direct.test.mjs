@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { directConversationFilter, signalIsDirectBetween } from "./signal-feed.ts";
+import { directConversation, directConversationFilter, directHistoryNotice, signalIsDirectBetween } from "./signal-feed.ts";
 
 const me = "u-me", nikki = "u-nikki", muse = "a-muse", other = "a-other";
 const s = (from, fromKind, to, toAgent) => ({ from, fromKind, to, toAgent });
@@ -70,4 +70,36 @@ test("no conversation query without a viewer, with yourself, or with an id that 
   assert.equal(directConversationFilter(viewer, { kind: "person", id: viewer }), null);
   assert.equal(directConversationFilter(viewer, { kind: "agent", id: "x),or(to.is.null" }), null);
   assert.equal(directConversationFilter("sample-owner", { kind: "agent", id: "22222222-2222-4222-8222-222222222222" }), null);
+});
+
+const row = (id, createdAt, from, fromKind, to, toAgent, extra = {}) => ({ id, createdAt, from, fromKind, to, toAgent, ...extra });
+
+test("a Direct Message shows its own history when the workspace page holds none of it", () => {
+  const agent = { kind: "agent", id: muse };
+  const history = [row("h1", "2026-11-17T12:00:00Z", me, "user", null, muse)];
+  // The newest workspace page filtered to nothing (its rows were expired self-notes): the conversation still shows.
+  assert.deepEqual(directConversation([], history, me, agent, () => true).map((s) => s.id), ["h1"]);
+  assert.equal(directHistoryNotice("ready", 1), null, "rows on screen: no empty line");
+  // Control: a conversation whose own read answered with nothing is empty, and only then.
+  assert.deepEqual(directConversation([], [], me, agent, () => true), []);
+  assert.equal(directHistoryNotice("ready", 0), "empty");
+});
+
+test("the page's copy of a row wins, ended rows from the read drop, and the merge stays newest first", () => {
+  const agent = { kind: "agent", id: muse };
+  const page = [row("p2", "2026-11-17T12:05:00Z", muse, "agent", me, null, { live: true }),
+    row("other", "2026-11-17T12:04:00Z", me, "user", null, null)];
+  const history = [row("p2", "2026-11-17T12:05:00Z", muse, "agent", me, null, { live: false }),
+    row("h1", "2026-11-17T12:01:00Z", me, "user", null, muse),
+    row("ended", "2026-11-17T12:02:00Z", me, "user", null, muse)];
+  const shown = directConversation(page, history, me, agent, (s) => s.id !== "ended");
+  assert.deepEqual(shown.map((s) => s.id), ["p2", "h1"]);
+  assert.equal(shown[0].live, true, "the page's row, with this browser's live state");
+});
+
+test("an unanswered or failed read is never called an empty conversation", () => {
+  assert.equal(directHistoryNotice("pending", 0), "loading");
+  assert.equal(directHistoryNotice("pending", 2), null, "rows from the page show while the read is out");
+  assert.equal(directHistoryNotice("failed", 0), "failed");
+  assert.equal(directHistoryNotice("failed", 3), "failed", "a failed read says so above the rows it kept");
 });

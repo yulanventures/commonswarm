@@ -34,6 +34,31 @@ export const directConversationFilter = (viewerId: string, partner: DirectPartne
     `and(from_kind.eq.${partnerKind},from.eq.${partner.id},to.eq.${viewerId})`;
 };
 
+/** Where a Direct Message's own history read stands. */
+export type DirectHistoryState = "pending" | "ready" | "failed";
+
+/** The 1:1 conversation on screen, newest first: the loaded page's rows between the two, plus the conversation's own
+ *  read. A row the page already holds wins, since it carries this browser's posted and live state; `readable` drops
+ *  ended rows from the read as the page already dropped them. The page being empty changes nothing here. */
+export const directConversation = <T extends DirectSignal & { id: string; createdAt: string }>(
+  page: readonly T[],
+  history: readonly T[],
+  viewerId: string,
+  partner: DirectPartner,
+  readable: (signal: T) => boolean,
+): T[] => {
+  const loaded = new Set(page.map((signal) => signal.id));
+  const earlier = history.filter((signal) => !loaded.has(signal.id) && readable(signal));
+  const pool = earlier.length === 0 ? [...page] : [...page, ...earlier].sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+  return pool.filter((signal) => signalIsDirectBetween(signal, viewerId, partner));
+};
+
+/** The line a Direct Message shows besides its rows. A failed read always says so, above any rows already shown; an
+ *  empty conversation says it is loading until its read answers, and is called empty only after a read that did. */
+export const directHistoryNotice = (state: DirectHistoryState, shown: number): "failed" | "loading" | "empty" | null =>
+  state === "failed" ? "failed" : shown > 0 ? null : state === "pending" ? "loading" : "empty";
+
 /* ~~"targets them or an agent they operate"~~ Dead 2026-09-01, by operator report:
  * in a solo-owner workspace the operator operates nearly every agent, so the
  * operated-agent clause made "Direct to you" degenerate into ALL directed

@@ -309,6 +309,9 @@
 .hm-frame .dashboard__feed-more .dashboard__button { border: 1.5px solid var(--home-ink); border-radius: 999px; background: transparent; color: var(--home-ink); font-weight: 700; }
 .hm-frame .dashboard__feed-more .dashboard__button:hover { background: var(--home-soft); }
 .hm-frame .dashboard__filter-empty { color: var(--home-ink-muted); }
+/* A Direct Message whose own read failed: Retry in place, the same outlined pill as "Load older", 40 px tall. */
+.hm-frame .dashboard__inline-retry { min-block-size: 40px; margin-inline-start: 4px; padding: 0 14px; border: 1.5px solid var(--home-ink); border-radius: 999px; background: transparent; color: var(--home-ink); font: inherit; font-weight: 700; cursor: pointer; }
+.hm-frame .dashboard__inline-retry:hover { background: var(--home-soft); }
 
 /* ---- Composer: "Message <workspace>" label, a 50 px field with 14 px corners, an ink Send ---- */
 /* Space.dc.html: padding 14px 24px 22px, the 13 px label (body line-height 1.45), 6 px, the 50 px field: 112 px at rest.
