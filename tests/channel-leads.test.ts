@@ -66,7 +66,7 @@ test("set_channel_lead refuses anything else", () => {
 });
 
 test("the modes match the migration's CHECK, and set_channel_lead is a person's command", () => {
-  const migration = readFileSync(new URL("../supabase/migrations/20261117000001_channel_leads.sql", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../supabase/migrations/20261117000002_channel_leads.sql", import.meta.url), "utf8");
   assert.ok(migration.includes(`CHECK (lead_mode IN (${CHANNEL_LEAD_MODES.map((mode) => `'${mode}'`).join(", ")}))`));
   assert.ok(HUMAN_ONLY_COMMANDS.has("set_channel_lead"));
   const bundle = readFileSync(new URL("../supabase/functions/_shared/protocol.js", import.meta.url), "utf8");

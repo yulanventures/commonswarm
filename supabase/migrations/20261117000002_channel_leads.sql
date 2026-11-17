@@ -15,7 +15,7 @@
 -- swarm_read.channels appends lead_mode and lead_agent_principal_id; earlier columns, the
 -- private-channel gate, the owner and the grants are unchanged.
 --
--- Rollback: deploy/release-proofs/channel-leads/20261117000001-rollback.sql.
+-- Rollback: deploy/release-proofs/channel-leads/20261117000002-rollback.sql.
 SET search_path = swarm, pg_catalog, public;
 
 ALTER TABLE swarm.channels

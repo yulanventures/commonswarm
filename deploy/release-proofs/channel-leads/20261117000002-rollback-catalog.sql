@@ -1,4 +1,4 @@
--- Read-only rollback catalog verification for 20261117000001.
+-- Read-only rollback catalog verification for 20261117000002.
 SELECT NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.channels'::regclass AND attname IN ('lead_mode','lead_agent_principal_id') AND NOT attisdropped)
  AND to_regprocedure('swarm.channel_effective_live_lead(uuid,uuid)') IS NULL
  AND to_regprocedure('swarm.reset_channel_lead_on_principal_revoke()') IS NULL

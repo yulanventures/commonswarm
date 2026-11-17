@@ -1,4 +1,4 @@
--- Read-only catalog and body verification for 20261117000001 (channel leads).
+-- Read-only catalog and body verification for 20261117000002 (channel leads).
 SELECT (SELECT count(*)=5 AND bool_and(p.proowner='swarm_admin'::regrole AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog'] AND md5(p.prosrc)=e.digest)
  FROM (VALUES
   ('swarm.channel_effective_live_lead(uuid,uuid)','c1c6325eeff17d5d4dc7d61bfdf65319'),

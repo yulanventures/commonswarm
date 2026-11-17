@@ -1,4 +1,4 @@
--- Rollback for 20261117000001: restore the 20261113000003 swarm_read.channels and drop the channel-lead objects.
+-- Rollback for 20261117000002: restore the 20261113000003 swarm_read.channels and drop the channel-lead objects.
 -- CREATE OR REPLACE VIEW cannot drop a column, so the view is recreated with its owner and grants.
 SET search_path = swarm, pg_catalog, public;
 DROP VIEW swarm_read.channels;
