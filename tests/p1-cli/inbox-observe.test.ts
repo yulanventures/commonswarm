@@ -12,6 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -31,8 +32,19 @@ function signal(id: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-async function runInbox(ackStatus: number, json: boolean) {
+/** Enough directed messages that their output cannot fit in the pipe and its reader's buffer. */
+const LARGE = Array.from({ length: 80 }, (_, index) =>
+  signal(`${(index % 9) + 1}${String(index).padStart(7, "0")}-6666-4666-8666-666666666666`,
+    { to_agent: PRINCIPAL, kind: "ask", body: "x".repeat(7_500) }));
+
+/**
+ * stdout: "flow" reads the child's output as it comes; "hold" leaves it unread until the child is
+ * writing and the pipe is full, then reads it; "fail" closes the pipe at that point instead.
+ */
+async function runInbox(ackStatus: number, json: boolean, options: { stdout?: "flow" | "hold" | "fail"; large?: boolean } = {}) {
+  const mode = options.stdout ?? "flow";
   const root = await mkdtemp(join(tmpdir(), "cswarm-inbox-observe-"));
+  let acksWhileWriting = -1;
   const commands: Array<Record<string, unknown>> = [];
   let readsBeforeAck = -1;
   let reads = 0;
@@ -54,7 +66,7 @@ async function runInbox(ackStatus: number, json: boolean) {
           });
         }
         return reply(200, {
-          signals: [
+          signals: options.large ? LARGE : [
             signal(DIRECTED, { to_agent: PRINCIPAL, kind: "ask" }),
             signal(MENTIONED, { mentions: [{ position: 0, kind: "agent", id: PRINCIPAL, source: "author" }] }),
             signal(ELSEWHERE, { to_agent: OTHER_AGENT }),
@@ -97,14 +109,30 @@ async function runInbox(ackStatus: number, json: boolean) {
     let stdout = "", stderr = "";
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => stdout += chunk);
     child.stderr.on("data", (chunk: string) => stderr += chunk);
-    const code = await new Promise<number | null>((resolveExit, reject) => {
-      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`inbox timed out; stderr=${stderr}`)); }, 20_000);
+    const exited = new Promise<number | null>((resolveExit, reject) => {
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`inbox timed out; stderr=${stderr}`)); }, 30_000);
       child.once("exit", (exitCode) => { clearTimeout(timer); resolveExit(exitCode); });
       child.once("error", (error) => { clearTimeout(timer); reject(error); });
     });
-    return { code, stdout, stderr, commands, readsBeforeAck, reads };
+    const read = () => child.stdout.on("data", (chunk: string) => stdout += chunk);
+    if (mode === "flow") {
+      read();
+    } else {
+      // Unread, the child's stdout fills this side's buffer and then the pipe: the child is now
+      // mid-write. Give it time to observe early if it were going to.
+      const started = Date.now();
+      while (child.stdout.readableLength === 0 && child.exitCode === null && Date.now() - started < 20_000) {
+        await delay(20);
+      }
+      assert.ok(child.stdout.readableLength > 0, `the child never started writing; stderr=${stderr}`);
+      await delay(1_500);
+      acksWhileWriting = commands.filter((command) => command.kind === "ack_agent_delivery").length;
+      if (mode === "hold") read();
+      else child.stdout.destroy();
+    }
+    const code = await exited;
+    return { code, stdout, stderr, commands, readsBeforeAck, reads, acksWhileWriting };
   } finally {
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     await rm(root, { recursive: true, force: true });
@@ -135,3 +163,25 @@ test("a failed observation changes neither an agent's inbox output nor its exit 
   assert.deepEqual(JSON.parse(failed.stdout), JSON.parse(ok.stdout));
   assert.equal(failed.commands.filter((command) => command.kind === "ack_agent_delivery").length, 1, "tried once, not retried");
 });
+
+const acks = (commands: Array<Record<string, unknown>>) => commands.filter((command) => command.kind === "ack_agent_delivery");
+
+for (const json of [false, true]) {
+  test(`an agent's inbox${json ? " --json" : ""} observes nothing while its output is held, then observes once it is written`, { timeout: 60_000 }, async () => {
+    const result = await runInbox(200, json, { stdout: "hold", large: true });
+    assert.equal(result.acksWhileWriting, 0, "no observation while the write is pending");
+    assert.equal(result.code, 0, result.stderr);
+    const printed = LARGE.filter((row) => result.stdout.includes(row.id)).length;
+    assert.equal(printed, LARGE.length, `printed ${printed} of ${LARGE.length}: ${result.stdout.slice(0, 600)}`);
+    // Observed after the write completed: every id once, in batches of at most fifty.
+    assert.deepEqual(acks(result.commands).flatMap((command) => command.signal_ids as string[]).sort(),
+      LARGE.map((row) => row.id).sort());
+  });
+
+  test(`an agent's inbox${json ? " --json" : ""} whose output fails observes nothing`, { timeout: 60_000 }, async () => {
+    const result = await runInbox(200, json, { stdout: "fail", large: true });
+    assert.equal(result.acksWhileWriting, 0, "no observation while the write is pending");
+    assert.notEqual(result.code, 0, "a failed write is the command's failure");
+    assert.equal(acks(result.commands).length, 0, "and no delivery is observed");
+  });
+}

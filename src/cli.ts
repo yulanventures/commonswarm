@@ -60,6 +60,7 @@ import {
   runSetupGuide,
   runSetupImport,
   runSetupVersion,
+  writeOnboardingOutput,
 } from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -5374,7 +5375,10 @@ async function runSignalRead(
   }
 
   /* An agent that read its inbox has seen what was printed: observe those deliveries (check's
-   * unclaimed ack) after the output is written, best effort and briefly. Never changes the output. */
+   * unclaimed ack) only after the output is written, best effort and briefly. The output goes
+   * through writeOnboardingOutput, the awaited writer check uses: it settles when stdout has
+   * taken the bytes and rejects when the write fails, so a held pipe holds the observation and a
+   * failed write observes nothing. Never changes the output. */
   const observePrinted = async () => {
     if (!inbox || selected.kind !== "agent" || selected.agent === undefined) return;
     await observeSurfacedDeliveries({
@@ -5387,14 +5391,17 @@ async function runSignalRead(
   };
 
   if (args.has("json")) {
-    printJson(
+    // printJson's bytes, written and awaited.
+    await writeOnboardingOutput(`${JSON.stringify(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
       }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince, queryBase.since!, args) }
         : inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
         ? { notice: INBOX_LIMIT_NOTICE } : {}) },
-    );
+      null,
+      2,
+    )}\n`);
     if (selected.kind === "agent") {
       await reportRenderedBroadcasts(
         cloud,
@@ -5421,14 +5428,13 @@ async function runSignalRead(
     );
     return;
   }
+  let printed = "";
   if (channelSlug !== undefined) {
     /* Say what was narrowed. Without this an empty channel and an empty
      * workspace print the same thing. */
-    process.stdout.write(
-      `${inbox ? "Inbox" : "Feed"}, filed in ${channelSlug}:\n`,
-    );
+    printed += `${inbox ? "Inbox" : "Feed"}, filed in ${channelSlug}:\n`;
   }
-  process.stdout.write(`${renderSignals(rows, {
+  printed += `${renderSignals(rows, {
     inbox,
     includeStale: args.has("include-stale"),
     authors,
@@ -5437,11 +5443,13 @@ async function runSignalRead(
     ...(authors.workspaceName === undefined ? {} : {
       workspace: { id: selected.selectedWorkspace, name: authors.workspaceName },
     }),
-  })}\n`);
+  })}\n`;
   if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
-    process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
+    printed += `${INBOX_LIMIT_NOTICE}\n`;
   }
-  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since!, args)}\n`);
+  if (moreSince !== undefined) printed += `${inboxMoreNotice(moreSince, queryBase.since!, args)}\n`;
+  // The same bytes the separate writes produced, in one awaited write.
+  await writeOnboardingOutput(printed);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
