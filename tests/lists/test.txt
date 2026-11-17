@@ -54,6 +54,7 @@ tests/support/agent-receive-cli.test.ts
 tests/support/arrival-watch.test.ts
 tests/p1-cli/resume.test.ts
 tests/delivery-client.test.ts
+tests/delivery-observation.test.ts
 tests/p1-cli/d038-invite-form.test.ts
 tests/p1-cli/listener-provider.test.ts
 tests/p1-cli/standing-grants.test.ts

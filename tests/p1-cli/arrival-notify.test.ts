@@ -37,15 +37,16 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
   };
   const receiptBefore = structuredClone(receipt);
   // SIGTERM goes out only after both lines are rendered AND the server has seen the best-effort
-  // attest (signals_seen), the seen mark (add_reaction) and the attended-seat canary (post_signal),
-  // never on a fixed delay that a loaded runner can beat.
+  // attest (signals_seen), the seen mark (add_reaction), the delivery observation
+  // (ack_agent_delivery) and the attended-seat canary (post_signal), never on a fixed delay that a
+  // loaded runner can beat.
   let rendered = false;
   let stopped = false;
   let stop = (): void => {};
   const commandKinds = () => requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
   const maybeStop = () => {
     if (stopped || !rendered || !commandKinds().includes("signals_seen") || !commandKinds().includes("add_reaction") ||
-        !commandKinds().includes("post_signal")) return;
+        !commandKinds().includes("ack_agent_delivery") || !commandKinds().includes("post_signal")) return;
     stopped = true;
     stop();
   };
@@ -75,7 +76,9 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
           event_ids: [], signal_id: command.signal_id, emoji: command.emoji, added: true }));
         return;
       }
-      if (req.url === "/functions/v1/command" && command?.kind === "signals_seen") {
+      // The attest and the observation both fail here: the watcher carries on regardless.
+      if (req.url === "/functions/v1/command" &&
+          (command?.kind === "signals_seen" || command?.kind === "ack_agent_delivery")) {
         res.writeHead(503, { "content-type": "application/json" }).end(
           JSON.stringify({ error: "temporarily_unavailable" }),
         );
@@ -243,15 +246,26 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
         "/functions/v1/command",
         "/functions/v1/command",
         "/functions/v1/command",
+        "/functions/v1/command",
       ],
     );
     assert.equal((requests[0]?.body.command as Record<string, unknown>).kind, "claim_wake_lease");
     assert.equal(requests[1]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
     assert.equal(requests[1]?.body.after_id, OLD_SIGNAL);
     assert.equal(requests[1]?.body.include_reactions, true);
-    // The broadcast attest and the seen mark go out together after the batch; their order is not fixed.
-    const afterBatch = requests.slice(2, 4).map(({ body }) => body.command as Record<string, unknown>);
-    assert.deepEqual(afterBatch.map((command) => command.kind).sort(), ["add_reaction", "signals_seen"]);
+    /* The broadcast attest, the seen mark and the delivery observation go out after the batch's lines
+     * are written; their order is not fixed, and the observation runs in the background, so it may
+     * also land after the canary. */
+    const middle = requests.slice(2, 6).map(({ body }) => body.command as Record<string, unknown>);
+    assert.deepEqual(middle.map((command) => command.kind).sort(),
+      ["ack_agent_delivery", "add_reaction", "post_signal", "signals_seen"]);
+    const afterBatch = middle.filter((command) => command.kind !== "post_signal");
+    assert.deepEqual(
+      afterBatch.find((command) => command.kind === "ack_agent_delivery"),
+      { kind: "ack_agent_delivery", signal_ids: [NEW_SIGNAL], lease_id: null, listener_instance_id: null,
+        outcome: "observed", last_error_code: null, surfaced: true, unclaimed: true },
+      "only the ask addressed to this agent is observed, and its failure stops nothing",
+    );
     assert.deepEqual(
       afterBatch.find((command) => command.kind === "signals_seen")?.signal_ids,
       [BROADCAST_SIGNAL],
@@ -262,8 +276,11 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
       { kind: "add_reaction", signal_id: NEW_SIGNAL, emoji: "\u{1F440}", source: "ack" },
       "only the ask addressed to this agent is marked seen",
     );
-    assert.equal((requests[4]?.body.command as Record<string, unknown>).kind, "post_signal");
-    assert.equal((requests[5]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
+    // The canary follows the batch's attest and seen mark (it waits for both); the release is last.
+    const kinds = requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
+    assert.ok(kinds.indexOf("post_signal") > kinds.indexOf("add_reaction"));
+    assert.ok(kinds.indexOf("post_signal") > kinds.indexOf("signals_seen"));
+    assert.equal(kinds[6], "release_wake_lease");
     assert.deepEqual(receipt, receiptBefore);
 
     const stored = JSON.parse(await readFile(cursorStore.location, "utf8")) as {

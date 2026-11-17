@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { AgentSetupError, openProfileCredential, privatePath, profileSessionContext, profileWorkspaceSession, profileTarget, readAgentProfile, selectAgentWorkspace, agentWorkspaceStatePath } from "../cloud/agent-profile.js";
-import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
+import { AGENT_CHECK_DIRECT_TIMEOUT_MS, checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
 import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
@@ -312,6 +312,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           } else {
             let deferredCommit: ((lastVisibleId?: string) => Promise<void>) | undefined;
             const result = await checkAgentMessages({ profilePath, workspaceId:profile.workspace_id, hostSessionId: options.hostSessionId,
+              timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
               present: async () => undefined,
               deferCursorCommit: commit => { deferredCommit = commit; },
             });

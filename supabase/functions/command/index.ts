@@ -142,7 +142,9 @@ import {
   DELIVERY_MAX_OUTSTANDING_LEASES,
   hydrateDeliveryRefs,
   parseClaimLedger,
-  type AckAgentDeliveryCommand, type AckResult,
+  DELIVERY_OBSERVE_BATCH_MAX,
+  observeUnclaimedDeliveryForActedSignal,
+  type AckAgentDeliveryBatchCommand, type AckAgentDeliveryCommand, type AckResult,
   type ClaimAgentInboxCommand,
   type DeliveryAckOutcome,
 } from "./durable-delivery.ts";
@@ -577,7 +579,7 @@ interface SignalRecord {
   recipients: SignalRecipient[];
 }
 
-type DeliveryCommand = ClaimAgentInboxCommand | AckAgentDeliveryCommand;
+type DeliveryCommand = ClaimAgentInboxCommand | AckAgentDeliveryCommand | AckAgentDeliveryBatchCommand;
 
 interface TouchPresenceCommand {
   kind: "touch_presence";
@@ -867,6 +869,11 @@ interface StoredResponse {
   removed?: boolean;
   /** mark_channel_read: each target's read position after the command. */
   channels?: ChannelReadPosition[];
+  /** Batched unclaimed observation: its outcome, the ids named, those now observed, and each refusal. */
+  outcome?: string;
+  signal_ids?: string[];
+  observed_signal_ids?: string[];
+  refused?: Array<{ signal_id: string; error: string }>;
 }
 
 interface EventEnvelope {
@@ -2165,6 +2172,41 @@ function validateCommand(
         ok: false,
         status: 400,
         reason: "claim_agent_inbox fields are malformed",
+      };
+  }
+
+  if (cmd.kind === ACK_AGENT_DELIVERY_KIND && Object.hasOwn(cmd, "signal_ids")) {
+    /* The batched unclaimed observation: check's shape with 1..50 ids in place of signal_id.
+     * Every other field is fixed and required, and the two id fields never appear together, so
+     * the single-id shape older clients send parses exactly as it did. */
+    const ids = cmd.signal_ids;
+    const valid = exactKeys(cmd, [
+      "kind", "signal_ids", "lease_id", "listener_instance_id",
+      "outcome", "last_error_code", "surfaced", "unclaimed",
+    ]) &&
+      Array.isArray(ids) && ids.length >= 1 && ids.length <= DELIVERY_OBSERVE_BATCH_MAX &&
+      ids.every((id) => typeof id === "string" && UUID_RE.test(id)) &&
+      cmd.lease_id === null && cmd.listener_instance_id === null &&
+      cmd.outcome === "observed" && cmd.last_error_code === null &&
+      cmd.surfaced === true && cmd.unclaimed === true;
+    return valid
+      ? {
+        ok: true,
+        command: {
+          kind: "ack_agent_delivery",
+          signal_ids: [...new Set((ids as string[]).map((id) => id.toLowerCase()))],
+          lease_id: null,
+          listener_instance_id: null,
+          outcome: "observed",
+          last_error_code: null,
+          surfaced: true,
+          unclaimed: true,
+        },
+      }
+      : {
+        ok: false,
+        status: 400,
+        reason: "ack_agent_delivery fields are malformed",
       };
   }
 
@@ -3802,6 +3844,25 @@ async function isPrivateChannelAgentCommand(
     `;
     if (ch?.visibility === "private") return true;
   }
+  /* A batched observation reads as the claim below does: presence is held back only when every
+   * message it named is in a private channel. */
+  if (kind === "ack_agent_delivery" && Array.isArray(localBody?.signal_ids) && localBody.signal_ids.length > 0) {
+    const signalIds = (localBody.signal_ids as unknown[])
+      .filter((id): id is string => typeof id === "string" && UUID_RE.test(id));
+    if (signalIds.length !== localBody.signal_ids.length) return false;
+    const [nonPrivate] = await tx<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM swarm.signals AS s
+        LEFT JOIN swarm.channels AS c
+          ON c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id
+        WHERE s.workspace_id = ${workspaceId}::uuid
+          AND s.id = ANY (${signalIds}::uuid[])
+          AND (s.channel_id IS NULL OR c.visibility IS DISTINCT FROM 'private')
+      ) AS exists
+    `;
+    if (!nonPrivate?.exists) return true;
+  }
   if (kind === CLAIM_AGENT_INBOX_KIND && Array.isArray(localBody?.deliveries) && localBody.deliveries.length > 0) {
     const signalIds: string[] = [];
     for (const entry of localBody.deliveries) {
@@ -4069,6 +4130,22 @@ function storedResponse(value: unknown): StoredResponse {
         channels: (response.channels as Record<string, unknown>[]).map((position) => ({
           channel_id: position.channel_id as string | null,
           read_through_at: position.read_through_at as string,
+        })),
+      }
+      : {}),
+    ...(Array.isArray(response.observed_signal_ids) && Array.isArray(response.signal_ids) &&
+        Array.isArray(response.refused) &&
+        [...response.signal_ids, ...response.observed_signal_ids].every((id) => typeof id === "string") &&
+        response.refused.every((entry) => {
+          const row = record(entry);
+          return row !== null && typeof row.signal_id === "string" && typeof row.error === "string";
+        })
+      ? {
+        signal_ids: response.signal_ids as string[],
+        observed_signal_ids: response.observed_signal_ids as string[],
+        refused: (response.refused as Record<string, unknown>[]).map((entry) => ({
+          signal_id: entry.signal_id as string,
+          error: entry.error as string,
         })),
       }
       : {}),
@@ -12314,8 +12391,16 @@ async function signalNamesRecipient(
               SELECT 1
               FROM swarm.agent_principals AS owned
               WHERE owned.principal_id = r.recipient_agent_principal_id
-                AND owned.workspace_id = r.workspace_id
                 AND owned.owner_user_id = ${caller.userId}::uuid
+                AND (
+                  owned.workspace_id = r.workspace_id
+                  OR EXISTS (
+                    SELECT 1 FROM swarm.agent_workspace_memberships AS seat
+                    WHERE seat.principal_id = owned.principal_id
+                      AND seat.owner_user_id = owned.owner_user_id
+                      AND seat.workspace_id = r.workspace_id
+                  )
+                )
             )
           )
         )
@@ -12332,12 +12417,23 @@ async function signalAgentOwnedByUser(
   ownerUserId: string,
 ): Promise<boolean> {
   if (principalId === null) return false;
+  /* The agent's first workspace, or any workspace it has a membership row in (live or ended): the
+   * rule swarm_read.signals reads by (swarm.agent_has_workspace_membership, 20261116000005), so an
+   * owner can answer every message addressed to its agent that it can read. */
   const rows = await tx<{ principal_id: string }[]>`
-    SELECT principal_id
-    FROM swarm.agent_principals
-    WHERE workspace_id = ${route.workspaceId}::uuid
-      AND principal_id = ${principalId}::uuid
-      AND owner_user_id = ${ownerUserId}::uuid
+    SELECT p.principal_id
+    FROM swarm.agent_principals AS p
+    WHERE p.principal_id = ${principalId}::uuid
+      AND p.owner_user_id = ${ownerUserId}::uuid
+      AND (
+        p.workspace_id = ${route.workspaceId}::uuid
+        OR EXISTS (
+          SELECT 1 FROM swarm.agent_workspace_memberships AS seat
+          WHERE seat.principal_id = p.principal_id
+            AND seat.owner_user_id = p.owner_user_id
+            AND seat.workspace_id = ${route.workspaceId}::uuid
+        )
+      )
     LIMIT 1
   `;
   return rows[0] !== undefined;
@@ -13203,6 +13299,29 @@ async function ackAuditChannelIds(
   return row !== undefined ? [row.channel_id] : undefined;
 }
 
+/** ackAuditChannelIds for a batched observation: every channel among the caller's own deliveries. */
+async function ackAuditChannelIdsFor(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string | null,
+  signalIds: readonly string[],
+): Promise<string[] | undefined> {
+  if (principalId === null || signalIds.length === 0) return undefined;
+  const rows = await tx<{ channel_id: string }[]>`
+    SELECT DISTINCT s.channel_id
+    FROM swarm.signal_deliveries AS d
+    JOIN swarm.signals AS s
+      ON s.workspace_id = d.workspace_id
+     AND s.id = d.signal_id
+    WHERE d.workspace_id = ${workspaceId}::uuid
+      AND d.signal_id = ANY(${signalIds as string[]}::uuid[])
+      AND d.recipient_agent_principal_id = ${principalId}::uuid
+      AND s.channel_id IS NOT NULL
+    ORDER BY s.channel_id
+  `;
+  return rows.length > 0 ? rows.map((row) => row.channel_id) : undefined;
+}
+
 async function replayAuditChannelIds(
   tx: Sql,
   workspaceId: string,
@@ -13278,6 +13397,18 @@ async function replayAuditChannelIds(
       workspaceId,
       auth.agent?.principal_id ?? null,
       stored.signal_id,
+    ));
+  }
+  /* A stored batched observation (it alone carries observed_signal_ids) names its messages as
+   * signal_ids: tag every later use of the command id with their channels, as the fresh request's
+   * audit did and as the single shape's stored signal_id does. */
+  if (Array.isArray(stored?.observed_signal_ids) && Array.isArray(stored?.signal_ids)) {
+    addAll(await ackAuditChannelIdsFor(
+      tx,
+      workspaceId,
+      auth.agent?.principal_id ?? null,
+      (stored.signal_ids as unknown[])
+        .filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
     ));
   }
   if (
@@ -16928,6 +17059,21 @@ async function handleTransaction(
         });
         return { status: 409, body: { error: "reaction_limit_reached", message: outcome.message } };
       }
+      /* An agent that reacts to a message has seen it: observe its own unclaimed delivery of that
+       * message, exactly as a reply does. Only a deliberate reaction: a client's automatic 👀
+       * (source "ack") follows check's own ack or a watcher line, which decide that themselves (a
+       * watcher beside a running listener leaves the row for the listener's lease). */
+      if (command.kind === "add_reaction" && command.source === "manual" &&
+          auth.credentialKind === "agent" && auth.agent !== null) {
+        await observeUnclaimedDeliveryForActedSignal(tx, {
+          workspaceId: route.workspaceId,
+          recipientPrincipalId: auth.agent.principal_id,
+          signalId: command.signal_id,
+          managed: auth.agent.managed_at != null,
+          proof: sessionProofParse.ok ? sessionProofParse.proof : null,
+        }, (sqlstate) => logCommandFailure("command_request_failure", kind, "best_effort",
+          "acted_delivery_observation_failed", undefined, sqlstate));
+      }
       const response: StoredResponse = {
         ok: true,
         event_ids: [],
@@ -17832,6 +17978,20 @@ async function handleTransaction(
         };
       }
       const signal = postOutcome.signal;
+      /* An agent that answers a message has seen it: observe its own unclaimed delivery of the
+       * message it replied to, in this transaction. Best effort and outside the stored response,
+       * so the reply's result, its request hash and its replay are unchanged; a replay returns the
+       * stored reply before reaching here and observes nothing twice. */
+      if (auth.credentialKind === "agent" && auth.agent !== null && typeof command.in_reply_to === "string") {
+        await observeUnclaimedDeliveryForActedSignal(tx, {
+          workspaceId: route.workspaceId,
+          recipientPrincipalId: auth.agent.principal_id,
+          signalId: command.in_reply_to,
+          managed: auth.agent.managed_at != null,
+          proof: sessionProofParse.ok ? sessionProofParse.proof : null,
+        }, (sqlstate) => logCommandFailure("command_request_failure", kind, "best_effort",
+          "acted_delivery_observation_failed", undefined, sqlstate));
+      }
       const signalResponse: StoredResponse = {
         ok: true,
         event_ids: [],
@@ -18327,6 +18487,80 @@ async function handleTransaction(
           ...(await optionalWakeForPrincipal(tx, agent.principal_id)),
         },
       };
+    }
+
+    if (command.kind === ACK_AGENT_DELIVERY_KIND && "signal_ids" in command) {
+      /* check's unclaimed observation for a page of surfaced messages in one request. Each id
+       * takes exactly the single-id path (ackAgentDelivery, unclaimed), in id order so two
+       * batches lock rows in the same order, and answers on its own: one leased, unknown or
+       * refused id never costs the others their observation. One rate charge, one ledger row and
+       * one audit row per request, tagged with every acked message's channel. */
+      const agent = auth.agent;
+      if (agent === null) {
+        return { status: 403, body: { error: "delivery_unavailable" } };
+      }
+      const refusedBy = new Map<string, string>();
+      for (const signalId of [...command.signal_ids].sort()) {
+        const refusal = ackDeliveryRefusal(await ackAgentDelivery(tx, {
+          workspaceId: route.workspaceId,
+          recipientPrincipalId: agent.principal_id,
+          signalId,
+          leaseId: null,
+          listenerInstanceId: null,
+          outcome: "observed",
+          lastErrorCode: null,
+          surfaced: true,
+          unclaimed: true,
+          managed: agent.managed_at != null,
+          proof: sessionProofParse.ok ? sessionProofParse.proof : null,
+        }));
+        if (refusal) refusedBy.set(signalId, String(record(refusal.http.body)?.error ?? "delivery_unavailable"));
+      }
+      const batchResponse: StoredResponse = {
+        ok: true,
+        event_ids: [],
+        outcome: "observed",
+        signal_ids: command.signal_ids,
+        observed_signal_ids: command.signal_ids.filter((id) => !refusedBy.has(id)),
+        refused: command.signal_ids.filter((id) => refusedBy.has(id))
+          .map((id) => ({ signal_id: id, error: refusedBy.get(id)! })),
+      };
+      const batchChannelIds = await ackAuditChannelIdsFor(
+        tx,
+        route.workspaceId,
+        agent.principal_id,
+        command.signal_ids,
+      );
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.credentialKind},
+          ${canonicalPrincipal(auth.actor)},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json(batchResponse as unknown as postgres.JSONValue)}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(auth, commandId, kind, route.workspaceId, route.streamId, hash);
+      }
+      await insertAudit(tx, {
+        auth,
+        commandKind: kind,
+        workspaceId: route.workspaceId,
+        streamId: route.streamId,
+        outcome: "accepted",
+        detail: ignoredIdentity,
+        hash,
+        channelIds: batchChannelIds,
+      });
+      return { status: 200, body: { status: "accepted", ...batchResponse } };
     }
 
     if (command.kind === ACK_AGENT_DELIVERY_KIND) {

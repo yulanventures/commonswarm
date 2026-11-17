@@ -4023,6 +4023,104 @@
             "removes": [],
             "reason": "Runs only inside the stdio MCP file_get tool for a picture; there is no CLI verb for it. The storage path is the same one cswarm file get downloads under REQUEST_TIMEOUT_MS."
           }
+        },
+        "src/cloud/agent-check-budget.ts:AGENT_CHECK_DIRECT_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read",
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-check-budget.ts:23; src/onboarding-cli.ts:212; src/mcp/server.ts:315",
+          "detail": "Whole check run directly (cswarm check without --hook, the stdio MCP check tool): the same work as AGENT_CHECK_TIMEOUT_MS plus observing the page.",
+          "operation": {
+            "name": "check-direct",
+            "class": "not-run",
+            "writes": [
+              "agent turn presence on the command edge",
+              "unclaimed delivery observations",
+              "private-copy presence throttle and check.json cursor/cache"
+            ],
+            "removes": [],
+            "reason": "A direct check sends touch_presence and observes its deliveries, so it is not a read-only production measurement.",
+            "proxy_operation": "check"
+          }
+        },
+        "src/onboarding-cli.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read",
+            "/functions/v1/command"
+          ],
+          "citation": "src/onboarding-cli.ts:212",
+          "detail": "cswarm check passes AGENT_CHECK_DIRECT_TIMEOUT_MS; --hook keeps the host-hook budget.",
+          "operation": {
+            "name": "check-direct-site",
+            "class": "not-run",
+            "writes": [
+              "private-copy check.json cursor/cache only"
+            ],
+            "removes": [],
+            "reason": "Use of AGENT_CHECK_DIRECT_TIMEOUT_MS.",
+            "proxy_operation": "check"
+          }
+        },
+        "src/mcp/server.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/read",
+            "/functions/v1/command"
+          ],
+          "citation": "src/mcp/server.ts:315",
+          "detail": "The stdio MCP check tool passes AGENT_CHECK_DIRECT_TIMEOUT_MS.",
+          "operation": {
+            "name": "mcp-check-site",
+            "class": "not-run",
+            "writes": [
+              "private-copy check.json cursor/cache only"
+            ],
+            "removes": [],
+            "reason": "Use of AGENT_CHECK_DIRECT_TIMEOUT_MS.",
+            "proxy_operation": "check"
+          }
+        },
+        "src/cloud/agent-check.ts:requestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-check.ts:367",
+          "detail": "Ceiling for one observation request in check (AGENT_CHECK_TIMEOUT_MS), inside the check's own deadline.",
+          "operation": {
+            "name": "check-observe",
+            "class": "not-run",
+            "writes": [
+              "unclaimed delivery observations"
+            ],
+            "removes": [],
+            "reason": "Unclaimed delivery observation writes delivery state on the command edge."
+          }
+        },
+        "src/cloud/delivery-observation.ts:SURFACED_OBSERVATION_BUDGET_MS": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/delivery-observation.ts:123",
+          "detail": "How long cswarm inbox and inbox --notify spend observing what they printed; best effort.",
+          "operation": {
+            "name": "inbox-observe",
+            "class": "not-run",
+            "writes": [
+              "unclaimed delivery observations"
+            ],
+            "removes": [],
+            "reason": "Unclaimed delivery observation writes delivery state on the command edge."
+          }
         }
       }
     }

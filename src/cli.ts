@@ -388,6 +388,7 @@ import {
   reportSeenReactions,
   seenAckTargets,
 } from "./cloud/agent-signal-receipts.js";
+import { observeSurfacedDeliveries, surfacedDeliveryIds } from "./cloud/delivery-observation.js";
 import {
   compareSemVer,
   type ProviderVersionNotice,
@@ -5372,6 +5373,19 @@ async function runSignalRead(
     assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
   }
 
+  /* An agent that read its inbox has seen what was printed: observe those deliveries (check's
+   * unclaimed ack) after the output is written, best effort and briefly. Never changes the output. */
+  const observePrinted = async () => {
+    if (!inbox || selected.kind !== "agent" || selected.agent === undefined) return;
+    await observeSurfacedDeliveries({
+      target: cloud,
+      fetcher: selected.fetcher,
+      credential: selected.bearer,
+      workspaceId: selected.selectedWorkspace,
+      signalIds: surfacedDeliveryIds(rows, selected.agent.principalId),
+    });
+  };
+
   if (args.has("json")) {
     printJson(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
@@ -5389,6 +5403,7 @@ async function runSignalRead(
         renderedBroadcastIds(rows),
       );
     }
+    await observePrinted();
     return;
   }
   const authors = await settleSignalAuthorLabels(
@@ -5435,12 +5450,14 @@ async function runSignalRead(
       renderedBroadcastIds(rows),
     );
   }
+  await observePrinted();
 }
 
 /**
  * Human-visible arrival surface for a host Monitor. It reads signal pages and
- * advances only a local cursor; delivery claim/ack state belongs to the
- * listener and interactive hook paths and is never touched here.
+ * advances only a local cursor. It never claims or leases a delivery; after an
+ * arrival line is written it only observes that delivery unclaimed, as check
+ * does, and leaves every leased or acked row to the listener and hook paths.
  */
 async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   if (!hasAgentCredential(args)) {
@@ -5725,6 +5742,28 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
       },
       afterEmitBatch: async (signals) => {
+        /* The arrival lines are written: observe those deliveries (check's unclaimed ack), so the
+         * roster sees this seat picking up. In the background, bounded and never fatal: the watch
+         * loop does not wait for it, and a failure leaves the delivery for the next check. The
+         * agent's own notes (the attended canary among them) are left for check, and a seat with a
+         * running listener leaves every row for the listener to lease and its session to surface. */
+        const observeBearer = renderedBearer;
+        void (async () => {
+          try {
+            const listener = await readListenerStatusIfPresent(listenerPaths({
+              profileId: cloud.profileId, workspaceId: selected.selectedWorkspace, principalId,
+            }));
+            if (LISTENER_RUNNING_STATES.includes(listener?.state ?? "stopped")) return;
+          } catch { return; }
+          await observeSurfacedDeliveries({
+            target: cloud,
+            fetcher: selected.fetcher,
+            credential: observeBearer,
+            workspaceId: selected.selectedWorkspace,
+            signalIds: surfacedDeliveryIds(signals, principalId, { excludeOwn: true }),
+            signal: controller.signal,
+          });
+        })();
         // 👀 on the arrivals just printed that reach this agent, beside the broadcast seen report.
         await Promise.all([
           reportRenderedBroadcasts(

@@ -16,6 +16,12 @@ export const AGENT_CHECK_TIMEOUT_MS =
   AGENT_CHECK_STARTUP_ALLOWANCE_MS -
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
 
+/**
+ * A check run directly (`cswarm check`, the stdio MCP check tool) has no host hook timing it, so it
+ * takes a normal command deadline instead of the hook's: enough to read a page and observe all of it.
+ */
+export const AGENT_CHECK_DIRECT_TIMEOUT_MS = 15_000;
+
 export const HOST_HOOK_PROCESS_DEADLINE_MS =
   HOST_HOOK_TIMEOUT_SECONDS * 1_000 - AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
 
