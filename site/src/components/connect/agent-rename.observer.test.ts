@@ -343,6 +343,32 @@ test("People rows: a taken name keeps the draft across re-renders with the serve
   assert.equal(p.sent.length, 1);
 });
 
+// Designer P2 on #479: an answer belongs to the field that sent it, not to whichever field the agent has now.
+test("People rows: after Cancel and Rename again, the earlier attempt's late answer leaves the new field alone", async () => {
+  for (const late of [{ ok: false, message: "Refusal from old attempt" }, { ok: true }] as RenameOutcome[]) {
+    const p = people([agent("Scout")]);
+    const type = (value: string) => { p.input("Scout").value = value; p.input("Scout").dispatch(event("input")); };
+    p.control("rename-Scout").click();
+    type("Old attempt");
+    p.field("Scout").dispatch(event("submit"));
+    assert.deepEqual(p.sent, [["Scout", "Old attempt"]]);
+    p.field("Scout").querySelector("button[data-rename-cancel]").click(); // the answer is still out
+    p.control("rename-Scout").click();
+    type("New draft");
+    await p.answer(late);
+    assert.equal(p.input("Scout")?.value, "New draft", `${late.ok ? "accepted" : "refused"}: the new draft stays`);
+    assert.equal(p.row("Scout").querySelector("p[data-rename-error]").hidden, true, "no refusal from the earlier attempt");
+    assert.equal(p.field("Scout").querySelector("button[data-rename-save]").disabled, false, "the new field is not waiting");
+    assert.ok(p.dom.doc.activeElement === p.input("Scout"), "focus stays in the new field");
+    // The new field's own save still works and is answered on its own.
+    p.field("Scout").dispatch(event("submit"));
+    assert.deepEqual(p.sent.at(-1), ["Scout", "New draft"]);
+    await p.answer({ ok: false, message: TAKEN });
+    assert.equal(p.row("Scout").querySelector("p[data-rename-error]").textContent, TAKEN);
+    assert.equal(p.input("Scout").value, "New draft");
+  }
+});
+
 test("People rows: Reconnect gives a hosted agent its sentence, a local agent a new setup prompt, and others nothing", async () => {
   const written: string[] = [];
   Object.defineProperty(globalThis.navigator, "clipboard", { value: { writeText: async (text: string) => { written.push(text); } }, configurable: true });

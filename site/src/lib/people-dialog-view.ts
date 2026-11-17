@@ -35,7 +35,7 @@ export interface PeopleDialogState { selected: { type: "agent" | "person"; id: s
   /** Builder-owned: the layout of the last render. A page keeps role drafts without a selected person. */
   layout?: "dialog" | "page";
   /** Builder-owned: the row whose name is being edited, with its draft, the server's refusal and a save in flight. */
-  rename?: { id: string; value: string; error: string; pending: boolean } | null;
+  rename?: { id: string; editor: number; value: string; error: string; pending: boolean } | null;
   /** Builder-owned: the hosted agent whose reconnect sentence is shown. */
   reconnect?: string | null }
 /** The page layout's own navigation. Links keep real hrefs; `navigate` (when given) handles the click in place. */
@@ -272,6 +272,9 @@ function pageHeading(doc: Document): HTMLElement | null {
     && bounds && bounds.width > 1 && bounds.height > 1 && !title.closest("[hidden],[inert]") ? title : null;
 }
 
+/** Each opened Rename field is a new editor; a save's answer applies only to the editor that sent it. */
+let renameEditors = 0;
+
 /** Real DOM builder. User text is always textContent or an input value, never HTML. */
 export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model: PeopleDialogModel, state: PeopleDialogState, callbacks: PeopleDialogCallbacks, options: PeopleDialogOptions = {}): void {
   const doc = root.ownerDocument;
@@ -476,14 +479,16 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const saveRename = async (id: string, name: string) => {
     const rename = callbacks.rename;
     if (!rename || state.rename?.id !== id || state.rename.pending) return;
-    state.rename = { id, value: name, error: "", pending: true }; callbacks.render();
+    // The answer belongs to this editor only: Cancel then Rename again on the same agent opens a new one.
+    const editor = state.rename.editor;
+    state.rename = { id, editor, value: name, error: "", pending: true }; callbacks.render();
     let outcome: RenameOutcome;
     try { outcome = await rename(id, name); }
     catch (error) { outcome = { ok: false, message: error instanceof Error ? error.message : "The rename was not confirmed." }; }
-    // Cancelled, or another row opened, while the server answered: that row's field is not this answer's.
-    if (state.rename?.id !== id) return;
+    // Cancelled, reopened, or another row opened while the server answered: that field is not this answer's.
+    if (state.rename?.id !== id || state.rename.editor !== editor) return;
     if (!outcome.ok) {
-      state.rename = { id, value: name, error: outcome.message, pending: false }; callbacks.render();
+      state.rename = { id, editor, value: name, error: outcome.message, pending: false }; callbacks.render();
       renameInput(id)?.focus({ preventScroll: true }); return;
     }
     state.rename = null; callbacks.render(); focusRow(id);
@@ -555,7 +560,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (callbacks.rename && peopleDialogCanAct(model, "rename", agent.id)) {
       const rename = button(doc, "Rename", () => {
         closeMenu(); state.reconnect = null;
-        state.rename = { id: agent.id, value: agent.rawName ?? agent.name, error: "", pending: false }; callbacks.render();
+        state.rename = { id: agent.id, editor: ++renameEditors, value: agent.rawName ?? agent.name, error: "", pending: false }; callbacks.render();
         const input = doc.getElementById(`pd-rename-${agent.id}`) as HTMLInputElement | null;
         input?.focus({ preventScroll: true }); input?.select();
       });
