@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
@@ -172,13 +173,31 @@ function buildPublicRead(plan: string): string {
   );
 }
 
-function buildPublicProbe(plan: string): string {
+/* Public-hosted-only kinds added after the 2026-09-28 lane 6 recording. The plan's probe pins the six
+ * kinds that recording answers for, and a later kind has no recorded response to replay, so the probe
+ * reads the source as it was recorded: these lines removed, each exactly once. That public HTTP still
+ * refuses each later kind is proved where it was added (tests/hosted-reactions.test.ts). */
+const KINDS_ADDED_AFTER_RECORDING = ["mark_hosted_channel_read_seen"] as const;
+
+function recordedHostedAuthority(root: string): string {
+  let source = readFileSync(HOSTED_AUTHORITY, "utf8");
+  for (const kind of KINDS_ADDED_AFTER_RECORDING) {
+    const line = `  '${kind}',\n`;
+    assert.equal(source.split(line).length, 2, `${kind} must appear once in the public hosted-only set`);
+    source = source.replace(line, "");
+  }
+  const path = join(root, "hosted-authority.recorded.ts");
+  writeFileSync(path, source);
+  return path;
+}
+
+function buildPublicProbe(plan: string, root: string): string {
   const step = extractStep(plan, "hm37-public-boundaries");
   const kindsProgram = extractPythonHeredoc(
     step,
     "python3 - src/protocol/hosted-authority.ts",
   );
-  const kinds = spawnSync("python3", ["-", HOSTED_AUTHORITY], {
+  const kinds = spawnSync("python3", ["-", recordedHostedAuthority(root)], {
     encoding: "utf8",
     input: kindsProgram,
   });
@@ -275,7 +294,7 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     const currentPrecondition = extractPrecondition(currentPlan);
     const currentRefusalPrecondition = extractRefusalPrecondition(currentPlan);
     const currentPublicRead = buildPublicRead(currentPlan);
-    const currentPublicProbe = buildPublicProbe(currentPlan);
+    const currentPublicProbe = buildPublicProbe(currentPlan, temporaryRoot);
     const recordingText = await readFile(RECORDING, "utf8");
     const recording = JSON.parse(recordingText) as Recording;
 
@@ -332,7 +351,7 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     assert.equal(previous.status, 0, previous.stderr);
     for (const [label, program, args] of [
       ["old-precondition", extractPrecondition(previous.stdout), [BASE]],
-      ["old-public", buildPublicProbe(previous.stdout), ["mcp", BASE]],
+      ["old-public", buildPublicProbe(previous.stdout, temporaryRoot), ["mcp", BASE]],
     ] as const) {
       assert.match(program, /assert "application\/json" in content_type/);
       const result = await runProgram(

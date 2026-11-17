@@ -1,7 +1,7 @@
 /**
  * The hosted react tool: what it sends and what it returns. It sends exactly add_reaction or
  * remove_reaction with signal_id and emoji, never a source: a hosted seat's automatic seen mark is
- * written by its check (command/index.ts handleHostedCheck), not through this tool.
+ * written by its check and its channel_read (command/index.ts markHostedSeatSeen), not through this tool.
  */
 import type { CommandResult } from "../command/contract.d.ts";
 import { normalizeReactionEmoji } from "../_shared/protocol.js";

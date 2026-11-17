@@ -192,6 +192,7 @@ import {
 } from "./human-receipts.ts";
 import {
   applyReaction,
+  hostedSeenAckTargets,
   markHostedCheckSeen,
   parseReactionCommand,
   REACTION_COMMAND_KINDS,
@@ -14430,7 +14431,7 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   }
   if (command?.kind === "ask_choice" || command?.kind === "answer_choice") return false;
   /* The hosted react tool sends exactly one add_reaction or remove_reaction with signal_id and emoji,
-   * never a source: a hosted seat's automatic seen mark is its check's own write (handleHostedCheck).
+   * never a source: a hosted seat's automatic seen mark is its check's own write (markHostedSeatSeen).
    * No other tool can send either kind. */
   if (tool === "react") {
     return (command?.kind === "add_reaction" || command?.kind === "remove_reaction") &&
@@ -14447,7 +14448,8 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   if (tool === "reply") return command.signal_kind === "note" && (
     (typeof command.in_reply_to === "string" && command.thread_root_id == null) ||
     (command.in_reply_to == null && typeof command.thread_root_id === "string"));
-  return (tool === "working_on" && command.signal_kind === "working-on") || (tool === "check" && (command.kind === "open_hosted_mcp_check_batch" || command.kind === "ack_hosted_mcp_check_batch"));
+  return (tool === "working_on" && command.signal_kind === "working-on") || (tool === "check" && (command.kind === "open_hosted_mcp_check_batch" || command.kind === "ack_hosted_mcp_check_batch" ||
+      command.kind === HOSTED_CHANNEL_READ_SEEN_KIND));
 }
 
 function hostedClaimInput(value: RequestBody): HostedSeatClaimInput | null {
@@ -17063,8 +17065,8 @@ async function handleTransaction(
        * message, exactly as a reply does. Only a deliberate reaction: a client's automatic 👀
        * (source "ack") follows check's own ack or a watcher line, which decide that themselves (a
        * watcher beside a running listener leaves the row for the listener's lease). */
-      if (command.kind === "add_reaction" && command.source === "manual" &&
-          auth.credentialKind === "agent" && auth.agent !== null) {
+      if (command.kind === "add_reaction" && command.source === "manual" && auth.agent !== null &&
+          (auth.credentialKind === "agent" || auth.credentialKind === "hosted_seat")) {
         await observeUnclaimedDeliveryForActedSignal(tx, {
           workspaceId: route.workspaceId,
           recipientPrincipalId: auth.agent.principal_id,
@@ -17982,7 +17984,8 @@ async function handleTransaction(
        * message it replied to, in this transaction. Best effort and outside the stored response,
        * so the reply's result, its request hash and its replay are unchanged; a replay returns the
        * stored reply before reaching here and observes nothing twice. */
-      if (auth.credentialKind === "agent" && auth.agent !== null && typeof command.in_reply_to === "string") {
+      if ((auth.credentialKind === "agent" || auth.credentialKind === "hosted_seat") && auth.agent !== null &&
+          typeof command.in_reply_to === "string") {
         await observeUnclaimedDeliveryForActedSignal(tx, {
           workspaceId: route.workspaceId,
           recipientPrincipalId: auth.agent.principal_id,
@@ -19894,6 +19897,132 @@ function hostedCheckBatchFact(row: HostedCheckBatchRow | undefined) {
   };
 }
 
+/**
+ * A hosted seat has seen what one of its turns returned (a check batch, or the mentions on a
+ * channel_read page): one 👀 on each ask or note it did not write, under the seat's claims the
+ * caller installed, and its own untouched delivery of each moved to observed, which is what a
+ * sender's "Seen" reads. A hosted seat is turn-only and never managed: no listener will lease it.
+ *
+ * Best effort and idempotent. Every write runs in a savepoint and logs only a SQLSTATE; a mark that
+ * exists and a row already acked are skipped, so a replayed batch or a reread page writes nothing.
+ */
+async function markHostedSeatSeen(
+  tx: Sql,
+  workspaceId: string,
+  principalId: string,
+  rows: readonly Record<string, unknown>[],
+  commandKind: string,
+): Promise<void> {
+  await markHostedCheckSeen(tx, workspaceId, principalId, rows, (sqlstate) =>
+    logCommandFailure("command_request_failure", commandKind, "best_effort", "hosted_check_seen_mark_failed",
+      undefined, sqlstate));
+  for (const signalId of hostedSeenAckTargets(rows, principalId, rows.length)) {
+    await observeUnclaimedDeliveryForActedSignal(tx, {
+      workspaceId, recipientPrincipalId: principalId, signalId, managed: false, proof: null,
+    }, (sqlstate) => logCommandFailure("command_request_failure", commandKind, "best_effort",
+      "hosted_seen_delivery_observation_failed", undefined, sqlstate));
+  }
+}
+
+/**
+ * The hosted MCP sends this after a channel_read page, with the ids that page returned, under a
+ * `check` capability: no hosted tool sends it, and no other credential reaches this handler.
+ */
+const HOSTED_CHANNEL_READ_SEEN_KIND = "mark_hosted_channel_read_seen";
+
+function hostedChannelReadSeenInput(
+  value: RequestBody,
+): { workspace_id: string; seat: string; signal_ids: string[] } | null {
+  const stream = record(value.stream);
+  const command = record(value.command);
+  if (
+    typeof value.command_id !== "string" || !COMMAND_ID_RE.test(value.command_id) ||
+    typeof value.workspace_id !== "string" || !UUID_RE.test(value.workspace_id) ||
+    !stream || !exactKeys(stream, ["kind"]) || stream.kind !== "workspace" ||
+    !command || command.kind !== HOSTED_CHANNEL_READ_SEEN_KIND ||
+    !exactKeys(command, ["kind", "seat", "signal_ids"]) ||
+    typeof command.seat !== "string" || !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(command.seat) ||
+    !Array.isArray(command.signal_ids) || command.signal_ids.length < 1 ||
+    command.signal_ids.length > SIGNALS_SEEN_MAX_IDS ||
+    !command.signal_ids.every((id) => typeof id === "string" && UUID_RE.test(id))
+  ) return null;
+  return {
+    workspace_id: value.workspace_id,
+    seat: command.seat,
+    signal_ids: [...new Set((command.signal_ids as string[]).map((id) => id.toLowerCase()))],
+  };
+}
+
+/**
+ * A hosted seat read a channel_read page. Of the messages it returned, those that mention the seat
+ * get what a hosted check gives them (👀 and the seat's delivery observed), and those posted to the
+ * whole channel get the seat's agent receipt, the "Seen by N of M agents" a local agent's
+ * signals_seen writes (its own posts too, as M counts their author). Each set is re-derived here under the seat's claims, so an id the seat could
+ * not read changes nothing. Local agents never reach this: their channel_read leaves deliveries for
+ * a running listener to claim.
+ *
+ * Best effort and idempotent, like the check's marks: nothing here changes the page, every write is
+ * conditional (no second mark, no second receipt, only an untouched delivery), and a failure rolls
+ * back only its savepoint.
+ */
+async function handleHostedChannelReadSeen(
+  body: RequestBody,
+  capability: HostedSeatCapability,
+): Promise<HttpResult> {
+  const input = hostedChannelReadSeenInput(body);
+  if (input === null || hostedCapabilityTool(capability) !== "check") {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  return await db.begin("isolation level read committed", async (tx) => {
+    await setTransaction(tx);
+    const seat = await revalidateHostedSeatCommand(tx, capability);
+    if (seat === null || seat.workspace_id !== input.workspace_id || seat.handle !== input.seat) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    // The same claims a hosted check installs, so visibility and reactability answer for this seat.
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({
+          sub: seat.owner_user_id,
+          role: "authenticated",
+          agent_principal_id: seat.principal_id,
+        })},
+        true
+      )
+    `;
+    const mentioning = await tx<Record<string, unknown>[]>`
+      SELECT s.id, s."from", s.from_kind, s.kind
+      FROM swarm.hosted_mcp_check_visible_signals(
+        ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid, ${input.signal_ids}::uuid[]
+      ) AS s
+      ORDER BY array_position(${input.signal_ids}::uuid[], s.id)
+    `;
+    await markHostedSeatSeen(tx, seat.workspace_id, seat.principal_id, mentioning, HOSTED_CHANNEL_READ_SEEN_KIND);
+    const channelWide = await tx<{ id: string }[]>`
+      SELECT s.id
+      FROM swarm.signals AS s
+      WHERE s.workspace_id = ${seat.workspace_id}::uuid
+        AND s.id = ANY(${input.signal_ids}::uuid[])
+        AND s.to_user_id IS NULL
+        AND s.to_agent_principal_id IS NULL
+    `;
+    if (channelWide.length > 0) {
+      try {
+        await tx.savepoint(async (sp) => await markAgentSignalsSeen(sp, {
+          workspaceId: seat.workspace_id,
+          principalId: seat.principal_id,
+          signalIds: channelWide.map((row) => row.id),
+        }));
+      } catch (error) {
+        logCommandFailure("command_request_failure", HOSTED_CHANNEL_READ_SEEN_KIND, "best_effort",
+          "hosted_channel_read_receipt_failed", undefined, dbCode(error) ?? null);
+      }
+    }
+    return { status: 200, body: { ok: true } };
+  });
+}
+
 async function handleHostedCheck(
   body: RequestBody,
   capability: HostedSeatCapability,
@@ -20236,10 +20365,8 @@ async function handleHostedCheck(
         throw new Error("hosted check replay visibility changed for recorded ids");
       }
     }
-    // 👀 on what this check returns, under the seat's claims installed above. Never fails the check.
-    await markHostedCheckSeen(tx, seat.workspace_id, seat.principal_id, signals, (sqlstate) =>
-      logCommandFailure("command_request_failure", input.command.kind, "best_effort", "hosted_check_seen_mark_failed",
-        undefined, sqlstate));
+    // 👀 and Seen on what this check returns, under the seat's claims installed above. Never fails the check.
+    await markHostedSeatSeen(tx, seat.workspace_id, seat.principal_id, signals, input.command.kind);
     return { status: 200, body: {
       context,
       batch_id: batch.batch_id,
@@ -20274,7 +20401,9 @@ export async function handleHostedCommand(
     return { status: 403, body: { error: "forbidden" } };
   }
   if (tool === "check") {
-    return await handleHostedCheck(input, capability);
+    return record(input.command)?.kind === HOSTED_CHANNEL_READ_SEEN_KIND
+      ? await handleHostedChannelReadSeen(input, capability)
+      : await handleHostedCheck(input, capability);
   }
   return await handleTransaction(
     input,

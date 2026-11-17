@@ -1,7 +1,7 @@
 /**
  * The hosted react tool and the hosted check's seen marks, without a database: argument
  * validation, the one command the tool sends, its outcome and refusal copy, and which returned
- * check rows a seat marks with 👀.
+ * check rows a seat marks with 👀, and the seen command the hosted MCP sends after a channel_read page.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -13,6 +13,10 @@ import { reactionCommand, reactionOutput } from "../supabase/functions/mcp/react
 import { hostedToolError, HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { HOSTED_SEEN_MARK_MAX, hostedSeenAckTargets } from "../supabase/functions/command/signal-reactions.ts";
+// @ts-expect-error TS5097: exercise the Deno source through tsx.
+import { channelReadSeenCommand, HOSTED_CHANNEL_READ_SEEN_KIND, HOSTED_CHANNEL_READ_SEEN_MAX, markChannelReadSeen } from "../supabase/functions/mcp/channel-seen.ts";
+import { readFile } from "node:fs/promises";
+import { publicHostedCommandForbidden } from "../src/protocol/hosted-authority.js";
 
 const seat = "seat_ABCDEFGHIJKLMNOPQRSTUV";
 const MESSAGE = "55555555-5555-4555-8555-555555555555";
@@ -103,4 +107,47 @@ test("a hosted check marks the asks and notes it returns that its agent did not 
     row({ id: `77777777-7777-4777-8777-${String(index).padStart(12, "0")}` }));
   assert.equal(HOSTED_SEEN_MARK_MAX, 20);
   assert.deepEqual(ids(many), many.slice(0, 20).map((value) => value.id), "the first twenty, in order");
+  // Seen (the delivery observed) is not a courtesy mark: every row a turn returns, not twenty.
+  assert.deepEqual(hostedSeenAckTargets(many, AGENT, many.length), many.map((value) => value.id));
+});
+
+test("after a channel_read page the hosted MCP sends one seen command with that page's ids, under a check capability", async () => {
+  const id = (n: number) => `77777777-7777-4777-8777-${String(n).padStart(12, "0")}`;
+  const page = [{ signal_id: id(1).toUpperCase() }, { signal_id: id(2) }, { signal_id: id(1) }, { signal_id: "nope" }, {}];
+  const input = channelReadSeenCommand(page, USER, seat);
+  assert.ok(input);
+  assert.match(String(input.command_id), /^mcpseen_[0-9a-f-]{36}$/u);
+  assert.deepEqual({ ...input, command_id: null }, {
+    command_id: null, client_version: "0.1.80", workspace_id: USER, stream: { kind: "workspace" },
+    command: { kind: HOSTED_CHANNEL_READ_SEEN_KIND, seat, signal_ids: [id(1), id(2)] },
+  }, "each returned id once, lowercased, in page order");
+  assert.equal(channelReadSeenCommand([], USER, seat), null, "an empty page sends nothing");
+  const many = Array.from({ length: HOSTED_CHANNEL_READ_SEEN_MAX + 3 }, (_, n) => ({ signal_id: id(n) }));
+  assert.equal((channelReadSeenCommand(many, USER, seat)!.command as { signal_ids: string[] }).signal_ids.length, 50);
+
+  const calls: string[] = [];
+  const cap = { kind: "hosted_seat" };
+  const send = (status: number) => async (sent: Record<string, unknown>, granted: unknown) => {
+    calls.push(`send:${(sent.command as { kind: string }).kind}:${granted === cap}`);
+    return { status, body: {} };
+  };
+  const capability = async () => { calls.push("capability"); return cap; };
+  assert.equal(await markChannelReadSeen([], USER, seat, capability, send(200)), false);
+  assert.deepEqual(calls, [], "an empty page asks for no capability");
+  assert.equal(await markChannelReadSeen(page, USER, seat, capability, send(200)), true);
+  assert.deepEqual(calls.splice(0), ["capability", `send:${HOSTED_CHANNEL_READ_SEEN_KIND}:true`]);
+  assert.equal(await markChannelReadSeen(page, USER, seat, async () => null, send(200)), false, "no capability, nothing sent");
+  assert.deepEqual(calls, []);
+  // A refusal or a failure leaves the page as it is: never a throw.
+  assert.equal(await markChannelReadSeen(page, USER, seat, capability, send(403)), false);
+  assert.equal(await markChannelReadSeen(page, USER, seat, capability, async () => { throw new Error("down"); }), false);
+  assert.equal(await markChannelReadSeen(page, USER, seat, async () => { throw new Error("down"); }, send(200)), false);
+});
+
+test("the command edge takes the hosted MCP's channel_read seen kind, and the MCP sends it after the page it returns", async () => {
+  const command = await readFile(new URL("../supabase/functions/command/index.ts", import.meta.url), "utf8");
+  assert.ok(command.includes(`const HOSTED_CHANNEL_READ_SEEN_KIND = "${HOSTED_CHANNEL_READ_SEEN_KIND}";`));
+  assert.equal(publicHostedCommandForbidden(HOSTED_CHANNEL_READ_SEEN_KIND), true, "public HTTP refuses it before authentication");
+  const mcp = await readFile(new URL("../supabase/functions/mcp/index.ts", import.meta.url), "utf8");
+  assert.match(mcp, /markChannelReadSeen\(messages, binding\.workspaceId, handle,\s*\(\) => seatCapability\(call\.token, binding, "check"\)/u);
 });

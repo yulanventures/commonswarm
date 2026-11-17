@@ -23,6 +23,8 @@ const commandUrl = new URL("../../supabase/functions/command/index.ts", import.m
 const authUrl = new URL(
   "../../supabase/functions/_shared/hosted-seat-auth.ts", import.meta.url,
 );
+const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
+const channelSeenUrl = new URL("../../supabase/functions/mcp/channel-seen.ts", import.meta.url);
 
 interface LocalEnvironment {
   API_URL: string;
@@ -68,14 +70,14 @@ const authModule = await import(${JSON.stringify(authUrl.href)});
 const { db, handleHostedCommand, handleRequest } = commandModule;
 const { authenticateHostedSeatCapability } = authModule;
 
-async function capability(handle, tool = "check") {
+async function capability(handle, tool = "check", use = "command") {
   return await db.begin(async (tx) => await authenticateHostedSeatCapability(tx, {
     grantId: input.grant,
     providerGrantId: "provider-" + input.grant,
     handle,
     tool,
     providerStatus: async () => ({ active: true }),
-  }, "command"));
+  }, use));
 }
 
 function body(handle, ack) {
@@ -168,6 +170,20 @@ if (input.operation === "single") {
     stream: { kind: "workspace" },
     command: input.command,
   }, cap);
+} else if (input.operation === "channel-read") {
+  // What mcp/index.ts does for channel_read: the read edge's page, then (unless readOnly) the seen
+  // command for the messages that page returned, under a check capability.
+  const read = await import(${JSON.stringify(readUrl.href)});
+  const seen = await import(${JSON.stringify(channelSeenUrl.href)});
+  const reader = await capability(input.capabilityHandle, "channel_read", "read");
+  const page = reader === null ? { status: 403, body: { error: "forbidden" } } : await read.handleHostedRead({
+    resource: "channel_messages", workspace_id: input.workspace, channel: input.channel ?? "general",
+    after_id: null, limit: 50, fit_bytes: 64 * 1024,
+  }, reader);
+  const messages = Array.isArray(page.body.messages) ? page.body.messages : [];
+  const marked = input.readOnly === true ? null : await seen.markChannelReadSeen(messages, input.workspace,
+    input.capabilityHandle, () => capability(input.capabilityHandle, "check"), handleHostedCommand);
+  result = { status: page.status, body: { ids: messages.map((message) => message.signal_id), marked } };
 } else {
   throw new Error("unknown hosted check operation");
 }
@@ -637,6 +653,160 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
   assert.equal(acked.body.acknowledged_batch_id, first.body.batch_id, "the acknowledgement still lands");
   assert.deepEqual(acked.body.signals, []);
   assert.deepEqual(await marks(), expected);
+});
+
+/* Hosted seats are turn-only, with no listener lease: what a seat's turn shows it, or acts on,
+ * moves its own untouched delivery to observed, which the sender's "Seen" reads. */
+
+async function deliveryOf(signalId: string, principal: string) {
+  const [row] = await sql<{ ack_outcome: string | null; ack_via: string | null; acked_at: Date | null; lease_id: string | null }[]>`
+    SELECT ack_outcome, ack_via, acked_at, lease_id FROM swarm.signal_deliveries
+    WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${principal}::uuid`;
+  assert.ok(row, `a delivery row exists for ${signalId}`);
+  return { ...row };
+}
+
+/** swarm_read.message_status as the sending person reads it in the web app. */
+async function seenFor(fixture: Fixture, signalId: string, principal: string): Promise<unknown> {
+  return await sql.begin(async (tx) => {
+    await tx`SELECT set_config('role', 'authenticated', true),
+      set_config('request.jwt.claims', ${JSON.stringify({ sub: fixture.owner, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ status: { statuses: Array<Record<string, unknown>> } | null }[]>`
+      SELECT swarm_read.message_status(${fixture.workspace}::uuid, ${[signalId]}::uuid[]) AS status`;
+    return row?.status?.statuses.find((entry) => entry.agent_principal_id === principal)?.seen;
+  });
+}
+
+async function seenMarksBy(fixture: Fixture, principal: string): Promise<Array<{ signal_id: string; source: string }>> {
+  return (await sql<{ signal_id: string; source: string }[]>`
+    SELECT signal_id::text AS signal_id, source FROM swarm.signal_reactions
+    WHERE workspace_id = ${fixture.workspace}::uuid AND actor_agent_principal_id = ${principal}::uuid
+      AND emoji = ${"\u{1F440}"}
+    ORDER BY signal_id`).map((row) => ({ ...row }));
+}
+
+async function receiptsBy(fixture: Fixture, principal: string): Promise<Array<{ signal_id: string; first_seen_at: string }>> {
+  return (await sql<{ signal_id: string; first_seen_at: string }[]>`
+    SELECT signal_id::text AS signal_id, first_seen_at::text AS first_seen_at FROM swarm.signal_agent_receipts
+    WHERE workspace_id = ${fixture.workspace}::uuid AND principal_id = ${principal}::uuid
+    ORDER BY signal_id`).map((row) => ({ ...row }));
+}
+
+const unaddressedPost = { kind: "post_signal", to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null };
+function signalIdOf(result: HarnessResult): string {
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  return String((result.body.signal as { id: string }).id);
+}
+
+test("a hosted check leaves the seat's own delivery observed, so the sender reads Seen, and a replay changes nothing", async () => {
+  const fixture = await seedFixture();
+  const ask = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+    ...unaddressedPost, signal_kind: "ask", body: `seen ask ${randomUUID()}`, to_agent_principal_id: fixture.principalA } }));
+  const mention = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+    ...unaddressedPost, signal_kind: "note", body: `seen mention ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] } }));
+  // Positive control: before any turn the rows are untouched and the sender reads not seen.
+  assert.deepEqual(await deliveryOf(ask, fixture.principalA), { ack_outcome: null, ack_via: null, acked_at: null, lease_id: null });
+  assert.equal(await seenFor(fixture, ask, fixture.principalA), false);
+
+  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.deepEqual(Object.keys(first.body).sort(), ["acknowledged_batch_id", "batch_id", "context", "cursor", "signals"]);
+  for (const id of [ask, mention]) {
+    const row = await deliveryOf(id, fixture.principalA);
+    assert.equal(row.ack_outcome, "observed", id);
+    assert.equal(row.ack_via, "unclaimed", id);
+    assert.equal(row.lease_id, null, "no lease is taken");
+  }
+  assert.equal(await seenFor(fixture, ask, fixture.principalA), true, "message_status reads seen");
+  assert.equal(await seenFor(fixture, mention, fixture.principalA), true);
+  const ackedAt = (await deliveryOf(ask, fixture.principalA)).acked_at?.toISOString();
+
+  // Replaying the open batch, then acknowledging it, neither fails nor writes the rows again.
+  const replay = runHarness<HarnessResult>(fixture, { operation: "single" });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.batch_id, first.body.batch_id);
+  const acked = runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
+  assert.equal(acked.status, 200, JSON.stringify(acked.body));
+  assert.equal((await deliveryOf(ask, fixture.principalA)).acked_at?.toISOString(), ackedAt, "observed once");
+});
+
+test("a hosted private reply and a hosted react observe the seat's own delivery of that message", async () => {
+  const fixture = await seedFixture();
+  const asOwner = (body: string) => signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt,
+    command: { ...unaddressedPost, signal_kind: "ask", body, to_agent_principal_id: fixture.principalA } }));
+  const answered = asOwner(`reply to me ${randomUUID()}`);
+  const reacted = asOwner(`react to me ${randomUUID()}`);
+  const untouched = asOwner(`leave me ${randomUUID()}`);
+
+  const reply = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "reply", command: {
+    ...unaddressedPost, signal_kind: "note", body: `on it ${randomUUID()}`, in_reply_to: answered } });
+  assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  const react = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "react", command: {
+    kind: "add_reaction", signal_id: reacted, emoji: "\u{1F44D}" } });
+  assert.equal(react.status, 200, JSON.stringify(react.body));
+
+  assert.equal((await deliveryOf(answered, fixture.principalA)).ack_outcome, "observed", "the reply observes");
+  assert.equal((await deliveryOf(reacted, fixture.principalA)).ack_outcome, "observed", "the reaction observes");
+  assert.equal(await seenFor(fixture, answered, fixture.principalA), true);
+  assert.equal(await seenFor(fixture, reacted, fixture.principalA), true);
+  assert.equal((await deliveryOf(untouched, fixture.principalA)).ack_outcome, null, "a message the seat did not act on stays");
+});
+
+test("a hosted channel_read marks the mention it returns seen and counts the seat on channel-wide posts", async () => {
+  const fixture = await seedFixture();
+  const asOwner = (command: Record<string, unknown>) => signalIdOf(runHarness<HarnessResult>(fixture,
+    { operation: "public", ownerJwt: fixture.ownerJwt, command: { ...unaddressedPost, signal_kind: "note", ...command } }));
+  const mention = asOwner({ body: `for A ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] });
+  const forB = asOwner({ body: `for B ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalB }] });
+  const plain = asOwner({ body: `everyone ${randomUUID()}` });
+  const own = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note",
+    command: { ...unaddressedPost, signal_kind: "note", body: `A's own ${randomUUID()}` } }));
+
+  // Control: the read edge alone, which is all a local agent's channel_read uses, records nothing.
+  const readOnly = runHarness<HarnessResult>(fixture, { operation: "channel-read", readOnly: true });
+  assert.equal(readOnly.status, 200, JSON.stringify(readOnly.body));
+  for (const id of [mention, forB, plain, own]) assert.ok((readOnly.body.ids as string[]).includes(id), id);
+  assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, null);
+  assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), []);
+  assert.deepEqual(await receiptsBy(fixture, fixture.principalA), []);
+
+  const read = runHarness<HarnessResult>(fixture, { operation: "channel-read" });
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.equal(read.body.marked, true, JSON.stringify(read.body));
+  assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, "observed", "the mention reads as seen");
+  assert.equal(await seenFor(fixture, mention, fixture.principalA), true);
+  assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), [{ signal_id: mention, source: "ack" }],
+    "one 👀, on the mention only");
+  assert.equal((await deliveryOf(forB, fixture.principalB)).ack_outcome, null, "another seat's delivery is untouched");
+  const receipts = await receiptsBy(fixture, fixture.principalA);
+  assert.deepEqual(receipts.map((row) => row.signal_id).sort(), [mention, forB, plain, own].sort(),
+    "every channel-wide post the page returned counts the seat (its own too: M counts the author)");
+
+  // Reading the same page again writes nothing new.
+  const again = runHarness<HarnessResult>(fixture, { operation: "channel-read" });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), [{ signal_id: mention, source: "ack" }]);
+  assert.deepEqual(await receiptsBy(fixture, fixture.principalA), receipts);
+});
+
+test("only a check capability carries the channel_read seen command, and only for its own seat", async () => {
+  const fixture = await seedFixture();
+  const mention = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+    ...unaddressedPost, signal_kind: "note", body: `for A ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] } }));
+  const command = { kind: "mark_hosted_channel_read_seen", seat: fixture.handleA, signal_ids: [mention] };
+  const asNote = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note", command });
+  assert.equal(asNote.status, 403, JSON.stringify(asNote.body));
+  const otherSeat = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", capabilityHandle: fixture.handleB, command });
+  assert.equal(otherSeat.status, 403, JSON.stringify(otherSeat.body));
+  const person = runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
+  assert.deepEqual({ status: person.status, body: person.body }, { status: 403, body: { error: "forbidden" } },
+    "public HTTP refuses the hosted-only kind before authentication");
+  assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, null);
+  assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), []);
+  // Positive control: the seat's own check capability is accepted.
+  const own = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", command });
+  assert.equal(own.status, 200, JSON.stringify(own.body));
+  assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, "observed");
 });
 
 test("batch guard rejects signals not addressed to the seat principal", async () => {
