@@ -21,7 +21,8 @@
 --
 -- swarm_read.signals: an addressed message's recipient always has a membership row in the
 -- message's workspace (the foreign keys on swarm.signals and swarm.signal_recipients name
--- swarm.agent_workspace_memberships since 20261028000002), so the first-workspace test is replaced.
+-- swarm.agent_workspace_memberships since 20261028000002), so the first-workspace test is replaced
+-- by swarm.agent_has_workspace_membership.
 -- The other surfaces key on an author, an assignee or the whole agent list, where that is not
 -- guaranteed (registrar principals have no membership row), so they keep the first-workspace test
 -- beside the membership: the first workspace reads exactly as before. The broadcast rosters list
@@ -37,11 +38,63 @@
 -- agent removed from the to-do's workspace as agent_removed. Messages an agent sends to someone
 -- else stay readable only to their recipients.
 --
--- Rollback: recreate swarm_read.signals by swapping each membership EXISTS below back to its
--- first-workspace equality, and the four functions from 20261113000003_private_channels.sql
--- (867-1130, 1132-1315, 1474-1574, 1926-2131).
+-- Rollback: recreate swarm_read.signals by swapping each swarm.agent_has_workspace_membership call
+-- below back to its first-workspace equality, drop that function, and recreate the four functions
+-- from 20261113000003_private_channels.sql (867-1130, 1132-1315, 1474-1574, 1926-2131).
 
--- 1. swarm_read.signals, spliced from the live definition as every recreation since 20260905000002.
+-- 1. swarm_read.signals asks the membership through a function, as it asks private-channel access
+-- (swarm.claims_can_access_channel): a view that named swarm.agent_workspace_memberships would
+-- record a dependency on the table, and the 20261028000001 rollback drill drops that table.
+--
+-- Any membership row counts, live or ended: the view admits an owner to messages addressed to an
+-- agent it owns, and keeps doing so after the agent is removed, as in the agent's first workspace
+-- (the agent's own reads end at its credential). It answers only for the caller's own agents, the
+-- only ones either arm asks about, so it tells no one about another person's agents. Without the
+-- memberships table (the 20261028000001 rollback drill) it answers as the view did before:
+-- whether this is the agent's first workspace.
+CREATE OR REPLACE FUNCTION swarm.agent_has_workspace_membership(
+  p_principal_id uuid,
+  p_owner_user_id uuid,
+  p_workspace_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog AS $$
+DECLARE
+  claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+  -- The caller as auth.uid() reads it.
+  v_caller text := coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), claims->>'sub');
+BEGIN
+  IF p_principal_id IS NULL OR p_owner_user_id IS NULL OR p_workspace_id IS NULL
+    OR coalesce(v_caller, '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    RETURN false;
+  END IF;
+  IF v_caller::uuid IS DISTINCT FROM p_owner_user_id THEN
+    RETURN false;
+  END IF;
+  IF to_regclass('swarm.agent_workspace_memberships') IS NULL THEN
+    RETURN EXISTS (
+      SELECT 1 FROM swarm.agent_principals AS p
+      WHERE p.principal_id = p_principal_id
+        AND p.owner_user_id = p_owner_user_id
+        AND p.workspace_id = p_workspace_id
+    );
+  END IF;
+  RETURN EXISTS (
+    SELECT 1 FROM swarm.agent_workspace_memberships AS seat
+    WHERE seat.principal_id = p_principal_id
+      AND seat.owner_user_id = p_owner_user_id
+      AND seat.workspace_id = p_workspace_id
+  );
+END;
+$$;
+
+ALTER FUNCTION swarm.agent_has_workspace_membership(uuid, uuid, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.agent_has_workspace_membership(uuid, uuid, uuid)
+  FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.agent_has_workspace_membership(uuid, uuid, uuid)
+  TO authenticated, swarm_read;
+
+-- The view itself, spliced from the live definition as every recreation since 20260905000002.
 SELECT set_config(
   'swarm.signals_view_before',
   pg_get_viewdef('swarm_read.signals'::regclass, true),
@@ -57,8 +110,9 @@ DECLARE
   recipient_arm constant text := '\mowned\.workspace_id\s*=\s*addressee\.workspace_id\M';
   body text;
 BEGIN
-  IF position('agent_workspace_memberships' IN live_def) > 0 THEN
-    RAISE EXCEPTION 'swarm_read.signals already reads agent_workspace_memberships';
+  IF position('agent_has_workspace_membership' IN live_def) > 0
+     OR position('agent_workspace_memberships' IN live_def) > 0 THEN
+    RAISE EXCEPTION 'swarm_read.signals already asks agent memberships';
   END IF;
   IF (SELECT count(*) FROM regexp_matches(live_def, scalar_arm, 'g')) <> 1 THEN
     RAISE EXCEPTION 'expected exactly one first-workspace test on the scalar agent arm of swarm_read.signals';
@@ -68,15 +122,9 @@ BEGIN
   END IF;
 
   body := regexp_replace(live_def, scalar_arm,
-    '(EXISTS ( SELECT 1 FROM swarm.agent_workspace_memberships principal_seat'
-    || ' WHERE principal_seat.principal_id = principal.principal_id'
-    || ' AND principal_seat.owner_user_id = principal.owner_user_id'
-    || ' AND principal_seat.workspace_id = s.workspace_id))');
+    'swarm.agent_has_workspace_membership(principal.principal_id, principal.owner_user_id, s.workspace_id)');
   body := regexp_replace(body, recipient_arm,
-    '(EXISTS ( SELECT 1 FROM swarm.agent_workspace_memberships owned_seat'
-    || ' WHERE owned_seat.principal_id = owned.principal_id'
-    || ' AND owned_seat.owner_user_id = owned.owner_user_id'
-    || ' AND owned_seat.workspace_id = addressee.workspace_id))');
+    'swarm.agent_has_workspace_membership(owned.principal_id, owned.owner_user_id, addressee.workspace_id)');
   body := rtrim(body, E' ;\n\t');
 
   EXECUTE 'CREATE OR REPLACE VIEW swarm_read.signals WITH (security_barrier = true) AS ' || body;
@@ -94,8 +142,8 @@ SELECT swarm.assert_view_clauses_preserved(
 SELECT set_config('swarm.signals_view_before', '', false);
 
 -- Positive control: both arms now ask the membership and neither asks the first workspace, each
--- agent_principals lookup has its membership beside it, and the boundary the next splice
--- depends on is still unique.
+-- agent_principals lookup has its membership beside it, the view depends on no membership table
+-- (only on the function), and the boundary the next splice depends on is still unique.
 DO $$
 DECLARE
   after_def text := pg_get_viewdef('swarm_read.signals'::regclass, true);
@@ -104,9 +152,19 @@ BEGIN
      OR after_def ~ '\mowned\.workspace_id\s*=\s*addressee\.workspace_id\M' THEN
     RAISE EXCEPTION 'swarm_read.signals still tests an addressed agent''s first workspace';
   END IF;
-  IF (SELECT count(*) FROM regexp_matches(after_def, 'agent_workspace_memberships', 'g')) <> 2
+  IF (SELECT count(*) FROM regexp_matches(after_def, 'agent_has_workspace_membership', 'g')) <> 2
      OR (SELECT count(*) FROM regexp_matches(after_def, '\magent_principals\M', 'g')) <> 2 THEN
     RAISE EXCEPTION 'swarm_read.signals: expected two agent arms, each with its membership';
+  END IF;
+  IF position('agent_workspace_memberships' IN after_def) > 0 OR EXISTS (
+    SELECT 1
+    FROM pg_depend AS d
+    JOIN pg_rewrite AS rule ON d.classid = 'pg_rewrite'::regclass AND d.objid = rule.oid
+    WHERE rule.ev_class = 'swarm_read.signals'::regclass
+      AND d.refclassid = 'pg_class'::regclass
+      AND d.refobjid = 'swarm.agent_workspace_memberships'::regclass
+  ) THEN
+    RAISE EXCEPTION 'swarm_read.signals depends on swarm.agent_workspace_memberships; the 20261028000001 rollback could not drop it';
   END IF;
   IF position('claims_can_access_channel' IN after_def) = 0 THEN
     RAISE EXCEPTION 'swarm_read.signals lost its private-channel gate';
