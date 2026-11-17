@@ -66,6 +66,7 @@ invite-onramp[data-kylon-onramp] {
     --k-shell-rail-hover: var(--k-shell-dark-rail-hover);
     --k-shell-side: var(--k-shell-dark-side);
     --k-shell-ink: var(--k-shell-dark-ink);
+  --k-shell-prose: var(--k-shell-dark-prose);
     --k-shell-secondary: var(--k-shell-dark-secondary);
     --k-shell-muted: var(--k-shell-dark-muted);
     --k-shell-line: var(--k-shell-dark-line);
@@ -87,6 +88,7 @@ invite-onramp[data-kylon-onramp] {
   --k-shell-rail-hover: var(--k-shell-dark-rail-hover);
   --k-shell-side: var(--k-shell-dark-side);
   --k-shell-ink: var(--k-shell-dark-ink);
+  --k-shell-prose: var(--k-shell-dark-prose);
   --k-shell-secondary: var(--k-shell-dark-secondary);
   --k-shell-muted: var(--k-shell-dark-muted);
   --k-shell-line: var(--k-shell-dark-line);

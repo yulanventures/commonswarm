@@ -184,6 +184,40 @@ test("dark mode lifts surface off black, softens text contrast, and steps column
   }
 });
 
+test("chat message prose is one step softer than names and mentions, in both themes, and stays at AA", async () => {
+  const carbon = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
+  const kylonTokens = await readFile(new URL("../styles/kylon-tokens.css", import.meta.url), "utf8");
+  const messages = await readFile(new URL("../styles/kylon-messages.css", import.meta.url), "utf8");
+
+  assert.match(carbon, /--k-shell-prose:\s*#3f454f;/u);
+  assert.match(carbon, /--k-shell-dark-prose:\s*#c9cdd4;/u);
+  // Both dark branches (OS and manual) map the dark prose in, beside the ink.
+  assert.equal(kylonTokens.match(/--k-shell-prose:\s*var\(--k-shell-dark-prose\);/gu)?.length, 2);
+  // Only message rows' prose takes it: the shared markdown class (Wiki) and the name/recipient line keep the ink.
+  assert.match(messages, /\.dashboard__message \.dashboard__message-markdown \{[^}]*color:\s*var\(--k-shell-prose, var\(--k-shell-ink\)\);/u);
+  assert.doesNotMatch(messages, /\.dashboard__message-mentions[^{]*\{[^}]*--k-shell-prose/u);
+  // A mention in the prose is the name: full ink and bold, never the softer prose.
+  assert.match(messages, /\.dashboard__message-markdown \.dashboard__mention \{[^}]*color:\s*var\(--k-shell-ink\);[^}]*font-weight:\s*700;/u);
+
+  const luminance = (hex) => {
+    const rgb = hex.slice(1).match(/../gu).map((x) => parseInt(x, 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  };
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  for (const [prose, ink, surfaces] of [
+    ["#3f454f", "#09090b", ["#ffffff", "#f4f4f5", "#e4e4e7"]],
+    ["#c9cdd4", "#e4e6eb", ["#191b20", "#20232a", "#282c35"]],
+  ]) {
+    for (const bg of surfaces) {
+      assert.ok(contrast(prose, bg) >= 4.5, `prose ${prose} on ${bg}: ${contrast(prose, bg).toFixed(2)}`);
+      assert.ok(contrast(prose, bg) < contrast(ink, bg), `prose ${prose} is softer than the ink on ${bg}`);
+    }
+  }
+});
+
 test("message headers keep recipient metadata reachable alongside the name, agent badge, and clock time", async () => {
   const { authorLabel, continuesStreamGroup } = await import("./home-stream.ts");
   const channel = await readFile(new URL("../styles/kylon-channel.css", import.meta.url), "utf8");
