@@ -208,6 +208,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       let rosterFilter, signalFilter, previousSignalIds, feedWasEmpty, liveFeedInFlight, liveFeedQueued;
       let rosterRefreshInFlight, rosterRefreshAttemptedAt;
       const homeScroll=new Map(), homeOverviewCounts=new Map(), homeTodoDetails=new Map(), homePolicies=new Map();
+      const forgetPrivateChannelMembers=()=>{};
       const postedSinceReset=new Map(), deliveryReceiptCache=new Map(), attachmentPreviewUrls=new Map();
       const unknownAgentCandidates=new Set(), settledUnknownAgents=new Set(), expandedSignalIds=new Set();
       const humanSeenReporter={resetVisible(){}}, pendingRefreshGate={resetCooldown(){}};

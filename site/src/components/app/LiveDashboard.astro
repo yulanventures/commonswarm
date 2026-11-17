@@ -1006,6 +1006,8 @@ import "../../styles/kylon-command-palette.css";
       />
       <label for="dashboard-channel-edit-description">Description (optional)</label>
       <textarea id="dashboard-channel-edit-description" data-channel-edit-description rows="4"></textarea>
+      <label for="dashboard-channel-lead" data-channel-lead-label hidden>Channel lead</label>
+      <select id="dashboard-channel-lead" data-channel-lead-select hidden></select>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
         <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
@@ -1382,6 +1384,8 @@ import "../../styles/kylon-command-palette.css";
     updateChannel,
     archiveChannel,
     unarchiveChannel,
+    setChannelLead,
+    channelAgentMemberIds,
     type BrowserSignalPlacement,
     type Signal,
     type WorkspaceChannel,
@@ -1506,6 +1510,8 @@ import "../../styles/kylon-command-palette.css";
     signalInChannelView,
   } from "../../lib/channels";
   import { renderChannelDirectory, type DirectoryChannel } from "../../lib/channel-directory";
+  import { CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
+    type ChannelLead } from "../../lib/channel-lead";
   import {
     pendingAccessRows,
     loadPendingAccess,
@@ -1777,6 +1783,14 @@ import "../../styles/kylon-command-palette.css";
     let homePeopleReadState: HomeReadState = "pending";
     const homeScroll = new Map<string, number>();
     const homeOverviewCounts = new Map<string, number | null>();
+    /* Private channels' member agents, by account, workspace and channel: the header names only a lead that is a
+       member, and the Channel lead select offers only members. Absent: not read; null: being read, or not readable. */
+    const privateChannelAgentIds = new Map<string, Set<string> | null>();
+    /* The latest members read for each key, as a token only that read holds. Only it may write; an older read that
+       answers later, or any read that answers after a reset, writes nothing. */
+    const privateChannelMemberReads = new Map<string, object>();
+    /** At every workspace or account reset: forget what was read, and retire every read still in flight. */
+    const forgetPrivateChannelMembers = (): void => { privateChannelAgentIds.clear(); privateChannelMemberReads.clear(); };
     let railOverviewGeneration = 0;
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
@@ -5646,14 +5660,39 @@ import "../../styles/kylon-command-palette.css";
       const kind = agents.some(agent => agent.principalId === id) ? "agent" : members.some(member => member.userId === id) ? "person" : null;
       if (kind) void openDirectMessage({ kind, id } as EntityRef);
     };
-    /** Group chat header: "Lead: <agent>" opens the lead's profile; owners and admins without a lead get "Set lead". */
+    /**
+     * Group chat header: "Lead: <agent>" opens the lead's profile.
+     * - #general and All messages name the workspace lead; owners and admins without one get "Set lead", to People & agents.
+     * - A named channel names the agent an untagged post there wakes: its own lead, or the workspace lead. In a private
+     *   channel that agent must be a member, so nothing is shown until its members are known. No lead is a choice: nothing
+     *   is shown. A lead that is missing (gone, not allowed to lead, not a member, or no workspace lead) offers the people
+     *   who can manage the channel "Set lead", to its settings with the Channel lead select focused.
+     */
     const syncChannelLeadPill = (): void => {
       const copy = one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__copy");
       copy?.querySelector("[data-channel-lead-pill]")?.remove();
       // The lead belongs to the channels. A direct message is between two parties and shows only who it is with.
       if (!copy || homeRoute.view !== "chat" || sampleMode || (typeof activeDm !== "undefined" && activeDm)) return;
-      const lead = activeWorkspaceLeadAgent();
-      if (!lead && !viewerMaySetWorkspaceLead()) return;
+      const inNamedChannel = activeChannelId !== null && activeChannelId !== GENERAL_CHANNEL_ID;
+      const named = inNamedChannel && unknownChannelId === null ? activeChannel() : null;
+      // A channel not read yet, or not found: its lead is not known.
+      if (inNamedChannel && !named) return;
+      let lead: Agent | null = null;
+      let setLead: ((pill: HTMLButtonElement) => void) | null = null;
+      if (!named) {
+        lead = activeWorkspaceLeadAgent();
+        if (!lead && viewerMaySetWorkspaceLead()) setLead = () => openRosterDialog();
+      } else {
+        const memberAgentIds = named.visibility === "private" ? privateChannelMembersFor(named) : null;
+        const effective = namedChannelLead({ lead: channelLead(named), agents, workspaceLead: activeWorkspaceLeadAgent(),
+          visibility: named.visibility ?? null, memberAgentIds });
+        if (effective.state === "lead") lead = effective.agent;
+        else if (effective.state === "missing" && !named.archivedAt && viewerMayManageChannel(named)) {
+          const channelId = named.channelId;
+          setLead = pill => openChannelDialog("settings", channelId, pill, "lead");
+        }
+      }
+      if (!lead && !setLead) return;
       const pill = document.createElement("button");
       pill.type = "button";
       pill.className = "hm-lead-pill";
@@ -5672,11 +5711,14 @@ import "../../styles/kylon-command-palette.css";
         body.append(mark, name);
         pill.setAttribute("aria-label", `Lead: ${lead.name}`);
         pill.title = `Lead: ${lead.name}`;
-        pill.addEventListener("click", () => openEntityPanel({ kind: "agent", id: lead.principalId }, pill));
-      } else {
-        body.textContent = "Set lead";
+        pill.dataset.leadAgent = lead.principalId;
+        const id = lead.principalId;
+        pill.addEventListener("click", () => openEntityPanel({ kind: "agent", id }, pill));
+      } else if (setLead) {
+        const open = setLead;
+        body.textContent = SET_LEAD_LABEL;
         pill.dataset.leadUnset = "";
-        pill.addEventListener("click", () => openRosterDialog());
+        pill.addEventListener("click", () => open(pill));
       }
       pill.append(body);
       copy.insertBefore(pill, copy.querySelector("[data-channel-header-description]"));
@@ -5719,7 +5761,7 @@ import "../../styles/kylon-command-palette.css";
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
-        channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription),
+        channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
         toggleStar: () => {
           const place = activePlace();
           if (place) void saveChannelPreference(place.viewId, { starred: !place.starred }, "[data-channel-star]");
@@ -10443,6 +10485,7 @@ import "../../styles/kylon-command-palette.css";
       homeRailKey = "";
       homeCatchUpKey = "";
       homeOverviewCounts.clear();
+      forgetPrivateChannelMembers();
       // The People page's hosts may sit in the route pane: park them before it is cleared.
       parkPeopleHosts();
       layout.refreshTodoContext(() => {
@@ -12992,7 +13035,9 @@ import "../../styles/kylon-command-palette.css";
     /* Channel settings and the full channel directory share the existing channel authority. */
     let channelDialogMode: "create" | "settings" | "archive" = "create";
     let managedChannelId: string | null = null;
-    let channelDialogOriginal: { slug: string; purpose: string | null } | null = null;
+    let channelDialogOriginal: { slug: string; purpose: string | null; lead: string } | null = null;
+    /* set_channel_lead command ids: a fresh one per selection, the same one to retry an unanswered attempt. */
+    const channelLeadAttempts = new CommandAttempts();
     let channelDialogPending = false;
     let channelDialogEpoch = 0;
     let channelArchiveBackToSettings = false;
@@ -13028,6 +13073,7 @@ import "../../styles/kylon-command-palette.css";
         ? `[data-rail-channel-menu="${CSS.escape(element.dataset.railChannelMenu)}"]`
         : element?.hasAttribute("data-channel-settings-open") ? "[data-channel-settings-open]"
         : element?.hasAttribute("data-channel-header-description") ? "[data-channel-header-description]"
+        : element?.hasAttribute("data-channel-lead-pill") ? "[data-channel-lead-pill]"
         : element?.hasAttribute("data-home-new-channel") ? "[data-home-new-channel]"
         : element?.hasAttribute("data-home-all-channels") ? "[data-home-all-channels]"
         : element?.id ? `#${CSS.escape(element.id)}` : null;
@@ -13052,10 +13098,89 @@ import "../../styles/kylon-command-palette.css";
         ...(purpose !== channelDialogOriginal?.purpose ? { purpose } : {}),
       };
     };
+    /** The Channel lead the select now shows, when it differs from what the dialog opened with. */
+    const channelLeadChange = (): ChannelLead | null => {
+      const select = one<HTMLSelectElement>("[data-channel-lead-select]");
+      const channel = channelById(channels, managedChannelId);
+      // An archived channel takes no new lead; a disabled option is kept on show, not offered.
+      if (!select || select.hidden || !channel || channel.archivedAt || !channelDialogOriginal || select.value === channelDialogOriginal.lead) return null;
+      if (Array.from(select.options).some(option => option.value === select.value && option.disabled)) return null;
+      return channelLeadFromValue(select.value);
+    };
     const syncChannelSettingsSubmit = (): void => {
       const channel = channelById(channels, managedChannelId);
       const save = one<HTMLButtonElement>("[data-channel-rename-submit]");
-      if (save) save.disabled = channelDialogPending || !channel || !viewerMayManageChannel(channel) || Object.keys(channelSettingsChanges()).length === 0;
+      if (save) save.disabled = channelDialogPending || !channel || !viewerMayManageChannel(channel) ||
+        (Object.keys(channelSettingsChanges()).length === 0 && channelLeadChange() === null);
+    };
+    /** The Channel lead select: only for people who can manage the channel. `keep` holds what it shows across a rebuild. */
+    const renderChannelLeadSelect = (channel: WorkspaceChannel | null, manageable: boolean, keep: boolean): void => {
+      const select = one<HTMLSelectElement>("[data-channel-lead-select]");
+      if (!select) return;
+      select.hidden = !channel || !manageable;
+      const label = one<HTMLElement>("[data-channel-lead-label]"); if (label) label.hidden = select.hidden;
+      if (!channel || !manageable) { select.replaceChildren(); return; }
+      const stored = channelLead(channel);
+      const selected = keep && select.value ? select.value : channelLeadValue(stored);
+      const members = channel.visibility === "private" ? knownPrivateChannelMembers(channel.channelId) : null;
+      select.replaceChildren(...channelLeadOptions({ agents, workspaceLead: activeWorkspaceLeadAgent(), stored, selected,
+        memberAgentIds: members, visibility: channel.visibility ?? null }).map(option => {
+        const element = new Option(option.label, option.value);
+        element.disabled = option.disabled === true;
+        return element;
+      }));
+      select.value = selected;
+      select.disabled = channelDialogPending || channel.archivedAt !== null;
+    };
+    const privateMembersKey = (channelId: string): string | null =>
+      session && activeWorkspaceId ? `${session.user.id}:${activeWorkspaceId}:${channelId}` : null;
+    const knownPrivateChannelMembers = (channelId: string): ReadonlySet<string> | null => {
+      const key = privateMembersKey(channelId);
+      return key ? privateChannelAgentIds.get(key) ?? null : null;
+    };
+    /** Read a private channel's member agents now. Only the latest read for this account, workspace and channel,
+        answering before any reset or newer page request, writes: then the header is drawn again and `then` runs. A set
+        already read stays in use meanwhile. */
+    const readPrivateChannelMembers = (channel: WorkspaceChannel, then?: () => void): void => {
+      const key = privateMembersKey(channel.channelId);
+      if (!key || !session || !activeWorkspaceId || sampleMode || channel.visibility !== "private") return;
+      const workspaceId = activeWorkspaceId, userId = session.user.id, channelId = channel.channelId, version = requestVersion;
+      const token = {};
+      privateChannelMemberReads.set(key, token);
+      if (!privateChannelAgentIds.get(key)) privateChannelAgentIds.set(key, null);
+      const latest = (): boolean => privateChannelMemberReads.get(key) === token;
+      void channelAgentMemberIds(workspaceId, channelId).then(ids => {
+        if (!latest()) return;
+        privateChannelMemberReads.delete(key);
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || session?.user.id !== userId) {
+          // The page moved on without a reset: drop the answer, and let the next ask read again.
+          if (privateChannelAgentIds.get(key) === null) privateChannelAgentIds.delete(key);
+          return;
+        }
+        privateChannelAgentIds.set(key, new Set(ids));
+        syncChannelLeadPill();
+        then?.();
+      }, () => {
+        // Not read: the header names no lead here and the select offers the stored lead only, until settings read again.
+        if (latest()) privateChannelMemberReads.delete(key);
+      });
+    };
+    /** A private channel's member agents when known. The first ask for a channel starts its one read. */
+    const privateChannelMembersFor = (channel: WorkspaceChannel): ReadonlySet<string> | null => {
+      const key = privateMembersKey(channel.channelId);
+      if (key && !privateChannelAgentIds.has(key)) readPrivateChannelMembers(channel);
+      return knownPrivateChannelMembers(channel.channelId);
+    };
+    /** A private channel offers only its member agents: read them when its settings open, for that dialog only. */
+    const loadChannelLeadMembers = (channel: WorkspaceChannel): void => {
+      if (channel.visibility !== "private" || !viewerMayManageChannel(channel)) return;
+      const epoch = channelDialogEpoch, channelId = channel.channelId;
+      readPrivateChannelMembers(channel, () => {
+        if (epoch !== channelDialogEpoch || managedChannelId !== channelId) return;
+        const current = channelById(channels, channelId);
+        renderChannelLeadSelect(current, current !== null && viewerMayManageChannel(current), true);
+        syncChannelSettingsSubmit();
+      });
     };
     const keepChannelDialogFocus = (): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
@@ -13083,8 +13208,11 @@ import "../../styles/kylon-command-palette.css";
       const description = one<HTMLTextAreaElement>("[data-channel-edit-description]");
       if (name) { name.readOnly = !manageable; if (initialize && mode === "settings") name.value = channel?.slug ?? ""; }
       if (description) { description.readOnly = !manageable; if (initialize && mode === "settings") description.value = channel?.purpose ?? ""; }
-      if (initialize && mode === "settings") channelDialogOriginal = channel ? { slug: channel.slug, purpose: channel.purpose } : null;
-      for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = channelDialogPending;
+      if (mode === "settings") renderChannelLeadSelect(channel, manageable, !initialize);
+      if (initialize && mode === "settings") channelDialogOriginal = channel ? { slug: channel.slug, purpose: channel.purpose, lead: channelLeadValue(channelLead(channel)) } : null;
+      for (const input of all<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("[data-channel-dialog] input, [data-channel-dialog] textarea, [data-channel-dialog] select")) input.disabled = channelDialogPending;
+      // An archived channel takes no new lead (and its Save never turns on for one).
+      const leadSelect = one<HTMLSelectElement>("[data-channel-lead-select]"); if (leadSelect) leadSelect.disabled = channelDialogPending || channel?.archivedAt != null;
       const state = one<HTMLElement>("[data-channel-settings-status]"); if (state) state.hidden = !channel?.archivedAt;
       const save = one<HTMLButtonElement>("[data-channel-rename-submit]"); if (save) save.hidden = !manageable;
       const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
@@ -13154,7 +13282,7 @@ import "../../styles/kylon-command-palette.css";
       mode: "create" | "settings" | "archive",
       channelId: string | null = null,
       opener: HTMLElement | null = null,
-      editDescription = false,
+      focusOn: "name" | "description" | "lead" = "name",
     ): void => {
       const dialog = one<HTMLDialogElement>("[data-channel-dialog]");
       if (!dialog || dialog.open || sampleMode || !session) return;
@@ -13167,9 +13295,12 @@ import "../../styles/kylon-command-palette.css";
       if (channelDialogReturn.drawer) layout.closeNavigation(false);
       channelDialogEpoch++; channelDialogMode = mode; managedChannelId = channel?.channelId ?? null;
       channelDialogSucceeded = false; channelDialogPending = false; channelArchiveBackToSettings = false;
+      if (mode === "settings" && channel) loadChannelLeadMembers(channel);
       setChannelDialogError(""); renderChannelDialog(); dialog.showModal();
+      const lead = one<HTMLSelectElement>("[data-channel-lead-select]");
       const first = mode === "create" ? one<HTMLElement>("[data-channel-new-slug]")
-        : mode === "settings" ? one<HTMLElement>(editDescription ? "[data-channel-edit-description]" : "[data-channel-rename-slug]")
+        : mode === "settings" ? (focusOn === "lead" && lead && !lead.hidden ? lead
+          : one<HTMLElement>(focusOn === "description" ? "[data-channel-edit-description]" : "[data-channel-rename-slug]"))
         : one<HTMLElement>("[data-channel-archive-submit]");
       first?.focus({ preventScroll: true });
     };
@@ -15720,13 +15851,20 @@ import "../../styles/kylon-command-palette.css";
     const holdChannelDialog = (pending: boolean): void => {
       channelDialogPending = pending;
       for (const button of all<HTMLButtonElement>("[data-channel-dialog] button[type=submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) holdChannelSubmit(button, pending);
-      for (const input of all<HTMLInputElement | HTMLTextAreaElement>("[data-channel-dialog] input, [data-channel-dialog] textarea")) input.disabled = pending;
+      for (const input of all<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("[data-channel-dialog] input, [data-channel-dialog] textarea, [data-channel-dialog] select")) input.disabled = pending;
+      const leadSelect = one<HTMLSelectElement>("[data-channel-lead-select]");
+      if (leadSelect) leadSelect.disabled = pending || channelById(channels, managedChannelId)?.archivedAt != null;
       if (!pending) syncChannelSettingsSubmit();
       keepChannelDialogFocus();
     };
     const channelDialogOwns = (epoch: number): boolean => epoch === channelDialogEpoch && one<HTMLDialogElement>("[data-channel-dialog]")?.open === true;
     /** Paint the accepted row even if the follow-up read fails. A later read may supersede it. */
     const applyChannelResult = (channel: WorkspaceChannel, workspaceId: string, version: number): void => {
+      /* Only set_channel_lead's answer carries the lead; a rename or an archive keeps the one already read. */
+      const previous = channelById(channels, channel.channelId);
+      if (channel.leadMode === undefined && previous?.leadMode !== undefined) {
+        channel = { ...channel, leadMode: previous.leadMode, leadAgentPrincipalId: previous.leadAgentPrincipalId ?? null };
+      }
       channels = [...channels.filter(row => row.channelId !== channel.channelId), channel];
       channelsLoaded = true;
       if (activeChannelArchived()) railArchivedOpen = true;
@@ -15768,22 +15906,62 @@ import "../../styles/kylon-command-palette.css";
         void refreshChannelPolicy(workspaceId);
       }
     };
+    /**
+     * Save sends only what changed: channel_update for the name or description, then set_channel_lead for
+     * the lead. Both are pinned at Save to this account, workspace and channel; an answer that lands after
+     * any of them moved on paints nothing.
+     */
     const submitChannelSettings = async (): Promise<void> => {
       const channel = channelById(channels, managedChannelId), input = one<HTMLInputElement>("[data-channel-rename-slug]");
       if (!input || !channel || !session || sampleMode || !activeWorkspaceId || channelDialogPending || !viewerMayManageChannel(channel)) return;
-      const changes = channelSettingsChanges(); if (!Object.keys(changes).length) return;
+      const changes = channelSettingsChanges(), lead = channelLeadChange();
+      if (!Object.keys(changes).length && !lead) return;
       const problem = channelSubmitProblem(channelSubmitSlug(input.value));
       setChannelDialogError("");
       if (problem !== null) { setChannelDialogError(problem); input.focus(); return; }
       const workspaceId = activeWorkspaceId, version = requestVersion, epoch = channelDialogEpoch;
+      const pinned = session, userId = session.user.id, channelId = channel.channelId;
+      const current = (): boolean => version === requestVersion && workspaceId === activeWorkspaceId && session?.user.id === userId;
+      const owns = (): boolean => channelDialogOwns(epoch) && managedChannelId === channelId;
       holdChannelDialog(true);
       try {
-        const saved = await updateChannel(session, uuid(), workspaceId, channel.channelId, changes);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-        applyChannelResult(saved, workspaceId, version);
-        if (channelDialogOwns(epoch)) finishChannelCommand(null);
+        if (Object.keys(changes).length) {
+          const saved = await updateChannel(pinned, uuid(), workspaceId, channelId, changes);
+          if (!current()) return;
+          applyChannelResult(saved, workspaceId, version);
+          // Accepted: a refused lead below must not send this part again.
+          if (owns() && channelDialogOriginal) channelDialogOriginal = { ...channelDialogOriginal, slug: saved.slug, purpose: saved.purpose };
+        }
+        if (lead) {
+          const key = `${userId}:${workspaceId}:${channelId}`;
+          const commandId = channelLeadAttempts.commandId(key, channelLeadValue(lead), uuid);
+          let result: Awaited<ReturnType<typeof setChannelLead>>;
+          try {
+            result = await setChannelLead(pinned, commandId, workspaceId, channelId, lead);
+          } catch (error) {
+            // No answer: Save with the same selection sends the same command id, so the server replays its answer.
+            if (!current() || !owns()) return;
+            holdChannelDialog(false); setChannelDialogError(readableError(error));
+            return;
+          }
+          channelLeadAttempts.settle(key);
+          if (!current()) return;
+          if (!owns()) {
+            // Accepted for a dialog that has gone: read the channels again rather than paint from this answer.
+            if (result.ok) void refreshChannels(workspaceId, version, true).catch(() => {});
+            return;
+          }
+          if (!result.ok) {
+            // The server's sentence; the selection stays, to change or save again.
+            holdChannelDialog(false); setChannelDialogError(result.message);
+            one<HTMLSelectElement>("[data-channel-lead-select]")?.focus({ preventScroll: true });
+            return;
+          }
+          applyChannelResult(result.channel, workspaceId, version);
+        }
+        if (owns()) finishChannelCommand(null);
       } catch (error) {
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId || !channelDialogOwns(epoch)) return;
+        if (!current() || !owns()) return;
         holdChannelDialog(false); setChannelDialogError(readableError(error));
       }
     };
@@ -15860,6 +16038,7 @@ import "../../styles/kylon-command-palette.css";
       one<HTMLElement>("[data-channel-settings-archive]")?.focus();
     });
     for (const input of all<HTMLElement>("[data-channel-rename-slug], [data-channel-edit-description]")) input.addEventListener("input", syncChannelSettingsSubmit);
+    one<HTMLSelectElement>("[data-channel-lead-select]")?.addEventListener("change", syncChannelSettingsSubmit);
     one<HTMLFormElement>("[data-channel-create-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelCreate(); });
     one<HTMLFormElement>("[data-channel-rename-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelSettings(); });
     one<HTMLFormElement>("[data-channel-archive-form]")?.addEventListener("submit", event => { event.preventDefault(); void submitChannelArchive(); });

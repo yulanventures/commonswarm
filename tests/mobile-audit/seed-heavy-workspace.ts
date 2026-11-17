@@ -315,6 +315,13 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       /* A second star, so Starred has an order to change; and a shared order an owner chose (CM-2b). */
       ok("star_general", await command(owner.token, { kind: "channel_preference_set", channel_id: null, starred: true }, workspace));
       ok("order_channels", await command(owner.token, { kind: "channel_reorder", channel_ids: [channels.long, channels.general] }, workspace));
+      /* A channel with a lead of its own, not the workspace lead (agents[0]), so its header names a different agent
+         and its settings open with that agent selected. A long name, so the pill's ellipsis is in the picture. */
+      const channelLead = [ids["agent.long"], ...agents].find(id => id && id !== agents[0]);
+      if (channelLead) {
+        ids["agent.channelLead"] = channelLead;
+        ok("channel_lead", await command(owner.token, { kind: "set_channel_lead", channel_id: channels.group, lead_mode: "agent", principal_id: channelLead }, workspace));
+      }
       /* A private channel, through the real command: the owner made it, and the admin and one agent were added.
          It is never placed, so it sorts after the rows above. One message, so its feed is not empty. */
       const lock = await command(owner.token, { kind: "channel_create", slug: "boiler-quotes", purpose: "Quotes we have not shared yet",

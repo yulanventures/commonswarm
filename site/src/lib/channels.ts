@@ -60,6 +60,10 @@ export interface WorkspaceChannel {
   sortRank?: number;
   /** `"private"`: read only by its members. `null` or absent: not known (see private-channels.ts). */
   visibility?: "open" | "private" | null;
+  /** Who an untagged post from a person here wakes (channel-lead.ts). Absent: an older server, read as "workspace". */
+  leadMode?: "workspace" | "agent" | "none";
+  /** The named lead when `leadMode` is "agent"; null otherwise. */
+  leadAgentPrincipalId?: string | null;
 }
 
 /** What the feed is filtered to. `null` is the unfiltered view. */
