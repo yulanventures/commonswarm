@@ -343,6 +343,9 @@ test("a note, an ask and a multi-recipient message to the agent in its second wo
       ${lead.principal}::uuid, ${owner.id}::uuid, ${shared}::uuid) AS member`;
     return row!.member;
   }) as Promise<boolean>;
+  // A person can't name it at all: schema swarm has no USAGE for authenticated.
+  await assert.rejects(asPerson(owner, (tx) => tx`SELECT swarm.agent_has_workspace_membership(
+    ${lead.principal}::uuid, ${owner.id}::uuid, ${shared}::uuid)`), (error: unknown) => (error as { code?: string }).code === "42501");
   assert.equal(await hasMembership(owner), true);
   assert.equal(await hasMembership(bystander), false, "another person learns nothing about the owner's agents");
 
