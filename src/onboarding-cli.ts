@@ -10,6 +10,7 @@ import {
   cachedAgentMessage, checkAgentMessages, renderAgentCheck, shellQuote,
 } from "./cloud/agent-check.js";
 import {
+  AGENT_CHECK_DIRECT_TIMEOUT_MS,
   HOST_HOOK_PROCESS_DEADLINE_MS,
   hostHookCheckDeadlineAt,
   processDeadlineDelayMs,
@@ -207,6 +208,8 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
   if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
   await checkAgentMessages({
     profilePath: args.required("profile"), workspaceId:args.optional("workspace-id"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
+    // No host hook times a direct check (--hook goes through runTurnHook and its process deadline).
+    timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
     present: async result => args.has("json") ? output(result) : writeOnboardingOutput(renderAgentCheck(result)),
   });
 }

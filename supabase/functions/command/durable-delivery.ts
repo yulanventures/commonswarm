@@ -136,6 +136,24 @@ export interface AckAgentDeliveryCommand {
   unclaimed?: true;
 }
 
+/** Most deliveries one batched unclaimed observation names. */
+export const DELIVERY_OBSERVE_BATCH_MAX = 50;
+
+/**
+ * check's unclaimed observation for several surfaced messages in one request. Only this shape:
+ * every field but the ids is fixed, and `signal_id` never appears beside `signal_ids`.
+ */
+export interface AckAgentDeliveryBatchCommand {
+  kind: "ack_agent_delivery";
+  signal_ids: string[];
+  lease_id: null;
+  listener_instance_id: null;
+  outcome: "observed";
+  last_error_code: null;
+  surfaced: true;
+  unclaimed: true;
+}
+
 export interface DeliveryLedgerRef {
   signal_id: string;
   lease_id: string;
@@ -865,6 +883,146 @@ export type AckResult =
   | { status: "session_conflict" }
   | { status: "session_expired" };
 
+interface UnclaimedObservationTarget {
+  workspaceId: string;
+  recipientPrincipalId: string;
+  signalId: string;
+}
+
+type SessionProof = { session_id: string; generation: number } | null | undefined;
+
+/**
+ * A managed principal must present session proof, and a row bound to a session must be bound to
+ * that one: an unclaimed observation is not a way around the session fence.
+ */
+function unclaimedSessionMatches(
+  row: { session_id: string | null; session_generation: string | number | null },
+  managed: boolean,
+  proof: SessionProof,
+): boolean {
+  return !(managed && (
+    proof == null ||
+    (row.session_id !== null && (row.session_id !== proof.session_id ||
+      Number(row.session_generation) !== proof.generation))
+  ));
+}
+
+/** May this recipient observe the signal unclaimed: an ask or note it can still read, addressed to it or mentioning it. */
+async function unclaimedObservationDirected(
+  tx: Sql,
+  args: UnclaimedObservationTarget,
+): Promise<boolean> {
+  const directed = await tx<{ allowed: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM swarm.signals AS s
+      WHERE s.workspace_id = ${args.workspaceId}::uuid
+        AND s.id = ${args.signalId}::uuid
+        AND s.kind IN ('ask', 'note')
+        AND (
+          s.channel_id IS NULL
+          OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'agent', ${args.recipientPrincipalId}::uuid)
+        )
+        AND (s.to_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          OR EXISTS (
+            SELECT 1 FROM swarm.signal_recipients AS r
+            WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+              AND r.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          )
+          OR EXISTS (
+          /* Or the signal mentions this agent. A mention sits only on a message the whole
+           * workspace can read (swarm.signal_mentions refuses anything else), so this admits
+           * the agent to nothing it could not already read. */
+          SELECT 1 FROM swarm.signal_mentions AS mention
+          WHERE mention.signal_id = s.id
+            AND mention.workspace_id = s.workspace_id
+            AND mention.mentioned_agent_principal_id = ${args.recipientPrincipalId}::uuid
+        ))
+    ) AS allowed
+  `;
+  return directed[0]?.allowed === true;
+}
+
+/**
+ * The unclaimed observation's write. It sets the ack columns and leaves every lease column null,
+ * which signal_deliveries_check9 admits for `observed` and for no other outcome.
+ */
+async function markUnclaimedObserved(
+  tx: Sql,
+  args: UnclaimedObservationTarget,
+): Promise<number> {
+  const updated = await tx`
+    UPDATE swarm.signal_deliveries
+    SET
+      acked_at = statement_timestamp(),
+      ack_outcome = 'observed',
+      ack_via = COALESCE(ack_via, 'unclaimed'),
+      delivered_at = COALESCE(delivered_at, statement_timestamp()),
+      surfaced_at = COALESCE(surfaced_at, statement_timestamp()),
+      updated_at = statement_timestamp()
+    WHERE workspace_id = ${args.workspaceId}::uuid
+      AND signal_id = ${args.signalId}::uuid
+      AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+      AND acked_at IS NULL
+  `;
+  return updated.count;
+}
+
+/**
+ * An agent replied to a message or reacted to it, so it has seen it: observe the agent's own
+ * delivery of that message as check's unclaimed ack does, in the acting command's transaction.
+ *
+ * Only a row nothing has touched moves: unacked, no outcome, and no lease now or ever. A leased,
+ * once-leased, queued or acked row stays exactly as it is, and so does a managed principal's row
+ * bound to another session. The recipient is always the acting agent, so no agent observes a
+ * delivery that is not its own.
+ *
+ * Best effort. A savepoint holds the work, a row another transaction holds is skipped rather than
+ * waited for, and a failure rolls back only the savepoint and reaches `onFailure` as a SQLSTATE.
+ * The acting command's result and stored response never depend on it.
+ */
+export async function observeUnclaimedDeliveryForActedSignal(
+  tx: Sql,
+  args: UnclaimedObservationTarget & { managed: boolean; proof: SessionProof },
+  onFailure: (sqlstate: string | null) => void = () => {},
+): Promise<boolean> {
+  try {
+    return await tx.savepoint(async (sp) => {
+      const [row] = await sp<{
+        acked_at: Date | null;
+        ack_outcome: string | null;
+        lease_id: string | null;
+        leased_by: string | null;
+        last_lease_id: string | null;
+        last_leased_by: string | null;
+        session_id: string | null;
+        session_generation: string | number | null;
+      }[]>`
+        SELECT acked_at, ack_outcome, lease_id, leased_by, last_lease_id, last_leased_by,
+          session_id, session_generation
+        FROM swarm.signal_deliveries
+        WHERE workspace_id = ${args.workspaceId}::uuid
+          AND signal_id = ${args.signalId}::uuid
+          AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+        FOR UPDATE SKIP LOCKED
+      `;
+      if (
+        !row || row.acked_at !== null || row.ack_outcome !== null ||
+        row.lease_id !== null || row.leased_by !== null ||
+        row.last_lease_id !== null || row.last_leased_by !== null
+      ) return false;
+      if (!unclaimedSessionMatches(row, args.managed, args.proof)) return false;
+      if (!await unclaimedObservationDirected(sp, args)) return false;
+      return await markUnclaimedObserved(sp, args) === 1;
+    });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    try {
+      onFailure(typeof code === "string" && /^[0-9A-Z]{5}$/u.test(code) ? code : null);
+    } catch { /* A log failure never fails the command either. */ }
+    return false;
+  }
+}
+
 /**
  * Acknowledge a live lease, or promote a queued receipt after hook surfacing.
  */
@@ -937,55 +1095,11 @@ export async function ackAgentDelivery(
      * present session proof, exactly as the queued path below does — an unclaimed ack is not a
      * way around the session fence. */
     if (row.last_lease_id !== null || row.last_leased_by !== null) return { status: "conflict" };
-    if (managed && (
-      args.proof == null ||
-      (row.session_id !== null && (row.session_id !== args.proof.session_id ||
-        Number(row.session_generation) !== args.proof.generation))
-    )) return { status: "session_conflict" };
-    const directed = await tx<{ allowed: boolean }[]>`
-      SELECT EXISTS (
-        SELECT 1 FROM swarm.signals AS s
-        WHERE s.workspace_id = ${args.workspaceId}::uuid
-          AND s.id = ${args.signalId}::uuid
-          AND s.kind IN ('ask', 'note')
-          AND (
-            s.channel_id IS NULL
-            OR swarm.actor_can_access_channel(s.workspace_id, s.channel_id, 'agent', ${args.recipientPrincipalId}::uuid)
-          )
-          AND (s.to_agent_principal_id = ${args.recipientPrincipalId}::uuid
-            OR EXISTS (
-              SELECT 1 FROM swarm.signal_recipients AS r
-              WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
-                AND r.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
-            )
-            OR EXISTS (
-            /* Or the signal mentions this agent. A mention sits only on a message the whole
-             * workspace can read (swarm.signal_mentions refuses anything else), so this admits
-             * the agent to nothing it could not already read. */
-            SELECT 1 FROM swarm.signal_mentions AS mention
-            WHERE mention.signal_id = s.id
-              AND mention.workspace_id = s.workspace_id
-              AND mention.mentioned_agent_principal_id = ${args.recipientPrincipalId}::uuid
-          ))
-      ) AS allowed
-    `;
-    if (!directed[0]?.allowed) return { status: "unavailable" };
+    if (!unclaimedSessionMatches(row, managed, args.proof)) return { status: "session_conflict" };
+    if (!await unclaimedObservationDirected(tx, args)) return { status: "unavailable" };
     if (row.acked_at === null) {
       if (row.ack_outcome !== null || row.lease_id !== null || row.leased_by !== null) return { status: "conflict" };
-      await tx`
-        UPDATE swarm.signal_deliveries
-        SET
-          acked_at = statement_timestamp(),
-          ack_outcome = 'observed',
-          ack_via = COALESCE(ack_via, 'unclaimed'),
-          delivered_at = COALESCE(delivered_at, statement_timestamp()),
-          surfaced_at = COALESCE(surfaced_at, statement_timestamp()),
-          updated_at = statement_timestamp()
-        WHERE workspace_id = ${args.workspaceId}::uuid
-          AND signal_id = ${args.signalId}::uuid
-          AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
-          AND acked_at IS NULL
-      `;
+      await markUnclaimedObserved(tx, args);
       return {
         status: "accepted",
         response: {

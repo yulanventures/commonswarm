@@ -139,9 +139,15 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         return send(200, { signals: body.after_id ? incoming.filter(row => row.id > body.after_id) : incoming, capabilities: { cursor_after: 1, sender_owner_relation: 1 } });
       }
       if (body.command?.kind === "ack_agent_delivery" && body.command?.unclaimed === true) {
-        observations.push(body);
-        return send(200, { ok: true, status: "accepted", event_ids: [],
-          signal_id: body.command.signal_id, outcome: "observed" });
+        // One entry per observed id, whether check sent them batched or singly.
+        const batch = Array.isArray(body.command.signal_ids) ? body.command.signal_ids as string[] : null;
+        for (const id of batch ?? [body.command.signal_id]) {
+          observations.push({ ...body, command: { ...body.command, signal_id: id } });
+        }
+        return send(200, batch
+          ? { ok: true, status: "accepted", event_ids: [], outcome: "observed", signal_ids: batch,
+            observed_signal_ids: batch, refused: [] }
+          : { ok: true, status: "accepted", event_ids: [], signal_id: body.command.signal_id, outcome: "observed" });
       }
       if (body.command?.kind === "renew_agent_token") {
         renewals++;

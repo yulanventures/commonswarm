@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -455,5 +456,84 @@ test("receive hook exits after timeout output even when transport keeps the proc
       }
     }
     assert.ok(selfAborted, `with ${preloadDelayMs}ms preload the check never aborted itself in 3 runs; only the hard exit fired`);
+  }
+});
+
+test("a hook-timed check keeps the host-hook budget however far its absolute deadline is", { timeout: 15_000 }, async () => {
+  const profilePath = await profile();
+  const started = Date.now();
+  // runTurnHook passes only deadlineAtMs; the check's own budget stays AGENT_CHECK_TIMEOUT_MS.
+  await assert.rejects(checkAgentMessages({
+    profilePath,
+    fetcher: fetcher([signal(1)], AGENT_CHECK_TIMEOUT_MS + 300),
+    deadlineAtMs: Date.now() + 60_000,
+    present: async () => {},
+  }), { code: "check_timeout" });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < AGENT_CHECK_TIMEOUT_MS + 250, `a hook check ran ${elapsed}ms`);
+});
+
+test("a direct cswarm check outlives the hook budget and observes its whole page in one request", { timeout: 40_000 }, async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    ...signal(1),
+    id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
+    body: `message ${index + 1}`,
+    created_at: new Date(Date.UTC(2026, 8, 16, 0, 0, index)).toISOString(),
+  }));
+  const acks: Array<Record<string, unknown>> = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", chunk => raw += chunk);
+    request.on("end", async () => {
+      const body = JSON.parse(raw || "{}") as Record<string, unknown>;
+      const reply = (status: number, value: unknown) =>
+        response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (body.resource === "members") return reply(200, {
+        members: [{ user_id: OWNER_ID, display_name: "Owner" }],
+        agents: [{ principal_id: PRINCIPAL_ID, name: "Agent", owner_user_id: OWNER_ID }],
+        identity: { credential_valid: true, principal_id: PRINCIPAL_ID, workspace_id: WORKSPACE_ID, owner_user_id: OWNER_ID },
+      });
+      if (body.resource === "signals") {
+        // Longer than a hook check may take, well inside a direct check's budget.
+        await delay(AGENT_CHECK_TIMEOUT_MS + 300);
+        return reply(200, { signals: rows, capabilities: { sender_owner_relation: 1, cursor_after: 1 } });
+      }
+      const command = body.command as Record<string, unknown> | undefined;
+      if (command?.kind === "ack_agent_delivery") {
+        acks.push(command);
+        const ids = command.signal_ids as string[];
+        return reply(200, { status: "accepted", ok: true, event_ids: [], outcome: "observed", signal_ids: ids,
+          observed_signal_ids: ids, refused: [] });
+      }
+      return reply(200, { status: "accepted", ok: true, event_ids: [] });
+    });
+  });
+  await new Promise<void>(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const profilePath = await profile();
+    const stored = JSON.parse(await readFile(profilePath, "utf8"));
+    await writeFile(profilePath, JSON.stringify({ ...stored, url: `http://127.0.0.1:${address.port}` }), { mode: 0o600 });
+    const home = await mkdtemp(join(root, "direct-home-"));
+    const child = spawn(process.execPath, ["--import", tsxImport, cliPath, "check", "--profile", profilePath, "--json"], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "config"), SWARM_AGENT_STATE_DIR: join(home, "agent-state") },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    const status = await new Promise<number | null>(resolveStatus => child.once("close", resolveStatus));
+    assert.equal(status, 0, stderr);
+    assert.equal(JSON.parse(stdout).messages.length, rows.length);
+    assert.equal(acks.length, 1, "one observation request");
+    assert.deepEqual(acks[0]!.signal_ids, rows.map(row => row.id));
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [], "one run leaves nothing for the next");
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }
 });

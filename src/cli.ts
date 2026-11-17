@@ -60,6 +60,7 @@ import {
   runSetupGuide,
   runSetupImport,
   runSetupVersion,
+  writeOnboardingOutput,
 } from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -388,6 +389,7 @@ import {
   reportSeenReactions,
   seenAckTargets,
 } from "./cloud/agent-signal-receipts.js";
+import { observeSurfacedDeliveries, surfacedDeliveryIds } from "./cloud/delivery-observation.js";
 import {
   compareSemVer,
   type ProviderVersionNotice,
@@ -5372,15 +5374,34 @@ async function runSignalRead(
     assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
   }
 
+  /* An agent that read its inbox has seen what was printed: observe those deliveries (check's
+   * unclaimed ack) only after the output is written, best effort and briefly. The output goes
+   * through writeOnboardingOutput, the awaited writer check uses: it settles when stdout has
+   * taken the bytes and rejects when the write fails, so a held pipe holds the observation and a
+   * failed write observes nothing. Never changes the output. */
+  const observePrinted = async () => {
+    if (!inbox || selected.kind !== "agent" || selected.agent === undefined) return;
+    await observeSurfacedDeliveries({
+      target: cloud,
+      fetcher: selected.fetcher,
+      credential: selected.bearer,
+      workspaceId: selected.selectedWorkspace,
+      signalIds: surfacedDeliveryIds(rows, selected.agent.principalId),
+    });
+  };
+
   if (args.has("json")) {
-    printJson(
+    // printJson's bytes, written and awaited.
+    await writeOnboardingOutput(`${JSON.stringify(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
       }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince, queryBase.since!, args) }
         : inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
         ? { notice: INBOX_LIMIT_NOTICE } : {}) },
-    );
+      null,
+      2,
+    )}\n`);
     if (selected.kind === "agent") {
       await reportRenderedBroadcasts(
         cloud,
@@ -5389,6 +5410,7 @@ async function runSignalRead(
         renderedBroadcastIds(rows),
       );
     }
+    await observePrinted();
     return;
   }
   const authors = await settleSignalAuthorLabels(
@@ -5406,14 +5428,13 @@ async function runSignalRead(
     );
     return;
   }
+  let printed = "";
   if (channelSlug !== undefined) {
     /* Say what was narrowed. Without this an empty channel and an empty
      * workspace print the same thing. */
-    process.stdout.write(
-      `${inbox ? "Inbox" : "Feed"}, filed in ${channelSlug}:\n`,
-    );
+    printed += `${inbox ? "Inbox" : "Feed"}, filed in ${channelSlug}:\n`;
   }
-  process.stdout.write(`${renderSignals(rows, {
+  printed += `${renderSignals(rows, {
     inbox,
     includeStale: args.has("include-stale"),
     authors,
@@ -5422,11 +5443,13 @@ async function runSignalRead(
     ...(authors.workspaceName === undefined ? {} : {
       workspace: { id: selected.selectedWorkspace, name: authors.workspaceName },
     }),
-  })}\n`);
+  })}\n`;
   if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
-    process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
+    printed += `${INBOX_LIMIT_NOTICE}\n`;
   }
-  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since!, args)}\n`);
+  if (moreSince !== undefined) printed += `${inboxMoreNotice(moreSince, queryBase.since!, args)}\n`;
+  // The same bytes the separate writes produced, in one awaited write.
+  await writeOnboardingOutput(printed);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
@@ -5435,12 +5458,14 @@ async function runSignalRead(
       renderedBroadcastIds(rows),
     );
   }
+  await observePrinted();
 }
 
 /**
  * Human-visible arrival surface for a host Monitor. It reads signal pages and
- * advances only a local cursor; delivery claim/ack state belongs to the
- * listener and interactive hook paths and is never touched here.
+ * advances only a local cursor. It never claims or leases a delivery; after an
+ * arrival line is written it only observes that delivery unclaimed, as check
+ * does, and leaves every leased or acked row to the listener and hook paths.
  */
 async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   if (!hasAgentCredential(args)) {
@@ -5725,6 +5750,28 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
       },
       afterEmitBatch: async (signals) => {
+        /* The arrival lines are written: observe those deliveries (check's unclaimed ack), so the
+         * roster sees this seat picking up. In the background, bounded and never fatal: the watch
+         * loop does not wait for it, and a failure leaves the delivery for the next check. The
+         * agent's own notes (the attended canary among them) are left for check, and a seat with a
+         * running listener leaves every row for the listener to lease and its session to surface. */
+        const observeBearer = renderedBearer;
+        void (async () => {
+          try {
+            const listener = await readListenerStatusIfPresent(listenerPaths({
+              profileId: cloud.profileId, workspaceId: selected.selectedWorkspace, principalId,
+            }));
+            if (LISTENER_RUNNING_STATES.includes(listener?.state ?? "stopped")) return;
+          } catch { return; }
+          await observeSurfacedDeliveries({
+            target: cloud,
+            fetcher: selected.fetcher,
+            credential: observeBearer,
+            workspaceId: selected.selectedWorkspace,
+            signalIds: surfacedDeliveryIds(signals, principalId, { excludeOwn: true }),
+            signal: controller.signal,
+          });
+        })();
         // 👀 on the arrivals just printed that reach this agent, beside the broadcast seen report.
         await Promise.all([
           reportRenderedBroadcasts(

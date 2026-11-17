@@ -19,11 +19,13 @@ import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
-import { DeliveryCommandClient, DeliveryHttpError } from "./delivery.js";
+import { DeliveryCommandClient } from "./delivery.js";
+import { observeUnclaimedDeliveries } from "./delivery-observation.js";
 import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 import { reportSeenReactions, seenAckTargets } from "./agent-signal-receipts.js";
 
 export {
+  AGENT_CHECK_DIRECT_TIMEOUT_MS,
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
   AGENT_CHECK_STARTUP_ALLOWANCE_MS,
   AGENT_CHECK_TIMEOUT_MS,
@@ -321,13 +323,14 @@ export async function checkAgentMessages(options: {
           const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
           const removed = new Set<string>();
           const retryUpdates = new Map<string, { attempts: number; first_at: number; next_at: number }>();
-          const persist = async (attempt?: { id: string; retry: { attempts: number; first_at: number; next_at: number } }, rotate = false) => {
+          type Retry = { attempts: number; first_at: number; next_at: number };
+          const persist = async (attempts?: ReadonlyMap<string, Retry>, rotate = false) => {
             await withFileLock(dirname(path), "check", async () => {
               const current = await readCheckState(path);
               const remaining = (current.pending_observed_ids ?? []).filter(value => !removed.has(value));
               const retries = { ...(current.pending_observed_retries ?? {}) };
               for (const [id, retry] of retryUpdates) retries[id] = retry;
-              if (attempt) retries[attempt.id] = attempt.retry;
+              for (const [id, retry] of attempts ?? []) retries[id] = retry;
               await writeSecureJsonFile(path, JSON.stringify({ ...current,
                 pending_observed_ids: remaining, pending_observed_retries: queuedRetries({ ...current, pending_observed_retries: retries }, remaining),
                 ...(rotate ? { pending_observed_next: remaining.length === 0 ? 0 : (start + batch.length) % remaining.length } : {}) }));
@@ -335,35 +338,40 @@ export async function checkAgentMessages(options: {
             removed.clear();
             retryUpdates.clear();
           };
-          for (const id of batch) {
-            const now = Date.now();
-            const remainingMs = deadlineMs - now;
-            if (remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) break;
+          const now = Date.now();
+          const remainingMs = deadlineMs - now;
+          const due = new Map<string, { prior: { attempts: number; first_at: number }; attempts: number; backoff: number }>();
+          const attempted = new Map<string, Retry>();
+          for (const id of remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS ? [] : batch) {
             const prior = committed.pending_observed_retries?.[id] ?? { attempts: 0, first_at: now };
             if (now - prior.first_at >= AGENT_CHECK_ACK_MAX_AGE_MS) {
               removed.add(id);
               continue;
             }
             if ((prior.next_at ?? 0) > now) continue;
-            // Commit before transport: a request that consumes the deadline still counts.
             const attempts = prior.attempts + 1;
             const backoff = Math.min(AGENT_CHECK_ACK_RETRY_MAX_MS,
               AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 8));
-            await persist({ id, retry: { attempts, first_at: prior.first_at, next_at: now + remainingMs + backoff } });
-            try {
-              const client = new DeliveryCommandClient(target, fetcher, {
-                deadlineMs: Math.min(AGENT_CHECK_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now())),
-              });
-              await client.observeUnclaimedAgentDelivery({ workspaceId: profile.workspace_id,
-                credential: token, commandId: randomUUID(), signalId: id });
-              removed.add(id);
-            } catch (error) {
-              const terminal = error instanceof DeliveryHttpError &&
-                (error.status === 403 || error.status === 404 || error.status === 409 ||
-                  (error.status === 400 && error.code === "invalid_request"));
-              if (terminal) removed.add(id);
-              else if (deadlineMs - Date.now() >= AGENT_CHECK_ACK_MIN_REMAINING_MS)
-                retryUpdates.set(id, { attempts, first_at: prior.first_at, next_at: Date.now() + backoff });
+            due.set(id, { prior, attempts, backoff });
+            attempted.set(id, { attempts, first_at: prior.first_at, next_at: now + remainingMs + backoff });
+          }
+          if (due.size > 0) {
+            // Commit before transport: a request that consumes the deadline still counts.
+            await persist(attempted);
+            /* One batched request for the whole batch (an older edge: the single shape, four at a
+             * time). Requests end a little before the deadline so the outcome below is written. */
+            const outcome = await observeUnclaimedDeliveries({
+              target, fetcher, credential: token, workspaceId: profile.workspace_id,
+              signalIds: [...due.keys()],
+              deadlineAtMs: deadlineMs - 2 * AGENT_CHECK_ACK_MIN_REMAINING_MS,
+              requestTimeoutMs: AGENT_CHECK_TIMEOUT_MS,
+            });
+            for (const id of [...outcome.observed, ...outcome.refused]) removed.add(id);
+            if (deadlineMs - Date.now() >= AGENT_CHECK_ACK_MIN_REMAINING_MS) {
+              for (const id of outcome.failed) {
+                const entry = due.get(id)!;
+                retryUpdates.set(id, { attempts: entry.attempts, first_at: entry.prior.first_at, next_at: Date.now() + entry.backoff });
+              }
             }
           }
           const writeBudgetMs = Math.floor(deadlineMs - Date.now());

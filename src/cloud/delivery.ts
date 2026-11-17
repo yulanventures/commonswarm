@@ -235,6 +235,24 @@ export interface UnclaimedObservationRequest {
   signalId: string;
 }
 
+/** Most deliveries one batched unclaimed observation names (the edge's DELIVERY_OBSERVE_BATCH_MAX). */
+export const UNCLAIMED_OBSERVATION_BATCH_MAX = 50;
+
+export interface UnclaimedObservationBatchRequest {
+  workspaceId: string;
+  credential: string;
+  commandId: string;
+  signalIds: readonly string[];
+}
+
+export interface UnclaimedObservationBatchResult {
+  httpStatus: number;
+  /** Observed now or already observed. */
+  observed: string[];
+  /** Refused by the edge (unavailable, leased, acked otherwise, session): final, never retried. */
+  refused: string[];
+}
+
 export interface DeliveryClientOptions {
   /**
    * Per-request deadline in ms covering fetch and the response body read.
@@ -997,5 +1015,51 @@ export class DeliveryCommandClient {
       signalId: request.signalId.toLowerCase(), outcome: "observed",
     });
     return { httpStatus: response.status, signalId: request.signalId.toLowerCase(), outcome: "observed" };
+  }
+
+  /**
+   * The same observation for up to UNCLAIMED_OBSERVATION_BATCH_MAX surfaced messages in one request.
+   * Each id answers on its own: observed, or refused. An edge older than the batch shape answers
+   * 400 (DeliveryHttpError); the caller then falls back to observeUnclaimedAgentDelivery per id.
+   */
+  async observeUnclaimedAgentDeliveries(
+    request: UnclaimedObservationBatchRequest,
+  ): Promise<UnclaimedObservationBatchResult> {
+    checkedCommandId(request.commandId);
+    assertAgentToken(request.credential);
+    checkedUuidRequest(request.workspaceId, "workspaceId");
+    const ids = [...new Set(request.signalIds.map((id) => id.toLowerCase()))];
+    if (ids.length === 0 || ids.length > UNCLAIMED_OBSERVATION_BATCH_MAX) {
+      throw new Error(`a batched observation names 1..${UNCLAIMED_OBSERVATION_BATCH_MAX} signal ids`);
+    }
+    for (const id of ids) checkedUuidRequest(id, "signalIds");
+    const { response, text } = await this.post(request, {
+      kind: "ack_agent_delivery",
+      signal_ids: ids,
+      lease_id: null,
+      listener_instance_id: null,
+      outcome: "observed",
+      last_error_code: null,
+      [ACK_AGENT_DELIVERY_SURFACED_FIELD]: true,
+      unclaimed: true,
+    }, "unclaimed delivery observation");
+    if (!response.ok) throw refusal(response, text);
+    const body = successBody(response, text, "unclaimed delivery observation") as Record<string, unknown>;
+    const asked = new Set(ids);
+    const observed = Array.isArray(body.observed_signal_ids) ? body.observed_signal_ids : null;
+    const refusedRows = Array.isArray(body.refused) ? body.refused : null;
+    const refused = refusedRows?.map((row) =>
+      row && typeof row === "object" && !Array.isArray(row) ? (row as Record<string, unknown>).signal_id : null);
+    if (
+      body.outcome !== "observed" || observed === null || refused === undefined ||
+      ![...observed, ...refused].every((id) => typeof id === "string" && asked.has(id)) ||
+      new Set([...observed, ...refused]).size !== ids.length ||
+      observed.length + refused.length !== ids.length
+    ) {
+      throw new DeliveryMalformedResponseError(
+        "delivery observation response did not answer each id once",
+      );
+    }
+    return { httpStatus: response.status, observed: observed as string[], refused: refused as string[] };
   }
 }

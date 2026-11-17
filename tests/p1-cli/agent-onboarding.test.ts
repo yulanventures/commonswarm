@@ -9,7 +9,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
-import { AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_ACK_RETRY_BASE_MS, AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_DIRECT_TIMEOUT_MS, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -53,7 +53,16 @@ function row(i: number, body = `message ${i}`): SignalRecord {
     from: OWNER, from_kind: "user", to: null, to_agent: AGENT, in_reply_to: null, about: null, kind: i % 2 ? "ask" : "note",
     body, until: "2099-01-01T00:00:00.000Z", created_at: "2026-09-08T00:00:00.000Z", sender_owner_relation: "same_owner" };
 }
-function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck: boolean | number = false) {
+/** Every signal id the observation requests named, single or batched, in request order. */
+function ackedIds(requests: Array<Record<string, unknown>>): string[] {
+  return requests.map(r => r.command as { kind?: string; signal_id?: string; signal_ids?: string[] } | undefined)
+    .filter(command => command?.kind === "ack_agent_delivery")
+    .flatMap(command => command!.signal_ids ?? [command!.signal_id!]);
+}
+function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck: boolean | number = false,
+  options: { oldEdge?: boolean; ackDelayMs?: number } = {}) {
+  let inFlight = 0;
+  const stats = { maxInFlight: 0 };
   const requests: Array<Record<string, unknown>> = [];
   const fetcher = (async (_input: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -75,13 +84,22 @@ function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck: boolean 
       assert.equal(command.unclaimed, true);
       assert.equal(command.lease_id, null);
       assert.equal(command.outcome, "observed");
+      const batch = Array.isArray(command.signal_ids) ? command.signal_ids as string[] : null;
+      // An edge older than the batch shape refuses it as a malformed command.
+      if (batch && options.oldEdge) return new Response(JSON.stringify({ error: "invalid_request" }), { status: 400 });
+      inFlight++;
+      stats.maxInFlight = Math.max(stats.maxInFlight, inFlight);
+      try {
+        if (options.ackDelayMs) await new Promise(resolveDelay => setTimeout(resolveDelay, options.ackDelayMs));
+      } finally { inFlight--; }
       return new Response(JSON.stringify(failAck ? { error: failAck === 409 ? "delivery_ack_conflict" : "temporarily_unavailable" } :
-        { ok: true, status: "accepted", event_ids: [], signal_id: command.signal_id, outcome: "observed" }),
+        batch ? { ok: true, status: "accepted", event_ids: [], outcome: "observed", signal_ids: batch, observed_signal_ids: batch, refused: [] }
+        : { ok: true, status: "accepted", event_ids: [], signal_id: command.signal_id, outcome: "observed" }),
         { status: failAck ? typeof failAck === "number" ? failAck : 503 : 200 });
     } else throw new Error("unexpected request");
     return new Response(JSON.stringify(result), { status: 200 });
   }) as typeof fetch;
-  return { fetcher, requests };
+  return { fetcher, requests, stats };
 }
 async function saveInput(envelope = connection()) {
   const dir = await mkdtemp(join(root, "input-"));
@@ -206,7 +224,7 @@ test("standalone checks drain tied timestamps and overflow and ACK what was show
     more = result.has_more;
   }
   assert.deepEqual(seen, rows.map(r => r.id));
-  assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, rows.length);
+  assert.deepEqual(ackedIds(fake.requests).sort(), rows.map(r => r.id).sort(), "each shown message is observed once");
   const quiet = await checkAgentMessages({ profilePath, hostSessionId: "resumed-session", fetcher: fake.fetcher, present: async () => {} });
   assert.equal(quiet.messages.length, 0, "resume shares the profile cursor");
   assert.equal(renderAgentCheck(quiet), "");
@@ -259,7 +277,7 @@ test("failed observation leaves check successful and retries after a later empty
   assert.equal(quiet.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 0);
 });
 
-test("terminal observation refusals leave the queue after one request each", { timeout: 15_000 }, async () => {
+test("terminal observation refusals leave the queue after one attempt each", { timeout: 15_000 }, async () => {
   const { profilePath } = await setup();
   const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE + 1 }, (_, index) => row(index + 1));
   const failed = fixture(rows, AGENT, 409);
@@ -267,8 +285,40 @@ test("terminal observation refusals leave the queue after one request each", { t
   for (let check = 0; check < 5; check++)
     await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
   const acks = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
-  assert.equal(acks.length, rows.length, "N terminal refusals cause N requests across five later checks");
-  assert.deepEqual(acks.map(r => (r.command as { signal_id: string }).signal_id), rows.map(row => row.id));
+  assert.equal(acks.length, 2, "one batched request per page across five later checks");
+  assert.deepEqual(ackedIds(failed.requests), rows.map(row => row.id), "N terminal refusals name each id once");
+});
+
+test("a check observes a whole page in one batched request", { timeout: 15_000 }, async () => {
+  const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE }, (_, index) => row(index + 1));
+  const { profilePath } = await setup();
+  const fake = fixture(rows, AGENT, false, { ackDelayMs: 800 });
+  const result = await checkAgentMessages({ profilePath, fetcher: fake.fetcher, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
+    present: async () => {} });
+  assert.equal(result.messages.length, AGENT_CHECK_PAGE_SIZE);
+  const acks = fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks.length, 1, "one request for the page");
+  assert.deepEqual((acks[0]!.command as { signal_ids: string[] }).signal_ids, rows.map(r => r.id));
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  assert.deepEqual(state.pending_observed_ids, [], "nothing is left for the next check");
+  assert.deepEqual(state.pending_observed_retries, {});
+});
+
+test("against an edge without the batch shape a check observes each message singly, four at a time", { timeout: 15_000 }, async () => {
+  const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE }, (_, index) => row(index + 1));
+  const { profilePath } = await setup();
+  const fake = fixture(rows, AGENT, false, { oldEdge: true, ackDelayMs: 100 });
+  await checkAgentMessages({ profilePath, fetcher: fake.fetcher, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
+    present: async () => {} });
+  const acks = fake.requests.map(r => r.command as { kind?: string; signal_id?: string; signal_ids?: string[] } | undefined)
+    .filter(command => command?.kind === "ack_agent_delivery");
+  assert.deepEqual(acks[0]!.signal_ids, rows.map(r => r.id), "the batch goes first");
+  assert.deepEqual(acks.slice(1).map(command => command!.signal_id).sort(), rows.map(r => r.id).sort(),
+    "then every id once in the single shape");
+  assert.ok(acks.slice(1).every(command => command!.signal_ids === undefined));
+  assert.equal(fake.stats.maxInFlight, 4, "four single requests at a time");
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  assert.deepEqual(state.pending_observed_ids, [], "the 400 dropped nothing: every id was observed singly");
 });
 
 test("transient observation retries use backoff until the age cap", { timeout: 10_000 }, async () => {
@@ -276,16 +326,28 @@ test("transient observation retries use backoff until the age cap", { timeout: 1
   const failed = fixture([row(1)], AGENT, 503);
   const path = join(dirname(profilePath), "check.json");
   for (let check = 0; check < 5; check++) {
+    const started = Date.now();
     await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
     const state = JSON.parse(await readFile(path, "utf8"));
-    assert.ok(state.pending_observed_retries[row(1).id].next_at > Date.now());
+    const retry = state.pending_observed_retries[row(1).id];
+    /* The backoff is measured from the failure, which comes after `started`, so this bound holds
+     * however slow the runner is. Comparing against the clock after the check did not: the first
+     * backoff is 250 ms, and a loaded runner can spend that between the failure and the read. */
+    assert.equal(retry.attempts, check + 1, "each transient failure counts one attempt");
+    assert.ok(retry.next_at >= started + AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** check,
+      `attempt ${check + 1} backs off at least ${AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** check} ms`);
     if (check < 4) {
+      // A backoff still running defers the retry: hold it open whatever the runner's speed, then check again.
+      retry.next_at = Math.max(retry.next_at, Date.now() + 60_000);
+      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
       const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length;
       await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
       assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length,
         before, "backoff defers an immediate retry");
-      state.pending_observed_retries[row(1).id].next_at = 0;
-      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+      const deferred = JSON.parse(await readFile(path, "utf8"));
+      assert.equal(deferred.pending_observed_retries[row(1).id].attempts, check + 1, "a deferred retry is not an attempt");
+      deferred.pending_observed_retries[row(1).id].next_at = 0;
+      await writeFile(path, JSON.stringify(deferred), { mode: 0o600 });
     }
   }
   const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
@@ -327,6 +389,9 @@ test("deadline timeout counts the attempt and preserves an earlier 409 removal",
   const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
     if (body.command?.kind === "ack_agent_delivery") {
+      // An older edge: the batch is refused, then each id goes singly.
+      if (Array.isArray(body.command.signal_ids))
+        return new Response(JSON.stringify({ error: "invalid_request" }), { status: 400 });
       if (body.command.signal_id === row(1).id)
         return new Response(JSON.stringify({ error: "delivery_ack_conflict" }), { status: 409 });
       return await new Promise<Response>(() => {});
