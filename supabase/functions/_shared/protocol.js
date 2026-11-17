@@ -824,7 +824,9 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "disable_agent_management",
   "recover_agent_session",
   // A person's own channel read position (its own handler, not the reducer). Agents use channel_read.
-  "mark_channel_read"
+  "mark_channel_read",
+  // A channel's lead is a person's setting, as the workspace lead is (a channel command, not the reducer).
+  "set_channel_lead"
 ]);
 function isAgentScopeDenylisted(scope) {
   const words = scopeWords(scope);

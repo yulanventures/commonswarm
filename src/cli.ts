@@ -127,6 +127,9 @@ import {
   normalizeChannelSlug,
   renderChannelList,
   unknownChannelMessage,
+  channelLeadCommand,
+  resolveChannelLeadAgent,
+  type ChannelLeadMode,
   type ChannelRow,
 } from "./cloud/channels.js";
 import {
@@ -701,6 +704,7 @@ export const KNOWN_FLAGS = new Set([
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
+  "workspace", "none",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -738,6 +742,8 @@ export const BOOLEAN_FLAGS = new Set([
   "remove",
   "multi",
   "private",
+  "workspace",
+  "none",
 ]);
 
 const UUID_RE =
@@ -10262,6 +10268,48 @@ async function runChannelUnarchive(args: Arguments): Promise<void> {
   );
 }
 
+/* A person's setting, like the workspace lead: no agent credential or profile flags. */
+export const RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "json", "workspace", "none"] as const;
+
+/** `cswarm channel lead <channel> (<agent> | --workspace | --none)`: exactly one choice. */
+export function channelLeadChoice(args: Arguments): { mode: ChannelLeadMode; agent?: string } {
+  const agent = args.positionals[3];
+  const chosen = [agent !== undefined, args.has("workspace"), args.has("none")].filter(Boolean).length;
+  if (args.positionals[2] === undefined || chosen !== 1) {
+    throw new UsageError("cswarm channel lead needs the channel and one of an agent, --workspace or --none");
+  }
+  if (agent !== undefined) return { mode: "agent", agent };
+  return { mode: args.has("workspace") ? "workspace" : "none" };
+}
+
+/** Choose who an untagged top-level person post in a channel wakes. Channel managers only. */
+async function runChannelLead(args: Arguments): Promise<void> {
+  const choice = channelLeadChoice(args);
+  const positionals = choice.mode === "agent" ? 4 : 3;
+  args.assertShape(RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, positionals);
+  const selector = args.positionals[2]!;
+  const selectorKind = channelSelectorKind(selector);
+  const context = await fileContext(args, RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, positionals);
+  if (context.selected.kind !== "human") throw new Error("cswarm channel lead uses your own sign-in. Run cswarm login");
+  const channelId = await resolveChannelSelector(context, selector, selectorKind);
+  let agent: { principal_id: string; name: string } | undefined;
+  if (choice.mode === "agent") {
+    const directory = await signalDirectory(context.cloud, context.selected.selectedWorkspace, context.selected);
+    const principalId = resolveChannelLeadAgent(choice.agent!, directory.agents);
+    agent = directory.agents.find((row) => row.principal_id.toLowerCase() === principalId) ??
+      { principal_id: principalId, name: principalId };
+  }
+  const channel = await sendChannelCommand(context, channelLeadCommand(channelId, choice.mode, agent?.principal_id));
+  if (args.has("json")) {
+    printJson({ workspace_id: channel.workspace_id, channel });
+    return;
+  }
+  const lead = choice.mode === "agent"
+    ? `${sanitizeDisplayLabel(agent!.name, "Unnamed agent")} (${agent!.principal_id})`
+    : choice.mode === "workspace" ? "the workspace lead" : "none";
+  process.stdout.write(`Channel ${channel.slug} lead: ${lead}.\n`);
+}
+
 export const RUN_TASK_COMMAND_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS] as const;
 
 async function runTaskCommand(args: Arguments): Promise<void> {
@@ -11129,6 +11177,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     update: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUpdate), description: "Change a channel's name or purpose.", mutates: true, flags: [...agentFlags, "name", "purpose", "clear-purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel update <name|channel-id> [--name <new-name>] [--purpose <text> | --clear-purpose] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    lead: commandEntry({ ...noTool("a person's channel setting; never a model tool"), handler: traced("runChannel", runChannelLead), description: "Choose who untagged posts from people in a channel wake.", mutates: true, flags: RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm channel lead <name|channel-id> (<agent> | --workspace | --none) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     unarchive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelUnarchive), description: "Bring an archived channel back.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel unarchive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
@@ -11273,6 +11322,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "channel.update": RUN_CHANNEL_UPDATE_1_ACCEPTED_FLAGS,
   "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
   "channel.unarchive": RUN_CHANNEL_UNARCHIVE_1_ACCEPTED_FLAGS,
+  "channel.lead": RUN_CHANNEL_LEAD_1_ACCEPTED_FLAGS,
   "file.put": FILE_PUT_ACCEPTED_FLAGS,
   "file.ls": FILE_LS_ACCEPTED_FLAGS,
   "file.get": FILE_GET_ACCEPTED_FLAGS,

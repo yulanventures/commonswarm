@@ -163,11 +163,53 @@ export interface ChannelRow {
   archived_at: string | null;
   visibility?: "open" | "private";
   /**
+   * Who an untagged top-level person post here wakes: the workspace lead ("workspace"), the agent
+   * in lead_agent_principal_id ("agent"), or nobody ("none"). Absent from older deployments.
+   */
+  lead_mode?: "workspace" | "agent" | "none";
+  lead_agent_principal_id?: string | null;
+  /**
    * An agent's own unread for this channel: true when channel_read has messages there it hasn't
    * read, null until its first channel_read in the workspace. Agent lists only; a person's list
    * has no unread here.
    */
   unread?: boolean | null;
+}
+
+export type ChannelLeadMode = "workspace" | "agent" | "none";
+
+const LEAD_AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The agent `cswarm channel lead` names, by its id or its exact name, from the workspace's live
+ * agents. The server decides whether it may lead (local, not turn-only, can read the channel).
+ */
+export function resolveChannelLeadAgent(
+  selector: string,
+  agents: readonly { principal_id: string; name: string }[],
+): string {
+  const matches = LEAD_AGENT_ID.test(selector)
+    ? agents.filter((agent) => agent.principal_id.toLowerCase() === selector.toLowerCase())
+    : agents.filter((agent) => agent.name === selector);
+  if (matches.length === 1) return matches[0]!.principal_id.toLowerCase();
+  if (matches.length > 1) {
+    throw new Error(`More than one agent is named ${selector}; use one of these ids: ${
+      matches.map((agent) => agent.principal_id).join(", ")}`);
+  }
+  throw new Error(`${selector} is not a live agent in this workspace. Nothing changed.`);
+}
+
+/** The wire command: principal_id is sent only when an agent leads. */
+export function channelLeadCommand(
+  channelId: string,
+  mode: ChannelLeadMode,
+  principalId?: string,
+):
+  | { kind: "set_channel_lead"; channel_id: string; lead_mode: "workspace" | "none" }
+  | { kind: "set_channel_lead"; channel_id: string; lead_mode: "agent"; principal_id: string } {
+  if (mode !== "agent") return { kind: "set_channel_lead", channel_id: channelId, lead_mode: mode };
+  if (principalId === undefined) throw new Error("an agent lead needs the agent's id");
+  return { kind: "set_channel_lead", channel_id: channelId, lead_mode: "agent", principal_id: principalId };
 }
 
 /** An agent's channel list: the rows, and general's (unfiled messages) unread beside them. */
@@ -195,6 +237,8 @@ export const CHANNEL_COLUMNS = [
   "created_at",
   "archived_at",
   "visibility",
+  "lead_mode",
+  "lead_agent_principal_id",
 ] as const;
 
 /**

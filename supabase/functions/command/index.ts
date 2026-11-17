@@ -198,6 +198,11 @@ import {
   signalReactable,
 } from "./signal-reactions.ts";
 import {
+  type ChannelLeadMode,
+  parseSetChannelLeadCommand,
+  type SetChannelLeadCommand,
+} from "./channel-lead.ts";
+import {
   advanceChannelReads,
   channelFeedMessage,
   type ChannelReadPosition,
@@ -499,7 +504,8 @@ type ChannelCommand =
   | {
     kind: "workspace_channel_policy_set";
     channel_creation_policy: ChannelCreationPolicy;
-  };
+  }
+  | SetChannelLeadCommand;
 
 interface ChannelRecord {
   channel_id: string;
@@ -511,6 +517,9 @@ interface ChannelRecord {
   created_at: string;
   archived_at: string | null;
   visibility: ChannelVisibility;
+  /** set_channel_lead only: the stored setting, as swarm_read.channels shows it. */
+  lead_mode?: ChannelLeadMode;
+  lead_agent_principal_id?: string | null;
 }
 
 interface ChannelMemberRecord {
@@ -1291,6 +1300,8 @@ const CHANNEL_COMMAND_KINDS = [
   "channel_star_reorder",
   "channel_reorder",
   "workspace_channel_policy_set",
+  // A person's command only (HUMAN_ONLY_COMMANDS); it rides this path for the lock, the 404 and the manager rule.
+  "set_channel_lead",
 ] as const;
 const TOUCH_PRESENCE_KIND = "touch_presence";
 
@@ -2410,6 +2421,10 @@ function validateCommand(
         ...(members !== undefined ? { members } : {}),
       },
     };
+  }
+
+  if (cmd.kind === "set_channel_lead") {
+    return parseSetChannelLeadCommand(cmd);
   }
 
   if (cmd.kind === "channel_member_add") {
@@ -10899,6 +10914,37 @@ async function canManageChannel(
   return await isHumanWorkspaceAdmin(tx, workspaceId, auth);
 }
 
+/**
+ * Can this agent lead this channel: a live local agent in the workspace (not turn-only, not a join
+ * registrar) whose owner is still a member, and that can read the channel. The same agent rule as
+ * swarm.set_workspace_lead, plus channel access; swarm.channel_effective_live_lead re-checks it on
+ * every post, so a lead that leaves later simply stops being woken.
+ */
+async function channelLeadCandidate(
+  tx: Sql,
+  workspaceId: string,
+  channelId: string,
+  principalId: string,
+): Promise<boolean> {
+  const [candidate] = await tx<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS p
+      JOIN swarm.agent_workspace_memberships AS am
+        ON am.principal_id = p.principal_id AND am.workspace_id = ${workspaceId}::uuid AND am.revoked_at IS NULL
+      JOIN swarm.memberships AS owner_m
+        ON owner_m.workspace_id = ${workspaceId}::uuid AND owner_m.user_id = p.owner_user_id
+       AND owner_m.revoked_at IS NULL
+      WHERE p.principal_id = ${principalId}::uuid
+        AND p.revoked_at IS NULL AND p.transport = 'local' AND NOT p.turn_only
+        AND NOT EXISTS (
+          SELECT 1 FROM swarm.agent_join_credentials AS j WHERE j.registrar_principal_id = p.principal_id)
+        AND swarm.actor_can_access_channel(${workspaceId}::uuid, ${channelId}::uuid, 'agent', p.principal_id)
+    ) AS ok
+  `;
+  return candidate?.ok === true;
+}
+
 async function countRemainingLiveHumanManagers(
   tx: Sql,
   workspaceId: string,
@@ -11087,6 +11133,18 @@ async function applyChannelCommand(
   command: ChannelCommand,
 ): Promise<ChannelOutcome> {
   const actor = authActorIdentity(auth);
+
+  /* A channel's lead is a person's setting, like the workspace lead: an agent credential is refused
+   * before the channel is looked up, so the answer says nothing about it. */
+  if (command.kind === "set_channel_lead" && (auth.credentialKind !== "user" || auth.actor.user === null)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "forbidden",
+      message: "Only a person can choose a channel's lead.",
+      reason: "credential_kind_forbidden",
+    };
+  }
 
   if (command.kind === "channel_preference_set") {
     if (auth.credentialKind !== "user" || auth.actor.user === null) {
@@ -11615,6 +11673,40 @@ async function applyAccessibleChannelCommand(
     };
   }
 
+  if (command.kind === "set_channel_lead") {
+    if (
+      command.lead_mode === "agent" &&
+      !(await channelLeadCandidate(tx, route.workspaceId, row.channel_id, command.principal_id!))
+    ) {
+      return {
+        ok: false,
+        status: 403,
+        error: "channel_lead_not_eligible",
+        message:
+          "A channel lead must be a live local agent in this workspace that is not turn-only and can read this channel. Nothing changed.",
+        reason: "channel_lead_not_eligible",
+      };
+    }
+    const [updated] = await tx<(ChannelRow & { lead_mode: ChannelLeadMode; lead_agent_principal_id: string | null })[]>`
+      UPDATE swarm.channels
+      SET lead_mode = ${command.lead_mode},
+          lead_agent_principal_id = ${command.principal_id}::uuid
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND channel_id = ${row.channel_id}::uuid
+      RETURNING channel_id, workspace_id, slug, purpose,
+                created_by_principal, created_by_kind, created_at, archived_at, visibility,
+                lead_mode, lead_agent_principal_id
+    `;
+    return {
+      ok: true,
+      channel: {
+        ...channelRecord(updated!),
+        lead_mode: updated!.lead_mode,
+        lead_agent_principal_id: updated!.lead_agent_principal_id,
+      },
+    };
+  }
+
   if (command.kind === "channel_member_add") {
     if (row.visibility !== "private") {
       return {
@@ -11853,6 +11945,20 @@ async function applyAccessibleChannelCommand(
       );
     }
     if (row.visibility === "open") {
+      /* A channel lead named while the channel was open keeps leading only if it was admitted
+       * here; otherwise the channel goes back to the workspace lead, as when a lead is removed. */
+      await tx`
+        UPDATE swarm.channels AS c
+        SET lead_mode = 'workspace', lead_agent_principal_id = NULL
+        WHERE c.workspace_id = ${route.workspaceId}::uuid
+          AND c.channel_id = ${updatedRow.channel_id}::uuid
+          AND c.lead_mode = 'agent'
+          AND NOT EXISTS (
+            SELECT 1 FROM swarm.channel_members AS m
+            WHERE m.workspace_id = c.workspace_id AND m.channel_id = c.channel_id
+              AND m.member_kind = 'agent' AND m.agent_principal_id = c.lead_agent_principal_id
+          )
+      `;
       await tx`
         UPDATE swarm.channel_preferences AS p
         SET starred = false,
@@ -17157,10 +17263,12 @@ async function handleTransaction(
         auth,
         command,
       );
-      /* Workspace Lead: an untagged top-level note or ask from a person wakes the workspace's
-       * lead agent, exactly as if the person had named it. Tags, replies, threads, agent posts
-       * and status kinds are untouched, so agents never route to each other this way. A lead
-       * that is no longer live leaves the post an ordinary broadcast instead of refusing it. */
+      /* Workspace Lead: an untagged top-level note or ask from a person wakes the lead agent of
+       * the channel it is posted in (swarm.channel_effective_live_lead: the channel's own agent,
+       * the workspace lead, or nobody; general always takes the workspace lead), exactly as if
+       * the person had named it. Tags, replies, threads, agent posts and status kinds are
+       * untouched, so agents never route to each other this way. A lead that is no longer live
+       * leaves the post an ordinary broadcast instead of refusing it. */
       let signalTarget = namedTarget;
       let leadMention: string | null = null;
       let leadAgentApplied: string | null = null;
@@ -17171,8 +17279,16 @@ async function handleTransaction(
         namedTarget.toUserId === null && namedTarget.toAgentPrincipalId === null &&
         namedTarget.inReplyTo === null
       ) {
-        const [lead] = await tx<{ principal_id: string | null }[]>`
-          SELECT swarm.workspace_live_lead(${route.workspaceId}::uuid) AS principal_id`;
+        /* The channel is resolved here only to choose the lead; the post's own channel checks
+         * (and their refusals) run below, in their usual order. A name that does not resolve
+         * wakes nobody, and the post is refused there anyway. */
+        const leadChannel = await resolveSignalChannel(tx, route, auth, command);
+        const [lead] = leadChannel.ok
+          ? await tx<{ principal_id: string | null }[]>`
+            SELECT swarm.channel_effective_live_lead(
+              ${route.workspaceId}::uuid, ${leadChannel.channelId}::uuid
+            ) AS principal_id`
+          : [];
         if (lead?.principal_id && await signalAgentTargetIsLive(tx, route, lead.principal_id)) {
           /* With mentions on, the post stays public and the lead is mentioned,
            * unless the person named someone themselves.
@@ -17443,9 +17559,10 @@ async function handleTransaction(
         });
       }
       if (placementChannelId !== null) {
-        /* A workspace lead that is not admitted to a private channel must neither
-         * receive nor be mentioned on an untagged post inside it: the post stays
-         * inside #lock as an ordinary channel broadcast. */
+        /* A lead that is not admitted to a private channel must neither receive nor
+         * be mentioned on an untagged post inside it: the post stays inside #lock as
+         * an ordinary channel broadcast. channel_effective_live_lead already refuses
+         * such a lead; this re-check is kept as the edge's own guard. */
         if (
           leadAgentApplied !== null &&
           !(await actorCanAccessChannel(
