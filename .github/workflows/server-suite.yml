@@ -184,23 +184,34 @@ jobs:
         if: matrix.suite == 'server-repeat'
         with:
           version: 2.118.0
-      - name: Read the pinned edge-runtime image
+      # One image cache for every suite that starts the local stack: the pinned edge-runtime image plus
+      # every image "supabase start" runs, read from the installed CLI (scripts/ci/server-suite.mjs).
+      # A warm cache pulls nothing from a registry; "Start the local stack" fails if supabase start pulls.
+      - name: Read the pinned images
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
-        id: edge-runtime-image
-        run: node scripts/ci/server-suite.mjs image-metadata >> "$GITHUB_OUTPUT"
-      - name: Cache the pinned edge-runtime image
-        if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
-        id: edge-runtime-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: pinned-images
+        run: |
+          set -euo pipefail
+          # A tested commit from before the stack image cache has no stack list: it pulls as it always did.
+          if grep -q check-stack-images scripts/ci/server-suite.mjs; then
+            node scripts/ci/server-suite.mjs image-metadata >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::This commit predates the stack image cache; its images are pulled from the registry."
+          fi
+      - name: Restore the pinned images
+        if: (matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit') && steps.pinned-images.outputs.key != ''
+        id: pinned-image-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/pinned-images
-          # The key includes the exact measured manifest digest, not just the tag.
-          key: ${{ runner.os }}-${{ runner.arch }}-pinned-images-v2-${{ steps.edge-runtime-image.outputs.key }}
-      - name: Prepare the pinned edge-runtime image
+          # The key hashes the CLI version, every image it names and the edge-runtime digest.
+          key: ${{ runner.os }}-${{ runner.arch }}-pinned-images-v3-${{ steps.pinned-images.outputs.key }}
+      - name: Prepare the pinned images
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
+        id: pinned-images-ready
         env:
           PINNED_IMAGE_CACHE: ${{ runner.temp }}/pinned-images
-          PINNED_IMAGE_CACHE_HIT: ${{ steps.edge-runtime-cache.outputs.cache-hit }}
+          PINNED_IMAGE_CACHE_HIT: ${{ steps.pinned-image-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           node scripts/ci/server-suite.mjs prepare-images "$PINNED_IMAGE_CACHE" "$PINNED_IMAGE_CACHE_HIT"
@@ -236,6 +247,16 @@ jobs:
             free_db_port
             supabase start --ignore-health-check >/dev/null
           fi
+          if grep -q check-stack-images scripts/ci/server-suite.mjs; then
+            node scripts/ci/server-suite.mjs check-stack-images "$RUNNER_TEMP/pinned-images"
+          fi
+      # Saved only after a complete pull on a cache miss and a stack start that pulled nothing.
+      - name: Save the pinned images
+        if: (matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit') && steps.pinned-images-ready.outputs.save == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/pinned-images
+          key: ${{ runner.os }}-${{ runner.arch }}-pinned-images-v3-${{ steps.pinned-images.outputs.key }}
       - name: Apply migrations as the box superuser
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         run: |

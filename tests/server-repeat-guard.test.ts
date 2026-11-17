@@ -234,3 +234,92 @@ test('the workflow final gate rejects failed or cancelled jobs even with complet
     assert.equal(result.status === 0, status === 'success', result.stderr);
   }
 });
+
+// The local stack image cache (#480) reads its list from the installed CLI's embedded Dockerfile.
+const cliDockerfile = `# Exposed for updates by .github/dependabot.yml
+FROM supabase/postgres:17.6.1.171 AS pg
+# New always-on service alias: extend SERVICE_IMAGE_ALIASES.
+FROM library/kong:2.8.1 AS kong
+FROM axllent/mailpit:v1.30.2 AS mailpit
+FROM postgrest/postgrest:v16.3 AS postgrest
+FROM supabase/postgres-meta:v0.99.0 AS pgmeta
+FROM supabase/studio:2026.09.14-sha-4dd8a95 AS studio
+FROM darthsim/imgproxy:v3.8.0 AS imgproxy
+FROM supabase/edge-runtime:v1.76.2 AS edgeruntime
+FROM timberio/vector:0.53.0-alpine AS vector
+FROM supabase/supavisor:2.9.13 AS supavisor
+FROM supabase/gotrue:v2.197.0 AS gotrue
+FROM supabase/realtime:v2.135.3 AS realtime
+FROM supabase/storage-api:v1.77.0 AS storage
+FROM supabase/logflare:1.50.12 AS logflare
+# One-shot job images (not started as long-running containers).
+FROM supabase/pgadmin-schema-diff:cli-0.0.5 AS differ
+FROM supabase/migra:3.0.1663481299 AS migra
+FROM supabase/pg_prove:3.36 AS pgprove
+`;
+function imageMetadata(context: TestContext, version: string, dockerfile: string, env: Record<string, string> = {}) {
+  const directory = scratch(context);
+  // The list follows `exit`, as data inside the binary, never as commands.
+  writeFileSync(join(directory, 'supabase'), `#!/bin/sh\necho ${version}\nexit 0\n${dockerfile}`, { mode: 0o755 });
+  const { SUPABASE_INTERNAL_IMAGE_REGISTRY: _registry, ...inherited } = process.env;
+  return spawnSync(process.execPath, ['scripts/ci/server-suite.mjs', 'image-metadata'], {
+    encoding: 'utf8',
+    env: { ...inherited, PATH: `${directory}:${process.env.PATH}`, ...env },
+  });
+}
+function metadataKey(result: ReturnType<typeof imageMetadata>) {
+  assert.equal(result.status, 0, result.stderr);
+  const key = result.stdout.match(/^key=([0-9a-f]{64})$/m)?.[1];
+  assert.ok(key, result.stdout);
+  return key;
+}
+
+test('the image cache lists every image supabase start runs, by the first name the CLI looks for', context => {
+  const result = imageMetadata(context, '2.118.0', cliDockerfile);
+  metadataKey(result);
+  const images = [...result.stderr.matchAll(/^ {2}(\S+): (\S+)$/gm)].map(match => `${match[1]} ${match[2]}`);
+  assert.deepEqual(images, [
+    'edge-runtime-pinned public.ecr.aws/supabase/edge-runtime:v1.73.13',
+    'pg public.ecr.aws/supabase/postgres:17.6.1.171',
+    'kong public.ecr.aws/supabase/kong:2.8.1',
+    'mailpit public.ecr.aws/supabase/mailpit:v1.30.2',
+    'postgrest public.ecr.aws/supabase/postgrest:v16.3',
+    'pgmeta public.ecr.aws/supabase/postgres-meta:v0.99.0',
+    'studio public.ecr.aws/supabase/studio:2026.09.14-sha-4dd8a95',
+    'edgeruntime public.ecr.aws/supabase/edge-runtime:v1.76.2',
+    'vector public.ecr.aws/supabase/vector:0.53.0-alpine',
+    'gotrue public.ecr.aws/supabase/gotrue:v2.197.0',
+    'realtime public.ecr.aws/supabase/realtime:v2.135.3',
+    'storage public.ecr.aws/supabase/storage-api:v1.77.0',
+    'logflare public.ecr.aws/supabase/logflare:1.50.12',
+  ]);
+});
+
+test('the image cache key changes with the CLI version or any image, and only then', context => {
+  const base = metadataKey(imageMetadata(context, '2.118.0', cliDockerfile));
+  assert.equal(metadataKey(imageMetadata(context, '2.118.0', cliDockerfile)), base);
+  assert.notEqual(metadataKey(imageMetadata(context, '2.119.0', cliDockerfile)), base);
+  assert.notEqual(metadataKey(imageMetadata(context, '2.118.0', cliDockerfile.replace('gotrue:v2.197.0', 'gotrue:v2.198.0'))), base);
+});
+
+for (const [name, version, dockerfile, env] of [
+  ['no embedded image list', '2.118.0', 'FROM pg_catalog.pg_class AS c\n', {}],
+  ['a started alias missing', '2.118.0', cliDockerfile.replace(/^FROM .* AS mailpit\n/m, ''), {}],
+  ['an unreadable version', 'unknown', cliDockerfile, {}],
+  ['a registry override', '2.118.0', cliDockerfile, { SUPABASE_INTERNAL_IMAGE_REGISTRY: 'docker.io' }],
+] as const) {
+  test(`the image cache refuses ${name}`, context => {
+    assert.notEqual(imageMetadata(context, version, dockerfile, env).status, 0);
+  });
+}
+
+test('the workflow saves the image cache under the restored key, only after the stack check', () => {
+  const workflow = readFileSync('.github/workflows/server-suite.yml', 'utf8');
+  const keys = [...workflow.matchAll(/^ {10}key: (.*pinned-images-v3-.*)$/gm)].map(match => match[1]);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1]);
+  const start = workflow.indexOf('      - name: Start the local stack\n');
+  const check = workflow.indexOf('node scripts/ci/server-suite.mjs check-stack-images');
+  const save = workflow.indexOf('      - name: Save the pinned images\n');
+  assert.ok(start > 0 && start < check && check < save, 'the save must follow the stack check');
+});
