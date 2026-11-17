@@ -14054,8 +14054,11 @@ function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolea
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
-  if (tool === "reply") return command.signal_kind === "note" &&
-    typeof command.in_reply_to === "string";
+  /* A hosted reply is private (in_reply_to) or, to a message everyone in its channel can read, a
+   * thread reply (thread_root_id); mcp/signal-tools.ts decides which. Never both. */
+  if (tool === "reply") return command.signal_kind === "note" && (
+    (typeof command.in_reply_to === "string" && command.thread_root_id == null) ||
+    (command.in_reply_to == null && typeof command.thread_root_id === "string"));
   return (tool === "working_on" && command.signal_kind === "working-on") || (tool === "check" && (command.kind === "open_hosted_mcp_check_batch" || command.kind === "ack_hosted_mcp_check_batch"));
 }
 

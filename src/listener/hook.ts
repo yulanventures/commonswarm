@@ -715,7 +715,7 @@ export function renderHookSignal(
     ? `reply (optional), in your message's thread: cswarm reply ${item.reactedTo} "<answer>" --thread --workspace-id ${item.workspaceId}`
     : item.replyThreadRootId === undefined
     ? `reply${optional}: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId}`
-    : `reply in the thread${optional}, where ${readableWhere} it: cswarm reply ${item.replyThreadRootId} "<answer>" --thread --workspace-id ${item.workspaceId} (to answer only the author: cswarm reply ${item.signalId} "<answer>" --workspace-id ${item.workspaceId})`;
+    : `reply in the thread${optional}, where ${readableWhere} it: cswarm reply ${item.replyThreadRootId} "<answer>" --thread --workspace-id ${item.workspaceId} (to answer only the author: cswarm reply ${item.signalId} "<answer>" --private --workspace-id ${item.workspaceId})`;
   const header = `[CommonSwarm] ${senderKind} ${JSON.stringify(sender)} ${intent}`;
   if (cap === HOOK_BODY_PREVIEW_CHARS_NONE) return [header, replyLine].join("\n");
   return [

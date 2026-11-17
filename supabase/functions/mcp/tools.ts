@@ -7,6 +7,8 @@ import { SIGNAL_UNSAFE_GLOBAL_RE } from "../_shared/signal-text.ts";
 import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannelSlug } from "../_shared/channels.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { contentTypeForName } from "../../../src/protocol/file-types.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
+import { bodyMayMention, MENTION_MAX_RECIPIENTS } from "../../../src/protocol/mention-address.ts";
 
 import {
   HOSTED_TODO_LIST_TOOLS, validateHostedTodoListToolArguments, HouseholdToolInputError,
@@ -46,6 +48,9 @@ const requestId = text(8, 72, REQUEST_ID_PATTERN);
 const channel = text(1, CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE.source);
 const recipient = objectSchema({ kind: { type: "string", enum: ["user", "agent"] }, id: uuid }, ["kind", "id"]);
 const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 };
+/** Names or ids of people and agents a public message mentions; @Name in the body counts too. */
+export const MENTION_SELECTOR_MAX = 80;
+const mentions = { type: "array", items: text(1, MENTION_SELECTOR_MAX), minItems: 1, maxItems: MENTION_MAX_RECIPIENTS };
 const integer = (minimum: number, maximum: number): JsonSchema => ({ type: "integer", minimum, maximum });
 // A choice ask's options: bare labels (choices) or objects (options), 2 to 6 either way.
 const choiceLabels = { type: "array", items: text(1, CHOICE_LABEL_MAX), minItems: CHOICE_MIN, maxItems: CHOICE_MAX };
@@ -94,25 +99,24 @@ export const CORE_TOOL_TABLE = [
   {
     name: "ask", effect: "write", title: "Ask workspace participants",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Ask one or more workspace participants, optionally attaching files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may, and attachments are not allowed. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
+    description: "Ask workspace participants: privately with recipients, or in a channel with mentions (@Name in the body counts as a mention). Optionally attach files from file_put or file_ls. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several; then recipients is one person, who alone answers, or omitted so anyone who reads the ask may, and attachments and mentions are not allowed. The answer arrives in check as a reply reading \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    // recipients may be left out only by an ask with choices, which then goes to whoever reads it.
-    inputSchema: { ...objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
-      anyOf: [{ required: ["recipients"] }, { required: ["options"] }, { required: ["choices"] }] },
+    // No anyOf: recipients, mentions, an @Name in the body, or options/choices name the audience (validateHostedToolArguments).
+    inputSchema: objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, options: choiceOptionList, choices: choiceLabels, multi: { type: "boolean" }, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "note", effect: "write", title: "Share a workspace note",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Share a note, optionally with recipients and attached files from file_put or file_ls. Retry with the same request_id.",
+    description: "Share a note, optionally with recipients, or with mentions on a public note (@Name in the body counts as a mention), and attached files from file_put or file_ls. Retry with the same request_id.",
     annotations: { title: "Share a workspace note", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), attachments, channel, request_id: requestId }, ["seat", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, recipients, mentions, body: text(1, 8000), attachments, channel, request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "reply", effect: "write", title: "Reply to a signal",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Reply privately to a signal, optionally attaching files from file_put or file_ls. Retry with the same request_id.",
+    description: "Reply to a signal: in its thread when everyone in the channel can read it, notifying its author, otherwise privately to its author. Set private to true to answer the author privately. A thread reply takes mentions (@Name in the body counts). Optionally attach files from file_put or file_ls. Retry with the same request_id.",
     annotations: { title: "Reply to a signal", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), attachments, request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
+    inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), mentions, private: { type: "boolean" }, attachments, request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
   },
   {
     name: "reraise", effect: "write", title: "Re-raise an open ask",
@@ -364,10 +368,10 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   claim_seat: { allowed: ["workspace_id", "agent_id", "name", "request_id"], required: ["request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
-  // recipients is required unless the ask has choices (validateHostedToolArguments).
-  ask: { allowed: ["seat", "recipients", "body", "attachments", "channel", "options", "choices", "multi", "request_id"], required: ["seat", "body", "request_id"] },
-  note: { allowed: ["seat", "recipients", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
-  reply: { allowed: ["seat", "signal_id", "body", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
+  // An ask names recipients, mentions or choices (validateHostedToolArguments).
+  ask: { allowed: ["seat", "recipients", "mentions", "body", "attachments", "channel", "options", "choices", "multi", "request_id"], required: ["seat", "body", "request_id"] },
+  note: { allowed: ["seat", "recipients", "mentions", "body", "attachments", "channel", "request_id"], required: ["seat", "body", "request_id"] },
+  reply: { allowed: ["seat", "signal_id", "body", "mentions", "private", "attachments", "request_id"], required: ["seat", "signal_id", "body", "request_id"] },
   reraise: { allowed: ["seat", "signal_id", "request_id"], required: ["seat", "signal_id", "request_id"] },
   react: { allowed: ["seat", "signal_id", "emoji", "remove", "request_id"], required: ["seat", "signal_id", "emoji", "request_id"] },
   working_on: { allowed: ["seat", "body", "channel", "request_id"], required: ["seat", "body", "request_id"] },
@@ -386,6 +390,11 @@ const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; require
   memory_get: { allowed: ["seat", "memory_id"], required: ["seat", "memory_id"] },
   memory_forget: { allowed: ["seat", "memory_id", "request_id"], required: ["seat", "memory_id", "request_id"] },
 };
+
+/** The refusal for an ask that names nobody, in the argument validator's own format. */
+export function askAudienceRefusal(): HostedToolInputError {
+  return new HostedToolInputError(`Invalid ask_audience: ${EXPECTED.ask_audience}.`);
+}
 
 export class HostedToolInputError extends Error {
   constructor(message: string) {
@@ -407,6 +416,10 @@ const EXPECTED: Record<string, string> = {
   ack: "provide the batch UUID returned by check, or omit ack to open the inbox",
   body: "provide 1 to 8000 characters with non-whitespace text; only tab, newline and carriage return are allowed control characters",
   recipients: "provide 1 to 20 objects with only kind (user or agent) and id (UUID); use members to find recipients",
+  ask_audience: "provide recipients for a private ask, mentions or an @Name in the body for an ask in a channel, or options or choices for an ask anyone who reads it may answer",
+  choice_mentions: "an ask with options or choices mentions nobody; leave out mentions",
+  mentions: `provide 1 to ${MENTION_MAX_RECIPIENTS} names or UUIDs from members, each once; mentions go on a message everyone in the channel can read, so leave out recipients`,
+  private: "provide true to reply privately to the author, or omit it",
   signal_id: "provide the signal UUID from check that you want to reply to",
   channel: "provide a channel name from channel_ls, or general for the main channel",
   after_id: "pass next.after_id from the previous channel_read page",
@@ -569,6 +582,8 @@ export function validateHostedToolArguments(
   if (!validRequestId(args.request_id)) invalid("request_id");
   if (name === "ask" && (args.options !== undefined || args.choices !== undefined || args.multi !== undefined)) {
     hostedChoiceOptions(args);
+    // ask_choice carries no mentions on the command edge; an @Name in a choice ask's body stays text.
+    if (args.mentions !== undefined) throw new HostedToolInputError(`Invalid mentions: ${EXPECTED.choice_mentions}.`);
     if (args.multi !== undefined && typeof args.multi !== "boolean") invalid("multi");
     if (args.attachments !== undefined) throw new HostedToolInputError("Invalid attachments: an ask with choices takes no attachments.");
     if (args.recipients !== undefined && (!validRecipients(args.recipients) ||
@@ -578,12 +593,16 @@ export function validateHostedToolArguments(
     if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
     return args;
   }
-  if (name === "ask" && args.recipients === undefined) {
-    throw new HostedToolInputError(`Missing recipients: ${EXPECTED.recipients}.`);
+  // An ask names someone: recipients, mentions, or an @tag in the body (resolved later; see askAudienceRefusal).
+  if (name === "ask" && args.recipients === undefined && args.mentions === undefined && !bodyMayMention(String(args.body))) {
+    invalid("ask_audience");
   }
-  if ((name === "ask" && !validRecipients(args.recipients)) ||
-      (name === "note" && args.recipients !== undefined && !validRecipients(args.recipients))) invalid("recipients");
+  if ((name === "ask" || name === "note") && args.recipients !== undefined && !validRecipients(args.recipients)) invalid("recipients");
+  if (args.mentions !== undefined && !validMentions(args.mentions)) invalid("mentions");
+  if (args.mentions !== undefined && args.recipients !== undefined) invalid("mentions");
   if (name === "reply" && !validUuid(args.signal_id)) invalid("signal_id");
+  if (args.private !== undefined && typeof args.private !== "boolean") invalid("private");
+  if (args.private === true && args.mentions !== undefined) invalid("mentions");
   if (args.attachments !== undefined && !validAttachments(args.attachments)) invalid("attachments");
   if (args.channel !== undefined && !validChannel(args.channel)) invalid("channel");
   return args;
@@ -613,6 +632,18 @@ export function hostedChoiceOptions(args: HostedToolArguments): Array<{ id: stri
   } catch {
     throw new HostedToolInputError(`Invalid ${key}: ${EXPECTED[key]}.`);
   }
+}
+
+function validMentions(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MENTION_MAX_RECIPIENTS) return false;
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim() === "" || item.length > MENTION_SELECTOR_MAX || CONTROL_RE.test(item)) return false;
+    const key = item.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
 }
 
 function validChannel(value: unknown): boolean {

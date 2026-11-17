@@ -129,3 +129,6 @@ tests/admin-release-w4-second-pass.test.ts
 tests/workspace-skills.test.ts
 tests/interactive-replies-client.test.ts
 tests/api-md-contract.test.ts
+tests/mention-address.test.ts
+tests/reply-placement.test.ts
+tests/channel-general.test.ts

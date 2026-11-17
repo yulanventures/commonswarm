@@ -8,65 +8,23 @@
  * 2026-09-05 (`SIGNAL_RECIPIENT_MAX` in `_shared/channels.ts`), so one message now carries the
  * whole set. A reader who meets the old wording somewhere else should read this instead.
  *
- * This lives outside the dashboard component so it can be tested directly. Every rule below was
- * written against a defect a review arm found in the first version, and each has a test:
- * longest-name-first, boundary characters, case folding that changes a string's LENGTH,
- * two roster entries sharing a name, and more tags than one message may carry.
+ * The parser itself lives in src/protocol/mention-address.ts, so the CLI and both MCP servers
+ * read a tag exactly as the composer does. This file adds only what the browser needs on top:
+ * roster targets with display labels that tell duplicate names apart.
  */
-import { COMPOSER_TO_MAX } from "./composer-address.js";
-import {
-  foldIdentityName,
-  identityDisplayLabels,
-  type IdentityRecord,
-} from "./identity-label.js";
+import { identityDisplayLabels, type IdentityRecord } from "./identity-label.js";
+import { isTaggable, type MentionTarget } from "../../../src/protocol/mention-address.js";
 
-export interface MentionEntity {
-  id: string;
-  kind: "agent" | "person";
-}
-
-export interface MentionTarget {
-  entity: MentionEntity;
-  /** Raw display name. A name-only tag uses this, and refuses when it is shared. */
-  name: string;
-  /** Picker and tag label. Duplicate names include a short UUID suffix. */
-  label?: string;
-}
-
-export interface MentionAddress {
-  /** Names shared by two roster entries. A tag on one of these cannot be resolved. */
-  ambiguous: string[];
-  /** Tags past the cap. They are named rather than dropped in silence. */
-  overflow: string[];
-  recipients: MentionEntity[];
-}
-
-/**
- * A ceiling on one message, and the SAME number the server refuses above. It is imported
- * rather than typed: a tag costs a row in `swarm.signal_recipients` now, not a whole signal,
- * so the parser must stop exactly where the To: set does.
- */
-export const MENTION_MAX_RECIPIENTS = COMPOSER_TO_MAX;
-
-/** What may sit in front of an @ for it to start a tag. */
-const OPENS_TAG = /\s|[([]/u;
-
-/** What may sit after a name for the tag to end there. */
-const CLOSES_TAG = /[\s.,;:!?)\]]/u;
-
-/* Decompose, drop the combining marks, then lower-case. Plain `toLowerCase` is not enough:
- * "İ" folds to TWO code units, so "@ipek" never matched a roster name of "İpek". Stripping marks
- * makes a tag forgiving about accents, and the same fold decides ambiguity below, so two names
- * that differ only by an accent are treated as the same name rather than silently colliding. */
-const fold = (value: string): string => foldIdentityName(value);
-
-/* A name has to survive folding as something a reader could type after an "@". Only combining
- * marks fold to "", and only whitespace folds to whitespace; both used to bind — the first on the
- * empty span after a dangling "@", the second on "@ ". Checked in BOTH entry points, because
- * addressFromBody is called with target lists this module did not build. */
-export function isTaggable(name: string): boolean {
-  return fold(name).trim() !== "";
-}
+export {
+  MENTION_MAX_RECIPIENTS,
+  addressFromBody,
+  isTaggable,
+  mentionSpans,
+  type MentionAddress,
+  type MentionEntity,
+  type MentionSpan,
+  type MentionTarget,
+} from "../../../src/protocol/mention-address.js";
 
 /**
  * Longest name first, so "@Dana Rivera" is never read as "@Dana" plus stray text.
@@ -103,157 +61,4 @@ export function mentionTargets(
     .sort((left, right) =>
       right.label.length - left.label.length || right.name.length - left.name.length
     );
-}
-
-/** Names two or more roster entries share, folded. */
-function ambiguousNames(targets: readonly MentionTarget[]): Set<string> {
-  const counts = new Map<string, number>();
-  for (const target of targets) {
-    const folded = fold(target.name);
-    counts.set(folded, (counts.get(folded) ?? 0) + 1);
-  }
-  return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
-}
-
-function targetLabel(target: MentionTarget): string {
-  return target.label ?? target.name;
-}
-
-function entityKey(target: MentionTarget): string {
-  return `${target.entity.kind}:${target.entity.id}`;
-}
-
-function tagMatch(
-  body: string,
-  at: number,
-  token: string,
-): number | null {
-  if (!isTaggable(token)) return null;
-  const span = body.slice(at + 1, at + 1 + token.length);
-  if (span.length !== token.length) return null;
-  if (fold(span) !== fold(token)) return null;
-  const after = body[at + 1 + token.length];
-  if (after !== undefined && !CLOSES_TAG.test(after)) return null;
-  return token.length;
-}
-
-type MentionHit = {
-  target: MentionTarget;
-  consumed: number;
-  via: "label" | "name";
-};
-
-function mentionHitsAt(
-  body: string,
-  at: number,
-  targets: readonly MentionTarget[],
-): MentionHit[] {
-  const hits: MentionHit[] = [];
-  for (const target of targets) {
-    const labelLength = tagMatch(body, at, targetLabel(target));
-    if (labelLength !== null) {
-      hits.push({ target, consumed: labelLength, via: "label" });
-    }
-    const nameLength = tagMatch(body, at, target.name);
-    if (nameLength !== null) {
-      hits.push({ target, consumed: nameLength, via: "name" });
-    }
-  }
-  return hits;
-}
-
-export function addressFromBody(
-  body: string,
-  targets: readonly MentionTarget[],
-): MentionAddress {
-  const ordered = [...targets]
-    .filter((target) => isTaggable(target.name) || isTaggable(targetLabel(target)))
-    .sort((left, right) =>
-      targetLabel(right).length - targetLabel(left).length ||
-      right.name.length - left.name.length
-    );
-  const ambiguousSet = ambiguousNames(ordered);
-  const recipients: MentionEntity[] = [];
-  const ambiguous: string[] = [];
-  const overflow: string[] = [];
-  const seen = new Set<string>();
-  for (let at = body.indexOf("@"); at !== -1; at = body.indexOf("@", at + 1)) {
-    const before = at === 0 ? "" : body[at - 1]!;
-    if (before !== "" && !OPENS_TAG.test(before)) continue;
-    const hits = mentionHitsAt(body, at, ordered);
-    if (hits.length === 0) continue;
-    const consumed = Math.max(...hits.map((hit) => hit.consumed));
-    const top = hits.filter((hit) => hit.consumed === consumed);
-    const matchedIds = new Set(top.map((hit) => entityKey(hit.target)));
-    const sharedNameHit = top.find(
-      (hit) => hit.via === "name" && ambiguousSet.has(fold(hit.target.name)),
-    );
-    const labelHit = top.some((hit) => hit.via === "label");
-    if (matchedIds.size > 1 || (sharedNameHit !== undefined && !labelHit)) {
-      const token = sharedNameHit !== undefined && !labelHit
-        ? sharedNameHit.target.name
-        : body.slice(at + 1, at + 1 + consumed);
-      if (!ambiguous.includes(token)) ambiguous.push(token);
-      at += consumed;
-      continue;
-    }
-    const matched = top[0]?.target;
-    if (matched === undefined) continue;
-    const key = `${matched.entity.kind}:${matched.entity.id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      if (recipients.length < MENTION_MAX_RECIPIENTS) recipients.push({ ...matched.entity });
-      else overflow.push(targetLabel(matched));
-    }
-    at += consumed;
-  }
-  return { ambiguous, overflow, recipients };
-}
-
-/** One tag in a text and who it names. `end` is exclusive and includes the "@". */
-export interface MentionSpan {
-  start: number;
-  end: number;
-  entity: MentionEntity;
-}
-
-/**
- * WHERE THE TAGS ARE, for drawing them. `addressFromBody` answers who a body names; this answers
- * where each name sits, by the same reading: the same boundary characters, the same folding,
- * longest name first, and a name two targets share is left as plain text unless the tag used a
- * label that tells them apart.
- *
- * The caller passes ONLY the people and agents the message is known to mention. Who was
- * mentioned is a stored fact with stable ids; this never decides it, it only finds the words.
- * A mention whose name is no longer in the text (a later rename) is simply not found.
- */
-export function mentionSpans(
-  text: string,
-  targets: readonly MentionTarget[],
-): MentionSpan[] {
-  const ordered = [...targets]
-    .filter((target) => isTaggable(target.name) || isTaggable(targetLabel(target)))
-    .sort((left, right) =>
-      targetLabel(right).length - targetLabel(left).length ||
-      right.name.length - left.name.length
-    );
-  if (ordered.length === 0) return [];
-  const ambiguousSet = ambiguousNames(ordered);
-  const spans: MentionSpan[] = [];
-  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
-    const before = at === 0 ? "" : text[at - 1]!;
-    if (before !== "" && !OPENS_TAG.test(before)) continue;
-    const hits = mentionHitsAt(text, at, ordered);
-    if (hits.length === 0) continue;
-    const consumed = Math.max(...hits.map((hit) => hit.consumed));
-    const top = hits.filter((hit) => hit.consumed === consumed);
-    const matchedIds = new Set(top.map((hit) => entityKey(hit.target)));
-    const sharedNameOnly = top.some((hit) => hit.via === "name" && ambiguousSet.has(fold(hit.target.name))) &&
-      !top.some((hit) => hit.via === "label");
-    if (matchedIds.size === 1 && !sharedNameOnly) {
-      spans.push({ start: at, end: at + 1 + consumed, entity: { ...top[0]!.target.entity } });
-    }
-    at += consumed;
-  }
-  return spans;
 }

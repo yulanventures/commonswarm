@@ -22,12 +22,14 @@ import {
   CHANNEL_READ_COLUMNS,
   channelSlugProblem,
   chatReadKeys,
+  GENERAL_CHANNEL_SLUG,
   normalizeChannelSlug,
   SIGNAL_KINDS as SIGNAL_KIND_LIST,
   unknownChannelMessage,
 } from "../_shared/channels.ts";
 import { optionalWake } from "../_shared/wake.ts";
 import { channelPageDeliverable, fitChannelPage } from "../mcp/channel-page.ts";
+import { replyTargetAnswer, type ReplyTargetRow } from "./reply-target.ts";
 import {
   hostedCapabilityTool,
   revalidateHostedSeatRead,
@@ -137,6 +139,12 @@ interface SignalReadRequest {
   include_mentions: boolean;
   /** Its own Object.hasOwn group. True adds each row's reactions, grouped by emoji. */
   include_reactions: boolean;
+  /**
+   * Its own Object.hasOwn group, absent from installed clients' bodies. One message by id, from the
+   * same rows the read returns without it: a client reads the message it is replying to, to decide
+   * whether the reply goes in the thread or privately. It narrows; it never widens.
+   */
+  signal_id: string | null;
 }
 
 interface MemberReadRequest {
@@ -559,6 +567,7 @@ function parseBody(
   const cursorMode = hasAfterCreatedAt && hasAfterId;
   const hasIncludeMentions = Object.hasOwn(body, "include_mentions");
   const hasIncludeReactions = Object.hasOwn(body, "include_reactions");
+  const hasSignalId = Object.hasOwn(body, "signal_id");
   if (
     !exactKeys(body, [
       "resource",
@@ -574,6 +583,7 @@ function parseBody(
       "include_stale",
       ...(hasIncludeMentions ? ["include_mentions"] : []),
       ...(hasIncludeReactions ? ["include_reactions"] : []),
+      ...(hasSignalId ? ["signal_id"] : []),
     ]) ||
     body.resource !== "signals" ||
     typeof body.workspace_id !== "string" ||
@@ -603,10 +613,12 @@ function parseBody(
     typeof body.include_stale !== "boolean" ||
     (hasIncludeMentions && typeof body.include_mentions !== "boolean") ||
     (hasIncludeReactions && typeof body.include_reactions !== "boolean") ||
+    (hasSignalId && !(typeof body.signal_id === "string" && UUID_RE.test(body.signal_id))) ||
     (hasChannel &&
       !(body.channel === null ||
         (typeof body.channel === "string" &&
-          channelSlugProblem(body.channel) === null)))
+          (channelSlugProblem(body.channel) === null ||
+            normalizeChannelSlug(body.channel) === GENERAL_CHANNEL_SLUG))))
   ) {
     return null;
   }
@@ -646,6 +658,7 @@ function parseBody(
     include_stale: body.include_stale as boolean,
     include_mentions: body.include_mentions === true,
     include_reactions: body.include_reactions === true,
+    signal_id: hasSignalId ? (body.signal_id as string).toLowerCase() : null,
   };
 }
 
@@ -1278,8 +1291,11 @@ async function handle(
      * silent fall back to the unfiltered feed: falling back would return
      * strictly MORE than the caller asked for. */
     const channelSlug = body.channel ?? null;
+    /* "general" is unfiled messages (channel_id NULL), the name channel_ls and channel_read give
+     * them. It is reserved, so no real channel can carry it; it filters strictly to unfiled. */
+    const unfiledOnly = channelSlug === GENERAL_CHANNEL_SLUG;
     let channelId: string | null = null;
-    if (channelSlug !== null) {
+    if (channelSlug !== null && !unfiledOnly) {
       const channelRows = await tx<{ channel_id: string }[]>`
         SELECT channel_id
         FROM swarm_read.channels
@@ -1454,10 +1470,12 @@ async function handle(
           ${inReplyTo}::uuid IS NULL
           OR s.in_reply_to = ${inReplyTo}::uuid
         )
+        AND (${body.signal_id}::uuid IS NULL OR s.id = ${body.signal_id}::uuid)
         AND (
           ${channelId}::uuid IS NULL
           OR s.channel_id = ${channelId}::uuid
         )
+        AND (${unfiledOnly} = false OR s.channel_id IS NULL)
         AND (
           ${body.since}::timestamptz IS NULL OR
           s.created_at >= ${body.since}::timestamptz
@@ -1533,6 +1551,7 @@ async function handle(
         AND (${body.kind}::text IS NULL OR ${body.kind}::text = 'note')
         AND (${inReplyTo}::uuid IS NULL OR r.signal_id = ${inReplyTo}::uuid)
         AND (${channelId}::uuid IS NULL OR s.channel_id = ${channelId}::uuid)
+        AND (${unfiledOnly} = false OR s.channel_id IS NULL)
         AND (${body.since}::timestamptz IS NULL OR r.created_at >= ${body.since}::timestamptz)
         AND (
           ${useAfterCursor} = false
@@ -1570,6 +1589,8 @@ export type HostedReadInput =
   | { resource: "members"; workspace_id: string }
   | { resource: "roster"; workspace_id: string }
   | { resource: "channels"; workspace_id: string }
+  /** Where a hosted reply goes. Read with a channel_read capability: it answers only for public messages. */
+  | { resource: "reply_target"; workspace_id: string; signal_id: string }
   | { resource: "channel_members"; workspace_id: string; channel_id: string }
   | (Omit<ChannelMessagesReadRequest, "max_bytes"> & { fit_bytes?: number })
   | MemorySearchReadRequest
@@ -1617,6 +1638,7 @@ export interface ReadResult {
 function hostedReadInputValid(input: HostedReadInput): boolean {
   if (!UUID_RE.test(input.workspace_id)) return false;
   if (input.resource === "channel_members") return UUID_RE.test(input.channel_id);
+  if (input.resource === "reply_target") return UUID_RE.test(input.signal_id);
   if (isMemoryRead(input)) return parseMemoryRead({ ...input }) !== null;
   if (input.resource === "channel_messages" && input.fit_bytes !== undefined) {
     return Number.isSafeInteger(input.fit_bytes) && input.fit_bytes >= CHANNEL_PAGE_MIN_BYTES;
@@ -1661,6 +1683,7 @@ export async function handleHostedRead(
       (input.resource === "channels" && tool !== "channel_ls") ||
       (input.resource === "channel_members" && tool !== "channel_members") ||
       (input.resource === "channel_messages" && tool !== "channel_read") ||
+      (input.resource === "reply_target" && tool !== "channel_read") ||
       (input.resource === "memory_search" && tool !== "memory_search") ||
       (input.resource === "memory_get" && tool !== "memory_get") ||
       (input.resource === "files" && tool !== "file_ls") ||
@@ -1724,6 +1747,31 @@ export async function handleHostedRead(
     }
     if (input.resource === "roster") {
       return { status: 200, body: { ...await workspaceRoster(tx, seat.workspace_id), context } };
+    }
+    if (input.resource === "reply_target") {
+      /* A hosted reply to a message everyone in its channel can read goes in that message's thread.
+       * ELIGIBILITY IS channel_read's OWN, not a copy of it: the target is admitted only when
+       * swarm_read.channel_messages accepts it as the cursor of its channel, which applies every
+       * rule a channel_read page does (the caller's channel access, the message still live, no
+       * addressee, recipient, private reply or ask chain, and the same for its thread root). The view
+       * row only names the channel to ask and, once admitted, the author and root. Expired, hidden,
+       * addressed and unknown targets all answer the same null, and the reply stays private. */
+      const targetId = input.signal_id.toLowerCase();
+      const [row] = await tx<ReplyTargetRow[]>`
+        SELECT s.id, s.thread_root_id, s."from", s.from_kind,
+          swarm_read.channel_messages(
+            s.workspace_id,
+            CASE WHEN s.channel_id IS NULL THEN 'general'
+              ELSE (SELECT c.slug FROM swarm_read.channels AS c
+                WHERE c.workspace_id = s.workspace_id AND c.channel_id = s.channel_id) END,
+            s.id,
+            1
+          ) AS page
+        FROM swarm_read.signals AS s
+        WHERE s.workspace_id = ${seat.workspace_id}::uuid AND s.id = ${targetId}::uuid
+        LIMIT 1
+      `;
+      return { status: 200, body: { context, signal_id: targetId, ...replyTargetAnswer(row, seat.principal_id) } };
     }
     if (input.resource === "channels") {
       // The read role's view, gated by the seat owner's membership; no new grant.

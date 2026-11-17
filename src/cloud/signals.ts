@@ -35,6 +35,8 @@ import { parseServerSessionStatus, type ServerSessionStatus } from "./session-cl
 import { isReplyStatus } from "./reply-status.js";
 import { CHAIN_MAX_HOPS } from "./ask-chain-constants.js";
 import { normalizeReactionEmoji } from "../protocol/signal-reactions.js";
+import type { ReplyTarget } from "../protocol/reply-placement.js";
+import type { MentionRosterEntry } from "../protocol/mention-address.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -114,6 +116,8 @@ export interface SignalQuery {
    * `swarm_read.channels` first and passes the id it found.
    */
   channelId?: string;
+  /** Only unfiled messages (channel_id NULL): `--channel general` on a person's read. */
+  unfiledOnly?: boolean;
   since?: string;
   /**
    * Strict keyset lower bound: return rows after this (created_at, id).
@@ -1226,7 +1230,7 @@ async function humanSignals(
     "select",
     [
       "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,reply_status,about,kind,body,attachments,until,created_at,chain_hop",
-      ...(query.channelId === undefined
+      ...(query.channelId === undefined && query.unfiledOnly !== true
         ? []
         : ["channel_id", "thread_root_id", "broadcast_to_channel"]),
     ].join(","),
@@ -1234,6 +1238,8 @@ async function humanSignals(
   url.searchParams.set("workspace_id", `eq.${query.workspaceId}`);
   if (query.channelId !== undefined) {
     url.searchParams.set("channel_id", `eq.${query.channelId}`);
+  } else if (query.unfiledOnly === true) {
+    url.searchParams.set("channel_id", "is.null");
   }
   if (query.inbox) url.searchParams.set("to", `eq.${credential.userId}`);
   if (!query.includeStale) {
@@ -1756,6 +1762,88 @@ export async function readAgentSignalMembers(
     fetcher,
   );
   return [...directory.members];
+}
+
+/**
+ * The message a reply answers, read only to decide where the reply goes
+ * (src/protocol/reply-placement.ts). One row by id from what this caller can already read: an
+ * agent through the read edge's feed with `signal_id`, a person through swarm_read.signals.
+ *
+ * null when the caller can't read it, when the read is refused, or when the deployment can't look a
+ * message up by id (an edge from before `signal_id` refuses the key with a 400). Each way the reply
+ * falls back to the flags, so a message the caller can't see is refused exactly as before.
+ */
+export async function readReplyTarget(
+  target: CloudTarget,
+  credential: SignalCredential,
+  workspaceId: string,
+  signalId: string,
+  fetcherOrOptions: typeof fetch | SignalReadOptions = fetch,
+): Promise<ReplyTarget | null> {
+  if (!UUID_RE.test(workspaceId) || !UUID_RE.test(signalId)) throw new Error("reply target must be a signal UUID");
+  const options = normalizeReadOptions(fetcherOrOptions);
+  const id = signalId.toLowerCase();
+  let result: { response: Response; body: unknown } | null;
+  try {
+    if (credential.kind === "agent") {
+      result = await fetchSignalReadRetrying(options.fetcher, readEndpoint(target), {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential.token}`, apikey: target.anonKey, "content-type": "application/json" },
+        body: JSON.stringify({
+          resource: "signals", workspace_id: workspaceId.toLowerCase(), inbox: false, about: null, kind: null,
+          in_reply_to: null, since: null, limit: 1, include_stale: true, signal_id: id,
+        }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }, perReadTimeoutMs(options));
+    } else {
+      const url = new URL("/rest/v1/signals", target.url);
+      url.searchParams.set("select", "id,from,from_kind,to,to_agent,in_reply_to,thread_root_id");
+      url.searchParams.set("workspace_id", `eq.${workspaceId.toLowerCase()}`);
+      url.searchParams.set("id", `eq.${id}`);
+      url.searchParams.set("limit", "1");
+      result = await fetchSignalReadRetrying(options.fetcher, url, {
+        headers: { authorization: `Bearer ${credential.accessToken}`, apikey: target.anonKey, "accept-profile": "swarm_read" },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }, perReadTimeoutMs(options));
+    }
+  } catch (error) {
+    mapReadFailure(error, options.deadlineMs !== undefined);
+  }
+  if (result === null) throw plainTransportError();
+  const { response, body } = result;
+  /* These leave the flags in charge: an edge from before `signal_id` answers 400, and a refused or
+   * missing read is refused again, with the reply's own sentence, when the reply is sent. Anything
+   * else (a rate limit, a timeout) is an error: guessing would send a thread reply privately. */
+  if ([400, 401, 403, 404].includes(response.status)) return null;
+  if (!response.ok) throwSignalHttp(response, body);
+  const rows = credential.kind === "agent"
+    ? (body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).signals : undefined)
+    : body;
+  if (!Array.isArray(rows)) throw plainMalformedError("signal read returned malformed JSON");
+  const row = rows.find((value) =>
+    value !== null && typeof value === "object" && (value as Record<string, unknown>).id === id
+  ) as Record<string, unknown> | undefined;
+  if (row === undefined) return null;
+  const text = (value: unknown): string | null => typeof value === "string" ? value : null;
+  return {
+    id,
+    to: text(row.to),
+    to_agent: text(row.to_agent),
+    in_reply_to: text(row.in_reply_to),
+    thread_root_id: text(row.thread_root_id),
+    recipients: Array.isArray(row.recipients) ? row.recipients : null,
+    audience: text(row.audience),
+    from: text(row.from),
+    from_kind: text(row.from_kind),
+  };
+}
+
+/** The directory as the shared mention resolver reads it (src/protocol/mention-address.ts). */
+export function mentionRosterFromDirectory(directory: SignalDirectory): MentionRosterEntry[] {
+  return [
+    ...directory.members.map((member) => ({ kind: "user" as const, id: member.user_id, name: member.display_name })),
+    ...directory.agents.map((agent) => ({ kind: "agent" as const, id: agent.principal_id, name: agent.name })),
+  ];
 }
 
 export function resolveSignalRecipient(

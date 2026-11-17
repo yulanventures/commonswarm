@@ -68,6 +68,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   let serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
   let workspaceName = "Test workspace";
   let ambiguousRecipient = false, malformedRead = false, renewalReason: string | null = null;
+  let refusedMention: string | null = null;
   let incoming = [signal(incomingBody, "ask")];
   const edge = createServer((req, res) => {
     let raw = "";
@@ -153,6 +154,10 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
           ...(sendError.message === undefined ? {} : { message: sendError.message }) });
         if (serverConflict) { serverConflict = false; return send(409, { error: "command_id_conflict", message: "Request ID conflicts with another command." }); }
         if (sendRefusal) return send(403, { error: "signal_refused", message: "Signal refused." });
+        // A mention of someone no longer live: the edge's bare 403.
+        if (refusedMention !== null && (body.command.mentions ?? []).some((m: { id: string }) => m.id === refusedMention)) {
+          return send(403, { error: "forbidden" });
+        }
         const previous = committed.get(body.command_id);
         const response = { status: "accepted", ok: true, event_ids: [], events: [], signal: {
           ...signal(body.command.body, body.command.signal_kind), from: AGENT, from_kind: "agent",
@@ -238,6 +243,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setIncoming: (rows: ReturnType<typeof signal>[]) => { incoming = rows; },
     setWorkspaceName: (name: string) => { workspaceName = name; },
     setAmbiguousRecipient: (value: boolean) => { ambiguousRecipient = value; },
+    refuseMentionOf: (id: string | null) => { refusedMention = id; },
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
     setFilePrecondition: (value: number | null) => { filePrecondition = value; },
@@ -954,6 +960,56 @@ test("MCP react adds or removes one emoji with request_id as its command id, and
   } finally { await f.close(); }
 });
 
+test("MCP reply goes in the thread of a channel message, privately otherwise, and @Name becomes a mention", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  const ROOT = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    // A message inside a thread everyone in the channel reads: the reply roots on the thread.
+    f.setIncoming([{ ...signal("in the open", "note"), to_agent: null, thread_root_id: ROOT, audience: "workspace" } as unknown as ReturnType<typeof signal>]);
+    await f.call("reply", { signal_id: ID, body: "done @Owner", request_id: "thread001" });
+    assert.deepEqual(f.posts.at(-1)!.command, { kind: "post_signal", signal_kind: "note", body: "done @Owner",
+      to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null, thread_root_id: ROOT,
+      mentions: [{ kind: "user", id: OWNER }] });
+    // private: true answers the author whatever the message is, and leaves the body's tag as text.
+    await f.call("reply", { signal_id: ID, body: "just you @Owner", private: true, request_id: "private01" });
+    assert.deepEqual(f.posts.at(-1)!.command, { kind: "post_signal", signal_kind: "note", body: "just you @Owner",
+      to_user_id: null, to_agent_principal_id: null, in_reply_to: ID, about: null });
+    // An addressed message is answered privately; an explicit mention there is refused before sending.
+    f.setIncoming([signal("for you", "ask")]);
+    const sent = f.posts.length;
+    const refused = await f.call("reply", { signal_id: ID, body: "ok", mentions: ["Owner"], request_id: "private02" });
+    assert.equal(refused.result.isError, true);
+    assert.equal(refused.value.code, "mention_private_reply");
+    assert.equal(f.posts.length, sent);
+    // A public note resolves @Name and mentions; the mention key is absent when nobody is named.
+    await f.call("note", { body: "heads up @owner", mentions: ["Test agent"], request_id: "mention01" });
+    assert.deepEqual(f.posts.at(-1)!.command.mentions, [{ kind: "user", id: OWNER }, { kind: "agent", id: AGENT }]);
+    await f.call("note", { body: "mail me@owner.example", request_id: "mention02" });
+    assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "mentions"), false);
+    const addressed = await f.call("note", { body: "hi", to: "Owner", mentions: ["Owner"], request_id: "mention03" });
+    assert.equal(addressed.value.code, "mention_addressed");
+    for (const [index, audience] of [{ to: "Owner" }, {}].entries()) {
+      const choice = await f.call("ask", { body: "pick", ...audience, choices: ["a", "b"], mentions: ["Owner"], request_id: `mention05${index}` });
+      assert.equal(choice.value.code, "mention_choice", "a choice ask, addressed or open, refuses mentions");
+      assert.equal(choice.value.message, MCP_ERROR_SENTENCES.mention_choice!.message);
+    }
+    f.setAmbiguousRecipient(true);
+    // The implicit author mention refused (the author left): sent again without it, and said so.
+    f.setIncoming([{ ...signal("in the open", "note"), to_agent: null, thread_root_id: ROOT, audience: "workspace" } as unknown as ReturnType<typeof signal>]);
+    f.refuseMentionOf(OWNER);
+    const fallback = f.posts.length;
+    const unnotified = await f.call("reply", { signal_id: ID, body: "done", request_id: "authorgone1" });
+    assert.deepEqual(f.posts.slice(fallback).map((post) => [post.command_id, post.command.mentions ?? null]),
+      [["authorgone1", [{ kind: "user", id: OWNER }]], ["authorgone1_noauth", null]]);
+    assert.notEqual(unnotified.result.isError, true);
+    assert.match(unnotified.value.author_not_notified, /could not be mentioned/);
+    f.refuseMentionOf(null);
+    const ambiguous = await f.call("note", { body: "@Owner look", request_id: "mention04" });
+    assert.equal(ambiguous.value.code, "mention_ambiguous");
+    assert.equal(ambiguous.value.message, MCP_ERROR_SENTENCES.mention_ambiguous!.message);
+  } finally { await f.close(); }
+});
+
 test("re-raise refusals name the ask's state and what can still be done", () => {
   for (const [code, next] of [["ask_expired", "send a new ask if it still matters"], ["ask_answered", "call check to read the replies"],
     ["reraise_too_soon", "wait until 24 hours after the last re-raise, then use a new request_id"], ["reraise_unsupported", "send a new ask if it still matters"]] as const) {
@@ -1167,7 +1223,7 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
       [{ body: "hello", request_id: "valid004", to: "x".repeat(81) }, "to"],
     ] as const) await assert.rejects(f.client.callTool({ name: "note", arguments: args }), (error: any) => error.code === -32602 && error.message.includes(bad));
     const channelRule = note.inputSchema.properties!.channel as { pattern: string; maxLength: number; not: { enum: string[] } };
-    assert.deepEqual(channelRule.not.enum, ["all-signals", "general"]);
+    assert.deepEqual(channelRule.not.enum, ["all-signals"], "general posts unfiled");
     assert.match("all-signals", new RegExp(channelRule.pattern));
     for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates ", "all-signals"]) {
       await assert.rejects(f.client.callTool({ name: "note", arguments: { body: "hello", request_id: "valid005", channel } }),
@@ -1176,6 +1232,10 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
     const posted = await f.call("note", { body: "hello", request_id: "valid006", channel: "team-updates" });
     assert.equal(posted.result.isError, undefined);
     assert.equal(f.posts.at(-1)!.command.channel, "team-updates");
+    for (const [tool, extra] of [["note", {}], ["ask", {}], ["working_on", {}]] as const) {
+      await f.call(tool, { body: "hello", request_id: `general_${tool}`, channel: "general", ...extra });
+      assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "channel"), false, `${tool} to general is unfiled`);
+    }
     assert.equal((note.inputSchema.properties!.channel as { maxLength: number }).maxLength, 32);
     assert.match(note.description!, /slugs are lowercase/);
   } finally { await f.close(); }

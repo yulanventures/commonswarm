@@ -10,8 +10,13 @@ import { AgentSetupError, openProfileCredential, privatePath, profileSessionCont
 import { checkAgentMessages, cachedAgentMessage, assertProfileIdentity } from "../cloud/agent-check.js";
 import { bindSessionProof } from "../cloud/session-proof.js";
 import { listSessionContexts, sessionProofOf } from "../cloud/session-context.js";
-import { readAgentRoster, readAgentSignalDirectory, resolveSignalRecipient } from "../cloud/signals.js";
-import { listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
+import { mentionRosterFromDirectory, readAgentRoster, readAgentSignalDirectory, readReplyTarget, resolveSignalRecipient } from "../cloud/signals.js";
+import {
+  addReplyAuthorMention, bodyMayMention, MentionResolutionError, replyAuthorMentionRefused, replyAuthorNotNotified, replyRetryCommandId, resolveMentions,
+  withoutReplyAuthor, type WireMention,
+} from "../protocol/mention-address.js";
+import { decideReplyPlacement, type ReplyPlacement } from "../protocol/reply-placement.js";
+import { GENERAL_CHANNEL_SLUG, listChannelsWithUnreadAsAgent, readChannelMessagesAsAgent } from "../cloud/channels.js";
 import {
   getMemoryAsAgent, MemoryError, memorySaveProblem, memorySubject, searchMemoriesAsAgent, sendMemoryCommand,
   type MemoryKind, type MemorySaveInput,
@@ -406,6 +411,8 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
            * member (to) or to anyone who reads it, in general or channel. */
           const choiceAsk = tool.name === "ask" ? askChoiceArguments(args as Record<string, unknown>) : null;
           if (choiceAsk !== null) {
+            // ask_choice carries no mentions on the command edge; an @Name in its body stays text.
+            if ((args as Record<string, unknown>).mentions !== undefined) throw new MentionResolutionError("mention_choice");
             let toUserId: string | null = null;
             if (args.to !== undefined) {
               const recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));
@@ -417,7 +424,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
               const sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token,
                 command: { kind: "ask_choice", body: args.body!, to_user_id: toUserId, about: args.about ?? null,
                   options: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}),
-                  ...(args.channel === undefined ? {} : { channel: args.channel }) },
+                  ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }) },
                 commandId: args.request_id!, signal: extra.signal });
               output = { ...tool.mapResult(sent), choices: choiceAsk.options, ...(choiceAsk.multi ? { multi: true } : {}) };
             } catch (error) {
@@ -426,11 +433,42 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             }
             break;
           }
+          const raw = args as Record<string, unknown>;
+          const selectors = Array.isArray(raw.mentions) ? (raw.mentions as string[]) : [];
+          /* A reply goes in the thread of a message everyone in its channel can read, and privately
+           * otherwise (src/protocol/reply-placement.ts). A message this agent can't read leaves the
+           * reply private, refused exactly as before. */
+          let placement: ReplyPlacement | null = null;
+          if (tool.name === "reply") {
+            const signalId = args.signal_id!.toLowerCase();
+            const privately = raw.private === true;
+            const target = privately ? null
+              : await readReplyTarget(profileTarget(profile), { kind: "agent", token }, profile.workspace_id, signalId, fetcher);
+            placement = decideReplyPlacement({ target, signalId, private: privately, status: false, thread: false, broadcastToChannel: false,
+              self: { kind: "agent", id: profile.principal_id } });
+          }
+          const publicPost = (tool.name === "ask" || tool.name === "note") && args.to === undefined;
+          if (selectors.length > 0 && (tool.name === "ask" || tool.name === "note") && !publicPost) {
+            throw new MentionResolutionError("mention_addressed");
+          }
+          if (selectors.length > 0 && placement?.placement === "private") throw new MentionResolutionError("mention_private_reply");
+          let mentions: WireMention[] = [];
+          if ((publicPost || placement?.placement === "thread") && (selectors.length > 0 || bodyMayMention(args.body!))) {
+            mentions = resolveMentions({ body: args.body!, selectors,
+              roster: mentionRosterFromDirectory(await directory({ fetcher, token })) });
+          }
+          // A thread reply notifies the author it answers, as the private reply it replaces did.
+          const replyAuthor = placement?.placement === "thread" ? placement.author : null;
+          const withAuthor = addReplyAuthorMention(mentions, replyAuthor);
+          mentions = withAuthor.mentions;
           let parentSignalId: string | undefined;
           let parentContextSentence: string | undefined;
           if (tool.name === "ask") {
             parentSignalId = args.parent_signal_id?.toLowerCase();
-            if (parentSignalId === undefined) {
+            /* An ask chain is private, so a mentioned ask has no parent: an explicit one is refused,
+             * and the one this session would have filled in is left off. */
+            if (parentSignalId !== undefined && mentions.length > 0) throw new MentionResolutionError("mention_ask_chain");
+            if (parentSignalId === undefined && mentions.length === 0) {
               parentSignalId = await defaultAskParent(stateProfilePath, options.hostSessionId);
               if (parentSignalId === undefined) parentContextSentence = ASK_PARENT_CONTEXT_SENTENCE;
             }
@@ -439,21 +477,39 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           if ((tool.name === "ask" || tool.name === "note") && args.to !== undefined) {
             recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));
           }
-          const command: PostSignalCommand = { kind: "post_signal", signal_kind: tool.name === "working_on" ? "working-on" : tool.name === "reply" ? "note" : tool.name,
+          let command: PostSignalCommand = { kind: "post_signal", signal_kind: tool.name === "working_on" ? "working-on" : tool.name === "reply" ? "note" : tool.name,
             body: args.body!, to_user_id: recipient?.kind === "user" ? recipient.id : null,
             to_agent_principal_id: recipient?.kind === "agent" ? recipient.id : null,
-            in_reply_to: tool.name === "reply" ? args.signal_id!.toLowerCase() : null,
+            in_reply_to: placement?.placement === "private" ? placement.inReplyTo : null,
+            ...(placement?.placement === "thread" ? { thread_root_id: placement.threadRootId } : {}),
+            ...(mentions.length === 0 ? {} : { mentions }),
             ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
             about: args.about ?? null,
-            ...(args.channel === undefined ? {} : { channel: args.channel }),
+            // "general" is unfiled: no channel key at all.
+            ...(args.channel === undefined || args.channel === GENERAL_CHANNEL_SLUG ? {} : { channel: args.channel }),
             ...(args.until === undefined ? {} : { until_ms: signalDuration(args.until) }),
           };
           const client = new ThinCommandClient(profileTarget(profile), fetcher);
           let sent;
+          let authorNotNotified: string | null = null;
           try {
-            sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
-              commandId: args.request_id!, signal: extra.signal });
-            output = { ...tool.mapResult(sent), ...(parentContextSentence === undefined ? {} : { parent_context: parentContextSentence }) };
+            try {
+              sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
+                commandId: args.request_id!, signal: extra.signal });
+            } catch (error) {
+              /* Refused because of the implicit author mention: send once more without it, under a
+               * derived id, so a retried request takes the same two ids. */
+              if (!withAuthor.authorAdded || replyAuthor === null || !(error instanceof CommandHttpError) ||
+                  !replyAuthorMentionRefused(error.status, error.code)) throw error;
+              authorNotNotified = replyAuthorNotNotified(error.code);
+              const remaining = withoutReplyAuthor(mentions, replyAuthor);
+              const { mentions: _dropped, ...rest } = command;
+              command = { ...rest, ...(remaining.length === 0 ? {} : { mentions: remaining }) };
+              sent = await client.sendSignal({ workspaceId: profile.workspace_id, credential: token, command,
+                commandId: replyRetryCommandId(args.request_id!), signal: extra.signal });
+            }
+            output = { ...tool.mapResult(sent), ...(parentContextSentence === undefined ? {} : { parent_context: parentContextSentence }),
+              ...(authorNotNotified === null ? {} : { author_not_notified: authorNotNotified }) };
             unknownOnce.delete(`${tool.name}:${args.request_id}`);
           } catch (error) {
             if (error instanceof CommandHttpError && error.status >= 400 && error.status < 500 && error.code) {

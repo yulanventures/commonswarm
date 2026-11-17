@@ -3,9 +3,10 @@ import { WORKSPACE_SKILL_TRUST_WARNING } from "../protocol/workspace-skills.js";
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
 import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
+import { MENTION_MAX_RECIPIENTS } from "../protocol/mention-address.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
 import { CHOICE_DESCRIPTION_MAX, CHOICE_LABEL_MAX, CHOICE_MAX, CHOICE_MIN, choiceOptions, type ChoiceOption, type ChoiceOptionInput } from "../cloud/choices.js";
-import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, GENERAL_CHANNEL_SLUG, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
@@ -32,7 +33,11 @@ export const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST
 const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
 export const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
 const absolutePath = { ...string(4096, 1), description: "Absolute path on this host." };
-const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
+/** Names or ids of people and agents a public message mentions. @Name in the body counts too. */
+const mentions = { type: "array" as const, items: string(SIGNAL_RECIPIENT_MAX, 1), minItems: 1, maxItems: MENTION_MAX_RECIPIENTS };
+// "general" posts unfiled, as channel_ls and channel_read name it; the other reserved names are refused.
+const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source),
+  not: { enum: RESERVED_CHANNEL_SLUGS.filter((slug) => slug !== GENERAL_CHANNEL_SLUG) } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
 /** An ask's choice options: an object form beside the v1 bare labels (choices). */
 const choiceOptionsSchema = {
   type: "array" as const, minItems: CHOICE_MIN, maxItems: CHOICE_MAX,
@@ -49,9 +54,9 @@ export const schema = (properties: Record<string, object>, required: string[] = 
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several. With to (a member) only that person answers; without it, anyone who reads the ask may. Choices take no until or parent_signal_id. The reply reads \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX }, options: choiceOptionsSchema, multi: { type: "boolean" as const } }, ["body", "request_id"]), mapResult: mapSignal },
-  { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
-  { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Without to, @Name in the body and mentions (names or ids) wake the people and agents named. To let a person answer with a click, give options (2 to 6 {label, description?, recommended?}; at most one recommended, shown first) or choices (2 to 6 labels), and multi: true to allow several. With to (a member) only that person answers; without it, anyone who reads the ask may. Choices take no until, parent_signal_id or mentions. The reply reads \"Selected: <labels>\" and/or \"Other: <text>\". Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), mentions, parent_signal_id: uuid, choices: { type: "array" as const, items: string(CHOICE_LABEL_MAX, 1), minItems: CHOICE_MIN, maxItems: CHOICE_MAX }, options: choiceOptionsSchema, multi: { type: "boolean" as const } }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "note", description: "Share a note. Channel slugs are lowercase. Without to, @Name in the body and mentions (names or ids) wake the people and agents named. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1), mentions }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "reply", description: "Reply to a signal: in its thread when everyone in the channel can read it, notifying its author, otherwise privately to its author. Set private to true to answer the author privately. A thread reply takes mentions, and @Name in the body. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, mentions, private: { type: "boolean" as const }, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "reraise", description: "Re-raise an open ask you sent: one reminder note to the same people, in reply to the ask. At most once every 24 hours per ask. Retry with the same request_id if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, request_id: requestId }, ["signal_id", "request_id"]), mapResult: mapReraise },
   { name: "react", description: "React to a message with one emoji, or a shortcode such as :+1:. Set remove to true to take your reaction off. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, emoji: string(SIGNAL_REACTION_MAX_BYTES, 1), remove: { type: "boolean" as const }, request_id: requestId }, ["signal_id", "emoji", "request_id"]), mapResult: mapReaction },
   { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },

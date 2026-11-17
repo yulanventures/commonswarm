@@ -1,5 +1,13 @@
 #!/usr/bin/env node
 import {bindSessionProof} from './cloud/session-proof.js';
+import {
+  addReplyAuthorMention, bodyMayMention, replyAuthorMentionRefused, replyAuthorNotNotified, resolveMentions, withoutReplyAuthor,
+  type WireMention,
+} from "./protocol/mention-address.js";
+import {
+  decideReplyPlacement, replyFlagProblem, replyNeedsTarget, ReplyPlacementError, replyTargetAuthor, replyTargetIsPublic,
+  REPLY_BROADCAST_NEEDS_THREAD, type ReplyAuthor, type ReplyPlacement,
+} from "./protocol/reply-placement.js";
 import {agentWorkspaces} from './cloud/agent-workspaces.js';
 
 import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
@@ -109,6 +117,8 @@ import {
   channelSelectorProblem,
   CHANNEL_PURPOSE_MAX,
   channelSlugProblem,
+  GENERAL_CHANNEL_SLUG,
+  isGeneralChannel,
   findChannelBySlug,
   CHANNEL_PAGE_MAX_BYTES,
   listChannelsWithUnreadAsAgent,
@@ -292,6 +302,8 @@ import {
   SINCE_OFFSET_GUIDANCE,
   readAgentRoster,
   readAgentSignalDirectory,
+  readReplyTarget,
+  mentionRosterFromDirectory,
   readSignals,
   renderSignalStatus,
   renderSignals,
@@ -688,7 +700,7 @@ export const KNOWN_FLAGS = new Set([
   "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
-  "message-status", "choice", "expected-revision", "option", "recommended", "multi",
+  "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -725,6 +737,7 @@ export const BOOLEAN_FLAGS = new Set([
   "message-status",
   "remove",
   "multi",
+  "private",
 ]);
 
 const UUID_RE =
@@ -1028,11 +1041,18 @@ deployment's operators — agents are encouraged to report friction they hit.
 
 A channel is where a message is FILED, not who may read it. Everyone in the
 workspace reads every channel, and --channel changes nothing about who sees a
-signal. Archiving a channel keeps its history and its permalinks and refuses new
-messages. cswarm reply --thread answers in the open, in the thread of the signal
-you name, so it takes no recipient; add --broadcast-to-channel to send that reply
-to the thread's channel as well. Plain cswarm reply is unchanged and still
-answers the original author privately.
+signal. --channel general posts unfiled and reads only unfiled messages; the
+name stays reserved for channel create and rename. Archiving a channel keeps its
+history and its permalinks and refuses new messages. cswarm reply answers a message everyone in its channel can read in
+its thread and notifies the author, and answers an addressed message privately
+to its author. --private
+answers the author privately instead; --broadcast-to-channel sends a thread reply
+to the thread's channel as well. --thread is accepted and changes nothing.
+
+@Name in a note, an ask or a thread reply mentions that member or agent and wakes
+the agent; --mention <name|id> does the same. A mention goes only on a message
+everyone in the channel can read, at most 8 per message. A name two people or
+agents share is refused; mention one of them by id.
 
 Signals (intention sharing) accept the same credential selection. Agent mode
 never opens a browser or infers a human's saved workspace. Durations use a whole
@@ -3443,9 +3463,14 @@ function signalKind(value: string): SignalKind {
  * server does not apply. `src/cloud/channels.ts` explains why the rule is a
  * copy and what keeps the two byte-identical.
  */
+/**
+ * --channel for posting and reading. "general" (any case) is unfiled messages: a post omits the
+ * channel, and a read filters strictly to channel_id NULL. Other names follow the slug rule.
+ */
 function channelOption(args: Arguments): string | undefined {
   const value = args.optional("channel");
   if (value === undefined) return undefined;
+  if (isGeneralChannel(value)) return GENERAL_CHANNEL_SLUG;
   const problem = channelSlugProblem(value);
   if (problem !== null) throw new Error(problem);
   return normalizeChannelSlug(value);
@@ -3913,6 +3938,17 @@ async function runPostSignal(
    * while SWARM_INTERACTIVE_REPLIES is off. Checked here, before any network. */
   const choiceAsk = kind === "ask" ? askChoiceFlags(args) : null;
   const choices = choiceAsk?.options ?? null;
+  /* A mention wakes the people and agents a public message names: the body's @Name tags plus each
+   * --mention. An addressed message already reaches its recipients, and the edge refuses both. A
+   * choice ask (ask_choice) carries no mentions on the command edge, so --mention is refused with
+   * choices too; an @Name in a choice ask's body stays plain text. */
+  const mentionSelectors = kind === "working-on" ? [] : args.all("mention");
+  if (mentionSelectors.length > 0 && args.optional("to") !== undefined) {
+    throw new UsageError("--mention goes on a message everyone in the channel can read, so it can't be combined with --to");
+  }
+  if (mentionSelectors.length > 0 && choices !== null) {
+    throw new UsageError("--mention can't be combined with --option or --choice: a choice ask mentions nobody");
+  }
   /* Checked before the target, the credential, or any upload: a name that
    * cannot be a channel name costs nothing to refuse here, and the sentence is
    * the one the server would have sent. */
@@ -3929,11 +3965,6 @@ async function runPostSignal(
     if (explicitParent !== undefined) {
       if (!UUID_RE.test(explicitParent)) throw new Error("--parent requires the full signal UUID of the ask being handled");
       parentSignalId = explicitParent.toLowerCase();
-    } else {
-      parentSignalId = args.expandedProfilePath === undefined
-        ? undefined
-        : await defaultAskParent(args.expandedProfilePath, args.expandedProfileHostSessionId);
-      if (parentSignalId === undefined) process.stderr.write(ASK_PARENT_CLI_SENTENCE);
     }
   }
   const cloud = await target(args);
@@ -3963,6 +3994,33 @@ async function runPostSignal(
   if (choices !== null && recipient !== null && recipient.kind !== "user") {
     throw new Error("--choice asks a person: --to must name a workspace member, not an agent");
   }
+  let mentions: WireMention[] = [];
+  let mentionedNames: string[] = [];
+  if (kind !== "working-on" && toSelector === undefined && choices === null && (mentionSelectors.length > 0 || bodyMayMention(body))) {
+    let directory: SignalDirectory;
+    try {
+      directory = await signalDirectory(cloud, credential.selectedWorkspace, credential);
+    } catch (error) {
+      if (kind === "ask") throw new Error(askCreateFailureMessage(credential.selectedWorkspace, error));
+      throw error;
+    }
+    const roster = mentionRosterFromDirectory(directory);
+    mentions = resolveMentions({ body, selectors: mentionSelectors, roster });
+    mentionedNames = mentions.map((mention) =>
+      sanitizeDisplayLabel(roster.find((row) => row.kind === mention.kind && row.id === mention.id)?.name ?? mention.id, mention.id)
+    );
+  }
+  /* An ask chain (--parent) is a private exchange between agents, so a mentioned ask has none: an
+   * explicit --parent is refused, and the parent this session would have filled in is left off. */
+  if (parentSignalId !== undefined && mentions.length > 0) {
+    throw new UsageError("--parent continues a private ask chain, so the ask can't mention anyone; remove --parent or the mention");
+  }
+  if (kind === "ask" && choices === null && parentSignalId === undefined && mentions.length === 0) {
+    parentSignalId = args.expandedProfilePath === undefined
+      ? undefined
+      : await defaultAskParent(args.expandedProfilePath, args.expandedProfileHostSessionId);
+    if (parentSignalId === undefined) process.stderr.write(ASK_PARENT_CLI_SENTENCE);
+  }
   /* Broadcast asks cannot receive authorized replies; waiting would never succeed. A choice ask
    * is the exception: whoever answers it, the answer is a reply to the asker. */
   if (waitSeconds !== undefined && recipient === null && choices === null) {
@@ -3984,7 +4042,7 @@ async function runPostSignal(
     about: args.optional("about") === undefined ? null : signalText(args.required("about"), "about"),
     options: choices,
     ...(choiceAsk?.multi === true ? { multi: true } : {}),
-    ...(channel === undefined ? {} : { channel }),
+    ...(channel === undefined || channel === GENERAL_CHANNEL_SLUG ? {} : { channel }),
   } : {
     kind: "post_signal",
     signal_kind: kind,
@@ -3998,7 +4056,9 @@ async function runPostSignal(
     ...(untilMs === undefined
       ? {}
       : { until_ms: untilMs }),
-    ...(channel === undefined ? {} : { channel }),
+    // "general" is unfiled: no channel key at all.
+    ...(channel === undefined || channel === GENERAL_CHANNEL_SLUG ? {} : { channel }),
+    ...(mentions.length === 0 ? {} : { mentions }),
   };
   let result: PostSignalResult;
   try {
@@ -4088,6 +4148,7 @@ async function runPostSignal(
         "Signal shared. It is immutable, tenancy-scoped, and will quietly expire at its horizon.",
       signal,
       ...(choices === null ? {} : { choices, ...(choiceAsk?.multi === true ? { multi: true } : {}) }),
+      ...(mentions.length === 0 ? {} : { mentions }),
       ...(formatAdvisory !== null ? { [FORMAT_ADVISORY_FIELD]: formatAdvisory } : {}),
       retried: result.retried,
       attempts: result.attempts,
@@ -4143,7 +4204,9 @@ async function runPostSignal(
     );
   }
   process.stdout.write(
-    `Signal shared. It is immutable and ${audience}.\n${renderSignals([signal], {
+    `Signal shared. It is immutable and ${audience}.${
+      mentionedNames.length === 0 ? "" : ` Mentioned: ${mentionedNames.join(", ")}.`
+    }\n${renderSignals([signal], {
       inbox: false,
       includeStale: true,
       authors,
@@ -4163,7 +4226,7 @@ export const POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS = [
   ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, ...BODY_FLAGS,
   "about", "channel", "until", "json", ...SESSION_CONTEXT_FLAGS,
 ] as const;
-export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "attach"] as const;
+export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "mention", "attach"] as const;
 export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "parent", "wait", "choice", "option", "recommended", "multi"] as const;
 
 export function postSignalAllowedFlags(kind: SignalKind = "note"): readonly string[] {
@@ -4232,10 +4295,12 @@ export function threadReplyMessage(
 
 async function runReply(args: Arguments): Promise<void> {
   const allowedFlags = replyAllowedFlags();
-  const inThread = args.has("thread");
+  const threadFlag = args.has("thread");
   const broadcastToChannel = args.has("broadcast-to-channel");
+  const privately = args.has("private");
   const requestedStatus = args.optional("status");
-  if (inThread && requestedStatus !== undefined) {
+  const mentionSelectors = args.all("mention");
+  if (threadFlag && requestedStatus !== undefined) {
     throw new ReplyStatusUsageError(
       "reply_status_thread: --status applies only to a private reply; remove --thread or --status",
     );
@@ -4243,16 +4308,14 @@ async function runReply(args: Arguments): Promise<void> {
   if (requestedStatus !== undefined && !isReplyStatus(requestedStatus)) {
     throw new UsageError(`--status must be ${REPLY_STATUSES.join("|")}`);
   }
-  const replyStatus: ReplyStatus | undefined = inThread
-    ? undefined
-    : requestedStatus ?? "answered";
-  if (broadcastToChannel && !inThread) {
-    /* The edge refuses this pairing too, with its own generated sentence. It is
-     * refused here as well because nothing has been sent yet and the reader can
-     * fix it in place. */
-    throw new UsageError(
-      "--broadcast-to-channel sends a thread reply to its channel as well, so it needs --thread",
-    );
+  const flagProblem = replyFlagProblem({ private: privately, thread: threadFlag, broadcastToChannel });
+  if (flagProblem !== null) throw new UsageError(flagProblem);
+  const needsTarget = replyNeedsTarget({ private: privately, status: requestedStatus !== undefined });
+  /* The edge refuses these pairings too, with its own sentences. They are refused here as well
+   * because nothing has been sent yet and the reader can fix them in place. */
+  if (!needsTarget && broadcastToChannel) throw new UsageError(REPLY_BROADCAST_NEEDS_THREAD);
+  if (!needsTarget && mentionSelectors.length > 0) {
+    throw new UsageError("--mention goes on a thread reply, so it can't be combined with --private or --status");
   }
   const signalId = args.positionals[1];
   if (signalId === undefined || !UUID_RE.test(signalId)) {
@@ -4264,6 +4327,58 @@ async function runReply(args: Arguments): Promise<void> {
   const credential = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true,
   });
+  /* WHERE THE REPLY GOES (src/protocol/reply-placement.ts). A message everyone in its channel can
+   * read is answered in its thread, rooted on the thread's first message; an addressed message or
+   * a private reply is answered privately to its author; --private or --status always answers
+   * privately. The message is read first. One this caller can't read, or a deployment that can't
+   * look a message up by id, leaves the flags in charge exactly as before, so the refusal is the
+   * same one it always was. */
+  const replyTarget = needsTarget
+    ? await readReplyTarget(cloud, signalCredentialOf(credential), credential.selectedWorkspace, signalId)
+    : null;
+  /* The replier, so a thread reply never mentions its own author. An agent credential that does
+   * not carry its principal id learns it from the directory, read only when it can matter. */
+  let directory: SignalDirectory | null = null;
+  const loadDirectory = async (): Promise<SignalDirectory> =>
+    directory ??= await signalDirectory(cloud, credential.selectedWorkspace, credential);
+  let self: ReplyAuthor | null = credential.kind === "agent"
+    ? credential.agent?.principalId ? { kind: "agent", id: credential.agent.principalId } : null
+    : { kind: "user", id: credential.human!.userId };
+  if (self === null && replyTarget !== null && replyTargetIsPublic(replyTarget) && replyTargetAuthor(replyTarget)?.kind === "agent") {
+    const identity = (await loadDirectory()).identity?.principal_id;
+    self = identity ? { kind: "agent", id: identity } : null;
+  }
+  let placement: ReplyPlacement;
+  try {
+    placement = decideReplyPlacement({
+      target: replyTarget,
+      signalId,
+      private: privately,
+      status: requestedStatus !== undefined,
+      thread: threadFlag,
+      broadcastToChannel,
+      self,
+    });
+  } catch (error) {
+    if (error instanceof ReplyPlacementError) throw new UsageError(error.message);
+    throw error;
+  }
+  const inThread = placement.placement === "thread";
+  if (!inThread && mentionSelectors.length > 0) {
+    throw new Error("That message is addressed, so the reply goes privately to its author and can't mention anyone; remove --mention");
+  }
+  let mentions: WireMention[] = [];
+  if (inThread && (mentionSelectors.length > 0 || bodyMayMention(body))) {
+    const roster = mentionRosterFromDirectory(await loadDirectory());
+    mentions = resolveMentions({ body, selectors: mentionSelectors, roster });
+  }
+  /* A thread reply notifies the author it answers, as the private reply it replaces did. */
+  const replyAuthor = placement.placement === "thread" ? placement.author : null;
+  const withAuthor = addReplyAuthorMention(mentions, replyAuthor);
+  mentions = withAuthor.mentions;
+  const replyStatus: ReplyStatus | undefined = inThread
+    ? undefined
+    : requestedStatus as ReplyStatus | undefined ?? "answered";
   const untilMs = signalDuration(args.optional("until"));
   const attachments = await uploadSignalAttachments(
     cloud,
@@ -4272,50 +4387,57 @@ async function runReply(args: Arguments): Promise<void> {
   );
   /* Two different replies, one verb.
    *
-   * Without --thread this is unchanged: `in_reply_to` means "answer the author
-   * privately", the server re-addresses the row from the signal being answered,
-   * and the client sends null targets.
+   * A private reply: `in_reply_to` means "answer the author privately", the server re-addresses
+   * the row from the signal being answered, and the client sends null targets.
    *
-   * With --thread it is a message in the open, rooted on the signal named. The
-   * two keys are mutually exclusive on the wire — the edge refuses a body that
-   * carries both, because the audience would be ambiguous at the exact point
-   * addressing is decided — so `in_reply_to` goes to null here. A thread reply
-   * also carries no recipient, which the null targets already satisfy. */
-  const command: PostSignalCommand = {
+   * A thread reply: a message in the open, rooted on the thread. The two keys are mutually
+   * exclusive on the wire, because the audience would be ambiguous at the exact point addressing
+   * is decided, so `in_reply_to` goes to null here. A thread reply carries no recipient, which
+   * the null targets already satisfy, and may carry mentions. */
+  let command: PostSignalCommand = {
     kind: "post_signal",
     signal_kind: "note",
     body,
     to_user_id: null,
     to_agent_principal_id: null,
-    in_reply_to: inThread ? null : signalId.toLowerCase(),
+    in_reply_to: placement.placement === "private" ? placement.inReplyTo : null,
     ...(replyStatus === undefined ? {} : { reply_status: replyStatus }),
     about: null,
     ...(attachments.length === 0 ? {} : { attachments }),
     ...(untilMs === undefined ? {} : { until_ms: untilMs }),
-    ...(inThread ? { thread_root_id: signalId.toLowerCase() } : {}),
-    ...(broadcastToChannel ? { broadcast_to_channel: true } : {}),
+    ...(placement.placement === "thread" ? { thread_root_id: placement.threadRootId } : {}),
+    ...(inThread && broadcastToChannel ? { broadcast_to_channel: true } : {}),
+    ...(mentions.length === 0 ? {} : { mentions }),
   };
   let result;
+  let authorNotNotified: string | null = null;
   try {
-    result = await postSignalCommand(cloud, credential, command);
+    try {
+      result = await postSignalCommand(cloud, credential, command);
+    } catch (error) {
+      /* Refused because of the implicit author mention: send the reply without it. An explicit
+       * mention stays, so a refusal it causes is the reply's refusal. */
+      if (!withAuthor.authorAdded || replyAuthor === null || !(error instanceof CommandHttpError) ||
+          !replyAuthorMentionRefused(error.status, error.code)) throw error;
+      authorNotNotified = replyAuthorNotNotified(error.code);
+      mentions = withoutReplyAuthor(mentions, replyAuthor);
+      const { mentions: _dropped, ...rest } = command;
+      command = { ...rest, ...(mentions.length === 0 ? {} : { mentions }) };
+      result = await postSignalCommand(cloud, credential, command);
+    }
   } catch (error) {
-    /* A 403 on the REPLY verb specifically means the referenced signal is not one this
-     * caller may answer — the audience is derived server-side and a reply is accepted only
-     * when the referenced signal was addressed TO the caller (command/index.ts reply target
-     * resolution). The most common way to hit it is replying to your OWN ask: you addressed
-     * that ask to someone else, so you are not its addressee. Classify on the typed HTTP
-     * status, never the message (D-053); the bare "HTTP 403 forbidden" gave the reader
-     * nowhere to go (Fastio feedback 2026-08-19). */
-    /* The 403 hint below is about `in_reply_to` addressing: a private reply is
-     * accepted only from the addressee of the signal it answers. A thread reply
-     * is not addressed to anyone, so that explanation would name a cause that
-     * does not apply to it. */
+    /* A 403 on a PRIVATE reply means the referenced signal is not one this caller may answer:
+     * the audience is derived server-side and a reply is accepted only when the referenced
+     * signal was addressed TO the caller. Classify on the typed HTTP status, never the message
+     * (D-053). A thread reply is not addressed to anyone, so that explanation would name a cause
+     * that does not apply to it. */
     const hint = inThread ? null : replyRefusalHint(error);
     if (hint !== null) throw new Error(hint);
     throw error;
   }
   const signal = result.response.signal!;
   const formatAdvisory = messageFormatAdvisory(signal.body);
+  const advisory = placement.placement === "private" ? placement.advisory : null;
   const replyMessage = threadReplyMessage(signal, {
     inThread,
     broadcastToChannel,
@@ -4326,7 +4448,11 @@ async function runReply(args: Arguments): Promise<void> {
       message: inThread
         ? replyMessage
         : "Reply shared. It is immutable, tenancy-scoped, and will quietly expire at its horizon.",
+      placement: placement.placement,
+      ...(advisory === null ? {} : { advisory }),
+      ...(authorNotNotified === null ? {} : { author_not_notified: authorNotNotified }),
       signal,
+      ...(mentions.length === 0 ? {} : { mentions }),
       ...(formatAdvisory !== null ? { [FORMAT_ADVISORY_FIELD]: formatAdvisory } : {}),
       retried: result.retried,
       attempts: result.attempts,
@@ -4341,7 +4467,7 @@ async function runReply(args: Arguments): Promise<void> {
     ),
   );
   process.stdout.write(
-    `${replyMessage}\n${
+    `${replyMessage}${advisory === null ? "" : ` ${advisory}`}${authorNotNotified === null ? "" : ` ${authorNotNotified}`}\n${
       renderSignals([signal], {
         inbox: false,
         includeStale: true,
@@ -4358,6 +4484,8 @@ export const REPLY_ACCEPTED_FLAGS = [
     ...BODY_FLAGS,
     "attach",
     "broadcast-to-channel",
+    "mention",
+    "private",
     "status",
     "thread",
     "until",
@@ -5132,7 +5260,8 @@ async function runSignalRead(
    * on the id. Resolving locally is also what lets an unknown name be answered
    * with the names that DO exist, generated from the rows just read. */
   let channelId: string | undefined;
-  if (channelSlug !== undefined && selected.kind === "human") {
+  const unfiledOnly = channelSlug === GENERAL_CHANNEL_SLUG;
+  if (channelSlug !== undefined && selected.kind === "human" && !unfiledOnly) {
     const rows = await listChannelsAsHuman(
       cloud,
       selected.human!.accessToken,
@@ -5149,6 +5278,7 @@ async function runSignalRead(
       ? {}
       : { channel: channelSlug }),
     ...(channelId === undefined ? {} : { channelId }),
+    ...(unfiledOnly && selected.kind === "human" ? { unfiledOnly: true } : {}),
     ...(args.optional("about") === undefined
       ? {}
       : { about: signalText(args.required("about"), "about") }),
@@ -11004,9 +11134,9 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   roster: commandEntry({ tool: "roster", mcp: true, handler: traced("runRoster", runRoster), description: "Every agent in this workspace: status, owner, current work, and open asks to people.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 16, visible: true, help: ["cswarm roster [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
-  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "wait"], cliOnlyFlags: ["attach", "choice", "option", "recommended", "multi"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--parent <signal-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`, `cswarm ask ${signalBody} [--to <member>] [--channel <name>] --option "<label>[::description]" --option "<label>[::description]" [--option ...] [--recommended <n|id>] [--multi] [--about <ref>] [--wait <seconds>] [--json]  # 2..6 options (--choice <label> also works); a person answers with a click or Other text`], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "status", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--status <${REPLY_STATUSES.join("|")}>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "wait"], cliOnlyFlags: ["attach", "choice", "option", "recommended", "multi", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent> | --mention <member|agent> ...] [--parent <signal-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`, `cswarm ask ${signalBody} [--to <member>] [--channel <name>] --option "<label>[::description]" --option "<label>[::description]" [--option ...] [--recommended <n|id>] [--multi] [--about <ref>] [--wait <seconds>] [--json]  # 2..6 options (--choice <label> also works); a person answers with a click or Other text`], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "private", "status", "until"], cliOnlyFlags: ["attach", "mention"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--private] [--status <${REPLY_STATUSES.join("|")}>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--mention <member|agent> ...] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
