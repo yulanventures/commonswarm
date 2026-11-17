@@ -773,7 +773,26 @@ async function main(): Promise<void> {
             await settle(page);
             missing = await outside();
           }
-          if (missing.length) throw new Error(`not in frame after settling: ${missing.join(" | ")}`);
+          if (missing.length) {
+            // Say where each missing part and its scroller ended up, so a failure tells clipping from a near miss.
+            const where = await page.evaluate((list: string[]) => list.map(selector => {
+              const el = document.querySelector(selector);
+              if (!el) return `${selector}: absent`;
+              const r = el.getBoundingClientRect();
+              let box = "";
+              for (let node = el.parentElement; node; node = node.parentElement) {
+                const style = getComputedStyle(node);
+                if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+                  const s = node.getBoundingClientRect();
+                  box = ` scroller=${node.tagName.toLowerCase()}.${[...node.classList].join(".")} top=${s.top.toFixed(1)} bottom=${s.bottom.toFixed(1)}`
+                    + ` scrollTop=${node.scrollTop} scrollHeight=${node.scrollHeight} clientHeight=${node.clientHeight}`;
+                  break;
+                }
+              }
+              return `${selector}: top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} innerHeight=${window.innerHeight}${box}`;
+            }), missing) as string[];
+            throw new Error(`not in frame after settling: ${missing.join(" | ")} [${where.join(" ; ")}]`);
+          }
         }
         return settled;
       };
