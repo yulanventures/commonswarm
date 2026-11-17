@@ -262,11 +262,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     AGENT_HOST_STATUS_LABELS,
     DESKTOP_SIGN_IN_NOTE,
     INVITE_CONNECT_FOOTNOTE,
-    MENU_LABELS_NOTE,
     TURN_ONLY_NOTE,
+    hostSayName,
     inviteAssistantHosts,
     inviteConnectFootnote,
-    joinSentence,
+    joinPrompt,
     privacyNote,
     type AgentHost,
     type AgentHostStep,
@@ -379,7 +379,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         ...(connects ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
         ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE.joiner] : []),
         ...host.notes,
-        MENU_LABELS_NOTE,
       ];
     };
 
@@ -424,8 +423,9 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
         title.replaceChildren("Connect ", name);
       }
       if (caption) {
-        /* The canvas caption: muted sentence, the agent's identity in strong text. */
-        const line = addAgentOwnershipLine(workspaceName, "", connectHost.name);
+        /* The canvas caption: muted sentence, the agent's identity in strong text. The agent
+           names itself when it joins, so the caption does not call it by its app's name. */
+        const line = addAgentOwnershipLine(workspaceName, "", "agent");
         const marker = " see it as ";
         const at = line.lastIndexOf(marker);
         if (at < 0) {
@@ -450,7 +450,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           status.hidden = true;
         }
       }
-      const prompt = connectHost.steps.find((step) => step.say)?.say ?? joinSentence(connectHost.name);
+      const prompt = joinPrompt({ workspace: workspaceName, app: hostSayName(connectHost) });
       let promptElement: HTMLElement | null = null;
       let promptReveal: HTMLDetailsElement | null = null;
       if (steps) {
@@ -531,6 +531,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
           return item;
         };
         for (const step of connectHost.steps) steps.append(renderStep(step));
+        /* The catalog's steps end at setup; the sentence to paste is said once, last. */
+        if (connectHost.status !== "waiting") steps.append(renderStep({ text: "In a chat, paste this:", say: prompt }));
       }
       if (notes) {
         const lines = connectNotes(connectHost);

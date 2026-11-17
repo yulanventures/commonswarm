@@ -35,19 +35,17 @@ const SECRET_BODY = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1Ll2Mm3Nn4O";
 const SECRET = `swm_join_${SECRET_BODY}`;
 const EXPIRES = "2026-09-23T12:00:00.000Z";
 
+/* The element has no form of its own: the Add an agent panel names the agent and asks for the
+   prompt, so today's controls are the result's and the blocked state's Try again. */
 const TODAY_ACTIONS = [
   "retry",
-  "create-another",
-  "mint",
   "copy",
   "download-connection",
   "done",
 ];
 const TODAY_HEADINGS = [
-  "Name your agent.",
   "Checking your session…",
   "Not available",
-  "Creating your agent prompt.",
   "Your agent prompt is ready.",
 ];
 
@@ -206,7 +204,7 @@ function headings(html: string): string[] {
 }
 
 function copyMethod(source: string): string {
-  const start = source.indexOf("    async #copy()");
+  const start = source.indexOf("    async #copy(");
   const end = source.indexOf("\n  }\n", start);
   assert.ok(start !== -1 && end !== -1);
   return source.slice(start, end);
@@ -304,9 +302,9 @@ test("the invite flag is on only for the string 1", () => {
 test("flag off matches today's Add an agent controls and token handoff", () => {
   const stripped = stripFlagged(CONNECT);
   assert.deepEqual(dataActions(template(CONNECT)), [
-    ...TODAY_ACTIONS.slice(0, 3),
+    TODAY_ACTIONS[0],
     "mint-join",
-    ...TODAY_ACTIONS.slice(3, 5),
+    ...TODAY_ACTIONS.slice(1, 3),
     "revoke-join",
     "done",
   ]);

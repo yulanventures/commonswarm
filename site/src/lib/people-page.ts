@@ -41,7 +41,7 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     invite.addEventListener("click", () => nav.invite?.()); actions.append(invite);
   }
   if (nav.addAgentHref && !model.sample) {
-    const add = make("a", "pd-page-secondary", "Connect new agent"); add.href = nav.addAgentHref;
+    const add = make("a", "pd-page-secondary", "Add an agent"); add.href = nav.addAgentHref;
     add.dataset.peoplePageAddAgent = ""; add.dataset.pdFocus = "page-add-agent";
     if (nav.navigate) add.addEventListener("click", event => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;

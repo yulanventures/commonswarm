@@ -109,9 +109,8 @@ test("ordinary AgentConnect has no lifetime choice and preserves its 30-day boot
       await waitFor("ready form", () => host.dataset.state === "ready");
       const automaticCommands = commandRequests().length;
       if (one('[data-field="ttl"]') || /Key lifetime/.test(host.textContent)) throw new Error("Lifetime choice returned");
-      const name = one('[data-field="name"]'); name.value = "Synthetic assistant";
-      name.dispatchEvent(new Event("input", { bubbles: true }));
-      one('[data-action="mint"]').click();
+      // The Add an agent panel names the agent; the element only mints for that name.
+      host.requestPromptNamed("Synthetic assistant");
       await waitFor("minted result", () => host.dataset.state === "done" && !host.hasAttribute("data-mint-busy"));
       report({ requests, unexpected, automaticCommands,
         policy: one('[data-slot="connection-policy"]').textContent,

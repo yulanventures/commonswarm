@@ -11,7 +11,8 @@ import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../li
 import { canPreviewChatAttachment } from '../../lib/chat-image-preview';
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, homeParty, mapHomePeople, homeAskAnswered, homeViewTitle, resolveHomeRoute, homeAgentFixCards } from '../../lib/home-map';
 import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
-import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
+import { agentLabelInSentence } from '../../lib/home-names';
+import { joinAttemptMatch } from '../../lib/add-agent';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
 import { parentRoute, routeHref } from '../../lib/home-route';
@@ -857,22 +858,17 @@ test('People Allow lands from settled access, continues after consent, and retir
     const flushFrames = () => { for (const frame of frames.splice(0)) frame(); };
     return { context, focus, scroll, calls, replies, title, card, purpose, role, approvalTitle, list, fileTitle, notice,
       flushFrames, finishContent: async () => { assert.ok(contentReplies.length, 'existing content render is pending'); contentReplies.shift()!(); await drain(); },
-      allow: (entry: 'people' | 'picker' = 'people') => {
-        if (entry === 'people') return runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>;
-        runInContext("homeRoute={view:'add-agent',workspaceId:'W'}; app.dataset.channelView='agent-choice'", context);
-        hostListeners.get('agent-host-approve')!();
-        return drain();
-      },
+      allow: () => runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>,
       navigate: (view: string) => runInContext(`navigateHome({view:'${view}',workspaceId:'W'},'push')`, context) as Promise<void>,
       reply: async (value: unknown) => { assert.ok(replies.length, 'real access transport is pending'); replies.shift()!(value); await drain(); },
     };
   };
   for (const row of [
     { entry: 'people', immediate: false, empty: false }, { entry: 'people', immediate: true, empty: false },
-    { entry: 'people', immediate: false, empty: true }, { entry: 'picker', immediate: false, empty: false },
+    { entry: 'people', immediate: false, empty: true },
   ] as const) {
     const f = fixture(row.immediate, row.empty ? [] : undefined);
-    await f.allow(row.entry);
+    await f.allow();
     if (!row.immediate) {
       f.flushFrames();
       assert.deepEqual(f.scroll, [], 'pending access must not scroll the hidden consent card or trust cached access');
@@ -1313,18 +1309,61 @@ test('each navigation focuses the visible H1 for that view', async () => {
 });
 
 
-test('the Add agent poll passes the measured joined time and ignores another owner', async () => {
-  const joined: unknown[] = [], intervals: number[] = [];
-  let tick: ()=>void = ()=>{};
-  const context = createContext({ ...MESSAGE_STATUS_STUBS, document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
-    one:()=>({showJoined:(value:unknown)=>joined.push(JSON.parse(JSON.stringify(value)))}), renderRoster:()=>{},
-    roster:async()=>[{principalId:'foreign',name:'Muse',ownerUserId:'nikki',joinedAt:'2026-10-05T11:31:00Z'},
-      {principalId:'own',name:'Claude',ownerUserId:'tom',joinedAt:'2026-10-05T11:32:00Z'}] });
-  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',requestVersion=1,sampleMode=false,agents=[],hostJoinGeneration=0,hostJoinTimer,hostJoinKnown=new Set(),hostJoinStartedAt=0;const app={dataset:{channelView:'agent-choice'}},householdAccess={status:'ok',workspaceId:'W'};",context);
-  runInContext(await dashboardFunctions(['stopHostJoinWatch','startHostJoinWatch']),context);
-  runInContext('startHostJoinWatch()',context); tick(); await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(intervals,[5000]);
-  assert.deepEqual(joined,[{name:'Claude',principalId:'own',canApprove:true,hosted:false,joinedAt:'2026-10-05T11:32:00Z'}]);
+// The Add an agent panel's joined card allows in one click; Lists & docs opens only to set it up first.
+test('the joined card Allow approves in place and opens Lists & docs only for setup', async () => {
+  const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+  const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let listener = '';
+  const find = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'addEventListener' && ts.isStringLiteral(node.arguments[0])
+      && node.arguments[0].text === 'agent-host-approve' && ts.isExpressionStatement(node.parent)) listener = node.parent.getText(ast);
+    ts.forEachChild(node, find);
+  };
+  find(ast); assert.ok(listener);
+  for (const outcome of ['approved', 'setup', 'refused'] as const) {
+    const listeners = new Map<string, (event: unknown) => void>(), allowed: unknown[][] = [], navigated: unknown[] = [];
+    const context = createContext({ ...MESSAGE_STATUS_STUBS,
+      hostPicker: { addEventListener: (name: string, fn: (event: unknown) => void) => listeners.set(name, fn) },
+      allowAgentFromPeople: async (...args: unknown[]) => { allowed.push(args.slice(0, 2)); if (outcome === 'refused') throw new Error('Not allowed.'); return outcome; },
+      navigateHome: (route: unknown) => { navigated.push(route); }, readableError: (error: Error) => error.message });
+    runInContext("let activeWorkspaceId='W';", context);
+    runInContext(ts.transpileModule(listener, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    const button = { disabled: true }, status = { textContent: '' };
+    listeners.get('agent-host-approve')!({ detail: { principalId: 'A', button, status } });
+    listeners.get('agent-host-approve')!({ detail: { principalId: '', button, status } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(JSON.parse(JSON.stringify(allowed)), [['W', 'A']], `${outcome}: one approval for the agent that joined`);
+    assert.deepEqual(JSON.parse(JSON.stringify(navigated)), outcome === 'setup' ? [{ view: 'lists', workspaceId: 'W' }] : [], `${outcome}: Lists & docs opens only for setup`);
+    if (outcome === 'refused') assert.deepEqual([status.textContent, button.disabled], ['Not allowed.', false]);
+  }
+});
+
+test('the Add agent poll matches this attempt, passes the measured joined time and ignores another owner', async () => {
+  const roster = [{principalId:'foreign',name:'Muse',ownerUserId:'nikki',transport:'hosted_mcp',joinedAt:'2026-10-05T11:31:00Z'},
+    {principalId:'key',name:'Scout',ownerUserId:'tom',transport:'local',joinedAt:'2026-10-05T11:31:30Z'},
+    {principalId:'own',name:'RidgeHQ Lead',ownerUserId:'tom',transport:'hosted_mcp',joinedAt:'2026-10-05T11:32:00Z'}];
+  const watch = async (agentName: string) => {
+    const joined: unknown[] = [], intervals: number[] = [], remembered: unknown[] = [];
+    let tick: ()=>void = ()=>{};
+    const context = createContext({ ...MESSAGE_STATUS_STUBS, document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
+      one:()=>({hostId:'claude',agentName,showJoined:(value:unknown)=>joined.push(JSON.parse(JSON.stringify(value)))}), renderRoster:()=>{},
+      joinAttemptMatch, addAgentStore:()=>null, rememberJoinedHost:(_store:unknown,record:unknown)=>remembered.push(JSON.parse(JSON.stringify(record))),
+      roster:async()=>roster });
+    runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',requestVersion=1,sampleMode=false,agents=[],hostJoinGeneration=0,hostJoinTimer,hostJoinKnown=new Set(),hostJoinStartedAt=0;const app={dataset:{channelView:'agent-choice'}},householdAccess={status:'ok',workspaceId:'W'};",context);
+    runInContext(await dashboardFunctions(['stopHostJoinWatch','startHostJoinWatch']),context);
+    runInContext('startHostJoinWatch()',context); tick(); await new Promise(resolve=>setImmediate(resolve));
+    return { joined, intervals, remembered };
+  };
+  const blank = await watch('');
+  assert.deepEqual(blank.intervals,[5000]);
+  assert.deepEqual(blank.joined,[{name:'RidgeHQ Lead',principalId:'own',canApprove:true,hosted:true,joinedAt:'2026-10-05T11:32:00Z'}],
+    'a blank name takes the new hosted agent of mine, not a key agent or another owner\'s');
+  assert.deepEqual(blank.remembered,[{workspaceId:'W',hostId:'claude',principalId:'own'}]);
+  assert.equal((await watch('ridgehq lead')).joined.length,1,'a typed name matches ignoring case');
+  const other = await watch('Planner');
+  assert.deepEqual([other.joined,other.remembered],[[],[]],'a typed name ignores a different new agent');
 });
 
 
@@ -1422,13 +1461,14 @@ test('past agents owned by the viewer remain answerers beyond the 200-name histo
   }
 });
 
-test('Add agent receives the viewer first name and Home and Done leave that screen', async () => {
-  const seen: Array<{ workspaceName?: string; accountEmail?: string; viewerFirstName?: string }> = [];
+test('Add agent opens the panel with its workspace, roster and connected apps, and Home and Done leave it', async () => {
+  const seen: Array<{ workspaceName?: string; accountEmail?: string }> = [];
   const backs: boolean[] = [];
-  const context = createContext({ ...MESSAGE_STATUS_STUBS, 
-    personFirstName,
+  const context = createContext({ ...MESSAGE_STATUS_STUBS,
     parentRoute,
     seen,
+    addAgentStore: () => null,
+    connectedHosts: (_store: unknown, workspaceId: string, roster: string[]) => roster.includes('lead') ? [`claude@${workspaceId}`] : [],
     window: {
       requestAnimationFrame() {},
       history: { state: { home: true, homePrevious: true }, back() { backs.push(true); } },
@@ -1438,36 +1478,40 @@ test('Add agent receives the viewer first name and Home and Done leave that scre
     let sampleMode = false, activeWorkspaceId = 'W', accountLabel = 'tom@example.test';
     let homeRoute = { view: 'add-agent', workspaceId: 'W' };
     const workspaces = [{ id: 'W', name: 'Home' }];
-    const members = [{ userId: 'tom', name: 'Tom Langridge', role: 'owner' }];
-    const session = { user: { id: 'tom', email: 'tom@example.test', user_metadata: { user_name: 'Tom Langridge' } } };
+    const agents = [{ principalId: 'lead', name: 'RidgeHQ Lead' }];
+    const session = { user: { id: 'tom', email: 'tom@example.test' } };
     const accountName = () => accountLabel;
-    const picker = { reset() {}, setContext(value) { seen.push(value); } };
-    const existingAgentChoiceIsCurrent = undefined;
+    const app = { dataset: { channelView: 'feed' } };
+    const panel = { resets: 0, rosters: [], connected: [], watches: 0 };
+    const showChannelView = (view) => { app.dataset.channelView = view; };
+    const startHostJoinWatch = () => { panel.watches++; };
+    const picker = { watchable: true, reset() { panel.resets++; }, setContext(value) { seen.push(value); },
+      setRoster(names) { panel.rosters.push(names); }, setConnected(ids) { panel.connected.push(ids); } };
+    let existingAgentChoiceIsCurrent = undefined, mounts = 0;
+    const mountAlreadyYours = () => { mounts++; };
     const one = selector => selector === 'agent-host-picker' ? picker : null;
     const navigated = [], stopped = [];
     const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
     const stopHostJoinWatch = () => { stopped.push('stop'); };
-    const showChannelView = () => {};
   `, context);
   runInContext(await dashboardFunctions(['openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
   runInContext('openAgentChoice()', context);
-  assert.equal(seen[0]?.viewerFirstName, 'Tom');
-  assert.equal(seen[0]?.workspaceName, 'Home');
-  assert.equal(seen[0]?.accountEmail, 'tom@example.test');
-  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'agent'),
-    'It joins as yours. People in Home see it as Tom’s agent.');
-  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'Claude'),
-    'It joins as yours. People in Home see it as Tom’s Claude.');
-  runInContext("members.length = 0; accountLabel = 'Tom Langridge'; openAgentChoice();", context);
-  assert.equal(seen[1]?.viewerFirstName, 'Tom', 'an account name supplies the first name when the roster has not arrived');
-  runInContext("accountLabel = 'tom@example.test'; openAgentChoice();", context);
-  assert.equal(seen[2]?.viewerFirstName, '');
-  assert.equal(addAgentOwnershipLine('Home', seen[2]?.viewerFirstName ?? '', 'agent'),
-    'It joins as yours. People in Home see it as your agent.');
-  runInContext("accountLabel = 'your account'; openAgentChoice();", context);
-  assert.equal(seen[3]?.viewerFirstName, '');
-  assert.equal(addAgentOwnershipLine('Home', seen[3]?.viewerFirstName ?? '', 'agent'),
-    'It joins as yours. People in Home see it as your agent.');
+  assert.deepEqual(JSON.parse(JSON.stringify(seen[0])), { workspaceName: 'Home', accountEmail: 'tom@example.test' });
+  assert.deepEqual(JSON.parse(runInContext('JSON.stringify(panel)', context) as string),
+    { resets: 1, rosters: [['RidgeHQ Lead']], connected: [['claude@W']], watches: 0 });
+  assert.equal(runInContext('mounts', context), 1, 'Already yours loads with the panel');
+  // A workspace read that applies the route again keeps the attempt in progress.
+  runInContext('existingAgentChoiceIsCurrent = () => true; openAgentChoice();', context);
+  assert.deepEqual([runInContext('panel.resets', context), runInContext('mounts', context), runInContext('panel.rosters.length', context),
+    runInContext('panel.watches', context)], [1, 1, 2, 0],
+    'a late re-apply refreshes the roster but keeps the name, the app, Already yours and the running watch');
+  // Back from the invite view: the same attempt, and the watch the panel stopped when it left the screen starts again.
+  runInContext("app.dataset.channelView = 'invite'; openAgentChoice();", context);
+  assert.deepEqual([runInContext('panel.resets', context), runInContext('panel.watches', context), runInContext('app.dataset.channelView', context)],
+    [1, 1, 'agent-choice']);
+  runInContext("picker.watchable = false; app.dataset.channelView = 'connect'; openAgentChoice();", context);
+  assert.equal(runInContext('panel.watches', context), 1, 'a key route has nothing to watch for');
+  runInContext('existingAgentChoiceIsCurrent = undefined;', context);
   const stopsAfterOpen = runInContext('stopped.length', context) as number;
   const navigated = () => JSON.parse(runInContext('JSON.stringify(navigated)', context) as string) as Array<{ route: { view: string; workspaceId?: string; agentId?: string }; mode: string }>;
   runInContext('leaveAddAgentForHome()', context);

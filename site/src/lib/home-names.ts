@@ -59,7 +59,7 @@ export function personFirstName(displayName: string): string {
   return trimmed.split(/\s+/)[0] ?? "";
 }
 
-/** UI-SPEC 3.7: the line under “Add one of your agents to Home”. */
+/** The /invite connect caption: whose agent it is and how people see it. */
 export function addAgentOwnershipLine(workspace: string, viewerFirstName: string, agentName: string): string {
   const place = workspace.trim() || "this workspace";
   const agent = agentName.trim() || "agent";

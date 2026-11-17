@@ -6,11 +6,64 @@ import { HOSTED_MCP_RESOURCE } from "../../../src/protocol/hosted-authority.ts";
 import {
   AGENT_HOSTS,
   INVITE_CONNECT_FOOTNOTE,
+  agentHostsFor,
   claudeInstallLink,
   cursorInstallLink,
+  hostSayName,
   inviteConnectFootnote,
+  joinPrompt,
+  reconnectPrompt,
+  takenAgentName,
 } from "./agent-hosts.ts";
 import { setupSteps } from "./setup-checklist.ts";
+
+test("the join sentence lets a blank name name itself, never as the app, and uses a typed name as given", () => {
+  assert.equal(
+    joinPrompt({ workspace: "Home", app: "Claude" }),
+    "Join my \"Home\" workspace on CommonSwarm. Pick a short name for your role in this session, not just \"Claude\", then post one short line saying what you're working on.",
+  );
+  assert.equal(
+    joinPrompt({ workspace: " Home ", app: "Claude", name: "  RidgeHQ Lead " }),
+    "Join my \"Home\" workspace on CommonSwarm as \"RidgeHQ Lead\", then post one short line saying what you're working on.",
+  );
+  assert.equal(
+    joinPrompt({ workspace: "", app: null }),
+    "Join my workspace on CommonSwarm. Pick a short name for your role in this session, then post one short line saying what you're working on.",
+  );
+  assert.equal(
+    reconnectPrompt({ workspace: "Home", name: "RidgeHQ Lead" }),
+    "Reconnect to my \"Home\" workspace on CommonSwarm as \"RidgeHQ Lead\". Reuse that agent; don't make a new one.",
+  );
+  assert.equal(hostSayName(AGENT_HOSTS.find((host) => host.id === "other-app")), null);
+  assert.equal(hostSayName(AGENT_HOSTS.find((host) => host.id === "codex")), "Codex");
+  for (const sentence of [joinPrompt({ workspace: "Home", app: "Claude" }), joinPrompt({ workspace: "Home", app: "Claude", name: "A" })]) {
+    assert.doesNotMatch(sentence, /list who is there|look for it|web app|seat|claim/i);
+  }
+});
+
+test("a typed name collides with an agent here ignoring case, and a blank name never does", () => {
+  const here = ["RidgeHQ Lead", "Scout"];
+  assert.equal(takenAgentName(" ridgehq LEAD ", here), "RidgeHQ Lead");
+  assert.equal(takenAgentName("Scout 2", here), null);
+  assert.equal(takenAgentName("   ", here), null);
+});
+
+test("the catalog's steps end at setup: no join sentence inside them, and ChatGPT waits under More apps", async () => {
+  const join = /join my|join .*workspace|list who is there|look for it/i;
+  for (const host of AGENT_HOSTS) {
+    for (const step of [...host.steps, ...(host.testing?.steps ?? [])]) {
+      assert.doesNotMatch(`${step.text} ${step.say ?? ""}`, join, `${host.id}: ${step.text}`);
+    }
+  }
+  const primary = agentHostsFor("setter").filter((host) => host.joiner === "primary").map((host) => host.id);
+  assert.deepEqual(primary, ["claude", "muse", "grok", "grok-bot", "gemini"]);
+  assert.equal(AGENT_HOSTS.find((host) => host.id === "chatgpt")?.joiner, "more");
+  /* Evidence points at a line that still says what it claims. */
+  const terminal = AGENT_HOSTS.find((host) => host.id === "terminal");
+  const [file, line] = terminal.evidence.replace(/^site\//, "").split(":");
+  const source = await readFile(new URL(`../../${file}`, import.meta.url), "utf8");
+  assert.match(source.split("\n")[Number(line) - 1] ?? "", /requestPromptNamed\(/);
+});
 
 test("the Claude setup step prefills only the public connector name and address", () => {
   const claude = AGENT_HOSTS.find((host) => host.id === "claude");

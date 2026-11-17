@@ -120,7 +120,7 @@ test("every household result is dropped once its workspace, account, version or 
   assert.match(reset, /accessReads\.invalidate\(\);\s*connectionReads\.invalidate\(\);/);
 });
 
-test("the Add an agent poll runs only while its own host page is open, and stops on any change", () => {
+test("the Add an agent poll runs only while a connector app is chosen in the panel, and stops on any change", () => {
   const watch = section(script, "const startHostJoinWatch = (): void => {", "    };\n");
   assert.match(watch, /const watch = hostJoinGeneration;/);
   assert.match(watch, /watch === hostJoinGeneration &&/);
@@ -131,8 +131,11 @@ test("the Add an agent poll runs only while its own host page is open, and stops
   assert.match(watch, /if \(!live\(\)\) return;/, "a reply from a replaced watch is ignored");
   const stop = section(script, "const stopHostJoinWatch = (): void => {", "    };\n");
   assert.match(stop, /hostJoinGeneration \+= 1;/);
-  assert.match(script, /hostPicker\?\.addEventListener\("agent-host-selected", \(\) => startHostJoinWatch\(\)\);/);
-  assert.match(script, /hostPicker\?\.addEventListener\("agent-host-back", \(\) => stopHostJoinWatch\(\)\);/);
+  assert.match(watch, /joinAttemptMatch\(nextAgents, \{ ownerUserId: me, known: hostJoinKnown, name: picker\?\.agentName \?\? "" \}\)/,
+    "the watch takes this attempt's agent, by the name typed now");
+  const selected = section(script, 'hostPicker?.addEventListener("agent-host-selected", () => {', "    });\n");
+  assert.match(selected, /if \(hostPicker\.watchable\) startHostJoinWatch\(\);\s*else stopHostJoinWatch\(\);/,
+    "a key route or an app that cannot connect yet stops the watch");
 });
 
 /* Real emitted doors are covered by the kylon-host owner. This separate dispatch guard
