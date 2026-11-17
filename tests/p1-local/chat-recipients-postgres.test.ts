@@ -145,6 +145,8 @@ async function insertSignal(
      * dead on arrival.
      */
     createdAtHours?: number;
+    /** The channel the row is filed in. Defaults to none (unfiled). */
+    channelId?: string | null;
   },
 ): Promise<void> {
   await tx`
@@ -162,7 +164,7 @@ async function insertSignal(
         + (${row.untilHours ?? 24} * interval '1 hour'),
       statement_timestamp()
         + (${row.createdAtHours ?? 0} * interval '1 hour'),
-      NULL, NULL, false
+      ${row.channelId ?? null}::uuid, NULL, false
     )
   `;
 }
@@ -208,10 +210,32 @@ async function readableIdsAs(
   userId: string,
   workspaceId: string,
 ): Promise<Set<string>> {
+  return await readableIdsWithClaims(tx, { sub: userId, role: "authenticated" }, workspaceId);
+}
+
+/** As an agent reads: its owner's sub plus its own principal, the claims the read edge installs. */
+async function readableIdsAsAgent(
+  tx: Tx,
+  ownerId: string,
+  agentId: string,
+  workspaceId: string,
+): Promise<Set<string>> {
+  return await readableIdsWithClaims(
+    tx,
+    { sub: ownerId, role: "authenticated", agent_principal_id: agentId },
+    workspaceId,
+  );
+}
+
+async function readableIdsWithClaims(
+  tx: Tx,
+  claims: Record<string, string>,
+  workspaceId: string,
+): Promise<Set<string>> {
   await tx`
     SELECT set_config(
       'request.jwt.claims',
-      ${JSON.stringify({ sub: userId, role: "authenticated" })},
+      ${JSON.stringify(claims)},
       true
     )
   `;
@@ -303,13 +327,224 @@ test("a signal addressed to three people is readable by all three and by nobody 
         /* Recipient 2 is an AGENT owned by `second`, which the owner reads for
          * oversight the same way the scalar arm already allows. The owner of
          * the workspace does not own it, so it does not admit them. */
+        /* ~~"the author is not a recipient, and sender visibility is not this lane"~~ The author
+         * reads their own message since 20261117000004: not as a recipient, as its author. */
         const byOwner = await readableIdsAs(tx, f.owner, f.workspaceA);
         assert.equal(
           byOwner.has(manyRecipients),
+          true,
+          "the author reads their own message",
+        );
+        assert.equal(byOwner.has(scalarOnly), true, "and the one-recipient one");
+
+        throw ROLLBACK;
+      }),
+      (error: unknown) => error === ROLLBACK,
+    );
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+});
+
+test("the author of a direct message reads it, through their own claims and nobody else's (20261117000004)", async () => {
+  const sql = postgres(databaseUrl(), { max: 1 });
+  const f = newFixture();
+  const toPerson = randomUUID();
+  const toAgent = randomUUID();
+  const agentToPerson = randomUUID();
+  try {
+    await assert.rejects(
+      sql.begin(async (tx) => {
+        await seed(tx, f);
+        await insertSignal(tx, {
+          id: toPerson,
+          workspaceId: f.workspaceA,
+          from: f.owner,
+          toUserId: f.second,
+          toAgent: null,
+          kind: "note",
+          body: "just for you",
+        });
+        await insertSignal(tx, {
+          id: toAgent,
+          workspaceId: f.workspaceA,
+          from: f.owner,
+          toUserId: null,
+          toAgent: f.agentOfSecond,
+          kind: "note",
+          body: "just for your agent",
+        });
+        await insertSignal(tx, {
+          id: agentToPerson,
+          workspaceId: f.workspaceA,
+          from: f.agentOne,
+          fromKind: "agent",
+          toUserId: f.second,
+          toAgent: null,
+          kind: "note",
+          body: "from the owner's agent",
+        });
+
+        const byOwner = await readableIdsAs(tx, f.owner, f.workspaceA);
+        assert.equal(byOwner.has(toPerson), true, "the author reads their message to a person");
+        assert.equal(byOwner.has(toAgent), true, "and to another person's agent");
+        assert.equal(
+          byOwner.has(agentToPerson),
           false,
-          "the author is not a recipient, and sender visibility is not this lane",
+          "an owner does not read what their agent sent to someone else",
         );
 
+        const bySecond = await readableIdsAs(tx, f.second, f.workspaceA);
+        assert.equal(bySecond.has(toPerson), true, "control: the recipient still reads it");
+        assert.equal(bySecond.has(agentToPerson), true, "control: and the agent's message to them");
+
+        const byBystander = await readableIdsAs(tx, f.bystander, f.workspaceA);
+        assert.equal(byBystander.has(toPerson), false, "a bystander reads none of them");
+        assert.equal(byBystander.has(toAgent), false);
+        assert.equal(byBystander.has(agentToPerson), false);
+
+        /* An agent's claims carry its owner's sub. They must not admit the owner's own messages. */
+        const byOwnersAgent = await readableIdsAsAgent(tx, f.owner, f.agentOne, f.workspaceA);
+        assert.equal(
+          byOwnersAgent.has(toPerson),
+          false,
+          "the author's own agent does not read the author's person-sent message",
+        );
+        assert.equal(byOwnersAgent.has(toAgent), false);
+        assert.equal(byOwnersAgent.has(agentToPerson), true, "an agent reads what it sent");
+
+        const bySibling = await readableIdsAsAgent(tx, f.owner, f.agentTwo, f.workspaceA);
+        assert.equal(
+          bySibling.has(agentToPerson),
+          false,
+          "another agent of the same owner does not read it",
+        );
+
+        await tx`
+          UPDATE swarm.agent_principals
+          SET revoked_at = statement_timestamp()
+          WHERE principal_id = ${f.agentOne}::uuid
+        `;
+        const byRevoked = await readableIdsAsAgent(tx, f.owner, f.agentOne, f.workspaceA);
+        assert.equal(byRevoked.has(agentToPerson), false, "a revoked agent no longer reads what it sent");
+        assert.equal(
+          (await readableIdsAs(tx, f.second, f.workspaceA)).has(agentToPerson),
+          true,
+          "control: the recipient still reads it",
+        );
+
+        throw ROLLBACK;
+      }),
+      (error: unknown) => error === ROLLBACK,
+    );
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+});
+
+test("an author removed from the workspace stops reading their own direct message", async () => {
+  const sql = postgres(databaseUrl(), { max: 1 });
+  const f = newFixture();
+  const dm = randomUUID();
+  try {
+    await assert.rejects(
+      sql.begin(async (tx) => {
+        await seed(tx, f);
+        await insertSignal(tx, {
+          id: dm,
+          workspaceId: f.workspaceA,
+          from: f.third,
+          toUserId: f.second,
+          toAgent: null,
+          kind: "note",
+          body: "before I go",
+        });
+        assert.equal(
+          (await readableIdsAs(tx, f.third, f.workspaceA)).has(dm),
+          true,
+          "a member reads what they sent",
+        );
+        await tx`
+          UPDATE swarm.memberships
+          SET revoked_at = statement_timestamp()
+          WHERE workspace_id = ${f.workspaceA}::uuid AND user_id = ${f.third}::uuid
+        `;
+        assert.equal(
+          (await readableIdsAs(tx, f.third, f.workspaceA)).has(dm),
+          false,
+          "and stops when their membership ends",
+        );
+        assert.equal(
+          (await readableIdsAs(tx, f.second, f.workspaceA)).has(dm),
+          true,
+          "control: the recipient still reads it",
+        );
+        throw ROLLBACK;
+      }),
+      (error: unknown) => error === ROLLBACK,
+    );
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+});
+
+test("an author who leaves a private channel stops reading their direct message filed in it", async () => {
+  const sql = postgres(databaseUrl(), { max: 1 });
+  const f = newFixture();
+  const channelId = randomUUID();
+  const dm = randomUUID();
+  try {
+    await assert.rejects(
+      sql.begin(async (tx) => {
+        await seed(tx, f);
+        await tx`
+          INSERT INTO swarm.channels (
+            channel_id, workspace_id, slug, purpose, created_by_principal, created_by_kind, visibility
+          ) VALUES (
+            ${channelId}::uuid, ${f.workspaceA}::uuid, 'quiet', NULL, ${f.owner}::uuid, 'user', 'private'
+          )
+        `;
+        await tx`
+          INSERT INTO swarm.channel_members (
+            workspace_id, channel_id, member_kind, user_id, is_manager, added_by_kind, added_by_principal
+          ) VALUES
+            (${f.workspaceA}::uuid, ${channelId}::uuid, 'user', ${f.owner}::uuid, true, 'user', ${f.owner}::uuid),
+            (${f.workspaceA}::uuid, ${channelId}::uuid, 'user', ${f.second}::uuid, false, 'user', ${f.owner}::uuid),
+            (${f.workspaceA}::uuid, ${channelId}::uuid, 'user', ${f.third}::uuid, false, 'user', ${f.owner}::uuid)
+        `;
+        /* Addressed, so only the author arm can admit its author: a broadcast in the channel was
+         * already readable by every channel member. */
+        await insertSignal(tx, {
+          id: dm,
+          workspaceId: f.workspaceA,
+          from: f.third,
+          toUserId: f.second,
+          toAgent: null,
+          kind: "note",
+          body: "in the quiet channel",
+          channelId,
+        });
+        assert.equal(
+          (await readableIdsAs(tx, f.third, f.workspaceA)).has(dm),
+          true,
+          "a channel member reads what they sent there",
+        );
+        await tx`
+          DELETE FROM swarm.channel_members
+          WHERE workspace_id = ${f.workspaceA}::uuid
+            AND channel_id = ${channelId}::uuid
+            AND user_id = ${f.third}::uuid
+        `;
+        assert.equal(
+          (await readableIdsAs(tx, f.third, f.workspaceA)).has(dm),
+          false,
+          "and stops after leaving the channel",
+        );
+        assert.equal(
+          (await readableIdsAs(tx, f.second, f.workspaceA)).has(dm),
+          true,
+          "control: the recipient, still a member, reads it",
+        );
         throw ROLLBACK;
       }),
       (error: unknown) => error === ROLLBACK,

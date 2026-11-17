@@ -4740,10 +4740,11 @@ Deno.exit(0);
     const personADirected = await viewRowAs(personA.id, async (tx) =>
       await tx<{ id: string }[]>`SELECT id::text AS id FROM swarm_read.signals WHERE id = ANY(${allProtectedSignalIds}::uuid[])`
     );
+    // Since 20261117000004 the author also reads the two replies personA wrote.
     assert.deepEqual(
       personADirected.map((r) => r.id).sort(),
-      [askLocalId, h0ReplyId, hostedAskId, hostedReplyId].sort(),
-      "authorized #lock recipient reads all 4 incoming directed asks/replies in swarm_read.signals",
+      [askLocalId, h0ReplyId, hostedAskId, hostedReplyId, ordinaryReplyId, personAReplyToHostedId].sort(),
+      "authorized #lock recipient reads all 4 incoming directed asks/replies, and its author its own 2, in swarm_read.signals",
     );
     for (const sentReplyId of [ordinaryReplyId, personAReplyToHostedId]) {
       const [personAReceipt] = await viewRowAs(personA.id, async (tx) =>
@@ -4762,10 +4763,18 @@ Deno.exit(0);
         SELECT swarm_read.message_status(${ws}::uuid, ${statusTargetIds}::uuid[]) AS ms
       `
     );
+    /* ~~[mentionHostedXId]~~ message_status reads swarm_read.signals, which since 20261117000004 admits personA's
+     * own two replies too, so each of them that enqueued a delivery has a status as well. */
+    const sentWithDeliveries = (await sql<{ id: string }[]>`
+      SELECT DISTINCT signal_id::text AS id FROM swarm.signal_deliveries
+      WHERE workspace_id = ${ws}::uuid
+        AND signal_id = ANY(${[mentionHostedXId, ordinaryReplyId, personAReplyToHostedId]}::uuid[])
+    `).map((row) => row.id).sort();
+    assert.ok(sentWithDeliveries.includes(mentionHostedXId), "control: the mention enqueued a delivery");
     assert.deepEqual(
-      personAStatuses!.ms.statuses.map((s) => s.signal_id),
-      [mentionHostedXId],
-      "authorized #lock sender reads message_status on #lock agent mention",
+      [...new Set(personAStatuses!.ms.statuses.map((s) => s.signal_id))].sort(),
+      sentWithDeliveries,
+      "authorized #lock sender reads message_status on #lock agent mention and on its own replies, and nothing else",
     );
 
     // Remove hostedPrincipalX from #lock while step2.xBatch (holding ONLY #lock signals) is still open,

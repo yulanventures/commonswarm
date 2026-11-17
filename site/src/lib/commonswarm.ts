@@ -64,6 +64,8 @@ import {
   type WorkspaceChannel,
 } from "./channels.js";
 import { parseChannelVisibility } from "./private-channels.js";
+import { directConversationFilter, type DirectPartner } from "./signal-feed.js";
+import { signalHistoryFilter } from "./signal-history.js";
 import { parseChannelLeadColumns, setChannelLeadCommand, type ChannelLead } from "./channel-lead.js";
 import {
   attachFeedChannels,
@@ -3184,6 +3186,40 @@ export async function feed(workspaceId: string, limit = 50): Promise<Signal[]> {
         .select(BROWSER_SIGNAL_COLUMNS)
         .eq("workspace_id", workspaceId)
         .order("created_at", { ascending: false })
+        .limit(limit)
+        .abortSignal(signal),
+  );
+  if (error) throw new Error(error.message);
+  return (data ?? []).map((row) => browserSignalFromRow(row as unknown as Record<string, unknown>));
+}
+
+/**
+ * The newest messages between the viewer and one teammate, by the same rule as `signalIsDirectBetween`, which the
+ * screen still applies over what this returns. Narrowed in the query, so a conversation is not limited to whatever
+ * of it falls in the newest page of the whole workspace. The view is the authorization; this only narrows it.
+ */
+export async function directMessages(
+  workspaceId: string,
+  viewerId: string,
+  partner: DirectPartner,
+  limit = 50,
+): Promise<Signal[]> {
+  const conversation = directConversationFilter(viewerId, partner);
+  if (conversation === null) return [];
+  const c = client();
+  if (!c) throw new NoDeployment();
+  const { data, error } = await readWithDeadline(
+    "direct messages",
+    (signal) =>
+      c
+        .schema("swarm_read")
+        .from("signals")
+        .select(BROWSER_SIGNAL_COLUMNS)
+        .eq("workspace_id", workspaceId)
+        .or(conversation)
+        .or(signalHistoryFilter(new Date().toISOString()))
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
         .limit(limit)
         .abortSignal(signal),
   );
