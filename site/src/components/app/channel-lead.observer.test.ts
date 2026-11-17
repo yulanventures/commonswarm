@@ -35,6 +35,7 @@ class El {
   listeners = new Map<string, () => void>(); textContent = ''; className = ''; title = ''; type = ''; hidden = false;
   disabled = false; open = false; #value = '';
   constructor(readonly tag: string) {}
+  get options(): El[] { return this.children; }
   get value(): string { return this.#value; }
   set value(next: string) { this.#value = this.tag !== 'select' || this.children.some(option => option.value === next) ? next : ''; }
   append(...nodes: El[]) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node); } }
@@ -113,11 +114,13 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
     let channels = ${JSON.stringify([channelRow(OPEN, 'design'), channelRow(LOCKED, 'quotes', { visibility: 'private', leadMode: 'agent', leadAgentPrincipalId: BUILDER }),
       channelRow(OTHER, 'garden', { createdByPrincipal: 'u3' })])};
     let channelsLoaded = true, railArchivedOpen = false;
-    let managedChannelId = null, channelDialogOriginal = null, channelDialogPending = false, channelDialogEpoch = 0, channelLeadMembers = null;
+    let managedChannelId = null, channelDialogOriginal = null, channelDialogPending = false, channelDialogEpoch = 0;
+    const privateChannelAgentIds = new Map();
     const channelLeadAttempts = new CommandAttempts();
   `, context);
   runInContext(await dashboardFunctions(['activeWorkspaceLeadAgent', 'viewerMaySetWorkspaceLead', 'viewerWorkspaceRole', 'viewerMayManageChannel',
     'activeChannel', 'syncChannelLeadPill', 'channelSettingsChanges', 'channelLeadChange', 'syncChannelSettingsSubmit', 'renderChannelLeadSelect',
+    'privateMembersKey', 'knownPrivateChannelMembers', 'readPrivateChannelMembers', 'privateChannelMembersFor',
     'loadChannelLeadMembers', 'channelDialogOwns', 'applyChannelResult', 'submitChannelSettings']), context);
   const run = <T = unknown>(code: string): T => runInContext(code, context) as T;
   /** The settings dialog as openChannelDialog leaves it, without its focus and return bookkeeping. */
@@ -129,7 +132,7 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
     dialog.open = true;
     slug.value = run<string>(`channelById(channels, '${channelId}').slug`); description.value = '';
   };
-  const options = () => select.children.map(option => [option.value, option.textContent]);
+  const options = () => select.children.map(option => option.disabled ? [option.value, option.textContent, 'disabled'] : [option.value, option.textContent]);
   const pill = () => copy.children.find(child => Object.hasOwn(child.dataset, 'channelLeadPill')) ?? null;
   const pillText = () => { const found = pill(); return found ? found.descendants().map(n => n.textContent).filter(Boolean).join('|') : null; };
   return { calls, context, run, dialog, select, label, save, copy, openSettings, options, pill, pillText };
@@ -158,12 +161,13 @@ test('the Channel lead select offers the workspace lead, No lead and the agents 
   assert.equal(d.select.hidden, false);
 });
 
-test('a private channel offers only its member agents, keeping the stored lead while they load', async () => {
+test('a private channel offers only its member agents, keeping the stored lead while they load and naming no unconfirmed lead', async () => {
   let answer!: (ids: string[]) => void;
   const d = await dashboard({ channelAgentMemberIds: (...args: unknown[]) => { d.calls.members.push(args); return new Promise(resolve => { answer = resolve; }); } });
   d.openSettings(LOCKED);
   assert.deepEqual(d.calls.members, [['w1', LOCKED]]);
-  assert.deepEqual(d.options(), [['workspace', 'Workspace lead (Atlas)'], ['none', 'No lead'], [`agent:${BUILDER}`, 'Builder']]);
+  assert.deepEqual(d.options(), [['workspace', 'Workspace lead'], ['none', 'No lead'], [`agent:${BUILDER}`, 'Builder']],
+    'before members are known the workspace lead is not named');
   assert.equal(d.select.value, `agent:${BUILDER}`, 'the stored lead is selected before members are known');
   d.select.value = 'none';
   answer([BUILDER]); await tick();
@@ -176,6 +180,35 @@ test('a private channel offers only its member agents, keeping the stored lead w
   d.run('channelDialogEpoch++;');
   answer([BUILDER, ATLAS]); await tick();
   assert.deepEqual(d.options().map(([value]) => value), ['workspace', 'none', `agent:${BUILDER}`]);
+});
+
+test('a stored lead that may not lead here is kept on show, disabled, and never sent', async () => {
+  const d = await dashboard({ channelAgentMemberIds: async (...args: unknown[]) => { d.calls.members.push(args); return [ATLAS]; } });
+  // The private channel's stored lead (Builder) is not a member any more.
+  d.openSettings(LOCKED); await tick();
+  assert.deepEqual(d.options(), [['workspace', 'Workspace lead (Atlas)'], ['none', 'No lead'], [`agent:${ATLAS}`, 'Atlas'], [`agent:${BUILDER}`, 'Builder', 'disabled']],
+    'the members read redrew the select');
+  assert.equal(d.select.value, `agent:${BUILDER}`, 'the selection does not jump');
+  // A choice that became disabled under the person (here: shown after they picked it) is not a change to send.
+  d.run(`channelDialogOriginal = { ...channelDialogOriginal, lead: 'none' };`);
+  assert.equal(d.run('channelLeadChange()'), null);
+  d.select.value = `agent:${ATLAS}`;
+  assert.deepEqual(plain(d.run('channelLeadChange()')), { mode: 'agent', principalId: ATLAS });
+});
+
+test('an archived channel shows its lead with the select disabled, and Save stays off', async () => {
+  const d = await dashboard();
+  d.run(`channels = channels.map(row => row.channelId === '${OPEN}' ? { ...row, archivedAt: '2026-11-02T00:00:00Z' } : row);`);
+  d.openSettings(OPEN);
+  assert.equal(d.select.hidden, false);
+  assert.equal(d.select.disabled, true);
+  d.select.value = 'none';
+  assert.equal(d.run('channelLeadChange()'), null);
+  d.run('syncChannelSettingsSubmit()');
+  assert.equal(d.save.disabled, true);
+  // Not archived: enabled.
+  d.openSettings(OTHER);
+  assert.equal(d.select.disabled, false);
 });
 
 test('Save sends set_channel_lead alone when only the lead changed, and paints the accepted channel', async () => {
@@ -289,53 +322,122 @@ test('an answer that lands after the workspace, the account or the channel moved
   assert.deepEqual(d.calls.errors.filter(Boolean), []);
 });
 
-test('the header pill names each channel\'s lead, and #general keeps the workspace lead', async () => {
+test('the header pill names each channel\'s lead, stays quiet for No lead, and #general keeps the workspace lead', async () => {
   const d = await dashboard({ openChannelDialog: (...args: unknown[]) => { d.calls.opened.push(args); } });
-  const set = (patch: string) => d.run(`channels = channels.map(row => row.channelId === '${OPEN}' ? { ...row, ${patch} } : row);`);
+  const set = (id: string, patch: string) => d.run(`channels = channels.map(row => row.channelId === '${id}' ? { ...row, ${patch} } : row);`);
+  const sync = () => d.run('syncChannelLeadPill()');
+  const opensSettings = (id: string) => {
+    const before = d.calls.roster;
+    d.pill()!.click();
+    assert.deepEqual(d.calls.opened.at(-1)?.slice(0, 2), ['settings', id]);
+    assert.equal(d.calls.opened.at(-1)?.[3], 'lead');
+    assert.equal(d.calls.roster, before, 'a channel\'s Set lead never opens People & agents');
+  };
 
-  d.run(`activeChannelId = '${GENERAL_CHANNEL_ID}';`); d.run('syncChannelLeadPill()');
+  d.run(`activeChannelId = '${GENERAL_CHANNEL_ID}';`); sync();
   assert.equal(d.pillText(), 'A|Atlas', '#general: the workspace lead');
   d.pill()!.click();
   assert.deepEqual(plain(d.calls.entity.at(-1)?.[0]), { kind: 'agent', id: ATLAS });
-  d.run('activeChannelId = null;'); d.run('syncChannelLeadPill()');
+  d.run('activeChannelId = null;'); sync();
   assert.equal(d.pillText(), 'A|Atlas', 'All messages: the workspace lead');
 
-  d.run(`activeChannelId = '${OPEN}';`); d.run('syncChannelLeadPill()');
+  d.run(`activeChannelId = '${OPEN}';`); sync();
   assert.equal(d.pillText(), 'A|Atlas', 'a channel on the workspace lead');
-  set(`leadMode: 'agent', leadAgentPrincipalId: '${BUILDER}'`); d.run('syncChannelLeadPill()');
+  set(OPEN, `leadMode: 'agent', leadAgentPrincipalId: '${BUILDER}'`); sync();
   assert.equal(d.pillText(), 'B|Builder', 'a channel with its own lead');
   assert.equal(d.pill()?.getAttribute('aria-label'), 'Lead: Builder');
   d.pill()!.click();
   assert.deepEqual(plain(d.calls.entity.at(-1)?.[0]), { kind: 'agent', id: BUILDER });
   assert.equal(d.copy.children.filter(child => Object.hasOwn(child.dataset, 'channelLeadPill')).length, 1, 'one pill, redrawn in place');
 
-  set(`leadMode: 'none', leadAgentPrincipalId: null`); d.run('syncChannelLeadPill()');
-  assert.equal(d.pillText(), SET_LEAD_LABEL, 'No lead: the manager is offered Set lead');
+  set(OPEN, `leadMode: 'none', leadAgentPrincipalId: null`); sync();
+  assert.equal(d.pill(), null, 'No lead is a choice: nothing, even for a manager');
+
+  set(OPEN, `leadMode: 'agent', leadAgentPrincipalId: '${HOSTED}'`); sync();
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'a lead that may not lead is missing: the manager may set one');
   assert.equal(d.pill()?.dataset.leadUnset, '');
-  d.pill()!.click();
-  assert.deepEqual(d.calls.opened.at(-1)?.slice(0, 2), ['settings', OPEN]);
-  assert.equal(d.calls.opened.at(-1)?.[3], 'lead');
-  assert.equal(d.calls.roster, 0);
+  opensSettings(OPEN);
+  set(OPEN, `leadMode: 'agent', leadAgentPrincipalId: 'a-gone'`); sync();
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'a lead no longer on the roster is missing');
 
-  set(`leadMode: 'agent', leadAgentPrincipalId: '${HOSTED}'`); d.run('syncChannelLeadPill()');
-  assert.equal(d.pillText(), SET_LEAD_LABEL, 'a lead that may not lead names nobody');
-
-  set(`leadMode: 'none', leadAgentPrincipalId: null, archivedAt: '2026-11-02T00:00:00Z'`); d.run('syncChannelLeadPill()');
-  assert.equal(d.pill(), null, 'an archived channel takes no posts: no Set lead');
-
-  set(`archivedAt: null`); d.run(`session = { user: { id: '${U2}' } };`); d.run('syncChannelLeadPill()');
-  assert.equal(d.pill(), null, 'No lead, for someone who cannot manage the channel: no pill');
-
-  // Unchanged: a workspace without a lead offers its owners Set lead, to People & agents.
-  d.run(`session = { user: { id: '${U1}' } }; workspaces[0].leadAgentPrincipalId = null; activeChannelId = '${GENERAL_CHANNEL_ID}';`);
-  d.run('syncChannelLeadPill()');
+  // The workspace has no lead: in a named channel on the workspace lead, Set lead goes to the channel's settings.
+  set(OPEN, `leadMode: 'workspace', leadAgentPrincipalId: null`);
+  d.run(`workspaces[0].leadAgentPrincipalId = null;`); sync();
+  assert.equal(d.pillText(), SET_LEAD_LABEL);
+  opensSettings(OPEN);
+  // ...and in #general, to People & agents, as before.
+  d.run(`activeChannelId = '${GENERAL_CHANNEL_ID}';`); sync();
   assert.equal(d.pillText(), SET_LEAD_LABEL);
   d.pill()!.click();
   assert.equal(d.calls.roster, 1);
-  d.run(`members = members.map(m => ({ ...m, role: 'member' }));`); d.run('syncChannelLeadPill()');
+  d.run(`workspaces[0].leadAgentPrincipalId = '${ATLAS}'; activeChannelId = '${OPEN}';`);
+
+  set(OPEN, `leadMode: 'agent', leadAgentPrincipalId: '${HOSTED}', archivedAt: '2026-11-02T00:00:00Z'`); sync();
+  assert.equal(d.pill(), null, 'an archived channel takes no posts: no Set lead');
+  set(OPEN, `archivedAt: null`); d.run(`session = { user: { id: '${U2}' } };`); sync();
+  assert.equal(d.pill(), null, 'a missing lead, for someone who cannot manage the channel: no pill');
+
+  // A channel that has not been read yet names nobody.
+  d.run(`activeChannelId = 'c-not-read';`); sync();
   assert.equal(d.pill(), null);
-  d.run(`activeDm = { kind: 'agent', id: '${ATLAS}' }; workspaces[0].leadAgentPrincipalId = '${ATLAS}';`); d.run('syncChannelLeadPill()');
+
+  // Unchanged: only owners and admins get #general's Set lead.
+  d.run(`session = { user: { id: '${U1}' } }; workspaces[0].leadAgentPrincipalId = null; activeChannelId = '${GENERAL_CHANNEL_ID}';`);
+  d.run(`members = members.map(m => ({ ...m, role: 'member' }));`); sync();
+  assert.equal(d.pill(), null);
+  d.run(`activeDm = { kind: 'agent', id: '${ATLAS}' }; workspaces[0].leadAgentPrincipalId = '${ATLAS}';`); sync();
   assert.equal(d.pill(), null, 'a direct message names no lead');
+});
+
+test('a private channel\'s header names only a member lead, and nothing until its members are known', async () => {
+  const answers: Array<(ids: string[] | Error) => void> = [];
+  const d = await dashboard({
+    openChannelDialog: (...args: unknown[]) => { d.calls.opened.push(args); },
+    channelAgentMemberIds: (...args: unknown[]) => {
+      d.calls.members.push(args);
+      return new Promise((resolve, reject) => { answers.push(value => value instanceof Error ? reject(value) : resolve(value)); });
+    },
+  });
+  const sync = () => d.run('syncChannelLeadPill()');
+  d.run(`channels = channels.map(row => row.channelId === '${LOCKED}' ? { ...row, leadMode: 'workspace', leadAgentPrincipalId: null } : row);
+    activeChannelId = '${LOCKED}';`);
+  sync(); sync();
+  assert.equal(d.pill(), null, 'nothing while the members are not known');
+  assert.deepEqual(d.calls.members, [['w1', LOCKED]], 'read once');
+  answers.shift()!([BUILDER]); await tick();
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'the workspace lead (Atlas) is not a member: the lead is missing, and the read redrew the header');
+  d.pill()!.click();
+  assert.deepEqual(d.calls.opened.at(-1)?.slice(0, 2), ['settings', LOCKED]);
+
+  d.run(`channels = channels.map(row => row.channelId === '${LOCKED}' ? { ...row, leadMode: 'agent', leadAgentPrincipalId: '${BUILDER}' } : row);`); sync();
+  assert.equal(d.pillText(), 'B|Builder', 'a member lead is named');
+  assert.equal(d.calls.members.length, 1, 'the known members are reused');
+
+  // Opening the channel's settings reads its members again; the header follows the newer answer.
+  d.openSettings(LOCKED);
+  assert.equal(d.calls.members.length, 2);
+  answers.shift()!([ATLAS]); await tick();
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'Builder left the channel');
+
+  // Another workspace keys its own read; an answer that lands after the workspace changed is dropped.
+  d.run(`channels = channels.map(row => row.channelId === '${LOCKED}' ? { ...row, workspaceId: 'w2' } : row);
+    activeWorkspaceId = 'w2'; workspaces[1].leadAgentPrincipalId = '${ATLAS}';`);
+  sync();
+  assert.equal(d.pill(), null);
+  assert.deepEqual(d.calls.members.at(-1), ['w2', LOCKED]);
+  d.run(`activeWorkspaceId = 'w1';`);
+  answers.shift()!([ATLAS]); await tick();
+  d.run(`activeWorkspaceId = 'w2';`); sync();
+  assert.equal(d.pill(), null, 'the answer for w2 landed while w1 was open: not kept');
+
+  // A failed read leaves the header quiet, without reading again on every redraw.
+  d.run(`session = { user: { id: '${U2}' } }; members = members.map(m => ({ ...m, role: 'owner' }));`);
+  sync();
+  const reads = d.calls.members.length;
+  answers.shift()!(new Error('offline')); await tick();
+  sync(); sync();
+  assert.equal(d.pill(), null);
+  assert.equal(d.calls.members.length, reads);
 });
 
 test('Set lead opens the channel\'s settings with the Channel lead select focused', async () => {

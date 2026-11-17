@@ -74,43 +74,74 @@ export interface ChannelLeadOptionsInput {
   visibility?: "open" | "private" | null;
 }
 
-export interface ChannelLeadOption { value: string; label: string }
+/** `disabled`: a stored or chosen lead that may not lead here, kept so the selection never jumps, but not a choice. */
+export interface ChannelLeadOption { value: string; label: string; disabled?: true }
+
+/** The workspace lead option before a private channel's members are known: it names nobody it cannot vouch for. */
+export const WORKSPACE_LEAD_UNCONFIRMED_LABEL = "Workspace lead";
 
 /**
  * Workspace lead, No lead, then every agent that may lead here, by name. In a private channel only its
- * member agents may, and while they are not known none are offered. The stored lead and the shown value
- * are always options, so opening the dialog or loading members never moves the selection.
+ * member agents may, and while they are not known none are offered and the workspace lead is not named.
+ * The stored lead and the shown value are always options, so opening the dialog or loading members never
+ * moves the selection; one that may not lead here (not on the roster, hosted or turn-only, or a private
+ * channel's members are known and it is not one) is disabled.
  */
 export function channelLeadOptions(input: ChannelLeadOptionsInput): ChannelLeadOption[] {
   const privateChannel = input.visibility === "private";
   const members = privateChannel ? input.memberAgentIds ?? null : null;
   const inChannel = (id: string): boolean => !privateChannel || (members !== null && members.has(id));
-  const workspaceLead = input.workspaceLead && (!privateChannel || members === null || members.has(input.workspaceLead.principalId))
-    ? input.workspaceLead.name : null;
+  const workspaceLabel = privateChannel && members === null ? WORKSPACE_LEAD_UNCONFIRMED_LABEL
+    : workspaceLeadOptionLabel(input.workspaceLead && inChannel(input.workspaceLead.principalId) ? input.workspaceLead.name : null);
   const eligible = input.agents.filter((agent) => mayLeadChannel(agent) && inChannel(agent.principalId));
   const kept = [channelLeadValue(input.stored), input.selected ?? ""]
     .map((value) => channelLeadFromValue(value))
     .flatMap((lead) => lead?.mode === "agent" ? [lead.principalId] : []);
   const ids = new Set(eligible.map((agent) => agent.principalId));
-  const extra = kept.filter((id, index) => !ids.has(id) && kept.indexOf(id) === index)
-    .map((id) => input.agents.find((agent) => agent.principalId === id) ?? { principalId: id, name: UNNAMED_LEAD_LABEL });
-  const byName = (left: LeadAgent, right: LeadAgent): number =>
-    left.name < right.name ? -1 : left.name > right.name ? 1 : left.principalId < right.principalId ? -1 : left.principalId > right.principalId ? 1 : 0;
+  const extra = kept.filter((id, index) => !ids.has(id) && kept.indexOf(id) === index).map((id) => {
+    const agent = input.agents.find((candidate) => candidate.principalId === id);
+    // While a private channel's members load, its stored lead is not known to be ineligible: it stays a choice.
+    const pending = privateChannel && members === null && agent !== undefined && mayLeadChannel(agent);
+    return { agent: agent ?? { principalId: id, name: UNNAMED_LEAD_LABEL }, disabled: !pending };
+  });
+  const byName = (left: { agent: LeadAgent }, right: { agent: LeadAgent }): number =>
+    left.agent.name < right.agent.name ? -1 : left.agent.name > right.agent.name ? 1
+    : left.agent.principalId < right.agent.principalId ? -1 : left.agent.principalId > right.agent.principalId ? 1 : 0;
   return [
-    { value: "workspace", label: workspaceLeadOptionLabel(workspaceLead) },
+    { value: "workspace", label: workspaceLabel },
     { value: "none", label: NO_LEAD_LABEL },
-    ...[...eligible, ...extra].sort(byName).map((agent) => ({ value: `agent:${agent.principalId}`, label: agent.name })),
+    ...[...eligible.map((agent) => ({ agent, disabled: false })), ...extra].sort(byName).map(({ agent, disabled }) => ({
+      value: `agent:${agent.principalId}`, label: agent.name, ...(disabled ? { disabled: true as const } : {}),
+    })),
   ];
 }
 
 /**
- * What the header shows for a named channel's own setting ("agent" or "none"): the named agent while it
- * is on the roster and may lead, otherwise nobody. "workspace" is drawn exactly as #general draws it.
+ * What a named channel's header names (#general always names the workspace lead):
+ * - "quiet": No lead, chosen on purpose. Nothing is shown.
+ * - "unknown": a private channel whose members are not known yet. Nothing is shown until they are.
+ * - "lead": the agent an untagged post wakes: the channel's own lead or the workspace lead, live, allowed to
+ *   lead, and in a private channel one of its members.
+ * - "missing": the setting names nobody who can lead here now.
  */
-export function namedChannelLead<Agent extends LeadAgent>(lead: ChannelLead, agents: readonly Agent[]): Agent | null {
-  if (lead.mode !== "agent") return null;
-  const agent = agents.find((candidate) => candidate.principalId === lead.principalId);
-  return agent && mayLeadChannel(agent) ? agent : null;
+export type NamedChannelLead<Agent> = { state: "quiet" } | { state: "unknown" } | { state: "lead"; agent: Agent } | { state: "missing" };
+
+export function namedChannelLead<Agent extends LeadAgent>(input: {
+  lead: ChannelLead;
+  agents: readonly Agent[];
+  workspaceLead: Agent | null;
+  visibility?: "open" | "private" | null;
+  /** A private channel's member agents; null while not known. Ignored for an open channel. */
+  memberAgentIds?: ReadonlySet<string> | null;
+}): NamedChannelLead<Agent> {
+  if (input.lead.mode === "none") return { state: "quiet" };
+  const privateChannel = input.visibility === "private";
+  const members = privateChannel ? input.memberAgentIds ?? null : null;
+  if (privateChannel && members === null) return { state: "unknown" };
+  const principalId = input.lead.mode === "agent" ? input.lead.principalId : null;
+  const candidate = principalId === null ? input.workspaceLead : input.agents.find((agent) => agent.principalId === principalId) ?? null;
+  if (!candidate || !mayLeadChannel(candidate) || (members !== null && !members.has(candidate.principalId))) return { state: "missing" };
+  return { state: "lead", agent: candidate };
 }
 
 /**

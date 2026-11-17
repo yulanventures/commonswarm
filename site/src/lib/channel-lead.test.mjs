@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  CommandAttempts, UNNAMED_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue,
+  CommandAttempts, UNNAMED_LEAD_LABEL, WORKSPACE_LEAD_UNCONFIRMED_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue,
   namedChannelLead, parseChannelLeadColumns, setChannelLeadCommand,
 } from "./channel-lead.ts";
 import { CommandOutcomeUnknown, setChannelLead, workspaceChannels } from "./commonswarm.ts";
@@ -124,35 +124,57 @@ test("the select offers the workspace lead, No lead, then the agents that may le
   assert.equal(channelLeadOptions({ agents, workspaceLead: null, stored: { mode: "none" } })[0].label, "Workspace lead (none)");
 });
 
-test("a private channel offers only its member agents, and none until they are known", () => {
+test("a private channel offers only its member agents, and names no workspace lead until they are known", () => {
   const members = new Set([B, H]);
   const base = { agents, workspaceLead: lead, visibility: "private" };
   assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "workspace" }, memberAgentIds: members }).map((o) => o.label),
     ["Workspace lead (none)", "No lead", "Builder"], "the workspace lead is not a member, so here it leads nobody");
   assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "workspace" }, memberAgentIds: new Set([W]) }).map((o) => o.label),
     ["Workspace lead (Wren)", "No lead", "Wren"]);
-  assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "agent", principalId: B }, memberAgentIds: null }).map((o) => o.value),
-    ["workspace", "none", `agent:${B}`], "while members load, the stored lead stays so the selection never jumps");
+  assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "agent", principalId: B }, memberAgentIds: null }),
+    [{ value: "workspace", label: WORKSPACE_LEAD_UNCONFIRMED_LABEL }, { value: "none", label: "No lead" }, { value: `agent:${B}`, label: "Builder" }],
+    "while members load: the workspace lead is not named, and the stored lead stays a choice so the selection never jumps");
   assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "none" }, memberAgentIds: null }).map((o) => o.value), ["workspace", "none"]);
+  assert.deepEqual(channelLeadOptions({ ...base, stored: { mode: "agent", principalId: A }, memberAgentIds: members }).slice(2),
+    [{ value: `agent:${A}`, label: "Atlas", disabled: true }, { value: `agent:${B}`, label: "Builder" }],
+    "a stored lead known not to be a member is kept, disabled");
 });
 
-test("the stored lead and the shown value always stay options", () => {
+test("the stored lead and the shown value always stay options, disabled when they may not lead", () => {
   const gone = "ffffffff-ffff-4fff-8fff-ffffffffffff";
   const options = channelLeadOptions({ agents, workspaceLead: null, stored: { mode: "agent", principalId: gone }, selected: `agent:${T}` });
-  assert.deepEqual(options.slice(2).map((o) => [o.value, o.label]),
-    [[`agent:${gone}`, UNNAMED_LEAD_LABEL], [`agent:${A}`, "Atlas"], [`agent:${B}`, "Builder"], [`agent:${T}`, "Turn taker"], [`agent:${W}`, "Wren"]]);
+  assert.deepEqual(options.slice(2), [
+    { value: `agent:${gone}`, label: UNNAMED_LEAD_LABEL, disabled: true },
+    { value: `agent:${A}`, label: "Atlas" }, { value: `agent:${B}`, label: "Builder" },
+    { value: `agent:${T}`, label: "Turn taker", disabled: true }, { value: `agent:${W}`, label: "Wren" },
+  ]);
 });
 
-test("values round-trip, and the header names a channel's own lead only while it may lead", () => {
+test("values round-trip", () => {
   for (const value of [{ mode: "workspace" }, { mode: "none" }, { mode: "agent", principalId: A }]) {
     assert.deepEqual(channelLeadFromValue(channelLeadValue(value)), value);
   }
   for (const odd of ["", "agent:", "lead", "AGENT:x"]) assert.equal(channelLeadFromValue(odd), null, odd);
-  assert.equal(namedChannelLead({ mode: "agent", principalId: A }, agents)?.name, "Atlas");
-  assert.equal(namedChannelLead({ mode: "agent", principalId: H }, agents), null, "a hosted agent never leads");
-  assert.equal(namedChannelLead({ mode: "agent", principalId: "gone" }, agents), null);
-  assert.equal(namedChannelLead({ mode: "none" }, agents), null);
-  assert.equal(namedChannelLead({ mode: "workspace" }, agents), null, "the workspace lead is drawn as #general draws it");
+});
+
+test("a named channel's header names the agent a post wakes, stays quiet for No lead, and says when the lead is missing", () => {
+  const named = (input) => namedChannelLead({ agents, workspaceLead: lead, ...input });
+  assert.deepEqual(named({ lead: { mode: "none" } }), { state: "quiet" }, "No lead is a choice");
+  assert.deepEqual(named({ lead: { mode: "none" }, visibility: "private", memberAgentIds: null }), { state: "quiet" });
+  assert.equal(named({ lead: { mode: "agent", principalId: A } }).agent?.name, "Atlas");
+  assert.equal(named({ lead: { mode: "workspace" } }).agent?.name, "Wren", "the workspace lead");
+  assert.deepEqual(named({ lead: { mode: "agent", principalId: H } }), { state: "missing" }, "a hosted agent never leads");
+  assert.deepEqual(named({ lead: { mode: "agent", principalId: "gone" } }), { state: "missing" }, "no longer on the roster");
+  assert.deepEqual(named({ lead: { mode: "workspace" }, workspaceLead: null }), { state: "missing" }, "no workspace lead");
+  // Private: only a member leads, and nothing is said before the members are known.
+  assert.deepEqual(named({ lead: { mode: "workspace" }, visibility: "private", memberAgentIds: null }), { state: "unknown" });
+  assert.deepEqual(named({ lead: { mode: "agent", principalId: A }, visibility: "private", memberAgentIds: null }), { state: "unknown" });
+  assert.deepEqual(named({ lead: { mode: "workspace" }, visibility: "private", memberAgentIds: new Set([A]) }), { state: "missing" },
+    "the workspace lead is not a member");
+  assert.equal(named({ lead: { mode: "workspace" }, visibility: "private", memberAgentIds: new Set([W]) }).agent?.name, "Wren");
+  assert.equal(named({ lead: { mode: "agent", principalId: A }, visibility: "private", memberAgentIds: new Set([A]) }).agent?.name, "Atlas");
+  assert.deepEqual(named({ lead: { mode: "agent", principalId: A }, visibility: "private", memberAgentIds: new Set([B]) }), { state: "missing" });
+  assert.equal(named({ lead: { mode: "workspace" }, visibility: "open", memberAgentIds: new Set() }).agent?.name, "Wren", "members matter only when private");
 });
 
 test("one command id per selection: kept while unanswered, fresh after an answer or for another selection", () => {
