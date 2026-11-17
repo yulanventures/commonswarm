@@ -300,7 +300,7 @@ const KEYBOARD_WITNESSES: Record<string, KeyboardSpec[]> = {
     ],
     activate: { key: "Enter", expect: { active: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-existing]' } },
   }],
-  // A decision card's Other field: Shift+Tab reaches the Other row, and Enter folds the field back with focus on that row.
+  // A decision card's Something else field: Shift+Tab reaches its row, and Enter folds the field back with focus on that row.
   "app.chat.choice-other": [{
     name: "choice-other-row",
     start: { active: '[data-signal-id="{message.choiceOpen}"] [data-decision-other-input]' },
@@ -390,13 +390,13 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
     require: ['[data-signal-id="{message.choiceMultiAnswered}"]:has(li[data-decision-other][data-chosen="true"])'], max: 1 }],
   "app.chat.choice-long": [{ name: "choice-long", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceLong}"]',
     require: ['[data-signal-id="{message.choiceLong}"]'], max: 1, focus: true, focusTarget: '.hm-decision [data-decision-option="full"]' }],
-  /* Typed Other text survives a real feed rebuild: the Other field is focused, a note in this channel makes the app's own
-     poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while the
-     field's Submit is enabled, which it is only while the draft still holds the typed text. Last on the page, and the
-     screen runs alone, because the note it posts rebuilds this channel's feed until the spec expires it. */
+  /* Typed Something else text survives a real feed rebuild: its field is focused, a note in this channel makes the app's
+     own poll rebuild the list, and focus must come back to the same field with its draft. The target matches only while
+     the card's Done is shown and enabled, which it is only while the draft still holds the typed text. Last on the page,
+     and the screen runs alone, because the note it posts rebuilds this channel's feed until the spec expires it. */
   "app.chat.choice-other-redraw": [{ name: "choice-other-redraw", rows: FEED_ROWS, prefer: '[data-signal-id="{message.choiceOpen}"]',
     require: ['[data-signal-id="{message.choiceOpen}"]'], max: 1, focus: true,
-    focusTarget: '.hm-decision [data-decision-other-input]:has(~ [data-decision-submit]:not([disabled]))',
+    focusTarget: '.hm-decision:has([data-decision-submit]:not([disabled]):not([hidden])) [data-decision-other-input]',
     focusAcrossRebuild: true, refreshChannel: "channel.private" }],
   "app.thread": [{ name: "feed", rows: FEED_ROWS, max: 6, focus: true }],
   "app.todos": [{ name: "todos", rows: ":is([data-todo-row], [data-home-todo])", max: 6, focus: true }],

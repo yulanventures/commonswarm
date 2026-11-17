@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { buildChoiceCard, type ChoiceCardVM } from "../../lib/choice-card";
+import { buildChoiceCard, setChoiceCardTitle, type ChoiceCardVM } from "../../lib/choice-card";
 import { parseAskChoices, type AskChoiceState, type ChoiceDraft, type ChoiceSubmission } from "../../lib/choices";
 import { needsYouCard, NEEDS_YOU_CHOICE_ACTION } from "../../lib/home-primitives";
 import { signalHasEnded } from "../../lib/signal-history";
@@ -29,6 +29,7 @@ class FakeElement {
   prepend(...nodes: Array<FakeElement | string>) { for (const n of [...nodes].reverse()) { if (typeof n !== "string") { n.remove(); n.parentElement = this; } this.children.unshift(n); } }
   remove() { if (this.parentElement) { const p = this.parentElement; p.children = p.children.filter(child => child !== this); this.parentElement = null; } }
   replaceWith(other: FakeElement) { const p = this.parentElement!; const index = p.children.indexOf(this); other.remove(); p.children[index] = other; other.parentElement = p; this.parentElement = null; }
+  after(other: FakeElement) { const p = this.parentElement!; other.remove(); p.children.splice(p.children.indexOf(this) + 1, 0, other); other.parentElement = p; }
   setAttribute(name: string, value: string) { this.attrs.set(name, String(value)); }
   getAttribute(name: string) { return this.attrs.get(name) ?? null; }
   removeAttribute(name: string) { this.attrs.delete(name); }
@@ -53,6 +54,9 @@ const has = (cls: string) => (el: FakeElement) => el.className.split(" ").includ
 const asDoc = (doc: FakeDocument) => doc as unknown as Document;
 const form = (root: FakeElement) => root.one(el => el.tagName === "FORM");
 const asEl = (el: HTMLElement) => el as unknown as FakeElement;
+/** Each row's letter badge, in order. */
+const letters = (root: FakeElement) => root.find(has("hm-decision__letter")).map(badge => badge.textContent);
+const done = (root: FakeElement) => root.one(el => el.dataset.decisionSubmit !== undefined);
 
 const SIGNAL = "44444444-4444-4444-8444-444444444444";
 const OPTIONS = [
@@ -81,24 +85,60 @@ test("an open single-choice card: recommended first, descriptions as a second li
   assert.ok(buttons.every(b => b.type === "button" && b.className === "hm-decision__option"));
   buttons[2]!.fire("click");
   assert.deepEqual(submits, [{ optionIds: ["wait"], otherText: null }]);
-  // Other is the last row of the same stack, and never an input inside a button.
+  // Something else is the last row of the same stack, and never an input inside a button.
   const list = root.one(has("hm-decision__options"));
   const last = list.children.at(-1) as FakeElement;
   assert.ok(last.dataset.decisionOther !== undefined);
   for (const control of root.find(el => el.tagName === "BUTTON")) assert.equal(control.find(el => el.tagName === "INPUT" || el.tagName === "BUTTON").length, 0);
+  assert.equal(root.find(has("hm-decision__hint")).length, 0, "single choice has no hint: a tap answers");
+  assert.equal(done(root).hidden, true, "no Done while every answer is a tap");
 });
 
-test("Other expands to a labelled field, Enter or Submit sends its text, and Escape on an empty field collapses back to Other", () => {
+test("rows carry letters in display order, the native control is kept, and Something else takes the next letter", () => {
+  const single = card({ state: state() });
+  assert.deepEqual(letters(single.root), ["A", "B", "C", "D"], "three options, then Something else as D");
+  const rows = single.root.find(has("hm-decision__option"));
+  assert.deepEqual(rows.map(row => row.one(has("hm-decision__letter")).textContent), ["A", "B", "C", "D"], "each row holds its own letter");
+  assert.ok(rows.every(row => row.one(has("hm-decision__letter")).getAttribute("aria-hidden") === "true"), "letters add nothing to a row's name");
+  assert.ok(has("hm-decision__option--other")(rows[3]!));
+  assert.equal(rows[3]!.one(has("hm-decision__label")).textContent, "Something else");
+
+  const six = state({ multi: true, options: ["a", "b", "c", "d", "e", "f"].map(id => ({ id, label: id.toUpperCase() })) });
+  const multi = card({ state: six });
+  assert.deepEqual(letters(multi.root), ["A", "B", "C", "D", "E", "F", "G"], "six options, then Something else as G");
+  const boxes = multi.root.find(el => el.tagName === "INPUT" && el.type === "checkbox");
+  assert.equal(boxes.length, 7, "every row keeps its native checkbox, Something else included");
+  for (const box of boxes) {
+    const label = box.parentElement!;
+    assert.equal(label.tagName, "LABEL");
+    assert.equal(label.children[0], box, "the checkbox comes first in its label, before the letter");
+    assert.ok(has("hm-decision__letter")(label.children[1] as FakeElement));
+    assert.equal(label.one(has("hm-decision__mark")).textContent, "✓", "a check beside the letter shows a tick without colour");
+  }
+
+  const answered = card({ state: state({ answer: { optionId: "wait", optionIds: ["wait"], otherText: null, byViewer: true, actorUserId: null, at: null } }) });
+  assert.deepEqual(letters(answered.root), ["A", "B", "C", "D"], "a completed card keeps the same letters");
+});
+
+test("Something else expands to a labelled field and Done, Enter or Done sends its text, and Escape on an empty field folds both away", () => {
   const { doc, root, submits, drafts } = card({ state: state() });
   const trigger = root.one(el => el.dataset.decisionOtherTrigger !== undefined);
   const field = root.one(has("hm-decision__other-field"));
   const input = root.one(el => el.dataset.decisionOtherInput !== undefined);
-  const submit = root.one(el => el.dataset.decisionSubmit !== undefined);
-  assert.equal(trigger.textContent, "Other…");
+  const submit = done(root);
+  assert.equal(trigger.one(has("hm-decision__label")).textContent, "Something else");
+  assert.ok(has("hm-decision__option--other")(trigger));
+  // Open, the row reads as picked: its check (shown by aria-expanded) sits beside the filled letter, as on a ticked row.
+  assert.deepEqual([trigger.one(has("hm-decision__mark")).textContent, trigger.one(has("hm-decision__mark")).getAttribute("aria-hidden")], ["✓", "true"]);
   assert.deepEqual([trigger.getAttribute("aria-expanded"), trigger.getAttribute("aria-controls"), field.hidden], ["false", field.id, true]);
-  assert.equal(input.getAttribute("aria-label"), "Other answer");
+  assert.deepEqual([input.getAttribute("aria-label"), input.placeholder, input.maxLength], ["Something else", "Type your answer…", 500]);
+  assert.equal(input.parentElement, field, "the field is a sibling of the row, never inside it");
+  assert.deepEqual([submit.textContent, submit.hidden, submit.type], ["Done", true, "submit"], "Done waits until Something else opens");
   trigger.fire("click");
   assert.deepEqual([trigger.getAttribute("aria-expanded"), field.hidden, doc.activeElement === input], ["true", false, true]);
+  assert.equal(submit.hidden, false, "Something else open: Done shows");
+  assert.equal(submit.parentElement, form(root), "Done is the form's own last control, outside the row and the field");
+  assert.equal(form(root).children.at(-1), submit);
   assert.equal(submit.disabled, true, "nothing to send yet");
   form(root).fire("submit");
   assert.equal(submits.length, 0);
@@ -111,19 +151,23 @@ test("Other expands to a labelled field, Enter or Submit sends its text, and Esc
   input.value = ""; input.fire("input");
   assert.equal(input.fire("keydown", { key: "Escape" }).defaultPrevented, true);
   assert.deepEqual([field.hidden, trigger.getAttribute("aria-expanded"), doc.activeElement === trigger], [true, "false", true]);
+  assert.equal(submit.hidden, true, "folded: Done goes again");
 });
 
-test("a multi-select card builds a draft with native checkboxes and sends it once with one Submit", () => {
+test("a multi-select card has the hint, builds a draft with native checkboxes and sends it once with one Done", () => {
   const { doc, root, submits } = card({ state: state({ multi: true }) });
   assert.equal(root.dataset.decisionMode, "multi");
+  const hint = root.one(has("hm-decision__hint"));
+  assert.deepEqual([hint.tagName, hint.textContent], ["P", "Choose all that apply"]);
+  assert.equal(root.children[0], hint, "the hint is the card's first line, above the form");
   const boxes = root.find(el => el.tagName === "INPUT" && el.type === "checkbox" && el.dataset.decisionOption !== undefined);
   assert.deepEqual(boxes.map(b => b.dataset.decisionOption), ["skip", "ship", "wait"]);
   assert.ok(boxes.every(b => b.parentElement!.tagName === "LABEL"), "each checkbox is labelled by its row");
   const submits_ = root.find(el => el.dataset.decisionSubmit !== undefined);
-  assert.equal(submits_.length, 1, "one Submit for the card");
+  assert.equal(submits_.length, 1, "one Done for the card");
   const submit = submits_[0]!;
   assert.equal(submit.parentElement, form(root));
-  assert.equal(submit.disabled, true);
+  assert.deepEqual([submit.textContent, submit.hidden, submit.disabled], ["Done", false, true], "multi-select always shows Done, off until something is ticked");
   boxes[1]!.checked = true; boxes[1]!.fire("change");
   boxes[0]!.checked = true; boxes[0]!.fire("change");
   assert.equal(submit.disabled, false);
@@ -146,7 +190,7 @@ test("a multi-select card builds a draft with native checkboxes and sends it onc
   assert.equal(boxes[2]!.checked, false);
 });
 
-test("single choice: Other text sends only while its field is open", () => {
+test("single choice: Something else text sends only while its field is open", () => {
   const { root, submits } = card({ state: state(), draft: { selected: [], otherOpen: false, otherText: "kept from before" } });
   const submit = root.one(el => el.dataset.decisionSubmit !== undefined);
   assert.equal(submit.disabled, true);
@@ -176,9 +220,17 @@ test("a rebuild puts the draft back; pending blocks every path but keeps focus t
   form(pending.root).fire("submit");
   assert.equal(pending.submits.length, 0, "a pending ask takes no second answer");
   assert.equal(pending.root.one(el => el.dataset.decisionOtherInput !== undefined).readOnly, true);
-  assert.equal(pending.root.one(el => el.getAttribute("role") === "status").textContent, "Sending…");
+  // Done shows "Sending…"; the status line says it to screen readers only, so it is never on screen twice.
+  assert.deepEqual([done(pending.root).textContent, done(pending.root).hidden], ["Sending…", false]);
+  const status = pending.root.one(el => el.getAttribute("role") === "status");
+  assert.deepEqual([status.textContent, status.className], ["Sending…", "hm-sr-only"]);
+  // A tapped row: no Done, so the line says it on screen.
+  const tapped = card({ state: state(), pending: true });
+  assert.equal(done(tapped.root).hidden, true);
+  assert.equal(tapped.root.one(el => el.getAttribute("role") === "status").className, "hm-decision__foot");
   const multiPending = card({ state: state({ multi: true }), pending: true });
   assert.equal(multiPending.root.find(el => el.tagName === "INPUT" && el.type === "checkbox")[0]!.fire("click").defaultPrevented, true);
+  assert.equal(done(multiPending.root).textContent, "Sending…");
 
   const refused = card({ state: state(), error: "This kind of answer can't be sent here yet. Pick one of the options instead.", draft: { selected: [], otherOpen: true, otherText: "x" } });
   const alert = refused.root.one(el => el.getAttribute("role") === "alert");
@@ -195,11 +247,15 @@ test("an answered card keeps every row, read-only, marks what was chosen, and na
   assert.equal(root.find(el => ["BUTTON", "INPUT", "LABEL"].includes(el.tagName)).length, 0, "no controls");
   const items = root.find(el => el.tagName === "LI");
   assert.deepEqual(items.map(li => [li.dataset.decisionOption ?? "other", li.dataset.chosen]),
-    [["skip", "false"], ["ship", "true"], ["wait", "true"], ["other", "true"]], "every offered row stays, Other shows its text");
+    [["skip", "false"], ["ship", "true"], ["wait", "true"], ["other", "true"]], "every offered row stays, Something else shows its text");
   assert.equal(items[1]!.one(has("hm-decision__mark")).textContent, "✓");
   assert.equal(items[1]!.one(has("hm-sr-only")).textContent, ", chosen", "chosen is said in words too");
+  assert.equal(items[0]!.find(has("hm-decision__mark")).length, 0, "an unchosen row has no check");
   assert.equal(items[1]!.one(has("hm-decision__description")).textContent, "Today, before the visit");
-  assert.equal(items[3]!.one(has("hm-decision__description")).textContent, "and lunch");
+  assert.deepEqual([items[3]!.one(has("hm-decision__label")).textContent, items[3]!.one(has("hm-decision__description")).textContent],
+    ["Something else", "and lunch"]);
+  assert.ok(has("hm-decision__option--other")(items[3]!));
+  assert.equal(root.find(has("hm-decision__hint")).length, 0, "a completed card has no hint");
   const foot = root.one(has("hm-decision__foot"));
   assert.equal(foot.textContent, "Chosen by you · 10:00 AM");
   assert.equal(foot.one(el => el.tagName === "TIME").dateTime, "2026-11-16T10:00:00Z");
@@ -207,6 +263,9 @@ test("an answered card keeps every row, read-only, marks what was chosen, and na
   const amys = state({ answer: { optionId: "wait", optionIds: ["wait"], otherText: null, byViewer: false, actorUserId: null, at: null } });
   const theirs = card({ state: amys, chooser: "Amy" });
   assert.equal(theirs.root.one(has("hm-decision__foot")).textContent, "Chosen by Amy", "no time until the server gives one");
+  const quiet = theirs.root.find(el => el.tagName === "LI").at(-1)!;
+  assert.deepEqual([quiet.dataset.decisionOther, quiet.dataset.chosen, quiet.find(has("hm-decision__description")).length], ["", "false", 0],
+    "Something else unused: still the last row, unchosen, with nothing under it");
   // An answer wins over expiry and over being someone else's card.
   assert.equal(card({ state: amys, ended: true, interactive: false }).root.dataset.decisionState, "answered");
 });
@@ -215,7 +274,7 @@ test("expired, answered in words and not-yours cards are read-only with every ro
   const expired = card({ state: state(), ended: true });
   assert.equal(expired.root.dataset.decisionState, "expired");
   assert.equal(expired.root.one(has("hm-decision__foot")).textContent, "Expired · Not answered");
-  assert.deepEqual(expired.root.find(el => el.tagName === "LI").map(li => li.dataset.chosen), ["false", "false", "false"]);
+  assert.deepEqual(expired.root.find(el => el.tagName === "LI").map(li => li.dataset.chosen), ["false", "false", "false", "false"]);
   const replied = card({ state: state(), repliedInWords: true });
   assert.equal(replied.root.one(has("hm-decision__foot")).textContent, "Answered");
   const repliedThenEnded = card({ state: state(), repliedInWords: true, ended: true });
@@ -224,11 +283,11 @@ test("expired, answered in words and not-yours cards are read-only with every ro
   const notYours = card({ state: state(), interactive: false });
   assert.equal(notYours.root.dataset.decisionState, "readonly");
   assert.equal(notYours.root.find(has("hm-decision__foot")).length, 0);
-  assert.deepEqual(notYours.root.find(el => el.tagName === "LI").map(li => li.dataset.decisionOption), ["skip", "ship", "wait"]);
+  assert.deepEqual(notYours.root.find(el => el.tagName === "LI").map(li => li.dataset.decisionOption ?? "other"), ["skip", "ship", "wait", "other"]);
   assert.equal(notYours.root.find(el => ["BUTTON", "INPUT"].includes(el.tagName)).length, 0);
 });
 
-test("Waiting on you shows the same card, with Other in place of Reply, and sends through the card", () => {
+test("Waiting on you shows the same card, with Something else in place of Reply, and sends through the card", () => {
   const doc = new FakeDocument();
   const n: NeedsYouVM = { id: SIGNAL, kind: "ask", workspace: { id: "W", name: "Home", href: "/app?w=W" },
     from: { id: "amy", name: "Amy", firstName: "Amy", initials: "A", you: false, role: "member" }, what: "Amy asked you: ‘Ship?’", when: "1 hour ago",
@@ -246,6 +305,12 @@ test("Waiting on you shows the same card, with Other in place of Reply, and send
   assert.deepEqual(actions, [`${NEEDS_YOU_CHOICE_ACTION}wait`]);
   const sample = asEl(needsYouCard(asDoc(doc), { ...n, sample: true } as NeedsYouVM, () => {}));
   assert.equal(sample.find(has("hm-decision")).length, 0, "samples get no card");
+  // Multi-select: the hint opens the card, under the card's own question heading.
+  const multi = asEl(needsYouCard(asDoc(doc), { ...n, choices: { options: OPTIONS, multi: true } }, () => {}, { submit: () => {} }));
+  const box = multi.one(has("hm-decision"));
+  assert.equal((box.children[0] as FakeElement).textContent, "Choose all that apply");
+  assert.equal(box.find(has("hm-decision__title")).length, 0, "the card's heading is the question; the box adds no second title");
+  assert.deepEqual(letters(box), ["A", "B", "C", "D"]);
 });
 
 // The feed: appendChoices lifted from the dashboard, run with the real card builder.
@@ -266,15 +331,19 @@ function feed(viewer = "zoe") {
   const context: Record<string, unknown> = {
     document: doc, Date, Intl, session: { user: { id: viewer } }, activeWorkspaceId: "W", sampleMode: false,
     choiceRows: new Map<string, AskChoiceState>(), choiceErrors: new Map(), choiceDrafts: new Map(), choiceIsPending: () => false,
-    buildChoiceCard, signalHasEnded, entityName: (entity: { id: string }) => ({ amy: "Amy", zoe: "Zoe" } as Record<string, string>)[entity.id] ?? "Someone",
+    buildChoiceCard, setChoiceCardTitle, signalHasEnded, entityName: (entity: { id: string }) => ({ amy: "Amy", zoe: "Zoe" } as Record<string, string>)[entity.id] ?? "Someone",
     sendChoice: (id: string, submission: ChoiceSubmission) => sent.push([id, submission]),
   };
   runInNewContext(lift(["choiceDraftKey", "choiceViewerMayAnswer", "choiceChooserName", "choiceAnsweredAt", "appendChoices"]), context);
-  const row = (signal: Record<string, unknown>, replied = false) => {
-    const body = doc.createElement("div"); const question = doc.createElement("div"); question.className = "dashboard__message-markdown";
-    question.textContent = "Which quote?"; body.append(question);
+  /* As buildMessageRow calls it: "self" is a one-block question (the message text is the title), "separate" is prose
+     then a question (the text keeps the prose, a second node is the title), "none" is a body kept whole. */
+  const row = (signal: Record<string, unknown>, replied = false, title: "self" | "separate" | "none" = "self") => {
+    const body = doc.createElement("div"); const text = doc.createElement("div"); text.className = "dashboard__message-markdown";
+    text.textContent = title === "self" ? "Which quote?" : "Three quotes came back."; body.append(text);
+    const question = title === "separate" ? doc.createElement("div") : null;
+    if (question) { question.className = "dashboard__message-markdown"; question.textContent = "Which quote?"; }
     (context.appendChoices as (...args: unknown[]) => void)(body, { id: SIGNAL, kind: "ask", from: "agent-1", fromKind: "agent", to: viewer, toAgent: null,
-      until: "2999-01-01T00:00:00Z", createdAt: "2026-11-16T09:00:00Z", ...signal }, question, replied);
+      until: "2999-01-01T00:00:00Z", createdAt: "2026-11-16T09:00:00Z", ...signal }, text, replied, false, title === "self" ? text : question ?? undefined);
     return body;
   };
   return { doc, context, sent, row };
@@ -286,8 +355,11 @@ test("in the feed the question moves into the card, and only the person it asks 
   const body = f.row({});
   const decision = body.children[0] as FakeElement;
   assert.ok(has("hm-decision")(decision), "the card takes the question's place");
-  assert.equal((decision.children[0] as FakeElement).className, "dashboard__message-markdown", "the question is the card's first line");
-  assert.equal(form(decision).find(el => el.className === "dashboard__message-markdown").length, 0, "the question is outside the form: nothing in it can submit an answer");
+  assert.equal(body.children.length, 1, "a one-block question is shown once, in the card");
+  const title = decision.children[0] as FakeElement;
+  assert.equal(title.className, "dashboard__message-markdown hm-decision__title", "the question is the card's bold title");
+  assert.deepEqual([decision.getAttribute("aria-labelledby"), decision.getAttribute("aria-label")], [title.id, null], "the question names the group");
+  assert.equal(form(decision).find(has("dashboard__message-markdown")).length, 0, "the question is outside the form: nothing in it can submit an answer");
   assert.equal(decision.dataset.decisionState, "open");
   decision.find(el => el.tagName === "BUTTON" && el.dataset.decisionOption === "wait")[0]!.fire("click");
   assert.deepEqual(f.sent, [[SIGNAL, { optionIds: ["wait"], otherText: null }]]);
@@ -304,7 +376,27 @@ test("in the feed the question moves into the card, and only the person it asks 
   assert.equal((plainBody.children[0] as FakeElement).className, "dashboard__message-markdown", "no stored choices, no card");
 });
 
-test("in the feed, Other text typed before a rebuild is in the rebuilt card, and its Submit sends that text", () => {
+test("in the feed, prose stays in the message above the card and the question titles it; a body kept whole leaves the card untitled", () => {
+  const f = feed();
+  (f.context.choiceRows as Map<string, AskChoiceState>).set(SIGNAL, state({ multi: true }));
+  const split = f.row({}, false, "separate");
+  const [prose, decision] = split.children as FakeElement[];
+  assert.deepEqual([prose!.className, prose!.textContent], ["dashboard__message-markdown", "Three quotes came back."], "the prose stays the message");
+  assert.ok(has("hm-decision")(decision!), "the card follows the prose");
+  assert.deepEqual([(decision!.children[0] as FakeElement).className, (decision!.children[0] as FakeElement).textContent],
+    ["dashboard__message-markdown hm-decision__title", "Which quote?"]);
+  assert.equal((decision!.children[1] as FakeElement).textContent, "Choose all that apply", "the hint sits under the title");
+
+  const whole = f.row({}, false, "none");
+  const [text, untitled] = whole.children as FakeElement[];
+  assert.equal(text!.className, "dashboard__message-markdown", "the whole body stays in the message");
+  assert.ok(has("hm-decision")(untitled!));
+  assert.equal(untitled!.find(has("hm-decision__title")).length, 0, "no title: nothing is guessed from the body");
+  assert.equal(untitled!.getAttribute("aria-label"), "Choices");
+  assert.equal((untitled!.children[0] as FakeElement).textContent, "Choose all that apply");
+});
+
+test("in the feed, Something else text typed before a rebuild is in the rebuilt card, and its Done sends that text", () => {
   const f = feed();
   (f.context.choiceRows as Map<string, AskChoiceState>).set(SIGNAL, state());
   const first = f.row({}).children[0] as FakeElement;
@@ -317,8 +409,8 @@ test("in the feed, Other text typed before a rebuild is in the rebuilt card, and
   const input = rebuilt.one(el => el.dataset.decisionOtherInput !== undefined);
   const trigger = rebuilt.one(el => el.dataset.decisionOtherTrigger !== undefined);
   const submit = rebuilt.one(el => el.dataset.decisionSubmit !== undefined);
-  assert.deepEqual([input.value, trigger.getAttribute("aria-expanded"), rebuilt.one(has("hm-decision__other-field")).hidden, submit.disabled],
-    ["Harbor, but after 10am", "true", false, false]);
+  assert.deepEqual([input.value, trigger.getAttribute("aria-expanded"), rebuilt.one(has("hm-decision__other-field")).hidden, submit.hidden, submit.disabled],
+    ["Harbor, but after 10am", "true", false, false, false]);
   form(rebuilt).fire("submit");
   assert.deepEqual(f.sent, [[SIGNAL, { optionIds: [], otherText: "Harbor, but after 10am" }]]);
 });

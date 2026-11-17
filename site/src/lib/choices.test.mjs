@@ -1,7 +1,7 @@
 /** Reached by `npm --prefix site test` through the src/lib/*.test.mjs glob. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { answerChoiceCommand, answerNeedsV2, cleanOtherText, draftSubmission, orderedChoiceOptions, parseAskChoices } from "./choices.ts";
+import { answerChoiceCommand, answerNeedsV2, cleanOtherText, draftSubmission, orderedChoiceOptions, parseAskChoices, splitChoicePrompt } from "./choices.ts";
 
 const SIGNAL = "44444444-4444-4444-8444-444444444444";
 const ACTOR = "55555555-5555-4555-8555-555555555555";
@@ -70,4 +70,39 @@ test("a draft sends only real options and clean Other text, and an empty draft s
   assert.equal(cleanOtherText("x".repeat(501)), null);
   assert.equal(cleanOtherText("line\nbreak"), null);
   assert.equal(cleanOtherText(" ok "), "ok");
+});
+
+test("a choice prompt splits only when nothing can be lost: one plain block is the question; prose then a plain question line splits", () => {
+  // One paragraph: the question alone, shown once as the card's title.
+  assert.deepEqual(splitChoicePrompt("  Ship the Tuesday build?  "), { prose: null, question: "Ship the Tuesday build?" });
+  assert.deepEqual(splitChoicePrompt("Pick one for dinner"), { prose: null, question: "Pick one for dinner" }, "a one-block prompt needn't end in ?");
+  // Two or more: the prose stays the message, the last line is the question.
+  assert.deepEqual(splitChoicePrompt("All seven Intercom replies are drafted.\n\nWhich Intercom replies should I send?"),
+    { prose: "All seven Intercom replies are drafted.", question: "Which Intercom replies should I send?" });
+  assert.deepEqual(splitChoicePrompt("First.\r\n\r\nSecond, with **bold**.\n \n\nWhich one?"),
+    { prose: "First.\n\nSecond, with **bold**.", question: "Which one?" }, "CRLF and blank-ish lines split too; Markdown in the prose is kept");
+  // Anything else stays whole above an untitled card.
+  const whole = (body) => ({ prose: body.trim(), question: null });
+  for (const body of [
+    "Here is the plan.\n\nI'll start on Monday.",                       // the last block isn't a question
+    "Here is the plan.\n\nShould I start\non Monday?",                  // the last block is two lines
+    "Options:\n\n- one\n- two?",                                        // a list where the question would be
+    "Context.\n\n> Quote?",                                             // a quote
+    "Context.\n\n# Which?",                                             // a heading
+    "Context.\n\n1. First?",                                            // a numbered list
+    "Context.\n\n| a | b |?",                                           // a table row
+    "```\ncode\n```\n\nWhich?",                                         // a code fence anywhere
+    "~~~\ncode\n\nmore\n~~~\n\nWhich?",
+    "- just a list",                                                    // one block that is a list
+    "Pick one:\n- a\n- b",                                              // one block with a list under its first line
+    "Which?\n> quoted",                                                 // one block with a quote line
+    `Context.\n\n${"Why ".repeat(60)}?`,                                // a question past 240 characters
+    "x".repeat(241),                                                    // one block past 240 characters
+  ]) assert.deepEqual(splitChoicePrompt(body), whole(body), JSON.stringify(body));
+  assert.deepEqual(splitChoicePrompt("x".repeat(240)), { prose: null, question: "x".repeat(240) }, "240 characters is still a title");
+  // The prose is the body's own text: indented code keeps its four spaces, and a leading indented line stays code.
+  assert.deepEqual(splitChoicePrompt("Run these first:\n\n    npm ci\n    npm test\n\nShould I push?"),
+    { prose: "Run these first:\n\n    npm ci\n    npm test", question: "Should I push?" });
+  assert.deepEqual(splitChoicePrompt("\n    npm ci\n\nShould I push?"), { prose: "    npm ci", question: "Should I push?" });
+  assert.deepEqual(splitChoicePrompt("    npm ci\n\nI ran it."), { prose: "    npm ci\n\nI ran it.", question: null });
 });

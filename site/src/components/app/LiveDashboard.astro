@@ -1425,8 +1425,8 @@ import "../../styles/kylon-command-palette.css";
     type AgentStatusEvent,
     type MessageStatus,
   } from "../../lib/message-status";
-  import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, type AskChoiceState, type ChoiceDraft, type ChoiceSubmission } from "../../lib/choices";
-  import { buildChoiceCard } from "../../lib/choice-card";
+  import { ASK_CHOICES_BATCH, CHOICE_ANSWER_FAILED, splitChoicePrompt, type AskChoiceState, type ChoiceDraft, type ChoiceSubmission } from "../../lib/choices";
+  import { buildChoiceCard, setChoiceCardTitle } from "../../lib/choice-card";
   import { REACTION_PICKER_EMOJIS, pickerMove, reactionNames, reactionPillLabel, type ReactionGroup } from "../../lib/reactions";
   import {
     agentActivityFrameIsNewer,
@@ -7904,18 +7904,20 @@ import "../../styles/kylon-command-palette.css";
       if (!Number.isFinite(at)) return null;
       return { iso: iso!, text: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(at)) };
     };
-    /* Moves the message's question into the card, in the question's place. Nothing happens for an
-       ask without stored choices (or before they are read): it keeps its ordinary rendering. */
-    const appendChoices = (body: HTMLElement, signal: Signal, question?: HTMLElement, repliedInWords = false, checking = false): void => {
+    /* Puts the card in the message. `text` is the message's rendered body; `title` is the question the card shows as its
+       bold title: `text` itself for a one-block question (the card takes its place), a separate node when the body has
+       prose before its question (the card follows the prose), or none when the body stays whole above the card. Nothing
+       happens for an ask without stored choices (or before they are read): it keeps its ordinary rendering. */
+    const appendChoices = (body: HTMLElement, signal: Signal, text?: HTMLElement, repliedInWords = false, checking = false, title?: HTMLElement): void => {
       const state = choiceRows.get(signal.id);
       if (!state) {
-        // Waiting for the first choices read: the card's box around the question, and nothing else.
-        if (checking && question && question.parentElement === body) {
+        // Waiting for the first choices read: the card's box around the whole body, and nothing else.
+        if (checking && text && text.parentElement === body) {
           const shell = document.createElement("div");
           shell.className = "hm-decision";
           shell.dataset.decision = signal.id; shell.dataset.decisionState = "checking";
           shell.setAttribute("aria-busy", "true");
-          question.replaceWith(shell); shell.prepend(question);
+          text.replaceWith(shell); shell.prepend(text);
         }
         return;
       }
@@ -7931,8 +7933,10 @@ import "../../styles/kylon-command-palette.css";
         draft: (draft) => { choiceDrafts.set(draftKey, draft); },
       });
       if (card.dataset.decisionState !== "open" && card.dataset.decisionState !== "pending") card.tabIndex = -1;
-      if (question && question.parentElement === body) { question.replaceWith(card); card.prepend(question); }
-      else body.append(card);
+      if (text && text.parentElement === body) {
+        if (title === text) text.replaceWith(card); else text.after(card);
+      } else body.append(card);
+      if (title) setChoiceCardTitle(card, title);
     };
 
     const sendChoice = async (signalId: string, submission: ChoiceSubmission): Promise<void> => {
@@ -9596,29 +9600,43 @@ import "../../styles/kylon-command-palette.css";
          * returns null and every "## Heading" an agent writes renders as literal text, which is
          * how a long agent report arrived as a wall of "#" characters. A message sits under the
          * channel title, so its "#" becomes an h2 rather than competing with the page's h1. */
-        setSanitizedMessageMarkdown(markdown, signal.body, { headingOffset: 1 });
-        /* AFTER the sanitizer, over the sanitized tree's text nodes only. A brain topic an agent
-         * named becomes a control that opens that topic, Markdown-rendered, in the Brain panel.
-         * Running it here rather than inside the renderer keeps it out of the innerHTML path:
-         * it builds elements, never HTML strings, so it adds no injection surface. */
-        linkifyBrainTopics(markdown, {
-          topics: brainTopicNames(),
-          open: (topic) => void openBrainTopic(topic),
-        });
-        /* Mentions the author wrote, drawn where their names stand. Who is mentioned comes from
-           the stored rows; the body is only searched for those names. Rows the server added
-           (the lead, a thread's participants) have no words in the body and draw nothing. */
+        /* A choice ask whose body ends in a plain question shows that question once, as the decision card's title; any
+           paragraphs before it stay here as the message. A body that can't be split safely stays here whole, above an
+           untitled card, and until its choices are read the whole body stays here too (splitChoicePrompt). */
+        const choicePrompt = choiceRows.has(signal.id) ? splitChoicePrompt(signal.body) : null;
+        const choiceQuestion = choicePrompt?.prose != null && choicePrompt.question !== null ? document.createElement("div") : null;
         const authored = (signalMentionRows.get(signal.id) ?? []).filter((mention) => mention.source === "author");
-        if (authored.length > 0) {
-          const keys = new Set(authored.map((mention) => `${mention.kind}:${mention.id}`));
-          markMentions(
-            markdown,
-            mentionTargets(agents, members).filter((target) => keys.has(`${target.entity.kind}:${target.entity.id}`)),
-            (entity) => entity.kind === "person"
-              ? entity.id === viewerId
-              : agents.some((agent) => agent.principalId === entity.id && agent.ownerUserId === viewerId),
-          );
+        const renderMessageText = (element: HTMLElement, text: string): void => {
+          setSanitizedMessageMarkdown(element, text, { headingOffset: 1 });
+          /* AFTER the sanitizer, over the sanitized tree's text nodes only. A brain topic an agent
+           * named becomes a control that opens that topic, Markdown-rendered, in the Brain panel.
+           * Running it here rather than inside the renderer keeps it out of the innerHTML path:
+           * it builds elements, never HTML strings, so it adds no injection surface. */
+          linkifyBrainTopics(element, {
+            topics: brainTopicNames(),
+            open: (topic) => void openBrainTopic(topic),
+          });
+          /* Mentions the author wrote, drawn where their names stand. Who is mentioned comes from
+             the stored rows; the body is only searched for those names. Rows the server added
+             (the lead, a thread's participants) have no words in the body and draw nothing. */
+          if (authored.length > 0) {
+            const keys = new Set(authored.map((mention) => `${mention.kind}:${mention.id}`));
+            markMentions(
+              element,
+              mentionTargets(agents, members).filter((target) => keys.has(`${target.entity.kind}:${target.entity.id}`)),
+              (entity) => entity.kind === "person"
+                ? entity.id === viewerId
+                : agents.some((agent) => agent.principalId === entity.id && agent.ownerUserId === viewerId),
+            );
+          }
+        };
+        renderMessageText(markdown, choiceQuestion && choicePrompt?.prose ? choicePrompt.prose : signal.body);
+        if (choiceQuestion && choicePrompt?.question) {
+          choiceQuestion.className = "dashboard__message-markdown";
+          renderMessageText(choiceQuestion, choicePrompt.question);
         }
+        // The card's title: the separate question, or the whole one-block body itself. None when the body stays whole.
+        const choiceTitle = choiceQuestion ?? (choicePrompt && choicePrompt.prose === null ? markdown : undefined);
         if (!expandedSignalIds.has(signal.id)) {
           markdown.classList.add("dashboard__message-markdown--collapsed");
         }
@@ -9676,7 +9694,7 @@ import "../../styles/kylon-command-palette.css";
            the receipt says yet, so touch layouts can give its status badge room without the row changing height later. */
         if (signal.toAgent !== null) row.dataset.deliveryTracked = "";
         appendMessageStatus(body, signal, meta);
-        appendChoices(body, signal, markdown, streamSignal?.answered ?? false, choiceChecking);
+        appendChoices(body, signal, markdown, streamSignal?.answered ?? false, choiceChecking, choiceTitle);
         /* Reactions sit under the message, before the row's tools; they are never in the floating footer. */
         appendReactions(body, signal);
         /* THE REPLY CONTROL, offered only where the server would accept the thread.

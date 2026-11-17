@@ -106,6 +106,38 @@ export function orderedChoiceOptions(options: readonly ChoiceOption[]): ChoiceOp
   return [...recommended, ...options.filter((option) => !option.recommended)];
 }
 
+/** The longest question the card takes as its title. */
+export const CHOICE_TITLE_MAX = 240;
+// A list, quote, table or heading on any line of a block.
+const BLOCK_PREFIX_RE = /^[ \t]*(?:[-*+>|#]|\d+\.)/mu;
+
+/**
+ * A choice ask's body as the card shows it, split only when nothing can be lost or mis-titled:
+ * - one plain block of at most 240 characters is the question alone (prose null): the card's title, shown once;
+ * - two or more blocks whose last is one plain line ending in "?" (at most 240 characters): the blocks before it are
+ *   prose, kept in the message above the card, and that line is the card's title;
+ * - anything else (a code fence anywhere, a list, quote, table or heading where the question would be, a long or
+ *   multi-line last block, or one that isn't a question): the whole body is prose and the card has no title.
+ */
+export function splitChoicePrompt(body: string): { prose: string | null; question: string | null } {
+  // Leading blank lines and trailing space go; the prose keeps its own indentation (an indented code line stays code).
+  const text = body.replace(/\r\n?/gu, "\n").replace(/^(?:[ \t]*\n)+/u, "").trimEnd();
+  const whole = { prose: text, question: null };
+  if (/```|~~~/u.test(text)) return whole;
+  const plain = (block: string) => !BLOCK_PREFIX_RE.test(block) && Array.from(block).length <= CHOICE_TITLE_MAX;
+  const separators = Array.from(text.matchAll(/\n[ \t]*\n/gu));
+  const lastSeparator = separators[separators.length - 1];
+  const prose = lastSeparator ? text.slice(0, lastSeparator.index).trimEnd() : "";
+  if (!lastSeparator || !prose.trim()) {
+    const question = text.trim();
+    return plain(question) ? { prose: null, question } : whole;
+  }
+  // The prose is the body's own text up to the last blank line, never re-joined from trimmed blocks.
+  const last = text.slice((lastSeparator.index ?? 0) + lastSeparator[0].length).trim();
+  if (!last || !plain(last) || last.includes("\n") || !last.endsWith("?")) return whole;
+  return { prose, question: last };
+}
+
 /** Trimmed Other text that can be sent, or null. Control characters are refused rather than silently changed. */
 export function cleanOtherText(text: string): string | null {
   const trimmed = text.trim();

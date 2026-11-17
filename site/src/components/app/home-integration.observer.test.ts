@@ -35,6 +35,7 @@ import { isTaggable } from '../../lib/mention-address';
 import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage } from '../../lib/household-access';
 import { workspaceLeadLine, buildSharedCard } from '../../lib/home-side-cards';
 import type { HomeOverview } from '../../lib/home/contract';
+import { splitChoicePrompt } from '../../lib/choices';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -49,6 +50,7 @@ const MESSAGE_STATUS_STUBS = {
   appendChoices: () => undefined,
   choiceRows: new Map(),
   choiceAwaitsCheck: () => false,
+  splitChoicePrompt,
   resetChoices: () => undefined,
   // Read positions have their own test (channel-reads.observer.test.ts).
   paintUnreadDivider: () => undefined,
@@ -510,6 +512,10 @@ test('workspace and channel composers keep their own addresses when a thread clo
   assert.equal(input.placeholder, 'Message #general', 'the lead is named in the header, never in the box');
   runInContext("channel={slug:'marketing'}; syncComposerPlacement();", context);
   assert.equal(input.placeholder, 'Message #marketing');
+  // A Direct Message names its partner, even with an open choice ask there: a typed message is not bound to the ask
+  // (it goes without in_reply_to), so the box never promises to answer it. The card's Something else answers it.
+  runInContext("var activeDm={kind:'agent',id:'orbit'}; var entityName=()=>'Orbit'; channel=null; syncComposerPlacement();", context);
+  assert.deepEqual([input.placeholder, attributes.get('aria-label')], ['Message Orbit', 'Message Orbit']);
 });
 
 /** Record the row builder's tree operations. Sanitizing and topic parsing are separate
@@ -1130,6 +1136,44 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     assert.equal(toggle?.getAttribute('aria-expanded'), 'true');
     assert.equal(markdown.classes.has('dashboard__message-markdown--collapsed'), false);
   }
+});
+test('a choice ask renders its prose as the message and its question as a separate title, or one block as the title, or stays whole', async () => {
+  const document = { createElement: (tag: string) => new RowNode(tag) };
+  const calls: { text: RowNode | undefined; title: RowNode | undefined }[] = [];
+  const context = createContext({ ...MESSAGE_STATUS_STUBS, document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras, signalHasEnded, homeAskAnswered,
+    choiceRows: new Map([['S-choice', { signalId: 'S-choice', multi: false, options: [], answer: null }]]),
+    appendChoices: (_body: RowNode, _signal: unknown, text?: RowNode, _replied?: boolean, _checking?: boolean, title?: RowNode) => { calls.push({ text, title }); },
+    window: { requestAnimationFrame() {} },
+    setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
+  });
+  runInContext(`
+    const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='tom', now=0;
+    const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map(), signalMentionRows=new Map();
+    const removedAgentOwners=new Map(), agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map();
+    const streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
+    const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'tom',
+      ownerFirstName:'Tom',ownerInitial:'T',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
+    const signalIsDirectToViewer=(signal,viewer)=>signal.to===viewer, initials=()=>'', kindLabel=kind=>kind;
+    const formatTime=()=>({absolute:'Oct 5',relative:'Now'}), channelById=()=>null, brainTopicNames=()=>[];
+    const appendDeliveryReceipt=()=>{}, canStartThread=()=>false, threadReplyRoot=null;
+  `, context);
+  runInContext(await dashboardFunctions(['buildMessageRow'], ['markThreadReplyRoot', 'humanSeenScopeFor']), context);
+  const build = (id: string, body: string) => runInContext(`buildMessageRow(${JSON.stringify({ id, from: 'claude', fromKind: 'agent', kind: 'ask', body,
+    to: 'tom', toAgent: null, about: null, attachments: [], channelId: null, createdAt: '2026-10-05T12:00:00Z' })},false)`, context) as RowNode;
+  build('S-choice', 'All seven replies are drafted.\n\nWhich replies should I send?');
+  let call = calls.at(-1)!;
+  assert.equal(call.text?.textContent, 'All seven replies are drafted.', 'the prose stays the message text');
+  assert.equal(call.title?.textContent, 'Which replies should I send?', 'the question is its own node, for the card');
+  assert.notEqual(call.title, call.text);
+  build('S-choice', 'Ship the Tuesday build?');
+  call = calls.at(-1)!;
+  assert.equal(call.title, call.text, 'one block: the message text itself is the title, shown once');
+  build('S-choice', 'Here is the plan.\n\n- one\n- two');
+  call = calls.at(-1)!;
+  assert.deepEqual([call.text?.textContent, call.title], ['Here is the plan.\n\n- one\n- two', undefined], 'a body that cannot split stays whole, untitled');
+  build('S-plain', 'Draft.\n\nWhich one?');
+  call = calls.at(-1)!;
+  assert.deepEqual([call.text?.textContent, call.title], ['Draft.\n\nWhich one?', undefined], 'no choices read: the whole body, as before');
 });
 test('an unknown write outcome is shown plainly; a late result never writes to the next workspace', async () => {
   const context = createContext({ ...MESSAGE_STATUS_STUBS,  HomeCommandRefused, HomeToolsUnavailable, CommandOutcomeUnknown, crypto: { randomUUID: () => 'request-1' } });
