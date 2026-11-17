@@ -1786,6 +1786,11 @@ import "../../styles/kylon-command-palette.css";
     /* Private channels' member agents, by account, workspace and channel: the header names only a lead that is a
        member, and the Channel lead select offers only members. Absent: not read; null: being read, or not readable. */
     const privateChannelAgentIds = new Map<string, Set<string> | null>();
+    /* The latest members read for each key, as a token only that read holds. Only it may write; an older read that
+       answers later, or any read that answers after a reset, writes nothing. */
+    const privateChannelMemberReads = new Map<string, object>();
+    /** At every workspace or account reset: forget what was read, and retire every read still in flight. */
+    const forgetPrivateChannelMembers = (): void => { privateChannelAgentIds.clear(); privateChannelMemberReads.clear(); };
     let railOverviewGeneration = 0;
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
@@ -10480,7 +10485,7 @@ import "../../styles/kylon-command-palette.css";
       homeRailKey = "";
       homeCatchUpKey = "";
       homeOverviewCounts.clear();
-      privateChannelAgentIds.clear();
+      forgetPrivateChannelMembers();
       // The People page's hosts may sit in the route pane: park them before it is cleared.
       parkPeopleHosts();
       layout.refreshTodoContext(() => {
@@ -13133,19 +13138,32 @@ import "../../styles/kylon-command-palette.css";
       const key = privateMembersKey(channelId);
       return key ? privateChannelAgentIds.get(key) ?? null : null;
     };
-    /** Read a private channel's member agents now. When they land for the same account and workspace, the header is
-        drawn again and `then` runs. A set already read stays in use meanwhile. */
+    /** Read a private channel's member agents now. Only the latest read for this account, workspace and channel,
+        answering before any reset or newer page request, writes: then the header is drawn again and `then` runs. A set
+        already read stays in use meanwhile. */
     const readPrivateChannelMembers = (channel: WorkspaceChannel, then?: () => void): void => {
       const key = privateMembersKey(channel.channelId);
       if (!key || !session || !activeWorkspaceId || sampleMode || channel.visibility !== "private") return;
-      const workspaceId = activeWorkspaceId, userId = session.user.id, channelId = channel.channelId;
+      const workspaceId = activeWorkspaceId, userId = session.user.id, channelId = channel.channelId, version = requestVersion;
+      const token = {};
+      privateChannelMemberReads.set(key, token);
       if (!privateChannelAgentIds.get(key)) privateChannelAgentIds.set(key, null);
+      const latest = (): boolean => privateChannelMemberReads.get(key) === token;
       void channelAgentMemberIds(workspaceId, channelId).then(ids => {
-        if (workspaceId !== activeWorkspaceId || session?.user.id !== userId) return;
+        if (!latest()) return;
+        privateChannelMemberReads.delete(key);
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || session?.user.id !== userId) {
+          // The page moved on without a reset: drop the answer, and let the next ask read again.
+          if (privateChannelAgentIds.get(key) === null) privateChannelAgentIds.delete(key);
+          return;
+        }
         privateChannelAgentIds.set(key, new Set(ids));
         syncChannelLeadPill();
         then?.();
-      }, () => { /* Not read: the header names no lead here, and the select offers the stored lead only. */ });
+      }, () => {
+        // Not read: the header names no lead here and the select offers the stored lead only, until settings read again.
+        if (latest()) privateChannelMemberReads.delete(key);
+      });
     };
     /** A private channel's member agents when known. The first ask for a channel starts its one read. */
     const privateChannelMembersFor = (channel: WorkspaceChannel): ReadonlySet<string> | null => {

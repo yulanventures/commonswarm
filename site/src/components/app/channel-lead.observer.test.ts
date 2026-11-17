@@ -14,18 +14,19 @@ import {
   CommandAttempts, SET_LEAD_LABEL, channelLead, channelLeadFromValue, channelLeadOptions, channelLeadValue, namedChannelLead,
 } from '../../lib/channel-lead';
 
-async function dashboardFunctions(names: string[]): Promise<string> {
+/** `optional`: declarations an older source may lack, so a test run against it fails on behaviour, not on a missing name. */
+async function dashboardFunctions(names: string[], optional: string[] = []): Promise<string> {
   const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
   const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found = new Map<string, string>();
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && names.includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && [...names, ...optional].includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
     ts.forEachChild(node, visit);
   };
   visit(ast);
   for (const name of names) assert.ok(found.has(name), `production declaration ${name}`);
-  return ts.transpileModule(names.map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  return ts.transpileModule([...optional.filter(name => found.has(name)), ...names].map(name => found.get(name)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
 
 /** Just enough DOM: children, dataset hooks, listeners, focus. A select's value must name one of its options. */
@@ -115,13 +116,13 @@ async function dashboard(overrides: Record<string, unknown> = {}) {
       channelRow(OTHER, 'garden', { createdByPrincipal: 'u3' })])};
     let channelsLoaded = true, railArchivedOpen = false;
     let managedChannelId = null, channelDialogOriginal = null, channelDialogPending = false, channelDialogEpoch = 0;
-    const privateChannelAgentIds = new Map();
+    const privateChannelAgentIds = new Map(), privateChannelMemberReads = new Map();
     const channelLeadAttempts = new CommandAttempts();
   `, context);
   runInContext(await dashboardFunctions(['activeWorkspaceLeadAgent', 'viewerMaySetWorkspaceLead', 'viewerWorkspaceRole', 'viewerMayManageChannel',
     'activeChannel', 'syncChannelLeadPill', 'channelSettingsChanges', 'channelLeadChange', 'syncChannelSettingsSubmit', 'renderChannelLeadSelect',
     'privateMembersKey', 'knownPrivateChannelMembers', 'readPrivateChannelMembers', 'privateChannelMembersFor',
-    'loadChannelLeadMembers', 'channelDialogOwns', 'applyChannelResult', 'submitChannelSettings']), context);
+    'loadChannelLeadMembers', 'channelDialogOwns', 'applyChannelResult', 'submitChannelSettings'], ['forgetPrivateChannelMembers']), context);
   const run = <T = unknown>(code: string): T => runInContext(code, context) as T;
   /** The settings dialog as openChannelDialog leaves it, without its focus and return bookkeeping. */
   const openSettings = (channelId: string) => {
@@ -438,6 +439,52 @@ test('a private channel\'s header names only a member lead, and nothing until it
   sync(); sync();
   assert.equal(d.pill(), null);
   assert.equal(d.calls.members.length, reads);
+});
+
+test('only the latest members read writes: an older answer after a newer one, or any answer after a reset, changes nothing', async () => {
+  const held: Array<(ids: string[]) => void> = [];
+  const d = await dashboard({ channelAgentMemberIds: (...args: unknown[]) => {
+    d.calls.members.push(args);
+    return new Promise(resolve => { held.push(resolve); });
+  } });
+  const cached = () => plain([...(d.run<Set<string> | null>(`knownPrivateChannelMembers('${LOCKED}')`) ?? [])]);
+  // A private channel led by Builder. The header starts read A; opening its settings starts read B.
+  d.run(`activeChannelId = '${LOCKED}';`);
+  d.run('syncChannelLeadPill()');
+  d.openSettings(LOCKED);
+  assert.equal(held.length, 2);
+  const [readA, readB] = held;
+  readB!([ATLAS]); await tick();
+  assert.deepEqual(cached(), [ATLAS]);
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'the newer read: Builder is not a member');
+  assert.deepEqual(d.options().at(-1), [`agent:${BUILDER}`, 'Builder', 'disabled']);
+  readA!([BUILDER]); await tick();
+  assert.deepEqual(cached(), [ATLAS], 'the older read answered last: B\'s members stay');
+  assert.equal(d.pillText(), SET_LEAD_LABEL, 'the header does not name a lead the newer read excluded');
+  assert.deepEqual(d.options().at(-1), [`agent:${BUILDER}`, 'Builder', 'disabled']);
+
+  // A reset (workspace or account) between reads: the same channel is read again, then the retired read answers.
+  d.openSettings(LOCKED);
+  const retired = held.at(-1)!;
+  d.run(`typeof forgetPrivateChannelMembers === 'function' ? forgetPrivateChannelMembers() : privateChannelAgentIds.clear(); requestVersion++;`);
+  d.run('syncChannelLeadPill()');
+  assert.equal(d.pill(), null, 'after the reset nothing is known');
+  const fresh = held.at(-1)!;
+  assert.notEqual(fresh, retired, 'the header read the channel again');
+  fresh([ATLAS]); await tick();
+  assert.equal(d.pillText(), SET_LEAD_LABEL);
+  retired([BUILDER]); await tick();
+  assert.deepEqual(cached(), [ATLAS], 'the read from before the reset writes nothing');
+  assert.equal(d.pillText(), SET_LEAD_LABEL);
+
+  // A retired read that answers into a cache the reset emptied writes nothing either.
+  d.openSettings(LOCKED);
+  const beforeReset = held.at(-1)!;
+  d.run(`typeof forgetPrivateChannelMembers === 'function' ? forgetPrivateChannelMembers() : privateChannelAgentIds.clear(); requestVersion++;`);
+  beforeReset([BUILDER]); await tick();
+  assert.deepEqual(cached(), [], 'nothing written after the reset');
+  d.run('syncChannelLeadPill()');
+  assert.equal(d.pill(), null);
 });
 
 test('Set lead opens the channel\'s settings with the Channel lead select focused', async () => {
