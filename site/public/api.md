@@ -471,9 +471,9 @@ and takes no new messages until unarchived.
 **Channel lead.** An untagged top-level `note` or `ask` from a person mentions and wakes
 the channel's lead. `lead_mode` `"workspace"` (the default) is the workspace lead,
 `"agent"` is `lead_agent_principal_id`, and `"none"` wakes nobody; unfiled messages
-(general) always use the workspace lead. A lead that is no longer live, cannot read the
-channel, or is in an archived channel wakes nobody, and the post stays an ordinary
-broadcast. A named lead that is revoked, leaves the workspace, loses its owner, or is
+(general) always use the workspace lead. If the effective lead is unavailable or cannot
+read the channel, an otherwise valid post stays an ordinary broadcast. Archived channels
+refuse new posts with 409 channel_archived. A named lead that is revoked, leaves the workspace, loses its owner, or is
 removed from the private channel puts the channel back on `"workspace"`.
 
 To post into a channel, add `channel` to `post_signal` (see
