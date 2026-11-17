@@ -87,6 +87,40 @@ function stackImages() {
   return { cli: version, binary, images: [pinnedEdgeImage(), ...images] };
 }
 
+// The images the C1 docker stdin check (server shard 1) and the p1-cli Docker tests run by tag (#487). Each is
+// pulled only by its linux/amd64 manifest digest, read from the registry API, and tagged with the name its
+// consumers use, so `docker run <tag>` finds it locally. Every registry listed serves the same digest.
+// `users` must name the tag literally; the C1 check takes its tag from image-metadata (c1_psql_image).
+function dockerHubLibrary(name, digest) {
+  return [`${name}@${digest}`, `public.ecr.aws/docker/library/${name}@${digest}`, `mirror.gcr.io/library/${name}@${digest}`];
+}
+function supabaseRegistries(name, digest) {
+  return [`public.ecr.aws/supabase/${name}@${digest}`, `ghcr.io/supabase/${name}@${digest}`, `supabase/${name}@${digest}`];
+}
+const pinnedTestImages = [
+  { alias: 'c1-psql', image: 'postgres:17.12', digest: 'sha256:6f7593c161689b6b02c78668b314af7da8811b592c5519108c57a49d0b6ad788', registries: dockerHubLibrary, users: [] },
+  { alias: 'p1-cli-postgres', image: 'postgres:17.11', digest: 'sha256:996e9dc583ba9f0265a2c75547a9c95fb22c251e394749cab205a0a00e1856a1', registries: dockerHubLibrary,
+    users: ['tests/p1-cli/n-db-target-marker.test.ts', 'tests/p1-cli/n-db-freeze-hosted-shape.test.ts', 'tests/p1-cli/supabase-stack.test.ts'] },
+  { alias: 'p1-cli-box-postgres', image: 'public.ecr.aws/supabase/postgres:17.6.1.147', digest: 'sha256:0c0d3539aaf3c8c09a9a5b044ad3f709470e7241f3e4c69e1572bfac1b90a24b', registries: supabaseRegistries,
+    users: ['tests/p1-cli/n-db-cron-jobs.test.ts'] },
+];
+function testImages() {
+  return pinnedTestImages.map(({ alias, image, digest, registries, users }) => {
+    for (const file of users) {
+      assert.ok(readFileSync(file, 'utf8').includes(`"${image}"`), `${file} no longer runs ${image}; review pinnedTestImages in scripts/ci/server-suite.mjs`);
+    }
+    const name = image.replace(/:[^/:]+$/, '').split('/').pop();
+    return { alias, image, digest, candidates: registries(name, digest) };
+  });
+}
+function imageSet(set = 'stack') {
+  assert.ok(set === 'stack' || set === 'test', `unknown image set: ${set}`);
+  return set === 'test' ? { label: 'pinned test images', images: testImages() } : { label: 'pinned images', images: stackImages().images };
+}
+function repositoryOf(reference) {
+  return reference.split('@')[0].replace(/:[^/:]+$/, '').replace(/^library\//, '');
+}
+
 function docker(args) {
   return spawnSync('docker', args, { encoding: 'utf8', timeout: 180_000 });
 }
@@ -159,9 +193,9 @@ async function pullAll(images) {
   }));
   return entries;
 }
-async function prepareImages(directory, cacheHit) {
+async function prepareImages(directory, cacheHit, set) {
   mkdirSync(directory, { recursive: true });
-  const { images } = stackImages();
+  const { label, images } = imageSet(set);
   const archive = join(directory, 'images.tar.zst');
   const lockPath = join(directory, 'images.json');
   const snapshot = `${directory}-before-start.json`;
@@ -175,7 +209,7 @@ async function prepareImages(directory, cacheHit) {
       for (const { image } of images) assert.equal(identity(image), lock.entries[image]?.identity, `cached image identity: ${image}`);
       rmSync(archive);
       writeFileSync(snapshot, `${JSON.stringify(localImages())}\n`);
-      console.log(`Restored and verified ${images.length} pinned images from the cache; no registry pulls.`);
+      console.log(`Restored and verified ${images.length} ${label} from the cache; no registry pulls.`);
       return;
     } catch (error) {
       console.log(`::warning title=Image cache::Cached images could not be verified; pulling them. ${String(error.message).split('\n')[0]}`);
@@ -186,7 +220,7 @@ async function prepareImages(directory, cacheHit) {
   assert.equal(saved.status, 0, saved.stderr || saved.error?.message || 'docker save failed');
   writeFileSync(lockPath, `${JSON.stringify({ images, entries }, null, 2)}\n`);
   writeFileSync(snapshot, `${JSON.stringify(localImages())}\n`);
-  console.log(`Pulled ${images.length} pinned images; cache archive ${(statSync(archive).size / 1e9).toFixed(2)} GB`);
+  console.log(`Pulled ${images.length} ${label}; cache archive ${(statSync(archive).size / 1e9).toFixed(2)} GB`);
   // Only a complete pull gets here. A cache miss saves the archive once the stack check passes.
   if (cacheHit !== 'true' && process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'save=true\n');
 }
@@ -206,6 +240,21 @@ function checkStackImages(directory) {
   const unused = images.filter(({ alias, image }) => alias !== 'edge-runtime-pinned' && !used.has(image));
   if (unused.length) console.log(`::warning title=Image cache::Cached but not started: ${unused.map(({ alias }) => alias).join(', ')}`);
   console.log(`Local stack started ${containers.length} containers from cached images; supabase start pulled 0 images.`);
+}
+// Run after the C1 check and the p1-cli suite: each pinned test image still has its cached identity, and no
+// image appeared in their repositories (a pull under another tag or digest). Other new images are listed.
+function checkTestImages(directory) {
+  const { images, entries } = JSON.parse(readFileSync(join(directory, 'images.json'), 'utf8'));
+  const before = new Set(JSON.parse(readFileSync(`${directory}-before-start.json`, 'utf8')));
+  const repositories = new Set(images.flatMap(({ image, candidates }) => [image, ...candidates].map(repositoryOf)));
+  const added = localImages().filter(entry => !before.has(entry));
+  const pulled = added.filter(entry => repositories.has(repositoryOf(entry.slice(entry.indexOf(' ') + 1))));
+  const changed = images.filter(({ image }) => inspect(image) === undefined || identity(image) !== entries[image]?.identity).map(({ image }) => image);
+  const other = added.filter(entry => !pulled.includes(entry));
+  if (other.length) console.log(`::warning title=Image cache::New images outside the image caches since the pinned test images were loaded:%0A${other.join('%0A')}`);
+  assert.deepEqual(changed, [], `pinned test images changed or went missing after they were loaded; something pulled them:\n${changed.join('\n')}`);
+  assert.deepEqual(pulled, [], `images were pulled into the pinned test image repositories; point the caller at the pinned tag in scripts/ci/server-suite.mjs:\n${pulled.join('\n')}`);
+  console.log(`Checked ${images.length} pinned test images: unchanged, none pulled from a registry.`);
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -237,6 +286,15 @@ switch (command) {
   }
   case 'image-metadata': {
     // stdout goes to GITHUB_OUTPUT; the list goes to the log.
+    if (args[0] === 'test') {
+      const images = testImages();
+      console.error(`${images.length} pinned test images:`);
+      for (const { alias, image, digest } of images) console.error(`  ${alias}: ${image} ${digest}`);
+      console.log(`key=${createHash('sha256').update(JSON.stringify({ images })).digest('hex')}`);
+      console.log(`c1_psql_image=${images.find(({ alias }) => alias === 'c1-psql').image}`);
+      break;
+    }
+    assert.ok(args[0] === undefined || args[0] === 'stack', `unknown image set: ${args[0]}`);
     const { cli, binary, images } = stackImages();
     console.error(`Supabase CLI ${cli} (${binary}); ${images.length} pinned images:`);
     for (const { alias, image } of images) console.error(`  ${alias}: ${image}`);
@@ -244,11 +302,14 @@ switch (command) {
     break;
   }
   case 'prepare-images':
-    await prepareImages(args[0], args[1]);
+    await prepareImages(args[0], args[1], args[2]);
     break;
   case 'check-stack-images':
     checkStackImages(args[0]);
     break;
+  case 'check-test-images':
+    checkTestImages(args[0]);
+    break;
   default:
-    throw new Error('Expected list, receipt, verify, image-metadata, prepare-images, or check-stack-images');
+    throw new Error('Expected list, receipt, verify, image-metadata, prepare-images, check-stack-images, or check-test-images');
 }
