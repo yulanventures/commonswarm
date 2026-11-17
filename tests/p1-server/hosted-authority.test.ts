@@ -4488,6 +4488,14 @@ test("claim_seat replays only the same request_id or agent_id; a taken name, ign
   const live = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.agent_principals
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND lower(name) = lower(${name}) AND revoked_at IS NULL`;
   assert.equal(live[0]?.n, 1, "one live agent per name, ignoring case");
+
+  // Witness: the owner removes an agent, then claims its name again and gets a new agent.
+  // A removed agent's seat and membership never hold the name.
+  await removeHostedSeat(fixture, fixture.grantA, second.body.seat_id);
+  const again = claimAs(fixture, `${name} 2`);
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.notEqual(again.body.principal_id, second.body.principal_id, "a new agent, never the removed one");
+  assert.notEqual(again.body.handle, second.body.handle);
   const refusals = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.audit_log
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
       AND outcome = 'domain' AND reason = 'hosted_seat_name_taken'`;
