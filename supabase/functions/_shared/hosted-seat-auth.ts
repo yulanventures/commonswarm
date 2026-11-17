@@ -299,10 +299,13 @@ export async function resolveHostedConnectionContext(
       // The name is the seat row's, which rename_agent keeps current. The SQL resolver above
       // is pinned by release catalogs, so the agent is added here rather than there.
       if (context === null || seat === null) return context;
+      // A name may hold U+2028 or U+2029, which no name rule refuses. The summary stays on one
+      // line, as the resolver keeps its own part; agent.name keeps the name exactly.
+      const oneLine = seat.name.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
       return {
         ...context,
         agent: { principal_id: seat.principal_id, name: seat.name },
-        summary: `${context.summary} This chat's agent is "${seat.name}".`,
+        summary: `${context.summary} This chat's agent is "${oneLine}".`,
       };
     });
   } finally {

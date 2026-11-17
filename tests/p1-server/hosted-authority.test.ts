@@ -2086,7 +2086,15 @@ test("accepted removal fences concurrent same-name and new-name claims", { timeo
     assert.equal(result.removed.status, 200, JSON.stringify(result.removed.body));
     assert.ok((sameName ? [403, 409] : [200, 403]).includes(result.claimed.status), JSON.stringify(result.claimed));
     const newIdentitySurvived = !sameName && result.claimed.status === 200;
-    assert.equal(result.refused.status, newIdentitySurvived ? 200 : 403, "no cached capability survives committed removal");
+    // The follow-up claim reuses the claimed name on a new request_id. When the new identity
+    // survived, that name is its live agent's, so the still-valid capability reaches the name
+    // decision and is told so (409 naming that agent); a fenced capability is refused 403.
+    assert.equal(result.refused.status, newIdentitySurvived ? 409 : 403, "no cached capability survives committed removal");
+    if (newIdentitySurvived) {
+      assert.equal(result.refused.body.error, "hosted_seat_name_taken", JSON.stringify(result.refused.body));
+      assert.equal(result.refused.body.existing_agent_id, result.claimed.body.principal_id,
+        "the live capability reached the decision and named its own surviving agent");
+    }
     if (result.claimed.status === 200) await assertSeatAccess(fixture, result.claimed, fixture.workspaceA, newIdentitySurvived ? 200 : 403);
   }
 });
@@ -3202,9 +3210,10 @@ test("hosted context HTTP preserves null email and keeps hostile names on one su
   const results = contextHttp(fixture);
   for (const row of results) {
     const context = assertContext(row, fixture, undefined, false, undefined, undefined,
-      { displayName, email: null, workspaceAName: workspaceName });
+      { displayName, email: null, workspaceAName: workspaceName }) as ConnectionContext & { agent?: { name: string } };
     assert.equal(context.summary,
-      "Connected as HM  owner display name in HM  workspace A name ; 2 approved workspace(s) available.");
+      "Connected as HM  owner display name in HM  workspace A name ; 2 approved workspace(s) available. This chat's agent is \"context-fixture-seat\".");
+    assert.equal(context.agent?.name, "context-fixture-seat");
   }
 });
 
@@ -3339,7 +3348,13 @@ test("context resolver runs under migrated read/command roles and denies forged 
           ${options.workspace ?? fixture.workspaceA}::uuid, ${options.handle ?? String(seat.handle)}) AS context`;
         return row!.context;
       };
-      assert.deepEqual(await resolve(), initial[0]!.body.context, role + " positive control");
+      // The SQL resolver is unchanged and pinned by release catalogs. The edge adds the seat's
+      // agent and one summary line (resolveHostedConnectionContext in _shared/hosted-seat-auth.ts).
+      const { agent, ...served } = initial[0]!.body.context as ConnectionContext & { agent?: { principal_id: string; name: string } };
+      assert.deepEqual(agent, { principal_id: seat.principal_id, name: seat.name }, role + " served agent is the seat's");
+      const suffix = ` This chat's agent is "${String(seat.name)}".`;
+      assert.ok(served.summary.endsWith(suffix), served.summary);
+      assert.deepEqual(await resolve(), { ...served, summary: served.summary.slice(0, -suffix.length) }, role + " positive control");
       for (const options of [{ owner: fixture.other }, { principal: randomUUID() }, { provider: `provider-${fixture.grantB}` },
         { handle: "seat_" + "Z".repeat(22) }, { tool: "note" }, { grant: fixture.grantB }, { workspace: fixture.workspaceB }]) {
         assert.equal(await resolve(options), null, role + " mismatched binding refuses metadata");
