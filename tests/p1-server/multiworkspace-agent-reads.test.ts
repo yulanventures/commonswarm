@@ -63,6 +63,8 @@ let note: string;
 let ask: string;
 let multi: string;
 let homeNote: string;
+/** A member's ask to `lead` in `shared`: its owner reads it only through the agent (receipts test). */
+let memberAsk: string;
 /** A held to-do in `shared` assigned to `lead` (home_overview test). */
 let heldShared: string;
 /** The to-do `lead` is doing in `shared` (home_overview test). */
@@ -188,6 +190,16 @@ async function asPerson<T>(person: Person, query: (tx: postgres.TransactionSql) 
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: person.id, role: "authenticated" })}, true)`;
     return await query(tx);
   }) as T;
+}
+
+/** swarm_read.signals under any claims, as PostgREST or the read edge would install them. */
+async function viewIdsWithClaims(claims: Row, workspace: string): Promise<string[]> {
+  return await sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE authenticated`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+    const rows = await tx<{ id: string }[]>`SELECT id FROM swarm_read.signals WHERE workspace_id = ${workspace}::uuid`;
+    return rows.map((row) => row.id);
+  });
 }
 
 async function receiptsAs(person: Person, workspace: string, signal: string): Promise<Row | null> {
@@ -402,6 +414,31 @@ test("the agent reads its own direct messages in a normal read, never in its inb
   assert.equal((await viewIds(owner, shared)).includes(toMember), false, "the owner does not read its agent's message to a person");
   assert.ok((await viewIds(member, shared)).includes(toMember), "control: the person it was sent to reads it");
   assert.equal((await viewIds(bystander, shared)).includes(toMember), false, "a bystander does not");
+
+  // A person's own direct message: its author reads it. Under the agent's claims, which carry the owner's sub, the
+  // view admits the agent's own message and not the owner's: asked of the view itself, where the edge cannot narrow.
+  const ownerToMember = await posted(owner.jwt, shared, { to_user_id: member.id });
+  const memberToOwner = await posted(member.jwt, shared, { to_user_id: owner.id });
+  const ownerToBystander = await posted(owner.jwt, shared, { to_user_id: bystander.id });
+  assert.ok((await viewIds(owner, shared)).includes(ownerToMember), "the author reads their direct message");
+  const asLead = await viewIdsWithClaims({ sub: owner.id, role: "authenticated", agent_principal_id: lead.principal }, shared);
+  assert.equal(asLead.includes(ownerToMember), false, "the agent's claims do not read its owner's direct message");
+  assert.ok(asLead.includes(toMember), "while they read the agent's own");
+
+  // The web Direct Message screen's query (site/src/lib/signal-feed.ts directConversationFilter, whose exact
+  // output the site unit test pins) through PostgREST with the author's own token.
+  const conversation = `and(from_kind.eq.user,from.eq.${owner.id},to.eq.${member.id}),` +
+    `and(from_kind.eq.user,from.eq.${member.id},to.eq.${owner.id})`;
+  const rest = await fetch(`${local.API_URL}/rest/v1/signals?select=id&workspace_id=eq.${shared}&or=(${conversation})`, {
+    signal: AbortSignal.timeout(15_000),
+    headers: { apikey: local.ANON_KEY, authorization: `Bearer ${owner.jwt}`, "accept-profile": "swarm_read" },
+  });
+  const restBody = await rest.text();
+  assert.equal(rest.status, 200, restBody);
+  const restIds = (JSON.parse(restBody) as Row[]).map((row) => String(row.id));
+  assert.ok(restIds.includes(ownerToMember), "the conversation query returns the author's own message");
+  assert.ok(restIds.includes(memberToOwner), "and the reply in the other direction");
+  assert.equal(restIds.includes(ownerToBystander), false, "but not the author's message to someone else");
 });
 
 test("receipts name the agent's reply in its second workspace, to the asker and to the agent's owner", { timeout: 120_000 }, async () => {
@@ -416,7 +453,7 @@ test("receipts name the agent's reply in its second workspace, to the asker and 
     [[lead.principal, lead.name, reply]], "the reply carries the agent's name");
 
   // Another member asks the agent; the agent answers them. Its owner reads both through the agent.
-  const memberAsk = await posted(member.jwt, shared, { signal_kind: "ask", to_agent_principal_id: lead.principal });
+  memberAsk = await posted(member.jwt, shared, { signal_kind: "ask", to_agent_principal_id: lead.principal });
   const answer = await posted(lead.token, shared, { in_reply_to: memberAsk, body: "done" });
   const oversight = await receiptsAs(owner, shared, memberAsk);
   assert.ok(oversight, "the owner reads the receipt of an ask to its agent");
@@ -541,7 +578,8 @@ test("removing the agent from the second workspace ends its reads there; its fir
   assert.deepEqual(await waitingIn(owner, home), [[heldHome, "hold", lead.principal]], "its first workspace is unchanged");
 
   const ownerView = await viewIds(owner, shared);
-  for (const id of [note, ask, multi]) {
+  // The owner wrote note, ask and multi (the author arm admits them too); memberAsk is read only through the agent.
+  for (const id of [note, ask, multi, memberAsk]) {
     assert.ok(ownerView.includes(id), `its owner still reads ${id}, as for an agent removed from its first workspace`);
   }
 });

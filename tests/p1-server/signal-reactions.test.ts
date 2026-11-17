@@ -347,21 +347,19 @@ test("a private message: only those it is addressed to react, and only their top
   const since = new Date();
   const unknown = await react(other.jwt, randomUUID(), "\u{1F44D}");
   assert.equal((await react(other.jwt, direct, "\u2705")).status, 200, "the recipient reacts");
-  // swarm_read.signals admits a private message to those it is addressed to, not to its author, so
-  // the author's reaction answers as an unknown id does, like their read.
-  const byAuthor = await react(owner.jwt, direct, "\u{1F44D}");
-  assert.equal(byAuthor.status, 404);
-  assert.deepEqual(byAuthor.body, unknown.body);
+  // ~~"the author's reaction answers as an unknown id does, like their read"~~ Since 20261117000004
+  // swarm_read.signals admits a message to its author, so the author reacts as its recipient does.
+  assert.equal((await react(owner.jwt, direct, "\u{1F44D}")).status, 200, "the author reacts");
   const sibling = await react(agentB.token, direct, "\u{1F44D}");
-  assert.equal(sibling.status, 404, "an agent of the author's is not addressed");
+  assert.equal(sibling.status, 404, "an agent of the author's is neither addressed nor its author");
   assert.deepEqual(sibling.body, unknown.body);
   assert.equal((await frames(workspaceTopic(), since)).some((p) => p.signal_id === direct), false);
   const toRecipient = await frames(memberTopic(other.id), since);
   assert.ok(toRecipient.length >= 1);
   for (const payload of toRecipient) assert.deepEqual(payload, { v: 1 });
-  assert.equal((await frames(memberTopic(owner.id), since)).length, 0, "the author's topic hears nothing it could not read");
-  assert.deepEqual((await reactionsSeenBy(other.id, direct)).map((r) => r.emoji), ["\u2705"]);
-  assert.deepEqual(await reactionsSeenBy(owner.id, direct), []);
+  assert.deepEqual((await reactionsSeenBy(other.id, direct)).map((r) => r.emoji), ["\u2705", "\u{1F44D}"]);
+  assert.deepEqual((await reactionsSeenBy(owner.id, direct)).map((r) => r.emoji), ["\u2705", "\u{1F44D}"],
+    "the author sees the reactions on their own message");
 
   // A message addressed to an agent: that agent reacts, and its owner's topic hears it; its sibling does not react,
   // and reading the view directly under the sibling's claims shows nothing.

@@ -1459,12 +1459,17 @@ test("P3-1 signals are authored, sanitized, isolated, idempotent, stale at read 
       about: null,
     });
     assert.equal(directed.status, 200);
+    const directedId = String((directed.body.signal as Record<string, unknown>).id);
     const senderRead = await humanSignalRead(
       f.uaJwt,
       f.workspaceA,
-      { id: `eq.${String((directed.body.signal as Record<string, unknown>).id)}` },
+      { id: `eq.${directedId}` },
     );
-    assert.deepEqual(senderRead.body.rows, []);
+    // ~~deepEqual(rows, [])~~ The author reads their own directed message since 20261117000004.
+    assert.deepEqual(
+      (senderRead.body.rows as Array<Record<string, unknown>>).map((row) => row.id),
+      [directedId],
+    );
     const recipientRead = await humanSignalRead(
       f.ua2Jwt,
       f.workspaceA,

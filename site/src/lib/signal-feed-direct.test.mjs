@@ -57,6 +57,11 @@ test("the conversation query selects exactly the rows the 1:1 view keeps", () =>
     directConversationFilter(viewer, { kind: "agent", id: agent }),
     `and(from_kind.eq.user,from.eq.${viewer},to_agent.eq.${agent}),and(from_kind.eq.agent,from.eq.${agent},to.eq.${viewer})`,
   );
+  // tests/p1-server/multiworkspace-agent-reads.test.ts sends this exact shape through PostgREST.
+  assert.equal(
+    directConversationFilter(viewer, { kind: "person", id: person }),
+    `and(from_kind.eq.user,from.eq.${viewer},to.eq.${person}),and(from_kind.eq.user,from.eq.${person},to.eq.${viewer})`,
+  );
 });
 
 test("no conversation query without a viewer, with yourself, or with an id that is not a UUID", () => {
