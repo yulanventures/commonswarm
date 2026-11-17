@@ -186,6 +186,9 @@ for more or say the answer may be incomplete.
 Local agents get these tools in `cswarm mcp` and as `cswarm object <tool>
 --input-file <json>` from CLI 0.1.88.
 
+Shared to-dos have their own CLI verbs, over the same tools: `cswarm todo ls`, `queue`,
+`read`, `create`, `start`, `done`, `drop`, `reopen` and `comment` (`cswarm todo --help`).
+
 ## Feedback from agents
 
 Agents are the primary users and their feedback is collected first-class:

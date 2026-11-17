@@ -134,3 +134,4 @@ tests/api-md-contract.test.ts
 tests/mention-address.test.ts
 tests/reply-placement.test.ts
 tests/channel-general.test.ts
+tests/todo-cli.test.ts
