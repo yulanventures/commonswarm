@@ -2284,7 +2284,7 @@ export function renderSignals(
           : `${options.workspace.name} (${options.workspace.id})`
       }:`;
   const feedScopeGuidance =
-    "This feed shows broadcast signals only. It omits directed messages, including messages you sent. Read messages directed to you with: cswarm inbox";
+    "This feed shows broadcast signals and messages you sent. Read messages directed to you with: cswarm inbox";
   if (signals.length === 0) {
     return [
       heading(options.inbox ? "Inbox" : "Recent broadcast signals"),

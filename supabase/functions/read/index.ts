@@ -1356,6 +1356,16 @@ async function handle(
         jsonb_build_object('kind', 'agent', 'id', ${agent.principal_id}::uuid)
       )
     )`;
+    /* WRITTEN BY THIS AGENT. Its own message to a person or another agent: the view admits it to
+     * these claims (swarm.claims_is_signal_sender, 20261117000004) and to no other agent of the same
+     * owner, and this keeps it in normal reads, threads and signal-by-id. Never in the inbox or
+     * check: nothing delivers an agent its own post, so a row that reaches the agent only this way
+     * stays out of `inbox: true` reads. */
+    const writtenByThisAgent = tx`(
+      ${body.inbox} = false
+      AND s.from_kind = 'agent'
+      AND s."from" = ${agent.principal_id}::uuid
+    )`;
     /* MENTIONED, the third way a message reaches this agent: an @tag, the lead on a person's
      * untagged post, or a thread the agent is in. Each is a row in swarm.signal_mentions on a
      * message the whole channel reads, and the same row is what woke the agent. The mention view
@@ -1457,6 +1467,7 @@ async function handle(
         AND (
           (s."to" IS NULL AND s.to_agent IS NULL)
           OR ${addressedToThisAgent}
+          OR ${writtenByThisAgent}
         )
         AND (
           ${body.inbox} = false

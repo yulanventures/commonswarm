@@ -1224,7 +1224,7 @@ import "../../styles/kylon-command-palette.css";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, renameAgent } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, directMessages, renameAgent } from "../../lib/commonswarm";
   import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
@@ -1813,6 +1813,11 @@ import "../../styles/kylon-command-palette.css";
     let signalFilter: SignalFilter = "all";
     /* The teammate whose 1:1 Direct Message is open in Chat (Grokbot model). Null: the group chat. */
     let activeDm: EntityRef | null = null;
+    /* The open Direct Message's own history (directMessages), read for the conversation instead of found in the
+       workspace's newest page. Kept apart from `signals`, whose cursor pages the whole feed; renderFeed shows the two
+       together. Bound to the workspace, viewer and teammate it was read for. */
+    let directHistory: { workspaceId: string; viewerId: string; partner: EntityRef; rows: Signal[] } | null = null;
+    let directHistoryTicket = 0;
     /* Channels the viewer can see, archived ones included: an archived channel still has to
        resolve for a permalink and still names the messages already in it. The rail lists the
        live ones only. */
@@ -5631,6 +5636,23 @@ import "../../styles/kylon-command-palette.css";
         else settle(result.status === "conflict" ? "This to-do changed. Reload to check." : homeRefusalCopy(result.reason), true);
       }).catch(() => { if (workspaceId === activeWorkspaceId) settle("The answer may not have been saved. Reload to check.", true); });
     };
+    /** Read the open Direct Message's history. Pinned to the workspace, viewer, teammate and screen version at the
+     *  request and dropped if any moved on before it landed; a newer read retires an older one. */
+    const loadDirectHistory = async (): Promise<void> => {
+      const ticket = ++directHistoryTicket;
+      const partner = activeDm;
+      const workspaceId = activeWorkspaceId;
+      const viewerId = session?.user.id ?? "";
+      const version = requestVersion;
+      if (!partner || !workspaceId || !viewerId || sampleMode) return;
+      let rows: Signal[];
+      // A failed read leaves the conversation as the newest page shows it; the next open or reload asks again.
+      try { rows = await directMessages(workspaceId, viewerId, partner); } catch { return; }
+      if (ticket !== directHistoryTicket || version !== requestVersion || workspaceId !== activeWorkspaceId ||
+        session?.user.id !== viewerId || activeDm?.kind !== partner.kind || activeDm?.id !== partner.id) return;
+      directHistory = { workspaceId, viewerId, partner, rows };
+      renderFeed();
+    };
     /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
      *  addressed to them, and their profile in the Details column. */
     const openDirectMessage = async (
@@ -5650,6 +5672,7 @@ import "../../styles/kylon-command-palette.css";
       renderHomeShell();
       syncComposerAddress(recipients);
       renderFeed();
+      void loadDirectHistory();
       syncComposerPlacement();
       renderHomeRail();
       const anchor = one<HTMLElement>(`[data-rail-${entity.kind === "agent" ? "agent" : "person"}="${CSS.escape(entity.id)}"]`) ?? one<HTMLElement>("[data-composer-input]");
@@ -9496,7 +9519,15 @@ import "../../styles/kylon-command-palette.css";
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
       const dm = typeof activeDm === "undefined" ? null : activeDm;
-      const visibleSignals = dm ? signals.filter(signal => signalIsDirectBetween(signal, viewerId, dm)) : filterSignals(signals, signalFilter, viewerId);
+      /* A Direct Message shows its own history beside the newest page, so it does not end where that page does. Rows
+         already in `signals` win: they carry this browser's posted and live state. */
+      const history = dm && directHistory && directHistory.workspaceId === activeWorkspaceId && directHistory.viewerId === viewerId &&
+        directHistory.partner.kind === dm.kind && directHistory.partner.id === dm.id ? directHistory.rows : [];
+      const loaded = new Set(signals.map(signal => signal.id));
+      const earlier = history.filter(signal => !loaded.has(signal.id) && signalIsReadable(signal, now));
+      const dmPool = earlier.length === 0 ? signals : [...signals, ...earlier].sort((a, b) =>
+        b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+      const visibleSignals = dm ? dmPool.filter(signal => signalIsDirectBetween(signal, viewerId, dm)) : filterSignals(signals, signalFilter, viewerId);
       const filterRow = one<HTMLElement>(".dashboard__feed-filters");
       if (filterRow) filterRow.hidden = !!dm;
       const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
@@ -10237,6 +10268,8 @@ import "../../styles/kylon-command-palette.css";
       signalCursor = last ? { createdAt: last.createdAt, id: last.id } : cursor;
       signalHasMore = page.hasMore;
       renderFeed();
+      // An open Direct Message rereads its own history with the page it sits beside.
+      if (reset && typeof activeDm !== "undefined" && activeDm) void loadDirectHistory();
       void refreshDeliveryReceipts(workspaceId, version);
       void refreshMessageStatus(workspaceId, version);
       void refreshChoices(workspaceId, version);

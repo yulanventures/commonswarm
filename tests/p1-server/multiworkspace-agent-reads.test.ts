@@ -321,8 +321,9 @@ test("a note, an ask and a multi-recipient message to the agent in its second wo
   assert.equal(feed.includes(homeNote), false, "a read names its workspace");
   assert.ok((await readIds(lead, home, true)).includes(homeNote), "its first workspace reads as before");
 
-  // Its owner, through swarm_read.signals. The view has no sender arm, so each of these is read through
-  // the agent the owner owns: the scalar arm for the note and the ask, the recipient arm for multi.
+  // Its owner, through swarm_read.signals. The owner wrote these, so since 20261117000004 the author arm admits
+  // them as well as the agent arms; the receipts test below reads a member's ask to the agent, which only the
+  // agent arm admits.
   const ownerView = await viewIds(owner, shared);
   for (const id of [...addressed, broadcast]) assert.ok(ownerView.includes(id), `the owner reads ${id}`);
 
@@ -381,6 +382,28 @@ test("a note, an ask and a multi-recipient message to the agent in its second wo
   assert.deepEqual(await check(lead, shared), [], "a second check is empty");
 });
 
+test("the agent reads its own direct messages in a normal read, never in its inbox or check (20261117000004)", { timeout: 120_000 }, async () => {
+  const toMember = await posted(lead.token, shared, { to_user_id: member.id });
+  const toSibling = await posted(lead.token, shared, { to_agent_principal_id: sibling.principal });
+  const own = [toMember, toSibling];
+
+  const feed = await readIds(lead, shared, false);
+  for (const id of own) assert.ok(feed.includes(id), `the agent's normal read holds what it sent: ${id}`);
+  const inbox = await readIds(lead, shared, true);
+  for (const id of own) assert.equal(inbox.includes(id), false, `its inbox does not: ${id}`);
+  const checked = await check(lead, shared);
+  for (const id of own) assert.equal(checked.includes(id), false, `nor its check: ${id}`);
+
+  // Only the author: the owner's other agent reads the message addressed to it and not the other one, and the
+  // owner reads neither as the agent's (oversight covers what is addressed to its agents, not what they send).
+  const siblingFeed = await readIds(sibling, shared, false);
+  assert.ok(siblingFeed.includes(toSibling), "control: the addressed agent reads it");
+  assert.equal(siblingFeed.includes(toMember), false, "another agent of the same owner does not read its message to a person");
+  assert.equal((await viewIds(owner, shared)).includes(toMember), false, "the owner does not read its agent's message to a person");
+  assert.ok((await viewIds(member, shared)).includes(toMember), "control: the person it was sent to reads it");
+  assert.equal((await viewIds(bystander, shared)).includes(toMember), false, "a bystander does not");
+});
+
 test("receipts name the agent's reply in its second workspace, to the asker and to the agent's owner", { timeout: 120_000 }, async () => {
   const reply = await posted(lead.token, shared, { in_reply_to: ask, body: "on it" });
   // The owner asked, so the receipt admits the owner as author; only the responder's name is in question.
@@ -397,6 +420,7 @@ test("receipts name the agent's reply in its second workspace, to the asker and 
   const answer = await posted(lead.token, shared, { in_reply_to: memberAsk, body: "done" });
   const oversight = await receiptsAs(owner, shared, memberAsk);
   assert.ok(oversight, "the owner reads the receipt of an ask to its agent");
+  assert.ok((await viewIds(owner, shared)).includes(memberAsk), "and the ask itself, through the agent it owns");
   assert.deepEqual((oversight.replies as Row[]).map((row) => [row.reply_signal_id, row.responder_display_name]), [[answer, lead.name]]);
   const asker = await receiptsAs(member, shared, memberAsk);
   assert.deepEqual((asker?.replies as Row[]).map((row) => [row.reply_signal_id, row.responder_display_name]), [[answer, lead.name]]);

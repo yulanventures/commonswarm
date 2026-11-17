@@ -21,6 +21,19 @@ export const signalIsDirectBetween = (signal: DirectSignal, viewerId: string, pa
   return (fromViewer && toPartner) || (fromPartner && signal.to === viewerId);
 };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `signalIsDirectBetween` as a PostgREST `or` over swarm_read.signals' scalar columns, so the server returns the
+ *  conversation itself rather than the newest page of the whole workspace. Null when no conversation can exist,
+ *  or an id is not a UUID and must not reach the filter string. */
+export const directConversationFilter = (viewerId: string, partner: DirectPartner): string | null => {
+  if (!UUID.test(viewerId) || !UUID.test(partner.id) || partner.id === viewerId) return null;
+  const toPartner = partner.kind === "agent" ? `to_agent.eq.${partner.id}` : `to.eq.${partner.id}`;
+  const partnerKind = partner.kind === "agent" ? "agent" : "user";
+  return `and(from_kind.eq.user,from.eq.${viewerId},${toPartner}),` +
+    `and(from_kind.eq.${partnerKind},from.eq.${partner.id},to.eq.${viewerId})`;
+};
+
 /* ~~"targets them or an agent they operate"~~ Dead 2026-09-01, by operator report:
  * in a solo-owner workspace the operator operates nearly every agent, so the
  * operated-agent clause made "Direct to you" degenerate into ALL directed

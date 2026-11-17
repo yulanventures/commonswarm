@@ -542,6 +542,8 @@ test("every view recreation kept the authorization clauses it started with", asy
         "to_user_id = auth.uid()",
         "to_agent_principal_id IS NULL",
         "owner_user_id = auth.uid()",
+        // The author arm (20261117000004).
+        "claims_is_signal_sender",
       ]
     ) {
       assert.ok(
