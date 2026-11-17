@@ -779,8 +779,8 @@ test("a hosted channel_read marks the mention it returns seen and counts the sea
     "one 👀, on the mention only");
   assert.equal((await deliveryOf(forB, fixture.principalB)).ack_outcome, null, "another seat's delivery is untouched");
   const receipts = await receiptsBy(fixture, fixture.principalA);
-  assert.deepEqual(receipts.map((row) => row.signal_id).sort(), [mention, forB, plain].sort(),
-    "every channel-wide post the page returned counts the seat, except its own");
+  assert.deepEqual(receipts.map((row) => row.signal_id).sort(), [mention, forB, plain, own].sort(),
+    "every channel-wide post the page returned counts the seat (its own too: M counts the author)");
 
   // Reading the same page again writes nothing new.
   const again = runHarness<HarnessResult>(fixture, { operation: "channel-read" });
@@ -799,7 +799,8 @@ test("only a check capability carries the channel_read seen command, and only fo
   const otherSeat = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", capabilityHandle: fixture.handleB, command });
   assert.equal(otherSeat.status, 403, JSON.stringify(otherSeat.body));
   const person = runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
-  assert.notEqual(person.status, 200, JSON.stringify(person.body));
+  assert.deepEqual({ status: person.status, body: person.body }, { status: 403, body: { error: "forbidden" } },
+    "public HTTP refuses the hosted-only kind before authentication");
   assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, null);
   assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), []);
   // Positive control: the seat's own check capability is accepted.

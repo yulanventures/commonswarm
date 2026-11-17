@@ -41,6 +41,7 @@ const PUBLIC_HOSTED_ONLY_COMMANDS = new Set([
   'claim_hosted_seat',
   'open_hosted_mcp_check_batch',
   'ack_hosted_mcp_check_batch',
+  'mark_hosted_channel_read_seen',
 ]);
 
 /** Public HTTP must stop these before credential classification or GoTrue. */

@@ -420,7 +420,8 @@ var PUBLIC_HOSTED_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "activate_hosted_mcp_grant",
   "claim_hosted_seat",
   "open_hosted_mcp_check_batch",
-  "ack_hosted_mcp_check_batch"
+  "ack_hosted_mcp_check_batch",
+  "mark_hosted_channel_read_seen"
 ]);
 function publicHostedCommandForbidden(kind) {
   return PUBLIC_HOSTED_ONLY_COMMANDS.has(kind);

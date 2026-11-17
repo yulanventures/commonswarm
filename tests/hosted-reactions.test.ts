@@ -16,6 +16,7 @@ import { HOSTED_SEEN_MARK_MAX, hostedSeenAckTargets } from "../supabase/function
 // @ts-expect-error TS5097: exercise the Deno source through tsx.
 import { channelReadSeenCommand, HOSTED_CHANNEL_READ_SEEN_KIND, HOSTED_CHANNEL_READ_SEEN_MAX, markChannelReadSeen } from "../supabase/functions/mcp/channel-seen.ts";
 import { readFile } from "node:fs/promises";
+import { publicHostedCommandForbidden } from "../src/protocol/hosted-authority.js";
 
 const seat = "seat_ABCDEFGHIJKLMNOPQRSTUV";
 const MESSAGE = "55555555-5555-4555-8555-555555555555";
@@ -146,6 +147,7 @@ test("after a channel_read page the hosted MCP sends one seen command with that 
 test("the command edge takes the hosted MCP's channel_read seen kind, and the MCP sends it after the page it returns", async () => {
   const command = await readFile(new URL("../supabase/functions/command/index.ts", import.meta.url), "utf8");
   assert.ok(command.includes(`const HOSTED_CHANNEL_READ_SEEN_KIND = "${HOSTED_CHANNEL_READ_SEEN_KIND}";`));
+  assert.equal(publicHostedCommandForbidden(HOSTED_CHANNEL_READ_SEEN_KIND), true, "public HTTP refuses it before authentication");
   const mcp = await readFile(new URL("../supabase/functions/mcp/index.ts", import.meta.url), "utf8");
   assert.match(mcp, /markChannelReadSeen\(messages, binding\.workspaceId, handle,\s*\(\) => seatCapability\(call\.token, binding, "check"\)/u);
 });

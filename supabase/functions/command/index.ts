@@ -19957,7 +19957,7 @@ function hostedChannelReadSeenInput(
  * A hosted seat read a channel_read page. Of the messages it returned, those that mention the seat
  * get what a hosted check gives them (👀 and the seat's delivery observed), and those posted to the
  * whole channel get the seat's agent receipt, the "Seen by N of M agents" a local agent's
- * signals_seen writes. Each set is re-derived here under the seat's claims, so an id the seat could
+ * signals_seen writes (its own posts too, as M counts their author). Each set is re-derived here under the seat's claims, so an id the seat could
  * not read changes nothing. Local agents never reach this: their channel_read leaves deliveries for
  * a running listener to claim.
  *
@@ -20006,7 +20006,6 @@ async function handleHostedChannelReadSeen(
         AND s.id = ANY(${input.signal_ids}::uuid[])
         AND s.to_user_id IS NULL
         AND s.to_agent_principal_id IS NULL
-        AND NOT (s.from_kind = 'agent' AND s.from_principal = ${seat.principal_id}::uuid)
     `;
     if (channelWide.length > 0) {
       try {
