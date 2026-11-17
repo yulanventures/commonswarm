@@ -4598,7 +4598,7 @@ test("the case-insensitive name migration stops on live hosted collisions and na
   const second = claimAs(fixture, `${name} other`);
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.equal(second.status, 200, JSON.stringify(second.body));
-  const migration = repoSql("supabase/migrations/20261116000006_agent_names_ignore_case.sql");
+  const migration = repoSql("supabase/migrations/20261117000002_agent_names_ignore_case.sql");
   const [index] = await sql<{ def: string }[]>`SELECT pg_get_indexdef('swarm.hosted_mcp_seats_live_name_ci'::regclass) AS def`;
   assert.equal(index?.def, "CREATE UNIQUE INDEX hosted_mcp_seats_live_name_ci ON swarm.hosted_mcp_seats USING btree (workspace_id, lower(name)) WHERE (revoked_at IS NULL)");
   const drill = new Error("NAME_CASE_DRILL");
