@@ -1,6 +1,6 @@
 /** HM lane-3 PostgreSQL coverage. Runs only in the manual `server` suite. */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { DenoLineHarness, type DenoLineReply } from "../support/deno-line-harness.js";
 
 const migrationUrl = new URL(
   "../../supabase/migrations/20260928000004_hm_hosted_check.sql", import.meta.url,
@@ -63,12 +64,22 @@ let admin: SupabaseClient;
 let harnessDir: string;
 let harnessPath: string;
 
+let sharedHarness: DenoLineHarness;
+
+const HARNESS_RESULT = "HM_CHECK_RESULT:";
+const HARNESS_DONE = "HM_CHECK_DONE:";
+
+/* One process serves the file: it loads the command module once, then answers line-delimited
+ * requests (tests/support/deno-line-harness.ts). Every helper below closes over its own
+ * request's input, so nothing carries from one request to the next. */
 const harnessSource = `
-const input = JSON.parse(await new Response(Deno.stdin.readable).text());
 const commandModule = await import(${JSON.stringify(commandUrl.href)});
 const authModule = await import(${JSON.stringify(authUrl.href)});
 const { db, handleHostedCommand, handleRequest } = commandModule;
 const { authenticateHostedSeatCapability } = authModule;
+
+// deno-lint-ignore no-explicit-any
+async function handle(input: any) {
 
 async function capability(handle, tool = "check", use = "command") {
   return await db.begin(async (tx) => await authenticateHostedSeatCapability(tx, {
@@ -187,8 +198,47 @@ if (input.operation === "single") {
 } else {
   throw new Error("unknown hosted check operation");
 }
-console.log("HM_CHECK_RESULT:" + JSON.stringify(result));
+return result;
+}
+
+const encoder = new TextEncoder();
+function writeLine(file: { writeSync(bytes: Uint8Array): number }, text: string) {
+  let bytes = encoder.encode(text + "\\n");
+  while (bytes.length > 0) bytes = bytes.subarray(file.writeSync(bytes));
+}
+
+async function serve(line: string) {
+  const { id, input } = JSON.parse(line);
+  let reply;
+  try {
+    reply = { ok: true, result: await handle(input) };
+  } catch (error) {
+    console.error("hosted check request threw", error);
+    reply = { ok: false, error: error instanceof Error ? error.stack ?? error.message : String(error) };
+  }
+  writeLine(Deno.stdout, ${JSON.stringify(HARNESS_RESULT)} + id + ":" + JSON.stringify(reply));
+  writeLine(Deno.stderr, ${JSON.stringify(HARNESS_DONE)} + id);
+}
+
+const inflight = new Set();
+let buffered = "";
+for await (const chunk of Deno.stdin.readable.pipeThrough(new TextDecoderStream())) {
+  buffered += chunk;
+  let newline = buffered.indexOf("\\n");
+  while (newline >= 0) {
+    const line = buffered.slice(0, newline);
+    buffered = buffered.slice(newline + 1);
+    newline = buffered.indexOf("\\n");
+    if (line.trim() === "") continue;
+    const task = serve(line);
+    inflight.add(task);
+    task.finally(() => inflight.delete(task));
+  }
+}
+await Promise.allSettled([...inflight]);
 await db.end({ timeout: 2 });
+// The read module keeps a pool of its own; exit rather than wait for it to idle out.
+Deno.exit(0);
 `;
 
 before(() => {
@@ -206,9 +256,11 @@ before(() => {
   harnessDir = mkdtempSync(join(tmpdir(), "hm-hosted-check-"));
   harnessPath = join(harnessDir, "hosted-check-harness.ts");
   writeFileSync(harnessPath, harnessSource);
+  sharedHarness = newHarness();
 });
 
 after(async () => {
+  await sharedHarness?.close();
   await sql.end();
   rmSync(harnessDir, { recursive: true, force: true });
 });
@@ -300,7 +352,7 @@ async function postSignals(
 ): Promise<PostedSignal[]> {
   // Keep fixture creation on the production post_signal path. In particular,
   // this lets the command handler establish every signals table invariant.
-  const posted = runHarness<HarnessResult[]>(fixture, {
+  const posted = await runHarness<HarnessResult[]>(fixture, {
     operation: "post-signals",
     ownerJwt: fixture.ownerJwt,
     count,
@@ -327,16 +379,12 @@ async function postSignal(
   return posted;
 }
 
-function runHarness<T>(fixture: Fixture, input: Record<string, unknown>, rollback = false): T {
-  const result = spawnSync("deno", [
+function newHarness(extraEnv: Record<string, string> = {}): DenoLineHarness {
+  return new DenoLineHarness([
     "run", "--no-lock", "--config", "supabase/functions/command/deno.json",
     "--allow-env", "--allow-net", "--allow-read", harnessPath,
   ], {
-    cwd: process.cwd(), encoding: "utf8", input: JSON.stringify({
-      grant: fixture.grant, workspace: fixture.workspace,
-      capabilityHandle: fixture.handleA, requestHandle: fixture.handleA,
-      ...input,
-    }),
+    cwd: process.cwd(),
     env: {
       PATH: process.env.PATH ?? "",
       ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
@@ -345,15 +393,43 @@ function runHarness<T>(fixture: Fixture, input: Record<string, unknown>, rollbac
       SUPABASE_ANON_KEY: local.ANON_KEY,
       // Mentions on: no fixture here has a workspace lead, so only posts that send mentions change.
       SWARM_CHAT_MENTIONS: "1",
-      ...(rollback ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: "15" } : {}),
+      ...extraEnv,
     },
-    timeout: 90_000,
+    timeoutMs: 90_000,
+    resultPrefix: HARNESS_RESULT,
+    donePrefix: HARNESS_DONE,
   });
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  const line = result.stdout.trim().split("\n").reverse().find((entry) =>
-    entry.startsWith("HM_CHECK_RESULT:"));
-  assert.equal(typeof line, "string", result.stdout);
-  const parsed = JSON.parse((line ?? "").slice("HM_CHECK_RESULT:".length)) as T;
+}
+
+/**
+ * "shared" answers from the file's one long-lived harness. "fresh" starts a new process for this
+ * call alone, for a test about a worker restart. "rollback" is a fresh process with the rollback
+ * hook, which the command module reads from its environment once, at load.
+ */
+type HarnessProcess = "shared" | "fresh" | "rollback";
+
+async function runHarness<T>(
+  fixture: Fixture,
+  input: Record<string, unknown>,
+  mode: HarnessProcess = "shared",
+): Promise<T> {
+  const request = {
+    grant: fixture.grant, workspace: fixture.workspace,
+    capabilityHandle: fixture.handleA, requestHandle: fixture.handleA,
+    ...input,
+  };
+  let reply: DenoLineReply<T>;
+  if (mode === "shared") {
+    reply = await sharedHarness.request<T>(request);
+  } else {
+    const oneShot = newHarness(mode === "rollback" ? { SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP: "15" } : {});
+    try {
+      reply = await oneShot.request<T>(request);
+    } finally {
+      await oneShot.close();
+    }
+  }
+  const parsed = reply.result;
   const containsNon2xx = (value: unknown): boolean => {
     if (Array.isArray(value)) return value.some(containsNon2xx);
     if (value === null || typeof value !== "object") return false;
@@ -365,7 +441,7 @@ function runHarness<T>(fixture: Fixture, input: Record<string, unknown>, rollbac
   if (containsNon2xx(parsed)) {
     process.stderr.write(
       `hosted check harness returned a non-2xx response; subprocess stderr follows:\n${
-        result.stderr || "(empty)\n"
+        reply.stderr || "(empty)\n"
       }`,
     );
   }
@@ -445,12 +521,13 @@ test("lane-3 visibility function permits signals-view drop and recreation", asyn
 test("concurrent opens converge and a worker restart replays the stored ids", async () => {
   const fixture = await seedFixture();
   const signal = await postSignal(fixture);
-  const raced = runHarness<HarnessResult[]>(fixture, { operation: "open-race" });
+  const raced = await runHarness<HarnessResult[]>(fixture, { operation: "open-race" });
   assert.deepEqual(raced.map((entry) => entry.status), [200, 200]);
   assert.equal(raced[0]?.body.batch_id, raced[1]?.body.batch_id,
     "positive control: both opens return one active batch");
   assert.equal((raced[0]?.body.signals as unknown[])?.length, 1);
-  const restarted = runHarness<HarnessResult>(fixture, { operation: "single" });
+  // A new process stands in for the restarted worker: nothing carries over but the database.
+  const restarted = await runHarness<HarnessResult>(fixture, { operation: "single" }, "fresh");
   assert.equal(restarted.body.batch_id, raced[0]?.body.batch_id);
   assert.equal((restarted.body.signals as Array<{ id: string }>)[0]?.id, signal.id);
   const [count] = await sql<{ n: string }[]>`SELECT count(*)::text AS n
@@ -461,7 +538,7 @@ test("concurrent opens converge and a worker restart replays the stored ids", as
 test("expiry between calls does not change active-batch replay", { timeout: 120_000 }, async () => {
   const fixture = await seedFixture();
   await postSignal(fixture, fixture.principalA, 3_000);
-  const result = runHarness<{ first: HarnessResult; replay: HarnessResult }>(fixture, {
+  const result = await runHarness<{ first: HarnessResult; replay: HarnessResult }>(fixture, {
     operation: "expiry-replay", waitMs: 3_500,
   });
   assert.equal(result.first.status, 200, "positive control: unexpired signal opened");
@@ -473,13 +550,13 @@ test("expiry between calls does not change active-batch replay", { timeout: 120_
 test("ACK vs open and repeated ACK never close a newer batch", async () => {
   const fixture = await seedFixture();
   await postSignal(fixture);
-  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const first = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(first.status, 200, "positive control: first batch opened");
   const context = first.body.context as { account: { user_id: string }; workspace: { workspace_id: string } };
   assert.equal(context.account.user_id, fixture.owner);
   assert.equal(context.workspace.workspace_id, fixture.workspace);
   await postSignal(fixture);
-  const raced = runHarness<HarnessResult[]>(fixture, {
+  const raced = await runHarness<HarnessResult[]>(fixture, {
     operation: "ack-open-race", ack: first.body.batch_id,
   });
   assert.ok(raced.every((entry) => entry.status === 200));
@@ -488,7 +565,7 @@ test("ACK vs open and repeated ACK never close a newer batch", async () => {
     FROM swarm.hosted_mcp_check_batches
     WHERE seat_id = ${fixture.seatA}::uuid AND acknowledged_at IS NULL`;
   assert.ok(active);
-  const repeated = runHarness<HarnessResult>(fixture, {
+  const repeated = await runHarness<HarnessResult>(fixture, {
     operation: "single", ack: first.body.batch_id,
   });
   assert.equal(repeated.status, 200);
@@ -504,14 +581,14 @@ test("cross-seat wrong-batch ACKs are refused without locking each other", async
   const fixture = await seedFixture();
   await postSignal(fixture, fixture.principalA);
   await postSignal(fixture, fixture.principalB);
-  const openedA = runHarness<HarnessResult>(fixture, { operation: "single" });
-  const openedB = runHarness<HarnessResult>(fixture, {
+  const openedA = await runHarness<HarnessResult>(fixture, { operation: "single" });
+  const openedB = await runHarness<HarnessResult>(fixture, {
     operation: "single", capabilityHandle: fixture.handleB, requestHandle: fixture.handleB,
   });
   assert.equal(openedA.status, 200, "positive control: seat A has an active batch");
   assert.equal(openedB.status, 200, "positive control: seat B has an active batch");
 
-  const crossed = runHarness<HarnessResult[]>(fixture, {
+  const crossed = await runHarness<HarnessResult[]>(fixture, {
     operation: "cross-ack-race",
     handleA: fixture.handleA,
     handleB: fixture.handleB,
@@ -533,7 +610,7 @@ test("cross-seat wrong-batch ACKs are refused without locking each other", async
 
 test("unrelated ACK does not create durable cursor state", async () => {
   const fixture = await seedFixture();
-  const refused = runHarness<HarnessResult>(fixture, {
+  const refused = await runHarness<HarnessResult>(fixture, {
     operation: "single", ack: randomUUID(),
   });
   assert.equal(refused.status, 403);
@@ -545,7 +622,7 @@ test("unrelated ACK does not create durable cursor state", async () => {
   assert.equal(before?.n, "0");
 
   await postSignal(fixture);
-  const opened = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const opened = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(opened.status, 200, "positive control: a valid open persists normally");
   const [after] = await sql<{ n: string }[]>`
     SELECT count(*)::text AS n FROM swarm.hosted_mcp_check_cursors
@@ -557,9 +634,9 @@ test("unrelated ACK does not create durable cursor state", async () => {
 test("ACK accepts upper-case UUID spelling and advances the batch", async () => {
   const fixture = await seedFixture();
   await postSignal(fixture);
-  const opened = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const opened = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(opened.status, 200, "positive control: first batch opened");
-  const acknowledged = runHarness<HarnessResult>(fixture, {
+  const acknowledged = await runHarness<HarnessResult>(fixture, {
     operation: "single", ack: String(opened.body.batch_id).toUpperCase(),
   });
   assert.equal(acknowledged.status, 200);
@@ -573,18 +650,18 @@ test("ACK accepts upper-case UUID spelling and advances the batch", async () => 
 
 test("a public message that mentions the seat's agent arrives in its check, and one that mentions another agent does not", async () => {
   const fixture = await seedFixture();
-  const post = (recipientPrincipal: string) => runHarness<HarnessResult[]>(fixture, {
+  const post = async (recipientPrincipal: string) => (await runHarness<HarnessResult[]>(fixture, {
     operation: "post-signals", ownerJwt: fixture.ownerJwt, count: 1, recipientPrincipal,
     untilMs: 10 * 60 * 1000, mention: true,
-  })[0]!;
-  const mine = post(fixture.principalA);
-  const theirs = post(fixture.principalB);
+  }))[0]!;
+  const mine = await post(fixture.principalA);
+  const theirs = await post(fixture.principalB);
   assert.equal(mine.status, 200, JSON.stringify(mine.body));
   assert.equal(theirs.status, 200, JSON.stringify(theirs.body));
   const mineId = (mine.body.signal as { id: string; to_agent: string | null }).id;
   assert.equal((mine.body.signal as { to_agent: string | null }).to_agent, null, "the mention is not an address");
   // The check opens a batch, which the batch guard has to accept for a mention-only signal.
-  const opened = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const opened = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   assert.deepEqual((opened.body.signals as Array<{ id: string }>).map((signal) => signal.id), [mineId]);
 });
@@ -592,29 +669,29 @@ test("a public message that mentions the seat's agent arrives in its check, and 
 test("a check marks each ask and note it returns with one 👀 by the seat's agent, once, and its result is unchanged", async () => {
   const fixture = await seedFixture();
   const unaddressed = { to_user_id: null, to_agent_principal_id: null, in_reply_to: null, about: null };
-  const asOwner = (command: Record<string, unknown>) =>
-    runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
-  const asSeat = (tool: string, command: Record<string, unknown>) =>
-    runHarness<HarnessResult>(fixture, { operation: "seat-post", tool, command });
+  const asOwner = async (command: Record<string, unknown>) =>
+    await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
+  const asSeat = async (tool: string, command: Record<string, unknown>) =>
+    await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool, command });
   const idOf = (result: HarnessResult): string => {
     assert.equal(result.status, 200, JSON.stringify(result.body));
     return String((result.body.signal as { id: string }).id);
   };
-  const ask = idOf(asOwner({ kind: "post_signal", signal_kind: "ask", body: `seen ask ${randomUUID()}`,
+  const ask = idOf(await asOwner({ kind: "post_signal", signal_kind: "ask", body: `seen ask ${randomUUID()}`,
     ...unaddressed, to_agent_principal_id: fixture.principalA }));
-  const mentioned = idOf(asOwner({ kind: "post_signal", signal_kind: "note", body: `seen mention ${randomUUID()}`,
+  const mentioned = idOf(await asOwner({ kind: "post_signal", signal_kind: "note", body: `seen mention ${randomUUID()}`,
     ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] }));
   /* The seat's own public note, with a person's reaction on it. The read edge shows that reaction to
    * a local agent as a reaction note; a hosted check never returns one, so nothing is marked. */
-  const own = idOf(asSeat("note", { kind: "post_signal", signal_kind: "note", body: `own ${randomUUID()}`, ...unaddressed }));
-  const ownerReaction = asOwner({ kind: "add_reaction", signal_id: own, emoji: "\u{1F44D}" });
+  const own = idOf(await asSeat("note", { kind: "post_signal", signal_kind: "note", body: `own ${randomUUID()}`, ...unaddressed }));
+  const ownerReaction = await asOwner({ kind: "add_reaction", signal_id: own, emoji: "\u{1F44D}" });
   assert.equal(ownerReaction.status, 200, JSON.stringify(ownerReaction.body));
   // Where the server takes these at all, they stay unmarked.
-  const working = asOwner({ kind: "post_signal", signal_kind: "working-on", body: `working ${randomUUID()}`,
+  const working = await asOwner({ kind: "post_signal", signal_kind: "working-on", body: `working ${randomUUID()}`,
     ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
-  const selfAsk = asSeat("ask", { kind: "post_signal", signal_kind: "ask", body: `self ${randomUUID()}`,
+  const selfAsk = await asSeat("ask", { kind: "post_signal", signal_kind: "ask", body: `self ${randomUUID()}`,
     ...unaddressed, to: [{ kind: "agent", id: fixture.principalA }] });
-  const selfMention = asSeat("note", { kind: "post_signal", signal_kind: "note", body: `self mention ${randomUUID()}`,
+  const selfMention = await asSeat("note", { kind: "post_signal", signal_kind: "note", body: `self mention ${randomUUID()}`,
     ...unaddressed, mentions: [{ kind: "agent", id: fixture.principalA }] });
   const optional = [working, selfAsk, selfMention].filter((result) => result.status === 200).map(idOf);
 
@@ -626,7 +703,7 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
     ORDER BY signal_id`).map((row) => ({ ...row }));
   assert.deepEqual(await marks(), [], "nothing is marked before a check");
 
-  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const first = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.deepEqual(Object.keys(first.body).sort(), ["acknowledged_batch_id", "batch_id", "context", "cursor", "signals"],
     "the check's result has no new field");
@@ -643,12 +720,12 @@ test("a check marks each ask and note it returns with one 👀 by the seat's age
   assert.equal(onOwn!.count, "1", "only the person's reaction is on the seat's own note");
 
   // Opening again replays the same batch; acknowledging it opens an empty one. Neither adds a mark.
-  const replay = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const replay = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(replay.status, 200, JSON.stringify(replay.body));
   assert.equal(replay.body.batch_id, first.body.batch_id);
   assert.deepEqual(replay.body.signals, first.body.signals, "a replay returns the same rows");
   assert.deepEqual(await marks(), expected, "a second check does not duplicate a mark");
-  const acked = runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
+  const acked = await runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
   assert.equal(acked.status, 200, JSON.stringify(acked.body));
   assert.equal(acked.body.acknowledged_batch_id, first.body.batch_id, "the acknowledgement still lands");
   assert.deepEqual(acked.body.signals, []);
@@ -700,15 +777,15 @@ function signalIdOf(result: HarnessResult): string {
 
 test("a hosted check leaves the seat's own delivery observed, so the sender reads Seen, and a replay changes nothing", async () => {
   const fixture = await seedFixture();
-  const ask = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+  const ask = signalIdOf(await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
     ...unaddressedPost, signal_kind: "ask", body: `seen ask ${randomUUID()}`, to_agent_principal_id: fixture.principalA } }));
-  const mention = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+  const mention = signalIdOf(await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
     ...unaddressedPost, signal_kind: "note", body: `seen mention ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] } }));
   // Positive control: before any turn the rows are untouched and the sender reads not seen.
   assert.deepEqual(await deliveryOf(ask, fixture.principalA), { ack_outcome: null, ack_via: null, acked_at: null, lease_id: null });
   assert.equal(await seenFor(fixture, ask, fixture.principalA), false);
 
-  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const first = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.deepEqual(Object.keys(first.body).sort(), ["acknowledged_batch_id", "batch_id", "context", "cursor", "signals"]);
   for (const id of [ask, mention]) {
@@ -722,26 +799,26 @@ test("a hosted check leaves the seat's own delivery observed, so the sender read
   const ackedAt = (await deliveryOf(ask, fixture.principalA)).acked_at?.toISOString();
 
   // Replaying the open batch, then acknowledging it, neither fails nor writes the rows again.
-  const replay = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const replay = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(replay.status, 200, JSON.stringify(replay.body));
   assert.equal(replay.body.batch_id, first.body.batch_id);
-  const acked = runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
+  const acked = await runHarness<HarnessResult>(fixture, { operation: "single", ack: first.body.batch_id });
   assert.equal(acked.status, 200, JSON.stringify(acked.body));
   assert.equal((await deliveryOf(ask, fixture.principalA)).acked_at?.toISOString(), ackedAt, "observed once");
 });
 
 test("a hosted private reply and a hosted react observe the seat's own delivery of that message", async () => {
   const fixture = await seedFixture();
-  const asOwner = (body: string) => signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt,
+  const asOwner = async (body: string) => signalIdOf(await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt,
     command: { ...unaddressedPost, signal_kind: "ask", body, to_agent_principal_id: fixture.principalA } }));
-  const answered = asOwner(`reply to me ${randomUUID()}`);
-  const reacted = asOwner(`react to me ${randomUUID()}`);
-  const untouched = asOwner(`leave me ${randomUUID()}`);
+  const answered = await asOwner(`reply to me ${randomUUID()}`);
+  const reacted = await asOwner(`react to me ${randomUUID()}`);
+  const untouched = await asOwner(`leave me ${randomUUID()}`);
 
-  const reply = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "reply", command: {
+  const reply = await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "reply", command: {
     ...unaddressedPost, signal_kind: "note", body: `on it ${randomUUID()}`, in_reply_to: answered } });
   assert.equal(reply.status, 200, JSON.stringify(reply.body));
-  const react = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "react", command: {
+  const react = await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "react", command: {
     kind: "add_reaction", signal_id: reacted, emoji: "\u{1F44D}" } });
   assert.equal(react.status, 200, JSON.stringify(react.body));
 
@@ -754,23 +831,23 @@ test("a hosted private reply and a hosted react observe the seat's own delivery 
 
 test("a hosted channel_read marks the mention it returns seen and counts the seat on channel-wide posts", async () => {
   const fixture = await seedFixture();
-  const asOwner = (command: Record<string, unknown>) => signalIdOf(runHarness<HarnessResult>(fixture,
+  const asOwner = async (command: Record<string, unknown>) => signalIdOf(await runHarness<HarnessResult>(fixture,
     { operation: "public", ownerJwt: fixture.ownerJwt, command: { ...unaddressedPost, signal_kind: "note", ...command } }));
-  const mention = asOwner({ body: `for A ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] });
-  const forB = asOwner({ body: `for B ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalB }] });
-  const plain = asOwner({ body: `everyone ${randomUUID()}` });
-  const own = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note",
+  const mention = await asOwner({ body: `for A ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] });
+  const forB = await asOwner({ body: `for B ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalB }] });
+  const plain = await asOwner({ body: `everyone ${randomUUID()}` });
+  const own = signalIdOf(await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note",
     command: { ...unaddressedPost, signal_kind: "note", body: `A's own ${randomUUID()}` } }));
 
   // Control: the read edge alone, which is all a local agent's channel_read uses, records nothing.
-  const readOnly = runHarness<HarnessResult>(fixture, { operation: "channel-read", readOnly: true });
+  const readOnly = await runHarness<HarnessResult>(fixture, { operation: "channel-read", readOnly: true });
   assert.equal(readOnly.status, 200, JSON.stringify(readOnly.body));
   for (const id of [mention, forB, plain, own]) assert.ok((readOnly.body.ids as string[]).includes(id), id);
   assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, null);
   assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), []);
   assert.deepEqual(await receiptsBy(fixture, fixture.principalA), []);
 
-  const read = runHarness<HarnessResult>(fixture, { operation: "channel-read" });
+  const read = await runHarness<HarnessResult>(fixture, { operation: "channel-read" });
   assert.equal(read.status, 200, JSON.stringify(read.body));
   assert.equal(read.body.marked, true, JSON.stringify(read.body));
   assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, "observed", "the mention reads as seen");
@@ -783,7 +860,7 @@ test("a hosted channel_read marks the mention it returns seen and counts the sea
     "every channel-wide post the page returned counts the seat (its own too: M counts the author)");
 
   // Reading the same page again writes nothing new.
-  const again = runHarness<HarnessResult>(fixture, { operation: "channel-read" });
+  const again = await runHarness<HarnessResult>(fixture, { operation: "channel-read" });
   assert.equal(again.status, 200, JSON.stringify(again.body));
   assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), [{ signal_id: mention, source: "ack" }]);
   assert.deepEqual(await receiptsBy(fixture, fixture.principalA), receipts);
@@ -791,20 +868,20 @@ test("a hosted channel_read marks the mention it returns seen and counts the sea
 
 test("only a check capability carries the channel_read seen command, and only for its own seat", async () => {
   const fixture = await seedFixture();
-  const mention = signalIdOf(runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
+  const mention = signalIdOf(await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command: {
     ...unaddressedPost, signal_kind: "note", body: `for A ${randomUUID()}`, mentions: [{ kind: "agent", id: fixture.principalA }] } }));
   const command = { kind: "mark_hosted_channel_read_seen", seat: fixture.handleA, signal_ids: [mention] };
-  const asNote = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note", command });
+  const asNote = await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "note", command });
   assert.equal(asNote.status, 403, JSON.stringify(asNote.body));
-  const otherSeat = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", capabilityHandle: fixture.handleB, command });
+  const otherSeat = await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", capabilityHandle: fixture.handleB, command });
   assert.equal(otherSeat.status, 403, JSON.stringify(otherSeat.body));
-  const person = runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
+  const person = await runHarness<HarnessResult>(fixture, { operation: "public", ownerJwt: fixture.ownerJwt, command });
   assert.deepEqual({ status: person.status, body: person.body }, { status: 403, body: { error: "forbidden" } },
     "public HTTP refuses the hosted-only kind before authentication");
   assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, null);
   assert.deepEqual(await seenMarksBy(fixture, fixture.principalA), []);
   // Positive control: the seat's own check capability is accepted.
-  const own = runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", command });
+  const own = await runHarness<HarnessResult>(fixture, { operation: "seat-post", tool: "check", command });
   assert.equal(own.status, 200, JSON.stringify(own.body));
   assert.equal((await deliveryOf(mention, fixture.principalA)).ack_outcome, "observed");
 });
@@ -879,11 +956,11 @@ test("same-millisecond UUID ties page exactly without skipping or repeating", as
   assert.equal(tie?.updated, "51",
     "positive control: every posted signal received the tie timestamp");
   assert.ok(tie?.cursor_created_at instanceof Date);
-  const first = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const first = await runHarness<HarnessResult>(fixture, { operation: "single" });
   const firstIds = (first.body.signals as Array<{ id: string }>).map((row) => row.id);
   assert.deepEqual(firstIds, [...ids].sort().slice(0, 50),
     "positive control: first page follows truncated-time/UUID order");
-  const second = runHarness<HarnessResult>(fixture, {
+  const second = await runHarness<HarnessResult>(fixture, {
     operation: "single", ack: first.body.batch_id,
   });
   assert.deepEqual((second.body.signals as Array<{ id: string }>).map((row) => row.id),
@@ -895,15 +972,15 @@ test("same-millisecond UUID ties page exactly without skipping or repeating", as
 test("cross-seat calls and revoked membership are refused with positive controls", async () => {
   const fixture = await seedFixture();
   await postSignal(fixture);
-  const own = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const own = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(own.status, 200, "positive control: matching seat can check");
-  const crossed = runHarness<HarnessResult>(fixture, {
+  const crossed = await runHarness<HarnessResult>(fixture, {
     operation: "single", capabilityHandle: fixture.handleB, requestHandle: fixture.handleA,
   });
   assert.equal(crossed.status, 403);
   await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp()
     WHERE workspace_id = ${fixture.workspace}::uuid AND user_id = ${fixture.owner}::uuid`;
-  const revoked = runHarness<HarnessResult>(fixture, {
+  const revoked = await runHarness<HarnessResult>(fixture, {
     operation: "single", capabilityHandle: fixture.handleA, requestHandle: fixture.handleA,
   });
   assert.equal(revoked.status, 403);
@@ -912,7 +989,7 @@ test("cross-seat calls and revoked membership are refused with positive controls
 test("rollback injection leaves neither cursor nor batch", async () => {
   const fixture = await seedFixture();
   await postSignal(fixture);
-  const rolledBack = runHarness<HarnessResult>(fixture, { operation: "single" }, true);
+  const rolledBack = await runHarness<HarnessResult>(fixture, { operation: "single" }, "rollback");
   assert.equal(rolledBack.status, 599);
   const [counts] = await sql<{ cursors: string; batches: string }[]>`
     SELECT
@@ -922,6 +999,6 @@ test("rollback injection leaves neither cursor nor batch", async () => {
        WHERE seat_id = ${fixture.seatA}::uuid) AS batches
   `;
   assert.deepEqual(counts, { cursors: "0", batches: "0" });
-  const positive = runHarness<HarnessResult>(fixture, { operation: "single" });
+  const positive = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(positive.status, 200, "positive control: normal transaction persists");
 });
