@@ -262,23 +262,31 @@ test("activity transport classifies every boundary failure without message match
     ).publish(frame),
     rejectedWith("activity_transport_failed"),
   );
-  await assert.rejects(
-    new AgentActivityEndpointTransport(
-      { url: "https://example.invalid", anonKey: "anon", profileId: "test" },
-      { bearer: async () => "token" },
-      async (_input, init) => {
-        const signal = init?.signal;
-        assert.ok(signal, "activity request carries AbortSignal.timeout");
-        return await new Promise<Response>((_resolve, reject) => {
-          signal.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
+  // AbortSignal.timeout's timer doesn't keep the event loop alive. When nothing else is pending, the loop could
+  // empty before the 5 ms timeout fired and node:test cancelled the file as "still pending". A ref'd timer, cleared
+  // once the rejection lands, holds the loop open for exactly this wait.
+  const keepAlive = setTimeout(() => {}, 10_000);
+  try {
+    await assert.rejects(
+      new AgentActivityEndpointTransport(
+        { url: "https://example.invalid", anonKey: "anon", profileId: "test" },
+        { bearer: async () => "token" },
+        async (_input, init) => {
+          const signal = init?.signal;
+          assert.ok(signal, "activity request carries AbortSignal.timeout");
+          return await new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
           });
-        });
-      },
-      5,
-    ).publish(frame),
-    rejectedWith("activity_request_timeout"),
-  );
+        },
+        5,
+      ).publish(frame),
+      rejectedWith("activity_request_timeout"),
+    );
+  } finally {
+    clearTimeout(keepAlive);
+  }
   await assert.rejects(
     new AgentActivityEndpointTransport(
       { url: "https://example.invalid", anonKey: "anon", profileId: "test" },
