@@ -184,6 +184,8 @@ const {
     #workspaceName = "";
     #agents: AgentIdentity[] = [];
     #busy = false;
+    /* The intent generation of the key mint in flight; null for none, or for an invite mint. */
+    #busyIntent: number | null = null;
     #copyTimer: number | undefined;
     #pollTimer: number | undefined;
     #loadQueued = false;
@@ -366,34 +368,61 @@ const {
       this.finishPrompt("done", notify);
     }
 
+    /**
+     * The ticket a caller takes at its click, before any await: this element's intent generation then.
+     * Every retirement raises the generation (Back and leaving the key view, choosing another app,
+     * leaving the panel, the auth reset and sign-out through clearPrompt, disposal), so a ticket taken
+     * before one of them never becomes a request (HezSec C1 on #479, narrowed).
+     */
+    get intentTicket(): number {
+      return this.#intentGeneration;
+    }
+
     /** Re-onboard one existing identity through the same mint and prompt path as Add an agent. */
-    requestPromptFor(principalId: string, userId: string) {
-      if (principalId) this.#requestPrompt({ principalId }, userId);
+    requestPromptFor(principalId: string, userId: string, workspaceId: string, ticket: number) {
+      if (principalId) this.#requestPrompt({ principalId }, userId, workspaceId, ticket);
     }
 
     /** Create a new agent with this name and mint its prompt (the Add an agent panel's key routes). */
-    requestPromptNamed(name: string, userId: string) {
+    requestPromptNamed(name: string, userId: string, workspaceId: string, ticket: number) {
       const trimmed = name.trim();
-      if (trimmed) this.#requestPrompt({ name: trimmed }, userId);
+      if (trimmed) this.#requestPrompt({ name: trimmed }, userId, workspaceId, ticket);
     }
 
-    #requestPrompt(request: { principalId: string } | { name: string }, userId: string) {
-      if (!userId) return;
+    /* The caller names the account, the workspace and the ticket of its click (HezSec C1 on #479). A
+       request for any workspace other than the one this element is pinned to now, or with a ticket an
+       abandonment has retired since, is a click that was superseded on its way here: it is refused
+       before it becomes a request, so it never mints. The element never lends a newer generation to an
+       older click. */
+    #requestPrompt(request: { principalId: string } | { name: string }, userId: string, workspaceId: string, ticket: number) {
+      if (!userId || !workspaceId || workspaceId !== (this.getAttribute("workspace-id")?.trim() ?? "")) return;
+      if (ticket !== this.#intentGeneration) return;
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
-      let blocked = this.#busy || this.#prompt !== null;
+      /* A mint retired by a reset (sign-out, account switch, abandonment) may still be unwinding: it
+         creates and shows nothing more, but holds the single-mint guard until its current step
+         returns. A new request waits for it, bound like any other, and #mint's finally loads and runs
+         it, so every check before create, mint and reveal still applies (474 R2 deferred P2). */
+      const unwinding = this.#busy && this.#busyIntent !== null && this.#busyIntent !== this.#intentGeneration;
+      let blocked = (this.#busy && !unwinding) || this.#prompt !== null;
       if (h0LinkJoinEnabled) {
         blocked = blocked || this.#joinActive;
       }
-      if (blocked) return;
+      if (blocked) {
+        /* The open prompt, or the one still being made, stays on screen. The asker hears that this
+           request was not taken, so the panel's Copy setup prompt is ready again. */
+        this.dispatchEvent(new CustomEvent("commonswarm:agent-prompt-retired", { bubbles: true }));
+        return;
+      }
       /* Bound to the workspace and the account it was asked in: a load that lands elsewhere, or
          a session that belongs to someone else, mints nothing. */
       this.#request = {
         ...request,
-        workspaceId: this.getAttribute("workspace-id")?.trim() ?? "",
+        workspaceId,
         userId,
         intent: this.#intentGeneration,
       };
+      if (unwinding) return;
       if (
         this.dataset.state === "ready" &&
         this.#workspaceId === (this.getAttribute("workspace-id")?.trim() ?? "")
@@ -590,14 +619,20 @@ const {
          setting it this early safe — every early return still clears it. */
       if (this.#busy) return;
       this.#busy = true;
+      this.#busyIntent = request.intent;
       this.toggleAttribute("data-mint-busy", true);
       try {
         await this.#mintGuarded(request);
       } finally {
         this.#busy = false;
+        this.#busyIntent = null;
         this.toggleAttribute("data-mint-busy", false);
         if (this.#retargetPending && this.dataset.state !== "done") {
           this.#retargetPending = false;
+          this.#queueLoad();
+        } else if (this.#request && this.dataset.state !== "done") {
+          /* A request that waited for this retired mint to unwind: a fresh load reads the session
+             and the workspace again, then runs it through #mintRequestedPrompt. */
           this.#queueLoad();
         }
       }

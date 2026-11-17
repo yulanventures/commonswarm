@@ -2131,6 +2131,41 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ],
+    "frame": [
+      "[data-people-context] button[data-pd-focus=\"row-remove-agent-{agent}\"]",
+      "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) summary.pd-actions-toggle"
+    ]
+  },
+  {
+    "id": "app.people.rename",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"rename-{agent}\"])"
+      },
+      {
+        "click": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"rename-{agent}\"]) summary.pd-actions-toggle"
+      },
+      {
+        "scroll": "[data-people-context] .pd-agent:has(button[data-pd-focus=\"rename-{agent}\"]) .pd-row-actions[open] .pd-agent-actions"
+      },
+      {
+        "click": "[data-people-context] button[data-pd-focus=\"rename-{agent}\"]"
+      }
+    ],
+    "ready": "[data-people-context] form[data-rename-agent=\"{agent}\"] input[data-rename-input]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ],
+    "frame": [
+      "[data-people-context] form[data-rename-agent=\"{agent}\"] button[data-rename-cancel]",
+      "[data-people-context] form[data-rename-agent=\"{agent}\"] input[data-rename-input]"
     ]
   },
   {

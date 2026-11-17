@@ -82,7 +82,7 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | V14 | Files | `site/src/lib/file-list.ts:82` | /app?w=W&v=files; [data-file-list] | pending/empty/error/retry/stale; long filename/MIME/size/uploader; many versions; download failure; no access |
 | V15 | Wiki/topic reader | `site/src/lib/brain-view.ts:79` | /app?w=W&v=wiki; [data-brain-detail] | index empty/dense; selected long Markdown/table/code; raw toggle; version history; pending/timeout/retry; missing topic |
 | V16 | Wiki editor | `site/src/lib/brain-view.ts:207` | [data-brain-edit], [data-brain-form] | long editable text with keyboard; unsaved draft; save busy/error/unknown; permission loss; switched topic/workspace |
-| V17 | Add an agent panel | `site/src/components/connect/AgentHostPicker.astro:68` | /app?w=W&v=add-agent; [data-channel-view=agent-choice] | Already yours (shown only with an agent to add); app pills and More apps; connected mark; optional name with duplicate note; the one sentence to paste; collapsed setup help; waiting line; joined card |
+| V17 | Add an agent panel | `site/src/components/connect/AgentHostPicker.astro:68` | /app?w=W&v=add-agent; [data-channel-view=agent-choice] | Already yours (shown only with an agent to add); app pills and More apps; connected mark; optional name with duplicate note; the one sentence to paste; collapsed setup help; waiting line; joined card with Rename (opens focused, "Give this session its own name", when the agent took its app's name) |
 | V18 | Agent connect procedure | `site/src/components/connect/AgentConnect.astro:46` | [data-channel-view=connect] / agent-connect | loading/working line/blocked/result; prompt copy; error/reset; one-time secret fake only |
 | V19 | Invite person/link | `site/src/components/app/LiveDashboard.astro:422` | [data-channel-view=invite] | email/name inputs; invalid/pending/success/expired link; viewer/editor; fake invitees only |
 | V20 | Workspace/entity side detail | `site/src/components/app/LiveDashboard.astro:869` | [data-entity-panel], [data-home-side-slot] | member/agent/message entity; dense activity/access; mobile sheet; empty/refusal; close and retained main selection |
@@ -101,7 +101,7 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | M05 | Mention/tag picker | `site/src/lib/home-pickers.ts:338` | @ in to-do comment; composer own mention listbox | many matches, long labels, active descendant, empty result, input near bottom/keyboard; no forced full-screen menu |
 | M06 | Receipt disclosure | `site/src/components/app/LiveDashboard.astro:6133` | .dashboard__message-receipt > summary | closed/open; seen/delivered/no-recipient/failed/unavailable; long recipient names; >50 recipient truncation; Reply same row |
 | M07 | Wiki version disclosure | `site/src/components/app/LiveDashboard.astro:684` | .dashboard__brain-history > summary | many versions, long updater names, selected older revision, keyboard/open edge |
-| M08 | Member row actions | `site/src/lib/people-dialog-view.ts:259` | .pd-* action controls; exact generated selector HR | owner/member variants; remove/revoke/role/model actions; dense row overflow |
+| M08 | Member row actions | `site/src/lib/people-dialog-view.ts:259` | .pd-* action controls; exact generated selector HR | owner/member variants; remove/revoke/role/model/rename/reconnect actions; inline rename field (draft, refusal, Escape); hosted reconnect sentence; dense row overflow |
 | M09 | Provider picker and result disclosure | `site/src/components/connect/AgentHostPicker.astro:68` | agent-host-picker; buttons generated per host | retired as a separate page: the app's setup help and sentence are part of V17 (`app.add-agent.panel`) |
 | M10 | Landing interactive preview | `site/src/components/landing/WorkspacePreview.astro:7` | [data-preview-tab], [data-open-preview], [data-example-item] | all tabs, synchronized checkboxes, narrow scrolling, long text; not real backend data |
 | M11 | Download install disclosures | `site/src/components/download/InstallPanel.astro:6` | platform controls and details/summary within InstallPanel | all OS instructions, copied/error commands, long command line; HR selector mapping |
@@ -294,7 +294,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V14 | `app.files` — populated pending; `app.files.empty` candidate |
 | V15 | `app.wiki` — populated pending; `app.wiki.empty` candidate |
 | V16 | `app.wiki.editor` — candidate (`app.wiki-editor` superseded duplicate removed) |
-| V17 | `app.agent-chooser` — candidate; `app.add-agent.panel` candidate: Claude chosen and a name typed, the name field and the sentence's Copy wholly in frame, Tab from the name reaches Copy, a desktop hover witness over the app pills; `app.add-agent.existing` Already yours candidate on `{emptyWorkspace}`, opened with the panel, Tab from the title reaches its first Add |
+| V17 | `app.agent-chooser` — candidate; `app.add-agent.panel` candidate: Claude chosen and a name typed, the name field and the sentence's Copy wholly in frame, Tab from the name reaches Copy, a desktop hover witness over the app pills; `app.add-agent.existing` Already yours candidate on `{emptyWorkspace}`, opened with the panel, Tab from the title reaches its first Add. The joined card (Rename, and the opening focus for an app-named agent) is pending: it shows only after a real agent joins, which the seed does not do |
 | V18 | `app.agent-connect` — candidate: Terminal agent chosen under More apps, the name field and Copy setup prompt in frame; nothing is minted |
 | V19 | `app.invite-person` — pending |
 | V20 | `app.entity-detail` — pending |
@@ -327,7 +327,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M05 | `menu.mention` — pending |
 | M06 | `menu.receipt` — candidate; seeded `{message.addressedOwn}` with its `<details class="dashboard__message-receipt">` opened in `#general`: a card over the message, from the row's floating tool bar when the receipt is settled and from its avatar badge when it is a problem |
 | M07 | `menu.wiki-version` — pending |
-| M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action |
+| M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action; the menu now also lists Rename and Reconnect, with a frame (Remove first, then the toggle) and a desktop hover witness over its items preferring Rename. `app.people.rename` candidate: Rename chosen from that menu, the inline field open with Save and Cancel; frame lists Cancel first, then the field; a desktop hover witness over the People rows, preferring the row with the field, focusing its field; nothing is saved. The hosted Reconnect sentence (needs a seeded hosted agent of the viewer) is pending |
 | M09 | `menu.provider` — retired: the provider page and its Back control are gone; see `app.add-agent.panel` |
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |

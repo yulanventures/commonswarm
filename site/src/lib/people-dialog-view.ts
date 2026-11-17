@@ -1,6 +1,7 @@
 /** People & agents: roster and viewer rights in, detail controls and callbacks out.
  * Hosted and local owners share the Lists & docs flow and one approval command; the server decides. */
-import { AGENT_HOSTS } from "./agent-hosts";
+import { AGENT_HOSTS, reconnectPrompt } from "./agent-hosts";
+import { buildAgentRenameField, type RenameOutcome } from "./agent-rename";
 import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
@@ -14,6 +15,8 @@ export interface PeopleDialogAgent {
   lastActive: string; technical: string[]; grantRisk?: string | null; updateAvailable: boolean;
   access: { until: string | null } | null; accessReadState: "pending" | "succeeded" | "failed"; key: string | null; liveKey: boolean;
   own: boolean; mayManage: boolean; receipt: string;
+  /** The agent's own name; `name` may carry a short id suffix where names repeat. */
+  rawName?: string;
 }
 export interface PeopleDialogInvite { id: string; kind: "invite" | "agent" | "pending"; name: string; detail: string; mayCancel: boolean }
 /** `workspaceName` is the viewer's name for this workspace; it is used only in the role refusal copy. */
@@ -30,7 +33,11 @@ export interface PeopleDialogState { selected: { type: "agent" | "person"; id: s
   /** One entry per person whose role change is in flight. The entry object is the save's identity. */
   rolePending?: Map<string, { role: PeopleDialogRole }>; focusApplied?: string | null;
   /** Builder-owned: the layout of the last render. A page keeps role drafts without a selected person. */
-  layout?: "dialog" | "page" }
+  layout?: "dialog" | "page";
+  /** Builder-owned: the row whose name is being edited, with its draft, the server's refusal and a save in flight. */
+  rename?: { id: string; editor: number; value: string; error: string; pending: boolean } | null;
+  /** Builder-owned: the hosted agent whose reconnect sentence is shown. */
+  reconnect?: string | null }
 /** The page layout's own navigation. Links keep real hrefs; `navigate` (when given) handles the click in place. */
 export interface PeopleDialogPage {
   /** The workspace name and its home route: the back link. */
@@ -68,6 +75,8 @@ export interface PeopleDialogCallbacks {
   confirm: (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement) => void;
   /** Role change. Reject with an error that carries the server's stable code; the role control is hidden without this callback. */
   changeRole?: (change: PeopleDialogRoleChange) => Promise<void>;
+  /** rename_agent. A refusal resolves with the server's sentence; Rename is hidden without this callback. */
+  rename?: (id: string, name: string, editor: number) => Promise<RenameOutcome>;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -98,7 +107,14 @@ export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null
 export function peopleDialogAccessLabel(agent: Pick<PeopleDialogAgent, "hosted">): string {
   return agent.hosted ? `, ${HOSTED_LISTS_NOTE}` : ", Can use Lists & docs";
 }
-export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialogAction, id: string): boolean {
+/**
+ * Rename and Reconnect are row controls, not dialog actions. Rename mirrors rename_agent's gate (the
+ * agent's owner, or a workspace owner or admin: mayManage); the server still decides. Reconnect is the
+ * owner's: a hosted agent is brought back from the owner's own chat app, a local one with a new setup
+ * prompt for the same identity (the new-key action).
+ */
+export type PeopleRowAction = PeopleDialogAction | "rename" | "reconnect";
+export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleRowAction, id: string): boolean {
   if (model.sample) return false;
   if (action === "remove-person") return model.people.some((person) => person.id === id && person.mayRemove && !person.own);
   if (action === "cancel-invite") return model.invites.some((invite) => invite.id === id && invite.mayCancel);
@@ -107,7 +123,8 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialo
   if (action === "withdraw") return agent.own && agent.accessReadState === "succeeded" && !!agent.access;
   if (action === "resume") return agent.mayManage && agent.status.kind === "paused" && agent.status.fix.allowed;
   if (action === "allow") return agent.own && agent.accessReadState === "succeeded" && !agent.access;
-  if (action === "new-key" || action === "connected-apps") return agent.own;
+  if (action === "new-key" || action === "connected-apps" || action === "reconnect") return agent.own;
+  if (action === "rename") return agent.mayManage;
   if (action === "turn-off-key") return agent.liveKey && (agent.hosted ? agent.mayManage : agent.own);
   return action === "remove-agent" && agent.mayManage;
 }
@@ -254,6 +271,9 @@ function pageHeading(doc: Document): HTMLElement | null {
   return page?.getClientRects().length && !page.closest("[hidden],[inert]") && title?.getClientRects().length
     && bounds && bounds.width > 1 && bounds.height > 1 && !title.closest("[hidden],[inert]") ? title : null;
 }
+
+/** Each opened Rename field is a new editor; a save's answer applies only to the editor that sent it. */
+let renameEditors = 0;
 
 /** Real DOM builder. User text is always textContent or an input value, never HTML. */
 export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model: PeopleDialogModel, state: PeopleDialogState, callbacks: PeopleDialogCallbacks, options: PeopleDialogOptions = {}): void {
@@ -443,6 +463,62 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (state.selected?.id !== agent.id && agent.receipt) row.append(notice);
     const error = node(doc, "p", "pd-error"); error.setAttribute("role", "alert"); error.dataset.agentRowError = agent.id; error.hidden = true; row.append(error); return row;
   };
+  // Rename in the row: the draft, the server's refusal and a save in flight live in state, so a roster refresh keeps them.
+  const focusRow = (id: string) => doc.getElementById(`pd-agent-${id}`)?.focus({ preventScroll: !page });
+  const renameField = (agent: PeopleDialogAgent) => {
+    const draft = state.rename!;
+    const field = buildAgentRenameField(doc, { id: `pd-rename-${agent.id}`, label: "Name", current: agent.rawName ?? agent.name,
+      value: draft.value, error: draft.error, pending: draft.pending, focusKey: `rename-input-${agent.id}`,
+      onInput: (value) => { if (state.rename?.id === agent.id) { state.rename.value = value; state.rename.error = ""; } },
+      onCancel: () => { state.rename = null; callbacks.render(); focusRow(agent.id); },
+      onSubmit: (name) => void saveRename(agent.id, name) });
+    field.form.classList.add("pd-rename"); field.form.dataset.renameAgent = agent.id;
+    return field.form;
+  };
+  const renameInput = (id: string) => doc.getElementById(`pd-rename-${id}`) as HTMLInputElement | null;
+  const saveRename = async (id: string, name: string) => {
+    const rename = callbacks.rename;
+    if (!rename || state.rename?.id !== id || state.rename.pending) return;
+    // The answer belongs to this editor only: Cancel then Rename again on the same agent opens a new one.
+    const editor = state.rename.editor;
+    state.rename = { id, editor, value: name, error: "", pending: true }; callbacks.render();
+    let outcome: RenameOutcome;
+    try { outcome = await rename(id, name, editor); }
+    catch (error) { outcome = { ok: false, message: error instanceof Error ? error.message : "The rename was not confirmed." }; }
+    // Cancelled, reopened, or another row opened while the server answered: that field is not this answer's.
+    if (state.rename?.id !== id || state.rename.editor !== editor) return;
+    if (!outcome.ok) {
+      state.rename = { id, editor, value: name, error: outcome.message, pending: false }; callbacks.render();
+      renameInput(id)?.focus({ preventScroll: true }); return;
+    }
+    state.rename = null; callbacks.render(); focusRow(id);
+  };
+  // A hosted agent reconnects from its owner's chat app: the sentence to paste there, with Copy.
+  const reconnectSentence = (agent: PeopleDialogAgent) => {
+    const block = node(doc, "div", "pd-reconnect-sentence"); block.dataset.reconnectSentence = agent.id;
+    const text = reconnectPrompt({ workspace: model.workspaceName ?? "", name: agent.rawName ?? agent.name });
+    const sentence = node(doc, "p", "", text);
+    const copy = button(doc, "Copy", (opener) => {
+      void (async () => {
+        try { await navigator.clipboard.writeText(text); opener.textContent = "Copied"; }
+        catch {
+          const range = doc.createRange(); range.selectNodeContents(sentence);
+          const selection = doc.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+          opener.textContent = "Selected";
+        }
+      })();
+    });
+    copy.setAttribute("aria-label", `Copy the reconnect sentence for ${agent.name}`); copy.dataset.pdFocus = `reconnect-copy-${agent.id}`;
+    const close = button(doc, "Close", () => { state.reconnect = null; callbacks.render(); focusRow(agent.id); });
+    close.dataset.pdFocus = `reconnect-close-${agent.id}`;
+    const controls = node(doc, "div", "pd-reconnect-actions"); controls.append(copy, close);
+    block.append(sentence, controls);
+    block.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault(); event.stopPropagation(); state.reconnect = null; callbacks.render(); focusRow(agent.id);
+    });
+    return block;
+  };
   // Compact context row: native disclosure opens the main profile; its native actions disclosure retains the actions.
   const pageAgentRow = (agent: PeopleDialogAgent) => {
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
@@ -480,6 +556,28 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     // A row with a fix shows that one action, as the canvas does for a disconnected agent; its name still opens every detail.
     if (agentHref && agent.mayManage && !model.sample && !next) { const manage = link(doc, "Manage", agentHref(agent.id), "pd-pill-link", options.page?.navigate);
       manage.setAttribute("aria-label", `Manage ${agent.name}`); manage.dataset.pdFocus = `manage-${agent.id}`; actions.append(manage); }
+    const closeMenu = () => host.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]").forEach(menu => { menu.open = false; });
+    if (callbacks.rename && peopleDialogCanAct(model, "rename", agent.id)) {
+      const rename = button(doc, "Rename", () => {
+        closeMenu(); state.reconnect = null;
+        state.rename = { id: agent.id, editor: ++renameEditors, value: agent.rawName ?? agent.name, error: "", pending: false }; callbacks.render();
+        const input = doc.getElementById(`pd-rename-${agent.id}`) as HTMLInputElement | null;
+        input?.focus({ preventScroll: true }); input?.select();
+      });
+      rename.setAttribute("aria-label", `Rename ${agent.name}`); rename.dataset.pdFocus = `rename-${agent.id}`; actions.append(rename);
+    }
+    // Reconnect: a hosted agent comes back from its owner's chat app by a sentence; a local one with a new setup
+    // prompt for the same identity. Not beside a row whose repair is already Get a new key.
+    if (peopleDialogCanAct(model, "reconnect", agent.id) && !(next && agent.status.fix.action === "new-key")) {
+      const reconnect = agent.hosted
+        ? button(doc, "Reconnect", () => {
+          closeMenu(); state.rename = null; state.reconnect = agent.id; callbacks.render();
+          doc.querySelector<HTMLElement>(`[data-pd-focus="reconnect-copy-${agent.id}"]`)?.focus({ preventScroll: true });
+        })
+        : actionButton("new-key", agent, "Reconnect", notice);
+      reconnect.className = "pd-text-button"; reconnect.setAttribute("aria-label", `Reconnect ${agent.name}`);
+      reconnect.dataset.pdFocus = `reconnect-${agent.id}`; reconnect.dataset.reconnectAgent = agent.hosted ? "hosted" : "local"; actions.append(reconnect);
+    }
     if (peopleDialogCanAct(model, "remove-agent", agent.id)) { const remove = actionButton("remove-agent", agent, "Remove from workspace", notice);
       remove.className = "pd-text-button"; remove.setAttribute("aria-label", `Remove ${agent.name}`); remove.dataset.pdFocus = `row-remove-agent-${agent.id}`; actions.append(remove); }
     if (actions.childElementCount) {
@@ -493,6 +591,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       });
       menu.append(toggle, actions); row.append(menu);
     }
+    if (state.rename?.id === agent.id && callbacks.rename && peopleDialogCanAct(model, "rename", agent.id)) row.append(renameField(agent));
+    if (state.reconnect === agent.id && agent.hosted && peopleDialogCanAct(model, "reconnect", agent.id)) row.append(reconnectSentence(agent));
     if (state.selected?.id !== agent.id && agent.receipt) row.append(notice);
     const error = node(doc, "p", "pd-error"); error.setAttribute("role", "alert"); error.dataset.agentRowError = agent.id; error.hidden = true; row.append(error); return row;
   };

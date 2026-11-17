@@ -395,7 +395,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
     maker: "Connect with a one-time key",
     group: "other",
     status: null,
-    evidence: "site/src/components/connect/AgentConnect.astro:375",
+    evidence: "site/src/components/connect/AgentConnect.astro:387",
     logo: null,
     joiner: "hidden",
     desktopSignIn: false,
@@ -408,6 +408,20 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
 export function agentHostsFor(audience: "setter" | "joiner"): AgentHost[] {
   if (audience === "setter") return [...AGENT_HOSTS];
   return AGENT_HOSTS.filter((host) => host.joiner !== "hidden");
+}
+
+/*
+ * An agent named after its app ("Claude", "Codex") is usually a session that kept the app's name,
+ * so the joined card opens with Rename. The names are the catalog's own, ignoring case and outer
+ * spaces; a combined name ("ChatGPT and Dots") counts each part. "Another app" has no name to match.
+ */
+const APP_NAMES = new Set(AGENT_HOSTS.flatMap((host) => {
+  const name = hostSayName(host);
+  return name ? [name, ...name.split(" and ")] : [];
+}).map((name) => name.trim().toLocaleLowerCase()));
+
+export function agentNameIsAppName(name: string): boolean {
+  return APP_NAMES.has(name.trim().toLocaleLowerCase());
 }
 
 /** Desktop sign-in guidance names a route available on that audience's screen. */

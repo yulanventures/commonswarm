@@ -15,8 +15,10 @@
  * KEY ROUTES. Terminal and Grok Bot have no connector: the same name field (required there, since
  * the person creates the identity) and Copy setup prompt, which mints through <agent-connect>.
  *
- * NOT BUILT HERE. Renaming the agent from the joined card, and the nudge to rename an agent that
- * took its app's name, wait for the server's rename command.
+ * THE JOINED CARD. "{Name} joined {Workspace}." with Rename beside Done and Add another. An agent that
+ * took its app's name ("Claude") opens with the rename field focused: "Give this session its own
+ * name". The dashboard sends rename_agent (renameAgent); the server decides who may and which names
+ * are free.
  */
 import "../../styles/home/onboarding.css";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
@@ -235,11 +237,13 @@ const notesOf = (host: AgentHost): string[] => [
   </div>
 
   <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby="ahp-joined-title" hidden>
-    <h2 class="hm-ahp__joined-title" id="ahp-joined-title" tabindex="-1" data-ahp-joined-title></h2>
+    <h2 class="hm-ahp__joined-title" id="ahp-joined-title" tabindex="-1" data-ahp-joined-title><span tabindex="-1" data-ahp-joined-name></span><span data-ahp-joined-rest></span></h2>
+    <div data-ahp-rename-slot></div>
     <div class="hm-ahp__actions">
       <button class="hm-ahp__button hm-ahp__button--done" type="button" data-ahp-done>Done</button>
       <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-approve hidden>Allow Lists &amp; docs</button>
       <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-another>Add another</button>
+      <button class="hm-ahp__button hm-ahp__button--text" type="button" data-ahp-rename hidden>Rename</button>
     </div>
     <p class="hm-ahp__field-note" role="status" aria-live="polite" data-ahp-approve-status></p>
   </section>
@@ -253,7 +257,8 @@ const notesOf = (host: AgentHost): string[] => [
 </agent-host-picker>
 
 <script>
-  import { agentJoinedSentence, joinPrompt, joinedListsOffer, takenAgentName } from "../../lib/agent-hosts";
+  import { agentJoinedSentence, agentNameIsAppName, joinPrompt, joinedListsOffer, takenAgentName } from "../../lib/agent-hosts";
+  import { buildAgentRenameField, type RenameField, type RenameOutcome } from "../../lib/agent-rename";
   import { addAgentStore, lastHost, rememberLastHost } from "../../lib/add-agent";
   const WAITING_HINT_MS = 120_000;
 
@@ -262,6 +267,12 @@ const notesOf = (host: AgentHost): string[] => [
 
     #hostId = "";
     #joinedPrincipalId = "";
+    #joinedName = "";
+    #joinedAt: string | undefined;
+    #rename: RenameField | null = null;
+    /* Set by the dashboard: sends rename_agent for this workspace and account. Without it, no Rename.
+       Declared, not initialised, so a handler set before this element upgrades is kept. */
+    declare renameAgent: ((principalId: string, name: string) => Promise<RenameOutcome>) | null | undefined;
     #agentNames: string[] = [];
     /* The signed-in account: what this browser remembers for the panel is kept under it. */
     #viewerId = "";
@@ -307,6 +318,7 @@ const notesOf = (host: AgentHost): string[] => [
           },
         }));
       });
+      this.querySelector<HTMLButtonElement>("[data-ahp-rename]")?.addEventListener("click", () => this.#openRename(false));
       this.querySelector<HTMLButtonElement>("[data-ahp-another]")?.addEventListener("click", () => {
         const host = this.#hostId;
         this.reset(host);
@@ -360,6 +372,7 @@ const notesOf = (host: AgentHost): string[] => [
     reset(hostId?: string): void {
       window.clearTimeout(this.#waitingTimer);
       this.#joinedPrincipalId = "";
+      this.#closeRename();
       this.#minting = false;
       const name = this.#nameInput();
       if (name) name.value = "";
@@ -402,10 +415,14 @@ const notesOf = (host: AgentHost): string[] => [
 
     showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted?: boolean; joinedAt?: string }): void {
       window.clearTimeout(this.#waitingTimer);
+      this.#closeRename();
       this.#joinedPrincipalId = agent.principalId;
-      const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
+      this.#joinedName = agent.name;
+      this.#joinedAt = agent.joinedAt;
+      this.#renderJoinedTitle();
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
-      if (title) title.textContent = agentJoinedSentence(agent.name, workspace, agent.joinedAt);
+      const rename = this.querySelector<HTMLButtonElement>("[data-ahp-rename]");
+      if (rename) rename.hidden = !this.renameAgent;
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
       if (approve) {
         approve.hidden = !joinedListsOffer({ hosted: agent.hosted === true, canApprove: agent.canApprove }).showApprove;
@@ -413,7 +430,76 @@ const notesOf = (host: AgentHost): string[] => [
         approve.textContent = "Allow Lists & docs";
       }
       this.#show("joined");
-      title?.focus({ preventScroll: true });
+      // A session that kept its app's name is asked for its own, with the field ready to type in.
+      if (this.renameAgent && agentNameIsAppName(agent.name)) this.#openRename(true);
+      else title?.focus({ preventScroll: true });
+    }
+
+    /** "{Name} joined {Workspace}.", with the name in its own focusable span for after a rename. */
+    #renderJoinedTitle(): void {
+      const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
+      const sentence = agentJoinedSentence(this.#joinedName, workspace, this.#joinedAt);
+      const name = this.querySelector<HTMLElement>("[data-ahp-joined-name]");
+      const rest = this.querySelector<HTMLElement>("[data-ahp-joined-rest]");
+      if (name) name.textContent = this.#joinedName;
+      if (rest) rest.textContent = sentence.slice(this.#joinedName.length);
+    }
+
+    #openRename(ownName: boolean): void {
+      const slot = this.querySelector<HTMLElement>("[data-ahp-rename-slot]");
+      if (!slot || !this.renameAgent || !this.#joinedPrincipalId) return;
+      this.#closeRename();
+      const principalId = this.#joinedPrincipalId;
+      const field = buildAgentRenameField(document, {
+        id: "ahp-rename",
+        label: ownName ? "Give this session its own name" : "Name",
+        current: this.#joinedName,
+        value: this.#joinedName,
+        onCancel: () => {
+          this.#closeRename();
+          this.querySelector<HTMLButtonElement>("[data-ahp-rename]")?.focus({ preventScroll: true });
+        },
+        onSubmit: (name) => void this.#saveRename(principalId, name),
+      });
+      this.#rename = field;
+      slot.replaceChildren(field.form);
+      const button = this.querySelector<HTMLButtonElement>("[data-ahp-rename]");
+      if (button) button.hidden = true;
+      field.input.focus({ preventScroll: true });
+      field.input.select();
+    }
+
+    #closeRename(): void {
+      this.#rename = null;
+      this.querySelector<HTMLElement>("[data-ahp-rename-slot]")?.replaceChildren();
+      const button = this.querySelector<HTMLButtonElement>("[data-ahp-rename]");
+      if (button) button.hidden = !this.renameAgent || !this.#joinedPrincipalId;
+    }
+
+    async #saveRename(principalId: string, name: string): Promise<void> {
+      const field = this.#rename;
+      const send = this.renameAgent;
+      if (!field || !send) return;
+      field.setError("");
+      field.setPending(true);
+      let outcome: RenameOutcome;
+      try {
+        outcome = await send(principalId, name);
+      } catch (error) {
+        outcome = { ok: false, message: error instanceof Error ? error.message : "The rename was not confirmed." };
+      }
+      // The card moved on (Add another, a new agent, the panel left): this answer is not its.
+      if (this.#rename !== field || this.#joinedPrincipalId !== principalId) return;
+      field.setPending(false);
+      if (!outcome.ok) {
+        field.setError(outcome.message);
+        field.input.focus({ preventScroll: true });
+        return;
+      }
+      this.#joinedName = name;
+      this.#renderJoinedTitle();
+      this.#closeRename();
+      this.querySelector<HTMLElement>("[data-ahp-joined-name]")?.focus({ preventScroll: true });
     }
 
     #chip(id: string): HTMLButtonElement | null {

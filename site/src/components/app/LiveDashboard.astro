@@ -1222,7 +1222,8 @@ import "../../styles/kylon-command-palette.css";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
-  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, renameAgent } from "../../lib/commonswarm";
+  import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
   import { AttachmentsRefused, attachmentsRefusal, placementVisibility, sendDestination, uploadAttachmentsFor } from "../../lib/private-channels";
   import { buildAccountAgents } from "../../lib/account-agents";
   import { mountWorkspaceAgentPicker } from "../../lib/workspace-agent-picker";
@@ -1656,8 +1657,9 @@ import "../../styles/kylon-command-palette.css";
   interface SecretHoldingAgentConnect extends HTMLElement {
     clearPrompt(notify?: boolean): void;
     finishPrompt(reason: "done" | "back" | "consumed", notify?: boolean): void;
-    requestPromptFor(principalId: string, userId: string): void;
-    requestPromptNamed(name: string, userId: string): void;
+    readonly intentTicket: number;
+    requestPromptFor(principalId: string, userId: string, workspaceId: string, ticket: number): void;
+    requestPromptNamed(name: string, userId: string, workspaceId: string, ticket: number): void;
     retirePending(): void;
   }
 
@@ -1672,6 +1674,7 @@ import "../../styles/kylon-command-palette.css";
     showJoined(agent: { name: string; principalId: string; canApprove: boolean; hosted: boolean; joinedAt?: string }): void;
     mintFailed(message: string): void;
     mintSettled(): void;
+    renameAgent: ((principalId: string, name: string) => Promise<RenameOutcome>) | null | undefined;
   }
 
   interface CreateIntent {
@@ -2017,6 +2020,12 @@ import "../../styles/kylon-command-palette.css";
     /* The key the Add an agent panel minted for a named Terminal agent or Grok Bot, until its
        first use brings the panel back with the joined card (or the person leaves it). */
     let panelKeyMint: { workspaceId: string; userId: string; principalId: string; name: string } | null = null;
+    /* The agents panel keys created, from each accepted mint, by principal. The panel's duplicate check
+       counts each one until the roster read includes it, so a slow or failed read never drops a name
+       just confirmed, however many were added in a row. Cleared on the auth reset. */
+    let panelKnownAgents: Array<{ workspaceId: string; userId: string; principalId: string; name: string }> = [];
+    /* rename_agent command ids: a fresh one per attempt, the same one to retry an unanswered attempt. */
+    const renameAttempts = new RenameAttempts();
     let freshInviteLink = "";
     let freshInviteId = "";
     let freshInviteWorkspaceId = "";
@@ -5351,12 +5360,7 @@ import "../../styles/kylon-command-palette.css";
             });
           },
           onFix: action => {
-            if (action === "new-key") {
-              const userId = session?.user.id ?? "";
-              void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
-                openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id, userId));
-              });
-            }
+            if (action === "new-key") void requestNewKeyFor(id, workspace.id);
             else void manage().then(() => pressOnPage(`resume-${id}`));
           },
           onRemove: () => { void manage().then(() => pressOnPage(`remove-agent-${id}`)); },
@@ -7265,7 +7269,7 @@ import "../../styles/kylon-command-palette.css";
               newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? (tokenMatches ? grant.revokedAt : null) });
             if (risk) { grantRisk = risk; technical.push(risk); }
           }
-          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames),
+          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames), rawName: agent.name,
             ownerId: agent.ownerUserId, ownerName, model: agent.model, app: null, hosted: agent.transport === "hosted_mcp", status, receive,
             lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? peopleAgentActivityTime(agent.presence.last_command_at, now) : "Not active yet",
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
@@ -7373,6 +7377,20 @@ import "../../styles/kylon-command-palette.css";
           await setAgentModel(session, uuid(), scope.workspaceId, principalId, modelValue);
           if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
           await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
+        },
+        rename: async (principalId, name, editor) => {
+          const workspaceId = activeWorkspaceId;
+          if (!peopleDialogCanAct(peopleDialogModel(), "rename", principalId)) return { ok: false, message: "This action is no longer available. Go back and check the details." };
+          const outcome = await renameAgentHere(workspaceId, principalId, name);
+          /* The accepted name is already applied in place; the reload brings every surface in line. It
+             finishes before the row takes focus, so focus ends on the renamed row. A failed reload
+             cannot undo an accepted rename. Only the field that sent this rename may move focus: if it
+             was cancelled, or a newer Rename field is open, the data refreshes and focus stays put. */
+          if (outcome.ok && workspaceId === activeWorkspaceId) {
+            const sender = (): boolean => peopleDialogState.rename?.editor === editor;
+            try { await reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`, undefined, sender); } catch { /* the receipt is the accepted command */ }
+          }
+          return outcome;
         } }, { layout: "page", focus: peopleDialogFocus, tintFor: (agentId) => {
           // An agent wears its owner's colour, the same rule the rail and the capsules use. An owner
           // who left has no colour: null is the neutral form.
@@ -7397,7 +7415,9 @@ import "../../styles/kylon-command-palette.css";
       layout.peopleContext(null);
       syncPeopleDialogLayout();
     };
-    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
+    /** `mayFocus`, when given, is asked at each focus move (now and in the next frame); false leaves focus where it is. */
+    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction,
+      mayFocus: () => boolean = () => true): Promise<void> => {
       const selected = peopleDialogState.selected; const query = rosterFilter;
       const userId = session?.user.id;
       const wasOpen = peopleDialogOpen();
@@ -7406,7 +7426,8 @@ import "../../styles/kylon-command-palette.css";
       if (receipt && principalId) peopleDialogReceipts.set(`${workspaceId}:${principalId}`, receipt);
       if (wasOpen && peopleDialogOpen()) { rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
         const target = peopleDialogFocusTarget(action, principalId);
-        target?.focus({ preventScroll: true }); window.requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true })); }
+        if (mayFocus()) target?.focus({ preventScroll: true });
+        window.requestAnimationFrame(() => target?.isConnected && mayFocus() && target.focus({ preventScroll: true })); }
       const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
     };
     const peopleDialogFocusTarget = (action: PeopleDialogAction | undefined, id: string): HTMLElement | null => {
@@ -7419,13 +7440,47 @@ import "../../styles/kylon-command-palette.css";
       }
       return one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${id}`) ?? one<HTMLElement>("#dashboard-roster-title");
     };
+    /*
+     * A new key for an agent that exists: People's New key, Get a new key and Reconnect, and the agent
+     * page's fix (HezSec C1 on #479). The key view is a channel view, so the workspace's chat opens
+     * first. The request is bound at the click to its workspace, account and the navigation it makes.
+     * After that navigation, and again in the frame that asks for the prompt, the same scope must
+     * still be current; a later navigation, a workspace switch, sign-out or another account cancels it
+     * without asking for anything. The mint element is told the workspace too and refuses any other.
+     * It also takes the element's ticket at the click, before any await: Back, choosing another app,
+     * leaving the panel and the auth reset all retire it (retirePending), and the element refuses a
+     * retired ticket, so an abandoned click never becomes a request under a newer generation.
+     */
+    const requestNewKeyFor = async (principalId: string, workspaceId: string): Promise<"asked" | "cancelled"> => {
+      const value = session;
+      const connect = one<SecretHoldingAgentConnect>("agent-connect");
+      if (!value || !connect || !workspaceId || sampleMode || activeWorkspaceId !== workspaceId) return "cancelled";
+      const userId = value.user.id;
+      const ticket = connect.intentTicket;
+      const before = homeNavigation;
+      const opening = navigateHome({ view: "chat", workspaceId }, "push");
+      // navigateHome claims its navigation number before its first await; none claimed means it did not navigate.
+      const navigation = homeNavigation;
+      await opening;
+      const current = (): boolean => navigation !== before && navigation === homeNavigation && session?.user.id === userId
+        && activeWorkspaceId === workspaceId && homeRoute.view === "chat" && !sampleMode
+        && one<SecretHoldingAgentConnect>("agent-connect") === connect && connect.intentTicket === ticket;
+      if (!current()) return "cancelled";
+      const version = requestVersion;
+      openConnect();
+      return await new Promise((resolve) => window.requestAnimationFrame(() => {
+        if (!current() || version !== requestVersion) { resolve("cancelled"); return; }
+        connect.requestPromptFor(principalId, userId, workspaceId, ticket);
+        resolve("asked");
+      }));
+    };
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
       const workspaceId = activeWorkspaceId, userId = session.user.id;
       const agent = agents.find((entry) => entry.principalId === id);
       const grant = agent ? homeConnectionAccess(agent, workspaceId, accessStatuses) : undefined;
       // These three continue in the workspace: the key prompt and the consent card are channel views.
-      if (action === "new-key") { await navigateHome({ view: "chat", workspaceId }, "push"); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id, userId)); return; }
+      if (action === "new-key") { await requestNewKeyFor(id, workspaceId); return; }
       if (action === "connected-apps") { one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
       if (action === "allow") {
         const outcome = await allowAgentFromPeople(workspaceId, id, button, notice);
@@ -7487,6 +7542,7 @@ import "../../styles/kylon-command-palette.css";
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
         rosterFilter = "";
         peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
+        peopleDialogState.rename = null; peopleDialogState.reconnect = null;
         dialog.showModal();
       }
       peopleDialogFocus = focus; peopleDialogState.focusApplied = null;
@@ -10371,6 +10427,7 @@ import "../../styles/kylon-command-palette.css";
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
       panelKeyMint = null;
+      panelKnownAgents = [];
       disposeCleanup();
       resetSeatAdminState();
       listsAllowLanding = null;
@@ -11388,10 +11445,41 @@ import "../../styles/kylon-command-palette.css";
     let existingAgentChoiceIsCurrent: (() => boolean) | undefined;
     /** What the panel checks a name against and which apps it marks: this workspace's agents now. */
     const refreshAddAgentPanel = (picker: AddAgentPanel | null, workspaceId: string): void => {
-      picker?.setRoster?.(agents.map((agent) => agent.name));
+      // Agents panel keys created count until the roster read includes each of them (474 R2 deferred P2).
+      panelKnownAgents = panelKnownAgents.filter((known) => !agents.some((agent) => agent.principalId === known.principalId));
+      const extra = panelKnownAgents.filter((known) => known.workspaceId === workspaceId && known.userId === session?.user.id);
+      const roster = [...agents, ...extra];
+      picker?.setRoster?.(roster.map((agent) => agent.name));
       picker?.setConnected?.(workspaceId && session
-        ? connectedHosts(addAgentStore(), session.user.id, workspaceId, agents.map((agent) => agent.principalId))
+        ? connectedHosts(addAgentStore(), session.user.id, workspaceId, roster.map((agent) => agent.principalId))
         : []);
+    };
+    /** An accepted rename, applied where this page already holds the name. */
+    const applyAgentRename = (principalId: string, name: string): void => {
+      agents = agents.map((agent) => agent.principalId === principalId ? { ...agent, name } : agent);
+      panelKnownAgents = panelKnownAgents.map((known) => known.principalId === principalId ? { ...known, name } : known);
+      renderRoster();
+      refreshAddAgentPanel(one<AddAgentPanel>("agent-host-picker"), activeWorkspaceId);
+    };
+    /** rename_agent for this workspace and account, pinned at the click. The server decides who may
+        rename and which names are free; its refusal comes back as its own sentence. */
+    const renameAgentHere = async (workspaceId: string, principalId: string, name: string): Promise<RenameOutcome> => {
+      const value = session;
+      if (!value || !workspaceId || sampleMode) return { ok: false, message: "Sign in to rename this agent." };
+      const userId = value.user.id;
+      const key = `${userId}:${workspaceId}:${principalId}`;
+      const commandId = renameAttempts.commandId(key, name, uuid);
+      let result: Awaited<ReturnType<typeof renameAgent>>;
+      try {
+        result = await renameAgent(value, commandId, workspaceId, principalId, name);
+      } catch (error) {
+        // No answer: the same name sends the same command id again, so the server replays its answer.
+        return { ok: false, message: readableError(error) };
+      }
+      renameAttempts.settle(key);
+      if (!result.ok) return { ok: false, message: result.message };
+      if (session?.user.id === userId && activeWorkspaceId === workspaceId) applyAgentRename(principalId, name);
+      return { ok: true };
     };
     /** "Already yours": the person's agents that can join this workspace, each with Add. The
         section stays hidden unless there is one to add (or the list could not load). */
@@ -15570,15 +15658,21 @@ import "../../styles/kylon-command-palette.css";
       if (hostPicker.watchable) startHostJoinWatch();
       else stopHostJoinWatch();
     });
+    /* The joined card's Rename: the workspace on screen when Save is pressed, pinned until the answer. */
+    if (hostPicker) hostPicker.renameAgent = (principalId, name) => renameAgentHere(activeWorkspaceId, principalId, name);
     hostPicker?.addEventListener("agent-host-home", () => {
       leaveAddAgentForHome();
     });
     hostPicker?.addEventListener("agent-host-mint", (event: Event) => {
       const name = (event as CustomEvent<{ name?: unknown }>).detail?.name;
       const connect = one<SecretHoldingAgentConnect>("agent-connect");
-      if (typeof name !== "string" || !connect || !session) return;
+      /* Synchronous from the click, with no await before the request: the workspace and account on
+         screen now are the ones the request is bound to, and the element refuses any other workspace. */
+      const workspaceId = activeWorkspaceId;
+      if (typeof name !== "string" || !connect || !session || !workspaceId) return;
+      const ticket = connect.intentTicket;
       openConnect();
-      connect.requestPromptNamed(name, session.user.id);
+      connect.requestPromptNamed(name, session.user.id, workspaceId, ticket);
     });
     /* One-click Allow. Lists & docs opens only when it is not set up for this workspace yet. */
     hostPicker?.addEventListener("agent-host-approve", (event: Event) => {
@@ -15961,6 +16055,10 @@ import "../../styles/kylon-command-palette.css";
         && typeof detail.principalId === "string" && typeof detail.name === "string"
         ? { workspaceId, userId: session.user.id, principalId: detail.principalId, name: detail.name }
         : null;
+      if (panelKeyMint) {
+        const mint = panelKeyMint;
+        panelKnownAgents = [...panelKnownAgents.filter((known) => known.principalId !== mint.principalId), { ...mint }];
+      }
       const version = requestVersion;
       try {
         const [nextAgents, nextStatuses, nextPending] = await Promise.all([
