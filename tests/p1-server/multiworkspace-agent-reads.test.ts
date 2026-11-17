@@ -297,7 +297,34 @@ before(async () => {
     VALUES (${lead.principal}::uuid, ${shared}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)`;
   sibling = await createAgent("sibling", shared, owner);
   foreign = await createAgent("foreign", shared, bystander);
+  await awaitRestSchemaCache();
 }, { timeout: 120_000 });
+
+/**
+ * A gate, not a retry: wait before any assertion until PostgREST has loaded its schema cache. When this file runs
+ * first after the stack starts, the first REST call answers 503 PGRST002 ("Could not query the database for the
+ * schema cache. Retrying."). Only that answer means "keep waiting"; any other non-200 stops the gate with its body.
+ */
+async function awaitRestSchemaCache(): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let last = "no response";
+  while (Date.now() < deadline) {
+    const response = await fetch(`${local.API_URL}/rest/v1/signals?select=id&limit=1`, {
+      signal: AbortSignal.timeout(10_000),
+      headers: { apikey: local.ANON_KEY, authorization: `Bearer ${owner.jwt}`, "accept-profile": "swarm_read" },
+    });
+    const body = await response.text();
+    if (response.status === 200) return;
+    let code: unknown;
+    try { code = (JSON.parse(body) as { code?: unknown }).code; } catch { code = undefined; }
+    if (response.status !== 503 || code !== "PGRST002") {
+      throw new Error(`PostgREST refused the readiness read: ${response.status} ${body}`);
+    }
+    last = `${response.status} ${body}`;
+    await delay(500);
+  }
+  throw new Error(`PostgREST schema cache not ready after 60s: ${last}`);
+}
 
 after(async () => {
   if (functionProcess?.pid && functionProcess.exitCode === null) {
