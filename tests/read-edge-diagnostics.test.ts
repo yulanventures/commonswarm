@@ -343,8 +343,9 @@ function assertTransactionOpenings(name: "read" | "command", source: string): vo
   }
   visit(file);
   assert.deepEqual(inventory.sort(), name === "read" ? ["request"]
-    // The seventh command request transaction is runSeatAdminCommand (seat admin grant and end).
-    : ["audit", "audit", "audit", "audit", "drain", "request", "request", "request", "request", "request", "request", "request", "worker"],
+    // Request transactions include runSeatAdminCommand (seat admin grant and end) and, newest,
+    // handleHostedChannelReadSeen (a hosted channel_read page's seen marks).
+    : ["audit", "audit", "audit", "audit", "drain", "request", "request", "request", "request", "request", "request", "request", "request", "worker"],
   `${name}: all request, failure-audit, drain and worker transactions are accounted for`);
 
   if (name === "read") {

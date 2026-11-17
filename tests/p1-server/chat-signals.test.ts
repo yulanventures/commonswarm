@@ -2226,6 +2226,33 @@ test("a mention wakes the agent and leaves the message public; the shipped liste
   assert.equal(stranger.status, 403);
 });
 
+test("a local agent's channel_read marks nothing: its mention stays for its listener, with no 👀 and no receipt", async () => {
+  const agent = await mentionAgent(f.ownerId, "local-reader");
+  const slug = `local-read-${randomBytes(4).toString("hex")}`;
+  assert.equal((await send(f.ownerJwt, { kind: "channel_create", slug })).status, 200);
+  const mentioned = await send(f.ownerJwt, installedPost({ channel: slug, mentions: [{ kind: "agent", id: agent.principal }] }));
+  assert.equal(mentioned.status, 200, JSON.stringify(mentioned.body));
+  const plain = await send(f.ownerJwt, installedPost({ channel: slug }));
+  assert.equal(plain.status, 200, JSON.stringify(plain.body));
+  const ids = [String(signalOf(mentioned.body).id), String(signalOf(plain.body).id)];
+
+  const page = await readResource(agent.token, { resource: "channel_messages", workspace_id: f.workspace, channel: slug, max_bytes: 64 * 1024 });
+  assert.equal(page.status, 200, JSON.stringify(page.body));
+  assert.deepEqual((page.body.messages as Array<Record<string, unknown>>).map((m) => m.signal_id), ids, "positive control: the page returns both");
+
+  const [delivery] = await sql<{ ack_outcome: string | null; acked_at: Date | null }[]>`
+    SELECT ack_outcome, acked_at FROM swarm.signal_deliveries
+    WHERE signal_id = ${ids[0]!}::uuid AND recipient_agent_principal_id = ${agent.principal}::uuid`;
+  assert.deepEqual({ ...delivery }, { ack_outcome: null, acked_at: null }, "the delivery is left for the listener to claim");
+  const [counts] = await sql<{ marks: string; receipts: string }[]>`
+    SELECT
+      (SELECT count(*)::text FROM swarm.signal_reactions
+        WHERE actor_agent_principal_id = ${agent.principal}::uuid) AS marks,
+      (SELECT count(*)::text FROM swarm.signal_agent_receipts
+        WHERE principal_id = ${agent.principal}::uuid) AS receipts`;
+  assert.deepEqual({ ...counts }, { marks: "0", receipts: "0" });
+});
+
 test("a person's reply in a thread reaches the agents already in it, and a mention there reaches one more", async () => {
   const first = await mentionAgent(f.ownerId, "thread-first");
   const second = await mentionAgent(f.ownerId, "thread-second");

@@ -35,6 +35,7 @@ import { executeFilePut } from "./file-put.ts";
 import { SEAT_RELEASED_NOTE, executeSeatList } from "./seat-tools.ts";
 import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import { fitChannelPage } from "./channel-page.ts";
+import { markChannelReadSeen } from "./channel-seen.ts";
 import { fitMemoryRows, memorySaveCommand, memoryWriteOutput } from "./memory-tools.ts";
 import { reactionCommand, reactionOutput } from "./reaction-tools.ts";
 import { reportHostedSeatRefused } from "../_shared/access-lost.ts";
@@ -325,6 +326,9 @@ async function executeToolCall(call: HostedToolCall): Promise<Record<string, unk
       archived: output.archived, messages: Array.isArray(output.messages) ? output.messages as Array<Record<string, unknown>> : [],
       next: output.next ?? null }, limits.maxResponseBytes);
     const { messages, next } = page;
+    // Only the messages this page returns. A mention reads as seen and a channel-wide post counts the seat.
+    await markChannelReadSeen(messages, binding.workspaceId, handle,
+      () => seatCapability(call.token, binding, "check"), handleHostedCommand);
     return { ...page,
       provenance: messageReadProvenance(messages.map((m) => ({ ...m, id: m.signal_id })),
         { tool: "channel_read", scope: "messages posted to the whole workspace in one channel" }, next !== null) };
