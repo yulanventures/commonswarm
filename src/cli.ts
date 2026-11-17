@@ -12,7 +12,14 @@ import {agentWorkspaces} from './cloud/agent-workspaces.js';
 
 import { HOUSEHOLD_DEFINITION_TOOLS, HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
 import { householdRefusalNextStep } from "./protocol/household-next-steps.js";
-import { HouseholdObjectClient } from "./cloud/household-objects.js";
+import { HouseholdObjectClient, type HouseholdClientResult } from "./cloud/household-objects.js";
+import {
+  checkedToolArguments, fileText, mentionCount, oneSource, renderTodoList, renderTodoQueue, renderTodoRead, renderTodoWrite,
+  resolveTodoParty, todoBaseVersion, todoCommentBody, todoDue, todoFailureText, todoIdArgument, todoLimit, todoNames,
+  todoNextAction, todoNotes, todoOffset, todoSection, todoStart, todoTitle, TODO_STATE_VERBS,
+  type TodoNames, type TodoRosterEntry, type TodoStateVerb,
+} from "./cloud/todo-cli.js";
+import type { Party } from "./protocol/household-todos.js";
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
 import { randomUUID } from "node:crypto";
 import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main-routing.js";
@@ -707,6 +714,7 @@ export const KNOWN_FLAGS = new Set([
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status", "org-id",
   "message-status", "choice", "expected-revision", "option", "recommended", "multi", "mention", "private",
   "workspace", "none",
+  "all", "assignee", "offset", "section", "agent", "comment-offset", "notes", "notes-file", "due", "assign", "start", "base-version",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -746,6 +754,7 @@ export const BOOLEAN_FLAGS = new Set([
   "private",
   "workspace",
   "none",
+  "all",
 ]);
 
 const UUID_RE =
@@ -11054,18 +11063,218 @@ const SEAT_ADMIN_HELP: Readonly<Record<string, readonly [string, string]>> = {
 export const HOUSEHOLD_INPUT_ACCEPTED_FLAGS = [...agentFlags, "input-file"] as const;
 
 async function runHouseholdObject(args: Arguments): Promise<void> {
-  const context = await fileContext(args, HOUSEHOLD_INPUT_ACCEPTED_FLAGS, 2);
+  /* Flags, the input file and its schema are checked before the credential or the network: a
+   * refusal names the missing, unknown or wrongly shaped keys, and keeps the invalid_arguments code. */
+  args.assertShape(HOUSEHOLD_INPUT_ACCEPTED_FLAGS, 2);
   const inputPath = args.required("input-file");
-  const input = JSON.parse(readFileSync(inputPath, "utf8"));
+  let input: unknown;
+  try { input = JSON.parse(readFileSync(inputPath, "utf8")); }
+  catch (error) {
+    // The parser's message can quote the file; say only where to look.
+    if (error instanceof SyntaxError) throw new Error("--input-file is not valid JSON; it must hold one JSON object of tool arguments");
+    throw error;
+  }
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new UsageError("--input-file must contain an object of tool arguments");
+  const toolInput = { seat: LOCAL_HOUSEHOLD_SEAT, ...input };
+  checkedToolArguments(args.positionals[1]!, toolInput);
+  const context = await fileContext(args, HOUSEHOLD_INPUT_ACCEPTED_FLAGS, 2);
   const client = new HouseholdObjectClient(createHouseholdHttpTransport({ target: context.cloud,
     authenticate: async () => ({ credential: context.selected.bearer, fetcher: context.selected.fetcher }) }), context.selected.selectedWorkspace);
-  const result = await client.prepare(args.positionals[1]!, { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
+  const result = await client.prepare(args.positionals[1]!, toolInput,
     { upload: { reservation_id: "server_pending", expires_at: 0 } }).send();
   const next_action = result.status === 'refused' ? householdRefusalNextStep(result.reason) : undefined;
   process.stdout.write(JSON.stringify(next_action ? { ...result, next_action } : result) + "\n");
   if (["refused", "unknown", "conflict", "error"].includes(result.status)) process.exitCode = 1;
 }
+
+/* ──────────────────────────────── cswarm todo ────────────────────────────────
+ * First-class verbs over the existing household to-do tools (todo_list, todo_queue, todo_read,
+ * todo_create, todo_start, todo_set_state, todo_comment): the same command kind, tool names and
+ * argument keys as `cswarm object`, so the server's authority is unchanged. Every handler parses
+ * all of its flags and files before the credential, the directory or the tool call. */
+export const TODO_LS_ACCEPTED_FLAGS = [...agentFlags, "all", "assignee", "limit", "offset"] as const;
+export const TODO_QUEUE_ACCEPTED_FLAGS = [...agentFlags, "section", "agent", "limit", "offset"] as const;
+export const TODO_READ_ACCEPTED_FLAGS = [...agentFlags, "comment-offset"] as const;
+export const TODO_CREATE_ACCEPTED_FLAGS = [...agentFlags, "notes", "notes-file", "due", "assign", "start"] as const;
+export const TODO_START_ACCEPTED_FLAGS = [...agentFlags] as const;
+export const TODO_STATE_ACCEPTED_FLAGS = [...agentFlags, "base-version"] as const;
+export const TODO_COMMENT_ACCEPTED_FLAGS = [...agentFlags, "body-file"] as const;
+
+type TodoContext = FileCliContext & { client: HouseholdObjectClient; directory(): Promise<SignalDirectory> };
+
+async function todoContext(args: Arguments, flags: readonly string[], positionals: number): Promise<TodoContext> {
+  const context = await fileContext(args, flags, positionals);
+  const client = new HouseholdObjectClient(createHouseholdHttpTransport({ target: context.cloud,
+    authenticate: async () => ({ credential: context.selected.bearer, fetcher: context.selected.fetcher }) }), context.selected.selectedWorkspace);
+  let directory: Promise<SignalDirectory> | undefined;
+  return { ...context, client,
+    directory: () => directory ??= signalDirectory(context.cloud, context.selected.selectedWorkspace, context.selected) };
+}
+
+function todoRoster(directory: SignalDirectory): TodoRosterEntry[] {
+  return [
+    ...directory.members.map((member) => ({ kind: "user" as const, id: member.user_id, name: member.display_name })),
+    ...directory.agents.map((agent) => ({ kind: "agent" as const, id: agent.principal_id, name: agent.name })),
+  ];
+}
+
+const isMe = (selector: string | undefined): boolean => selector?.trim().toLowerCase() === "me";
+
+/** Names for human output, only when the directory was already read for this command. */
+async function todoDisplayNames(context: TodoContext, loaded: boolean): Promise<TodoNames> {
+  return loaded ? todoNames(todoRoster(await context.directory())) : new Map();
+}
+
+/** `me` is the caller: a person's user id, or the agent's principal id (from its directory identity
+ * when the credential file does not carry it). Anything else is a name or id in this workspace. */
+async function todoParty(context: TodoContext, selector: string, flag: string,
+  kinds: readonly ("user" | "agent")[] = ["user", "agent"]): Promise<Party> {
+  if (isMe(selector)) {
+    const selected = context.selected;
+    const me: Party = selected.kind === "human"
+      ? { kind: "user", id: selected.human!.userId.toLowerCase() }
+      : { kind: "agent", id: (selected.agent?.principalId ?? (await context.directory()).identity?.principal_id ?? "").toLowerCase() };
+    if (!me.id) throw new Error(`--${flag} me needs this agent's id, and the workspace directory did not return it; pass the id instead`);
+    if (!kinds.includes(me.kind)) throw new Error(`--${flag} names an agent; you are signed in as a person`);
+    return me;
+  }
+  return resolveTodoParty(selector, todoRoster(await context.directory()), flag, kinds);
+}
+
+/** One attempt, and one immediate retry with the same request_id when the outcome is unknown. */
+async function sendTodoTool(context: TodoContext, tool: string, input: Record<string, unknown>): Promise<HouseholdClientResult> {
+  const request = context.client.prepare(tool, checkedToolArguments(tool, { seat: LOCAL_HOUSEHOLD_SEAT, ...input }));
+  const result = await request.send();
+  return result.status === "unknown" ? await request.retry() : result;
+}
+
+async function emitTodo(args: Arguments, result: HouseholdClientResult, human: () => string | Promise<string>, todoId?: string): Promise<void> {
+  const failed = result.status !== "ok" && result.status !== "committed";
+  if (failed) process.exitCode = 1;
+  if (args.has("json")) {
+    const next_action = todoNextAction(result, todoId);
+    process.stdout.write(JSON.stringify(next_action ? { ...result, next_action } : result) + "\n");
+    return;
+  }
+  if (failed) {
+    process.stderr.write(`cswarm: ${todoFailureText(result, todoId)}\n`);
+    return;
+  }
+  process.stdout.write(await human());
+}
+
+function todoSelector(args: Arguments, flag: string): string | undefined {
+  const value = args.optional(flag);
+  if (value !== undefined && value.trim() === "") throw new Error(`--${flag} needs a name, an id or me`);
+  return value;
+}
+
+async function runTodoLs(args: Arguments): Promise<void> {
+  args.assertShape(TODO_LS_ACCEPTED_FLAGS, 2);
+  const scope = args.has("all") ? "all" as const : "open" as const;
+  const limit = todoLimit(args.optional("limit"));
+  const offset = todoOffset(args.optional("offset"));
+  const assigneeSelector = todoSelector(args, "assignee");
+  const context = await todoContext(args, TODO_LS_ACCEPTED_FLAGS, 2);
+  const assignee = assigneeSelector === undefined ? undefined : await todoParty(context, assigneeSelector, "assignee");
+  const result = await sendTodoTool(context, "todo_list", { scope, ...(assignee ? { assignee } : {}),
+    ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) });
+  await emitTodo(args, result, async () => renderTodoList(result as Extract<HouseholdClientResult, { kind: "todo_list" }>, scope,
+    await todoDisplayNames(context, assigneeSelector !== undefined && !isMe(assigneeSelector))));
+}
+
+async function runTodoQueue(args: Arguments): Promise<void> {
+  args.assertShape(TODO_QUEUE_ACCEPTED_FLAGS, 2);
+  const section = todoSection(args.optional("section"));
+  const limit = todoLimit(args.optional("limit"));
+  const offset = todoOffset(args.optional("offset"));
+  if (offset !== undefined && section === undefined) throw new Error("--offset pages one section; add --section working, up_next, not_yet or requests");
+  const agentSelector = todoSelector(args, "agent");
+  const context = await todoContext(args, TODO_QUEUE_ACCEPTED_FLAGS, 2);
+  const agent = agentSelector === undefined ? undefined : await todoParty(context, agentSelector, "agent", ["agent"]);
+  const result = await sendTodoTool(context, "todo_queue", { ...(agent ? { principal_id: agent.id } : {}),
+    ...(section === undefined ? {} : { section }), ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) });
+  await emitTodo(args, result, async () => renderTodoQueue((result as Extract<HouseholdClientResult, { kind: "todo_queue" }>).queue, section,
+    await todoDisplayNames(context, agentSelector !== undefined && !isMe(agentSelector))));
+}
+
+async function runTodoRead(args: Arguments): Promise<void> {
+  const todoId = todoIdArgument(args.positionals[2], "cswarm todo read");
+  args.assertShape(TODO_READ_ACCEPTED_FLAGS, 3);
+  const commentOffset = todoOffset(args.optional("comment-offset"), "comment-offset");
+  const context = await todoContext(args, TODO_READ_ACCEPTED_FLAGS, 3);
+  const result = await sendTodoTool(context, "todo_read", { todo_id: todoId, ...(commentOffset === undefined ? {} : { comment_offset: commentOffset }) });
+  await emitTodo(args, result, () => renderTodoRead(result as Extract<HouseholdClientResult, { kind: "todo_read" }>, new Map()), todoId);
+}
+
+async function runTodoCreate(args: Arguments): Promise<void> {
+  const rawTitle = args.positionals[2];
+  if (rawTitle === undefined) throw new Error('cswarm todo create needs a title: cswarm todo create "<title>"');
+  args.assertShape(TODO_CREATE_ACCEPTED_FLAGS, 3);
+  const title = todoTitle(rawTitle);
+  const notesSource = oneSource([{ label: "--notes", present: args.has("notes") }, { label: "--notes-file", present: args.has("notes-file") }], false, "the notes");
+  const dueOn = todoDue(args.optional("due"));
+  const assignSelector = todoSelector(args, "assign");
+  const start = todoStart(args.optional("start"));
+  if (start !== undefined && assignSelector === undefined) throw new Error("--start goes with --assign: it says how the assignee takes the to-do");
+  const notes = notesSource === null ? undefined
+    : todoNotes(notesSource === 0 ? args.required("notes") : fileText(readFileSync(args.required("notes-file"), "utf8")));
+  const context = await todoContext(args, TODO_CREATE_ACCEPTED_FLAGS, 3);
+  const to = assignSelector === undefined ? undefined : await todoParty(context, assignSelector, "assign");
+  const result = await sendTodoTool(context, "todo_create", { request_id: randomUUID(), title,
+    ...(notes === undefined ? {} : { notes }), ...(dueOn === undefined ? {} : { due_on: dueOn }),
+    ...(to === undefined ? {} : { assign: { to, ...(start === undefined ? {} : { start }) } }) });
+  await emitTodo(args, result, async () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, "Created",
+    await todoDisplayNames(context, assignSelector !== undefined && !isMe(assignSelector))));
+}
+
+async function runTodoStart(args: Arguments): Promise<void> {
+  const todoId = args.positionals[2] === undefined ? undefined : todoIdArgument(args.positionals[2], "cswarm todo start");
+  const positionals = todoId === undefined ? 2 : 3;
+  args.assertShape(TODO_START_ACCEPTED_FLAGS, positionals);
+  const context = await todoContext(args, TODO_START_ACCEPTED_FLAGS, positionals);
+  const result = await sendTodoTool(context, "todo_start", { request_id: randomUUID(), ...(todoId === undefined ? {} : { todo_id: todoId }) });
+  await emitTodo(args, result, () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, "Started", new Map()), todoId);
+}
+
+/** done, drop and reopen: todo_set_state against --base-version, or against the version a todo_read returns. */
+async function runTodoSetState(args: Arguments, verb: TodoStateVerb): Promise<void> {
+  const todoId = todoIdArgument(args.positionals[2], `cswarm todo ${verb}`);
+  args.assertShape(TODO_STATE_ACCEPTED_FLAGS, 3);
+  let baseVersion = todoBaseVersion(args.optional("base-version"));
+  const context = await todoContext(args, TODO_STATE_ACCEPTED_FLAGS, 3);
+  if (baseVersion === undefined) {
+    const read = await sendTodoTool(context, "todo_read", { todo_id: todoId });
+    if (read.status !== "ok" || read.kind !== "todo_read") { await emitTodo(args, read, () => "", todoId); return; }
+    baseVersion = read.todo.version;
+  }
+  const result = await sendTodoTool(context, "todo_set_state", { request_id: randomUUID(), todo_id: todoId, base_version: baseVersion,
+    state: TODO_STATE_VERBS[verb] });
+  const said = verb === "done" ? "Done" : verb === "drop" ? "Dropped" : "Reopened";
+  await emitTodo(args, result, () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, said, new Map()), todoId);
+}
+
+async function runTodoComment(args: Arguments): Promise<void> {
+  const todoId = todoIdArgument(args.positionals[2], "cswarm todo comment");
+  const source = oneSource([{ label: 'positional "<text>"', present: args.positionals.length > 3 },
+    { label: "--body-file <path>", present: args.has("body-file") }], true, "the comment");
+  const positionals = source === 0 ? 4 : 3;
+  args.assertShape(TODO_COMMENT_ACCEPTED_FLAGS, positionals);
+  const body = todoCommentBody(source === 0 ? args.positionals[3]! : fileText(readFileSync(args.required("body-file"), "utf8")));
+  const context = await todoContext(args, TODO_COMMENT_ACCEPTED_FLAGS, positionals);
+  const mentions = bodyMayMention(body)
+    ? mentionCount(resolveMentions({ body, roster: mentionRosterFromDirectory(await context.directory()) }))
+    : [];
+  const result = await sendTodoTool(context, "todo_comment", { request_id: randomUUID(), target: { kind: "todo", id: todoId }, body,
+    ...(mentions.length === 0 ? {} : { mentions }) });
+  await emitTodo(args, result, async () => renderTodoWrite(result as Extract<HouseholdClientResult, { status: "committed" }>, "Commented",
+    await todoDisplayNames(context, mentions.length > 0)), todoId);
+}
+
+const TODO_HELP_TAIL = "[--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]";
+const todoEntry = (handler: AgentCommandHandler, description: string, mutates: boolean, flags: readonly string[], help: string) =>
+  commandEntry({ ...noTool("the household to-do tools (todo_list, todo_read, ...) already serve MCP"), handler: traced("runTodo", handler),
+    description, mutates, flags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`${help} ${TODO_HELP_TAIL}`] });
 
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   object: group(Object.fromEntries([...HOUSEHOLD_TOOLS, ...HOUSEHOLD_DEFINITION_TOOLS].map(row => [row.name, commandEntry({
@@ -11074,6 +11283,30 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     help: [`cswarm object ${row.name} --input-file <path> [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`],
   })])), args => args.positionals[1], (_args, names) => new UsageError(`cswarm object takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, ...EXPAND_PROFILE },
+    profileListOrder: 23,
+  }),
+  todo: group({
+    ls: todoEntry(runTodoLs, "List open to-dos, or all of them with --all.", false, TODO_LS_ACCEPTED_FLAGS,
+      "cswarm todo ls [--all] [--assignee <me|name|id>] [--limit <1-50>] [--offset <n>]"),
+    queue: todoEntry(runTodoQueue, "Read an agent's line: working, up next, not yet and requests. Yours by default.", false, TODO_QUEUE_ACCEPTED_FLAGS,
+      "cswarm todo queue [--agent <name|id>] [--section <working|up_next|not_yet|requests>] [--limit <1-50>] [--offset <n>]"),
+    read: todoEntry(runTodoRead, "Read one to-do with its notes and up to twenty comments.", false, TODO_READ_ACCEPTED_FLAGS,
+      "cswarm todo read <todo-id> [--comment-offset <n>]"),
+    create: todoEntry(runTodoCreate, "Create a to-do, optionally assigned. Assigning never starts an agent.", true, TODO_CREATE_ACCEPTED_FLAGS,
+      'cswarm todo create "<title>" [--notes "<text>" | --notes-file <path>] [--due <YYYY-MM-DD>] [--assign <me|name|id> [--start <queue|now>]]'),
+    start: todoEntry(runTodoStart, "Move a to-do to doing. Without an id, the first ready item in your up next.", true, TODO_START_ACCEPTED_FLAGS,
+      "cswarm todo start [<todo-id>]"),
+    done: todoEntry((args) => runTodoSetState(args, "done"), "Mark a to-do done.", true, TODO_STATE_ACCEPTED_FLAGS,
+      "cswarm todo done <todo-id> [--base-version <n>]"),
+    drop: todoEntry((args) => runTodoSetState(args, "drop"), "Drop a to-do.", true, TODO_STATE_ACCEPTED_FLAGS,
+      "cswarm todo drop <todo-id> [--base-version <n>]"),
+    reopen: todoEntry((args) => runTodoSetState(args, "reopen"), "Reopen a done or dropped to-do.", true, TODO_STATE_ACCEPTED_FLAGS,
+      "cswarm todo reopen <todo-id> [--base-version <n>]"),
+    comment: todoEntry(runTodoComment, "Comment on a to-do. @Name mentions notify that person or agent.", true, TODO_COMMENT_ACCEPTED_FLAGS,
+      'cswarm todo comment <todo-id> ("<text>" | --body-file <path>)'),
+  }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm todo takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 22,
   }),
 
   admin: group({
@@ -11123,6 +11356,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     flags: ["connection-file", "profile", "host-session-id", "json", "check-version"],
     transports: STDIO_ONLY,
     ...NATIVE_PROFILE,
+    profileListOrder: 27,
     visible: true,
     bootstrap: true,
   }),
@@ -11134,6 +11368,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     flags: ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"],
     transports: ALL_TRANSPORTS,
     ...NATIVE_PROFILE,
+    profileListOrder: 25,
     visible: true,
     errorMode: "onboarding",
   }),
@@ -11146,6 +11381,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve --profile <absolute-path> --host-session-id <id>"], bootstrap: true }),
   }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
     refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
+    profileListOrder: 26,
     refusalTrace: "runOnboardingCommand:receive-refusal",
     refusalErrorMode: "onboarding",
   }),
@@ -11273,7 +11509,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
-  workspaces: commandEntry({ ...noTool("stdio serves connection workspace discovery directly"), handler: traced("runWorkspaces", runWorkspaces), description: "List reachable workspaces.", mutates: false, flags: RUN_WORKSPACES_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]", "cswarm workspaces --profile <absolute-path> [--host-session-id <id>] [--json]"], workspaceErrorJson: true }),
+  workspaces: commandEntry({ ...noTool("stdio serves connection workspace discovery directly"), handler: traced("runWorkspaces", runWorkspaces), description: "List reachable workspaces.", mutates: false, flags: RUN_WORKSPACES_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 24, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]", "cswarm workspaces --profile <absolute-path> [--host-session-id <id>] [--json]"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: RUN_NEW_1_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--org-id <uuid>] [--url <url> --anon-key <key>] [--json]`] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "provider", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
@@ -11378,6 +11614,15 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "brain.ls": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
   "brain.get": BRAIN_GET_ACCEPTED_FLAGS,
   "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
+  "todo.ls": TODO_LS_ACCEPTED_FLAGS,
+  "todo.queue": TODO_QUEUE_ACCEPTED_FLAGS,
+  "todo.read": TODO_READ_ACCEPTED_FLAGS,
+  "todo.create": TODO_CREATE_ACCEPTED_FLAGS,
+  "todo.start": TODO_START_ACCEPTED_FLAGS,
+  "todo.done": TODO_STATE_ACCEPTED_FLAGS,
+  "todo.drop": TODO_STATE_ACCEPTED_FLAGS,
+  "todo.reopen": TODO_STATE_ACCEPTED_FLAGS,
+  "todo.comment": TODO_COMMENT_ACCEPTED_FLAGS,
   members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
   roster: RUN_ROSTER_ACCEPTED_FLAGS,
   reraise: RUN_RERAISE_ACCEPTED_FLAGS,
