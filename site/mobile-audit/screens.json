@@ -2131,6 +2131,10 @@
     "requiresSeed": [
       "create_workspace",
       "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ],
+    "frame": [
+      "[data-people-context] button[data-pd-focus=\"row-remove-agent-{agent}\"]",
+      "[data-people-context] .pd-agent:has(button[data-pd-focus=\"row-remove-agent-{agent}\"]) summary.pd-actions-toggle"
     ]
   },
   {

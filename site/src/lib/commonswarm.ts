@@ -1778,7 +1778,8 @@ export async function renameAgent(
     return { ok: false, reason: "forbidden", message: "Your current role cannot rename this agent. Nothing changed." };
   }
   if (status === 400) {
-    return { ok: false, reason: "invalid", message: said(body.reason) || said(body.message) || "That name can't be used. The agent keeps its name." };
+    // The edge's validation sentence (AGENT_NAME_RULE for a bad name) is in `message`.
+    return { ok: false, reason: "invalid", message: said(body.message) || "That name can't be used. The agent keeps its name." };
   }
   if (status === 429) {
     return { ok: false, reason: "rate_limited", message: "Too many changes just now. Nothing changed; try again later." };

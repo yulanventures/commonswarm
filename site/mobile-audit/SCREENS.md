@@ -327,7 +327,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | M05 | `menu.mention` — pending |
 | M06 | `menu.receipt` — candidate; seeded `{message.addressedOwn}` with its `<details class="dashboard__message-receipt">` opened in `#general`: a card over the message, from the row's floating tool bar when the receipt is settled and from its avatar badge when it is a problem |
 | M07 | `menu.wiki-version` — pending |
-| M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action; the menu now also lists Rename and Reconnect. `app.people.rename` candidate: Rename chosen from that menu, the inline field open with Save and Cancel; frame lists Cancel first, then the field; a desktop hover witness over the People rows, preferring the row with the field, focusing its field; nothing is saved. The hosted Reconnect sentence (needs a seeded hosted agent of the viewer) is pending |
+| M08 | `menu.member-actions` — candidate; seeded Atlas agent row disclosure only, no action; the menu now also lists Rename and Reconnect, with a frame (Remove first, then the toggle) and a desktop hover witness over its items preferring Rename. `app.people.rename` candidate: Rename chosen from that menu, the inline field open with Save and Cancel; frame lists Cancel first, then the field; a desktop hover witness over the People rows, preferring the row with the field, focusing its field; nothing is saved. The hosted Reconnect sentence (needs a seeded hosted agent of the viewer) is pending |
 | M09 | `menu.provider` — retired: the provider page and its Back control are gone; see `app.add-agent.panel` |
 | M10 | `menu.landing-preview` — candidate; other states pending |
 | M11 | `menu.download-disclosures` — pending |

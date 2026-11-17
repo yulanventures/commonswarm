@@ -7385,8 +7385,12 @@ import "../../styles/kylon-command-palette.css";
           const workspaceId = activeWorkspaceId;
           if (!peopleDialogCanAct(peopleDialogModel(), "rename", principalId)) return { ok: false, message: "This action is no longer available. Go back and check the details." };
           const outcome = await renameAgentHere(workspaceId, principalId, name);
-          // The accepted name is already applied in place; the reload brings every surface in line.
-          if (outcome.ok && workspaceId === activeWorkspaceId) void reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`).catch(() => undefined);
+          /* The accepted name is already applied in place; the reload brings every surface in line. It
+             finishes before the row takes focus, so focus ends on the renamed row. A failed reload
+             cannot undo an accepted rename. */
+          if (outcome.ok && workspaceId === activeWorkspaceId) {
+            try { await reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`); } catch { /* the receipt is the accepted command */ }
+          }
           return outcome;
         } }, { layout: "page", focus: peopleDialogFocus, tintFor: (agentId) => {
           // An agent wears its owner's colour, the same rule the rail and the capsules use. An owner
@@ -7502,6 +7506,7 @@ import "../../styles/kylon-command-palette.css";
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
         rosterFilter = "";
         peopleDialogState.selected = null; peopleDialogState.showAllAttention = false; peopleDialogState.filter = "all";
+        peopleDialogState.rename = null; peopleDialogState.reconnect = null;
         dialog.showModal();
       }
       peopleDialogFocus = focus; peopleDialogState.focusApplied = null;
