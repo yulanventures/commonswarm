@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,127 +130,238 @@ test("an image at another tag does not satisfy the Compose pin", async () => {
   assert.equal(pulls, 1);
 });
 
-// Execute the workflow's actual shell and ensure entry point. Only Docker is stubbed.
-// This catches set -e aborts that the helper's injected Docker boundary cannot see.
+// Execute the workflow's actual shell for the pinned image cache (#480). Only Docker, zstd and the
+// Supabase CLI are stubbed; scripts/ci/server-suite.mjs runs for real.
 const workflow = readFileSync(join(repoRoot, ".github/workflows/server-suite.yml"), "utf8");
-const prepareStep = workflow.split("      - name: Prepare the pinned edge-runtime image\n")[1]?.split("      - name:")[0];
-assert.ok(prepareStep, "the workflow must prepare the edge-runtime image");
-const prepareScript = prepareStep.split("        run: |\n")[1]?.replace(/^          /gm, "");
-assert.ok(prepareScript, "the prepare step must have an executable shell block");
+function stepScript(name: string, marker = "        run: |\n"): string {
+  const step = workflow.split(`      - name: ${name}\n`)[1]?.split("      - name:")[0];
+  assert.ok(step, `the workflow must have the step ${name}`);
+  const script = step.split(marker)[1]?.replace(/^          /gm, "");
+  assert.ok(script, `${name} must have an executable shell block`);
+  return script;
+}
+const prepareScript = stepScript("Prepare the pinned images");
 
-for (const scenario of [
-  { name: "cold", hit: false, load: "valid", pull: "success" },
-  { name: "warm", hit: true, load: "valid", pull: "success" },
-  { name: "corrupt archive", hit: true, load: "error", pull: "success" },
-  { name: "archive with wrong image bytes", hit: true, load: "wrong-image", pull: "success" },
-  { name: "ECR rate limit and matching GHCR mirror", hit: false, load: "valid", pull: "rate-limit" },
-  { name: "GHCR digest mismatch", hit: false, load: "valid", pull: "bad-mirror" },
-  { name: "non-rate-limit error", hit: false, load: "valid", pull: "denied" },
-  { name: "mixed rate-limit and permission error", hit: false, load: "valid", pull: "mixed" },
-]) {
-  test(`workflow image preparation handles ${scenario.name}`, { timeout: 15_000 }, (context) => {
-    const tempRoot = realpathSync(tmpdir());
-    const work = mkdtempSync(join(tempRoot, "ci-edge-cache-"));
-    context.after(() => {
-      const resolved = realpathSync(work);
-      assert.ok(resolved.startsWith(join(tempRoot, "ci-edge-cache-")));
-      assert.notEqual(resolved, process.env.HOME);
-      const removed = spawnSync("rm", ["-r", resolved], { encoding: "utf8" });
-      assert.equal(removed.status, 0, removed.stderr);
-    });
-    const digest = 'sha256:e8ddc7b0f4888818159d4b665e922de667948e2864c895ed62acdfd29e7c6c80';
-    const primary = `public.ecr.aws/supabase/edge-runtime@${digest}`;
-    const mirror = `ghcr.io/supabase/edge-runtime@${digest}`;
-    const id = 'sha256:' + 'a'.repeat(64);
-    const statePath = join(work, "state.json");
-    const cache = join(work, "cache");
-    mkdirSync(cache);
-    const archivePath = join(cache, "images.tar");
-    const sentinelPath = join(work, "unrelated.txt");
-    writeFileSync(statePath, JSON.stringify({ images: {}, calls: [] }));
-    writeFileSync(sentinelPath, "keep this file");
-    if (scenario.hit) {
-      writeFileSync(archivePath, "restored archive");
-      writeFileSync(join(cache, "images.json"), JSON.stringify({
-        images: [{ image, digest, primary, mirror }], ids: { [image]: id },
-      }));
-    }
-    writeFileSync(join(work, "docker"), `#!${process.execPath}
+const cliDockerfile = [
+  "FROM supabase/postgres:17.6.1.171 AS pg",
+  "FROM library/kong:2.8.1 AS kong",
+  "FROM axllent/mailpit:v1.30.2 AS mailpit",
+  "FROM postgrest/postgrest:v16.3 AS postgrest",
+  "FROM supabase/postgres-meta:v0.99.0 AS pgmeta",
+  "FROM supabase/studio:2026.09.14-sha-4dd8a95 AS studio",
+  "FROM darthsim/imgproxy:v3.8.0 AS imgproxy",
+  "FROM supabase/edge-runtime:v1.76.2 AS edgeruntime",
+  "FROM timberio/vector:0.53.0-alpine AS vector",
+  "FROM supabase/supavisor:2.9.13 AS supavisor",
+  "FROM supabase/gotrue:v2.197.0 AS gotrue",
+  "FROM supabase/realtime:v2.135.3 AS realtime",
+  "FROM supabase/storage-api:v1.77.0 AS storage",
+  "FROM supabase/logflare:1.50.12 AS logflare",
+  "FROM supabase/pg_prove:3.36 AS pgprove",
+].join("\n");
+const stackImages = [...cliDockerfile.matchAll(/^FROM \S+\/(\S+) AS (\w+)$/gm)]
+  .filter(match => !["imgproxy", "supavisor", "pgprove"].includes(match[2]))
+  .map(match => `public.ecr.aws/supabase/${match[1]}`);
+const digest = "sha256:e8ddc7b0f4888818159d4b665e922de667948e2864c895ed62acdfd29e7c6c80";
+const edgePrimary = `public.ecr.aws/supabase/edge-runtime@${digest}`;
+const edgeMirror = `ghcr.io/supabase/edge-runtime@${digest}`;
+const allImages = [image, ...stackImages];
+
+// Each image is its own file, so the four concurrent pulls never race on shared state.
+const fakeDocker = `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const dir = process.env.DOCKER_STATE;
+const file = name => path.join(dir, "images", encodeURIComponent(name));
+const read = name => fs.existsSync(file(name)) ? JSON.parse(fs.readFileSync(file(name), "utf8")) : undefined;
+const write = (name, value) => fs.writeFileSync(file(name), JSON.stringify(value));
+fs.appendFileSync(path.join(dir, "calls.log"), JSON.stringify(args) + "\\n");
+const fail = message => { console.error(message); process.exit(1); };
+const repository = ref => ref.split("@")[0].replace(/:[^/:]+$/, "").replace(/^library\\//, "");
+if (args[0] === "pull" && args[1] === "--quiet") {
+  const ref = args[2];
+  const mode = process.env.DOCKER_PULL;
+  const attempt = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\\n").filter(line => line === JSON.stringify(args)).length;
+  if (mode === "denied") fail("Error response from daemon: pull access denied");
+  if (mode === "flaky" && attempt === 1) fail("Error response from daemon: Get \\"https://registry\\": net/http: TLS handshake timeout");
+  if (["data-limit", "bad-mirror"].includes(mode) && ref.startsWith("public.ecr.aws/")) fail("error from registry: Data limit exceeded");
+  const pinned = ref.includes("@");
+  const repoDigest = pinned ? (mode === "bad-mirror" ? ref + "wrong" : ref) : repository(ref) + "@sha256:" + "c".repeat(64);
+  write(ref, { Id: "sha256:" + "a".repeat(64), Os: "linux", Architecture: "amd64", RootFS: { Layers: ["sha256:" + Buffer.from(repository(ref).split("/").pop() + ref.split(/[:@]/).pop()).toString("hex")] }, RepoDigests: [repoDigest] });
+} else if (args[0] === "image" && args[1] === "inspect") {
+  const found = read(args[2]);
+  if (!found) fail("Error: No such image: " + args[2]);
+  console.log(JSON.stringify([found]));
+} else if (args[0] === "tag") {
+  const found = read(args[1]);
+  if (!found) fail("No such image");
+  write(args[2], { ...found, RepoDigests: found.RepoDigests });
+} else if (args[0] === "save") {
+  const saved = Object.fromEntries(args.slice(1).map(name => { const found = read(name); if (!found) fail("absent " + name); return [name, found]; }));
+  process.stdout.write(JSON.stringify(saved));
+} else if (args[0] === "load" && args[1] === "--quiet") {
+  if (process.env.DOCKER_LOAD === "error") fail("unexpected EOF");
+  const saved = JSON.parse(fs.readFileSync(0, "utf8"));
+  for (const [name, value] of Object.entries(saved)) {
+    write(name, process.env.DOCKER_LOAD === "wrong-image" ? { ...value, RootFS: { Layers: ["sha256:other"] } } : value);
+  }
+} else if (args[0] === "image" && args[1] === "ls") {
+  const names = fs.readdirSync(path.join(dir, "images")).map(decodeURIComponent);
+  if (process.env.DOCKER_EXTRA_IMAGE) names.push(process.env.DOCKER_EXTRA_IMAGE);
+  for (const name of names) console.log("sha256:" + "a".repeat(64) + " " + name);
+} else if (args[0] === "ps") {
+  process.stdout.write(process.env.DOCKER_PS || "");
+} else {
+  fail("unexpected Docker call: " + JSON.stringify(args));
+}
+`;
+// zstd stands in as a byte-for-byte copy.
+const fakeZstd = `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-const state = JSON.parse(fs.readFileSync(process.env.DOCKER_STATE, "utf8"));
-const image = ${JSON.stringify(image)};
-const primary = ${JSON.stringify(primary)};
-const mirror = ${JSON.stringify(mirror)};
-const id = ${JSON.stringify(id)};
-state.calls.push(args);
-let status = 0;
-if (args[0] === "load" && args[1] === "--input" && args[2] === process.env.PINNED_IMAGE_CACHE + "/images.tar") {
-  if (!fs.existsSync(args[2])) throw new Error("missing cache archive");
-  if (process.env.DOCKER_LOAD === "error") {
-    console.error("unexpected EOF");
-    status = 1;
-  } else {
-    state.images[image] = { Id: process.env.DOCKER_LOAD === "valid" ? id : "sha256:" + "b".repeat(64) };
-  }
-} else if (args[0] === "image" && args[1] === "inspect") {
-  if (state.images[args[2]]) console.log(JSON.stringify([state.images[args[2]]]));
-  else status = 1;
-} else if (args[0] === "pull" && [primary, mirror].includes(args[1])) {
-  if (process.env.DOCKER_PULL === "denied" || process.env.DOCKER_PULL === "mixed") {
-    console.error(process.env.DOCKER_PULL === "mixed" ? "toomanyrequests: Rate exceeded\\npermission denied" : "permission denied");
-    status = 1;
-  } else if (args[1] === primary && process.env.DOCKER_PULL !== "success") {
-    console.error("toomanyrequests: Rate exceeded");
-    status = 1;
-  } else {
-    state.images[args[1]] = { Id: id, RepoDigests: process.env.DOCKER_PULL === "bad-mirror" ? [mirror + "wrong"] : [args[1]] };
-  }
-} else if (args[0] === "tag" && state.images[args[1]] && args[2] === image) {
-  state.images[image] = state.images[args[1]];
-} else if (args[0] === "save" && args[1] === "--output" && args[2] === process.env.PINNED_IMAGE_CACHE + "/images.tar" && args[3] === image) {
-  if (!state.images[image]) throw new Error("saving an absent image");
-  fs.writeFileSync(args[2], "fresh archive: " + image);
-} else {
-  throw new Error("unexpected Docker call: " + JSON.stringify(args));
+if (args[0] === "--version") process.exit(0);
+if (args[0] === "-dc") { process.stdout.write(fs.readFileSync(args[2])); process.exit(0); }
+const out = args[args.indexOf("-o") + 1];
+fs.writeFileSync(out, fs.readFileSync(0));
+`;
+
+interface Runner { work: string; cache: string; run: (script: string, env?: Record<string, string>) => SpawnSyncReturns<string>; calls: () => string[][]; reset: () => void }
+function runner(context: { after: (fn: () => void) => void }): Runner {
+  const tempRoot = realpathSync(tmpdir());
+  const work = mkdtempSync(join(tempRoot, "ci-image-cache-"));
+  context.after(() => {
+    const resolved = realpathSync(work);
+    assert.ok(resolved.startsWith(join(tempRoot, "ci-image-cache-")));
+    assert.notEqual(resolved, process.env.HOME);
+    const removed = spawnSync("rm", ["-r", resolved], { encoding: "utf8" });
+    assert.equal(removed.status, 0, removed.stderr);
+  });
+  const bin = join(work, "bin");
+  const state = join(work, "docker");
+  const cache = join(work, "cache", "pinned-images");
+  mkdirSync(bin);
+  mkdirSync(join(work, "cache"));
+  writeFileSync(join(bin, "docker"), fakeDocker, { mode: 0o755 });
+  writeFileSync(join(bin, "zstd"), fakeZstd, { mode: 0o755 });
+  writeFileSync(join(bin, "supabase"), `#!/bin/sh\necho 2.118.0\nexit 0\n${cliDockerfile}\n`, { mode: 0o755 });
+  const reset = () => {
+    spawnSync("rm", ["-rf", state]);
+    mkdirSync(join(state, "images"), { recursive: true });
+    writeFileSync(join(state, "calls.log"), "");
+  };
+  reset();
+  return {
+    work,
+    cache,
+    reset,
+    calls: () => readFileSync(join(state, "calls.log"), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as string[]),
+    run: (script, env = {}) => {
+      const { SUPABASE_INTERNAL_IMAGE_REGISTRY: _registry, ...inherited } = process.env;
+      return spawnSync("bash", ["-c", script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        timeout: 50_000,
+        env: {
+          ...inherited,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: join(work, "cache"),
+          PINNED_IMAGE_CACHE: cache,
+          PINNED_IMAGE_PULL_WAITS: "0,0,0",
+          DOCKER_STATE: state,
+          GITHUB_OUTPUT: join(work, "output"),
+          ...env,
+        },
+      });
+    },
+  };
 }
-fs.writeFileSync(process.env.DOCKER_STATE, JSON.stringify(state));
-process.exit(status);
-`, { mode: 0o755 });
-    const result = spawnSync("bash", ["-c", prepareScript], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      timeout: 12_000,
-      env: {
-        ...process.env,
-        PATH: `${work}:${process.env.PATH}`,
-        PINNED_IMAGE_CACHE: cache,
-        PINNED_IMAGE_CACHE_HIT: scenario.hit ? "true" : "",
-        DOCKER_STATE: statePath,
-        DOCKER_LOAD: scenario.load,
-        DOCKER_PULL: scenario.pull,
-      },
-    });
-    assert.equal(result.error, undefined);
-    const state = JSON.parse(readFileSync(statePath, "utf8")) as { images: Record<string, { Id: string }>; calls: string[][] };
-    assert.equal(readFileSync(sentinelPath, "utf8"), "keep this file");
-    const calls = (command: string) => state.calls.filter(args => args[0] === command);
-    assert.equal(calls("load").length, scenario.hit ? 1 : 0);
-    const needsPull = !scenario.hit || scenario.load !== "valid";
-    const fallback = ["rate-limit", "bad-mirror"].includes(scenario.pull);
-    assert.equal(calls("pull").length, fallback ? 4 : needsPull ? 1 : 0);
-    if (fallback) assert.deepEqual(calls("pull").map(args => args[1]), [primary, primary, primary, mirror]);
-    const fails = ["bad-mirror", "denied", "mixed"].includes(scenario.pull);
-    if (fails) {
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, scenario.pull === "bad-mirror" ? /exact registry digest/ : /permission denied/);
-      assert.equal(calls("save").length, 0);
-    } else {
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.equal(state.images[image].Id, id, "the exact Compose image must be available");
-      assert.equal(calls("save").length, needsPull ? 1 : 0);
-      assert.ok(existsSync(archivePath));
-      assert.equal(readFileSync(archivePath, "utf8"), needsPull ? `fresh archive: ${image}` : "restored archive");
-    }
+function pulls(calls: string[][]) {
+  return calls.filter(args => args[0] === "pull").map(args => args[2]);
+}
+function coldCache(context: { after: (fn: () => void) => void }) {
+  const cache = runner(context);
+  const cold = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "success" });
+  assert.equal(cold.status, 0, `${cold.stdout}${cold.stderr}`);
+  return cache;
+}
+
+test("a cold image cache pulls every image once, saves the archive and asks to save it", { timeout: 120_000 }, context => {
+  const cache = coldCache(context);
+  assert.deepEqual(pulls(cache.calls()).sort(), [edgePrimary, ...stackImages].sort());
+  assert.equal(cache.calls().filter(args => args[0] === "save").length, 1);
+  assert.ok(existsSync(join(cache.cache, "images.tar.zst")));
+  const lock = JSON.parse(readFileSync(join(cache.cache, "images.json"), "utf8"));
+  assert.deepEqual(lock.images.map((entry: { image: string }) => entry.image), allImages);
+  assert.equal(readFileSync(join(cache.work, "output"), "utf8"), "save=true\n");
+});
+
+test("a warm image cache loads, verifies and pulls nothing", { timeout: 120_000 }, context => {
+  const cache = coldCache(context);
+  cache.reset();
+  const warm = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "true" });
+  assert.equal(warm.status, 0, `${warm.stdout}${warm.stderr}`);
+  assert.match(warm.stdout, /Restored and verified 13 pinned images from the cache; no registry pulls\./);
+  assert.deepEqual(pulls(cache.calls()), []);
+  assert.equal(cache.calls().filter(args => args[0] === "load").length, 1);
+  assert.ok(!existsSync(join(cache.cache, "images.tar.zst")), "the loaded archive is removed to free disk");
+  assert.equal(readFileSync(join(cache.work, "output"), "utf8"), "save=true\n", "a hit must not ask to save again");
+});
+
+for (const load of ["error", "wrong-image"]) {
+  test(`a warm image cache that fails verification (${load}) warns and pulls`, { timeout: 120_000 }, context => {
+    const cache = coldCache(context);
+    cache.reset();
+    const result = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "true", DOCKER_LOAD: load, DOCKER_PULL: "success" });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /::warning title=Image cache::Cached images could not be verified/);
+    assert.equal(pulls(cache.calls()).length, allImages.length);
+  });
+}
+
+test("an ECR data limit falls through to GHCR in the same round", { timeout: 120_000 }, context => {
+  const cache = runner(context);
+  const result = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "data-limit" });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  const pulled = pulls(cache.calls());
+  assert.equal(pulled.length, allImages.length * 2);
+  assert.ok(pulled.includes(edgeMirror));
+  assert.match(result.stdout, /error from registry: Data limit exceeded/);
+});
+
+test("a transient pull error is retried in the next round", { timeout: 120_000 }, context => {
+  const cache = runner(context);
+  const result = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "flaky" });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /\(round 2\)/);
+});
+
+for (const [mode, message] of [["bad-mirror", /registry digest/], ["denied", /could not pull .* after 4 rounds/]] as const) {
+  test(`the image cache fails without saving when pulls cannot succeed: ${mode}`, { timeout: 120_000 }, context => {
+    const cache = runner(context);
+    const result = cache.run(prepareScript, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: mode });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, message);
+    assert.equal(cache.calls().filter(args => args[0] === "save").length, 0);
+    assert.ok(!existsSync(join(cache.work, "output")));
+  });
+}
+
+const checkScript = "node scripts/ci/server-suite.mjs check-stack-images \"$RUNNER_TEMP/pinned-images\"\n";
+test("the workflow checks the started stack against the image cache", () => {
+  assert.ok(stepScript("Start the local stack").includes(checkScript));
+});
+for (const [name, env, ok] of [
+  ["every container on a cached image", {}, true],
+  ["a container on an uncached image", { DOCKER_PS: "supabase_imgproxy_cloud-swarm public.ecr.aws/supabase/imgproxy:v3.8.0\n" }, false],
+  ["an image pulled during start", { DOCKER_EXTRA_IMAGE: "public.ecr.aws/supabase/imgproxy:v3.8.0" }, false],
+  ["no stack containers", { DOCKER_PS: "" }, false],
+] as const) {
+  test(`the stack image check: ${name}`, { timeout: 120_000 }, context => {
+    const cache = coldCache(context);
+    const containers = stackImages.map((stackImage, index) => `supabase_${index}_cloud-swarm ${stackImage}`).join("\n") + "\n";
+    const result = cache.run(checkScript, { DOCKER_PS: containers, ...env });
+    assert.equal(result.status === 0, ok, `${result.stdout}${result.stderr}`);
+    if (ok) assert.match(result.stdout, /Local stack started 12 containers from cached images; supabase start pulled 0 images\./);
   });
 }
