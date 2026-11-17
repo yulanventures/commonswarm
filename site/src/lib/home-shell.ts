@@ -149,6 +149,8 @@ export function buildWorkspacePicker(
   workspaceId: string,
   select: (workspaceId: string) => void,
   newWorkspace?: { href: string; open: (event: MouseEvent) => void },
+  /** Signed in only: each row gains a gear that opens that workspace's settings. */
+  openSettings?: (workspaceId: string, opener: HTMLButtonElement) => void,
 ): HTMLElement {
   const picker = node(doc, "details", "cs-workspace-picker");
   picker.dataset.workspacePicker = "";
@@ -166,7 +168,16 @@ export function buildWorkspacePicker(
     item.type = "button"; item.value = workspace.id;
     if (workspace.id === workspaceId) item.setAttribute("aria-current", "page");
     item.addEventListener("click", () => { picker.open = false; select(item.value); });
-    list.append(item);
+    if (!openSettings) { list.append(item); continue; }
+    const row = node(doc, "div", "cs-workspace-picker__row");
+    const settings = node(doc, "button", "cs-workspace-picker__settings");
+    settings.type = "button"; settings.dataset.workspacePickerSettings = workspace.id;
+    settings.setAttribute("aria-label", `Workspace settings, ${workspace.name}`); settings.title = "Workspace settings";
+    settings.setAttribute("aria-haspopup", "dialog"); settings.setAttribute("aria-controls", "dashboard-workspace-details");
+    settings.append(gearIcon(doc));
+    settings.addEventListener("click", () => { picker.open = false; openSettings(workspace.id, settings); });
+    row.append(item, settings);
+    list.append(row);
   }
   if (newWorkspace) {
     const create = node(doc, "a", "cs-workspace-picker__new", "New workspace");
@@ -322,15 +333,21 @@ function channelSettingsButton(doc: Document, callbacks: ShellCallbacks): HTMLBu
   button.type = "button"; button.dataset.channelSettingsOpen = "";
   button.setAttribute("aria-label", "Channel settings"); button.title = "Channel settings";
   button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "dashboard-channel-dialog");
+  button.append(gearIcon(doc));
+  button.addEventListener("click", () => callbacks.channelSettings?.(button));
+  return button;
+}
+
+/** The settings gear. Its size and stroke come from the button's own CSS. */
+function gearIcon(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
   const path = doc.createElementNS(svg.namespaceURI, "path");
   path.setAttribute("d", "m9.6 4.5.6-2.5h3.6l.6 2.5 2.1 1.2 2.5-.7 1.8 3.1-1.9 1.8v2.4l1.9 1.8-1.8 3.1-2.5-.7-2.1 1.2-.6 2.5h-3.6l-.6-2.5-2.1-1.2-2.5.7-1.8-3.1 1.9-1.8v-2.4L3.3 8.1 5.1 5l2.5.7z");
   const circle = doc.createElementNS(svg.namespaceURI, "circle");
   circle.setAttribute("cx", "12"); circle.setAttribute("cy", "11"); circle.setAttribute("r", "3");
-  svg.append(path, circle); button.append(svg);
-  button.addEventListener("click", () => callbacks.channelSettings?.(button));
-  return button;
+  svg.append(path, circle);
+  return svg;
 }
 
 function headerIcon(doc: Document, paths: readonly string[]): SVGSVGElement {
