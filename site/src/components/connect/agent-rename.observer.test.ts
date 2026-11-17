@@ -269,7 +269,7 @@ const agent = (id: string, overrides: Partial<PeopleDialogAgent> = {}): PeopleDi
   own: true, mayManage: true, receipt: "", ...overrides,
 });
 
-function people(agents: PeopleDialogAgent[], options: { sample?: boolean; rename?: boolean } = {}) {
+function people(agents: PeopleDialogAgent[], options: { sample?: boolean; rename?: boolean; renameWith?: (id: string, name: string, editor: number) => Promise<RenameOutcome> } = {}) {
   const dom = fakeDom();
   const root = dom.root("section"), detail = dom.root("section");
   const model: PeopleDialogModel = { people: [{ id: "alex", name: "Alex Rivera", role: "owner", own: true, mayRemove: false },
@@ -280,7 +280,7 @@ function people(agents: PeopleDialogAgent[], options: { sample?: boolean; rename
   const callbacks: PeopleDialogCallbacks = {
     render: () => renderPeopleDialog(root as never, detail as never, model, state, callbacks, { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } }),
     action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {}, confirm: () => {},
-    ...(options.rename === false ? {} : { rename: (id: string, name: string) => { sent.push([id, name]); return new Promise<RenameOutcome>(resolve => answers.push(resolve)); } }),
+    ...(options.rename === false ? {} : { rename: options.renameWith ?? ((id: string, name: string) => { sent.push([id, name]); return new Promise<RenameOutcome>(resolve => answers.push(resolve)); }) }),
   };
   callbacks.render();
   const row = (id: string) => root.querySelector(`li[data-agent-row="${id}"]`);
@@ -414,4 +414,79 @@ test("rename command ids: fresh per attempt, the same only to retry an unanswere
   attempts.settle("alex:W:p1");
   assert.equal(attempts.commandId("alex:W:p1", "Planner", fresh), "id-3", "after an answer, the same name is a new attempt");
   assert.equal(attempts.commandId("alex:W:p2", "Planner", fresh), "id-4", "another agent never shares an id");
+});
+
+/* ------------------------------------------------------------------------------------------------ */
+/* The dashboard's own People rename callback and reload                                             */
+/* ------------------------------------------------------------------------------------------------ */
+
+/* Designer P2 on #479 R2: an accepted answer from a cancelled field refreshes the page through the
+   dashboard's real callback and reloadPeopleDialog, which used to focus the row now and in the next
+   frame, pulling focus out of a newer field. Only the field that sent the rename may move focus. */
+const DASHBOARD_PEOPLE = (() => {
+  const raw = readFileSync(new URL("../app/LiveDashboard.astro", import.meta.url), "utf8");
+  const script = raw.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+  const ast = ts.createSourceFile("dashboard.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const parts: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ["reloadPeopleDialog", "peopleDialogFocusTarget"].includes(node.name.text)) {
+      parts.push(`const ${node.getText(ast)};`);
+    }
+    // The People page's rename callback is a property of renderDialogRoster's callbacks object.
+    if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === "rename" && node.initializer.getText(ast).includes("renameAgentHere")) {
+      parts.push(`const renameCallback = ${node.initializer.getText(ast)};`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(parts.length, 3, "the reload, its focus target and the rename callback");
+  return ts.transpileModule(parts.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+})();
+
+function dashboardPeople() {
+  const frames: Array<() => void> = [];
+  const replies: Array<(outcome: RenameOutcome) => void> = [];
+  let context: ReturnType<typeof createContext>;
+  const p = people([agent("Scout")], {
+    renameWith: (id, name, editor) => runInContext(`renameCallback(${JSON.stringify(id)}, ${JSON.stringify(name)}, ${editor})`, context) as Promise<RenameOutcome>,
+  });
+  context = createContext({
+    peopleDialogState: p.state, peopleDialogCanAct: (_model: unknown, action: string) => action === "rename",
+    peopleDialogModel: () => p.model, peopleDialogReceipts: new Map(), document: p.dom.doc,
+    renameAgentHere: () => new Promise<RenameOutcome>(resolve => replies.push(resolve)),
+    openWorkspace: async () => undefined, peopleDialogOpen: () => true, renderDialogRoster: () => p.render(),
+    one: (selector: string) => p.dom.doc.querySelector(selector),
+    window: { requestAnimationFrame: (fn: () => void) => { frames.push(fn); return 1; } },
+  });
+  runInContext(`let activeWorkspaceId = "W", session = { user: { id: "alex" } }, rosterFilter = "";`, context);
+  runInContext(DASHBOARD_PEOPLE, context);
+  const settle = async () => { for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve)); };
+  const type = (value: string) => { p.input("Scout").value = value; p.input("Scout").dispatch(event("input")); };
+  return { p, frames, replies, settle, type };
+}
+
+test("People rename through the dashboard: a cancelled field's accepted answer never takes focus from a newer field", async () => {
+  const d = dashboardPeople();
+  d.p.control("rename-Scout").click();
+  d.type("Old attempt");
+  d.p.field("Scout").dispatch(event("submit"));
+  d.p.field("Scout").querySelector("button[data-rename-cancel]").click();
+  d.p.control("rename-Scout").click();
+  d.type("New draft");
+  assert.ok(d.p.dom.doc.activeElement === d.p.input("Scout"));
+  d.replies.shift()!({ ok: true }); // the cancelled attempt's rename was accepted after all
+  await d.settle();
+  assert.ok(d.p.dom.doc.activeElement === d.p.input("Scout"), "the reload leaves focus in the newer field");
+  while (d.frames.length) d.frames.shift()!();
+  assert.ok(d.p.dom.doc.activeElement === d.p.input("Scout"), "and so does its next frame");
+  assert.equal(d.p.input("Scout").value, "New draft");
+  assert.equal(d.p.field("Scout").querySelector("button[data-rename-save]").disabled, false);
+  // Control: the field that sent the rename, still open, ends on the renamed row.
+  d.p.field("Scout").dispatch(event("submit"));
+  d.replies.shift()!({ ok: true });
+  await d.settle();
+  while (d.frames.length) d.frames.shift()!();
+  assert.equal(d.p.field("Scout"), null);
+  assert.ok(d.p.dom.doc.activeElement === d.p.dom.doc.getElementById("pd-agent-Scout"), "the sender's own success moves focus to the row");
 });

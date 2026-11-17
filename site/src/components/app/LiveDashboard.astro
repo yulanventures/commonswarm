@@ -7378,15 +7378,17 @@ import "../../styles/kylon-command-palette.css";
           if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
           await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
         },
-        rename: async (principalId, name) => {
+        rename: async (principalId, name, editor) => {
           const workspaceId = activeWorkspaceId;
           if (!peopleDialogCanAct(peopleDialogModel(), "rename", principalId)) return { ok: false, message: "This action is no longer available. Go back and check the details." };
           const outcome = await renameAgentHere(workspaceId, principalId, name);
           /* The accepted name is already applied in place; the reload brings every surface in line. It
              finishes before the row takes focus, so focus ends on the renamed row. A failed reload
-             cannot undo an accepted rename. */
+             cannot undo an accepted rename. Only the field that sent this rename may move focus: if it
+             was cancelled, or a newer Rename field is open, the data refreshes and focus stays put. */
           if (outcome.ok && workspaceId === activeWorkspaceId) {
-            try { await reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`); } catch { /* the receipt is the accepted command */ }
+            const sender = (): boolean => peopleDialogState.rename?.editor === editor;
+            try { await reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`, undefined, sender); } catch { /* the receipt is the accepted command */ }
           }
           return outcome;
         } }, { layout: "page", focus: peopleDialogFocus, tintFor: (agentId) => {
@@ -7413,7 +7415,9 @@ import "../../styles/kylon-command-palette.css";
       layout.peopleContext(null);
       syncPeopleDialogLayout();
     };
-    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
+    /** `mayFocus`, when given, is asked at each focus move (now and in the next frame); false leaves focus where it is. */
+    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction,
+      mayFocus: () => boolean = () => true): Promise<void> => {
       const selected = peopleDialogState.selected; const query = rosterFilter;
       const userId = session?.user.id;
       const wasOpen = peopleDialogOpen();
@@ -7422,7 +7426,8 @@ import "../../styles/kylon-command-palette.css";
       if (receipt && principalId) peopleDialogReceipts.set(`${workspaceId}:${principalId}`, receipt);
       if (wasOpen && peopleDialogOpen()) { rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
         const target = peopleDialogFocusTarget(action, principalId);
-        target?.focus({ preventScroll: true }); window.requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true })); }
+        if (mayFocus()) target?.focus({ preventScroll: true });
+        window.requestAnimationFrame(() => target?.isConnected && mayFocus() && target.focus({ preventScroll: true })); }
       const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
     };
     const peopleDialogFocusTarget = (action: PeopleDialogAction | undefined, id: string): HTMLElement | null => {

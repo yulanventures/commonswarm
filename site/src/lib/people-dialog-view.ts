@@ -76,7 +76,7 @@ export interface PeopleDialogCallbacks {
   /** Role change. Reject with an error that carries the server's stable code; the role control is hidden without this callback. */
   changeRole?: (change: PeopleDialogRoleChange) => Promise<void>;
   /** rename_agent. A refusal resolves with the server's sentence; Rename is hidden without this callback. */
-  rename?: (id: string, name: string) => Promise<RenameOutcome>;
+  rename?: (id: string, name: string, editor: number) => Promise<RenameOutcome>;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -483,7 +483,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const editor = state.rename.editor;
     state.rename = { id, editor, value: name, error: "", pending: true }; callbacks.render();
     let outcome: RenameOutcome;
-    try { outcome = await rename(id, name); }
+    try { outcome = await rename(id, name, editor); }
     catch (error) { outcome = { ok: false, message: error instanceof Error ? error.message : "The rename was not confirmed." }; }
     // Cancelled, reopened, or another row opened while the server answered: that field is not this answer's.
     if (state.rename?.id !== id || state.rename.editor !== editor) return;
