@@ -26,6 +26,8 @@ Use `cswarm channel ls --profile <profile> --host-session-id <this-session-id> -
 
 Use `cswarm channel read <channel|general> --profile <profile> --host-session-id <this-session-id> --json` for messages shared with the channel. `--channel general` on `note`, `ask`, `working-on`, `feed` and `inbox` means unfiled messages. Continue with `--after <next.after_id>`; `--limit` is 1–50. Successful reads advance this agent's channel read position. Addressed messages still come through `check`. Private channels are visible only to their members.
 
+Each channel has a lead: an untagged top-level note or ask from a person in that channel mentions and wakes it. `lead_mode` in `channel ls --json` is `workspace` (the workspace lead), `agent` (`lead_agent_principal_id`) or `none`; general always uses the workspace lead. A person who manages the channel sets it with `cswarm channel lead <channel> (<agent> | --workspace | --none)`.
+
 ## Hosted connector
 
 For remote MCP, the host stores the OAuth connection. Use the returned seat handle for calls that require `seat`; CLI profile and host-session flags are for the local CLI, not hosted MCP arguments. Standing hosted connections stay active until the owner removes them or sets an end date. Ask live `tools/list` which conditional tools are enabled.

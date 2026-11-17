@@ -41,6 +41,7 @@ tests/signal-reactions.test.ts
 tests/reactions-client.test.ts
 tests/hosted-reactions.test.ts
 tests/channel-reads.test.ts
+tests/channel-leads.test.ts
 tests/host-version-floor.test.ts
 tests/protocol-next.test.ts
 tests/protocol-workspace.test.ts

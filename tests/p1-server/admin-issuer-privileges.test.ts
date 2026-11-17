@@ -100,6 +100,8 @@ const literal = JSON.stringify([
   ['swarm_command', 'FUNCTION', 'swarm.set_local_workspace_approval(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.set_workspace_lead(uuid,uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'FUNCTION', 'swarm.workspace_live_lead(uuid)', 'EXECUTE', false],
+  // Channel leads: post_signal asks who an untagged person post in a channel wakes.
+  ['swarm_command', 'FUNCTION', 'swarm.channel_effective_live_lead(uuid,uuid)', 'EXECUTE', false],
   ['swarm_command', 'TABLE', 'swarm.agent_connection_sessions', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.agent_workspace_memberships', 'SELECT', false],
   ['swarm_command', 'TABLE', 'swarm.channel_members', 'DELETE', false],

@@ -410,6 +410,8 @@ export const CHANNEL_READ_COLUMNS = [
   "created_at",
   "archived_at",
   "visibility",
+  "lead_mode",
+  "lead_agent_principal_id",
 ] as const;
 
 /**

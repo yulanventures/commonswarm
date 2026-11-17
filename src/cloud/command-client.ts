@@ -183,7 +183,10 @@ export type ChannelCommand =
   /** At least one of slug and purpose. purpose null clears it. Works on an archived channel too. */
   | { kind: "channel_update"; channel_id: string; slug?: string; purpose?: string | null }
   | { kind: "channel_archive"; channel_id: string }
-  | { kind: "channel_unarchive"; channel_id: string };
+  | { kind: "channel_unarchive"; channel_id: string }
+  /** A person's command: who an untagged top-level person post in the channel wakes. principal_id only with "agent". */
+  | { kind: "set_channel_lead"; channel_id: string; lead_mode: "workspace" | "none" }
+  | { kind: "set_channel_lead"; channel_id: string; lead_mode: "agent"; principal_id: string };
 
 export interface ChannelCommandRequest {
   workspaceId: string;
