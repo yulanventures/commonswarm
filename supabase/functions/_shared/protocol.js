@@ -568,12 +568,12 @@ function decideHostedAuthority(command, facts, ctx) {
   const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
   if (facts.seat !== null) {
     const seat2 = facts.seat;
+    if (seat2.revoked_at !== null || seat2.handle_revoked_at !== null || seat2.principal_revoked_at !== null || seat2.transport !== "hosted_mcp" || seat2.turn_only !== true) {
+      return refuse("domain", "hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.");
+    }
     const reconnect = facts.reconnect_agent_id ?? null;
     if (reconnect === null || reconnect !== seat2.principal_id) {
       return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
-    }
-    if (seat2.revoked_at !== null || seat2.handle_revoked_at !== null || seat2.principal_revoked_at !== null || seat2.transport !== "hosted_mcp" || seat2.turn_only !== true) {
-      return refuse("domain", "hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.");
     }
     if (liveNamePrincipals.some((p) => p.principal_id !== seat2.principal_id)) {
       return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);

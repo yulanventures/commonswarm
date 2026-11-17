@@ -218,16 +218,19 @@ test("a name alone never reuses a seat; only an explicit reconnect by agent_id d
     assert.equal(collision.reason, HOSTED_SEAT_NAME_TAKEN.code);
     assert.equal(collision.detail, HOSTED_SEAT_NAME_TAKEN.message);
   }
+  // A removed seat answers as removed, with or without a reconnect, and never as a taken name.
   for (const changed of [
     { revoked_at: 1000 }, { handle_revoked_at: 1000 }, { principal_revoked_at: 1000 },
   ]) {
-    const revoked = decideHostedAuthority(
-      claim,
-      facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()], ...reconnect }),
-      context("hosted_grant"),
-    );
-    assert.equal(revoked.ok, false);
-    if (!revoked.ok) assert.equal(revoked.reason, "hosted_seat_revoked");
+    for (const how of [reconnect, {}]) {
+      const revoked = decideHostedAuthority(
+        claim,
+        facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal(principal, true)], ...how }),
+        context("hosted_grant"),
+      );
+      assert.equal(revoked.ok, false);
+      if (!revoked.ok) assert.equal(revoked.reason, "hosted_seat_revoked");
+    }
   }
 });
 

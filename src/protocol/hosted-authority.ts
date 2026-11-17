@@ -405,16 +405,18 @@ export function decideHostedAuthority(
   const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
   if (facts.seat !== null) {
     const seat = facts.seat;
-    // A name alone never reuses a seat: a new chat is a new agent. The same request_id
-    // replays from the idempotency ledger before this decision runs.
-    const reconnect = facts.reconnect_agent_id ?? null;
-    if (reconnect === null || reconnect !== seat.principal_id) {
-      return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
-    }
+    // A removed seat is answered as removed first, whoever names it: a removed seat never
+    // holds a name, so it is never reported as taken.
     if (seat.revoked_at !== null || seat.handle_revoked_at !== null ||
         seat.principal_revoked_at !== null || seat.transport !== 'hosted_mcp' ||
         seat.turn_only !== true) {
       return refuse('domain', 'hosted_seat_revoked', 'This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.');
+    }
+    // A name alone never reuses a live seat: a new chat is a new agent. The same request_id
+    // replays from the idempotency ledger before this decision runs.
+    const reconnect = facts.reconnect_agent_id ?? null;
+    if (reconnect === null || reconnect !== seat.principal_id) {
+      return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
     }
     if (liveNamePrincipals.some((p) => p.principal_id !== seat.principal_id)) {
       return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
