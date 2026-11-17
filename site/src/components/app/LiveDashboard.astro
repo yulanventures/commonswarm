@@ -11867,9 +11867,13 @@ import "../../styles/kylon-command-palette.css";
       /* From People & agents: the dialog already disabled the button for this click, and it shows a
        * refusal itself, so a refusal is thrown to it rather than written here. */
       fromPeople = false,
+      /* The scope the click was made in. A caller that awaited before approving passes it, so the
+       * approval is sent to that workspace with that session, or not at all; never to whichever
+       * workspace happens to be open now. */
+      pinned: HouseholdScope | null = null,
     ): Promise<void> => {
-      const scope = householdScope();
-      if (!scope || (!fromPeople && button.disabled)) return;
+      const scope = pinned ?? householdScope();
+      if (!scope || !householdCurrent(scope) || (!fromPeople && button.disabled)) return;
       button.disabled = true;
       status.textContent = "Saving…";
       const settle = (message: string): void => {
@@ -11916,23 +11920,31 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
-    /** People → Allow: one click, in place, with the defaults the Lists & docs card uses, once this
-     *  workspace's Lists & docs are set up. Before that, or for an agent with no connection to approve,
-     *  the caller opens the page that sets them up. */
+    /** People → Allow and the Add an agent joined card's Allow: one click, in place, with the defaults
+     *  the Lists & docs card uses, once this workspace's Lists & docs are set up. Before that, or for an
+     *  agent with no connection to approve, the caller opens the page that sets them up.
+     *
+     *  PINNED TO THE CLICK (HezSec C2 on #474). The workspace, account, boot version and household
+     *  generation are taken when the person clicks. After the connections read, the click goes on
+     *  only if that scope is still current; the connection and the role are read for it then, and the
+     *  approval is sent with it. A click in one workspace never approves in another ("stale"). */
     const allowAgentFromPeople = async (
       workspaceId: string,
       principalId: string,
       button: HTMLButtonElement,
       status: HTMLElement,
-    ): Promise<"approved" | "setup"> => {
+    ): Promise<"approved" | "setup" | "stale"> => {
+      const scope = householdScope();
+      if (!scope || scope.workspaceId !== workspaceId) return "stale";
       const ready = householdAccess.workspaceId === workspaceId && householdAccess.status === "ok";
       if (ready && householdConnectionsReadState !== "succeeded") await loadHouseholdConnections();
-      const connection = ready
+      if (!householdCurrent(scope)) return "stale";
+      const connection = ready && householdAccess.workspaceId === workspaceId
         ? householdConnections.find((entry) => String(entry.principal_id ?? "") === principalId)
         : undefined;
       if (!connection) return "setup";
-      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status, true);
-      return "approved";
+      await approveAgent(connection, householdAccess.contentRole === "editor" ? [...CONTENT_OPERATIONS] : ["read"], button, status, true, scope);
+      return householdCurrent(scope) ? "approved" : "stale";
     };
 
     /** Withdrawal leaves the agent connected and is audited by the command path. */

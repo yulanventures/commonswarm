@@ -1310,6 +1310,104 @@ test('each navigation focuses the visible H1 for that view', async () => {
 
 
 // The Add an agent panel's joined card allows in one click; Lists & docs opens only to set it up first.
+// HezSec C2 on #474: an Allow click is pinned to its workspace and account. The real shared helper,
+// the real connections read and the real approval send run here; only the transport is held.
+test('an Allow click held behind its connections read never approves in another workspace or for another account', async () => {
+  const code = await dashboardFunctions(['householdScope', 'householdCurrent', 'loadHouseholdConnections', 'approveAgent',
+    'allowAgentFromPeople', 'peopleDialogAction']);
+  const fixture = () => {
+    const sent: Array<{ kind: string; workspace: string; user: string; principal?: unknown; operations?: unknown }> = [];
+    const held: Array<() => void> = [], navigated: string[] = [];
+    const context = createContext({ ...MESSAGE_STATUS_STUBS, createLatestRead, CONTENT_OPERATIONS, accessRefusalMessage,
+      peopleDialogCanAct, homeConnectionAccess, navigated,
+      postCommand: (session: { user: { id: string } }, _id: string, command: { kind: string; connection?: { principal_id?: unknown; operations?: unknown } },
+        target: { workspace_id: string }) => {
+        sent.push({ kind: command.kind, workspace: target.workspace_id, user: session.user.id,
+          ...(command.connection ? { principal: command.connection.principal_id, operations: command.connection.operations } : {}) });
+        if (command.kind === 'household_connections') {
+          const connections = [{ kind: 'local', principal_id: 'A', approval: null, workspace: target.workspace_id }];
+          return new Promise(resolve => held.push(() => resolve({ status: 200, body: { status: 'ok', connections } })));
+        }
+        return Promise.resolve({ status: 200, body: { status: 'committed', expires_at: null } });
+      } });
+    runInContext(`
+      let session = { user: { id: 'tom' } }, activeWorkspaceId = 'W1', sampleMode = false, requestVersion = 1, householdAccessGeneration = 1;
+      let householdAccess = { workspaceId: 'W1', status: 'ok', contentRole: 'reader' };
+      let householdConnections = [], householdConnectionsReadState = 'idle';
+      const connectionReads = createLatestRead(), householdReceipts = new Map(), peopleDialogReceipts = new Map();
+      const agents = [{ principalId: 'A', ownerUserId: 'tom', name: 'Scout' }], accessStatuses = [];
+      const peopleDialogModel = () => ({ sample: false, agents: [{ id: 'A', own: true, accessReadState: 'succeeded', access: null }] });
+      const uuid = () => 'request', renderDialogRoster = () => {}, renderAgentApprovals = () => {}, approvalUntil = () => 'Allowed.';
+      const peopleDialogFocusTarget = () => null, one = () => null, all = () => [];
+      const navigateHome = async (route) => { navigated.push(route.view + ':' + route.workspaceId); };
+      // W2 is opened: a new household generation whose connections (the same agent, A) have settled.
+      const openW2 = () => {
+        activeWorkspaceId = 'W2'; householdAccessGeneration += 1;
+        householdAccess = { workspaceId: 'W2', status: 'ok', contentRole: 'editor' };
+        householdConnections = [{ kind: 'local', principal_id: 'A', approval: null, workspace: 'W2' }];
+        householdConnectionsReadState = 'succeeded';
+      };
+      const switchAccount = () => { session = { user: { id: 'mei' } }; requestVersion += 1; };
+    `, context);
+    runInContext(code, context);
+    const settle = async () => { for (let turn = 0; turn < 10; turn++) await new Promise(resolve => setImmediate(resolve)); };
+    const release = async () => { while (held.length) held.shift()!(); await settle(); };
+    const approvals = () => JSON.parse(JSON.stringify(sent.filter(entry => entry.kind === 'household_approve_connection')));
+    // An approval re-reads the connections afterwards; answer every read until the click is done.
+    const finish = async <T>(work: Promise<T>): Promise<T> => {
+      let done = false; void work.then(() => { done = true; }, () => { done = true; });
+      for (let round = 0; round < 20 && !done; round++) await release();
+      assert.ok(done, 'the click finished'); return work;
+    };
+    return { context, sent, release, settle, approvals, navigated, finish };
+  };
+  const button = () => ({ disabled: false }), status = () => ({ textContent: '' });
+
+  // The joined card's door (and the helper People uses): W1 click, W2 opened while W1's read is held.
+  const stale = fixture();
+  const outcome = runInContext('allowAgentFromPeople("W1", "A", button, status)',
+    Object.assign(stale.context, { button: button(), status: status() })) as Promise<string>;
+  await stale.settle();
+  assert.deepEqual(stale.sent.map(entry => `${entry.kind}@${entry.workspace}`), ['household_connections@W1'], 'the W1 read is held');
+  runInContext('openW2()', stale.context);
+  await stale.release();
+  const staleResult = await stale.finish(outcome);
+  assert.deepEqual(stale.approvals(), [], 'a W1 click approves nothing, and nothing in W2');
+  assert.equal(staleResult, 'stale');
+  // A fresh click in W2 is its own consent, and approves in W2 with W2's role.
+  assert.equal(await stale.finish(runInContext('allowAgentFromPeople("W2", "A", button, status)', stale.context) as Promise<string>), 'approved');
+  assert.deepEqual(stale.approvals(), [{ kind: 'household_approve_connection', workspace: 'W2', user: 'tom', principal: 'A',
+    operations: [...CONTENT_OPERATIONS] }]);
+
+  // Another account signs in while the read is held: nothing is sent for either account.
+  const account = fixture();
+  const before = runInContext('allowAgentFromPeople("W1", "A", button, status)',
+    Object.assign(account.context, { button: button(), status: status() })) as Promise<string>;
+  await account.settle();
+  runInContext('switchAccount()', account.context);
+  await account.release();
+  const accountResult = await account.finish(before);
+  assert.deepEqual(account.approvals(), [], 'nothing is sent for either account');
+  assert.equal(accountResult, 'stale');
+
+  // People & agents' Allow door, through peopleDialogAction, gets the same control.
+  const people = fixture();
+  const action = runInContext("peopleDialogAction('allow', 'A', button, status)",
+    Object.assign(people.context, { button: button(), status: status() })) as Promise<void>;
+  await people.settle();
+  runInContext('openW2()', people.context);
+  await people.finish(action);
+  assert.deepEqual(people.approvals(), [], 'People Allow in W1 approves nothing in W2');
+  assert.deepEqual(people.navigated, [], 'and does not open Lists & docs for a click that no longer applies');
+
+  // Unchanged when nothing moves: the click approves in W1 with W1's reader role.
+  const steady = fixture();
+  const steadyOutcome = runInContext('allowAgentFromPeople("W1", "A", button, status)',
+    Object.assign(steady.context, { button: button(), status: status() })) as Promise<string>;
+  assert.equal(await steady.finish(steadyOutcome), 'approved');
+  assert.deepEqual(steady.approvals(), [{ kind: 'household_approve_connection', workspace: 'W1', user: 'tom', principal: 'A', operations: ['read'] }]);
+});
+
 test('the joined card Allow approves in place and opens Lists & docs only for setup', async () => {
   const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
   const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
