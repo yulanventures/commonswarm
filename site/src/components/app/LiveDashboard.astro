@@ -1657,8 +1657,9 @@ import "../../styles/kylon-command-palette.css";
   interface SecretHoldingAgentConnect extends HTMLElement {
     clearPrompt(notify?: boolean): void;
     finishPrompt(reason: "done" | "back" | "consumed", notify?: boolean): void;
-    requestPromptFor(principalId: string, userId: string, workspaceId: string): void;
-    requestPromptNamed(name: string, userId: string, workspaceId: string): void;
+    readonly intentTicket: number;
+    requestPromptFor(principalId: string, userId: string, workspaceId: string, ticket: number): void;
+    requestPromptNamed(name: string, userId: string, workspaceId: string, ticket: number): void;
     retirePending(): void;
   }
 
@@ -7441,24 +7442,30 @@ import "../../styles/kylon-command-palette.css";
      * After that navigation, and again in the frame that asks for the prompt, the same scope must
      * still be current; a later navigation, a workspace switch, sign-out or another account cancels it
      * without asking for anything. The mint element is told the workspace too and refuses any other.
+     * It also takes the element's ticket at the click, before any await: Back, choosing another app,
+     * leaving the panel and the auth reset all retire it (retirePending), and the element refuses a
+     * retired ticket, so an abandoned click never becomes a request under a newer generation.
      */
     const requestNewKeyFor = async (principalId: string, workspaceId: string): Promise<"asked" | "cancelled"> => {
       const value = session;
-      if (!value || !workspaceId || sampleMode || activeWorkspaceId !== workspaceId) return "cancelled";
+      const connect = one<SecretHoldingAgentConnect>("agent-connect");
+      if (!value || !connect || !workspaceId || sampleMode || activeWorkspaceId !== workspaceId) return "cancelled";
       const userId = value.user.id;
+      const ticket = connect.intentTicket;
       const before = homeNavigation;
       const opening = navigateHome({ view: "chat", workspaceId }, "push");
       // navigateHome claims its navigation number before its first await; none claimed means it did not navigate.
       const navigation = homeNavigation;
       await opening;
       const current = (): boolean => navigation !== before && navigation === homeNavigation && session?.user.id === userId
-        && activeWorkspaceId === workspaceId && homeRoute.view === "chat" && !sampleMode;
+        && activeWorkspaceId === workspaceId && homeRoute.view === "chat" && !sampleMode
+        && one<SecretHoldingAgentConnect>("agent-connect") === connect && connect.intentTicket === ticket;
       if (!current()) return "cancelled";
       const version = requestVersion;
       openConnect();
       return await new Promise((resolve) => window.requestAnimationFrame(() => {
         if (!current() || version !== requestVersion) { resolve("cancelled"); return; }
-        one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(principalId, userId, workspaceId);
+        connect.requestPromptFor(principalId, userId, workspaceId, ticket);
         resolve("asked");
       }));
     };
@@ -15658,8 +15665,9 @@ import "../../styles/kylon-command-palette.css";
          screen now are the ones the request is bound to, and the element refuses any other workspace. */
       const workspaceId = activeWorkspaceId;
       if (typeof name !== "string" || !connect || !session || !workspaceId) return;
+      const ticket = connect.intentTicket;
       openConnect();
-      connect.requestPromptNamed(name, session.user.id, workspaceId);
+      connect.requestPromptNamed(name, session.user.id, workspaceId, ticket);
     });
     /* One-click Allow. Lists & docs opens only when it is not set up for this workspace yet. */
     hostPicker?.addEventListener("agent-host-approve", (event: Event) => {

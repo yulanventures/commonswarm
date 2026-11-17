@@ -37,8 +37,9 @@ interface Fixture {
     dataset: Record<string, string>;
     setAttribute(name: string, value: string): void;
     connectedCallback(): void;
-    requestPromptNamed(name: string, userId: string, workspaceId: string): void;
-    requestPromptFor(principalId: string, userId: string, workspaceId: string): void;
+    readonly intentTicket: number;
+    requestPromptNamed(name: string, userId: string, workspaceId: string, ticket: number): void;
+    requestPromptFor(principalId: string, userId: string, workspaceId: string, ticket: number): void;
     clearPrompt(notify?: boolean): void;
     retirePending(): void;
     querySelector(selector: string): FakeNode;
@@ -142,7 +143,7 @@ test("A's queued name, held behind the load, creates nothing for B after an acco
   const f = fixture();
   f.hold.roster = true;
   f.element.connectedCallback();
-  f.element.requestPromptNamed("Scout", "A", "W");
+  f.element.requestPromptNamed("Scout", "A", "W", f.element.intentTicket);
   await f.settle();
   assert.equal(f.element.dataset.state, "loading", "the load is held with A's request queued");
   // The dashboard's auth reset (resetWorkspaceSessionState) clears the element, then B opens W.
@@ -158,7 +159,7 @@ test("A's queued name, held behind the load, creates nothing for B after an acco
   assert.deepEqual(f.copied, []);
   assert.equal(f.element.dataset.state, "ready", "B's own load still finishes");
   f.hold.roster = false;
-  f.element.requestPromptNamed("Scout", "B", "W");
+  f.element.requestPromptNamed("Scout", "B", "W", f.element.intentTicket);
   await f.settle();
   assert.deepEqual(writes(f.calls), [["create", "B", "W", "Scout"], ["mint", "B", "W", "agent-Scout"]]);
   assert.equal(f.shown(), "SECRET PROMPT token-B");
@@ -169,7 +170,7 @@ test("without any reset, a load that lands under another account still mints not
   const f = fixture();
   f.hold.roster = true;
   f.element.connectedCallback();
-  f.element.requestPromptNamed("Scout", "A", "W");
+  f.element.requestPromptNamed("Scout", "A", "W", f.element.intentTicket);
   await f.settle();
   f.signIn("B");
   await f.release();
@@ -185,7 +186,7 @@ test("a reset mid-mint stops before create, and a reset after the mint shows and
   beforeCreate.element.connectedCallback();
   await beforeCreate.settle();
   beforeCreate.hold.device = true;
-  beforeCreate.element.requestPromptNamed("Scout", "A", "W");
+  beforeCreate.element.requestPromptNamed("Scout", "A", "W", beforeCreate.element.intentTicket);
   await beforeCreate.settle();
   beforeCreate.element.clearPrompt(false);
   beforeCreate.signIn("B");
@@ -196,7 +197,7 @@ test("a reset mid-mint stops before create, and a reset after the mint shows and
   beforeReveal.element.connectedCallback();
   await beforeReveal.settle();
   beforeReveal.hold.mint = true;
-  beforeReveal.element.requestPromptNamed("Scout", "A", "W");
+  beforeReveal.element.requestPromptNamed("Scout", "A", "W", beforeReveal.element.intentTicket);
   await beforeReveal.settle();
   assert.deepEqual(writes(beforeReveal.calls), [["create", "A", "W", "Scout"], ["mint", "A", "W", "agent-Scout"]]);
   beforeReveal.signIn("B");
@@ -213,11 +214,11 @@ test("a request made while a retired mint is still busy waits for it, then runs 
   f.element.connectedCallback();
   await f.settle();
   f.hold.device = true;
-  f.element.requestPromptNamed("Scout", "A", "W");
+  f.element.requestPromptNamed("Scout", "A", "W", f.element.intentTicket);
   await f.settle();
   f.element.clearPrompt(false); // the auth reset retires A
   f.signIn("B");
-  f.element.requestPromptNamed("Planner", "B", "W"); // before A's held device call settles
+  f.element.requestPromptNamed("Planner", "B", "W", f.element.intentTicket); // before A's held device call settles
   await f.settle();
   assert.deepEqual(writes(f.calls), [], "nothing is created while A's retired operation still holds the guard");
   f.hold.device = false;
@@ -236,11 +237,11 @@ test("a request made while a retired mint is still busy waits for it, then runs 
   g.element.connectedCallback();
   await g.settle();
   g.hold.device = true;
-  g.element.requestPromptNamed("Scout", "A", "W");
+  g.element.requestPromptNamed("Scout", "A", "W", g.element.intentTicket);
   await g.settle();
   g.element.clearPrompt(false);
   g.signIn("B");
-  g.element.requestPromptNamed("Planner", "B", "W");
+  g.element.requestPromptNamed("Planner", "B", "W", g.element.intentTicket);
   const before = g.element.events.length;
   g.element.clearPrompt(false);
   assert.equal(g.element.events.slice(before).some((event) => event.type === "commonswarm:agent-prompt-retired"), true);
@@ -255,10 +256,10 @@ test("a request while a live prompt is open, or a live mint is running, is answe
   f.element.connectedCallback();
   await f.settle();
   f.hold.mint = true;
-  f.element.requestPromptNamed("Scout", "A", "W");
+  f.element.requestPromptNamed("Scout", "A", "W", f.element.intentTicket);
   await f.settle();
   const before = f.element.events.length;
-  f.element.requestPromptNamed("Planner", "A", "W"); // the live mint is still running
+  f.element.requestPromptNamed("Planner", "A", "W", f.element.intentTicket); // the live mint is still running
   assert.deepEqual(f.element.events.slice(before).map((event) => event.type), ["commonswarm:agent-prompt-retired"],
     "the second request is turned away at once, so its Copy setup prompt is usable again");
   f.hold.mint = false;
@@ -266,7 +267,7 @@ test("a request while a live prompt is open, or a live mint is running, is answe
   assert.deepEqual(writes(f.calls), [["create", "A", "W", "Scout"], ["mint", "A", "W", "agent-Scout"]], "only the live request mints");
   assert.equal(f.shown(), "SECRET PROMPT token-A");
   const shown = f.element.events.length;
-  f.element.requestPromptNamed("Planner", "A", "W"); // the prompt is still on screen
+  f.element.requestPromptNamed("Planner", "A", "W", f.element.intentTicket); // the prompt is still on screen
   await f.settle();
   assert.deepEqual(f.element.events.slice(shown).map((event) => event.type), ["commonswarm:agent-prompt-retired"]);
   assert.equal(f.shown(), "SECRET PROMPT token-A", "the open prompt is never replaced");
@@ -277,7 +278,7 @@ test("abandoning the request, or a blocked load, retires it for good; a later lo
   const abandoned = fixture();
   abandoned.hold.roster = true;
   abandoned.element.connectedCallback();
-  abandoned.element.requestPromptNamed("Scout", "A", "W");
+  abandoned.element.requestPromptNamed("Scout", "A", "W", abandoned.element.intentTicket);
   await abandoned.settle();
   abandoned.element.retirePending(); // the panel closed, the app changed, or Back left the key view
   assert.deepEqual(abandoned.element.events.map((event) => event.type), ["commonswarm:agent-prompt-retired"],
@@ -292,7 +293,7 @@ test("abandoning the request, or a blocked load, retires it for good; a later lo
   blocked.hold.roster = true;
   blocked.hold.rosterFails = true;
   blocked.element.connectedCallback();
-  blocked.element.requestPromptNamed("Scout", "A", "W");
+  blocked.element.requestPromptNamed("Scout", "A", "W", blocked.element.intentTicket);
   await blocked.settle();
   await blocked.release();
   assert.equal(blocked.element.dataset.state, "blocked");
@@ -311,12 +312,12 @@ test("a request with no signed-in account, or for another workspace, is never qu
   const f = fixture();
   f.element.connectedCallback();
   await f.settle();
-  f.element.requestPromptNamed("Scout", "", "W");
+  f.element.requestPromptNamed("Scout", "", "W", f.element.intentTicket);
   await f.settle();
   assert.deepEqual(writes(f.calls), [], "no initiating account, no request");
   f.hold.roster = true;
   f.element.setAttribute("workspace-id", "X");
-  f.element.requestPromptNamed("Scout", "A", "X");
+  f.element.requestPromptNamed("Scout", "A", "X", f.element.intentTicket);
   f.element.setAttribute("workspace-id", "W");
   await f.release();
   assert.deepEqual(writes(f.calls), [], "a request asked in X does not mint in W");
@@ -326,14 +327,20 @@ test("the element refuses a request for a workspace other than the one it is pin
   const f = fixture();
   f.element.connectedCallback();
   await f.settle();
-  f.element.requestPromptFor("P", "A", "X");
-  f.element.requestPromptNamed("Scout", "A", "X");
-  f.element.requestPromptFor("P", "A", "");
+  f.element.requestPromptFor("P", "A", "X", f.element.intentTicket);
+  f.element.requestPromptNamed("Scout", "A", "X", f.element.intentTicket);
+  f.element.requestPromptFor("P", "A", "", f.element.intentTicket);
   await f.settle();
   assert.deepEqual(writes(f.calls), [], "the handoff names its workspace, and only that one may mint");
-  f.element.requestPromptFor("P", "A", "W");
+  // A ticket taken before a retirement is refused: the element never lends its newer generation to it.
+  const ticket = f.element.intentTicket;
+  f.element.retirePending();
+  f.element.requestPromptFor("P", "A", "W", ticket);
   await f.settle();
-  assert.deepEqual(writes(f.calls), [["mint", "A", "W", "P"]], "control: the pinned workspace mints once");
+  assert.deepEqual(writes(f.calls), [], "a retired ticket asks for nothing");
+  f.element.requestPromptFor("P", "A", "W", f.element.intentTicket);
+  await f.settle();
+  assert.deepEqual(writes(f.calls), [["mint", "A", "W", "P"]], "control: the pinned workspace and a live ticket mint once");
 });
 
 /*
@@ -349,7 +356,7 @@ const DASHBOARD = (() => {
   assert.ok(script);
   const ast = ts.createSourceFile("dashboard.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found = new Map<string, string>();
-  const wanted = ["requestNewKeyFor", "peopleDialogAction"];
+  const wanted = ["requestNewKeyFor", "peopleDialogAction", "closeConnect"];
   const visit = (node: ts.Node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && wanted.includes(node.name.text)) found.set(node.name.text, `const ${node.getText(ast)};`);
     ts.forEachChild(node, visit);
@@ -386,6 +393,9 @@ function newKeyFixture() {
       return held.nav ? new Promise((resolve) => navs.push(resolve)) : Promise.resolve();
     };
     const openConnect = () => { element.setAttribute("workspace-id", activeWorkspaceId); };
+    // Back from the key view, on the chat route: the feed again, with no navigation and no new read.
+    const keepConnectCredentialVisible = () => false, returned = [];
+    const returnToChannel = () => { returned.push(activeWorkspaceId); };
   `, context);
   runInContext(DASHBOARD, context);
   const click = (id = "P") => runInContext(`peopleDialogAction("new-key", ${JSON.stringify(id)}, {}, {})`, context) as Promise<void>;
@@ -468,4 +478,34 @@ test("C1: an account switch during the held navigation or frame mints nothing; a
   await k.f.settle();
   assert.deepEqual(writes(k.f.calls), [["mint", "A", "W1", "P"]], "control: nothing moved, one mint in W1");
   assert.equal(k.f.shown(), "SECRET PROMPT token-A");
+});
+
+/* HezSec C1 on #479, narrowed: Back in the same workspace changes no navigation, read, account or
+   workspace. The click's ticket is what Back retires, so the held frame must ask for nothing. */
+test("C1: Back (the real closeConnect) while the frame is held retires the click; nothing is asked, minted, shown or copied", async () => {
+  for (const back of ["closeConnect", "retirePending"] as const) {
+    const k = newKeyFixture();
+    await k.f.settle();
+    k.held.raf = true;
+    const clicked = k.click();
+    await k.f.settle();
+    const counters = () => k.run("JSON.stringify([homeNavigation, requestVersion, activeWorkspaceId, session.user.id])");
+    const before = counters();
+    await k.run(back === "closeConnect" ? "closeConnect()" : "element.retirePending()");
+    if (back === "closeConnect") assert.equal(k.run("returned.join('|')"), "W1", "Back returned to the W1 feed");
+    assert.equal(counters(), before, `${back}: navigation, reads, workspace and account are unchanged`);
+    const events = k.f.element.events.length;
+    await k.releaseFrames();
+    await clicked;
+    await k.f.settle();
+    assert.deepEqual(writes(k.f.calls), [], `${back}: nothing is created or minted`);
+    assert.equal(k.f.shown(), "");
+    assert.deepEqual(k.f.copied, []);
+    assert.equal(k.f.element.events.slice(events).some((event) => event.type === "commonswarm:agent-prompt-ready"), false);
+    // The same agent, asked for again after Back, is a new click and mints once.
+    k.held.raf = false;
+    await k.click();
+    await k.f.settle();
+    assert.deepEqual(writes(k.f.calls), [["mint", "A", "W1", "P"]], `${back}: a fresh click mints once`);
+  }
 });

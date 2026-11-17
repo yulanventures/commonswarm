@@ -368,22 +368,35 @@ const {
       this.finishPrompt("done", notify);
     }
 
+    /**
+     * The ticket a caller takes at its click, before any await: this element's intent generation then.
+     * Every retirement raises the generation (Back and leaving the key view, choosing another app,
+     * leaving the panel, the auth reset and sign-out through clearPrompt, disposal), so a ticket taken
+     * before one of them never becomes a request (HezSec C1 on #479, narrowed).
+     */
+    get intentTicket(): number {
+      return this.#intentGeneration;
+    }
+
     /** Re-onboard one existing identity through the same mint and prompt path as Add an agent. */
-    requestPromptFor(principalId: string, userId: string, workspaceId: string) {
-      if (principalId) this.#requestPrompt({ principalId }, userId, workspaceId);
+    requestPromptFor(principalId: string, userId: string, workspaceId: string, ticket: number) {
+      if (principalId) this.#requestPrompt({ principalId }, userId, workspaceId, ticket);
     }
 
     /** Create a new agent with this name and mint its prompt (the Add an agent panel's key routes). */
-    requestPromptNamed(name: string, userId: string, workspaceId: string) {
+    requestPromptNamed(name: string, userId: string, workspaceId: string, ticket: number) {
       const trimmed = name.trim();
-      if (trimmed) this.#requestPrompt({ name: trimmed }, userId, workspaceId);
+      if (trimmed) this.#requestPrompt({ name: trimmed }, userId, workspaceId, ticket);
     }
 
-    /* The caller names the account and the workspace its click was made in (HezSec C1 on #479). A
-       request for any workspace other than the one this element is pinned to now is a click that was
-       superseded on its way here: it is refused before it becomes a request, so it never mints. */
-    #requestPrompt(request: { principalId: string } | { name: string }, userId: string, workspaceId: string) {
+    /* The caller names the account, the workspace and the ticket of its click (HezSec C1 on #479). A
+       request for any workspace other than the one this element is pinned to now, or with a ticket an
+       abandonment has retired since, is a click that was superseded on its way here: it is refused
+       before it becomes a request, so it never mints. The element never lends a newer generation to an
+       older click. */
+    #requestPrompt(request: { principalId: string } | { name: string }, userId: string, workspaceId: string, ticket: number) {
       if (!userId || !workspaceId || workspaceId !== (this.getAttribute("workspace-id")?.trim() ?? "")) return;
+      if (ticket !== this.#intentGeneration) return;
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
       /* A mint retired by a reset (sign-out, account switch, abandonment) may still be unwinding: it
