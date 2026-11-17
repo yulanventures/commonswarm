@@ -8,8 +8,31 @@ export const HOSTED_MCP_RESOURCE = 'https://mcp.commonswarm.com/mcp';
 export const HOSTED_MCP_SEAT_LIMIT = 10;
 export const HOSTED_SEAT_NAME_TAKEN = {
   code: 'hosted_seat_name_taken',
-  message: 'That name is taken in this workspace; choose another.',
+  message: 'Another agent in this workspace already uses that name; choose another.',
 } as const;
+/** The 10-per-connection limit, in plain words. The limit itself is unchanged. */
+export const HOSTED_SEAT_LIMIT_MESSAGE =
+  `This connection already has ${HOSTED_MCP_SEAT_LIMIT} agents. Reuse one of them, or ask the person to retire one they no longer use.`;
+/** How many numbered names a suggestion may try. More than the names a workspace can hold. */
+export const HOSTED_NAME_SUGGESTION_TRIES = 200;
+
+/**
+ * Candidate names for a taken name, in the order a suggestion takes them: the name plus
+ * " 2", " 3" and so on. A long name is cut so each candidate stays within 80 characters.
+ * The caller keeps the first candidate that no agent in the workspace holds, compared
+ * ignoring case by PostgreSQL's lower() (command/index.ts hostedNameSuggestion).
+ */
+export function hostedNameCandidates(name: string, count = HOSTED_NAME_SUGGESTION_TRIES): string[] {
+  const chars = Array.from(name);
+  const out: string[] = [];
+  for (let n = 2; out.length < count; n++) {
+    const suffix = ` ${n}`;
+    const base = chars.slice(0, 80 - suffix.length).join('').replace(/ +$/u, '');
+    if (base === '') break;
+    out.push(base + suffix);
+  }
+  return out;
+}
 
 const PUBLIC_HOSTED_ONLY_COMMANDS = new Set([
   'begin_hosted_mcp_grant',
@@ -117,13 +140,17 @@ export interface HostedAuthorityFacts {
   workspace_consented: boolean;
   all_required_consents: boolean;
   all_required_memberships: boolean;
-  // Every exact-name principal in the workspace, any transport, live or revoked.
+  // Every principal in the workspace whose name matches ignoring case (PostgreSQL lower()),
+  // any transport, live or revoked.
   exact_name_principals: readonly {
     principal_id: string;
     owner_user_id: string;
     revoked: boolean;
   }[];
   live_seat_count: number;
+  // The agent_id of an explicit reconnect. Only a reconnect may return an existing seat: a
+  // claim by name alone always makes a new agent, so a second chat never shares the first's.
+  reconnect_agent_id?: string | null;
 }
 
 export interface HostedAuthorityState {
@@ -373,18 +400,25 @@ export function decideHostedAuthority(
     return refuse('authz', 'hosted_grant_binding_mismatch', 'seat claim does not match the grant binding');
   }
   if (!hostedSeatNameValid(command.name)) {
-    return refuse('domain', 'hosted_seat_name_invalid', 'Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.');
+    return refuse('domain', 'hosted_seat_name_invalid', 'Agent names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.');
   }
   const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
   if (facts.seat !== null) {
     const seat = facts.seat;
+    // A removed seat is answered as removed first, whoever names it: a removed seat never
+    // holds a name, so it is never reported as taken.
     if (seat.revoked_at !== null || seat.handle_revoked_at !== null ||
         seat.principal_revoked_at !== null || seat.transport !== 'hosted_mcp' ||
         seat.turn_only !== true) {
       return refuse('domain', 'hosted_seat_revoked', 'This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.');
     }
-    if (liveNamePrincipals.length !== 1 ||
-        liveNamePrincipals[0].principal_id !== seat.principal_id) {
+    // A name alone never reuses a live seat: a new chat is a new agent. The same request_id
+    // replays from the idempotency ledger before this decision runs.
+    const reconnect = facts.reconnect_agent_id ?? null;
+    if (reconnect === null || reconnect !== seat.principal_id) {
+      return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+    }
+    if (liveNamePrincipals.some((p) => p.principal_id !== seat.principal_id)) {
       return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
     }
     return { ok: true, events: [], reuse: seat };
@@ -395,7 +429,7 @@ export function decideHostedAuthority(
     return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
   }
   if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
-    return refuse('domain', 'hosted_seat_limit_reached', `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
+    return refuse('domain', 'hosted_seat_limit_reached', HOSTED_SEAT_LIMIT_MESSAGE);
   }
   return {
     ok: true,

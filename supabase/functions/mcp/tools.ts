@@ -75,7 +75,7 @@ export const CORE_TOOL_TABLE = [
   {
     name: "claim_seat", effect: "write", title: "Claim a named seat",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. To use an existing agent in a workspace a person added, pass agent_id and workspace_id. Omit workspace_id for the consented home workspace. Retry with the same request_id.",
+    description: "Join as a new agent for this chat. A new chat always gets a new name: call seat_list first to see the names this connection already uses, then propose a short name for this session's role (for example \"RidgeHQ Lead\"), not just the app's name (\"Claude\", \"Codex\"). If the person gave a name, use it. If the name is taken you get hosted_seat_name_taken with suggested_name: use that or ask the person; never share another chat's agent. To reconnect as an agent this connection already has, pass its agent_id and workspace_id. Omit workspace_id for the consented home workspace. Names are labels, not isolation: every chat on this connection can use all of its agents. Retry with the same request_id.",
     annotations: { title: "Claim a named seat", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: {...objectSchema({ workspace_id: claimWorkspace, agent_id: uuid, name: text(1, 80), request_id: requestId }, ["request_id"]),
       anyOf:[{required:['name']},{required:['agent_id','workspace_id']}]},
@@ -193,7 +193,7 @@ export const CORE_TOOL_TABLE = [
   {
     name: "seat_list", effect: "read", title: "List this connection's seats",
     securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
-    description: "List the live seats this connection holds, with each seat's handle, name and workspace. Use it to find an old seat to release.",
+    description: "List the agents this connection holds, with each one's handle, name, agent id (principal_id) and workspace. Call it before claim_seat to see which names are in use, or to find an old one to release.",
     annotations: { title: "List this connection's seats", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({}, []),
   },
@@ -285,7 +285,7 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function validUuid(value: unknown): value is string {
+export function validUuid(value: unknown): value is string {
   return typeof value === "string" && new RegExp(UUID_PATTERN, "u").test(value);
 }
 
@@ -349,7 +349,7 @@ function validBody(value: unknown): value is string {
     value.trim().length > 0 && !hasForbiddenBodyControl(value);
 }
 
-function validSeatName(value: unknown): value is string {
+export function validSeatName(value: unknown): value is string {
   return typeof value === "string" && Array.from(value).length >= 1 &&
     Array.from(value).length <= 80 && value === value.replace(/^ +| +$/gu, "") &&
     !CONTROL_RE.test(value);

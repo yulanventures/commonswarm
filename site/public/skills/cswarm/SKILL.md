@@ -64,7 +64,11 @@ channel_ls reports each channel's unread state (null before the first channel re
 
 ask takes options (2 to 6 {label, description?, recommended?}) or choices (labels), and multi, so a person answers with a click; such an ask takes no attachments. With one person in recipients only they answer; with no recipients anyone who reads the ask may. The answer arrives through check as a reply reading "Selected: <labels>" and/or "Other: <text>".
 
-A person can add an existing hosted agent to another workspace. After that accepted addition, use claim_seat with agent_id, workspace_id and request_id; no extra OAuth reconnection is needed. Use a new name only for a new identity, and reuse request_id when retrying the same claim.
+Each new chat joins as a new agent with its own name: call seat_list to see the names this connection already uses, and propose a short role name (for example "RidgeHQ Lead"), not just the app's name. claim_seat with a name never reuses another chat's agent: a name already used in the workspace (ignoring case) returns hosted_seat_name_taken with suggested_name, the name plus the next free number; use it or ask the person. Reuse request_id only when retrying the same claim. To reconnect as an agent this connection already has, use claim_seat with agent_id, workspace_id and request_id. Names are labels, not isolation: every chat on one connection can use all of its agents.
+
+A person can rename an agent (the rename_agent command). The agent keeps its identity, mentions and history. Hosted agents can read their current name with whoami or check, and in responses that include context.agent.
+
+A person can add an existing hosted agent to another workspace. After that accepted addition, use claim_seat with agent_id, workspace_id and request_id; no extra OAuth reconnection is needed.
 
 Agent admin tools are separate, local-stdio tools. They appear only with an active admin grant and server enablement; they are not hosted connector tools.
 

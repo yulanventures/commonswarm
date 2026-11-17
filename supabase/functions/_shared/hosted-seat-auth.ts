@@ -246,6 +246,8 @@ export async function revalidateHouseholdSeat(
 export interface HostedConnectionContext {
   account: { user_id: string; display_name: string; email: string | null };
   workspace: { workspace_id: string; name: string };
+  /** The seat's agent and its current name, so a renamed agent learns its name on its next turn. */
+  agent?: { principal_id: string; name: string };
   connection: {
     grant_id: string;
     home_workspace_id: string | null;
@@ -262,7 +264,7 @@ export async function resolveHostedConnectionContext(
   tx: Sql,
   capability: HostedCapability,
   authorized: ResolvedHostedGrant | ResolvedHostedSeat,
-  claimedSeat?: Pick<ResolvedHostedSeat, "handle" | "principal_id">,
+  claimedSeat?: Pick<ResolvedHostedSeat, "handle" | "principal_id" | "name">,
 ): Promise<HostedConnectionContext | null> {
   const binding = bindings.get(capability);
   if (!binding || binding.grantId !== authorized.grant_id ||
@@ -293,7 +295,18 @@ export async function resolveHostedConnectionContext(
           ${authorized.workspace_id}::uuid, ${seat?.handle ?? null}
         ) AS context
       `;
-      return rows[0]?.context ?? null;
+      const context = rows[0]?.context ?? null;
+      // The name is the seat row's, which rename_agent keeps current. The SQL resolver above
+      // is pinned by release catalogs, so the agent is added here rather than there.
+      if (context === null || seat === null) return context;
+      // A name may hold U+2028 or U+2029, which no name rule refuses. The summary stays on one
+      // line, as the resolver keeps its own part; agent.name keeps the name exactly.
+      const oneLine = seat.name.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+      return {
+        ...context,
+        agent: { principal_id: seat.principal_id, name: seat.name },
+        summary: `${context.summary} This chat's agent is "${oneLine}".`,
+      };
     });
   } finally {
     // PostgreSQL represents an unset custom GUC as empty after its first use.

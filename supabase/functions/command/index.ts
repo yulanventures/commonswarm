@@ -233,8 +233,11 @@ import {
   decideHostedAuthority, decideHostedCheck,
   HOSTED_CHECK_BATCH_LIMIT, hostedCheckMillisecondTimestamp, hostedSeatNameValid,
   HOSTED_MCP_SEAT_LIMIT,
+  HOSTED_SEAT_LIMIT_MESSAGE,
   HOSTED_SEAT_NAME_TAKEN,
+  hostedNameCandidates,
   PRINCIPAL_NAME_TAKEN,
+  AGENT_NAME_RULE,
   publicHostedCommandForbidden, legacyHouseholdAcceptRefusal, legacyRemovalRejoinRefusal,
   reduceHostedAuthority,
   SEAT_ADMIN_COMMAND_KINDS,
@@ -342,6 +345,8 @@ type ConnectCommand =
   }
   // Human relabeling: the mirror of declare, gated like revoke_agent_principal.
   | { kind: "set_agent_model"; principal_id: string; model: string | null }
+  // A person renames an agent, gated like revoke_agent_principal. The id is unchanged.
+  | { kind: "rename_agent"; principal_id: string; name: string }
   // §2.3 successor endpoint. It has no fields on purpose: the presented
   // predecessor credential IS the request, and accepting any target field here
   // is exactly the escalation the fence exists to stop.
@@ -705,6 +710,7 @@ type WorkspaceCommand =
     context: Record<string, string> | null;
   }
   | { kind: "set_agent_model"; principal_id: string; model: string | null }
+  | { kind: "rename_agent"; principal_id: string; name: string }
   | {
     kind: "renew_agent_token";
     successor_token_id: string;
@@ -1336,6 +1342,7 @@ const COMMAND_KINDS = [
   REGISTER_AGENT_SEAT_KIND,
   "revoke_agent_principal",
   "set_agent_model",
+  "rename_agent",
   "revoke_agent_token",
   "renew_agent_token",
   "declare_agent_model",
@@ -1389,6 +1396,7 @@ const CONNECT_COMMAND_KINDS = [
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
   "revoke_agent_principal",
   "set_agent_model",
+  "rename_agent",
 ] as const;
 /**
  * Everything that travels the workspace-stream path. `renew_agent_token` routes
@@ -3277,6 +3285,28 @@ function validateCommand(
     };
   }
 
+  // rename_agent: exactly a principal and the new name, checked by the same rule as a hosted
+  // claim's name (1 to 80 characters, no spaces at either end, no control characters).
+  if (cmd.kind === "rename_agent") {
+    if (!exactKeys(cmd, ["kind", "principal_id", "name"])) {
+      return {
+        ok: false,
+        status: 400,
+        reason: commandFieldsMessage("rename_agent", ["principal_id", "name"], []),
+      };
+    }
+    if (typeof cmd.principal_id !== "string" || !UUID_RE.test(cmd.principal_id)) {
+      return { ok: false, status: 400, reason: uuidFieldRuleText("principal_id") };
+    }
+    if (!hostedSeatNameValid(cmd.name)) {
+      return { ok: false, status: 400, reason: AGENT_NAME_RULE };
+    }
+    return {
+      ok: true,
+      command: { kind: "rename_agent", principal_id: cmd.principal_id.toLowerCase(), name: cmd.name as string },
+    };
+  }
+
   // Token revoke is workspace-routed and may be presented by an agent for
   // exact-token self-surrender (§2.3/§10). It is outside CONNECT so the human-
   // only registry does not pre-refuse agents before the reducer can confine
@@ -4646,6 +4676,7 @@ async function prepareWorkspaceCommand(
   let lineageId: string | null = null;
   let predecessorTokenId: string | null = null;
   let renewalFacts: RenewalFacts | null = null;
+  let renameTaken: boolean | null = null;
   let command: WorkspaceCommand;
 
   if (wire.kind === "invite_member") {
@@ -4726,6 +4757,9 @@ async function prepareWorkspaceCommand(
       principal_id: wire.principal_id,
       model: wire.model,
     };
+  } else if (wire.kind === "rename_agent") {
+    command = { kind: "rename_agent", principal_id: wire.principal_id, name: wire.name };
+    renameTaken = await agentNameTakenForRename(tx, wire.principal_id, wire.name);
   } else if (wire.kind === RENEW_AGENT_TOKEN_KIND) {
     // Every field below is read from the authenticated predecessor row or from
     // the server. `wire` contributes nothing but its kind.
@@ -4847,6 +4881,10 @@ async function prepareWorkspaceCommand(
     // otherwise so the reducer refuses `renewal_unsupported` instead of
     // deciding against a fabricated fact.
     ...(renewalFacts === null ? {} : { renewalFacts: () => renewalFacts! }),
+    ...(renameTaken === null || wire.kind !== "rename_agent" ? {} : {
+      agentNameTaken: (principalId: string, name: string) =>
+        principalId !== wire.principal_id || name !== wire.name || renameTaken!,
+    }),
     nextSeq: () => ++nextSeq,
     nextEventId: () => crypto.randomUUID(),
   };
@@ -5748,6 +5786,31 @@ async function updateWorkspaceProjection(
           "AgentModelDeclared projection did not update exactly one principal",
         );
       }
+    } else if (event.type === "AgentRenamed") {
+      // One name per agent: its principal row and every live seat it holds, in any workspace,
+      // so whoami, check and the hosted context read the new name on the agent's next turn.
+      // Removed seats keep the name they had. The CHECK on hosted_mcp_seats.name and the
+      // case-insensitive live-name index are the backstop for the reducer's checks.
+      if (typeof payload.principal_id !== "string" || typeof payload.name !== "string") {
+        throw new Error("AgentRenamed payload is malformed");
+      }
+      const renamedRows = await tx<{ principal_id: string }[]>`
+        UPDATE swarm.agent_principals
+        SET name = ${payload.name}
+        WHERE principal_id = ${payload.principal_id}::uuid
+          AND EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${route.workspaceId}::uuid AND am.revoked_at IS NULL)
+          AND revoked_at IS NULL
+        RETURNING principal_id
+      `;
+      if (renamedRows.length !== 1) {
+        throw new Error("AgentRenamed projection did not update exactly one principal");
+      }
+      await tx`
+        UPDATE swarm.hosted_mcp_seats
+        SET name = ${payload.name}
+        WHERE principal_id = ${payload.principal_id}::uuid
+          AND revoked_at IS NULL
+      `;
     } else if (event.type === "FeedbackSubmitted") {
       // Bounds were enforced by the reducer, mirroring feedback_body_bounded —
       // a violation here means the mirror drifted, and the constraint failing
@@ -6838,7 +6901,7 @@ async function seatAdminCreateAgentSeat(tx:Sql,body:RequestBody,auth:AuthContext
     message:`This workspace has reached its ${FREE_TIER_PRINCIPAL_LIMIT}-principal limit.`});
   await lockPrincipalName(tx,{workspaceId:workspace},{name});
   if(await hostedNameReserved(tx,workspace,name)) return refuse(409,PRINCIPAL_NAME_TAKEN.code,authorized,hash,null,{message:PRINCIPAL_NAME_TAKEN.message});
-  const taken=await tx`SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${workspace}::uuid AND name=${name} LIMIT 1`;
+  const taken=await tx`SELECT principal_id FROM swarm.agent_principals WHERE workspace_id=${workspace}::uuid AND lower(name)=lower(${name}) LIMIT 1`;
   if(taken.length) return refuse(409,PRINCIPAL_NAME_TAKEN.code,authorized,hash,null,{message:PRINCIPAL_NAME_TAKEN.message});
 
   const now=await clock();
@@ -7618,7 +7681,7 @@ async function lockPrincipalName(
   await tx`
     SELECT pg_advisory_xact_lock(
       1936142698,
-      hashtext(${route.workspaceId}::text || ':' || ${command.name})
+      hashtext(${route.workspaceId}::text || ':' || lower(${command.name}))
     )
   `;
 }
@@ -7633,11 +7696,99 @@ async function hostedNameReserved(
       SELECT 1
       FROM swarm.hosted_mcp_seats AS hs
       WHERE hs.workspace_id = ${workspaceId}::uuid
-        AND hs.name = ${name}
+        AND lower(hs.name) = lower(${name})
         AND hs.revoked_at IS NULL
     ) AS reserved
   `;
   return rows[0]?.reserved === true;
+}
+
+/**
+ * What a hosted claim refused for a taken name sends back so the agent can pick again.
+ * suggested_name: the name plus the lowest number no agent in the workspace holds, ignoring
+ * case, live or removed, plus live hosted seats. existing_agent_id: only when the agent holding
+ * the name is one this same connection holds, so it can reconnect with claim_seat agent_id.
+ * That agent is already listed by seat_list on this connection; any other holder's id is left out.
+ */
+async function hostedNameTakenHelp(
+  tx: Sql,
+  workspaceId: string,
+  grantId: string,
+  name: string,
+): Promise<{ suggested_name?: string; existing_agent_id?: string }> {
+  const candidates = hostedNameCandidates(name);
+  const [suggestion] = await tx<{ candidate: string }[]>`
+    WITH taken AS (
+      SELECT lower(p.name) AS name
+      FROM swarm.agent_principals AS p
+      WHERE p.workspace_id = ${workspaceId}::uuid
+         OR EXISTS (SELECT 1 FROM swarm.agent_workspace_memberships AS am
+           WHERE am.principal_id = p.principal_id AND am.workspace_id = ${workspaceId}::uuid)
+      UNION
+      SELECT lower(hs.name) FROM swarm.hosted_mcp_seats AS hs
+      WHERE hs.workspace_id = ${workspaceId}::uuid AND hs.revoked_at IS NULL
+    )
+    SELECT c.candidate
+    FROM unnest(${candidates}::text[]) WITH ORDINALITY AS c(candidate, n)
+    WHERE NOT EXISTS (SELECT 1 FROM taken AS t WHERE t.name = lower(c.candidate))
+    ORDER BY c.n
+    LIMIT 1
+  `;
+  const holders = await tx<{ principal_id: string }[]>`
+    SELECT p.principal_id
+    FROM swarm.agent_principals AS p
+    JOIN swarm.hosted_mcp_grant_agents AS ga
+      ON ga.principal_id = p.principal_id AND ga.owner_user_id = p.owner_user_id
+    WHERE ga.grant_id = ${grantId}::uuid
+      AND ga.revoked_at IS NULL
+      AND p.revoked_at IS NULL
+      AND lower(p.name) = lower(${name})
+      AND swarm.hosted_binding_eligible(ga.grant_id, ${workspaceId}::uuid, p.principal_id)
+    ORDER BY p.principal_id
+    LIMIT 2
+  `;
+  return {
+    ...(suggestion ? { suggested_name: suggestion.candidate } : {}),
+    ...(holders.length === 1 ? { existing_agent_id: holders[0]!.principal_id } : {}),
+  };
+}
+
+/**
+ * rename_agent's name check. Another agent holds the name, ignoring case, in a workspace this
+ * agent belongs to (its first workspace and every live membership): a live agent, a removed
+ * agent of another person (as a hosted claim treats it), or a live hosted seat. Takes the
+ * name lock of each of those workspaces, in order, before reading, as every name writer does.
+ */
+async function agentNameTakenForRename(tx: Sql, principalId: string, name: string): Promise<boolean> {
+  const spaces = await tx<{ workspace_id: string }[]>`
+    SELECT workspace_id FROM swarm.agent_principals WHERE principal_id = ${principalId}::uuid
+    UNION
+    SELECT workspace_id FROM swarm.agent_workspace_memberships
+    WHERE principal_id = ${principalId}::uuid AND revoked_at IS NULL
+    ORDER BY workspace_id
+  `;
+  for (const space of spaces) await lockPrincipalName(tx, { workspaceId: space.workspace_id }, { name });
+  const ids = spaces.map((space) => space.workspace_id);
+  const [row] = await tx<{ taken: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM swarm.agent_principals AS other
+      JOIN swarm.agent_principals AS self ON self.principal_id = ${principalId}::uuid
+      WHERE other.principal_id <> self.principal_id
+        AND lower(other.name) = lower(${name})
+        AND (other.revoked_at IS NULL OR other.owner_user_id <> self.owner_user_id)
+        AND (other.workspace_id = ANY(${ids}::uuid[]) OR EXISTS (
+          SELECT 1 FROM swarm.agent_workspace_memberships AS am
+          WHERE am.principal_id = other.principal_id AND am.workspace_id = ANY(${ids}::uuid[])))
+    ) OR EXISTS (
+      SELECT 1 FROM swarm.hosted_mcp_seats AS hs
+      WHERE hs.workspace_id = ANY(${ids}::uuid[])
+        AND hs.revoked_at IS NULL
+        AND hs.principal_id <> ${principalId}::uuid
+        AND lower(hs.name) = lower(${name})
+    ) AS taken
+  `;
+  return row?.taken !== false;
 }
 
 interface LockedJoinCredential {
@@ -10536,7 +10687,7 @@ async function enforceFreeTierBudget(
         SELECT principal_id
         FROM swarm.agent_principals
         WHERE workspace_id = ${route.workspaceId}::uuid
-          AND name = ${command.name}
+          AND lower(name) = lower(${command.name})
         LIMIT 1
       `;
       if (taken[0] !== undefined) {
@@ -14921,7 +15072,9 @@ async function claimHostedSeat(
           AND p.revoked_at IS NULL AND p.transport='hosted_mcp' AND p.turn_only
           AND NOT EXISTS(SELECT 1 FROM swarm.revocation_tombstones z WHERE z.kind='principal' AND z.target_id=p.principal_id)
           AND swarm.hosted_binding_eligible(ga.grant_id,${resolved.workspace_id}::uuid,p.principal_id)`;
-      if (!agent || input.command.name && input.command.name !== agent.name) return {status:403,body:{error:'forbidden'}};
+      if (!agent) return {status:403,body:{error:'forbidden'}};
+      // agent_id names the agent. A name sent beside it may predate a rename_agent, so the
+      // agent's current name wins and comes back in the response and its context.
       input.command.name=agent.name;
     } else {
       // Legacy name claims can create identities only in the original consent.
@@ -14990,14 +15143,14 @@ async function claimHostedSeat(
       JOIN swarm.agent_principals p ON p.principal_id=hs.principal_id
       WHERE hs.workspace_id=${route.workspaceId}::uuid
         AND (hs.grant_id=${closureGrant.grant_id}::uuid OR
-          (p.name=${input.command.name} AND p.owner_user_id=${closureGrant.owner_user_id}::uuid))
+          (lower(p.name)=lower(${input.command.name}) AND p.owner_user_id=${closureGrant.owner_user_id}::uuid))
       ORDER BY hs.seat_id`;
     const closure=await discoverClosure();
     for (const seat of closure) await tx`SELECT seat_id FROM swarm.hosted_mcp_seats WHERE seat_id=${seat.seat_id}::uuid FOR UPDATE`;
     await tx`SELECT handle FROM swarm.hosted_mcp_seat_handles
       WHERE seat_id=ANY(${closure.map(row=>row.seat_id)}::uuid[]) ORDER BY handle FOR UPDATE`;
     await tx`SELECT principal_id FROM swarm.agent_principals
-      WHERE (workspace_id=${route.workspaceId}::uuid AND name=${input.command.name})
+      WHERE (workspace_id=${route.workspaceId}::uuid AND lower(name)=lower(${input.command.name}))
         OR principal_id=ANY(${[...closure.map(row=>row.principal_id),...(input.command.agent_id?[input.command.agent_id]:[])]}::uuid[])
       ORDER BY principal_id FOR UPDATE`;
     if (JSON.stringify(await discoverClosure())!==JSON.stringify(closure)) throw new LocalAuthDiscoveryChanged();
@@ -15037,8 +15190,8 @@ async function claimHostedSeat(
           typeof response.handle !== "string" || typeof response.principal_id !== "string") {
         throw new Error("invalid hosted-seat idempotency response");
       }
-      const replayRows = await tx<{ seat_id: string }[]>`
-        SELECT hs.seat_id
+      const replayRows = await tx<{ seat_id: string; name: string }[]>`
+        SELECT hs.seat_id, hs.name
         FROM swarm.hosted_mcp_seats AS hs
         JOIN swarm.hosted_mcp_seat_handles AS h
           ON h.seat_id = hs.seat_id
@@ -15069,11 +15222,13 @@ async function claimHostedSeat(
       if (JSON.stringify(current) !== prefix.snapshot.hostedPrefix) throw new LocalAuthDiscoveryChanged();
       const [clock] = await tx<[{now_ms:string|number}]>`SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now_ms`;
       frame.now=Number(clock.now_ms);
+      // The receipt keeps the name at claim time; a later rename_agent is answered with the current one.
+      const currentName = replayRows[0]!.name;
       const context = await resolveHostedConnectionContext(tx, capability, resolved, {
-        handle: response.handle, principal_id: response.principal_id,
+        handle: response.handle, principal_id: response.principal_id, name: currentName,
       });
       if (context === null) return { status: 403, body: { error: "forbidden" } };
-      return { status: 200, body: { ...response, status: "accepted", replayed: true, context } };
+      return { status: 200, body: { ...response, name: currentName, status: "accepted", replayed: true, context } };
     }
 
     const existingRows = await tx<{
@@ -15101,8 +15256,8 @@ async function claimHostedSeat(
       JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
       WHERE hs.grant_id = ${grant.grant_id}::uuid
         AND hs.workspace_id = ${route.workspaceId}::uuid
-        AND hs.name = ${input.command.name}
-        AND (${input.command.agent_id ?? null}::uuid IS NULL OR hs.principal_id=${input.command.agent_id ?? null}::uuid)
+        AND (${input.command.agent_id ?? null}::uuid IS NULL AND lower(hs.name) = lower(${input.command.name})
+          OR hs.principal_id = ${input.command.agent_id ?? null}::uuid)
         AND swarm.hosted_binding_eligible(hs.grant_id,hs.workspace_id,hs.principal_id)
         AND hs.revoked_at IS NULL
         AND h.revoked_at IS NULL
@@ -15121,7 +15276,7 @@ async function claimHostedSeat(
       SELECT principal_id, owner_user_id, (revoked_at IS NOT NULL OR EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${route.workspaceId}::uuid AND am.revoked_at IS NOT NULL)) AS revoked
       FROM swarm.agent_principals
       WHERE EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=agent_principals.principal_id AND am.workspace_id=${route.workspaceId}::uuid)
-        AND name = ${input.command.name}
+        AND lower(name) = lower(${input.command.name})
         AND principal_id IS DISTINCT FROM ${input.command.agent_id ?? null}::uuid
       ORDER BY principal_id
     `;
@@ -15143,7 +15298,7 @@ async function claimHostedSeat(
         AND hs.workspace_id = ${route.workspaceId}::uuid
         AND hs.revoked_at IS NULL
         AND p.revoked_at IS NOT NULL
-        AND p.name = ${input.command.name}
+        AND lower(p.name) = lower(${input.command.name})
         AND p.owner_user_id = ${grant.owner_user_id}::uuid
     `;
     const current = await revalidateHostedGrantCommand(tx, capability);
@@ -15201,6 +15356,7 @@ async function claimHostedSeat(
       all_required_memberships: true,
       exact_name_principals: exactPrincipals,
       live_seat_count: liveSeatCount,
+      reconnect_agent_id: input.command.agent_id ?? null,
     }, {
       now: frame.now,
       actor: { user: grant.owner_user_id, agent_principal: null, run: null },
@@ -15229,8 +15385,12 @@ async function claimHostedSeat(
         detail: decision.detail,
         hash,
       });
+      if (decision.reason === HOSTED_SEAT_NAME_TAKEN.code) {
+        return { status: 409, body: { error: decision.reason, message: decision.detail,
+          ...await hostedNameTakenHelp(tx, route.workspaceId, grant.grant_id, input.command.name) } };
+      }
       return {
-        status: decision.reason === HOSTED_SEAT_NAME_TAKEN.code ? 409 : 403,
+        status: 403,
         body: { error: decision.reason, message: decision.detail },
       };
     }
@@ -15246,7 +15406,8 @@ async function claimHostedSeat(
         return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
       }
       if (liveSeatCount >= HOSTED_MCP_SEAT_LIMIT) {
-        return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT } };
+        return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT,
+          message: HOSTED_SEAT_LIMIT_MESSAGE } };
       }
       const hostedProjection = reduceHostedAuthority(null, decision.events[0]);
       const foldedSeat = hostedProjection.seats[seatId];
@@ -15365,7 +15526,7 @@ async function claimHostedSeat(
       hash,
     });
     const seatContext=await resolveHostedConnectionContext(tx,capability,resolved,{
-      handle:response.handle as string,principal_id:response.principal_id as string,
+      handle:response.handle as string,principal_id:response.principal_id as string,name:input.command.name,
     });
     if (seatContext===null) throw new LocalAuthDiscoveryChanged();
     return { status: 200, body: { status: "accepted", ...response, context:seatContext } };
@@ -15485,12 +15646,12 @@ async function handleTransaction(
         && !['owner','admin'].includes(admission.role))
         return 'business-refusal';
       const targetPrincipal=typeof rawLocal?.principal_id==='string' && UUID_RE.test(rawLocal.principal_id) ? rawLocal.principal_id:null;
-      if (targetPrincipal && ['mint_agent_token','mint_agent_join_credential','revoke_agent_principal','set_agent_model','disable_agent_session','recover_agent_session'].includes(kind)) {
+      if (targetPrincipal && ['mint_agent_token','mint_agent_join_credential','revoke_agent_principal','set_agent_model','rename_agent','disable_agent_session','recover_agent_session'].includes(kind)) {
         const [target]=await tx<{owner_user_id:string;workspace_id:string}[]>`SELECT owner_user_id,workspace_id FROM swarm.agent_principals
           WHERE principal_id=${targetPrincipal}::uuid AND (workspace_id=${localWorkspace}::uuid OR EXISTS(SELECT 1 FROM swarm.agent_workspace_memberships am WHERE am.principal_id=${targetPrincipal}::uuid AND am.workspace_id=${localWorkspace}::uuid))`;
         if (!target || (kind==='mint_agent_join_credential' && (target.workspace_id!==localWorkspace || target.owner_user_id!==verifiedHuman.userId))
           || (target.owner_user_id!==verifiedHuman.userId && !['owner','admin'].includes(admission.role)))
-          return ['revoke_agent_principal','set_agent_model','mint_agent_join_credential'].includes(kind) ? 'business-refusal' : 'forbidden';
+          return ['revoke_agent_principal','set_agent_model','rename_agent','mint_agent_join_credential'].includes(kind) ? 'business-refusal' : 'forbidden';
       }
       if (kind==='revoke_agent_token' && typeof rawLocal?.token_id==='string' && UUID_RE.test(rawLocal.token_id)) {
         const [target]=await tx<{owner_user_id:string;transport:string;workspace_id:string}[]>`SELECT p.owner_user_id,p.transport,p.workspace_id FROM swarm.agent_tokens t
@@ -15638,9 +15799,9 @@ async function handleTransaction(
         // (the actor and any target) FOR UPDATE: the serialization point #353's grant and end use.
         ...(seatAdminAgent ? {seatAdmin:true}:{}),
         principalMode: kind===CLAIM_AGENT_INBOX_KIND?'noKeyUpdate'
-          : seatAdminAgent || kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model'].includes(kind) ? 'update':'share',
+          : seatAdminAgent || kind==='acquire_agent_session' || revocation || ['enable_agent_management','disable_agent_management','recover_agent_session','declare_agent_model','set_agent_model','rename_agent'].includes(kind) ? 'update':'share',
         sessionMode:agentTokenHash!==null || ['add_agent_to_workspace','remove_agent_from_workspace','revoke_agent_principal','acquire_agent_session','renew_agent_session','release_agent_session','enable_agent_management','disable_agent_management','recover_agent_session'].includes(kind)?'update':'share',
-        hostedMode:revocation || ['add_agent_to_workspace','remove_agent_from_workspace'].includes(kind) ? 'update':'share',
+        hostedMode:revocation || ['add_agent_to_workspace','remove_agent_from_workspace','rename_agent'].includes(kind) ? 'update':'share',
         ...(joinCredentialHash && joinAttempt ? {join:{hash:joinCredentialHash,attempt:joinAttempt}}:{}),
       }) : null;
       if(localState.localPlan && verifiedHuman && (kind==='revoke_agent_token' || consent?.kind==='local')) {

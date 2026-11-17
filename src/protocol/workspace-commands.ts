@@ -5,6 +5,7 @@
 // wiring mistakes may not turn an agent credential into human authority.
 
 import { Actor, SCHEMA_VERSION } from './events.js';
+import { hostedSeatNameValid } from './hosted-authority.js';
 import {
   WorkspaceEventEnvelope,
   WorkspaceEventType,
@@ -19,6 +20,11 @@ export const PRINCIPAL_NAME_TAKEN = {
   code: 'principal_name_taken',
   message: 'principal id or name already exists',
 } as const;
+/** rename_agent's words for its two name refusals. */
+export const AGENT_NAME_RULE =
+  'Agent names are 1 to 80 characters, with no spaces at either end and no control characters.';
+export const AGENT_NAME_TAKEN_MESSAGE =
+  'Another agent in this workspace already uses that name, ignoring case. Choose another.';
 /* 30 DAYS, raised 8h→24h→30d by operator rulings 2026-08-18/19. The bootstrap credential
  * crosses a human (pasted into another machine's chat, often after environment repair on
  * that side), and rotation cannot start until a listener is READY — the step most likely to
@@ -99,6 +105,17 @@ export type WorkspaceCommand =
       allow_duplicate_name?: boolean;
     }
   | { kind: 'revoke_agent_principal'; principal_id: string }
+  | {
+      /**
+       * A person renames an agent: same gate as revoke_agent_principal (owner/admin, or the member
+       * who owns the agent). The principal id stays, so mentions, messages, seats and history keep
+       * pointing at the same agent. The name is unique ignoring case in every workspace the agent
+       * belongs to; the adapter checks that and answers agentNameTaken.
+       */
+      kind: 'rename_agent';
+      principal_id: string;
+      name: string;
+    }
   | {
       /**
        * Agent self-description (docs/design/2026-08-03-AGENT-SELF-IDENTIFY.md):
@@ -342,6 +359,12 @@ export interface DecideWorkspaceCtx {
    */
   pendingInvitationIds?(user_id: string): readonly string[];
   /**
+   * rename_agent only: whether another agent already holds this name, ignoring case, in any
+   * workspace the agent belongs to. Optional so an adapter that has not checked refuses the
+   * rename as taken instead of renaming unchecked.
+   */
+  agentNameTaken?(principal_id: string, name: string): boolean;
+  /**
    * Seat admin (switch on): the agent acts under one grant its owner confirmed. Set by the edge only after the
    * grant, the grantor's live ownership and the agent's membership were rechecked under lock. It admits exactly
    * SEAT_ADMIN_REDUCER_KINDS for an agent credential, at an Admin's level, never the grantor's own role.
@@ -441,6 +464,7 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind'] | 'add_agent
   'change_role',
   'create_agent_principal',
   'revoke_agent_principal',
+  'rename_agent',
   'set_agent_model',
   'mint_agent_token',
   'mint_agent_join_credential',
@@ -1081,6 +1105,36 @@ export function decideWorkspace(
         env(ctx, 'AgentPrincipalRevoked', {
           principal_id: cmd.principal_id,
           revoked_at: ctx.now,
+        }),
+      ]);
+    }
+
+    case 'rename_agent': {
+      /* Same gate as revoke_agent_principal and set_agent_model. HUMAN_ONLY_COMMANDS already
+       * refused agent credentials before this case. */
+      const principal = state.principals[cmd.principal_id];
+      if (!principal) {
+        return domain(ctx, cmd.kind, 'principal_not_found', 'agent principal does not exist');
+      }
+      if (principal.revoked_at !== null) {
+        return domain(ctx, cmd.kind, 'principal_revoked', 'agent principal is revoked');
+      }
+      if (!ownerOrAdmin(actorRole) && principal.owner_user_id !== user_id) {
+        return domain(ctx, cmd.kind, 'principal_not_owned', 'Member may rename only their own agent');
+      }
+      if (!hostedSeatNameValid(cmd.name)) {
+        return domain(ctx, cmd.kind, 'principal_name_invalid', AGENT_NAME_RULE);
+      }
+      if (cmd.name === principal.name) return accept([]);
+      if (ctx.agentNameTaken?.(cmd.principal_id, cmd.name) !== false) {
+        return domain(ctx, cmd.kind, PRINCIPAL_NAME_TAKEN.code, AGENT_NAME_TAKEN_MESSAGE);
+      }
+      return accept([
+        env(ctx, 'AgentRenamed', {
+          principal_id: cmd.principal_id,
+          name: cmd.name,
+          previous_name: principal.name,
+          renamed_at: ctx.now,
         }),
       ]);
     }

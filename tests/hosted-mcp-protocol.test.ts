@@ -627,7 +627,7 @@ test("claim_seat advertises and accepts an omitted workspace_id beside an explic
   assert.throws(()=>validateHostedToolArguments('claim_seat',{agent_id:verified.subject,request_id:'reuse_request_123'}));
   assert.throws(()=>validateHostedToolArguments('claim_seat',{agent_id:'invalid',workspace_id:verified.subject,request_id:'reuse_request_123'}));
   assert.equal(claim.inputSchema.properties.workspace_id.type, "string");
-  assert.equal(claim.description, "Choose a new, unique name for this chat/session; never use another agent's name. Reuse a name only for a seat this same connection created earlier. To use an existing agent in a workspace a person added, pass agent_id and workspace_id. Omit workspace_id for the consented home workspace. Retry with the same request_id.");
+  assert.equal(claim.description, "Join as a new agent for this chat. A new chat always gets a new name: call seat_list first to see the names this connection already uses, then propose a short name for this session's role (for example \"RidgeHQ Lead\"), not just the app's name (\"Claude\", \"Codex\"). If the person gave a name, use it. If the name is taken you get hosted_seat_name_taken with suggested_name: use that or ask the person; never share another chat's agent. To reconnect as an agent this connection already has, pass its agent_id and workspace_id. Omit workspace_id for the consented home workspace. Names are labels, not isolation: every chat on this connection can use all of its agents. Retry with the same request_id.");
 });
 
 test("claim_seat routes through the grant home and preserves explicit consent checks", async () => {

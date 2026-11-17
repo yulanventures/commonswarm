@@ -5,6 +5,7 @@ import { StreamIntegrityError, UnknownEventTypeError } from './reducer.js';
 import {
   AGENT_TRANSPORTS,
   AgentModelDeclared,
+  AgentRenamed,
   FeedbackSubmitted,
   HostedMcpSeatClaimed,
   HostedMcpSeatRevoked,
@@ -389,6 +390,26 @@ export function reduceWorkspace(
         principals: {
           ...s.principals,
           [p.principal_id]: { ...declaredFor, model: p.model ?? null },
+        },
+      };
+      break;
+    }
+    case 'AgentRenamed': {
+      const p = req<AgentRenamed>(
+        env.payload,
+        ['principal_id', 'name', 'previous_name', 'renamed_at'],
+        env.type,
+        env.seq,
+      );
+      const renamed = s.principals[p.principal_id];
+      if (!renamed) {
+        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...renamed, name: p.name },
         },
       };
       break;
