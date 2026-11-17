@@ -5,120 +5,141 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { composeEdgeRuntimeImage, composePath, repoRoot } from "./edge-runtime-function-boot.js";
-import { ensureDockerImage, pullDockerImage, type DockerResult } from "./docker-image-pull.js";
+import { ensureDockerImage, IMAGE_PULL_ATTEMPTS, pullDockerImage, type DockerResult } from "./docker-image-pull.js";
 
 const image = composeEdgeRuntimeImage();
+const ghcrImage = image.replace("public.ecr.aws/", "ghcr.io/");
+const hubImage = image.replace("public.ecr.aws/", "");
 const absent: DockerResult = { status: 1, stdout: "", stderr: "No such image" };
 const present: DockerResult = { status: 0, stdout: "[]", stderr: "" };
 const success: DockerResult = { status: 0, stdout: "Image is up to date", stderr: "" };
+const quiet = { log() {} };
 
-// The Docker boundary owns retry coverage for both callers. No service is started.
-for (const diagnostic of [
-  "Error response from daemon: toomanyrequests: Data limit exceeded",
-  "toomanyrequests: Rate exceeded",
-  "docker: Error response from daemon: TOOMANYREQUESTS: Rate exceeded",
+// A fake Docker for the helper: every pull answers from `answer`, and every call is recorded.
+function stubDocker(answer: (reference: string, round: number) => DockerResult, local: DockerResult = absent) {
+  const calls: string[][] = [];
+  const waits: number[] = [];
+  const attempts = new Map<string, number>();
+  return {
+    calls,
+    waits,
+    pulls: () => calls.filter(args => args[0] === "pull").map(args => args[1]),
+    dependencies: {
+      ...quiet,
+      run(args: string[]) {
+        calls.push(args);
+        if (args[0] === "image") return local;
+        if (args[0] === "tag") return present;
+        assert.equal(args[0], "pull");
+        const round = (attempts.get(args[1]) ?? 0) + 1;
+        attempts.set(args[1], round);
+        return answer(args[1], round);
+      },
+      async wait(milliseconds: number) { waits.push(milliseconds); },
+    },
+  };
+}
+
+// Any failure is retried in the next round, at every registry, as the CI image caches do (#486, #487).
+for (const failure of [
+  { status: 1, stdout: "", stderr: "Error response from daemon: toomanyrequests: Data limit exceeded" },
+  { status: 1, stdout: "", stderr: "Error response from daemon: error from registry: Data limit exceeded" },
+  { status: 1, stdout: "", stderr: "Error response from daemon: Get \"https://public.ecr.aws/v2/\": net/http: TLS handshake timeout" },
+  { status: 1, stdout: "manifest unknown", stderr: "" },
+  { status: null, stdout: "", stderr: "", error: new Error("spawn docker ETIMEDOUT"), signal: "SIGTERM" as const },
 ]) {
-  for (const limits of [1, 2]) {
-    test(`pinned image recovers after ${limits} ECR limits: ${diagnostic}`, async () => {
-      let pulls = 0;
-      const waits: number[] = [];
-      await ensureDockerImage(image, {
-        run(args) {
-          if (args[0] === "image") {
-            assert.deepEqual(args, ["image", "inspect", image]);
-            return absent;
-          }
-          assert.deepEqual(args, ["pull", image]);
-          pulls += 1;
-          return pulls <= limits ? { status: 1, stdout: "Pulling layers", stderr: `${diagnostic}\n` } : success;
-        },
-        async wait(milliseconds) { waits.push(milliseconds); },
-      });
-      assert.equal(pulls, limits + 1);
-      assert.deepEqual(waits, limits === 1 ? [1_000] : [1_000, 2_000]);
+  for (const failedRounds of [1, 2]) {
+    test(`a pinned image recovers after ${failedRounds} failed round(s): ${failure.error?.message || failure.stderr || failure.stdout}`, async () => {
+      const docker = stubDocker((_, round) => round <= failedRounds ? failure : success);
+      await ensureDockerImage(image, docker.dependencies);
+      const round = [image, ghcrImage, hubImage];
+      assert.deepEqual(docker.pulls(), [...Array.from({ length: failedRounds }, () => round).flat(), image]);
+      assert.deepEqual(docker.waits, failedRounds === 1 ? [5_000] : [5_000, 15_000]);
+      assert.equal(docker.calls.filter(args => args[0] === "tag").length, 0);
     });
   }
 }
 
-for (const failure of [
-  { status: 1, stdout: "", stderr: "permission denied" },
-  { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded\\npermission denied" },
-  { status: 1, stdout: "manifest unknown", stderr: "" },
-  { status: null, stdout: "", stderr: "", error: new Error("spawn docker ENOENT") },
-  { status: null, stdout: "", stderr: "toomanyrequests: Rate exceeded", error: new Error("spawn docker ETIMEDOUT"), signal: "SIGTERM" as const },
-]) {
-  test(`non-rate-limit failure stops immediately: ${failure.error?.message || failure.stderr || failure.stdout}`, async () => {
-    let pulls = 0;
-    const waits: number[] = [];
-    await assert.rejects(ensureDockerImage(image, {
-      run(args) {
-        if (args[0] === "image") return absent;
-        pulls += 1;
-        return failure;
-      },
-      async wait(milliseconds) { waits.push(milliseconds); },
-    }), error => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /non-rate-limit error/);
-      assert.ok(error.message.includes(failure.error?.message || failure.stderr || failure.stdout));
-      return true;
-    });
-    assert.equal(pulls, 1);
-    assert.deepEqual(waits, []);
+test("an ECR data limit falls through to GHCR in the same round, tagged as the requested image", async () => {
+  const docker = stubDocker(reference => reference === image
+    ? { status: 1, stdout: "", stderr: "Error response from daemon: error from registry: Data limit exceeded" }
+    : success);
+  await ensureDockerImage(image, docker.dependencies);
+  assert.deepEqual(docker.pulls(), [image, ghcrImage]);
+  assert.deepEqual(docker.calls.at(-1), ["tag", ghcrImage, image]);
+  assert.deepEqual(docker.waits, []);
+});
+
+test("a Docker Hub official image falls back to ECR's and Google's mirrors of the same tag", async () => {
+  const docker = stubDocker(reference => reference.startsWith("mirror.gcr.io/")
+    ? success
+    : { status: 1, stdout: "", stderr: "toomanyrequests: You have reached your unauthenticated pull rate limit." });
+  await ensureDockerImage("postgres:17.11", docker.dependencies);
+  assert.deepEqual(docker.pulls(), ["postgres:17.11", "public.ecr.aws/docker/library/postgres:17.11", "mirror.gcr.io/library/postgres:17.11"]);
+  assert.deepEqual(docker.calls.at(-1), ["tag", "mirror.gcr.io/library/postgres:17.11", "postgres:17.11"]);
+});
+
+test("a Docker Hub supabase image tries ECR and GHCR after Docker Hub", async () => {
+  const docker = stubDocker(() => ({ status: 1, stdout: "", stderr: "Rate exceeded" }));
+  const result = await pullDockerImage("supabase/postgres:17.6.1.147", docker.dependencies);
+  assert.equal(result.ready, false);
+  assert.deepEqual(docker.pulls().slice(0, 3), ["supabase/postgres:17.6.1.147", "public.ecr.aws/supabase/postgres:17.6.1.147", "ghcr.io/supabase/postgres:17.6.1.147"]);
+});
+
+test("a digest reference is retried at its own registry only", async () => {
+  const pinned = `public.ecr.aws/supabase/edge-runtime@sha256:${"e".repeat(64)}`;
+  const docker = stubDocker((_, round) => round < 3 ? { status: 1, stdout: "", stderr: "Rate exceeded" } : success);
+  await ensureDockerImage(pinned, docker.dependencies);
+  assert.deepEqual(docker.pulls(), [pinned, pinned, pinned]);
+});
+
+test("a failure that persists fails after every round with each registry's diagnostic", async () => {
+  const docker = stubDocker(reference => ({ status: 1, stdout: "", stderr: `manifest unknown at ${reference}` }));
+  await assert.rejects(ensureDockerImage(image, docker.dependencies), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, new RegExp(`failed after ${IMAGE_PULL_ATTEMPTS} rounds`));
+    for (const reference of [image, ghcrImage, hubImage]) assert.ok(error.message.includes(`manifest unknown at ${reference}`));
+    return true;
+  });
+  assert.equal(IMAGE_PULL_ATTEMPTS, 4);
+  assert.equal(docker.pulls().length, 3 * IMAGE_PULL_ATTEMPTS);
+  assert.deepEqual(docker.waits, [5_000, 15_000, 45_000]);
+});
+
+test("a failure mixed with registry limits fails instead of skipping", async () => {
+  const docker = stubDocker(reference => reference === hubImage
+    ? { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded\npermission denied" }
+    : { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded" });
+  await assert.rejects(pullDockerImage(image, docker.dependencies), /failed after 4 rounds.*permission denied/s);
+});
+
+test("the box caller keeps its explicit skip when every registry stays rate limited", async () => {
+  const docker = stubDocker(reference => ({
+    status: 1, stdout: "", stderr: reference === ghcrImage ? "toomanyrequests: Rate exceeded" : "error from registry: Data limit exceeded",
+  }));
+  const result = await pullDockerImage(image, docker.dependencies);
+  assert.equal(result.ready, false);
+  assert.equal(docker.pulls().length, 3 * IMAGE_PULL_ATTEMPTS);
+  if (!result.ready) assert.match(result.reason, /rate limits persisted after 4 rounds.*\n.*Data limit exceeded/s);
+  await assert.rejects(ensureDockerImage(image, stubDocker(() => ({ status: 1, stdout: "", stderr: "Rate exceeded" })).dependencies),
+    /rate limits persisted/);
+});
+
+for (const helper of [ensureDockerImage, pullDockerImage]) {
+  test(`the exact pinned image already present needs no pull or wait (${helper.name})`, async () => {
+    const docker = stubDocker(() => assert.fail("a cached image must not be pulled"), present);
+    await helper(image, docker.dependencies);
+    assert.deepEqual(docker.calls, [["image", "inspect", image]]);
+    assert.deepEqual(docker.waits, []);
   });
 }
-
-test("exhausted retry budget fails with the final diagnostic", async () => {
-  let pulls = 0;
-  const waits: number[] = [];
-  await assert.rejects(ensureDockerImage(image, {
-    run(args) {
-      if (args[0] === "image") return absent;
-      pulls += 1;
-      return {
-        status: 1,
-        stdout: "",
-        stderr: pulls < 3 ? "toomanyrequests: Rate exceeded" : "toomanyrequests: Data limit exceeded",
-      };
-    },
-    async wait(milliseconds) { waits.push(milliseconds); },
-  }), /after 3 bounded image-pull attempts.*\n.*Data limit exceeded/s);
-  assert.equal(pulls, 3);
-  assert.deepEqual(waits, [1_000, 2_000]);
-});
-
-test("box caller can retain its explicit skip on exhausted ECR limits", async () => {
-  let pulls = 0;
-  const result = await pullDockerImage(image, {
-    run() {
-      pulls += 1;
-      return { status: 1, stdout: "", stderr: "toomanyrequests: Rate exceeded" };
-    },
-    async wait() {},
-  });
-  assert.equal(result.ready, false);
-  assert.equal(pulls, 3);
-  if (!result.ready) assert.match(result.reason, /after 3 bounded image-pull attempts.*\n.*Rate exceeded/s);
-});
-
-test("the exact pinned image already present needs no pull or wait", async () => {
-  const inspected: string[][] = [];
-  await ensureDockerImage(image, {
-    run(args) {
-      inspected.push(args);
-      assert.deepEqual(args, ["image", "inspect", image]);
-      return present;
-    },
-    async wait() { assert.fail("a cached image must not wait"); },
-  });
-  assert.deepEqual(inspected, [["image", "inspect", image]]);
-});
 
 test("an image at another tag does not satisfy the Compose pin", async () => {
   const source = readFileSync(composePath, "utf8");
   const changedImage = composeEdgeRuntimeImage(source.replace(image, "public.ecr.aws/supabase/edge-runtime:changed-pin"));
   let pulls = 0;
   await ensureDockerImage(changedImage, {
+    ...quiet,
     run(args) {
       if (args[0] === "image") return args[2] === image ? present : absent;
       assert.deepEqual(args, ["pull", changedImage]);
@@ -365,3 +386,102 @@ for (const [name, env, ok] of [
     if (ok) assert.match(result.stdout, /Local stack started 12 containers from cached images; supabase start pulled 0 images\./);
   });
 }
+
+// The pinned test images (#487) go through the same prepare path into their own cache, and a check runs
+// after their consumers: the C1 docker stdin check (server shard 1) and the p1-cli suite.
+function testImageMetadata() {
+  const result = spawnSync(process.execPath, ["scripts/ci/server-suite.mjs", "image-metadata", "test"], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const digests = Object.fromEntries([...result.stderr.matchAll(/^ {2}\S+: (\S+) (sha256:[0-9a-f]{64})$/gm)].map(match => [match[1], match[2]]));
+  return { stdout: result.stdout, digests };
+}
+const prepareTestScript = stepScript("Prepare the pinned test images");
+const checkTestScript = "node scripts/ci/server-suite.mjs check-test-images \"$RUNNER_TEMP/pinned-test-images\"";
+function testCache(cache: Runner, env: Record<string, string>) {
+  return cache.run(prepareTestScript, { PINNED_IMAGE_CACHE: join(cache.work, "cache", "pinned-test-images"), ...env });
+}
+function coldTestCache(context: { after: (fn: () => void) => void }) {
+  const cache = runner(context);
+  const cold = testCache(cache, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "success" });
+  assert.equal(cold.status, 0, `${cold.stdout}${cold.stderr}`);
+  return { cache, cold };
+}
+
+test("the pinned test images are the tags their consumers run, each with a digest", () => {
+  const { stdout, digests } = testImageMetadata();
+  assert.match(stdout, /^key=[0-9a-f]{64}$/m);
+  assert.match(stdout, /^c1_psql_image=postgres:17\.12$/m);
+  assert.deepEqual(Object.keys(digests), ["postgres:17.12", "postgres:17.11", "public.ecr.aws/supabase/postgres:17.6.1.147"]);
+});
+
+test("a cold test image cache pulls each image only by digest, tags it and asks to save it", { timeout: 120_000 }, context => {
+  const { digests } = testImageMetadata();
+  const { cache, cold } = coldTestCache(context);
+  assert.match(cold.stdout, /Pulled 3 pinned test images; cache archive/);
+  assert.deepEqual(pulls(cache.calls()).sort(), [
+    `postgres@${digests["postgres:17.12"]}`,
+    `postgres@${digests["postgres:17.11"]}`,
+    `public.ecr.aws/supabase/postgres@${digests["public.ecr.aws/supabase/postgres:17.6.1.147"]}`,
+  ].sort());
+  assert.deepEqual(cache.calls().filter(args => args[0] === "tag").map(args => args[2]).sort(), Object.keys(digests).sort());
+  assert.equal(readFileSync(join(cache.work, "output"), "utf8"), "save=true\n");
+});
+
+test("a warm test image cache loads, verifies and pulls nothing", { timeout: 120_000 }, context => {
+  const { cache } = coldTestCache(context);
+  cache.reset();
+  const warm = testCache(cache, { PINNED_IMAGE_CACHE_HIT: "true" });
+  assert.equal(warm.status, 0, `${warm.stdout}${warm.stderr}`);
+  assert.match(warm.stdout, /Restored and verified 3 pinned test images from the cache; no registry pulls\./);
+  assert.deepEqual(pulls(cache.calls()), []);
+});
+
+test("an ECR data limit sends the box image to GHCR, still by digest", { timeout: 120_000 }, context => {
+  const { digests } = testImageMetadata();
+  const cache = runner(context);
+  const result = testCache(cache, { PINNED_IMAGE_CACHE_HIT: "", DOCKER_PULL: "data-limit" });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.ok(pulls(cache.calls()).includes(`ghcr.io/supabase/postgres@${digests["public.ecr.aws/supabase/postgres:17.6.1.147"]}`));
+});
+
+for (const [name, script, env, ok, message] of [
+  ["nothing pulled", "", {}, true, /Checked 3 pinned test images: unchanged, none pulled from a registry\./],
+  ["a pinned tag pulled again", "docker pull --quiet postgres:17.11\n", {}, false, /changed or went missing.*postgres:17\.11/s],
+  ["a pinned repository pulled under another name", "", { DOCKER_EXTRA_IMAGE: "postgres:<none>" }, false, /pulled into the pinned test image repositories/],
+  ["a mirror of a pinned repository pulled", "", { DOCKER_EXTRA_IMAGE: "mirror.gcr.io/library/postgres:17.11" }, false, /pulled into the pinned test image repositories/],
+  ["an unrelated image pulled", "", { DOCKER_EXTRA_IMAGE: "node:<none>" }, true, /::warning title=Image cache::New images outside the image caches.*node:<none>/],
+] as const) {
+  test(`the test image check: ${name}`, { timeout: 120_000 }, context => {
+    const { cache } = coldTestCache(context);
+    const result = cache.run(`set -e\n${script}${checkTestScript}\n`, env);
+    assert.equal(result.status === 0, ok, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, message);
+  });
+}
+
+test("the workflow prepares the test images after the stack check and checks them after their consumers", () => {
+  const at = (text: string) => {
+    const index = workflow.indexOf(text);
+    assert.ok(index > 0, `the workflow must have ${text.trim()}`);
+    return index;
+  };
+  const order = [
+    "      - name: Start the local stack\n",
+    "      - name: Save the pinned images\n",
+    "      - name: Read the pinned test images\n",
+    "      - name: Restore the pinned test images\n",
+    "      - name: Prepare the pinned test images\n",
+    "      - name: Save the pinned test images\n",
+    "      - name: C1 docker stdin check",
+    "      - name: p1-cli suite\n",
+    "      - name: Check that nothing pulled the pinned test images\n",
+  ].map(at);
+  assert.deepEqual(order, [...order].sort((left, right) => left - right));
+  const keys = [...workflow.matchAll(/^ {10}key: (.*pinned-test-images-v1-.*)$/gm)].map(match => match[1]);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1]);
+  assert.ok(workflow.includes(`run: ${checkTestScript}\n`));
+  const c1 = workflow.split("      - name: C1 docker stdin check")[1]?.split("      - name:")[0] ?? "";
+  assert.match(c1, /^ {10}C1_DOCKER_PSQL_IMAGE: \$\{\{ steps\.test-images\.outputs\.c1_psql_image \|\| 'postgres:17' \}\}$/m);
+  assert.doesNotMatch(c1, /C1_DOCKER_PSQL_IMAGE=postgres/);
+});

@@ -257,6 +257,44 @@ jobs:
         with:
           path: ${{ runner.temp }}/pinned-images
           key: ${{ runner.os }}-${{ runner.arch }}-pinned-images-v3-${{ steps.pinned-images.outputs.key }}
+      # The pinned test images (#487): the C1 docker stdin check (server shard 1) and the p1-cli Docker tests run
+      # these by tag. Their own cache through the same prepare-images path, so p1-cli never loads the stack.
+      # These steps follow the stack's, so the stack check never counts them as pulled by supabase start.
+      - name: Read the pinned test images
+        if: (matrix.suite == 'p1-cli' || (matrix.suite == 'server' && matrix.shard == 1))
+        id: test-images
+        run: |
+          set -euo pipefail
+          # A tested commit from before the test image cache pulls its test images as it always did.
+          if grep -q check-test-images scripts/ci/server-suite.mjs; then
+            node scripts/ci/server-suite.mjs image-metadata test >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::This commit predates the test image cache; its test images are pulled from the registry."
+          fi
+      - name: Restore the pinned test images
+        if: (matrix.suite == 'p1-cli' || (matrix.suite == 'server' && matrix.shard == 1)) && steps.test-images.outputs.key != ''
+        id: test-image-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/pinned-test-images
+          # The key hashes every test image, its digest and its registries.
+          key: ${{ runner.os }}-${{ runner.arch }}-pinned-test-images-v1-${{ steps.test-images.outputs.key }}
+      - name: Prepare the pinned test images
+        if: (matrix.suite == 'p1-cli' || (matrix.suite == 'server' && matrix.shard == 1)) && steps.test-images.outputs.key != ''
+        id: test-images-ready
+        env:
+          PINNED_IMAGE_CACHE: ${{ runner.temp }}/pinned-test-images
+          PINNED_IMAGE_CACHE_HIT: ${{ steps.test-image-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          node scripts/ci/server-suite.mjs prepare-images "$PINNED_IMAGE_CACHE" "$PINNED_IMAGE_CACHE_HIT" test
+      # The list is fixed and every image matched its digest, so a complete pull is saved at once.
+      - name: Save the pinned test images
+        if: (matrix.suite == 'p1-cli' || (matrix.suite == 'server' && matrix.shard == 1)) && steps.test-images-ready.outputs.save == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/pinned-test-images
+          key: ${{ runner.os }}-${{ runner.arch }}-pinned-test-images-v1-${{ steps.test-images.outputs.key }}
       - name: Apply migrations as the box superuser
         if: matrix.suite == 'server' || matrix.suite == 'server-repeat' || matrix.suite == 'p1-local' || matrix.suite == 'mobile-audit'
         run: |
@@ -403,11 +441,14 @@ jobs:
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y 2>&1 | tee -a server.log
           sudo apt-get install -y -q postgresql-17 2>&1 | tee -a server.log
           RUN_PG_REHEARSAL=1 PG_BIN=/usr/lib/postgresql/17/bin node --import tsx --test tests/c1-w2-rehearsal.test.ts 2>&1 | tee -a server.log
-      - name: C1 docker stdin check (plan ai_db shape, postgres:17)
+      - name: C1 docker stdin check (plan ai_db shape, PostgreSQL 17)
         if: ${{ !cancelled() && matrix.suite == 'server' && matrix.shard == 1 }}
+        env:
+          # The cached, digest-pinned tag; a commit from before the test image cache pulls postgres:17.
+          C1_DOCKER_PSQL_IMAGE: ${{ steps.test-images.outputs.c1_psql_image || 'postgres:17' }}
         run: |
           set -euo pipefail
-          PG_BIN=/usr/lib/postgresql/17/bin C1_DOCKER_PSQL_IMAGE=postgres:17 bash scripts/c1-docker-stdin-check.sh 2>&1 | tee -a server.log
+          PG_BIN=/usr/lib/postgresql/17/bin bash scripts/c1-docker-stdin-check.sh 2>&1 | tee -a server.log
       - name: Install bundled Chromium for p1-local
         if: matrix.suite == 'p1-local'
         run: bash "$RUNNER_TEMP/install-playwright-shell.sh"
@@ -458,6 +499,10 @@ jobs:
         run: |
           set -o pipefail
           npm run test:p1-cli 2>&1 | tee p1-cli.log
+      # After the C1 check (server shard 1) and the p1-cli suite: fails if anything pulled a pinned test image.
+      - name: Check that nothing pulled the pinned test images
+        if: ${{ !cancelled() && steps.test-images-ready.outcome == 'success' }}
+        run: node scripts/ci/server-suite.mjs check-test-images "$RUNNER_TEMP/pinned-test-images"
       - name: Site build and site suite
         if: matrix.suite == 'site'
         # Observers use only Playwright's bundled headless shell, after building the pages.
