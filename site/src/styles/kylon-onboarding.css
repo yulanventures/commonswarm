@@ -388,6 +388,13 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp__waitin
   min-inline-size: 0;
 }
 
+/* A control scrolled into view (Tab, or the page bringing Copy and Copy setup prompt up) stops 16px
+   short of the scroller's edge instead of flush with it, so a short landscape or phone screen shows
+   the whole control with room around it. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__host-view .hm-ahp :is(button, input, a, summary) {
+  scroll-margin-block: 16px;
+}
+
 @media (width <= 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .dashboard__invite-view,
   live-dashboard.dashboard[data-kylon-shell] .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__host-view {
