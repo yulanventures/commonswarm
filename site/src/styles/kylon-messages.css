@@ -212,6 +212,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   line-height: var(--lh-base);
 }
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashboard__message-markdown {
+  /* Message prose reads one step softer than the names around it; names and mentions keep full ink. */
+  color: var(--k-shell-prose, var(--k-shell-ink));
   /* Keep the body on its own flex line when recipient metadata is visible. */
   flex: 1 0 100%;
   max-inline-size: none;
@@ -711,16 +713,16 @@ live-dashboard.dashboard[data-kylon-shell] .hm-decision .hm-decision__foot {
   }
 }
 
-/* A mention in a message body: the name, tinted, in the line. It is text, not a control, so it
-   takes no extra height and no hit box. A mention of the reader (or one of their agents) is
+/* A mention in a message body: the name, in full ink and bold on a tint, in the line (the prose around it is
+   softer). It is text, not a control, so it takes no extra height and no hit box. A mention of the reader (or one of their agents) is
    marked more strongly, which is how a reader finds what was said to them. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message-markdown .dashboard__mention {
   padding: 1px 3px;
   margin-inline: -1px;
   border-radius: 4px;
-  color: color-mix(in srgb, var(--k-shell-focus) 78%, var(--k-shell-ink));
+  color: var(--k-shell-ink);
   background: color-mix(in srgb, var(--k-shell-focus) 11%, transparent);
-  font-weight: 500;
+  font-weight: 700;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }

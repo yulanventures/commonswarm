@@ -16,6 +16,8 @@
   --k-shell-rail-hover: var(--k-shell-selected);
   --k-shell-side: var(--k-shell-surface);
   --k-shell-ink: #09090b;
+  /* Chat message prose, one step softer than names (owner ask, 2026-11-17): 9.65:1 on white, 7.61:1 selected. */
+  --k-shell-prose: #3f454f;
   --k-shell-secondary: #52525b;
   --k-shell-muted: #71717a;
   --k-shell-line: #e4e4e7;
@@ -37,6 +39,7 @@
   --k-shell-dark-subtle: #20232a;
   --k-shell-dark-selected: #282c35;
   --k-shell-dark-ink: #e4e6eb;
+  --k-shell-dark-prose: #c9cdd4; /* 10.80:1 on the surface, 8.77:1 selected */
   --k-shell-dark-secondary: #a0a6b2;
   --k-shell-dark-muted: #8d94a2;
   --k-shell-dark-line: #262a33;
