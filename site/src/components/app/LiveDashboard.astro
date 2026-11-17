@@ -1778,6 +1778,11 @@ import "../../styles/kylon-command-palette.css";
 
     let agents: (Agent & { work?: AgentWorkStatus })[] = [];
     let members: Member[] = [];
+    /* Workspace settings: the latest open request, the workspace a picker gear opened (focus returns to the picker),
+       and the roster facts the panel was last drawn from. */
+    let workspaceSettingsIntent = 0;
+    let workspaceSettingsReturn: string | null = null;
+    let workspaceSettingsFacts = "";
     let pendingInvites: PendingMemberInvite[] = [];
     let accessStatuses: AgentAccessStatus[] = [];
     let pendingAgents: PendingAgentAccess[] = [];
@@ -5475,7 +5480,9 @@ import "../../styles/kylon-command-palette.css";
       if (pickerRoot && pickerRoot.dataset.pickerKey !== pickerKey) {
         const previous = pickerRoot.querySelector<HTMLDetailsElement>("[data-workspace-picker]");
         const focused = pickerRoot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
-        const choice = focused instanceof HTMLButtonElement ? focused.value : null;
+        /* A gear has no value: it is found again by the workspace it opens. */
+        const gear = focused?.dataset.workspacePickerSettings ?? null;
+        const choice = focused instanceof HTMLButtonElement && gear === null ? focused.value : null;
         const wasOpen = previous?.open ?? false;
         pickerRoot.dataset.pickerKey = pickerKey;
         /* A workspace opens on #general; New workspace is the picker's last entry (it left the rail). */
@@ -5487,11 +5494,15 @@ import "../../styles/kylon-command-palette.css";
         }, sampleMode ? undefined : { href: routeHref({ view: "new" }), open: () => {
           layout.closeNavigation(false);
           navigateHomeHref(routeHref({ view: "new" }));
-        } }) as HTMLDetailsElement;
+        } }, sampleMode ? undefined : (workspaceId, opener) => {
+          void openWorkspaceDetailsDialog(workspaceId, opener);
+        }) as HTMLDetailsElement;
         picker.open = wasOpen;
         pickerRoot.replaceChildren(picker);
         if (focused) {
-          const target = (choice === null ? null : [...picker.querySelectorAll<HTMLButtonElement>("button")].find(item => item.value === choice))
+          const buttons = [...picker.querySelectorAll<HTMLButtonElement>("button")];
+          const target = (gear !== null ? buttons.find(button => button.dataset.workspacePickerSettings === gear)
+            : choice === null ? null : buttons.find(item => item.value === choice))
             ?? picker.querySelector<HTMLElement>("summary");
           if (target?.getClientRects().length && !target.closest("[hidden], [inert]")) target.focus({ preventScroll: true });
         }
@@ -5720,7 +5731,7 @@ import "../../styles/kylon-command-palette.css";
         feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
-          else if (item === "settings") openWorkspaceDetailsDialog();
+          else if (item === "settings") void openWorkspaceDetailsDialog();
           // AdminDelegations owns the data-admin-access-open click through its delegated listener.
         } };
       layout.replaceHeader(() => replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
@@ -6045,6 +6056,17 @@ import "../../styles/kylon-command-palette.css";
       .filter(agent => wakePathMark(agent.oldestUnobservedAt) !== null)
       .map(agent => agent.principalId).join("|");
     let renderedWakeMarkKey = "";
+    /** What the settings panel shows from the roster: the viewer's role there and the two counts. */
+    const workspaceSettingsFactsKey = (workspaceId: string): string =>
+      JSON.stringify([workspaceId, members.find(member => member.userId === session?.user.id)?.role ?? null, members.length, agents.length]);
+    /* A roster that settles after the settings dialog opened (a poll, a retry) redraws the panel, so its role and counts are
+       this workspace's. Only a change redraws it: a redraw drops a half-typed rename or close confirmation. */
+    const syncWorkspaceSettingsRoster = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
+      if (!dialog?.open || sampleMode || !session) return;
+      const workspace = workspaces.find(item => item.id === activeWorkspaceId);
+      if (workspace && workspaceSettingsFactsKey(workspace.id) !== workspaceSettingsFacts) renderWorkspaceSettingsPanel(workspace);
+    };
     const renderRoster = (): void => {
       // A settled current roster replaces that workspace's snapshot identities; absence means removal.
       if (homePeopleReadState === "ready") catchUpData = catchUpData.map(entry =>
@@ -6055,6 +6077,7 @@ import "../../styles/kylon-command-palette.css";
       renderHeaderRoster();
       renderDialogRoster();
       renderedWakeMarkKey = wakeMarkKey();
+      syncWorkspaceSettingsRoster();
       /* ONE CALL, AND ORDER STOPPED BEING LOAD-BEARING. There used to be three steps here in
          an order that had to be right: the remembered set, then the draft, then a tag pass.
          Every arrangement of them was wrong in some transition, because they were three
@@ -7504,9 +7527,22 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
-    const openWorkspaceDetailsDialog = (): void => {
+    /** Opens settings for a workspace. A picker gear names one that may not be open yet: that workspace is opened first,
+        and only the latest request may show the dialog, and only while nothing else has navigated since. */
+    const openWorkspaceDetailsDialog = async (targetWorkspaceId = activeWorkspaceId, opener: HTMLElement | null = null): Promise<void> => {
+      const intent = ++workspaceSettingsIntent;
+      const userId = session?.user.id;
       const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
-      if (!dialog || dialog.open) return;
+      if (!dialog || !targetWorkspaceId) return;
+      if (opener) layout.closeNavigation(false);
+      if (activeWorkspaceId !== targetWorkspaceId) {
+        const navigated = navigateHome({ view: "chat", workspaceId: targetWorkspaceId }, "push");
+        const navigation = homeNavigation;
+        await navigated;
+        if (intent !== workspaceSettingsIntent || navigation !== homeNavigation || session?.user.id !== userId) return;
+      }
+      if (dialog.open || activeWorkspaceId !== targetWorkspaceId) return;
+      workspaceSettingsReturn = opener ? targetWorkspaceId : null;
       dialog.showModal();
       const workspace=workspaces.find(item=>item.id===activeWorkspaceId);
       if(session && !sampleMode && workspace) {
@@ -7527,9 +7563,19 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
-    const closeWorkspaceDetailsDialog = (): void => {
+    /** Only a person's close (the close button, Escape, the backdrop) returns focus to the picker; the app's own closes do not. */
+    const closeWorkspaceDetailsDialog = (byPerson = false): void => {
       const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
+      if (!byPerson) workspaceSettingsReturn = null;
       if (dialog?.open) dialog.close();
+    };
+    /** The gear when it is on screen; it sits in the closed picker, so in practice the picker's summary, or on a phone
+        (where the picker is in the closed drawer) the button that opens the navigation. */
+    const focusWorkspaceSettingsReturn = (workspaceId: string): void => {
+      const shown = (node: HTMLElement | null | undefined): node is HTMLElement => !!node?.isConnected && !!node.getClientRects().length && !node.closest("[hidden],[inert]");
+      const gear = all<HTMLElement>("[data-workspace-picker-settings]").find(node => node.dataset.workspacePickerSettings === workspaceId);
+      [gear, ...all<HTMLElement>("[data-workspace-picker] > summary"), ...all<HTMLElement>('button[aria-label="Open navigation"]'),
+        ...all<HTMLElement>("[data-home-workspace-shell] h1")].find(shown)?.focus({ preventScroll: true });
     };
 
     const formatTime = (value: string): { relative: string; absolute: string } => {
@@ -10895,6 +10941,7 @@ import "../../styles/kylon-command-palette.css";
       // Callers hold the row they opened with; the list may have a newer one (a rename, a policy change).
       const workspace = workspaces.find(row => row.id === opened.id) ?? opened;
       const me = members.find((member) => member.userId === session?.user.id);
+      workspaceSettingsFacts = workspaceSettingsFactsKey(workspace.id);
       renderWorkspaceSettings(root, {
         name: workspace.name,
         workspaceId: workspace.id,
@@ -14464,17 +14511,13 @@ import "../../styles/kylon-command-palette.css";
 
     one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", homeBack);
     one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", () => openRosterDialog());
-    one<HTMLButtonElement>("[data-workspace-details-trigger]")?.addEventListener(
-      "click",
-      openWorkspaceDetailsDialog,
-    );
-    one<HTMLButtonElement>("[data-workspace-settings-item]")?.addEventListener("click", () => {
-      openWorkspaceDetailsDialog();
+    one<HTMLButtonElement>("[data-workspace-details-trigger]")?.addEventListener("click", () => {
+      void openWorkspaceDetailsDialog();
     });
-    one<HTMLButtonElement>("[data-workspace-details-close]")?.addEventListener(
-      "click",
-      closeWorkspaceDetailsDialog,
-    );
+    one<HTMLButtonElement>("[data-workspace-settings-item]")?.addEventListener("click", () => {
+      void openWorkspaceDetailsDialog();
+    });
+    one<HTMLButtonElement>("[data-workspace-details-close]")?.addEventListener("click", () => closeWorkspaceDetailsDialog(true));
     one<HTMLButtonElement>("[data-entity-panel-close]")?.addEventListener(
       "click",
       () => closeEntityPanel(true),
@@ -15773,6 +15816,9 @@ import "../../styles/kylon-command-palette.css";
         for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
           trigger.setAttribute("aria-expanded", "false");
         }
+        if (dialog.open) return;
+        const returnTo = workspaceSettingsReturn; workspaceSettingsReturn = null;
+        if (returnTo !== null) focusWorkspaceSettingsReturn(returnTo);
       });
     }
     const rosterDialog = one<HTMLDialogElement>("[data-roster-dialog]");

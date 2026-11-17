@@ -2554,6 +2554,10 @@
     ],
     "requiresSeed": [
       "create_workspace"
+    ],
+    "frame": [
+      "[data-workspace-picker][open] .cs-workspace-picker__settings[data-workspace-picker-settings=\"{workspace}\"]",
+      "[data-workspace-picker][open] > summary"
     ]
   },
   {

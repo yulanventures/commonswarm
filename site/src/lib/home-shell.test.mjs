@@ -176,3 +176,53 @@ test("the workspace picker ends with New workspace, which opens the existing flo
   create.listeners.click({ button: 0, preventDefault() { prevented = true; } });
   assert.deepEqual(opened, ["new"]); assert.equal(prevented, true); assert.equal(picker.open, false);
 });
+
+test("signed in, each picker row adds a settings gear beside the unchanged workspace item", () => {
+  const element = tag => ({ tag, children: [], attrs: {}, listeners: {}, dataset: {}, open: false, value: "", type: "", title: "",
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    focus() { this.focused = true; },
+  });
+  const doc = { createElement: element, createElementNS: (_ns, tag) => element(tag) };
+  const selected = [], opened = [];
+  const picker = buildWorkspacePicker(doc, [
+    { id: "one", name: "First", archived: false },
+    { id: "gone", name: "Archived", archived: true },
+    { id: "two", name: "Second", archived: false },
+  ], "one", id => selected.push(id), undefined, (id, opener) => opened.push([id, opener]));
+  const [, list] = picker.children;
+  assert.deepEqual(list.children.map(row => [row.tag, row.className]),
+    [["div", "cs-workspace-picker__row"], ["div", "cs-workspace-picker__row"]]);
+  const [item, gear] = list.children[1].children;
+  assert.deepEqual([item.tag, item.className, item.type, item.value, item.textContent], ["button", "cs-workspace-picker__item", "button", "two", "Second"]);
+  assert.deepEqual([gear.tag, gear.className, gear.type, gear.dataset.workspacePickerSettings, gear.title],
+    ["button", "cs-workspace-picker__settings", "button", "two", "Workspace settings"]);
+  assert.deepEqual(gear.attrs, { "aria-label": "Workspace settings, Second", "aria-haspopup": "dialog", "aria-controls": "dashboard-workspace-details" });
+  assert.equal(list.children[0].children[0].attrs["aria-current"], "page");
+  // The channel header's gear glyph: one svg holding its path and circle.
+  assert.equal(gear.children.length, 1); assert.equal(gear.children[0].tag, "svg");
+  assert.deepEqual(gear.children[0].children.map(child => child.tag), ["path", "circle"]);
+
+  picker.open = true; gear.listeners.click();
+  assert.equal(picker.open, false);
+  assert.deepEqual(opened, [["two", gear]]); assert.deepEqual(selected, []);
+  picker.open = true; item.listeners.click();
+  assert.equal(picker.open, false); assert.deepEqual(selected, ["two"]); assert.equal(opened.length, 1);
+});
+
+test("without openSettings (sample mode) the picker has no gear and builds no svg", () => {
+  let svgs = 0;
+  const element = tag => ({ tag, children: [], attrs: {}, listeners: {}, dataset: {}, open: false, value: "",
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+  });
+  const picker = buildWorkspacePicker({ createElement: element, createElementNS: () => { svgs++; return element("svg"); } },
+    [{ id: "sample", name: "Sample", archived: false }], "sample", () => {});
+  const [, list] = picker.children;
+  assert.deepEqual(list.children.map(item => [item.tag, item.className, item.value]), [["button", "cs-workspace-picker__item", "sample"]]);
+  assert.equal(svgs, 0);
+  const all = node => [node, ...node.children.flatMap(all)];
+  assert.ok(!all(picker).some(node => node.className === "cs-workspace-picker__settings" || node.className === "cs-workspace-picker__row"));
+});

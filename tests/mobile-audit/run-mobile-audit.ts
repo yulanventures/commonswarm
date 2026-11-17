@@ -411,6 +411,10 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // The app pills: hovering or focusing one, the chosen one included, must not move the panel.
   "app.add-agent.panel": [{ name: "app-pills", rows: '[data-channel-view="agent-choice"]:not([hidden]) [data-ahp-host]', max: 6,
     prefer: '[data-ahp-host="claude"]', focus: true, require: ['[data-ahp-host="claude"]'] }],
+  // A workspace row and its settings gear: hovering the row or focusing the gear must not move the name or the list.
+  "nav.workspace-picker": [{ name: "workspace-rows", rows: "[data-workspace-picker][open] .cs-workspace-picker__row", max: 4,
+    prefer: '.cs-workspace-picker__row:has(> .cs-workspace-picker__item[aria-current="page"])', focus: true, focusTarget: ".cs-workspace-picker__settings",
+    require: ['.cs-workspace-picker__row:has(> .cs-workspace-picker__item[aria-current="page"])'] }],
 };
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;

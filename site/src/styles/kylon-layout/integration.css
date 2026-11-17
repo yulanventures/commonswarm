@@ -435,6 +435,19 @@ live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__i
   color: var(--cs-ink); background: transparent; font: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer;
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__item:is(:hover, [aria-current="page"]) { background: var(--cs-selected); }
+/* Signed in, each row ends in its workspace's settings gear. The list widens so a name keeps room beside it on a narrow rail. */
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__list:has(> .cs-workspace-picker__row) { min-inline-size: max(100%, 15rem); }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__row { display: flex; align-items: stretch; gap: 2px; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__row > .cs-workspace-picker__item { flex: 1 1 auto; min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings {
+  display: inline-grid; place-items: center; flex: none; box-sizing: border-box;
+  inline-size: 44px; min-inline-size: 44px; min-block-size: 44px; padding: 0; border: 0; border-radius: 5px;
+  color: var(--cs-muted); background: transparent; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings svg {
+  inline-size: 19px; block-size: 19px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker__settings:is(:hover, :focus-visible) { background: var(--cs-selected); color: var(--cs-ink); }
 live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .cs-workspace-picker :is(summary, button):focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
 @media (width > 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] > .cs-org-context-parking { min-block-size: 0; block-size: 100%; overflow: visible; }
