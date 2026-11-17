@@ -2698,11 +2698,12 @@ async function runPrincipal(args: Arguments): Promise<void> {
   }
   if (action === "rename") {
     args.assertShape(RUN_PRINCIPAL_3_ACCEPTED_FLAGS, 2);
+    // The flags are checked before any discovery, sign-in or stored credential is touched.
+    const principalId = args.required("principal-id");
+    const name = args.required("name");
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
-    const principalId = args.required("principal-id");
-    const name = args.required("name");
     const response = (
       await sendConnectWithPending(
         new ThinCommandClient(cloud, human.fetcher),
