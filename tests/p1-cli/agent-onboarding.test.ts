@@ -9,7 +9,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
-import { AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_DIRECT_TIMEOUT_MS, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_ACK_RETRY_BASE_MS, AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_DIRECT_TIMEOUT_MS, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -326,16 +326,28 @@ test("transient observation retries use backoff until the age cap", { timeout: 1
   const failed = fixture([row(1)], AGENT, 503);
   const path = join(dirname(profilePath), "check.json");
   for (let check = 0; check < 5; check++) {
+    const started = Date.now();
     await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
     const state = JSON.parse(await readFile(path, "utf8"));
-    assert.ok(state.pending_observed_retries[row(1).id].next_at > Date.now());
+    const retry = state.pending_observed_retries[row(1).id];
+    /* The backoff is measured from the failure, which comes after `started`, so this bound holds
+     * however slow the runner is. Comparing against the clock after the check did not: the first
+     * backoff is 250 ms, and a loaded runner can spend that between the failure and the read. */
+    assert.equal(retry.attempts, check + 1, "each transient failure counts one attempt");
+    assert.ok(retry.next_at >= started + AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** check,
+      `attempt ${check + 1} backs off at least ${AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** check} ms`);
     if (check < 4) {
+      // A backoff still running defers the retry: hold it open whatever the runner's speed, then check again.
+      retry.next_at = Math.max(retry.next_at, Date.now() + 60_000);
+      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
       const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length;
       await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
       assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length,
         before, "backoff defers an immediate retry");
-      state.pending_observed_retries[row(1).id].next_at = 0;
-      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+      const deferred = JSON.parse(await readFile(path, "utf8"));
+      assert.equal(deferred.pending_observed_retries[row(1).id].attempts, check + 1, "a deferred retry is not an attempt");
+      deferred.pending_observed_retries[row(1).id].next_at = 0;
+      await writeFile(path, JSON.stringify(deferred), { mode: 0o600 });
     }
   }
   const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
