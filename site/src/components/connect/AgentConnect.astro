@@ -169,6 +169,8 @@ const {
    * the page it lands on. Pages that own the workspace choice set workspace-id; pages that
    * don't let the element find one.
    */
+  type MintRequest = ({ principalId: string } | { name: string }) & { workspaceId: string; userId: string; intent: number };
+
   class AgentConnectElement extends HTMLElement {
     static observedAttributes = ["workspace-id", "workspace-name"];
 
@@ -187,8 +189,12 @@ const {
     #loadQueued = false;
     #loadVersion = 0;
     /* What the page asked to mint once the element is ready: a new key for an agent that exists,
-       or a new agent with the name the Add an agent panel took. */
-    #request: ({ principalId: string } | { name: string }) & { workspaceId: string } | null = null;
+       or a new agent with the name the Add an agent panel took. It is bound to the workspace and
+       the account that asked, and to the intent generation it was asked in. */
+    #request: MintRequest | null = null;
+    /* Raised by every reset (auth change, sign-out, abandonment, disposal). A request or an
+       in-flight mint from an older generation creates, mints, shows and copies nothing more. */
+    #intentGeneration = 0;
     #retargetPending = false;
     #inviteId: string | null = null;
     #joinActive = false;
@@ -207,11 +213,16 @@ const {
     }
 
     disconnectedCallback() {
+      this.retirePending();
       window.clearTimeout(this.#copyTimer);
       window.clearInterval(this.#pollTimer);
     }
 
     attributeChangedCallback() {
+      /* A queued request belongs to the workspace it was asked in; another workspace drops it. */
+      if (this.#request && this.#request.workspaceId !== (this.getAttribute("workspace-id")?.trim() ?? "")) {
+        this.#request = null;
+      }
       if (!this.#ready || !this.isConnected) return;
       if (this.#busy || this.dataset.state === "done") {
         this.#retargetPending = true;
@@ -336,22 +347,38 @@ const {
       }
     }
 
+    /**
+     * Retire whatever was asked for and not yet shown: the queued request, an in-flight mint
+     * (which stops at its next step) and any load still running for it. Called on every auth
+     * reset (through clearPrompt), on sign-out, and when the person abandons the request.
+     */
+    retirePending() {
+      const pending = this.#request !== null || this.#busy;
+      this.#intentGeneration += 1;
+      this.#request = null;
+      if (this.dataset.state === "loading") this.#loadVersion += 1;
+      /* The panel's Copy setup prompt waits on this request; tell it the request is gone. */
+      if (pending) this.dispatchEvent(new CustomEvent("commonswarm:agent-prompt-retired", { bubbles: true }));
+    }
+
     clearPrompt(notify = true) {
+      this.retirePending();
       this.finishPrompt("done", notify);
     }
 
     /** Re-onboard one existing identity through the same mint and prompt path as Add an agent. */
-    requestPromptFor(principalId: string) {
-      if (principalId) this.#requestPrompt({ principalId });
+    requestPromptFor(principalId: string, userId: string) {
+      if (principalId) this.#requestPrompt({ principalId }, userId);
     }
 
     /** Create a new agent with this name and mint its prompt (the Add an agent panel's key routes). */
-    requestPromptNamed(name: string) {
+    requestPromptNamed(name: string, userId: string) {
       const trimmed = name.trim();
-      if (trimmed) this.#requestPrompt({ name: trimmed });
+      if (trimmed) this.#requestPrompt({ name: trimmed }, userId);
     }
 
-    #requestPrompt(request: { principalId: string } | { name: string }) {
+    #requestPrompt(request: { principalId: string } | { name: string }, userId: string) {
+      if (!userId) return;
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
       let blocked = this.#busy || this.#prompt !== null;
@@ -359,8 +386,14 @@ const {
         blocked = blocked || this.#joinActive;
       }
       if (blocked) return;
-      /* Bound to the workspace it was asked in: a load that lands elsewhere mints nothing. */
-      this.#request = { ...request, workspaceId: this.getAttribute("workspace-id")?.trim() ?? "" };
+      /* Bound to the workspace and the account it was asked in: a load that lands elsewhere, or
+         a session that belongs to someone else, mints nothing. */
+      this.#request = {
+        ...request,
+        workspaceId: this.getAttribute("workspace-id")?.trim() ?? "",
+        userId,
+        intent: this.#intentGeneration,
+      };
       if (
         this.dataset.state === "ready" &&
         this.#workspaceId === (this.getAttribute("workspace-id")?.trim() ?? "")
@@ -516,6 +549,7 @@ const {
       const request = this.#request;
       if (!request || this.dataset.state !== "ready") return;
       this.#request = null;
+      if (request.intent !== this.#intentGeneration) return;
       if (request.workspaceId !== this.#workspaceId) {
         this.#failed("The workspace changed before the prompt was created. Nothing was created.", "name" in request);
         return;
@@ -544,7 +578,7 @@ const {
       }));
     }
 
-    async #mint(request: { principalId: string } | { name: string }) {
+    async #mint(request: MintRequest) {
       /* ★ THE GUARD IS SET HERE, NOT 30 LINES DOWN, AND THE GAP WAS A DOUBLE-MINT.
          `#busy` used to be checked here and assigned only after `await currentSession()`
          and the validation below. Two submits inside that window — a double-click, or
@@ -569,11 +603,32 @@ const {
       }
     }
 
-    async #mintGuarded(request: { principalId: string } | { name: string }) {
+    /* Every step that creates, mints or shows something first checks that its request is still
+       the live one and that the signed-in account is the one that asked. Leaving says nothing:
+       the person who asked has gone, and the person now here did not ask. */
+    #stillAsked(request: MintRequest, userId: string | undefined): boolean {
+      return request.intent === this.#intentGeneration && userId === request.userId
+        && request.workspaceId === this.#workspaceId;
+    }
+
+    #abandon() {
+      this.#formError(null);
+      this.#state("ready");
+    }
+
+    async #mintGuarded(request: MintRequest) {
       this.#formError(null);
       const named = "name" in request;
 
       const session = await currentSession();
+      if (request.intent !== this.#intentGeneration) {
+        this.#abandon();
+        return;
+      }
+      if (session && session.user.id !== request.userId) {
+        this.#abandon();
+        return;
+      }
       if (!session) {
         this.#blocked(
           "Your sign-in expired",
@@ -601,6 +656,7 @@ const {
       try {
         // The device has to exist before the mint will be accepted at all.
         const deviceId = await ensureBrowserDevice(session);
+        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
 
         const identity: AgentIdentity = "principalId" in request
           ? this.#agents.find((agent) => agent.principalId === request.principalId) ?? {
@@ -609,10 +665,13 @@ const {
             model: null,
           }
           : await createAgentIdentity(session, identityCommandId, this.#workspaceId, request.name);
+        if (!this.#stillAsked(request, session.user.id)) return this.#abandon();
 
         const credential = await mintAgentCredential(
           session, mintCommandId, this.#workspaceId, identity, deviceId, AGENT_TOKEN_MAX_TTL_MS,
         );
+        /* Before the secret is shown or copied: the same request, and the same account signed in. */
+        if (!this.#stillAsked(request, (await currentSession())?.user.id)) return this.#abandon();
 
         const target = deployment();
         if (!target) throw new NoDeployment();
@@ -646,6 +705,8 @@ const {
               model: identity.model,
               tokenId: credential.tokenId,
               workspaceId: this.#workspaceId,
+              /* Created from the Add an agent panel's name, not a new key for an agent that exists. */
+              named,
             },
           }),
         );
@@ -655,7 +716,7 @@ const {
         if (named) void this.#copy(true);
       } catch (error) {
         this.#state("ready");
-        this.#failed(this.#explain(error), named);
+        if (request.intent === this.#intentGeneration) this.#failed(this.#explain(error), named);
       } finally {
         this.#text("loading-title", "Checking your session…");
       }

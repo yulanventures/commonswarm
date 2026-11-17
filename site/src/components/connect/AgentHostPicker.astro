@@ -263,6 +263,8 @@ const notesOf = (host: AgentHost): string[] => [
     #hostId = "";
     #joinedPrincipalId = "";
     #agentNames: string[] = [];
+    /* The signed-in account: what this browser remembers for the panel is kept under it. */
+    #viewerId = "";
     #connected = new Set<string>();
     #minting = false;
     #waitingTimer: number | undefined;
@@ -336,7 +338,8 @@ const notesOf = (host: AgentHost): string[] => [
       return this.#chip(this.#hostId)?.dataset.ahpRoute === "connector";
     }
 
-    setContext(context: { workspaceName?: string; accountEmail?: string }): void {
+    setContext(context: { workspaceName?: string; accountEmail?: string; viewerId?: string }): void {
+      if (context.viewerId !== undefined) this.#viewerId = context.viewerId;
       if (context.workspaceName !== undefined) this.setAttribute("workspace-name", context.workspaceName);
       if (context.accountEmail !== undefined) this.setAttribute("account-email", context.accountEmail);
     }
@@ -364,7 +367,7 @@ const notesOf = (host: AgentHost): string[] => [
       this.#show("form");
       const approveStatus = this.querySelector<HTMLElement>("[data-ahp-approve-status]");
       if (approveStatus) approveStatus.textContent = "";
-      const next = hostId ?? lastHost(addAgentStore());
+      const next = hostId ?? lastHost(addAgentStore(), this.#viewerId);
       this.#hostId = "";
       if (next && this.#chip(next)) this.showHost(next);
       else this.#render();
@@ -374,7 +377,7 @@ const notesOf = (host: AgentHost): string[] => [
       const chip = this.#chip(id);
       if (!chip) return;
       this.#hostId = id;
-      rememberLastHost(addAgentStore(), id);
+      rememberLastHost(addAgentStore(), this.#viewerId, id);
       if (chip.closest("[data-ahp-more]")) this.querySelector<HTMLDetailsElement>("[data-ahp-more]")!.open = true;
       this.#error("");
       this.#show("form");

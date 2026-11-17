@@ -716,6 +716,8 @@ function attachAgentReceiptFixture(f: ReturnType<typeof creationFixture>) {
     pendingWorkspaceId: "", pendingWorkspaceCreate: false, livePromptPrincipalId: "principal",
     accessStatuses: [], pendingAgents: [], pendingAgentsLoadFailed: false,
     syncConnectWorkspace: () => {}, returnToChannel: () => {},
+    // No Add an agent panel key is waiting here; that path has its own test in home-integration.
+    finishPanelKeyMint: () => false,
     agentAccessStatuses: async () => [], loadPendingAccess: async () => ({ rows: [], failed: false }),
     pendingAgentAccess: async () => [], renderPendingAccess: () => {},
     uuid: () => `receipt-${++receiptId}`,

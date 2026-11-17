@@ -202,7 +202,7 @@ for (const view of ['todo', 'add-agent']) for (const nextUserId of ['nikki', nul
       let people, signals, sampleSignals, channels, channelListFailed, activeChannelId, unknownChannelId, composerIntent;
       let channelsLoaded, channelUnreadRows;
       let deliveryReceiptRefreshOwner, files, fileLoadError, signalCursor, signalHasMore, signalCutoff, channelLoadError;
-      let livePromptPrincipalId, freshInviteLink, freshInviteId, freshInviteWorkspaceId, inviteIntent, activeCreate;
+      let livePromptPrincipalId, panelKeyMint, freshInviteLink, freshInviteId, freshInviteWorkspaceId, inviteIntent, activeCreate;
       let rosterFilter, signalFilter, previousSignalIds, feedWasEmpty, liveFeedInFlight, liveFeedQueued;
       let rosterRefreshInFlight, rosterRefreshAttemptedAt;
       const homeScroll=new Map(), homeOverviewCounts=new Map(), homeTodoDetails=new Map(), homePolicies=new Map();
@@ -1340,6 +1340,70 @@ test('the joined card Allow approves in place and opens Lists & docs only for se
   }
 });
 
+// Cmd+K's Add an agent is one more door to the panel, never the bare key form.
+test('the command palette Add an agent opens the panel', async () => {
+  const context = createContext({ ...MESSAGE_STATUS_STUBS });
+  runInContext(`
+    const calls = [];
+    const app = { dataset: {} }, one = () => null;
+    const openAgentChoice = () => calls.push('panel'), openConnect = () => calls.push('connect');
+    const navigateHome = async (route) => { calls.push('navigate:' + route.view); };
+    let homeRoute = { view: 'chat', workspaceId: 'W' }, activeWorkspaceId = 'W';
+  `, context);
+  runInContext(await dashboardFunctions(['executeCommandPaletteItem']), context);
+  runInContext("executeCommandPaletteItem({ action: { type: 'connect-agent' } })", context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(runInContext('JSON.stringify(calls)', context) as string), ['panel']);
+});
+
+// A Terminal agent or Grok Bot key from the panel: its first use brings back the panel's joined card.
+test('a panel key that is used shows the joined card; a new key for an existing agent, or Done, does not', async () => {
+  const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const script = dashboard.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(script);
+  const ast = ts.createSourceFile('dashboard.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const listeners: string[] = [];
+  const find = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.getText(ast) === 'app.addEventListener'
+      && ts.isStringLiteral(node.arguments[0]) && ['commonswarm:agent-prompt-ready', 'commonswarm:agent-secret-cleared'].includes(node.arguments[0].text))
+      listeners.push(node.parent.getText(ast));
+    ts.forEachChild(node, find);
+  };
+  find(ast); assert.equal(listeners.length, 2);
+  const listenerCode = ts.transpileModule(listeners.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const run = async (ready: Record<string, unknown>, reason: string, approved = false) => {
+    const handlers = new Map<string, (event: unknown) => unknown>(), log: string[] = [];
+    const context = createContext({ ...MESSAGE_STATUS_STUBS, log,
+      connectedHosts: () => [], addAgentStore: () => null,
+      connectionApproval: (entry: { approval?: unknown }) => entry.approval ?? null,
+      never: () => new Promise(() => {}), window: { setTimeout() {}, requestAnimationFrame() {} } });
+    runInContext(`
+      const app = { dataset: { channelView: 'connect' }, addEventListener: (name, fn) => handlers.set(name, fn) };
+      let session = { user: { id: 'tom' } }, activeWorkspaceId = 'W', sampleMode = false, requestVersion = 1, livePromptPrincipalId = '';
+      let homeRoute = { view: 'add-agent', workspaceId: 'W' }, pendingWorkspaceId = '', pendingWorkspaceCreate = false, panelKeyMint = null;
+      let agents = [{ principalId: 'scout', name: 'Scout' }], accessStatuses = [], pendingAgents = [], pendingAgentsLoadFailed = false;
+      const workspaces = [{ id: 'W', name: 'Home' }], householdAccess = { status: 'ok', workspaceId: 'W' };
+      const householdConnections = ${approved ? "[{ principal_id: 'scout', approval: { operations: ['read'] } }]" : '[]'};
+      const picker = { mintSettled() {}, setRoster: (names) => log.push('roster:' + names.join('|')), setConnected() {},
+        showJoined: (agent) => log.push('joined:' + JSON.stringify(agent)) };
+      const connect = {};
+      const one = (selector) => selector === 'agent-host-picker' ? picker : selector === 'agent-connect' ? connect : null;
+      const showChannelView = (view) => { app.dataset.channelView = view; log.push('view:' + view); };
+      const syncConnectWorkspace = () => {}, returnToChannel = () => log.push('channel'), uuid = () => 'id';
+      const roster = never, agentAccessStatuses = never, pendingAgentAccess = never, loadPendingAccess = never;
+    `, Object.assign(context, { handlers }));
+    runInContext(await dashboardFunctions(['refreshAddAgentPanel', 'finishPanelKeyMint']), context);
+    runInContext(listenerCode, context);
+    void handlers.get('commonswarm:agent-prompt-ready')!({ detail: { workspaceId: 'W', principalId: 'scout', name: 'Scout', tokenId: 'T', ...ready } });
+    handlers.get('commonswarm:agent-secret-cleared')!({ detail: { reason } });
+    return log;
+  };
+  assert.deepEqual(await run({ named: true }, 'consumed'), ['view:agent-choice', 'roster:Scout',
+    'joined:{"name":"Scout","principalId":"scout","hosted":false,"canApprove":true}']);
+  assert.match((await run({ named: true }, 'consumed', true)).at(-1)!, /"canApprove":false/, 'an agent already allowed is not offered Allow again');
+  assert.deepEqual(await run({ named: false }, 'consumed'), ['channel'], 'a new key for an agent that exists returns to the channel');
+  assert.deepEqual(await run({ named: true }, 'done'), ['channel'], 'Done with the prompt still returns to the channel');
+});
+
 test('the Add agent poll matches this attempt, passes the measured joined time and ignores another owner', async () => {
   const roster = [{principalId:'foreign',name:'Muse',ownerUserId:'nikki',transport:'hosted_mcp',joinedAt:'2026-10-05T11:31:00Z'},
     {principalId:'key',name:'Scout',ownerUserId:'tom',transport:'local',joinedAt:'2026-10-05T11:31:30Z'},
@@ -1347,20 +1411,26 @@ test('the Add agent poll matches this attempt, passes the measured joined time a
   const watch = async (agentName: string) => {
     const joined: unknown[] = [], intervals: number[] = [], remembered: unknown[] = [];
     let tick: ()=>void = ()=>{};
+    const order: string[] = [];
     const context = createContext({ ...MESSAGE_STATUS_STUBS, document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
-      one:()=>({hostId:'claude',agentName,showJoined:(value:unknown)=>joined.push(JSON.parse(JSON.stringify(value)))}), renderRoster:()=>{},
+      one:()=>({hostId:'claude',agentName,
+        setRoster:(names:string[])=>order.push(`roster:${names.join('|')}`), setConnected:(ids:string[])=>order.push(`connected:${ids.join('|')}`),
+        showJoined:(value:unknown)=>{ order.push('joined'); joined.push(JSON.parse(JSON.stringify(value))); }}), renderRoster:()=>{},
       joinAttemptMatch, addAgentStore:()=>null, rememberJoinedHost:(_store:unknown,record:unknown)=>remembered.push(JSON.parse(JSON.stringify(record))),
+      connectedHosts:(_store:unknown,_user:string,_workspace:string,ids:string[])=>remembered.length && ids.includes('own') ? ['claude'] : [],
       roster:async()=>roster });
     runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',requestVersion=1,sampleMode=false,agents=[],hostJoinGeneration=0,hostJoinTimer,hostJoinKnown=new Set(),hostJoinStartedAt=0;const app={dataset:{channelView:'agent-choice'}},householdAccess={status:'ok',workspaceId:'W'};",context);
-    runInContext(await dashboardFunctions(['stopHostJoinWatch','startHostJoinWatch']),context);
+    runInContext(await dashboardFunctions(['refreshAddAgentPanel','stopHostJoinWatch','startHostJoinWatch']),context);
     runInContext('startHostJoinWatch()',context); tick(); await new Promise(resolve=>setImmediate(resolve));
-    return { joined, intervals, remembered };
+    return { joined, intervals, remembered, order };
   };
   const blank = await watch('');
   assert.deepEqual(blank.intervals,[5000]);
   assert.deepEqual(blank.joined,[{name:'RidgeHQ Lead',principalId:'own',canApprove:true,hosted:true,joinedAt:'2026-10-05T11:32:00Z'}],
     'a blank name takes the new hosted agent of mine, not a key agent or another owner\'s');
-  assert.deepEqual(blank.remembered,[{workspaceId:'W',hostId:'claude',principalId:'own'}]);
+  assert.deepEqual(blank.remembered,[{userId:'tom',workspaceId:'W',hostId:'claude',principalId:'own'}]);
+  assert.deepEqual(blank.order,['roster:Muse|Scout|RidgeHQ Lead','connected:claude','joined'],
+    'Add another starts from the roster and connected apps that include the agent that just joined');
   assert.equal((await watch('ridgehq lead')).joined.length,1,'a typed name matches ignoring case');
   const other = await watch('Planner');
   assert.deepEqual([other.joined,other.remembered],[[],[]],'a typed name ignores a different new agent');
@@ -1468,7 +1538,7 @@ test('Add agent opens the panel with its workspace, roster and connected apps, a
     parentRoute,
     seen,
     addAgentStore: () => null,
-    connectedHosts: (_store: unknown, workspaceId: string, roster: string[]) => roster.includes('lead') ? [`claude@${workspaceId}`] : [],
+    connectedHosts: (_store: unknown, userId: string, workspaceId: string, roster: string[]) => roster.includes('lead') ? [`claude@${workspaceId}@${userId}`] : [],
     window: {
       requestAnimationFrame() {},
       history: { state: { home: true, homePrevious: true }, back() { backs.push(true); } },
@@ -1494,11 +1564,12 @@ test('Add agent opens the panel with its workspace, roster and connected apps, a
     const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
     const stopHostJoinWatch = () => { stopped.push('stop'); };
   `, context);
-  runInContext(await dashboardFunctions(['openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
+  runInContext(await dashboardFunctions(['refreshAddAgentPanel', 'openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
   runInContext('openAgentChoice()', context);
-  assert.deepEqual(JSON.parse(JSON.stringify(seen[0])), { workspaceName: 'Home', accountEmail: 'tom@example.test' });
+  assert.deepEqual(JSON.parse(JSON.stringify(seen[0])), { workspaceName: 'Home', accountEmail: 'tom@example.test', viewerId: 'tom' },
+    'the panel keeps what it remembers under the signed-in account');
   assert.deepEqual(JSON.parse(runInContext('JSON.stringify(panel)', context) as string),
-    { resets: 1, rosters: [['RidgeHQ Lead']], connected: [['claude@W']], watches: 0 });
+    { resets: 1, rosters: [['RidgeHQ Lead']], connected: [['claude@W@tom']], watches: 0 });
   assert.equal(runInContext('mounts', context), 1, 'Already yours loads with the panel');
   // A workspace read that applies the route again keeps the attempt in progress.
   runInContext('existingAgentChoiceIsCurrent = () => true; openAgentChoice();', context);
