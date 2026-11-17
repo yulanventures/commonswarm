@@ -334,12 +334,15 @@ test("a note, an ask and a multi-recipient message to the agent in its second wo
   assert.ok(bystanderView.includes(broadcast), "the bystander reads the workspace");
   for (const id of addressed) assert.equal(bystanderView.includes(id), false, `the bystander does not read ${id}`);
 
-  // The membership function the view asks answers for the caller's own agents only.
-  const hasMembership = (person: Person) => asPerson(person, async (tx) => {
+  // The membership function the view asks answers for the caller's own agents only. A person can't name schema
+  // swarm (no USAGE), so this asks it the way the view's readers can: as swarm_read, under the person's claims.
+  const hasMembership = (person: Person) => sql.begin(async (tx) => {
+    await tx`SET LOCAL ROLE swarm_read`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: person.id, role: "authenticated" })}, true)`;
     const [row] = await tx<{ member: boolean }[]>`SELECT swarm.agent_has_workspace_membership(
       ${lead.principal}::uuid, ${owner.id}::uuid, ${shared}::uuid) AS member`;
     return row!.member;
-  });
+  }) as Promise<boolean>;
   assert.equal(await hasMembership(owner), true);
   assert.equal(await hasMembership(bystander), false, "another person learns nothing about the owner's agents");
 
