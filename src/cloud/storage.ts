@@ -582,7 +582,9 @@ export function pidStartMs(pid: number, runPs: typeof execFileSync = execFileSyn
 }
 
 /** Host-id locks copied from another machine or interrupted during creation cannot own this host. */
-async function staleHostIdOwnerRecord(lockPath: string, incompleteAgeMs: number): Promise<string | null> {
+async function staleHostIdOwnerRecord(
+  lockPath: string, incompleteAgeMs: number, lookupTimeoutMs?: number,
+): Promise<string | null> {
   const raw = await readFile(lockPath, "utf8").catch(() => null);
   if (raw === null) return null;
   let owner: { pid?: unknown; host?: unknown; createdAt?: unknown; startTime?: unknown };
@@ -601,7 +603,7 @@ async function staleHostIdOwnerRecord(lockPath: string, incompleteAgeMs: number)
     if ((error as NodeJS.ErrnoException).code === "EPERM") return null;
     throw error;
   }
-  const start = pidStartMs(owner.pid);
+  const start = pidStartMs(owner.pid, undefined, lookupTimeoutMs);
   return start !== null && Math.abs(start - (owner.startTime as number)) > 2_000 ? raw : null;
 }
 
@@ -680,6 +682,12 @@ export async function withFileLock<T>(
     throw new Error(`${lockName} lock timeout is invalid`);
   }
   const deadline = Date.now() + timeoutMs;
+  /* The owner-liveness lookup runs /bin/ps synchronously. Bound it by the time left, so a poll that starts just
+   * before the deadline cannot block past it (a hook check has 3.9 s, and the host kills it at 5). A lookup that
+   * times out returns null, which keeps the owner live: the safe answer. */
+  const lookupBudgetMs = () => Math.max(1, deadline - Date.now());
+  const ownerStartLookup = options.pidStartLookup ?? pidStartMs;
+  const startLookup: typeof pidStartMs = pid => ownerStartLookup(pid, undefined, lookupBudgetMs());
   let handle: Awaited<ReturnType<typeof open>> | null = null;
 
   let createdAt = 0;
@@ -708,8 +716,8 @@ export async function withFileLock<T>(
       const lockInfo = await stat(lockPath).catch(() => null);
       const dangling = lockInfo === null && pathInfo !== null;
       const deadCandidate = dangling ? options.stalePolicy === "host-id" ? "" : null : lockInfo ? options.stalePolicy === "host-id"
-        ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs))
-        : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), options.pidStartLookup) : null;
+        ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs), lookupBudgetMs())
+        : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), startLookup) : null;
       const deadRecord = deadCandidate === UNREADABLE_OWNER_RECORD
         ? await unreadableOwnerIdentity(lockPath, pathInfo) : deadCandidate;
       if (deadRecord !== null) {
@@ -761,7 +769,7 @@ export async function withFileLock<T>(
                   if ((error as NodeJS.ErrnoException).code === "ESRCH") gone = true;
                   else if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
                 }
-                const start = gone ? null : pidStartMs(owner.pid);
+                const start = gone ? null : pidStartMs(owner.pid, undefined, lookupBudgetMs());
                 abandoned = gone || (start !== null && Math.abs(start - owner.startTime) > 2_000);
               }
             } catch { /* Incomplete records become reclaimable after the stated grace. */ }
@@ -808,8 +816,8 @@ export async function withFileLock<T>(
           const freshInfo = await stat(lockPath).catch(() => null);
           const freshDangling = freshInfo === null && freshPathInfo !== null;
           const freshCandidate = freshDangling ? options.stalePolicy === "host-id" ? "" : null : freshInfo && (options.stalePolicy === "host-id"
-            ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs))
-            : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), options.pidStartLookup));
+            ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs), lookupBudgetMs())
+            : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), startLookup));
           const stillStale = freshCandidate === UNREADABLE_OWNER_RECORD
             ? await unreadableOwnerIdentity(lockPath, freshPathInfo) : freshCandidate;
           const sameRecord = typeof deadRecord === "object"
@@ -828,7 +836,8 @@ export async function withFileLock<T>(
         const owner = await readFile(lockPath, "utf8").then(raw => JSON.parse(raw) as { pid?: number; host?: string }).catch(() => null);
         throw new FileLockTimeoutError(lockName, lockPath, owner?.pid, false, owner?.host);
       }
-      await delay(25 + randomBytes(1)[0]! % 75, undefined, { signal: options.signal ?? undefined });
+      await delay(Math.min(25 + randomBytes(1)[0]! % 75, Math.max(0, deadline - Date.now())), undefined,
+        { signal: options.signal ?? undefined });
     }
   }
 
