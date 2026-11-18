@@ -7769,8 +7769,8 @@ import "../../styles/kylon-command-palette.css";
         // The question may have stood open across a refresh. Nothing is sent unless this exact row is still in the
         // list, for the same account and workspace, and still one the server would end.
         if (session?.user.id !== value.user.id || !usableRow()) {
-          say("This access changed while you were deciding. Nothing was sent.");
-          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = "This access changed while you were deciding. Nothing was sent.";
+          say("We couldn’t verify the current admin access. No removal request was sent.");
+          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = "We couldn’t verify the current admin access. No removal request was sent.";
           if (peopleDialogOpen()) renderDialogRoster();
           return;
         }

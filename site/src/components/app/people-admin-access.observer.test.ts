@@ -190,6 +190,9 @@ test("a question held open across a changed list sends nothing", async () => {
     await change(p);
     p.io.held!(); await settle(); await settle();
     assert.equal(p.ends.length, 0, `no command when ${why}`); assert.deepEqual(p.events, [], why);
+    // Where the row is still on screen, it says why nothing happened. The grant itself may be unchanged.
+    if (why === "the server would no longer accept an end") assert.equal(plain(p.run<any>("currentPeopleAdminAccess()")).notices.g1,
+      "We couldn’t verify the current admin access. No removal request was sent.");
   }
   const still = await page();
   await still.run("loadPeopleAdminAccess()");
