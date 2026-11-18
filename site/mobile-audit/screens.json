@@ -722,6 +722,10 @@
         "click": ".hm-ws-header [data-workspace-settings-item]"
       },
       {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
         "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]",
         "click": "dialog[data-workspace-details-popover][open] [data-workspace-cleanup-open]"
       },
@@ -739,13 +743,11 @@
       "dense"
     ],
     "requiresSeed": [
-      "create_workspace",
-      "channel_policy"
+      "create_workspace"
     ],
     "frame": [
-      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"admins\"]:checked)",
-      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"members\"]:not(:checked))",
-      "dialog[data-workspace-details-popover][open] [data-workspace-channel-policy] h3"
+      "dialog[data-cleanup-dialog][open] [data-cleanup-go]",
+      "dialog[data-cleanup-dialog][open] [data-cleanup-back]"
     ]
   },
   {
