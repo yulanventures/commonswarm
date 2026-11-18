@@ -2245,6 +2245,145 @@
     ]
   },
   {
+    "id": "app.people.agents-error",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-tab-retry=\"agents\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-tab-state=\"error\"] [data-tab-retry=\"agents\"]",
+    "states": [
+      "error"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "fault": {
+      "request": "**/rest/v1/agent_principals*",
+      "recover": {
+        "click": "[data-people-context] [data-tab-retry=\"agents\"]",
+        "expect": "[data-people-context] [data-agent-row]"
+      }
+    }
+  },
+  {
+    "id": "app.people.people-error",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-people\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-people\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-tab-state=\"error\"] [data-tab-retry=\"people\"]",
+    "states": [
+      "error"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "fault": {
+      "request": "**/rest/v1/member_profiles*",
+      "recover": {
+        "click": "[data-people-context] [data-tab-retry=\"people\"]",
+        "expect": "[data-people-context] .pd-person-disclosure"
+      }
+    }
+  },
+  {
+    "id": "app.people.invites-error",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-dialog-access-section]:not([hidden]) [data-tab-retry=\"invites\"]",
+    "states": [
+      "error"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "pending invite"
+    ],
+    "fault": {
+      "request": "**/rest/v1/pending_invitations*",
+      "recover": {
+        "click": "[data-people-context] [data-tab-retry=\"invites\"]",
+        "expect": "[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind=\"person\"]"
+      }
+    }
+  },
+  {
+    "id": "app.people.agents-loading",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-tab-retry=\"agents\"]"
+      },
+      {
+        "fault": "hold"
+      },
+      {
+        "click": "[data-people-context] [data-tab-retry=\"agents\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-tab-state=\"loading\"]",
+    "states": [
+      "loading"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "fault": {
+      "request": "**/rest/v1/agent_principals*",
+      "recover": {
+        "expect": "[data-people-context] [data-agent-row]"
+      }
+    }
+  },
+  {
+    "id": "app.people.agents-empty",
+    "kind": "view",
+    "path": "/app?w={emptyWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-agents\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-tab-state=\"empty\"]",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "create_workspace empty"
+    ]
+  },
+  {
+    "id": "app.people.invites-empty",
+    "kind": "view",
+    "path": "/app?w={emptyWorkspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-invites\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-dialog-access-section]:not([hidden]) [data-tab-state=\"empty\"]",
+    "states": [
+      "empty"
+    ],
+    "requiresSeed": [
+      "create_workspace empty"
+    ]
+  },
+  {
     "id": "dialog.people-invite-cancel",
     "kind": "dialog",
     "path": "/app?w={workspace}&v=people",
