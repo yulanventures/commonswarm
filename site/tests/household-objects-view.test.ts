@@ -154,9 +154,9 @@ test('revision ids are shown on request; the conflict review says who saved Base
   assert.doesNotMatch(review, new RegExp(`${base}|${current}`));
   // A history row still carries its id as the value its button opens; it is not shown as text.
   assert.doesNotMatch(history, /<small>Revision|<code>/);
-  for (const html of [review, history]) {
-    assert.match(html, /<button type="button" data-hh-action="revision-ids" aria-pressed="false">Show revision ids<\/button>/);
-  }
+  // Each copy of the switch names its place, so focus returns to the one that was pressed after a redraw.
+  assert.match(review, /<button type="button" data-hh-action="revision-ids" data-hh-value="conflict" aria-pressed="false">Show revision ids<\/button>/);
+  assert.match(history, /<button type="button" data-hh-action="revision-ids" data-hh-value="history" aria-pressed="false">Show revision ids<\/button>/);
   // Base and Current stay two labelled versions, each with who saved it and a machine-readable time.
   assert.match(review, /<section aria-label="Base"><h4>Base<\/h4><p class="hh-version-meta">Saved by Agent agent-a for person-a · <time datetime="[^"]+Z">/);
   assert.match(review, /<section aria-label="Current"><h4>Current<\/h4><p class="hh-version-meta">Saved by Person person-b · <time datetime="[^"]+Z">/);

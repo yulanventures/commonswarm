@@ -152,9 +152,10 @@ export function renderHouseholdContent(content: HouseholdContent | null): string
 }
 const button = (action: string, label: string, value = '', disabled = false, current = false): string =>
   `<button type="button" data-hh-action="${action}" data-hh-value="${esc(value)}"${disabled ? ' disabled' : ''}${current ? ' aria-current="true"' : ''}>${esc(label)}</button>`;
-/** The one switch for exact revision ids, used by the history and by the conflict review. */
-const revisionIdsToggle = (shown: boolean): string =>
-  `<button type="button" data-hh-action="revision-ids" aria-pressed="${shown}">${shown ? 'Hide revision ids' : 'Show revision ids'}</button>`;
+/** The one switch for exact revision ids, drawn in the history and in the conflict review. Each copy names its place,
+ * so after the view redraws, focus returns to the copy that was pressed and not to the first one on the page. */
+const revisionIdsToggle = (shown: boolean, place: 'history' | 'conflict'): string =>
+  `<button type="button" data-hh-action="revision-ids" data-hh-value="${place}" aria-pressed="${shown}">${shown ? 'Hide revision ids' : 'Show revision ids'}</button>`;
 /** Who saved a version and when, as far as the server said. */
 const savedBy = (version: HouseholdVersionView, names?: HouseholdWorkspaceView['names']): string =>
   `${esc(householdAttribution(version.author, names))} · <time datetime="${esc(stamp(version.occurred_at_server))}">${esc(localStamp(version.occurred_at_server))}</time>`;
@@ -168,7 +169,7 @@ export function renderHouseholdObjectHistory(object: HouseholdObjectView | null,
       <p>${savedBy(version, names)}</p>${showRevisionIds ? `
       <small>Revision <code>${esc(version.revision.token)}</code></small>` : ''}</li>`).join('')}</ol>
     ${object.next_history_cursor === null ? '<p>All returned history is shown.</p>' : button('history', 'Load more history', '', busy)}
-    ${revisionIdsToggle(showRevisionIds)}</section>`;
+    ${revisionIdsToggle(showRevisionIds, 'history')}</section>`;
 }
 export function renderHouseholdConflict(state: HouseholdObjectsState): string {
   const conflict = state.conflict;
@@ -185,7 +186,7 @@ export function renderHouseholdConflict(state: HouseholdObjectsState): string {
     ] as const).map(([label, content, version]) => `<section aria-label="${label}"><h4>${label}</h4>${version
       ? `<p class="hh-version-meta">Saved by ${savedBy(version, state.workspace.names)}</p>` : ''}${renderHouseholdContent(content as HouseholdContent)}</section>`).join('')}</div>
     ${state.show_revision_ids ? `<p class="hh-revision-ids">Base revision <code>${esc(conflict.base.revision.token)}</code> · Current revision <code>${esc(conflict.current.revision.token)}</code></p>` : ''}
-    ${revisionIdsToggle(state.show_revision_ids)}
+    ${revisionIdsToggle(state.show_revision_ids, 'conflict')}
     ${canSave ? `<label><input type="checkbox" data-hh-review /> I reviewed the current revision and my proposed changes.</label>
     ${button('reviewed-save', 'Save reviewed changes')}` : householdCanUpdate(state.workspace)
       ? '<p>Your proposed draft remains here while the save is checked.</p>'
