@@ -353,6 +353,10 @@ live-dashboard.dashboard[data-kylon-shell] .cs-waiting[data-waiting] { color: va
 }
 live-dashboard.dashboard[data-kylon-shell] .cs-waiting--phone { border-color: transparent; }
 @media (width > 52rem) { live-dashboard.dashboard[data-kylon-shell] .cs-waiting--phone { display: none; } }
+/* Catch up has no workspace header. There the control sits where a header would put it: the far right of the top. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-catchup] { position: relative; }
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting--page { position: absolute; inset-block-start: 10px; inset-inline-end: 20px; }
+@media (width <= 52rem) { live-dashboard.dashboard[data-kylon-shell] .cs-waiting--page { display: none; } }
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] .cs-waiting { border-color: ButtonText; }
 }

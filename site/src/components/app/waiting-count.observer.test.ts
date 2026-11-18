@@ -106,6 +106,9 @@ async function observeWaitingCount() {
   // The header and the phone bar are rebuilt on navigation, so the control is looked up live at each step.
   const phoneCopy = () => document.querySelector<HTMLAnchorElement>(".cs-org-phone-bar a.cs-waiting--phone");
   const deskCopy = () => document.querySelector<HTMLAnchorElement>("[data-home-workspace-shell] .hm-ws-header__actions > a.cs-waiting");
+  // Catch up has no workspace header; on a desktop its own copy sits at the same far-right spot.
+  const pageCopy = () => document.querySelector<HTMLAnchorElement>("[data-home-catchup] > a.cs-waiting--page");
+  const read = (link: Element | null) => [link?.querySelector("[data-waiting-count]")?.textContent ?? null, link?.getAttribute("aria-label") ?? null].join("|");
   const control = () => f.phone ? phoneCopy() : deskCopy();
   const count = () => control()?.querySelector<HTMLElement>("[data-waiting-count]")?.textContent ?? null;
   const name = () => control()?.getAttribute("aria-label") ?? null;
@@ -145,7 +148,11 @@ async function observeWaitingCount() {
     check(route("w") === f.ids[0] && route("v") === null, "the app is not on workspace one's chat");
     check(name() === "Waiting on you 1", "the control's name is not its words and its number");
     if (f.phone) check(!control()!.closest("dialog.cs-org-drawer"), "the phone control is inside the navigation drawer");
-    else check(!shown(phoneCopy()), "the phone copy is displayed on a desktop");
+    else {
+      check(!shown(phoneCopy()), "the phone copy is displayed on a desktop");
+      check(deskCopy()!.parentElement!.lastElementChild === deskCopy(), "the header control is not the last thing in the header's actions");
+    }
+    const headerBox = control()!.getBoundingClientRect();
     // 2. The control opens Catch up, whose Needs you list holds the question with its choices.
     control()!.click();
     const card = () => document.querySelector<HTMLElement>(`[data-home-catchup] .hm-catchup-needs-list [data-needs-you="${f.ask}"]`);
@@ -154,6 +161,13 @@ async function observeWaitingCount() {
     check(card()!.dataset.needsWorkspace === f.ids[8] && card()!.textContent!.includes(f.question), "the card is not the ninth workspace's question: " + card()!.textContent);
     check(options().map(option => option.dataset.decisionOption).join() === "yes,no", "the card's choices are not the stored ones");
     check(f.answers.length === 0, "an answer was sent before a choice was clicked");
+    // On a desktop the count stays in the same top-right place on Catch up, which has no header of its own.
+    if (!f.phone) {
+      await wait(() => shown(pageCopy()) && read(pageCopy()) === "1|Waiting on you 1", "Catch up shows the count on a desktop");
+      const pageBox = pageCopy()!.getBoundingClientRect();
+      check(Math.abs(pageBox.right - headerBox.right) <= 2 && Math.abs(pageBox.top - headerBox.top) <= 8, "the control moved between the header and Catch up: header " +
+        JSON.stringify([headerBox.right, headerBox.top]) + ", Catch up " + JSON.stringify([pageBox.right, pageBox.top]));
+    } else check(!shown(pageCopy()), "Catch up's desktop copy is displayed on a phone");
     // 3. One choice sends one answer_choice for that ask, in the ninth workspace.
     options()[0]!.click();
     await wait(() => f.answers.length > 0, "the answer reached the command endpoint");
@@ -165,6 +179,7 @@ async function observeWaitingCount() {
       document.querySelector("[data-home-catchup] .hm-catchup-subline")?.textContent === "Nothing needs you right now.", "the answered question left the list");
     // 5. The count follows. A phone keeps the control on Catch up; a desktop shows it again in workspace one's header.
     if (!f.phone) {
+      await wait(() => shown(pageCopy()) && read(pageCopy()) === "0|Waiting on you 0", "Catch up's own count reads zero after the answer");
       const back = document.querySelector<HTMLAnchorElement>(`[data-home-catchup] a.hm-catchup-card[data-workspace-id="${f.ids[0]}"]`);
       check(back, "Catch up has no link to workspace one"); back!.click();
       await wait(() => route("w") === f.ids[0] && route("v") === null && shown(control()), "back on workspace one's chat");

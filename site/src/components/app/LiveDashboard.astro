@@ -5542,27 +5542,27 @@ import "../../styles/kylon-command-palette.css";
      * its questions are answered; this is not a snapshot. It is read again after an answer, on return to the tab, and
      * once a minute while the tab is visible. Cost: one request per refresh, plus up to two for each workspace that
      * has an open question, three workspaces at a time. */
-    let waitingPhone: HTMLAnchorElement | null = null, waitingDesk: HTMLAnchorElement | null = null;
+    /* Where the control lives: after the title in the phone's top bar; last in the workspace header, which chat,
+       to-dos, files, wiki and an agent's page all share; and at the same far-right spot on Catch up, which has no
+       header. So on a desktop it is in one place whichever of those the person is reading. */
+    const WAITING_HOSTS = [[".cs-org-phone-title", "cs-waiting--phone"], ["[data-home-workspace-shell] .hm-ws-header__actions", ""],
+      ["[data-home-catchup]", "cs-waiting--page"]] as const;
+    const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
     let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
     /** Catch up, unless that is where the person already is: a second press must not reload it or add to history. */
     const openWaiting = (href: string): void => { if (homeRoute.view !== "catchup") navigateHomeHref(href); };
     const syncWaitingButtons = (): void => {
       const shown = !sampleMode && !!session && workspaces.length > 0;
-      const bar = shown ? one<HTMLElement>(".cs-org-phone-bar") : null;
-      const title = bar?.querySelector<HTMLElement>(".cs-org-phone-title") ?? null;
-      const actions = shown ? one<HTMLElement>("[data-home-workspace-shell] .hm-ws-header__actions") : null;
-      const href = routeHref({ view: "catchup" });
-      if (title) {
-        waitingPhone ??= buildWaitingButton(document, href, openWaiting);
-        waitingPhone.classList.add("cs-waiting--phone");
-        if (title.nextElementSibling !== waitingPhone) title.after(waitingPhone);
-      } else waitingPhone?.remove();
-      if (actions) {
-        waitingDesk ??= buildWaitingButton(document, href, openWaiting);
-        if (actions.firstElementChild !== waitingDesk) actions.prepend(waitingDesk);
-      } else waitingDesk?.remove();
       const total = waitingTotal(workspaces.map(workspace => workspace.id), homeOverviewCounts);
-      for (const button of [waitingPhone, waitingDesk]) if (button?.isConnected) updateWaitingButton(button, total);
+      WAITING_HOSTS.forEach(([selector, kind], index) => {
+        const host = shown ? one<HTMLElement>(selector) : null;
+        if (!host) { waitingLinks[index]?.remove(); return; }
+        const link = waitingLinks[index] ??= buildWaitingButton(document, routeHref({ view: "catchup" }), openWaiting);
+        if (kind) link.classList.add(kind);
+        if (index === 0) { if (host.nextElementSibling !== link) host.after(link); }
+        else if (host.lastElementChild !== link) host.append(link);
+        updateWaitingButton(link, total);
+      });
     };
     const refreshWaitingCounts = async (): Promise<void> => {
       // Catch up counts for itself, into the same map, and starts by clearing it.
