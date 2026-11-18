@@ -26,6 +26,14 @@ import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import { AUTH_ENTRY_COPY } from "../../lib/auth-entry";
+import { enabledProvidersForBuild } from "../../lib/auth-providers";
+/* Sign-in has one primary button. When the deployment offers a provider, the first provider button is
+   it and password Sign in is a secondary button, whatever is typed; with no provider, Sign in is. */
+const signInProviders = await enabledProvidersForBuild({
+  url: import.meta.env.PUBLIC_SUPABASE_URL,
+  anonKey: import.meta.env.PUBLIC_SUPABASE_ANON_KEY,
+});
+const passwordSignInClass = signInProviders.length > 0 ? "dashboard__button dashboard__button--secondary" : "dashboard__button dashboard__button--primary";
 import SampleNotice from "./SampleNotice.astro";
 import { MARK_AS_READ_LABEL as MARK_AS_READ } from "../../lib/channel-reads";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
@@ -129,7 +137,7 @@ import "../../styles/kylon-command-palette.css";
             data-signin-only
           />
           <div class="dashboard__email-row">
-            <button class="dashboard__button dashboard__button--primary" type="submit" data-password-signin data-signin-only>
+            <button class={passwordSignInClass} type="submit" data-password-signin data-signin-only>
               Sign in
             </button>
             <button class="dashboard__button dashboard__button--secondary" type="button" data-email-link>
