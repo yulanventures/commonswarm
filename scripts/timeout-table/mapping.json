@@ -4103,6 +4103,48 @@
             "removes": [],
             "reason": "Unclaimed delivery observation writes delivery state on the command edge."
           }
+        },
+        "src/cloud/arrival-watch.ts:NOTIFY_TAKEOVER_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/arrival-watch.ts:482-487,585-658",
+          "detail": "A new inbox --notify that replaces a same-host watcher of its seat waits up to one 60-second renewal period plus 45 seconds (the 15-second renewal request, the same-host lease read and teardown) for the replaced watcher to release both seat locks, then releases its claim and names the pid that did not stop.",
+          "operation": {
+            "name": "notify-same-host-takeover",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Waiting on another local process's lock release; covered by tests/p1-cli/notify-same-host-takeover.test.ts with a test-only shorter bound."
+          }
+        },
+        "src/cloud/arrival-watch.ts:timeoutMs": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/arrival-watch.ts:555-578",
+          "detail": "The per-seat notify start gate waits in 30-second file-lock rounds for up to the takeover bound plus 30 seconds while another start for the same seat replaces a watcher.",
+          "operation": {
+            "name": "notify-start-gate",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local file lock between two starts of one seat."
+          }
+        },
+        "src/cloud/arrival-watch.ts:timeoutMs#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/arrival-watch.ts:621",
+          "detail": "Default of the takeover wait: options.timeoutMs ?? NOTIFY_TAKEOVER_TIMEOUT_MS.",
+          "operation": {
+            "name": "notify-same-host-takeover-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of NOTIFY_TAKEOVER_TIMEOUT_MS."
+          }
         }
       }
     }

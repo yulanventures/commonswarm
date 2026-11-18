@@ -340,7 +340,7 @@ import {
   type SignalAttachmentRef,
 } from "./cloud/attachments.js";
 import {
-  acquireArrivalWatchSeatLocks,
+  acquireArrivalWatchSeatLocksReplacing,
   arrivalHostId,
   arrivalNotification,
   arrivalWatchLockHeld,
@@ -351,6 +351,9 @@ import {
   fileArrivalCursorStore,
   formatArrivalNotification,
   formatArrivalRetryNotice,
+  holdArrivalWatchStartGate,
+  notifyReplacedSentence,
+  readArrivalWatchTakeover,
   ARRIVAL_RETRY_NOTICE_THRESHOLD_MS,
   EXIT_NOTIFY_ORPHANED,
   NOTIFY_FLAG,
@@ -5570,14 +5573,92 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     ? process.env.CSWARM_TEST_PROC_ROOT
     : undefined;
   const watcherId = randomUUID();
-  const locks = await acquireArrivalWatchSeatLocks(
-    cloud,
-    selected.selectedWorkspace,
-    principalId,
-    process.pid,
-    watcherId,
-  );
+  const seatLockPath = arrivalWatchLockPath(cloud, selected.selectedWorkspace, principalId);
+  const hostId = await arrivalHostId(seatLockPath);
+  const hostLabel = selected.sessionContext?.host_label || hostname();
+  const restartCommand = notifyRefusalRestartCommand(restartOptions);
+  let leaseBearer = selected.bearer;
+  const leaseRequest = async (command: Record<string, unknown>) => {
+    leaseBearer = selected.session ? await selected.session.bearer() : selected.bearer;
+    return await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
+      token: leaseBearer,
+      command, restartCommand, sessionContextPath: suppliedContextPath, remedyCommand,
+      contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher,
+      signal: controller.signal });
+  };
+  const claimCommand = () => ({ kind: "claim_wake_lease", watcher_id: watcherId,
+    host_label: hostLabel, host_id: hostId, take_over: args.has("take-over") });
+  const releaseLease = async (claimedGeneration: number) => await sendWakeLeaseCommand({
+    target: cloud, workspaceId: selected.selectedWorkspace, token: leaseBearer,
+    command: { kind: "release_wake_lease", watcher_id: watcherId, generation: claimedGeneration },
+    restartCommand, sessionContextPath: suppliedContextPath, remedyCommand, timeoutMs: 2_000,
+    contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
+  const testTakeoverMs = process.env.NODE_ENV === "test" &&
+      new URL(cloud.url).hostname === "127.0.0.1"
+    ? Number(process.env.CSWARM_TEST_NOTIFY_TAKEOVER_MS)
+    : NaN;
+  /* One start per seat at a time, from the watch locks through the first lease claim. A live watcher
+   * of this seat on this host is replaced, never signalled: this start claims the lease, and the old
+   * watcher stops by itself when its next renewal is refused. */
+  let releaseStartGate: (() => Promise<void>) | null = null;
+  const openStartGate = async () => {
+    const release = releaseStartGate;
+    releaseStartGate = null;
+    await release?.();
+  };
+  let locks: { lockPath: string; legacyLockPath: string };
+  try {
+    releaseStartGate = await holdArrivalWatchStartGate(seatLockPath, controller.signal);
+    locks = await acquireArrivalWatchSeatLocksReplacing({
+      target: cloud, workspaceId: selected.selectedWorkspace, principalId, watcherId,
+      signal: controller.signal,
+      ...(Number.isInteger(testTakeoverMs) && testTakeoverMs >= 100 && testTakeoverMs <= 120_000
+        ? { timeoutMs: testTakeoverMs } : {}),
+      replacing: pid => process.stderr.write(
+        `cswarm: replacing inbox --notify pid ${pid} for this agent; it stops by itself at its next lease renewal.\n`),
+      claim: async () => {
+        leaseStopState = "claim-unknown";
+        const claimedGeneration = Number((await leaseRequest(claimCommand())).generation);
+        if (!Number.isSafeInteger(claimedGeneration) || claimedGeneration < 1) {
+          throw new Error("wake lease claim returned no generation");
+        }
+        leaseStopState = "last-known";
+        return claimedGeneration;
+      },
+      release: async claimedGeneration => {
+        try {
+          const released = await releaseLease(claimedGeneration);
+          if (released.released === true) leaseStopState = "released";
+        } catch (error) {
+          if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
+        }
+      },
+    });
+  } catch (error) {
+    await openStartGate();
+    if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
+    if (stopSignal !== null) {
+      finishSignalStop();
+      return;
+    }
+    throw error;
+  }
   const { lockPath } = locks;
+  /** The pid of the same-host start that replaced this watcher, proven by the record that start
+   * wrote beside the seat lock and by the lease now naming that start's watcher. */
+  const sameHostReplacement = async (failure: unknown): Promise<number | null> => {
+    if (!(failure instanceof WakeLeaseLostError) || failure.code !== "wake_lease_superseded" ||
+        failure.surface !== "watcher") return null;
+    const record = await readArrivalWatchTakeover(lockPath);
+    if (record === null || record.replaced_watcher_id !== watcherId.toLowerCase()) return null;
+    try {
+      const token = selected.session ? await selected.session.bearer() : selected.bearer;
+      const lease = await readAgentWakeLease(cloud, selected.selectedWorkspace, token, selected.fetcher ?? fetch);
+      return lease?.watcher_id.toLowerCase() === record.watcher_id ? record.pid : null;
+    } catch {
+      return null;
+    }
+  };
   const wake = createWakeSubscriber({ target: cloud });
   let stopRenewal: (() => void) | null = null;
   let attendedCanaryTask: Promise<void> | null = null;
@@ -5600,26 +5681,13 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     void attendedCanaryEmitted.then(done);
   });
   let cleanStop = false;
-  let leaseBearer = selected.bearer;
   try {
-    const hostId = await arrivalHostId(lockPath);
-    const hostLabel = selected.sessionContext?.host_label || hostname();
-    const restartCommand = notifyRefusalRestartCommand(restartOptions);
-    const leaseRequest = async (command: Record<string, unknown>) => {
-      leaseBearer = selected.session ? await selected.session.bearer() : selected.bearer;
-      return await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
-        token: leaseBearer,
-        command, restartCommand, sessionContextPath: suppliedContextPath, remedyCommand,
-        contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher,
-        signal: controller.signal });
-    };
     let claimed: Record<string, unknown>;
     let claimFailures = 0;
     for (;;) {
       try {
         leaseStopState = "claim-unknown";
-        claimed = await leaseRequest({ kind: "claim_wake_lease", watcher_id: watcherId,
-          host_label: hostLabel, host_id: hostId, take_over: args.has("take-over") });
+        claimed = await leaseRequest(claimCommand());
         break;
       } catch (error) {
         if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
@@ -5642,6 +5710,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         }
       }
     }
+    await openStartGate();
     generation = Number(claimed.generation);
     leaseStopState = "last-known";
     if (!Number.isSafeInteger(generation) || generation < 1) {
@@ -5774,7 +5843,15 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         }
       },
     });
-    if (watchFailure !== null && stopSignal === null) throw watchFailure;
+    if (watchFailure !== null && stopSignal === null) {
+      const replacedBy = await sameHostReplacement(watchFailure);
+      if (replacedBy !== null) {
+        // Replaced by a newer start on this host: a finished stop, so a supervisor leaves it down.
+        process.stderr.write(`cswarm: ${notifyReplacedSentence(replacedBy)}\n`);
+        return;
+      }
+      throw watchFailure;
+    }
     if (result.reason === "error") {
       throw result.error ?? new Error("arrival watch stopped");
     }
@@ -5785,6 +5862,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     if (error instanceof NotifyStdoutClosedError) cleanStop = true;
     throw error;
   } finally {
+    await openStartGate();
     stopRenewal?.();
     controller.abort();
     await attendedCanaryTask;
@@ -5792,12 +5870,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     await wake.close();
     if (generation !== null && (cleanStop || stopSignal !== null)) {
       try {
-        const released = await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
-          token: leaseBearer,
-          command: { kind: "release_wake_lease", watcher_id: watcherId, generation },
-          restartCommand: notifyRefusalRestartCommand(restartOptions),
-          sessionContextPath: suppliedContextPath, remedyCommand, timeoutMs: 2_000,
-          contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
+        const released = await releaseLease(generation);
         if (released.released === true) leaseStopState = "released";
       } catch (error) {
         if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
