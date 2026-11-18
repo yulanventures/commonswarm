@@ -271,10 +271,10 @@ test("hosted and local owners use the same Allow controls and approval command; 
     };
     await f.load();
     const paint = () => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(),
-      { selected: { type: "agent", id: principal }, collapsed: new Set(), showAllAttention: false, query: "" },
+      { selected: { type: "agent", id: principal }, query: "" },
       { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {},
         confirm: () => assert.fail("Allow opens the existing Lists & docs choices") },
-      { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
+      { page: { homeLabel: "Home", homeHref: "/app" } });
     const allowButton = () => dom.detail.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
     paint(); assert.ok(allowButton(), `${kind}: owner has Allow`);
     assert.equal(allowButton()!.attributes["data-allow-agent-access"], principal);
@@ -370,9 +370,9 @@ test("every tab says loading, empty or could not load with Retry in the same pla
   const f = dialogConnectionsFixture(), dom = approvalDom(); let reloads = 0, inviteReloads = 0;
   await f.load();
   const paint = (tab: string, over: Record<string, unknown>) => renderPeopleDialog(dom.root as any, dom.detail as any, { ...f.model(), ...over },
-    { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab } as any,
+    { selected: null, query: "", tab } as any,
     { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {}, reload: async () => { reloads += 1; }, reloadInvites: async () => { inviteReloads += 1; } },
-    { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
+    { page: { homeLabel: "Home", homeHref: "/app" } });
   const note = () => dom.root.descendants().find(node => (node as any).dataset?.tabState !== undefined) as any;
   const retry = () => dom.root.descendants().find(node => node.tag === "button" && (node as any).dataset?.tabRetry !== undefined) as any;
   paint("agents", {}); assert.equal(note(), undefined, "a tab with rows has no note");
@@ -393,13 +393,13 @@ test("every tab says loading, empty or could not load with Retry in the same pla
 test("Invite a person opens a form on the Invites tab, and the link shows only while the integration holds it", async () => {
   const f = dialogConnectionsFixture(), dom = approvalDom(); const sent: string[] = []; let forgotten = 0;
   await f.load();
-  const state: any = { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab: "people" };
+  const state: any = { selected: null, query: "", tab: "people" };
   let link = "", answer: any = { error: "Enter a full email address." };
   const callbacks: any = { render: () => paint(), action: () => {}, saveModel: async () => {}, confirm: () => {},
     createInvite: async (email: string) => { sent.push(email); return answer; }, forgetInvite: () => { forgotten += 1; link = ""; } };
   const model = () => { const base = f.model(); return { ...base, people: base.people.map((person: any) => ({ ...person, own: true, role: "owner" })) }; };
   function paint() { renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks,
-    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", invite: () => { throw new Error("the older page is not used"); }, madeInviteLink: link } }); }
+    { page: { homeLabel: "Home", homeHref: "/app", invite: () => { throw new Error("the older page is not used"); }, madeInviteLink: link } }); }
   const find = (test: (node: any) => boolean) => dom.root.descendants().find(test) as any;
   const byFocus = (key: string) => find(node => node.dataset?.pdFocus === key);
   paint(); byFocus("page-invite").click();
@@ -433,7 +433,7 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
   byFocus("invite-done").click();
   assert.equal(forgotten, 1, "Done tells the integration to forget the link"); assert.equal(state.invite, null);
   renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks,
-    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", inviteNotice: "The link for mei@example.test is no longer shown here because the workspace reloaded." } });
+    { page: { homeLabel: "Home", homeHref: "/app", inviteNotice: "The link for mei@example.test is no longer shown here because the workspace reloaded." } });
   assert.ok(find(node => node.dataset?.peopleInviteNotice !== undefined && node.textContent.startsWith("The link for mei@example.test is no longer shown here")),
     "a cleared link is said at the top of the Invites tab");
 });
@@ -443,12 +443,12 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   await f.load();
   const g = (n: number, over: Record<string, unknown> = {}) => ({ grantId: `00000000-0000-4000-8000-00000000000${n}`, principalId: `p${n}`, agentName: `Agent ${n}`,
     giverId: "someone", giverName: "Sam Rivera", level: "workspace", expiresAt: null, mayEnd: true, ...over });
-  const state: any = { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab: "admins" };
+  const state: any = { selected: null, query: "", tab: "admins" };
   let access: any = { read: "ready", all: true, grants: [g(1), g(2, { level: "organization", mayEnd: false })], notices: { [g(1).grantId]: "Refused." } };
   const callbacks: any = { render: () => paint(), action: () => {}, saveModel: async () => {}, confirm: () => {}, endAdmin: (grantId: string) => { ended.push(grantId); } };
   const model = () => { const base = f.model(); return { ...base, adminAccess: access,
     people: [...base.people.map((person: any) => ({ ...person, own: true, role: "owner" })), { id: "m", name: "Mei", role: "member", own: false, mayRemove: false }] }; };
-  function paint() { renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks, { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } }); }
+  function paint() { renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks, { page: { homeLabel: "Home", homeHref: "/app" } }); }
   const all = (test: (node: any) => boolean) => dom.root.descendants().filter(test) as any[];
   paint();
   assert.equal(all(node => node.dataset?.pdFocus?.startsWith("person-")).length, 1, "only owners and admins are listed");
@@ -491,9 +491,9 @@ test("the People page puts Allow Lists & docs on an own seat's row, one click ea
     name: "Muse", approval: null, connection_id: "00000000-0000-4000-8000-000000000002", grant_id: "00000000-0000-4000-8000-000000000003" }] } });
   await f.load();
   const paint = () => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(),
-    { selected: null, collapsed: new Set(), showAllAttention: false, query: "" },
+    { selected: null, query: "" },
     { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {}, confirm: () => {} },
-    { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
+    { page: { homeLabel: "Home", homeHref: "/app" } });
   const rowAllow = () => dom.root.descendants().find(node => node.tag === "button" && node.attributes["data-row-allow-agent-access"] === principal);
   paint();
   assert.ok(rowAllow(), "an own seat not yet allowed has the action on its row");

@@ -7394,7 +7394,7 @@ import "../../styles/kylon-command-palette.css";
       }
     });
 
-    const peopleDialogState: PeopleDialogState = { selected: null, collapsed: new Set(), showAllAttention: false, query: "" };
+    const peopleDialogState: PeopleDialogState = { selected: null, query: "" };
     const peopleDialogReceipts = new Map<string, string>();
     const peopleDialogModel = (): PeopleDialogModel => {
       const now = Date.now();
@@ -7563,7 +7563,7 @@ import "../../styles/kylon-command-palette.css";
             try { await reloadPeopleDialog(workspaceId, principalId, `Renamed to ${name}.`, undefined, sender); } catch { /* the receipt is the accepted command */ }
           }
           return outcome;
-        } }, { layout: "page", focus: peopleDialogFocus, tintFor: (agentId) => {
+        } }, { focus: peopleDialogFocus, tintFor: (agentId) => {
           // An agent wears its owner's colour, the same rule the rail and the capsules use. An owner
           // who left has no colour: null is the neutral form.
           const owner = peopleDialogModel().agents.find((agent) => agent.id === agentId)?.ownerId ?? null;
@@ -7577,7 +7577,7 @@ import "../../styles/kylon-command-palette.css";
           // The invite form is a channel view, so it opens from the workspace.
           invite: () => { void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => openInvite("channel")); },
           madeInviteLink: peopleDialogInviteLink(), inviteNotice: peopleDialogInviteNoticeText(),
-          onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
+          onQuery: (value) => { rosterFilter = value; renderDialogRoster(); },
         } });
       if (peopleDialogState.selected?.type === "agent") {
         mountRenewalEndDate(detail, peopleDialogState.selected.id);
@@ -7945,7 +7945,7 @@ import "../../styles/kylon-command-palette.css";
         peopleDialogReturn = { href: window.location.pathname + window.location.search + window.location.hash, opener };
         rosterFilter = "";
         // The tab is not reset: the dialog reopens on the tab last used in this page session (Agents the first time).
-        peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
+        peopleDialogState.selected = null;
         peopleDialogState.rename = null; peopleDialogState.reconnect = null;
         dialog.showModal();
       }
