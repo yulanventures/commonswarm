@@ -22,6 +22,18 @@ test("account agents show safe names, model, transport and workspace/org with an
   assert.ok(nodes.every(node => node.innerHTML === undefined));
 });
 
+test("an organization is named beside a workspace only when its name says something the workspace's does not", () => {
+  const orgs = (workspaces) => descendants(buildAccountAgents(doc, [{ ...agent, workspaces }]))
+    .filter(node => node.className === "account-agents__org").map(node => node.textContent);
+  // The usual case: one organization per workspace, with the same name. It is not said twice.
+  assert.deepEqual(orgs([{ ...workspace, name: "Rivera household", orgName: "Rivera household" }]), []);
+  assert.deepEqual(orgs([{ ...workspace, name: "Rivera household ", orgName: " Rivera household" }]), [], "spaces around a name do not make it a different name");
+  assert.deepEqual(orgs([{ ...workspace, orgName: "" }]), [], "an empty name draws no empty element");
+  // A different name is still shown, row by row.
+  assert.deepEqual(orgs([{ ...workspace, name: "Design studio", orgName: "Yulan Ventures" }, { ...workspace, id: "w2", name: "Yulan Ventures", orgName: "Yulan Ventures" }]),
+    ["Yulan Ventures"]);
+});
+
 test("removed agents/memberships and archived workspaces keep history without an active link", () => {
   for (const entry of [
     { ...agent, revokedAt: "2026-10-01" },

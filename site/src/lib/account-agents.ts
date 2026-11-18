@@ -59,7 +59,9 @@ export function buildAccountAgents(
         link.href = `/app?w=${encodeURIComponent(workspace.id)}`;
         row.append(link);
       } else row.append(node("span", "account-agents__workspace-name", workspace.name));
-      row.append(node("span", "account-agents__org", workspace.orgName));
+      // An organization usually has one workspace and the same name: saying it again beside the workspace adds nothing.
+      // It is named when it tells the person something the workspace's name does not.
+      if (workspace.orgName && workspace.orgName.trim() !== workspace.name.trim()) row.append(node("span", "account-agents__org", workspace.orgName));
       if (workspace.revokedAt || workspace.archivedAt) {
         row.append(node("span", "account-agents__state", workspace.revokedAt ? "Removed" : "Archived"));
       }
