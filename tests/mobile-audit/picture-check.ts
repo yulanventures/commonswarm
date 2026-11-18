@@ -68,6 +68,14 @@ const FAILED_NOTE = () => {
     centre: { x: b.left + b.width / 2, y: b.top + b.height / 2 },
   };
 };
+/** Where keyboard focus is, relative to the seeded picture: on its link, on its Retry, on the page body, or elsewhere. */
+const FOCUS = () => {
+  const link = document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image");
+  const active = document.activeElement;
+  if (active === link) return "picture";
+  if (active && active === link?.parentElement?.querySelector(".hm-extras__image-failed button")) return "retry";
+  return active === document.body || !active ? "body" : active.tagName.toLowerCase();
+};
 const near = (a: Rect | null, b: Rect | null) => !!a && !!b && Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.w - b.w), Math.abs(a.h - b.h)) <= 0.5;
 
 /** The seeded picture card's frame, image state and its message's other attachments. */
@@ -180,9 +188,10 @@ export async function runPictureChecks(
     await flaky.close();
 
         // 3. Failed storage: after one retry the frame says so and keeps its size; then the composer's staged previews.
+    let failedReads = 0, storageDown = true;
     const failing = await open(async (p: any) => {
       await p.route(SIGNED, async (route: any) => {
-        if (route.request().resourceType() === "image") await route.fulfill({ status: 404, body: "not found" });
+        if (route.request().resourceType() === "image" && storageDown) { failedReads++; await route.fulfill({ status: 404, body: "not found" }); }
         else await route.continue();
       });
     });
@@ -194,11 +203,30 @@ export async function runPictureChecks(
     check("a failed picture says so and offers Retry over its frame", !!note && /^Couldn't load image\s*Retry$/u.test(note.text ?? "") && note.overFrame && !note.inLink && note.reached, note);
     check("Retry is a 44px target", !!note && note.button.w >= 44 && note.button.h >= 44, note?.button ?? null);
     await shot(failing, "picture-unavailable");
-    // Storage answers again: Retry signs a new link and the picture loads in the same frame.
-    await failing.unroute(SIGNED);
-    if (note) await failing.mouse.click(note.centre.x, note.centre.y);
+    // Retry from the keyboard while storage still fails: focus goes to the picture, never the page, and stays there
+    // when the failure comes back. Tab from the picture then reaches Retry again.
+    const readsBefore = failedReads;
+    await failing.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__picture .hm-extras__image-failed button")?.focus());
+    const onRetry = await failing.evaluate(FOCUS);
+    await failing.keyboard.press("Enter");
+    const afterEnter = await failing.evaluate(FOCUS);
+    const started = Date.now();
+    while (Date.now() - started < 15_000 && failedReads < readsBefore + 2) await failing.waitForTimeout(100);
+    const failedAgain = await until(failing, p => p.state === "unavailable");
+    const afterFailure = await failing.evaluate(FOCUS);
+    check("Enter on Retry moves focus to the picture, and a failed retry leaves it there",
+      onRetry === "retry" && afterEnter === "picture" && failedReads >= readsBefore + 2 && failedAgain?.state === "unavailable" && afterFailure === "picture",
+      { onRetry, afterEnter, afterFailure, reads: failedReads - readsBefore, state: failedAgain?.state });
+    await failing.keyboard.press("Tab");
+    const tabbed = await failing.evaluate(FOCUS);
+    check("Tab from the picture reaches Retry", tabbed === "retry", tabbed);
+    // Storage answers again: Enter on Retry loads the picture in the same frame, with focus on the picture.
+    storageDown = false;
+    await failing.keyboard.press("Enter");
     const retried = await until(failing, p => p.loaded);
+    const afterLoad = await failing.evaluate(FOCUS);
     check("Retry loads the picture in the same frame", !!retried?.loaded && retried.painted && retried.state === null && near(frame, retried.frame), retried);
+    check("a successful retry leaves focus on the picture", afterLoad === "picture", afterLoad);
     check("the note is gone once the picture has loaded", (await failing.evaluate(FAILED_NOTE)) === null, null);
     const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>');
     await failing.setInputFiles("[data-composer-file-input]", [

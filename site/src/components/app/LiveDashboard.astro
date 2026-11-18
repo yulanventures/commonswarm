@@ -9790,6 +9790,12 @@ import "../../styles/kylon-command-palette.css";
       });
       retry.addEventListener("click", (event) => {
         event.preventDefault(); event.stopPropagation();
+        /* Retry goes away while the picture is tried again. If it holds focus, focus moves to the same attachment
+           first, so it is never dropped on the page. Nothing moves focus when the answer comes back: by then it is
+           wherever the reader has put it. */
+        if (document.activeElement === retry) {
+          (holder instanceof HTMLAnchorElement ? holder : holder.querySelector<HTMLElement>("button:not([hidden])"))?.focus({ preventScroll: true });
+        }
         failures = 0;
         void load();
       });

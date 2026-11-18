@@ -285,7 +285,8 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
 }
 /* A picture is painted only once it has loaded. While it waits, and when it cannot load, the frame shows that
    state itself; the browser's alt text and broken-picture mark are never drawn. */
-.hm-frame :is(.hm-extras__image, .dashboard__attachment-card)[data-preview-state] img {
+.hm-frame :is(.hm-extras__image, .dashboard__attachment-card)[data-preview-state] img,
+.hm-frame :is(.hm-extras__image, .dashboard__attachment-card) img:not([src]) {
   visibility: hidden;
 }
 .hm-frame .hm-extras__image[data-preview-state="loading"] .hm-extras__image-frame::before {
