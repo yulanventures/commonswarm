@@ -215,7 +215,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
       ${renderHouseholdConflict(state)}
       ${busy && state.proposed ? `<section aria-label="Unsaved local changes"><h4>Your local changes</h4>${renderHouseholdContent(state.proposed)}</section>` : ''}
       ${state.save_state === 'unknown' || state.save_state === 'pending' ? button('check-save', 'Check this save') : ''}
-      ${renderHouseholdObjectHistory(object, busy, workspace.names)}` : '<p>Select a list, doc or file to read it.</p>'}</article></div>`;
+      ${renderHouseholdObjectHistory(object, busy, workspace.names)}` : workspace.objects.length ? '<p>Select a list, doc or file to read it.</p>' : ''}</article></div>`;
 }
 
 /** Produce an explicit before-value patch. This never silently replaces a newer revision. */
