@@ -1484,7 +1484,7 @@ test('a panel key that is used shows the joined card; a new key for an existing 
       const app = { dataset: { channelView: 'connect' }, addEventListener: (name, fn) => handlers.set(name, fn) };
       let session = { user: { id: 'tom' } }, activeWorkspaceId = 'W', sampleMode = false, requestVersion = 1, livePromptPrincipalId = '';
       let homeRoute = { view: 'add-agent', workspaceId: 'W' }, pendingWorkspaceId = '', pendingWorkspaceCreate = false, panelKeyMint = null, panelKnownAgents = [];
-      let agents = ${facts.known === false ? '[]' : "[{ principalId: 'scout', name: 'Scout' }]"}, accessStatuses = [], pendingAgents = [], pendingAgentsLoadFailed = false;
+      let agents = ${facts.known === false ? '[]' : "[{ principalId: 'scout', name: 'Scout' }]"}, accessStatuses = [], pendingAgents = [], pendingAgentsLoadFailed = false, homePeopleReadState = 'ready';
       const workspaces = [{ id: 'W', name: 'Home' }], householdAccess = { status: 'ok', workspaceId: 'W' };
       const householdConnections = ${approved ? "[{ principal_id: 'scout', approval: { operations: ['read'] } }]" : '[]'};
       const picker = { mintSettled() {}, setRoster: (names) => { rosters.push([...names]); log.push('roster:' + names.join('|')); },

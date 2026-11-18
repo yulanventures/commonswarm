@@ -9,6 +9,7 @@ import { personTint } from "./home-names";
 import { buildPeoplePage } from "./people-page";
 import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
+import { peopleTabView, type PeopleRead } from "./people/states";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -22,7 +23,9 @@ export interface PeopleDialogAgent {
 }
 export type PeopleDialogInvite = PeopleInvite;
 /** `workspaceName` is the viewer's name for this workspace; it is used only in the role refusal copy. */
-export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean; workspaceName?: string }
+export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean; workspaceName?: string;
+  /** The read that brings people and agents. Absent means ready. */
+  read?: PeopleRead }
 export type PeopleDialogRole = PeopleDialogPerson["role"];
 /** The role-change action the builder emits. Integration maps it to the `change_role` command. */
 export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; role: PeopleDialogRole }
@@ -82,6 +85,8 @@ export interface PeopleDialogCallbacks {
   rename?: (id: string, name: string, editor: number) => Promise<RenameOutcome>;
   /** Reads the invites again after a failed load. Retry is hidden without this callback. */
   reloadInvites?: () => Promise<void> | void;
+  /** Reads people and agents again after a failed load. Retry is hidden without this callback. */
+  reload?: () => Promise<void> | void;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -591,11 +596,25 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     agents.forEach((agent) => list.append(agentRow(agent)));
     element.append(title, list); return element;
   };
+  // Every tab answers the same four ways: its rows, loading, empty, or could not load with Retry.
+  const view = peopleTabView({ tab, read: model.sample ? "ready" : model.read ?? "ready", invitesFailed: model.pendingFailed,
+    shown: tab === "people" ? shownPeople.length : tab === "agents" ? shownAgents : invites.length, searching: !!needle });
+  const tabNote = (): HTMLElement | null => {
+    if (!view.message) return null;
+    const note = node(doc, "p", "pd-muted pd-tab-state", view.message); note.dataset.tabState = view.state;
+    note.setAttribute("role", view.state === "error" ? "alert" : "status");
+    const again = tab === "invites" ? callbacks.reloadInvites : callbacks.reload;
+    if (view.retry && again) { const retry = button(doc, "Retry", async (opener) => {
+        if (opener.disabled) return; opener.disabled = true; opener.setAttribute("aria-busy", "true");
+        try { await again(); } finally { if (opener.isConnected) { opener.disabled = false; opener.removeAttribute("aria-busy"); } }
+      }); retry.dataset.tabRetry = tab; retry.dataset.pdFocus = `retry-${tab}`; note.append(doc.createTextNode(" "), retry); }
+    return note;
+  };
+  if (tab !== "invites") { const note = tabNote(); if (note) grid.append(note); }
   if (tab === "people") shownPeople.forEach(({ person, agents }) => grid.append(card(person, agents)));
   if (tab === "agents") {
     [...groups].sort((a, b) => Number(b.person.own) - Number(a.person.own)).forEach(({ person, agents }) => { if (agents.length) grid.append(card(person, agents)); });
     if (other.length) grid.append(card(null, other));
-    if (!shownAgents && !needle) { const none = node(doc, "p", "pd-muted pd-tab-empty", "No agents yet."); none.dataset.tabEmpty = "agents"; grid.append(none); }
   }
   host.append(grid);
   // Invited: every invite says who made it and when, and every one the viewer may end has Cancel.
@@ -615,16 +634,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel(invite)); row.append(cancel); }
     inviteList.append(row);
   }
-  const none = node(doc, "p", "pd-muted", state.query.trim() ? "No invites match." : "No invites waiting."); none.dataset.invitesEmpty = "";
-  none.hidden = !invitesOnly || invites.length > 0 || model.pendingFailed;
-  const load = node(doc, "p", "pd-muted pd-invite-load", "Invites could not load. "); load.dataset.pendingLoadNote = ""; load.hidden = !model.pendingFailed;
-  if (model.pendingFailed) load.setAttribute("role", "alert");
-  if (callbacks.reloadInvites) { const retry = button(doc, "Retry", async (opener) => {
-      if (opener.disabled) return; opener.disabled = true; opener.setAttribute("aria-busy", "true");
-      try { await callbacks.reloadInvites?.(); } finally { if (opener.isConnected) { opener.disabled = false; opener.removeAttribute("aria-busy"); } }
-    }); retry.dataset.invitesRetry = ""; retry.dataset.pdFocus = "invites-retry"; load.append(retry); }
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
-  invited.append(invitedTitle, inviteList, none, load, inviteError); host.append(invited);
+  // With nothing to count, the tab's own line (none waiting, loading, could not load) is the whole answer.
+  invitedTitle.hidden = invites.length === 0;
+  invited.append(invitedTitle); if (invitesOnly) { const note = tabNote(); if (note) invited.append(note); }
+  invited.append(inviteList, inviteError); host.append(invited);
   side.append(detail);
 
   if (state.roleReceipt && (state.selected?.type !== "person" || state.roleReceipt.userId !== state.selected.id)) {

@@ -7370,7 +7370,7 @@ import "../../styles/kylon-command-palette.css";
       const elevated = me?.role === "owner" || me?.role === "admin";
       const rosterNames = identityRoster().agents;
       return {
-        sample: sampleMode, pendingFailed: pendingAgentsLoadFailed,
+        sample: sampleMode, pendingFailed: pendingAgentsLoadFailed, read: homePeopleReadState,
         workspaceName: workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name,
         people: members.map((member) => ({ id: member.userId, name: member.name, role: member.role,
           own: member.userId === session?.user.id,
@@ -7507,7 +7507,7 @@ import "../../styles/kylon-command-palette.css";
             // The accepted command is the receipt; a failed follow-up read cannot undo it.
           }
         },
-        reloadInvites: reloadPeopleInvites,
+        reloadInvites: reloadPeopleInvites, reload: reloadPeopleRoster,
         confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
           if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
           const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
@@ -7582,12 +7582,22 @@ import "../../styles/kylon-command-palette.css";
       if (!nextPending.failed) pendingAgents = nextPending.rows;
       pendingAgentsLoadFailed = nextPending.failed || !invitesSettled || !statusesSettled;
       renderPendingAccess();
-      if (peopleDialogOpen()) (one<HTMLElement>("[data-invites-retry]") ?? one<HTMLElement>("#dashboard-roster-pending-title"))?.focus({ preventScroll: true });
+      if (peopleDialogOpen()) (one<HTMLElement>('[data-tab-retry="invites"]') ?? one<HTMLElement>('[data-pd-focus="tab-invites"]'))?.focus({ preventScroll: true });
+    };
+    /** Retry on People or Agents: the whole workspace load again. It owns the read state, the page behind the dialog and the version guards. */
+    const reloadPeopleRoster = async (): Promise<void> => {
+      const workspaceId = activeWorkspaceId, tab = peopleDialogState.tab ?? "agents";
+      if (!workspaceId || sampleMode) return;
+      await reloadPeopleDialog(workspaceId, "", "", undefined, () => false);
+      if (activeWorkspaceId !== workspaceId || !peopleDialogOpen()) return;
+      // Retry is gone once the read succeeds; focus then goes to the tab it was on.
+      (one<HTMLElement>(`[data-tab-retry="${tab}"]`) ?? one<HTMLElement>(`[data-pd-focus="tab-${tab}"]`))?.focus({ preventScroll: true });
     };
     const peopleDialogFocusTarget = (action: PeopleDialogAction | undefined, id: string): HTMLElement | null => {
       if (action === "cancel-invite") {
         const section = one<HTMLElement>("[data-dialog-access-section]");
-        if (section && !section.hidden) return one<HTMLElement>("#dashboard-roster-pending-title");
+        const title = one<HTMLElement>("#dashboard-roster-pending-title");
+        if (section && !section.hidden) return title && !title.hidden ? title : one<HTMLElement>('[data-pd-focus="tab-invites"]');
       }
       if (action === "remove-person" || action === "cancel-invite") {
         return one<HTMLElement>(".pd-person-disclosure") ?? one<HTMLElement>("#dashboard-roster-title");
