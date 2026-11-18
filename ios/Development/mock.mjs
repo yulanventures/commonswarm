@@ -11,7 +11,11 @@ const workspace = "00000000-0000-4000-8000-000000000003";
 const channel = "00000000-0000-4000-8000-000000000004";
 const codes = new Map();
 const receipts = new Map();
-const session = randomBytes(32).toString("hex");
+const sessions = new Set();
+let heldPost;
+let notifyPost;
+const postReceived = new Promise(resolve => { notifyPost = resolve; });
+let authenticatedRequests = 0;
 const messages = [];
 const address = (command) => command.channel ? "channel" : command.to_agent_principal_id ? "direct" : "general";
 const server = createServer(async (req, res) => {
@@ -22,6 +26,14 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, origin);
     if (req.headers.host !== new URL(origin).host) return reply(400, {});
+    if (verify && req.method === "GET" && url.pathname.startsWith("/fixture/")) {
+      if (url.pathname === "/fixture/wait-for-post") {
+        await postReceived;
+      } else if (url.pathname === "/fixture/release") {
+        heldPost?.();
+      } else if (url.pathname !== "/fixture/count") return reply(404, {});
+      return reply(200, authenticatedRequests);
+    }
     if (req.method === "GET" && url.pathname === "/auth/v1/authorize") {
       const redirect = new URL(url.searchParams.get("redirect_to"));
       const state = redirect.searchParams.get("state");
@@ -49,11 +61,19 @@ const server = createServer(async (req, res) => {
       if (!pending || pending.expires <= Date.now() || typeof body.code_verifier !== "string" ||
           createHash("sha256").update(body.code_verifier).digest("base64url") !== pending.challenge) return reply(400, {});
       codes.delete(body.auth_code);
+      const session = randomBytes(32).toString("hex");
+      sessions.add(session);
       return reply(200, { access_token: session, user: { id: me } });
     }
-    if (req.headers.authorization !== "Bearer " + session) return reply(401, {});
+    if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
+    authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
       if (body.workspace_id?.toLowerCase() !== workspace || body.command?.kind !== "post_signal") return reply(400, {});
+      if (verify && body.command.body === "held during sign-out") {
+        notifyPost();
+        await new Promise(resolve => { heldPost = resolve; });
+      }
+      if (body.command.channel && body.command.expected_channel_id !== channel) return reply(404, {});
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {

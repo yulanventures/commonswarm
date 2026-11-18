@@ -39,7 +39,9 @@ struct Post: Encodable {
                                          "in_reply_to": nil, "about": nil]
         switch destination {
         case .general: break
-        case .channel(_, let slug): fields["channel"] = slug
+        case .channel(let id, let slug):
+            fields["channel"] = slug
+            fields["expected_channel_id"] = id.uuidString.lowercased()
         case .person(let person): fields["to_user_id"] = person.uuidString.lowercased()
         case .agent(let agent): fields["to_agent_principal_id"] = agent.uuidString.lowercased()
         }
@@ -58,14 +60,11 @@ struct ConversationAPI {
         let url = origin.appending(path: path).appending(queryItems: query.map { URLQueryItem(name: $0.key, value: $0.value) })
         var request = URLRequest(url: url)
         request.setValue(publicKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer " + session.access_token, forHTTPHeaderField: "Authorization")
         return request
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let transport = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
-        defer { transport.finishTasksAndInvalidate() }
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw APIError.invalidResponse }
         guard (200..<300).contains(status) else { throw APIError.refused(status) }
         return try JSONDecoder().decode(T.self, from: data)
@@ -91,7 +90,7 @@ struct ConversationAPI {
         async let people: [Person] = rows("member_profiles", ["select": "user_id,display_name", "workspace_id": filter])
         async let agents: [Agent] = rows("agent_principals", ["select": "principal_id,name", "workspace_id": filter, "revoked_at": "is.null"])
         let (channelRows, peopleRows, agentRows) = try await (channels, people, agents)
-        let dms = peopleRows.filter { $0.user_id != session.user.id }.map {
+        let dms = peopleRows.filter { $0.user_id != session.userID }.map {
             Conversation(id: .person($0.user_id), name: $0.display_name ?? "Member", symbol: "person.crop.circle")
         } + agentRows.map { Conversation(id: .agent($0.principal_id), name: $0.name, symbol: "cpu") }
         return [Conversation(id: .general, name: "#general", symbol: "number")] + channelRows.map {
@@ -115,7 +114,7 @@ struct ConversationAPI {
         case .person(let id), .agent(let id):
             let peerIsAgent: Bool
             if case .agent = destination { peerIsAgent = true } else { peerIsAgent = false }
-            let viewer = session.user.id.uuidString
+            let viewer = session.userID.uuidString
             let toPeer = peerIsAgent ? "to_agent" : "to"
             let peerKind = peerIsAgent ? "agent" : "user"
             query["channel_id"] = "is.null"

@@ -42,6 +42,7 @@ struct SignInAttempt {
 
     func code(from callback: URL) throws -> String {
         guard let parts = URLComponents(url: callback, resolvingAgainstBaseURL: false),
+              callback.absoluteString.components(separatedBy: "?").first == Self.callback.absoluteString,
               parts.scheme == Self.callback.scheme, parts.percentEncodedHost == "auth",
               parts.percentEncodedPath == "/callback", parts.user == nil, parts.password == nil,
               parts.port == nil, parts.fragment == nil,
@@ -64,9 +65,9 @@ struct SignInAttempt {
         defer { transport.finishTasksAndInvalidate() }
         let (data, response) = try await transport.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw SignInError.refused }
-        let result = try JSONDecoder().decode(HumanSession.self, from: data)
+        let result = try JSONDecoder().decode(TokenResponse.self, from: data)
         guard !result.access_token.isEmpty else { throw SignInError.refused }
-        return result
+        return await HumanSession(result)
     }
 }
 
@@ -79,8 +80,41 @@ final class NoRedirect: NSObject, URLSessionTaskDelegate {
     }
 }
 
-struct HumanSession: Decodable {
+fileprivate struct TokenResponse: Decodable {
     struct User: Decodable { let id: UUID }
     let user: User
     let access_token: String
+}
+
+
+// All adapters for this login share one transport. Sign-out both closes it and
+// withdraws the credential, including from callers retained by a pending UI task.
+@MainActor
+final class HumanSession {
+    nonisolated let userID: UUID
+    private var accessToken: String?
+    private let transport = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
+    var isActive: Bool { accessToken != nil }
+
+    fileprivate init(_ response: TokenResponse) {
+        userID = response.user.id
+        accessToken = response.access_token
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let accessToken else { throw CancellationError() }
+        var authorized = request
+        authorized.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
+        let response = try await transport.data(for: authorized)
+        guard isActive else { throw CancellationError() }
+        try Task.checkCancellation()
+        return response
+    }
+
+    func signOut() {
+        accessToken = nil
+        transport.invalidateAndCancel()
+    }
+
+    deinit { transport.invalidateAndCancel() }
 }

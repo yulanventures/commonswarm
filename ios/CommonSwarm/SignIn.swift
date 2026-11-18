@@ -80,6 +80,7 @@ final class SignIn: ObservableObject {
 
     func signOut() {
         finish()
+        session?.signOut()
         session = nil
     }
 }

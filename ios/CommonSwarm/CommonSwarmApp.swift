@@ -47,7 +47,7 @@ private struct SessionView: View {
             if let session = auth.session, let deployment = Deployment.current {
                 WorkspacesView(api: ConversationAPI(origin: deployment.origin, publicKey: deployment.publicKey, session: session),
                                signOut: auth.signOut)
-                    .id(session.user.id)
+                    .id(session.userID)
             } else {
                 VStack(spacing: 16) {
                     if let url = Bundle.main.url(forResource: "BrandMark", withExtension: "png"),
@@ -235,7 +235,7 @@ private struct HistoryView: View {
     }
 
     private func sender(_ message: Message) -> String {
-        if message.from_kind == "user", message.from == api.session.user.id { return "You" }
+        if message.from_kind == "user", message.from == api.session.userID { return "You" }
         let key: Conversation.Destination = message.from_kind == "agent" ? .agent(message.from) : .person(message.from)
         return directory.first { $0.id == key }?.name ?? (message.from_kind == "agent" ? "Agent" : "Member")
     }
@@ -270,12 +270,13 @@ private struct HistoryView: View {
         defer { draft.sending = false }
         do {
             try await api.post(post)
+            guard api.session.isActive else { return }
             if draft.text == post.command["body"] ?? nil { draft.text = "" }
             draft.submission = nil
             await load(afterSend: true)
         } catch APIError.refused(let status) where (400..<500).contains(status) {
             draft.submission = nil
             draft.failed = true
-        } catch { draft.failed = true }
+        } catch { if api.session.isActive { draft.failed = true } }
     }
 }

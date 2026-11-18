@@ -381,6 +381,7 @@ interface SignalCommand {
   /* Chat fields. Each is INDEPENDENTLY optional — see chatSignalKeys. A body
    * that carries none of them is what every installed client sends. */
   channel?: string;
+  expected_channel_id?: string;
   thread_root_id?: string | null;
   broadcast_to_channel?: boolean;
   /* The multi-recipient address. When present it is non-empty and every entry
@@ -2932,6 +2933,11 @@ function validateCommand(
      * post after a perfectly ordered migration. */
     const chatKeys = chatSignalKeys(cmd);
     const channel = Object.hasOwn(cmd, "channel") ? cmd.channel : undefined;
+    const expectedChannelId = cmd.expected_channel_id;
+    if (Object.hasOwn(cmd, "expected_channel_id") && (typeof channel !== "string" ||
+      typeof expectedChannelId !== "string" || !UUID_RE.test(expectedChannelId))) {
+      return { ok: false, status: 400, reason: "expected_channel_id requires a channel and a UUID" };
+    }
     const threadRootId = Object.hasOwn(cmd, "thread_root_id")
       ? cmd.thread_root_id
       : undefined;
@@ -3027,6 +3033,7 @@ function validateCommand(
       ...attachmentKeys,
       ...optionalKeys,
       ...chatKeys,
+      ...(expectedChannelId === undefined ? [] : ["expected_channel_id"]),
       ...parentKeys,
       ...(hasReplyStatus ? ["reply_status"] : []),
     ]);
@@ -3134,6 +3141,7 @@ function validateCommand(
           ...(channel === undefined || channel === null
             ? {}
             : { channel: normalizeChannelSlug(channel as string) }),
+          ...(typeof expectedChannelId === "string" ? { expected_channel_id: expectedChannelId.toLowerCase() } : {}),
           ...(threadRootId === undefined
             ? {}
             : {
@@ -12125,6 +12133,7 @@ async function resolveSignalChannel(
     FROM swarm.channels
     WHERE workspace_id = ${route.workspaceId}::uuid
       AND lower(slug) = ${slug}
+      AND (${command.expected_channel_id ?? null}::uuid IS NULL OR channel_id = ${command.expected_channel_id ?? null}::uuid)
       AND swarm.actor_can_access_channel(
         workspace_id,
         channel_id,
