@@ -166,10 +166,101 @@ admin-delegations[data-kylon-account] > dialog :is(h3, h4, h5) {
   font: 600 14px/22px var(--k-shell-font);
   letter-spacing: 0;
 }
-admin-delegations[data-kylon-account] > dialog > section {
+/* Admin access: three views, each a short list. A view's first section sits directly under the scope line; later
+   sections and the foot More are set off by a rule. */
+admin-delegations[data-kylon-account] > dialog > [data-admin-pane-body] > section {
+  margin-block-start: 0;
+}
+/* History keeps past grants and recorded actions apart; the opening view is one list, agents then clients. */
+admin-delegations[data-kylon-account] > dialog > [data-admin-pane-body="history"] > section + section {
   margin-block-start: 24px;
   padding-block-start: 20px;
   border-block-start: 1px solid var(--k-shell-line);
+}
+admin-delegations[data-kylon-account] > dialog [data-admin-scope] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-block: 0 12px;
+  color: var(--k-shell-ink);
+}
+admin-delegations[data-kylon-account] > dialog [data-admin-scope] strong {
+  min-inline-size: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+admin-delegations[data-kylon-account][data-kylon-account] > dialog button:is([data-admin-scope-switch], [data-admin-clients-switch]) {
+  min-block-size: 44px;
+  padding-inline: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--k-shell-secondary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+admin-delegations[data-kylon-account] > dialog :is([data-admin-empty], [data-admin-past-empty], [data-admin-clients-account]) {
+  margin-block: 0;
+  color: var(--k-shell-secondary);
+}
+/* An empty status line takes no room but stays a live region, so the next result is still announced. */
+admin-delegations[data-kylon-account] > dialog [data-admin-status]:empty {
+  min-block-size: 0;
+  margin: 0;
+}
+/* Destructive actions sit on a row's own surface, where the theme's danger colour falls under 4.5:1 for small text.
+   These reach it: #b91c1c on the light surface, #f87171 on the dark one. */
+admin-delegations[data-kylon-account] {
+  --k-admin-danger-text: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) admin-delegations[data-kylon-account] {
+    --k-admin-danger-text: #f87171;
+  }
+}
+:root[data-theme="dark"] admin-delegations[data-kylon-account] {
+  --k-admin-danger-text: #f87171;
+}
+admin-delegations[data-kylon-account][data-kylon-account] > dialog :is(article, li) button[data-tone="danger"]:is(:enabled, :hover:enabled) {
+  color: var(--k-admin-danger-text);
+}
+/* A row: the holder, then the facts the decision needs, then its action with what the action does. */
+admin-delegations[data-kylon-account] > dialog article > p {
+  margin-block: 2px;
+  color: var(--k-shell-secondary);
+}
+admin-delegations[data-kylon-account] > dialog article > button {
+  margin-block-start: 12px;
+}
+admin-delegations[data-kylon-account] > dialog article > small {
+  display: block;
+  margin-block-start: 6px;
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+admin-delegations[data-kylon-account] > dialog details > summary {
+  display: flex;
+  align-items: center;
+  min-block-size: 44px;
+  color: var(--k-shell-secondary);
+  cursor: pointer;
+}
+admin-delegations[data-kylon-account] > dialog article > details {
+  margin-block-start: 4px;
+}
+admin-delegations[data-kylon-account] > dialog article > details > p {
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+admin-delegations[data-kylon-account] > dialog > details[data-admin-foot] {
+  margin-block-start: 24px;
+  border-block-start: 1px solid var(--k-shell-line);
+}
+admin-delegations[data-kylon-account] > dialog > details[data-admin-foot] > section {
+  margin-block-start: 16px;
 }
 admin-delegations[data-kylon-account] > dialog > p {
   color: var(--k-shell-secondary);
@@ -178,19 +269,19 @@ admin-delegations[data-kylon-account] > dialog nav {
   gap: 8px;
   margin-block: 20px;
 }
-admin-delegations[data-kylon-account] > dialog nav [aria-pressed="true"] {
+/* The doubled attribute outranks the shared dialog button rule, which otherwise leaves the selected view unmarked. */
+admin-delegations[data-kylon-account][data-kylon-account] > dialog nav button[aria-pressed="true"] {
   background: var(--k-shell-selected);
   border-color: var(--k-shell-control);
   font-weight: 600;
-}
-admin-delegations[data-kylon-account] > dialog nav [data-admin-refresh] {
-  margin-inline-start: auto;
 }
 admin-delegations[data-kylon-account] > dialog :is(article, li) {
   margin-block: 12px;
   padding: 16px;
   border-color: var(--k-shell-line);
   border-radius: 8px;
+  /* The dark theme draws no lines, so each row gets a surface of its own. */
+  background: var(--k-shell-subtle);
 }
 @media (width <= 440px) {
   :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) {
@@ -198,14 +289,10 @@ admin-delegations[data-kylon-account] > dialog :is(article, li) {
   }
   admin-delegations[data-kylon-account] > dialog nav {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-  admin-delegations[data-kylon-account] > dialog nav [data-admin-refresh] {
-    grid-column: 1 / -1;
-    justify-self: end;
-  }
-  admin-delegations[data-kylon-account] > dialog nav [data-admin-view="workspace"][hidden] + [data-admin-refresh] {
-    grid-column: auto;
+  admin-delegations[data-kylon-account] > dialog nav button {
+    padding-inline: 4px;
   }
 }
 /* Password is one short form: as wide as the question it asks, its field in line with the title, and Save as the

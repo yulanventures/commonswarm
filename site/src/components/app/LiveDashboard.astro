@@ -6718,7 +6718,7 @@ import "../../styles/kylon-command-palette.css";
               return;
             }
             event.preventDefault();
-            window.dispatchEvent(new CustomEvent("commonswarm:admin-access-open", { detail: { scope: "account" } }));
+            window.dispatchEvent(new CustomEvent("commonswarm:admin-access-open", { detail: { scope: "account", view: "history" } }));
           },
         });
         if (!panelEl) {

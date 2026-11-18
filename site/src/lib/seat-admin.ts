@@ -73,6 +73,9 @@ export interface SeatAdminGrantRow {
   registryVersion: number;
   expiresAt: string | null;
   state: SeatAdminGrantState;
+  /** The state the server reported. `state` can read "expired" early or late on this device's clock; where a grant is
+   *  listed and whether it keeps its Remove action follow this one, never the clock. */
+  serverState: SeatAdminGrantState;
   createdAt: string;
   endedAt: string | null;
   endReason: string | null;
@@ -316,6 +319,7 @@ export function parseSeatAdminGrantRecord(entry: unknown, nowMs = Date.now()): S
     registryVersion,
     expiresAt,
     state: effectiveState,
+    serverState: entry.state,
     createdAt: entry.created_at,
     endedAt,
     endReason,
@@ -393,7 +397,7 @@ export function buildGrantSeatAdminCommand(draft: SeatAdminGrantDraft): Record<s
 
 export async function readSeatAdminStatus(
   session: Session,
-): Promise<{ ok: true; status: SeatAdminStatusResponse } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; status: SeatAdminStatusResponse } | { ok: false; code: string; message: string; httpStatus?: number }> {
   const d = deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
@@ -413,7 +417,7 @@ export async function readSeatAdminStatus(
         isRecord(raw) && typeof raw.message === "string"
           ? raw.message
           : "Could not check agent admin availability.";
-      return { ok: false, code, message };
+      return { ok: false, code, message, httpStatus: response.status };
     }
     const status = parseSeatAdminStatus(raw);
     if (!status) {
@@ -427,7 +431,7 @@ export async function readSeatAdminStatus(
 
 export async function readMySeatAdminGrants(
   session: Session,
-): Promise<{ ok: true; grants: SeatAdminGrantRow[] } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; grants: SeatAdminGrantRow[] } | { ok: false; code: string; message: string; httpStatus?: number }> {
   const d = deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
@@ -450,7 +454,7 @@ export async function readMySeatAdminGrants(
         isRecord(raw) && typeof raw.message === "string"
           ? raw.message
           : "Could not load agent admin access.";
-      return { ok: false, code, message };
+      return { ok: false, code, message, httpStatus: response.status };
     }
     const grants = parseSeatAdminGrants(raw);
     if (!grants) {
@@ -968,10 +972,19 @@ export function seatAdminEndedBy(grant: SeatAdminGrantRow, viewerUserId?: string
   return viewerUserId && grant.endedBy === viewerUserId.toLowerCase() ? "you" : "another_owner";
 }
 
+/** Whether the server still counts this grant as live. It decides the row's place and its Remove action. */
+export function seatAdminGrantLive(grant: SeatAdminGrantRow): boolean {
+  return (grant.serverState ?? grant.state) === "active";
+}
+
 /** The history row's state line. The machine reason stays in the row's data, not in the words. */
 export function seatAdminGrantStateLabel(grant: SeatAdminGrantRow, viewerUserId?: string | null): string {
-  if (grant.state === "active") {
-    return grant.expiresAt ? `Active · Ends ${formatHistoryDate(grant.expiresAt)}` : "Active · Until removed";
+  if (seatAdminGrantLive(grant)) {
+    if (!grant.expiresAt) return "Active · Until removed";
+    // The decision row shows exactly when access ends, in the person's own named time zone, as client grants do.
+    const end = `${new Date(grant.expiresAt).toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
+    // The server still counts it active though this device's clock is past its end: say so, and keep it actionable.
+    return grant.state === "expired" ? `Active · Its end time, ${end}, has passed on this device` : `Active · Ends ${end}`;
   }
   if (grant.state === "expired") {
     return `Expired ${formatHistoryDate(grant.endedAt ?? grant.expiresAt)}`;
@@ -1013,6 +1026,17 @@ export function renderSeatAdminHistoryList(
     container.append(empty);
     return;
   }
+  const named = (grant: SeatAdminGrantRow): string => options.agentsByPrincipalId?.get(grant.principalId) ?? `Agent ${grant.principalId.slice(0, 8)}`;
+  // Agent names are not unique. Two agents that share a name carry a short agent id, before the action and in its
+  // confirmation; two grants that would still read the same carry a short grant id as well.
+  const holders = new Map<string, Set<string>>();
+  for (const grant of grants) holders.set(named(grant), (holders.get(named(grant)) ?? new Set()).add(grant.principalId));
+  const shownName = (grant: SeatAdminGrantRow): string =>
+    (holders.get(named(grant))?.size ?? 0) > 1 ? `${named(grant)} (agent ${grant.principalId.slice(0, 8)})` : named(grant);
+  const reads = (grant: SeatAdminGrantRow): string => [shownName(grant), grant.level, grant.organizationId ?? "", [...grant.workspaceIds].sort().join(","),
+    grant.scopeNames.join(","), seatAdminGrantStateLabel(grant, options.viewerUserId)].join("|");
+  const alike = new Map<string, number>();
+  for (const grant of grants) alike.set(reads(grant), (alike.get(reads(grant)) ?? 0) + 1);
   for (const grant of grants) {
     const card = doc.createElement("article");
     card.dataset.adminSeatGrant = grant.grantId;
@@ -1023,9 +1047,7 @@ export function renderSeatAdminHistoryList(
     const endedBy = seatAdminEndedBy(grant, options.viewerUserId);
     if (endedBy) card.dataset.adminSeatEndedBy = endedBy;
 
-    const agentName =
-      options.agentsByPrincipalId?.get(grant.principalId) ??
-      `Agent ${grant.principalId.slice(0, 8)}`;
+    const agentName = (alike.get(reads(grant)) ?? 0) > 1 ? `${shownName(grant)}, grant ${grant.grantId.slice(0, 8)}` : shownName(grant);
     const title = doc.createElement("h4");
     title.textContent = `${agentName} · ${formatGrantLevelLabel(grant.level)}`;
 
@@ -1046,7 +1068,7 @@ export function renderSeatAdminHistoryList(
 
     card.append(title, scopeLine, stateLine);
 
-    if (grant.state === "active") {
+    if (seatAdminGrantLive(grant)) {
       const button = doc.createElement("button");
       button.type = "button";
       button.textContent = "Remove admin access";
@@ -1064,7 +1086,11 @@ export function renderSeatAdminHistoryList(
         container.append(ending.dialog);
         ending.open(button);
       });
-      card.append(button);
+      // What the action does sits beside it, with its full reach, as well as in the confirmation it opens.
+      const effect = doc.createElement("small");
+      effect.dataset.adminSeatEffect = "";
+      effect.textContent = `Removing ends ${agentName}'s admin access${coverage.length ? ` in ${coverage.join(", ")}` : ""}.`;
+      card.append(button, effect);
     }
 
     container.append(card);

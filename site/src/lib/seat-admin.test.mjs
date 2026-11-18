@@ -13,6 +13,7 @@ import {
   resolveSeatAdminPanelModel,
   saveSeatAdminReauthIntent,
   seatAdminGrantCoverage,
+  seatAdminGrantLive,
   seatAdminGrantStateLabel,
   seatAdminRemovalReceipt,
 } from "./seat-admin.ts";
@@ -135,8 +136,14 @@ test("grant history: who ended it, in words; the machine reason stays in the dat
     "Ended Nov 17, 2026",
     "Ended Nov 17, 2026",
     "Expired Nov 16, 2026",
-    "Expired Nov 15, 2026",
+    // The server calls this one active; only this device's clock is past its end. It stays live, and says so.
+    `Active · Its end time, ${new Date("2026-11-15T12:00:00.000Z").toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone}), has passed on this device`,
   ]);
+  assert.equal(rows[5].state, "expired"); assert.equal(rows[5].serverState, "active");
+  assert.equal(seatAdminGrantLive(rows[5]), true, "a fast device clock never takes the Remove action away");
+  assert.equal(seatAdminGrantLive(rows[4]), false, "a grant the server marks expired is past");
+  assert.equal(seatAdminGrantStateLabel({ ...rows[5], state: "active", expiresAt: "2099-01-02T03:04:00.000Z" }),
+    `Active · Ends ${new Date("2099-01-02T03:04:00.000Z").toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`);
   assert.equal(seatAdminGrantStateLabel(rows[0], OTHER_USER_ID), "Ended Nov 17, 2026 by another owner", "another viewer");
   assert.equal(rows[0].endReason, "owner_downgrade", "the machine reason is kept");
   assert.ok(!seatAdminGrantStateLabel(rows[0], USER_ID).includes("owner_downgrade"));

@@ -99,7 +99,7 @@ export function buildSeatAdminPanel(doc: Document, model: SeatAdminPanelModel, a
     panel.append(notice);
   }
   if (model.historyHref) {
-    const history = element(doc, "a", "sa-admin__history", "Admin access and history");
+    const history = element(doc, "a", "sa-admin__history", "View admin history");
     history.href = model.historyHref;
     if (actions.history) history.addEventListener("click", actions.history);
     panel.append(history);

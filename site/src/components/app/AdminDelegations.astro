@@ -11,42 +11,57 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   </button>
   <dialog aria-labelledby="admin-access-title">
     <header>
-      <div><p class="eyebrow">Your account</p><h2 id="admin-access-title">Admin access and history</h2></div>
+      <h2 id="admin-access-title">Admin access</h2>
       <button type="button" data-admin-close aria-label="Close admin access">Close</button>
     </header>
-    <p>Review what your connections can do and the actions CommonSwarm recorded. Revoking a grant stops its dependent access. Prior actions and data already read remain.</p>
     <nav aria-label="Admin access views">
-      <button type="button" data-admin-view="account" aria-pressed="true">Your account</button>
-      <button type="button" data-admin-view="workspace" aria-pressed="false" hidden>This workspace</button>
-      <button type="button" data-admin-refresh>Refresh</button>
+      <button type="button" data-admin-pane="access" aria-pressed="true">Access</button>
+      <button type="button" data-admin-pane="history" aria-pressed="false">History</button>
+      <button type="button" data-admin-pane="clients" aria-pressed="false">Client approvals</button>
     </nav>
-    <p data-admin-gate role="status">Checking admin connection availability…</p>
-    <section aria-labelledby="admin-clients-title" data-admin-client-section>
-      <h3 id="admin-clients-title">Verified clients and your approvals</h3>
-      <p>Approving a client lets you review its permission request in your assistant. Each grant still needs your consent. Withdrawing approval stops its linked grants and dependent access.</p>
-      <div data-admin-clients></div><button type="button" data-admin-more-clients hidden>More clients</button>
-    </section>
+    <p data-admin-scope><strong data-admin-scope-name>Your account</strong> <button type="button" data-admin-scope-switch hidden>Show this workspace</button></p>
     <p role="status" aria-live="polite" data-admin-status></p>
-    <section aria-labelledby="admin-grants-title">
-      <h3 id="admin-grants-title">Your grants</h3><div data-admin-grants></div>
-      <button type="button" data-admin-more-grants hidden>More grants</button>
-    </section>
-    <section aria-labelledby="admin-seat-grants-title" data-admin-seat-section hidden>
-      <h3 id="admin-seat-grants-title">Agent admin grants</h3>
-      <p role="status" aria-live="polite" data-admin-seat-status hidden></p>
-      <div data-admin-seat-grants></div>
-      <button type="button" data-admin-seat-retry hidden>Retry</button>
-    </section>
-    <section aria-labelledby="admin-dependencies-title">
-      <h3 id="admin-dependencies-title">Workspace coverage and workers</h3>
-      <div data-admin-dependencies></div>
-      <button type="button" data-admin-more-workers hidden>More workers</button>
-      <button type="button" data-admin-more-coverage hidden>More coverage</button>
-    </section>
-    <section aria-labelledby="admin-history-title">
-      <h3 id="admin-history-title">Recorded actions</h3><ol data-admin-actions></ol>
-      <button type="button" data-admin-more-actions hidden>Older actions</button>
-    </section>
+    <p role="status" aria-live="polite" data-admin-seat-status hidden></p>
+    <div data-admin-pane-body="access">
+      <p data-admin-empty hidden>No active admin access is visible here.</p>
+      <section aria-label="Agents with admin access" data-admin-seat-section hidden>
+        <div data-admin-seat-grants></div>
+        <button type="button" data-admin-seat-retry hidden>Retry</button>
+      </section>
+      <section aria-label="Connected clients with admin access">
+        <div data-admin-grants></div>
+        <button type="button" data-admin-more-grants hidden>More grants</button>
+      </section>
+    </div>
+    <div data-admin-pane-body="history" hidden>
+      <section aria-labelledby="admin-past-title">
+        <h3 id="admin-past-title">Past grants</h3>
+        <p data-admin-past-empty hidden>No past grants are visible here.</p>
+        <div data-admin-past-seat-grants></div><div data-admin-past-grants></div>
+      </section>
+      <section aria-labelledby="admin-history-title">
+        <h3 id="admin-history-title">Recorded actions</h3><ol data-admin-actions></ol>
+        <button type="button" data-admin-more-actions hidden>Older actions</button>
+      </section>
+    </div>
+    <div data-admin-pane-body="clients" hidden>
+      <p data-admin-clients-account hidden>Client approvals belong to your whole account.</p>
+      <section aria-labelledby="admin-clients-title" data-admin-client-section>
+        <h3 id="admin-clients-title">Verified clients and your approvals</h3>
+        <p data-admin-gate role="status">Checking admin connection availability…</p>
+        <div data-admin-clients></div><button type="button" data-admin-more-clients hidden>More clients</button>
+      </section>
+    </div>
+    <details data-admin-foot>
+      <summary>More</summary>
+      <button type="button" data-admin-refresh>Refresh</button>
+      <section aria-labelledby="admin-dependencies-title">
+        <h3 id="admin-dependencies-title">Workspace coverage and workers</h3>
+        <div data-admin-dependencies></div>
+        <button type="button" data-admin-more-workers hidden>More workers</button>
+        <button type="button" data-admin-more-coverage hidden>More coverage</button>
+      </section>
+    </details>
   </dialog>
 </admin-delegations>
 
@@ -54,17 +69,32 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   import type { Session } from "@supabase/supabase-js";
   import { client, currentSession, uuid, CommandOutcomeUnknown, myOrganizations, myWorkspaces } from "../../lib/commonswarm";
   import { loadAdminRecovery, revokeAdminGrant, changeAdminClientApproval, readAdminIssuanceGate, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView, type AdminClientView, type AdminWorkerView, type AdminCoverageView } from "../../lib/admin-delegations";
-  import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList } from "../../lib/seat-admin";
+  import { readSeatAdminStatus, readMySeatAdminGrants, endSeatAdmin, renderSeatAdminHistoryList, seatAdminGrantLive } from "../../lib/seat-admin";
 
-  import { adminGateNotice, adminApprovalLines, adminClientAction, adminGrantLines, adminRenewalDiff, ADMIN_SITE_RENEWAL_GUIDANCE, type AdminSitePolicy } from "../../lib/admin-delegations-view";
+  import { adminGateNotice, adminApprovalParts, adminClientAction, adminGrantLines, adminGrantSummary, adminRenewalDiff, ADMIN_SITE_RENEWAL_GUIDANCE, type AdminSitePolicy } from "../../lib/admin-delegations-view";
   const root = document.querySelector<HTMLElement>("admin-delegations");
   if (root) {
     const one = <T extends Element>(selector: string): T => root.querySelector<T>(selector)!;
     const policy: AdminSitePolicy = JSON.parse(root.dataset.adminPolicy!);
     const dialog = one<HTMLDialogElement>("dialog");
     let session: Session | null = null, workspaceId: string | null = document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") ?? null;
-    one<HTMLElement>("[data-admin-view=workspace]").hidden = !workspaceId;
     let scope: "account" | "workspace" = "account", generation = 0;
+    // The opening view answers "who has admin access now". History and client approvals are their own views.
+    type Pane = "access" | "history" | "clients";
+    let pane: Pane = "access";
+    // True once a read has answered, so "nothing here" is never said while loading or after a refusal.
+    let loaded = false, seatActive = 0, seatPast = 0;
+    let workspaceNames = new Map<string, string>();
+    // Each agent read and each names read carries a ticket. A refused or foreign read, or a change of person, takes a
+    // new ticket, so a result still on its way is dropped and never redraws rows that were just cleared.
+    let seatEpoch = 0, namesTicket = 0;
+    const openMore = new Set<string>();
+    const forgetNames = (): void => { ++namesTicket; workspaceNames = new Map(); };
+    const clearSeats = (): void => {
+      ++seatEpoch; seatBusy = false;
+      one("[data-admin-seat-grants]").replaceChildren(); one("[data-admin-past-seat-grants]").replaceChildren();
+      one<HTMLElement>("[data-admin-seat-section]").hidden = true; one<HTMLElement>("[data-admin-seat-retry]").hidden = true;
+    };
     let grants: AdminGrantView[] = [], actions: AdminActionView[] = [];
     let clients: AdminClientView[] = [], workers: AdminWorkerView[] = [], coverage: AdminCoverageView[] = [];
     let clientsBefore: string | null = null, workersBefore: string | null = null, coverageBefore: string | null = null;
@@ -74,7 +104,11 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     let indicatorView: "account" | "workspace" = "account";
     const requestIds = new Map<string, string>();
     const seatEndRequestIds = new Map<string, string>();
-    const status = (message: string): void => { one<HTMLElement>("[data-admin-status]").textContent = message; };
+    // A message that tells the person to refresh opens the foot More, where Refresh is, so the way out is on screen.
+    const status = (message: string): void => {
+      one<HTMLElement>("[data-admin-status]").textContent = message;
+      if (/refresh/i.test(message)) one<HTMLDetailsElement>("[data-admin-foot]").open = true;
+    };
     const seatStatus = (message: string): void => {
       const el = one<HTMLElement>("[data-admin-seat-status]");
       el.textContent = message;
@@ -83,7 +117,9 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     const clear = (): void => {
       ++generation; grants = []; actions = []; clients = []; workers = []; coverage = [];
       grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null; busy = false; seatBusy = false;
-      for (const selector of ["[data-admin-grants]", "[data-admin-actions]", "[data-admin-clients]", "[data-admin-dependencies]", "[data-admin-seat-grants]"]) one(selector).replaceChildren();
+      loaded = false; seatActive = seatPast = 0; openMore.clear(); dialog.dataset.adminState = "loading";
+      for (const selector of ["[data-admin-grants]", "[data-admin-past-grants]", "[data-admin-actions]", "[data-admin-clients]", "[data-admin-dependencies]", "[data-admin-seat-grants]", "[data-admin-past-seat-grants]"]) one(selector).replaceChildren();
+      one<HTMLElement>("[data-admin-empty]").hidden = true; one<HTMLElement>("[data-admin-past-empty]").hidden = true;
       for (const selector of ["[data-admin-more-clients]", "[data-admin-more-workers]", "[data-admin-more-coverage]"]) one<HTMLElement>(selector).hidden = true;
       one<HTMLElement>("[data-admin-more-grants]").hidden = true; one<HTMLElement>("[data-admin-more-actions]").hidden = true;
       one<HTMLElement>("[data-admin-seat-section]").hidden = true;
@@ -100,7 +136,10 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       const at = generation;
       one<HTMLElement>("[data-admin-gate]").textContent = "Checking admin connection availability…";
       const result = await readAdminIssuanceGate();
-      if (generation === at) one<HTMLElement>("[data-admin-gate]").textContent = adminGateNotice(result.state);
+      if (generation === at) {
+        one<HTMLElement>("[data-admin-gate]").textContent = adminGateNotice(result.state);
+        if (result.state === "unavailable") one<HTMLDetailsElement>("[data-admin-foot]").open = true;
+      }
     };
     const renderDiff = (g: AdminGrantView): HTMLElement => {
       const diff = adminRenewalDiff(g, policy), section = document.createElement("section");
@@ -123,13 +162,23 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
     };
     const render = (): void => {
       const grantRoot = one<HTMLElement>("[data-admin-grants]"); grantRoot.replaceChildren();
-      if (!grants.length) grantRoot.append(text("p", "No grants of yours are visible in this view. Workspace owners can see relevant actions below."));
+      const pastRoot = one<HTMLElement>("[data-admin-past-grants]"); pastRoot.replaceChildren();
+      const perClient = new Map<string, number>();
+      for (const g of grants) perClient.set(g.client_id, (perClient.get(g.client_id) ?? 0) + 1);
       for (const g of grants) {
+        const summary = adminGrantSummary(g, policy, workspaceNames, Date.now(), (perClient.get(g.client_id) ?? 0) > 1);
         const card = document.createElement("article"); card.dataset.mode = g.mode;
+        // The row carries the decision: who holds the grant, whether it is active, its reach, what it may do, when it ends.
         card.append(text("h4", g.client_id));
-        for (const line of adminGrantLines(g, policy)) card.append(text("p", line));
-        card.append(renderDiff(g));
-        if (scope === "account" && g.owner_user_id === session?.user.id && g.state !== "revoked") {
+        for (const line of summary.lines) card.append(text("p", line));
+        // Every line this card printed before stays, in the same words, one press away.
+        const more = document.createElement("details"); more.dataset.adminGrantMore = g.grant_id; more.open = openMore.has(g.grant_id);
+        more.addEventListener("toggle", () => { if (more.open) openMore.add(g.grant_id); else openMore.delete(g.grant_id); });
+        more.append(text("summary", "More"));
+        for (const line of adminGrantLines(g, policy)) more.append(text("p", line));
+        more.append(renderDiff(g));
+        // A revoked or expired grant is history: it is listed under Past grants and has no action.
+        if (scope === "account" && g.owner_user_id === session?.user.id && !summary.past) {
           const button = document.createElement("button"); button.type = "button"; button.textContent = "Revoke grant"; button.dataset.tone = "danger"; button.disabled = busy;
           button.addEventListener("click", async () => {
             if (!session || busy) return;
@@ -150,16 +199,23 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
               busy = false; render(); status(error instanceof CommandOutcomeUnknown || error instanceof AdminGrantRevokeRefused ? error.message : `The revocation result is unavailable. Refresh or retry. Retry ID: ${requestId}.`);
             }
           });
-          card.append(button);
+          // What the action does sits beside it, and says that it ends the whole grant.
+          card.append(button, text("small", "Revoking ends this whole grant and stops its dependent access. Prior actions and data already read remain."));
         }
-        grantRoot.append(card);
+        // Revoking is offered in the account view only, as before; a workspace view says where to find it.
+        else if (scope === "workspace" && g.owner_user_id === session?.user.id && !summary.past) card.append(text("small", "To revoke this grant, show your whole account."));
+        card.append(more);
+        (summary.past ? pastRoot : grantRoot).append(card);
       }
       const clientRoot = one<HTMLElement>("[data-admin-clients]"); clientRoot.replaceChildren();
       one<HTMLElement>("[data-admin-client-section]").hidden = scope !== "account";
-      if (!clients.length) clientRoot.append(text("p", "No verified clients are visible in this view."));
+      one<HTMLElement>("[data-admin-clients-account]").hidden = scope === "account";
+      const answered = loaded && !busy;
+      if (answered && scope === "account" && !clients.length && clientsBefore === null) clientRoot.append(text("p", "No verified clients are visible in this view."));
       for (const c of clients) {
         const card = document.createElement("article"); card.append(text("h4", c.client_id));
-        for (const line of adminApprovalLines(c)) card.append(text("p", line));
+        const approval = adminApprovalParts(c);
+        for (const line of approval.lines) card.append(text("p", line));
         const action = session ? adminClientAction(c, session.user.id) : null;
         if (action && scope === "account") {
           const button = document.createElement("button"); button.type = "button";
@@ -190,12 +246,21 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
               if (error instanceof AdminGrantRevokeRefused) requestIds.delete(key);
               busy = false; render(); status(error instanceof CommandOutcomeUnknown || error instanceof AdminGrantRevokeRefused ? error.message : `The result is unavailable. Refresh or retry. Retry ID: ${requestId}.`);
             }
-          }); card.append(button);
+          }); card.append(button, text("small", action === "approve"
+            ? "Approving lets you review this client's permission request in your assistant. Each grant still needs your consent."
+            : "Withdrawing stops this client's linked grants and their dependent access."));
+        }
+        if (approval.more.length) {
+          const key = `client:${c.client_id}`, more = document.createElement("details"); more.open = openMore.has(key);
+          more.addEventListener("toggle", () => { if (more.open) openMore.add(key); else openMore.delete(key); });
+          more.append(text("summary", "More"));
+          for (const line of approval.more) more.append(text("p", line));
+          card.append(more);
         }
         clientRoot.append(card);
       }
       const dependencies = one<HTMLElement>("[data-admin-dependencies]"); dependencies.replaceChildren();
-      if (!workers.length && !coverage.length) dependencies.append(text("p", "No workspace coverage or worker dependencies are visible in this page."));
+      if (answered && !workers.length && !coverage.length) dependencies.append(text("p", "No workspace coverage or worker dependencies are visible in this page."));
       for (const row of coverage) {
         const parent = grants.find(g => g.grant_id === row.grant_id);
         dependencies.append(text("p", `Workspace ${row.workspace_id} · Grant ${row.grant_id}${parent?.state === "revoked" ? " · stopped" : " · effective at last read"}.`));
@@ -205,7 +270,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         dependencies.append(text("p", `Worker ${row.principal_id} · Workspace ${row.workspace_id} · Grant ${row.grant_id} · ${parent?.state === "revoked" ? "stopped" : row.state}${row.revoked_at ? ` · stopped ${row.revoked_at}` : ""}.`));
       }
       const actionRoot = one<HTMLOListElement>("[data-admin-actions]"); actionRoot.replaceChildren();
-      if (!actions.length) actionRoot.append(text("li", "No admin actions are visible in this view."));
+      if (answered && !actions.length) actionRoot.append(text("li", "No admin actions are visible in this view."));
       for (const a of actions) {
         const card = document.createElement("li"); card.dataset.outcome = a.outcome;
         card.append(text("strong", `${a.action.replaceAll("_", " ")} · ${a.outcome}`));
@@ -223,6 +288,26 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-refresh], [data-admin-more-grants], [data-admin-more-actions], [data-admin-more-clients], [data-admin-more-workers], [data-admin-more-coverage]")) button.disabled = busy;
       one<HTMLElement>("[data-admin-more-grants]").hidden = grantsBefore === null;
       one<HTMLElement>("[data-admin-more-actions]").hidden = actionsBefore === null;
+      syncEmpty();
+    };
+    /* "Nothing here" is said once per view, only after a read has answered and only when no further page is waiting.
+       It speaks of what this view can see, because the read reports the grants visible to this person. */
+    const syncEmpty = (): void => {
+      const settled = loaded && !busy && grantsBefore === null;
+      one<HTMLElement>("[data-admin-empty]").hidden = !(settled && one<HTMLElement>("[data-admin-grants]").children.length === 0 && seatActive === 0);
+      one<HTMLElement>("[data-admin-past-empty]").hidden = !(settled && one<HTMLElement>("[data-admin-past-grants]").children.length === 0 && seatPast === 0);
+    };
+    const showPane = (next: Pane): void => {
+      pane = next;
+      for (const name of ["access", "history", "clients"] as const) one<HTMLElement>(`[data-admin-pane-body=${name}]`).hidden = name !== pane;
+      for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-pane]")) button.setAttribute("aria-pressed", String(button.dataset.adminPane === pane));
+    };
+    /* One line above every view says which scope is showing, by name, and offers the other. */
+    const scopeLine = (): void => {
+      one<HTMLElement>("[data-admin-scope-name]").textContent = scope === "workspace" ? workspaceNames.get(workspaceId?.toLowerCase() ?? "") ?? "This workspace" : "Your account";
+      const other = one<HTMLButtonElement>("[data-admin-scope-switch]");
+      other.textContent = scope === "workspace" ? "Show my whole account" : "Show this workspace";
+      other.hidden = scope === "account" && !workspaceId;
     };
     let indicatorGeneration = 0;
     const indicator = async (): Promise<void> => {
@@ -251,11 +336,29 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         one<HTMLElement>("[data-admin-indicator-detail]").textContent = "Review access or try again.";
       }
     };
+    /* Any read that says this person may not see this view, the main one or an agent one, clears everything the view
+       drew: client grants, approvals, history, coverage, agent rows and the workspace names. It also takes a new
+       generation, so a read or a Remove still on its way finds itself out of date and draws nothing. The view then
+       stays cleared until a full refresh succeeds. */
+    const refuseView = (message: string): void => {
+      ++generation;
+      grants = []; actions = []; clients = []; workers = []; coverage = [];
+      grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null;
+      clearSeats(); seatActive = seatPast = -1; forgetNames(); scopeLine();
+      busy = false; loaded = false; dialog.dataset.adminState = "refused"; render(); status(message);
+    };
+    const denied = (result: { httpStatus?: number }): boolean => result.httpStatus === 401 || result.httpStatus === 403;
+    /* The agent rows are read only after the main read has answered yes, so nothing of theirs is drawn beside a
+       refusal, not even for a moment. */
+    const refresh = async (): Promise<void> => {
+      await load();
+      if (dialog.dataset.adminState === "ready") await loadSeatAdmin();
+    };
     type Collection = "grants" | "actions" | "clients" | "workers" | "coverage";
     const load = async (more?: Collection): Promise<void> => {
       if (!session || busy) return;
       const ownSession = session, at = ++generation, selected = scope === "workspace" ? workspaceId : null;
-      busy = true; render(); status("Loading admin access and recorded actions…"); void gate();
+      busy = true; dialog.dataset.adminState = "loading"; render(); status("Loading admin access and recorded actions…"); void gate();
       try {
         const [grantPage, actionPage, clientPage, workerPage, coveragePage] = await Promise.all([
           more && more !== "grants" ? null : loadAdminRecovery(ownSession, "admin_grants", selected, more ? grantsBefore : null),
@@ -270,39 +373,50 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         if (clientPage) { clients = more ? [...clients, ...clientPage.clients] : clientPage.clients; clientsBefore = clientPage.next_before; }
         if (workerPage) { workers = more ? [...workers, ...workerPage.workers] : workerPage.workers; workersBefore = workerPage.next_before; }
         if (coveragePage) { coverage = more ? [...coverage, ...coveragePage.coverage] : coveragePage.coverage; coverageBefore = coveragePage.next_before; }
-        busy = false; render(); status("Showing recorded server outcomes. Revoke ends future access; prior actions remain.");
+        // The lists are the answer; the state is also on the dialog for tools and tests.
+        busy = false; loaded = true; dialog.dataset.adminState = "ready"; render(); status("");
       } catch (error) {
         if (generation !== at) return;
-        // A refused/foreign projection must not leave previously rendered private rows behind.
-        grants = []; actions = []; clients = []; workers = []; coverage = [];
-        grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null;
-        busy = false; render(); status(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
+        refuseView(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
       }
     };
     const loadSeatAdmin = async (): Promise<void> => {
       if (!session) return;
-      const ownSession = session, at = generation, selected = scope === "workspace" ? workspaceId : null;
+      const ownSession = session, at = generation, epoch = ++seatEpoch, selected = scope === "workspace" ? workspaceId : null;
+      const stale = (): boolean => generation !== at || seatEpoch !== epoch || session?.user.id !== ownSession.user.id;
       const section = one<HTMLElement>("[data-admin-seat-section]");
       const retry = one<HTMLElement>("[data-admin-seat-retry]");
       const container = one<HTMLElement>("[data-admin-seat-grants]");
+      const pastContainer = one<HTMLElement>("[data-admin-past-seat-grants]");
+      // Not known until this read answers, so neither view says "nothing here" meanwhile.
+      seatActive = seatPast = -1; syncEmpty();
       const statusResult = await readSeatAdminStatus(ownSession);
-      if (generation !== at || session?.user.id !== ownSession.user.id) return;
-      if (!statusResult.ok || !statusResult.status.enabled) {
-        section.hidden = true;
-        retry.hidden = true;
-        container.replaceChildren();
+      if (stale()) return;
+      if (!statusResult.ok) {
+        if (denied(statusResult)) { refuseView("Admin access could not be verified for your account. Refresh or sign in again."); return; }
+        // A read that failed in passing is not an answer of "none": say what happened and offer Retry.
+        container.replaceChildren(text("p", statusResult.message)); pastContainer.replaceChildren();
+        section.hidden = false; retry.hidden = false;
         return;
       }
-      section.hidden = false;
+      if (!statusResult.status.enabled) {
+        section.hidden = true;
+        retry.hidden = true;
+        container.replaceChildren(); pastContainer.replaceChildren();
+        seatActive = seatPast = 0; syncEmpty();
+        return;
+      }
       const agentsByPrincipalId = new Map(statusResult.status.agents.map(a => [a.principalId, a.name]));
       const [grantsResult, orgs, workspaces] = await Promise.all([
         readMySeatAdminGrants(ownSession),
         myOrganizations().catch(() => []),
         myWorkspaces().catch(() => []),
       ]);
-      if (generation !== at || session?.user.id !== ownSession.user.id) return;
+      if (stale()) return;
       if (!grantsResult.ok) {
-        container.replaceChildren(text("p", grantsResult.message));
+        if (denied(grantsResult)) { refuseView("Admin access could not be verified for your account. Refresh or sign in again."); return; }
+        container.replaceChildren(text("p", grantsResult.message)); pastContainer.replaceChildren();
+        section.hidden = false;
         retry.hidden = false;
         return;
       }
@@ -316,10 +430,17 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         if (ws.id && ws.name?.trim()) workspacesById.set(ws.id.toLowerCase(), ws.name.trim());
         if (ws.orgId && ws.orgName?.trim()) organizationsById.set(ws.orgId.toLowerCase(), ws.orgName.trim());
       }
-      const filtered = selected
-        ? grantsResult.grants.filter(g => g.workspaceIds.includes(selected.toLowerCase()) || g.level === "organization")
+      // A workspace view lists the grants that reach this workspace: its own, and those of the organization it is in.
+      // An organization grant for some other organization does not belong here.
+      const selectedId = selected?.toLowerCase() ?? null;
+      const selectedOrg = selectedId ? workspaces.find(ws => ws.id?.toLowerCase() === selectedId)?.orgId?.toLowerCase() ?? null : null;
+      const filtered = selectedId
+        ? grantsResult.grants.filter(g => g.workspaceIds.includes(selectedId) || (g.level === "organization" && selectedOrg !== null && g.organizationId === selectedOrg))
         : grantsResult.grants;
-      renderSeatAdminHistoryList(container, filtered, {
+      // Placement follows the server's state, never this device's clock: what the server calls active is in the opening
+      // list with its action; ended and expired grants are under Past grants.
+      const current = filtered.filter(seatAdminGrantLive), past = filtered.filter(g => !seatAdminGrantLive(g));
+      const options: Parameters<typeof renderSeatAdminHistoryList>[2] = {
         agentsByPrincipalId,
         workspacesById,
         organizationsById,
@@ -337,7 +458,15 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
           }
           seatStatus("Removing agent admin access…");
           const outcome = await endSeatAdmin(activeSession, requestId, g.grantId);
-          if (generation !== callGen || session?.user.id !== activeSession.user.id) return;
+          if (session?.user.id !== activeSession.user.id) return;
+          if (generation !== callGen) {
+            /* The view was refreshed or refused while this was on its way, so this result may not be drawn into it.
+               After a refusal nothing is read or drawn until a full refresh succeeds. If the view has since been read
+               again in full, its agent rows are read again so the list shows what is true now. */
+            seatBusy = false;
+            if (dialog.dataset.adminState === "ready") void loadSeatAdmin();
+            return;
+          }
           seatBusy = false;
           if (outcome.kind === "accepted") {
             seatEndRequestIds.delete(g.grantId);
@@ -355,23 +484,42 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
           button.disabled = false;
           seatStatus(outcome.message);
         },
-      });
+      };
+      renderSeatAdminHistoryList(container, current, options);
+      renderSeatAdminHistoryList(pastContainer, past, options);
+      // The list says "nothing here" once for the whole view, not once per kind of holder.
+      if (!current.length) container.replaceChildren();
+      if (!past.length) pastContainer.replaceChildren();
+      section.hidden = current.length === 0;
+      seatActive = current.length; seatPast = past.length; syncEmpty();
     };
-    const open = (view: "account" | "workspace" = "account"): void => {
+    const open = (view: "account" | "workspace" = "account", wanted?: Pane): void => {
       if (!session) return;
       scope = view === "workspace" && workspaceId ? "workspace" : "account";
       clear();
-      for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-view]")) button.setAttribute("aria-pressed", String(button.dataset.adminView === scope));
-      if (!dialog.open) dialog.showModal(); void load(); void loadSeatAdmin();
+      // A fresh opening starts on who has access now; changing scope keeps the view the person is reading.
+      // The history link asks for History; every other door starts on Access.
+      if (wanted) showPane(wanted); else if (!dialog.open) showPane("access");
+      if (!dialog.open) dialog.showModal();
+      scopeLine();
+      const ownerId = session.user.id, ticket = ++namesTicket;
+      // Names for the scope line and for each grant's reach; ids are shown until they arrive, and if they never do.
+      void myWorkspaces().then(rows => {
+        if (ticket !== namesTicket || session?.user.id !== ownerId) return;
+        workspaceNames = new Map(rows.filter(row => row.id && row.name?.trim()).map(row => [row.id.toLowerCase(), row.name.trim()]));
+        scopeLine(); if (!busy) render();
+      }).catch(() => {});
+      void refresh();
     };
     one("[data-admin-indicator]").addEventListener("click", () => open(indicatorView));
     one("[data-admin-close]").addEventListener("click", () => dialog.close());
-    one("[data-admin-refresh]").addEventListener("click", () => { void load(); void loadSeatAdmin(); void indicator(); });
+    one("[data-admin-refresh]").addEventListener("click", () => { void refresh(); void indicator(); });
     one("[data-admin-seat-retry]").addEventListener("click", () => { void loadSeatAdmin(); });
     one("[data-admin-more-grants]").addEventListener("click", () => { void load("grants"); });
     one("[data-admin-more-actions]").addEventListener("click", () => { void load("actions"); });
     for (const collection of ["clients", "workers", "coverage"] as const) one(`[data-admin-more-${collection}]`).addEventListener("click", () => { void load(collection); });
-    for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-view]")) button.addEventListener("click", () => open(button.dataset.adminView === "workspace" ? "workspace" : "account"));
+    for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-pane]")) button.addEventListener("click", () => showPane(button.dataset.adminPane === "history" ? "history" : button.dataset.adminPane === "clients" ? "clients" : "access"));
+    one("[data-admin-scope-switch]").addEventListener("click", () => open(scope === "account" ? "workspace" : "account"));
     document.addEventListener("click", event => {
       const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-admin-access-open]") : null;
       if (button) {
@@ -381,21 +529,24 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       }
     });
     window.addEventListener("commonswarm:admin-access-open", event => {
-      const detail = (event as CustomEvent<{ scope?: "account" | "workspace" } | undefined>).detail;
-      open(detail?.scope === "workspace" ? "workspace" : "account");
+      const detail = (event as CustomEvent<{ scope?: "account" | "workspace"; view?: "history" } | undefined>).detail;
+      open(detail?.scope === "workspace" ? "workspace" : "account", detail?.view === "history" ? "history" : undefined);
     });
     window.addEventListener("commonswarm:workspace-selected", event => {
       const detail = (event as CustomEvent<{ workspaceId: string | null; sample?: boolean }>).detail;
       workspaceId = detail.sample ? null : detail.workspaceId;
-      one<HTMLElement>("[data-admin-view=workspace]").hidden = !workspaceId;
-      clear(); if (dialog.open) open(scope); void indicator();
+      clear(); if (dialog.open) open(scope); else scopeLine(); void indicator();
     });
+    // A link to ?admin=history opens History for the whole account, once, as soon as the person's session is known.
+    let wantsHistory = false;
+    try { wantsHistory = new URLSearchParams(window.location.search).get("admin") === "history"; } catch { /* ignore */ }
+    const openFromLink = (): void => { if (wantsHistory && session) { wantsHistory = false; open("account", "history"); } };
     const auth = client();
     auth?.auth.onAuthStateChange((_event, next) => {
       const changed = session?.user.id !== next?.user.id;
       session = next; root.hidden = !session;
-      if (changed) { clear(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
-      if (session) window.setTimeout(() => { void indicator(); }, 0);
+      if (changed) { clear(); forgetNames(); requestIds.clear(); seatEndRequestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
+      if (session) window.setTimeout(() => { void indicator(); openFromLink(); }, 0);
     });
     const initialGeneration = generation;
     void currentSession().then(next => {
@@ -403,9 +554,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       session = next; root.hidden = !next;
       if (next) {
         void indicator();
-        try {
-          if (new URLSearchParams(window.location.search).get("admin") === "history") open("account");
-        } catch { /* ignore */ }
+        openFromLink();
       }
     }).catch(() => { if (generation === initialGeneration) root.hidden = true; });
     // Human-facing status refresh, independent of the delegated runtime being online.
@@ -425,7 +574,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   admin-delegations :global(button:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
   admin-delegations :global(button:disabled) { opacity: .6; cursor: wait; }
   .admin-indicator[data-full-account=true], admin-delegations :global(article[data-mode=full_account]) { border: 2px solid var(--warning); background: var(--surface-2); }
-  .admin-indicator span, small, .eyebrow { color: var(--text-muted); font-size: .8rem; }
+  .admin-indicator span, small { color: var(--text-muted); font-size: .8rem; }
   dialog { color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-interactive); border-radius: .8rem; padding: 1.5rem; width: min(46rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow: auto; }
   dialog::backdrop { background: rgba(0,0,0,.45); }
   header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }

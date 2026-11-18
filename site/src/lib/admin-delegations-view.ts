@@ -24,6 +24,12 @@ export function adminApprovalLines(client: AdminClientView): string[] {
   ];
 }
 /** This is a UI affordance only; account commands enforce human ownership again. */
+/** A client's approval in two parts: what a person reads first, and the ids and event references behind More. */
+export function adminApprovalParts(client: AdminClientView): { lines: string[]; more: string[] } {
+  const lines = adminApprovalLines(client);
+  const references = client.approval ? 1 + (client.approval.withdrawal_event_id ? 1 : 0) : 0;
+  return { lines: lines.slice(0, lines.length - references), more: lines.slice(lines.length - references) };
+}
 export function adminClientAction(client: AdminClientView, ownerId: string): "approve" | "withdraw" | null {
   if (client.approval && client.approval.owner_user_id !== ownerId) return null;
   if (client.approval?.withdrawn_at) return null;
@@ -49,6 +55,42 @@ export function adminRenewalDiff(grant: AdminGrantView, policy: AdminSitePolicy)
 function policyLines(title: string, values: Record<string, unknown>): string[] {
   return Object.entries(values).filter(([, value]) => value !== null).map(([key, value]) =>
     `${title} · ${key.replaceAll("_", " ")}: ${Array.isArray(value) ? value.join(", ") || "none" : String(value)}.`);
+}
+/** Why a grant ended, in plain words. The exact code stays with the grant's detail lines, behind More. */
+const PAST_REASONS: Record<string, string> = {
+  human_revoked: "Revoked by the owner", owner_revoked: "Revoked by the owner",
+  human_withdrawn: "The owner withdrew this client's approval",
+  refresh_replay: "Stopped because an old sign-in key was used again",
+};
+/** What a person needs on the row before deciding whether a grant stays: whether it is active, what it reaches now, what
+ * it may do and exactly when it ends, in their own time zone. Everything else adminGrantLines prints stays behind More.
+ * `past` follows the server's state alone (revoked or expired): it decides whether the row keeps its action, so it never
+ * depends on this device's clock. A grant the server still calls active stays in the opening list with its action, and
+ * says so when its end time has passed here. `twin` marks a row that shares its client with another, so the connection
+ * tells them apart before the action. */
+export function adminGrantSummary(grant: AdminGrantView, policy: AdminSitePolicy, workspaceNames: ReadonlyMap<string, string> = new Map(), now = Date.now(), twin = false): { past: boolean; lines: string[] } {
+  const past = grant.state === "revoked" || grant.state === "expired";
+  // Access ends at whichever server deadline comes first.
+  const refresh = grant.refresh_deadline ? Date.parse(grant.refresh_deadline) : Number.NaN, expires = Date.parse(grant.expires_at);
+  const ends = Number.isFinite(refresh) && refresh < expires ? refresh : expires;
+  const end = `${new Date(ends).toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
+  const name = (id: string) => workspaceNames.get(id.toLowerCase()) ?? id;
+  const withdrawn = new Set(grant.withdrawn_workspace_ids.map(id => id.toLowerCase()));
+  // The reach is what the grant covers now: a workspace whose access was withdrawn is named apart, not counted in.
+  const reach = grant.workspace_ids.filter(id => !withdrawn.has(id.toLowerCase())).map(name);
+  return { past, lines: [
+    `${grant.state[0]!.toUpperCase()}${grant.state.slice(1)} · ${grant.mode === "full_account" ? "Full account" : "Selected workspaces"}`,
+    ...(twin ? [`Connection ${grant.connection_id.slice(0, 8)} · granted ${new Date(grant.created_at).toLocaleString()}`] : []),
+    ...(grant.issuance_status === "committed" ? [] : ["Issuance result unknown. This grant does not establish a usable admin connection."]),
+    ...(!past && grant.family && grant.family.state !== "active" ? [`Its connection is ${grant.family.state}.`] : []),
+    `${grant.workspace_selector === "owned_and_selected" ? "Existing and future owned workspaces, plus selected shared workspaces" : "Workspaces"}: ${reach.join(", ") || "none"}`,
+    ...(withdrawn.size ? [`Access withdrawn: ${grant.withdrawn_workspace_ids.map(name).join(", ")}`] : []),
+    `Can: ${labels(grant.capability_names, policy).join(", ") || "no capability snapshot available"}`,
+    grant.state === "expired" ? `Ended ${end}` : grant.state === "revoked" ? `It was set to end ${end}`
+      // The server still counts it active though this device's clock is past its end: say so, and keep its action.
+      : ends <= now ? `Its end time, ${end}, has passed on this device` : `Ends ${end}`,
+    ...(grant.state === "revoked" ? [PAST_REASONS[grant.reason_code ?? ""] ?? "Reason unavailable"] : []),
+  ] };
 }
 export function adminGrantLines(grant: AdminGrantView, policy: AdminSitePolicy, now = Date.now()): string[] {
   const state = grant.state === "active" && Date.parse(grant.expires_at) <= now ? "expired" : grant.state;
