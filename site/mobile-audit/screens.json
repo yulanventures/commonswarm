@@ -1938,7 +1938,8 @@
     "path": "/app?w={workspace}&todo={todo}",
     "setup": [
       {
-        "waitFor": "[data-home-route-pane]:not([hidden]) [data-assign-picker] .hm-assign-chip"
+        "waitFor": "[data-home-route-pane]:not([hidden]) [data-assign-picker] .hm-assign-toggle",
+        "click": "[data-home-route-pane]:not([hidden]) [data-assign-picker] .hm-assign-toggle"
       },
       {
         "scroll": "[data-assign-picker] .hm-assign-chips"

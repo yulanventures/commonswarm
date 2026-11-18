@@ -66,12 +66,12 @@ live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo .hm-t
 live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] .hm-todo :is(.hm-comment-author, .hm-todo-gate legend) {
   font-weight: 600;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-todos-filter-button, .hm-assign-chip, .hm-choice, .hm-todo-gate-kind) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-todos-filter-button, .hm-assign-chip, .hm-assign-toggle, .hm-choice, .hm-todo-gate-kind) {
   min-block-size: 44px; min-inline-size: 44px; max-inline-size: 100%; box-sizing: border-box;
   border-radius: 6px; font-family: inherit; font-size: 13px; font-weight: 500; line-height: 1.5;
   white-space: normal; overflow-wrap: anywhere; text-align: start;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-choice) {
+live-dashboard.dashboard[data-kylon-shell] [data-home-route-pane] :is(.hm-todos, .hm-todo) :is(.hm-todo-save, .hm-todo-cancel, .hm-todos-add-open, .hm-assign-toggle, .hm-choice) {
   border: 1px solid var(--k-shell-control); padding-inline: 12px; box-shadow: none;
   background: var(--k-shell-surface); color: var(--k-shell-ink);
 }

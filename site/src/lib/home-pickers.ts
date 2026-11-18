@@ -278,19 +278,40 @@ export function chipKey(options: PickOptionVM[], from: number | null, key: strin
   }
 }
 
-/** The assign picker: every person and agent who can be assigned, as chips grouped in their
- * person's capsule (Todo canvas). One radiogroup named by the panel heading; each chip is a
- * role="radio" button with one roving tab stop, and aria-checked marks the recorded assignee.
- * The chip shows the short name inside its owner's capsule; its accessible name is the full
- * label ("Your Claude"), and the caption the old list showed is its description. In sample mode,
- * or without permission, it is plain text. */
+/** Which assign choosers are open, by picker id. Kept outside the DOM: the to-do view is rebuilt on
+ * every refresh, and a chooser a person has open must still be open afterwards. */
+const openAssignPickers = new Set<string>();
+
+/** The assign picker. Closed, it is one row: who the to-do is assigned to, and a Change button
+ * (Assign when nobody is). Open, the row's button reads Cancel and the chooser is shown under it:
+ * every person and agent who can be assigned, as chips grouped in their person's capsule (Todo
+ * canvas). The chooser is one radiogroup named by the panel heading; each chip is a role="radio"
+ * button with one roving tab stop, and aria-checked marks the recorded assignee. The chip shows
+ * the short name inside its owner's capsule; its accessible name is the full label ("Your
+ * Claude"), and its caption is its description. A pick assigns and closes. Cancel and Escape close
+ * without assigning; either way focus is on the row's button. In sample mode, or without
+ * permission, the picker is plain text. */
 export function assignPicker(doc: Document, vm: AssignPickerVM, onPick: (option: PickOptionVM) => void): HTMLElement {
   const root = node(doc, "div", "hm-picker"); root.dataset.assignPicker = vm.id;
   if (vm.sample || vm.disabled) { root.append(node(doc, "span", "hm-picker-value", vm.current)); return root; }
+  const who = whoIndex(vm.people);
+  const markFor = (option: PickOptionVM | undefined): HTMLElement | null => {
+    if (!option) return null;
+    const person = who.get(`${option.kind}:${option.value}`);
+    const mark = person ? (isAgentVM(person) ? agentOrb(doc, person, { size: 28, badge: false }) : personAvatar(doc, person, 28))
+      : node(doc, "span", "hm-pick-letter", option.label.trim().slice(0, 1).toLocaleUpperCase() || "?");
+    mark.setAttribute("aria-hidden", "true");
+    return mark;
+  };
   const group = node(doc, "div", "hm-assign-chips"); group.id = `${vm.id}-group`;
   group.setAttribute("role", "radiogroup");
   if (vm.labelledBy) group.setAttribute("aria-labelledby", vm.labelledBy); else group.setAttribute("aria-label", vm.label);
-  const who = whoIndex(vm.people);
+  const row = node(doc, "div", "hm-assign-current");
+  const currentMark = markFor(vm.options.find((option) => option.value === vm.currentValue));
+  if (currentMark) row.append(currentMark);
+  const toggle = node(doc, "button", "hm-assign-toggle"); toggle.type = "button"; toggle.id = `${vm.id}-toggle`;
+  toggle.setAttribute("aria-controls", group.id);
+  row.append(node(doc, "span", "hm-picker-value", vm.current), toggle);
   const chips: HTMLButtonElement[] = [];
   let focus = chipStop(vm.options, vm.currentValue);
   const rove = (index: number | null) => {
@@ -298,6 +319,17 @@ export function assignPicker(doc: Document, vm: AssignPickerVM, onPick: (option:
     chips.forEach((chip, at) => { chip.tabIndex = at === index ? 0 : -1; });
     if (index !== null) chips[index]?.focus();
   };
+  const show = (open: boolean) => {
+    if (open) openAssignPickers.add(vm.id); else openAssignPickers.delete(vm.id);
+    group.hidden = !open;
+    toggle.textContent = open ? "Cancel" : vm.currentValue === null ? "Assign" : "Change";
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  const close = () => { show(false); toggle.focus(); };
+  toggle.addEventListener("click", () => {
+    if (group.hidden) { show(true); rove(chipStop(vm.options, vm.currentValue)); } else close();
+  });
+  const pick = (option: PickOptionVM) => { close(); onPick(option); };
   let capsule: HTMLElement | null = null; let capsuleGroup: Id | null = null;
   vm.options.forEach((option, index) => {
     if (!capsule || option.group !== capsuleGroup) {
@@ -313,23 +345,22 @@ export function assignPicker(doc: Document, vm: AssignPickerVM, onPick: (option:
     const person = who.get(`${option.kind}:${option.value}`);
     if (person && isAgentVM(person)) chip.dataset.pickState = person.state.kind;
     // Inside the owner's capsule the owner badge would repeat what the capsule already says.
-    const mark = person ? (isAgentVM(person) ? agentOrb(doc, person, { size: 28, badge: false }) : personAvatar(doc, person, 28))
-      : node(doc, "span", "hm-pick-letter", option.label.trim().slice(0, 1).toLocaleUpperCase() || "?");
-    mark.setAttribute("aria-hidden", "true");
     const shown = person && isAgentVM(person) ? person.nestedLabel || option.label : option.label;
     const caption = node(doc, "span", "hm-assign-caption", option.caption); caption.id = `${id}-caption`;
-    chip.append(mark, node(doc, "span", "hm-assign-name", shown), caption);
-    chip.addEventListener("click", () => { if (option.disabled) return; rove(index); onPick(option); });
+    chip.append(markFor(option)!, node(doc, "span", "hm-assign-name", shown), caption);
+    chip.addEventListener("click", () => { if (option.disabled) return; pick(option); });
     chip.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.preventDefault(); close(); return; }
       const result = chipKey(vm.options, index, event.key);
       if (!result.handled) return;
       event.preventDefault();
-      if (result.select) onPick(result.select);
+      if (result.select) pick(result.select);
       else if (result.focus !== index) rove(result.focus);
     });
     chips.push(chip); capsule!.append(chip);
   });
-  root.append(group);
+  show(openAssignPickers.has(vm.id));
+  root.append(row, group);
   return root;
 }
 

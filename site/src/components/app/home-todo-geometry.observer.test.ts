@@ -24,6 +24,10 @@ type Geometry = {
   tabStops: string[]; firstFocus: string | null; firstChecked: boolean; secondFocus: string | null; secondTabStops: string[];
   moveSent: string[]; checkedAfterMove: string[]; optionHeights: number[];
   escapeFocus: boolean; escapeSent: string[]; assigned: string[]; enterFocus: boolean; spaceAssigned: string[];
+  assignRow: { closed: boolean; label: string | null; expanded: string | null; controls: boolean; current: string | null; unassignedLabel: string | null;
+    toggle: { width: number; height: number } };
+  assignOpened: { open: boolean; label: string | null; expanded: string | null; focusChecked: boolean };
+  escapeClosed: boolean; enterClosed: boolean; cancel: { closed: boolean; focus: boolean; sent: number; label: string | null };
   tagOpen: boolean; tagLabels: string[]; tagFooter: string | null; tagText: string; tagClosedAfterPick: boolean; comments: { body: string; tags: string[] }[];
   tagEscapeClosed: boolean; personChips: number; agentChips: number; offStatus: string; offWarning: boolean; paneRows: number;
   sampleControls: string[]; sampleRows: number; sampleTitle: boolean; textColor: string;
@@ -164,10 +168,20 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
           completionChecked: completion?.checked ?? null, workspaceHref: article.querySelector('.hm-todo-link')?.getAttribute('href') ?? null };
       });
 
+      // Assignee row: closed, the picker is one row naming the assignee with a Change button (Assign when nobody
+      // has the to-do). The button opens the chooser under the row and moves focus to the recorded assignee's chip.
       // Assign chips: one radiogroup named by the "Assigned to" heading, one roving tab stop on the recorded
-      // assignee. Arrows move focus only (a pick is a write); Escape keeps focus and sends nothing; Enter and
-      // Space pick the focused chip, and focus stays on it.
+      // assignee. Arrows move focus only (a pick is a write). Escape and the row's button, now Cancel, close the
+      // chooser and send nothing; Enter and Space pick the focused chip and close it. Each time focus is on the button.
       const group = root.querySelector('[data-assign-picker] [role=radiogroup]');
+      const toggle = root.querySelector('[data-assign-picker] .hm-assign-toggle');
+      const toggleBox = toggle.getBoundingClientRect();
+      metrics.assignRow = { closed: group.hidden, label: toggle.textContent, expanded: toggle.getAttribute('aria-expanded'),
+        controls: toggle.getAttribute('aria-controls') === group.id, current: root.querySelector('.hm-assign-current .hm-picker-value').textContent,
+        unassignedLabel: document.querySelector('#unassigned .hm-assign-toggle')?.textContent ?? null, toggle: { width: toggleBox.width, height: toggleBox.height } };
+      toggle.click();
+      metrics.assignOpened = { open: !group.hidden, label: toggle.textContent, expanded: toggle.getAttribute('aria-expanded'),
+        focusChecked: document.activeElement.getAttribute('aria-checked') === 'true' };
       const radios = [...root.querySelectorAll('[data-assign-picker] [role=radio]')];
       const checked = () => radios.filter((radio) => radio.getAttribute('aria-checked') === 'true').map((radio) => radio.dataset.pickValue);
       const stops = () => radios.filter((radio) => radio.tabIndex === 0).map((radio) => radio.dataset.pickValue);
@@ -183,11 +197,13 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
       metrics.moveSent = [...calls.assigned]; metrics.checkedAfterMove = checked();
       const moved = document.activeElement;
       key(moved, 'Escape');
-      metrics.escapeFocus = document.activeElement === moved; metrics.escapeSent = [...calls.assigned];
-      key(moved, 'Enter');
-      metrics.assigned = [...calls.assigned]; metrics.enterFocus = document.activeElement === moved;
-      key(moved, 'ArrowLeft'); key(document.activeElement, ' ');
+      metrics.escapeFocus = document.activeElement === toggle; metrics.escapeClosed = group.hidden; metrics.escapeSent = [...calls.assigned];
+      toggle.click(); key(document.activeElement, 'ArrowRight'); key(document.activeElement, 'Enter');
+      metrics.assigned = [...calls.assigned]; metrics.enterFocus = document.activeElement === toggle; metrics.enterClosed = group.hidden;
+      toggle.click(); key(document.activeElement, 'ArrowRight'); key(document.activeElement, 'ArrowLeft'); key(document.activeElement, ' ');
       metrics.spaceAssigned = [...calls.assigned];
+      toggle.click(); const sentBeforeCancel = calls.assigned.length; toggle.click();
+      metrics.cancel = { closed: group.hidden, focus: document.activeElement === toggle, sent: calls.assigned.length - sentBeforeCancel, label: toggle.textContent };
 
       // Tag picker: "@Mu" opens a filtered list with the highlight footer; Enter writes the tag; Post sends it.
       const field = root.querySelector('[data-todo-comment]');
@@ -239,6 +255,14 @@ test("To-do view, To-dos pane and pickers: keyboard paths, 44 px targets, wrappi
 
       assert.deepEqual(g.moveSent, [], "moving focus never assigns"); assert.deepEqual(g.checkedAfterMove, ["claude"], "moving focus does not change the checked chip");
        assert.deepEqual(g.escapeSent, [], "Escape sends nothing");
+      assert.deepEqual({ ...g.assignRow, toggle: null }, { closed: true, label: "Change", expanded: "false", controls: true, current: "Your Claude", unassignedLabel: "Assign", toggle: null },
+        `${where}: closed, the picker is one row with the assignee and a Change button; with nobody assigned the button reads Assign`);
+      assert.ok(g.assignRow.toggle.width >= 44 && g.assignRow.toggle.height >= 44, `${where}: the Change button is a 44 px target: ${JSON.stringify(g.assignRow.toggle)}`);
+      assert.deepEqual(g.assignOpened, { open: true, label: "Cancel", expanded: "true", focusChecked: true }, `${where}: Change opens the chooser and focus goes to the recorded assignee`);
+      assert.ok(g.optionHeights.length > 0 && g.optionHeights.every((height) => height >= 44), `${where}: every chip in the open chooser is 44 px tall: ${g.optionHeights}`);
+      assert.equal(g.escapeFocus && g.escapeClosed, true, `${where}: Escape closes the chooser and returns focus to the row's button`);
+      assert.equal(g.enterFocus && g.enterClosed, true, `${where}: a pick closes the chooser and returns focus to the row's button`);
+      assert.deepEqual(g.cancel, { closed: true, focus: true, sent: 0, label: "Change" }, `${where}: Cancel closes the chooser, sends nothing and keeps focus on the button`);
       assert.deepEqual(g.assigned, ["dot"]);
       assert.deepEqual(g.spaceAssigned, ["dot", "claude"], "Space picks the focused chip");
 
