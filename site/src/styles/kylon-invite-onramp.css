@@ -167,3 +167,5 @@ invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-o
 @media (width <= 64rem) {
   invite-onramp[data-kylon-onramp][data-kylon-onramp][data-kylon-onramp] .invite-onramp__brand-link { display: inline-flex; align-items: center; min-inline-size: 44px; min-block-size: 44px; }
 }
+/* The disclosure's sentences each start a line and wrap as they need; no gap is added between them. */
+invite-onramp[data-kylon-onramp] [data-review-disclosure] > [data-disclosure-line] { display: block; }

@@ -256,6 +256,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   } from "../../lib/member-invite";
 
   import { browserHumanInvitations, HumanInviteRefused } from '../../lib/human-invitations';
+  import { showDisclosure } from '../../lib/disclosure-lines';
   import { addAgentOwnershipLine, personTint } from "../../lib/home-names";
   import type { HumanInvitePreview } from '../../../../src/cloud/human-invitations';
   import {
@@ -642,7 +643,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
             node.textContent = value.workspace_name;
           }
           one<HTMLElement>('[data-review-audience]')!.textContent = value.audience.map(m => `${m.display_name} (${m.role})`).join(', ');
-          one<HTMLElement>('[data-review-disclosure]')!.textContent = value.disclosure;
+          showDisclosure(one<HTMLElement>('[data-review-disclosure]')!, value.disclosure);
           one<HTMLElement>('[data-review-expiry]')!.textContent = 'This invitation expires ' + new Date(value.expires_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) + '.';
           resetReview();
           return show('review');
