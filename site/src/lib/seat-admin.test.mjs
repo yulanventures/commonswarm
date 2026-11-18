@@ -463,5 +463,5 @@ test("nonActiveSeatAdminGrantMessage returns explicit notices for expired, downg
 
 test("the end confirmation never promises the person something they cannot do", () => {
   assert.equal(seatAdminEndConsequence("you"), "It stays off until you turn it on again.");
-  assert.equal(seatAdminEndConsequence("owner"), "It stays off until the agent’s owner turns it on again.");
+  assert.equal(seatAdminEndConsequence("owner"), "Only the agent’s owner can grant this access again.");
 });

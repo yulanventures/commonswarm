@@ -372,7 +372,7 @@ export function seatAdminEndQuestion(agentName: string, level: SeatAdminLevel, c
 
 /** What the end confirmation says happens next. It must not promise the person something they cannot do. */
 export function seatAdminEndConsequence(restoredBy: "you" | "owner"): string {
-  return restoredBy === "owner" ? "It stays off until the agent’s owner turns it on again." : "It stays off until you turn it on again.";
+  return restoredBy === "owner" ? "Only the agent’s owner can grant this access again." : "It stays off until you turn it on again.";
 }
 
 /** Turning admin access off asks first. Keep (the initial focus), Escape and closing send nothing; End access
