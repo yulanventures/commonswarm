@@ -198,7 +198,19 @@ admin-delegations[data-kylon-account] > dialog :is(article, li) {
 live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] { inline-size: min(440px, calc(100% - 32px)); }
 live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] :is(.dashboard__connected-apps-intro, .dashboard__connected-apps-status, .dashboard__signout-others-actions) { margin-inline: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__connected-apps-status:empty { display: none; }
-live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-actions { margin-block: 16px 0; }
+/* The two answers are the same size, so neither is easier to hit than the other: side by side where both fit,
+   stacked full width on a phone with Cancel underneath, nearest the thumb. After a sign-out only Done is left and
+   takes the row. */
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-actions {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: 8px; margin-block: 16px 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-actions > button { inline-size: 100%; justify-content: center; text-align: center; }
+/* What ends and what stays: two short lines, the label of each in ink. */
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-effect > p { margin: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-effect > p + p { margin-block-start: 6px; }
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__signout-others-effect strong { color: var(--k-shell-ink); font-weight: 600; }
+/* The result of the sign-out stands apart from the two lines above it. */
+live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] .dashboard__connected-apps-status:not(:empty) { margin-block-start: 12px; color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog] [data-signout-others-confirm] {
   color: #fff;
   background: var(--k-shell-danger, #dc2626);
