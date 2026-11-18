@@ -254,70 +254,120 @@ test("the served consent page never renders the OAuth state", async () => {
   assert.match(response.headers["content-security-policy"], /^default-src 'none'; style-src 'unsafe-inline';/u);
 });
 
-// The workspace picker: Home is asked only when it is a real choice, and a hidden Home is never sent.
-function pickerDocument(rows) {
+// The workspace picker: Home is asked only when it is a real choice, and what is sent matches what is shown.
+function pickerDocument(rows, { picker = true } = {}) {
   const listeners = [];
   const nodes = rows.map((row) => ({
-    pick: { type: "checkbox", name: "workspace_ids", checked: row.ticked, disabled: !!row.locked },
+    pick: { type: "checkbox", name: "workspace_ids", checked: !!row.ticked, disabled: !!row.locked },
     home: { type: "radio", name: "home_workspace_id", checked: !!row.home, disabled: !!row.locked },
   }));
+  const needed = { textContent: "", dataset: { text: "Choose which one is Home." } };
   const document = {
     documentElement: { dataset: {} },
     addEventListener: (name, listener) => { listeners.push([name, listener]); },
-    querySelector: (selector) => selector === ".workspace-list" ? (rows.length ? {} : null) : null,
+    querySelector: (selector) => !picker ? null : selector === ".workspace-list" ? {} : selector === ".home-needed" ? needed : null,
     querySelectorAll: (selector) => selector === ".workspace-choice"
       ? nodes.map((node) => ({ querySelector: (inner) => inner.includes("workspace_ids") ? node.pick : node.home }))
       : [],
   };
-  const change = (index, ticked) => {
-    nodes[index].pick.checked = ticked;
-    for (const [name, listener] of listeners) if (name === "change") listener({ target: nodes[index].pick });
+  const window = { addEventListener: (name, listener) => { listeners.push([`window:${name}`, listener]); } };
+  const fire = (name, event) => { for (const [type, listener] of listeners) if (type === name) listener(event); };
+  new Function("document", "window", readFileSync(new URL("../src/consent-submit.js", import.meta.url), "utf8"))(document, window);
+  return {
+    document, nodes, needed,
+    homes: () => nodes.map((node) => node.home.checked),
+    tick(index, ticked) { nodes[index].pick.checked = ticked; fire("change", { target: nodes[index].pick }); },
+    // A real radio group clears its other members; the stand-in does it by hand.
+    choose(index) { nodes.forEach((node, at) => { node.home.checked = at === index; }); fire("change", { target: nodes[index].home }); },
+    restore(state) { state.forEach(([ticked, home], at) => { nodes[at].pick.checked = ticked; nodes[at].home.checked = home; }); fire("window:pageshow", { persisted: false }); },
   };
-  new Function("document", "window", readFileSync(new URL("../src/consent-submit.js", import.meta.url), "utf8"))(document, { addEventListener() {} });
-  return { document, nodes, change };
 }
 
-test("the picker script clears a Home that is no longer shown, and leaves a real choice alone", () => {
-  // Two ticked with a Home: a real choice, untouched. The script marks the page so the styles apply.
-  const two = pickerDocument([{ ticked: true, home: true }, { ticked: true }]);
-  assert.equal(two.document.documentElement.dataset.homeAuto, "choose");
-  assert.deepEqual(two.nodes.map((node) => node.home.checked), [true, false]);
-  // Untick the Home row: one workspace is left, so no Home is sent and the server takes the one that is ticked.
-  two.change(0, false);
-  assert.equal(two.document.documentElement.dataset.homeAuto, "one");
-  assert.deepEqual(two.nodes.map((node) => node.home.checked), [false, false]);
-  // Three ticked, Home on the second; unticking the third keeps it, unticking the second clears it.
-  const three = pickerDocument([{ ticked: true }, { ticked: true, home: true }, { ticked: true }]);
-  three.change(2, false);
-  assert.deepEqual(three.nodes.map((node) => node.home.checked), [false, true, false]);
-  three.change(2, true);
-  three.change(1, false);
-  assert.deepEqual(three.nodes.map((node) => node.home.checked), [false, false, false]);
-  // One ticked with a Home carried from the server: cleared at load, for the same reason.
-  assert.deepEqual(pickerDocument([{ ticked: true, home: true }, { ticked: false }]).nodes.map((node) => node.home.checked), [false, false]);
-  // A locked selection is carried by hidden fields; its disabled controls are left as rendered.
-  assert.deepEqual(pickerDocument([{ ticked: true, home: true, locked: true }]).nodes.map((node) => node.home.checked), [true]);
-  // A page with no picker is not marked.
-  assert.equal(pickerDocument([]).document.documentElement.dataset.homeAuto, undefined);
+test("the picker script sends one workspace as Home, and leaves the choice to the person with two or more", () => {
+  const picker = pickerDocument([{}, {}, {}]);
+  assert.equal(picker.document.documentElement.dataset.homeAuto, "one");
+  assert.deepEqual(picker.homes(), [false, false, false]);
+  // One ticked: that one is Home and the form says so (the hidden choice is filled in, never left stale).
+  picker.tick(1, true);
+  assert.deepEqual(picker.homes(), [false, true, false]);
+  assert.equal(picker.needed.textContent, "");
+  // A second tick makes it a real choice: the filled-in Home is cleared and the page asks.
+  picker.tick(0, true);
+  assert.equal(picker.document.documentElement.dataset.homeAuto, "choose");
+  assert.deepEqual(picker.homes(), [false, false, false]);
+  assert.equal(picker.needed.textContent, "Choose which one is Home.");
+  // The person's own choice is kept, and the ask goes away.
+  picker.choose(0);
+  assert.deepEqual(picker.homes(), [true, false, false]);
+  assert.equal(picker.needed.textContent, "");
+  picker.tick(2, true);
+  assert.deepEqual(picker.homes(), [true, false, false]);
+  // Unticking the Home row clears its Home while two remain, and the page asks again.
+  picker.tick(0, false);
+  assert.deepEqual(picker.homes(), [false, false, false]);
+  assert.equal(picker.needed.textContent, "Choose which one is Home.");
+  // Back to one: that one is Home. Back to none: no Home.
+  picker.tick(1, false);
+  assert.equal(picker.document.documentElement.dataset.homeAuto, "one");
+  assert.deepEqual(picker.homes(), [false, false, true]);
+  picker.tick(2, false);
+  assert.deepEqual(picker.homes(), [false, false, false]);
 });
 
-test("the picker keeps what the app can reach beside Allow, and asks about Home only through its rows", () => {
+test("the picker script keeps a Home the person chose, and follows ticks the browser restores", () => {
+  // Chosen with two ticked, then down to one and back to two: the choice was theirs, so it stays.
+  const chosen = pickerDocument([{ ticked: true, home: true }, { ticked: true }]);
+  assert.deepEqual(chosen.homes(), [true, false]);
+  chosen.tick(1, false);
+  chosen.tick(1, true);
+  assert.deepEqual(chosen.homes(), [true, false]);
+  // Dropping to the other workspace moves Home with it, since one workspace has one possible Home.
+  chosen.tick(0, false);
+  assert.deepEqual(chosen.homes(), [false, true]);
+  // A reload can restore ticks after the script first ran: the page catches up when it is shown.
+  const restored = pickerDocument([{}, {}]);
+  restored.restore([[true, false], [true, false]]);
+  assert.equal(restored.document.documentElement.dataset.homeAuto, "choose");
+  assert.equal(restored.needed.textContent, "Choose which one is Home.");
+  restored.restore([[true, false], [false, true]]);
+  assert.deepEqual(restored.homes(), [true, false]);
+  // A locked selection is carried by hidden fields; its disabled controls are left as rendered.
+  assert.deepEqual(pickerDocument([{ ticked: true, home: true, locked: true }]).homes(), [true]);
+  assert.deepEqual(pickerDocument([{ ticked: true, locked: true }]).homes(), [false]);
+  // A page with no picker is not marked.
+  assert.equal(pickerDocument([], { picker: false }).document.documentElement.dataset.homeAuto, undefined);
+});
+
+test("the picker says what the app can reach directly above Allow, and ties hiding Home to its script", () => {
   const html = page();
   const tree = htmlTree(html);
   const form = one(tree, (node) => node.tag === "form" && node.attrs.action?.endsWith("/consent"));
   const reach = one(form, (node) => node.tag === "p" && node.attrs.class === "reach");
-  assert.equal(text(reach), "It can reach only the workspaces you tick, and create up to 10 hosted seats in them. You can revoke it later in /app → Connected apps.");
-  const allow = one(form, (node) => node.tag === "button" && text(node) === "Allow connection");
-  const order = elements(form);
-  assert.ok(order.indexOf(reach) < order.indexOf(allow), "the reach line comes before Allow, inside the same form");
+  assert.equal(text(reach), "It can reach only the workspaces you tick, and create up to 10 hosted seats across them. You can revoke it, or a single seat, later in /app → Connected apps.");
+  const actions = one(form, (node) => node.tag === "div" && node.attrs.class === "actions");
+  const blocks = form.children.filter((child) => typeof child !== "string");
+  assert.equal(blocks.indexOf(actions) - blocks.indexOf(reach), 1, "nothing sits between the reach line and the buttons");
+  assert.equal(text(one(actions, (node) => node.tag === "button")), "Allow connection");
   assert.doesNotMatch(html, /What this connection can do|This app is asking to connect|Check each workspace this app may reach/u);
-  // Every workspace row still carries both fields with the same names; nothing is preselected by the page.
-  assert.match(html, /name="workspace_ids"/u);
-  assert.match(html, /name="home_workspace_id"/u);
+  // Every workspace row still carries both fields with the same names; the page itself preselects no Home.
+  assert.equal(html.match(/type="checkbox" name="workspace_ids"/gu).length, 3);
+  assert.equal(html.match(/type="radio" name="home_workspace_id"/gu).length, 3);
+  assert.doesNotMatch(html, /name="home_workspace_id"[^>]* checked/u);
+  // The ask for Home is a status message that starts empty; the script fills it in.
+  const needed = one(form, (node) => node.attrs.class === "home-needed");
+  assert.deepEqual([needed.attrs.role, needed.attrs["data-text"], text(needed)], ["status", "Choose which one is Home.", ""]);
   // Hiding Home is tied to the script that keeps it honest; without the script the choice stays in view.
   assert.match(html, /html\[data-home-auto\] \.workspace-choice \.home-choice\{display:none\}/u);
   assert.match(html, /html\[data-home-auto="choose"\] \.workspace-choice:has\(\.workspace-pick input:checked\) \.home-choice\{display:inline-flex\}/u);
   assert.doesNotMatch(html.replaceAll(/html\[data-home-auto[^{]*\{[^}]*\}/gu, ""), /\.home-choice\{display:none\}/u);
+  // A stray brace silently drops the rule after it (it once took the selected count with it).
+  let depth = 0;
+  for (const character of /<style>([\s\S]*?)<\/style>/u.exec(html)[1]) {
+    if (character === "{") depth += 1;
+    if (character === "}") depth -= 1;
+    assert.ok(depth >= 0, "a closing brace with nothing open");
+  }
+  assert.equal(depth, 0);
   // :has() cannot be nested; a nested one would silently drop the whole rule and hide Home for good.
   for (const [, selector] of html.matchAll(/(html\[data-home-auto[^{]*)\{/gu)) {
     assert.doesNotMatch(selector, /:has\([^()]*:has\(/u, selector);

@@ -226,15 +226,14 @@ input:disabled,input:disabled+span{cursor:default}
 .reach{font-size:15px;color:var(--muted);text-wrap:pretty}
 .reach strong{color:var(--ink)}
 .home-needed{margin-top:8px;padding:0 4px;font-size:14px;font-weight:700;color:var(--ink)}
-/* Home is asked only when it is a real choice: two or more workspaces ticked. With one, the server takes
-   that one as Home. The page script sets data-home-auto ("choose" with two or more ticked, "one" otherwise)
-   and clears a Home that is no longer shown, so this only applies while that script runs; without it every
+.home-needed:empty{display:none}
+/* Home is asked only when it is a real choice: two or more workspaces ticked. With one, that one is Home.
+   The page script sets data-home-auto ("choose" with two or more ticked, "one" otherwise) and keeps the Home
+   that is sent in step with what is shown, so this only applies while that script runs; without it every
    Home choice stays in view, as before. (:has() cannot be nested, so the count comes from the script.) */
 @supports selector(:has(*)){
   html[data-home-auto] .workspace-choice .home-choice{display:none}
   html[data-home-auto="choose"] .workspace-choice:has(.workspace-pick input:checked) .home-choice{display:inline-flex}
-  html[data-home-auto="choose"] .workspace-list:not(:has(.home-choice input:checked)) ~ .home-needed{display:block}
-}
 }
 .picker-selected::before{content:counter(chosen) " selected";font-weight:700;color:var(--ink)}
 form[action$="/consent"]>.warning{background:var(--soft);border:1px solid var(--hair)}
@@ -391,11 +390,11 @@ ${CONSENT_STYLES}
       ${pickerHelp ? `<p class="picker-help">${pickerHelp}</p>` : ""}
       <ul class="workspace-list${longList ? " is-long" : ""}">${workspaceRows}${emptyRow}</ul>
       <p class="picker-foot"><span>${countText}</span><span class="picker-selected" aria-hidden="true"></span></p>
-      <p class="home-needed" hidden>Choose which one is Home.</p>
+      <p class="home-needed" role="status" data-text="Choose which one is Home."></p>
     </fieldset>
-    <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> in them. You can revoke it later in <strong>/app → Connected apps</strong>.</p>
     <p class="warning">${ICONS.chat}<span><strong>Before you continue:</strong> ${CONSENT_WARNING}</span></p>
     ${renderConsentDestination({ clientName: clientDisplay.declaredName, redirectUri, metadataHost: clientDisplay.metadataHost })}
+    <p class="reach">It can reach only the workspaces you tick, and create up to <strong>10 hosted seats</strong> across them. You can revoke it, or a single seat, later in <strong>/app → Connected apps</strong>.</p>
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>
   </div>
