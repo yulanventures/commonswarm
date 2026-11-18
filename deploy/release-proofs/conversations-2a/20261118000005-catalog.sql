@@ -16,7 +16,7 @@ SELECT (SELECT count(*)=30 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
   ('swarm.conversation_member_key(uuid[],uuid[])','d3e00bd65903cb56d17ace12569db4d2','swarm_admin',NULL),
   ('swarm.conversation_next_generation(uuid,text,uuid)','b8eefd114cb97c9bb07f3e069bbf7013','swarm_admin',NULL),
   ('swarm.conversation_live_members(uuid)','eab25de6be2a8e9dad9fe3e0828209b7','swarm_admin',NULL),
-  ('swarm.conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)','d17b70b07a31f355bd8719eec60833eb','swarm_admin','swarm_command'),
+  ('swarm.conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)','6177a34e72a62e11914a278769402026','swarm_admin','swarm_command'),
   ('swarm.conversation_join(uuid,text,uuid,uuid)','b97cd4bdf0a7a76c61bdd3759f8bb1f2','swarm_admin','swarm_command'),
   ('swarm.conversation_leave(uuid,text,uuid,uuid)','017350da546c8a7a7437ff3d624e8c19','swarm_admin','swarm_command'),
   ('swarm.conversation_invite(uuid,text,uuid,uuid,uuid[],uuid[])','a68823893a0cfd92218893463b49866b','swarm_admin','swarm_command'),

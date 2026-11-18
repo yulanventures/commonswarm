@@ -17628,7 +17628,8 @@ async function handleTransaction(
         command.channel === undefined && command.thread_root_id == null && (command.in_reply_to ?? null) === null
       ) {
         /* Today's addressed post outside any channel files in the 1:1 or group of its set. If that set's
-         * group has someone who left, the database refuses it at commit; say why now. */
+         * group has someone who left, the database refuses it at commit; say why now, without a name: the
+         * composer can change recipients, and has no new-group action. */
         const recipients: ConversationMember[] = command.to ?? [
           ...(command.to_user_id ? [{ kind: "user" as const, id: command.to_user_id }] : []),
           ...(command.to_agent_principal_id ? [{ kind: "agent" as const, id: command.to_agent_principal_id }] : []),
@@ -17642,7 +17643,7 @@ async function handleTransaction(
             outcome: "domain", reason: "conversation_member_left", hash,
           });
           return decided({ status: 409, body: { error: "conversation_member_left",
-            message: `${departed} left this group. Start a new group to message these people.` } });
+            message: "Someone left this group. Choose different recipients to send this message." } });
         }
       }
       /* A reply to a choice ask takes the same per-ask lock answer_choice holds, so a typed reply

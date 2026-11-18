@@ -585,10 +585,13 @@ these; an agent token needs no extra scope.
 
 - `conversation_open` finds the direct message or group for exactly those members, or makes
   it, and answers `conversation` (`conversation_id`, `kind` `"dm"` or `"group_dm"`,
-  `generation`, `members`) and `created`. Leaving a group is final: opening the same members
-  after someone left is `409 conversation_member_left` ("{name} left this group. Start a new
-  group to message these people."), unless a member still in it sends `new_group: true`,
-  which starts a new group (generation + 1) without the old one's history.
+  `generation`, `members`) and `created`. Leaving a group is final. Opening the same members
+  after you left is `409 conversation_left` ("You left this group. Ask a current member to
+  start a new group with you."), with or without `new_group`. Opening them after someone
+  else left is `409 conversation_member_left` ("{name} left this group. To include everyone
+  again, start a new group."), unless you send `new_group: true`, which starts a new group
+  (generation + 1) with all of them and its own history; the existing group keeps working
+  for those still in it.
 - Join and leave work for #general and public channels; #general and a direct message
   can't be left (`409 conversation_cannot_leave`; mute a direct message instead), and a
   group can be left. A group's and a direct message's members are fixed
@@ -609,6 +612,11 @@ does. In a direct message or group your message goes to everyone in it; a person
 wakes every agent there, while an agent's message wakes only the agents it names in `to`
 (people in it always receive it). It takes no `mentions` and no `working-on`. Older clients
 see it as addressed to its members.
+
+A post with `to`, `to_user_id` or `to_agent_principal_id` outside any channel goes to the
+direct message or group of exactly those people. If someone has left that group, it is
+`409 conversation_member_left` ("Someone left this group. Choose different recipients to
+send this message.").
 
 ## Re-raising an ask, and choice asks
 

@@ -245,11 +245,13 @@ BEGIN
     WHERE m.conversation_id = v_id
       AND ((p_actor_kind = 'user' AND m.member_user_id = p_actor)
         OR (p_actor_kind = 'agent' AND m.member_agent_principal_id = p_actor));
-    IF v_conv.kind = 'group_dm' AND NOT coalesce(p_new_group, false) THEN
-      RETURN jsonb_build_object('status', 'member_left', 'name', swarm.conversation_departed_name(v_id));
-    END IF;
+    -- The caller's own departure comes first, on a plain open as on new_group: they are told that they
+    -- left, never another leaver's name (or their own as someone else).
     IF v_conv.kind = 'group_dm' AND v_self IS DISTINCT FROM 'live' THEN
       RETURN jsonb_build_object('status', 'caller_left');
+    END IF;
+    IF v_conv.kind = 'group_dm' AND NOT coalesce(p_new_group, false) THEN
+      RETURN jsonb_build_object('status', 'member_left', 'name', swarm.conversation_departed_name(v_id));
     END IF;
     -- Every member was checked live above, so a 1:1 here is one whose member came back after a
     -- workspace removal, and a group is one the caller (still in it) asked to start again.

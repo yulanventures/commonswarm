@@ -178,6 +178,8 @@ test("leaving a group is final; only an explicit new group from someone still in
     refusedBy("23514", "conversation_group_member_left"), "today's path to the founding set stays fenced");
 
   assert.deepEqual(await open(w.people.alice!, "user", founders, [w.agents.agentA!]), { status: "member_left", name: "carol" });
+  assert.deepEqual(await open(w.people.carol!, "user", [w.people.alice!, w.people.bob!], [w.agents.agentA!]),
+    { status: "caller_left" }, "the one who left is told so first, never another leaver's name");
   assert.deepEqual(await open(w.people.carol!, "user", [w.people.alice!, w.people.bob!], [w.agents.agentA!], true),
     { status: "caller_left" }, "the one who left cannot start it again");
   const fresh = await open(w.people.bob!, "user", [w.people.alice!, w.people.carol!], [w.agents.agentA!], true);

@@ -225,9 +225,9 @@ function refusal(status: Record<string, unknown>, kind: ConversationCommandKind)
         `A direct message or group holds at most ${CONVERSATION_MEMBER_MAX} people and agents, you included.`);
     case "member_left":
       return no(409, "conversation_member_left",
-        `${String(status.name ?? "Someone")} left this group. Start a new group to message these people.`);
+        `${String(status.name ?? "Someone")} left this group. To include everyone again, start a new group.`);
     case "caller_left":
-      return no(409, "conversation_left", "You left this group, so you can't start it again. Someone still in it can.");
+      return no(409, "conversation_left", "You left this group. Ask a current member to start a new group with you.");
     case "private_channel":
       return no(409, "conversation_private_channel",
         "A private channel's members are managed with channel_member_add, channel_member_remove and channel_leave.");
