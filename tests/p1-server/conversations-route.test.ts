@@ -178,6 +178,8 @@ test("leaving a group is final; only an explicit new group from someone still in
     refusedBy("23514", "conversation_group_member_left"), "today's path to the founding set stays fenced");
 
   assert.deepEqual(await open(w.people.alice!, "user", founders, [w.agents.agentA!]), { status: "member_left", name: "carol" });
+  assert.deepEqual(await open(w.people.carol!, "user", [w.people.alice!, w.people.bob!], [w.agents.agentA!]),
+    { status: "caller_left" }, "the one who left is told so first, never another leaver's name");
   assert.deepEqual(await open(w.people.carol!, "user", [w.people.alice!, w.people.bob!], [w.agents.agentA!], true),
     { status: "caller_left" }, "the one who left cannot start it again");
   const fresh = await open(w.people.bob!, "user", [w.people.alice!, w.people.carol!], [w.agents.agentA!], true);
@@ -358,6 +360,61 @@ test("a frame chosen while a leave or a removal is in flight waits for it: the o
     async () => { await post(sql, w, { from: w.people.alice!, channel: lock }); },
   );
   assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1 }, "the post committed after bob's removal: only alice hears it");
+});
+
+test("a reaction while its channel is being made private is announced to the channel's members only", async () => {
+  const room = await channel(sql, w, w.people.alice!);
+  const message = await post(sql, w, { from: w.people.alice!, channel: room });
+  assert.equal((await filed(sql, message))?.kind, "public_channel");
+  const at = await frames();
+  // The conversion as channel_update makes it: the visibility (which turns the channel's conversation
+  // private through step 1's sync trigger), then its members, held open while the reaction starts.
+  await overlap(
+    async (tx) => {
+      await tx`UPDATE swarm.channels SET visibility = 'private' WHERE workspace_id = ${w.id}::uuid AND channel_id = ${room}::uuid`;
+      await tx`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, is_manager, added_by_kind, added_by_principal)
+        VALUES (${w.id}::uuid, ${room}::uuid, 'user', ${w.people.alice!}::uuid, true, 'user', ${w.people.alice!}::uuid),
+          (${w.id}::uuid, ${room}::uuid, 'user', ${w.people.bob!}::uuid, false, 'user', ${w.people.alice!}::uuid)`;
+    },
+    async () => {
+      await sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
+        VALUES (${w.id}::uuid, ${message}::uuid, ${w.people.alice!}::uuid, ${"\u{1F512}"})`;
+    },
+  );
+  const [{ kind }] = await sql<{ kind: string }[]>`SELECT kind FROM swarm.conversations WHERE conversation_id = ${room}::uuid`;
+  assert.equal(kind, "private_channel");
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1, [topic("bob")]: 1 },
+    "its members hear the reaction; carol and dave, live in the workspace but outside the channel, hear nothing");
+});
+
+test("history never filed: a thread reply under an unfiled root tells nobody; an addressed one and a public one keep their audiences", async () => {
+  const id = () => randomUUID();
+  const [root, reply, open] = [id(), id(), id()];
+  // As step 1's backfill fixture writes it: a root from someone who no longer resolves, addressed to alice, and
+  // a reply under it, both history (the filing trigger off), so the reply stays unmapped as root_unfiled.
+  await sql.begin(async (tx) => {
+    await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+      VALUES (${root}::uuid, ${w.id}::uuid, ${id()}::uuid, 'user', ${w.people.alice!}::uuid, 'note', 'ghost', clock_timestamp() + interval '1 day')`;
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until, thread_root_id)
+      VALUES (${reply}::uuid, ${w.id}::uuid, ${w.people.alice!}::uuid, 'user', 'note', 'ghost reply', clock_timestamp() + interval '1 day', ${root}::uuid)`;
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until)
+      VALUES (${open}::uuid, ${w.id}::uuid, ${w.people.bob!}::uuid, 'user', 'note', 'open history', clock_timestamp() + interval '1 day')`;
+    await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
+  });
+  for (const unmapped of [root, reply, open]) assert.equal(await filed(sql, unmapped), null);
+  const react = (signal: string, by: string, emoji: string) => sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
+    VALUES (${w.id}::uuid, ${signal}::uuid, ${by}::uuid, ${emoji})`;
+  let at = await frames();
+  await react(reply, w.people.alice!, "\u{1F440}");
+  assert.deepEqual(delta(await frames(), at), {}, "the reply's audience is not proved, so nobody is told");
+  at = await frames();
+  await react(root, w.people.alice!, "\u{1F440}");
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1 }, "the addressed root: the person it addressed");
+  at = await frames();
+  await react(open, w.people.carol!, "\u{1F440}");
+  assert.deepEqual(delta(await frames(), at), Object.fromEntries(["alice", "bob", "carol", "dave"].map((n) => [topic(n), 1])),
+    "unfiled history for everyone: every live person");
 });
 
 test("an explicit read cursor follows the read rule 2a serves: an agent left off a group post cannot mark through it", async () => {

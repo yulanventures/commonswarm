@@ -240,7 +240,7 @@ test("conversation_open finds or makes a 1:1 or group; replays; refuses stranger
   assert.equal(left.changed, true);
   const refused = await send(ann.jwt, { kind: "conversation_open", members: [user(ben), user(cat), agent(annBot)] });
   assert.deepEqual({ status: refused.status, ...refused.body }, { status: 409, error: "conversation_member_left",
-    message: "Cat left this group. Start a new group to message these people." });
+    message: "Cat left this group. To include everyone again, start a new group." });
   const oldPath = await send(ann.jwt, note({ to: [user(ben), user(cat), agent(annBot)] }));
   assert.deepEqual([oldPath.status, oldPath.body.error], [409, "conversation_member_left"], "today's path says why too");
   assert.equal((await send(cat.jwt, { kind: "conversation_open", members: [user(ann), user(ben), agent(annBot)], new_group: true }))
@@ -475,4 +475,26 @@ test("a replay answers again only while its conversation is still open to the ca
     "after his removal, no channel kind and no read time");
   assert.deepEqual(ok(await send(ann.jwt, { kind: "conversation_mark_read", conversation_id: priv }, annMark)), annFirst,
     "ann, still in it, replays in full");
+});
+
+test("a group someone left: the one who left is told so first; a member still in it, and today's picker, are told what to do", { timeout: 60_000 }, async () => {
+  const set = [user(ben), user(dee), agent(deeBot)];
+  const without = (p: Person) => set.filter((m) => m.id !== p.id);
+  const group = await opened(ben.jwt, without(ben));
+  ok(await send(dee.jwt, { kind: "conversation_leave", conversation_id: group.conversation_id }));
+
+  const youLeft = { status: 409, error: "conversation_left",
+    message: "You left this group. Ask a current member to start a new group with you." };
+  const reopen = await send(dee.jwt, { kind: "conversation_open", members: without(dee) });
+  assert.deepEqual({ status: reopen.status, ...reopen.body }, youLeft, "on the first open, without new_group");
+  const restart = await send(dee.jwt, { kind: "conversation_open", members: without(dee), new_group: true });
+  assert.deepEqual({ status: restart.status, ...restart.body }, youLeft, "and on the explicit restart");
+
+  const stayed = await send(ben.jwt, { kind: "conversation_open", members: without(ben) });
+  assert.deepEqual({ status: stayed.status, ...stayed.body }, { status: 409, error: "conversation_member_left",
+    message: "Dee left this group. To include everyone again, start a new group." }, "a member still in it");
+
+  const picker = await send(ben.jwt, note({ to: without(ben) }));
+  assert.deepEqual({ status: picker.status, ...picker.body }, { status: 409, error: "conversation_member_left",
+    message: "Someone left this group. Choose different recipients to send this message." }, "today's picker, with no name");
 });
