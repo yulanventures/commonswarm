@@ -232,8 +232,9 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
   }
   let ended = grant!;
   if (!decision.already_ended) {
+    // The person who ended it is kept on the row; the database refuses an end by anyone without a say over the grant.
     const rows = await tx<GrantRow[]>`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = ${new Date(now)},
-        end_reason = 'owner_downgrade' WHERE grant_id = ${grant!.grant_id}::uuid RETURNING *`;
+        end_reason = 'owner_downgrade', ended_by_user_id = ${human.user_id}::uuid WHERE grant_id = ${grant!.grant_id}::uuid RETURNING *`;
     ended = rows[0]!;
     await record(tx, owner, account, human.user_id, commandId, now, { action: 'end_seat_admin', target_kind: 'seat_admin_grant',
       target_id: grant!.grant_id, workspace_id: null, level: grant!.level, principal_id: grant!.principal_id,

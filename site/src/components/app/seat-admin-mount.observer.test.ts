@@ -697,8 +697,32 @@ async function observeSeatAdminApp() {
         "organization grant command sent with selected org2 and null expires_at",
       );
 
-      // One-click removal of workspace admin leaves organization admin on and records state="downgraded".
+      // Turning workspace admin off asks first; Keep sends nothing and leaves it on.
+      const endCommandsBefore = seatCommands().length;
       document.querySelector<HTMLButtonElement>('[data-seat-admin-toggle="workspace"]')!.click();
+      const keepDialog = (await wait(
+        () => document.querySelector<HTMLDialogElement>('dialog[data-seat-admin-end="workspace"]'),
+        "end confirmation",
+      )) as HTMLDialogElement;
+      assert(keepDialog.open && keepDialog.textContent!.includes("End admin access for") &&
+        keepDialog.textContent!.includes("It stays off until you turn it on again."), "end confirmation asks in plain words");
+      assert(document.activeElement?.textContent === "Keep", "Keep has the initial focus");
+      findDialogBtn(keepDialog, "Keep")!.click();
+      await tick();
+      assert(!keepDialog.isConnected && seatCommands().length === endCommandsBefore, "Keep sends nothing");
+      assert(
+        document.querySelector<HTMLElement>('[data-seat-admin-toggle="workspace"]')?.getAttribute("aria-checked") === "true",
+        "Keep leaves workspace admin on",
+      );
+
+      // End access removes workspace admin, leaves organization admin on and records state="downgraded".
+      document.querySelector<HTMLButtonElement>('[data-seat-admin-toggle="workspace"]')!.click();
+      const endDialog = (await wait(
+        () => document.querySelector<HTMLDialogElement>('dialog[data-seat-admin-end="workspace"]'),
+        "end confirmation again",
+      )) as HTMLDialogElement;
+      assert(seatCommands().length === endCommandsBefore, "opening the end confirmation sends nothing");
+      findDialogBtn(endDialog, "End access")!.click();
       await wait(
         () =>
           document.querySelector<HTMLElement>('[data-seat-admin-toggle="workspace"]')?.getAttribute("aria-checked") ===

@@ -126,10 +126,10 @@ async function joinWorkspace(userId: string, role: "member" | "admin") {
   });
 }
 
-// One test's failure never leaves a grant active for the next.
+// One test's failure never leaves a grant active for the next. The grantor ends it, as the end guard requires.
 afterEach(async () => {
-  await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'owner_downgrade'
-    WHERE owner_user_id = ${owner.id}::uuid AND state = 'active'`;
+  await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'owner_downgrade',
+    ended_by_user_id = owner_user_id WHERE owner_user_id = ${owner.id}::uuid AND state = 'active'`;
 });
 
 after(async () => {
@@ -910,4 +910,141 @@ test("create a seat: no seat credential is stored or logged anywhere", async () 
     WHERE encode(token_hash, 'hex') = ANY(${seatTokens.map((t) => createHash("sha256").update(t).digest("hex"))}::text[])`;
   assert.equal(hashed, seatTokens.length, "each credential is stored as its hash");
   for (const token of seatTokens) assert.ok(!allFunctionLogs.includes(token), "no function log line carries a seat credential");
+});
+
+/* ---- who ended a grant, and the database guard: only an owner's end or a real expiry ends one ---- */
+
+type EndedSelf = { grant_id: string; level: string; state: string; end_reason: string; ended_at: string; ended_by: string | null };
+type PersonGrant = { grant_id: string; state: string; end_reason: string | null; ended_at: string | null; ended_by: string | null };
+async function selfRead(): Promise<{ grants: Array<{ grant_id: string }>; ended: EndedSelf[] }> {
+  const r = await readAs(agentToken);
+  assert.equal(r.status, 200, JSON.stringify(r.body) + functionLogs.slice(-1500));
+  assert.equal(r.body.enabled, true);
+  return r.body as unknown as { grants: Array<{ grant_id: string }>; ended: EndedSelf[] };
+}
+async function personRead(userId: string): Promise<PersonGrant[]> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ r: { grants: PersonGrant[] } }[]>`SELECT swarm_read.my_seat_admin_grants() AS r`;
+    return row!.r.grants;
+  });
+}
+const refusedByGuard = (name: string) => (error: unknown) => {
+  assert.equal((error as { code?: string }).code, "42501", `${name}: ${String(error)}`);
+  assert.match(String((error as Error).message), /only ends by an owner's choice or at its end date/, name);
+  return true;
+};
+
+test("an owner's end records who ended it; the agent's and the person's reads both show it", async () => {
+  const mine = await grant();
+  await endGrant(mine);
+  const [row] = await sql<{ ended_by_user_id: string | null; state: string }[]>`SELECT ended_by_user_id, state FROM swarm.seat_admin_grants
+    WHERE grant_id = ${mine}::uuid`;
+  assert.deepEqual({ ...row }, { ended_by_user_id: owner.id, state: "downgraded" });
+  let self = await selfRead();
+  assert.ok(!self.grants.some((g) => g.grant_id === mine), "an ended grant is not active");
+  assert.equal(self.ended[0]?.grant_id, mine, "the newest end comes first");
+  assert.deepEqual({ ...self.ended[0], ended_at: undefined }, { grant_id: mine, level: "workspace", workspace_ids: [workspace],
+    organization_id: null, state: "downgraded", end_reason: "owner_downgrade", ended_at: undefined, ended_by: "owner" });
+  assert.ok(Number.isFinite(Date.parse(self.ended[0]!.ended_at)), "ended_at is a time");
+  assert.ok(self.ended.length <= 10, "at most 10 ended grants");
+  let person = (await personRead(owner.id)).find((g) => g.grant_id === mine);
+  assert.deepEqual([person?.state, person?.end_reason, person?.ended_by], ["downgraded", "owner_downgrade", owner.id]);
+
+  // Another live owner of the covered workspace ends it: the agent sees "another owner", the grantor sees who.
+  const theirs = await grant();
+  await sql`UPDATE swarm.memberships SET role = 'owner' WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
+  try {
+    const ended = await account(other.jwt, { kind: "end_seat_admin", grant_id: theirs });
+    assert.equal(ended.status, 200, JSON.stringify(ended.body) + functionLogs.slice(-1500));
+  } finally {
+    await sql`UPDATE swarm.memberships SET role = 'member' WHERE workspace_id = ${workspace}::uuid AND user_id = ${other.id}::uuid`;
+  }
+  self = await selfRead();
+  assert.deepEqual([self.ended[0]?.grant_id, self.ended[0]?.ended_by], [theirs, "another_owner"]);
+  assert.ok(!JSON.stringify(self).includes(other.id), "the agent's read names a role, never the other person");
+  person = (await personRead(owner.id)).find((g) => g.grant_id === theirs);
+  assert.equal(person?.ended_by, other.id);
+
+  // An end recorded before the column existed: the reads find the actor in the grantor's history.
+  const older = await grant();
+  await endGrant(older);
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE swarm.seat_admin_grants SET ended_by_user_id = NULL WHERE grant_id = ${older}::uuid`;
+  });
+  self = await selfRead();
+  assert.deepEqual([self.ended[0]?.grant_id, self.ended[0]?.ended_by], [older, "owner"], "derived from the accepted end_seat_admin event");
+  person = (await personRead(owner.id)).find((g) => g.grant_id === older);
+  assert.equal(person?.ended_by, owner.id);
+  assert.equal((await personRead(other.id)).length, 0, "another person sees none of these grants");
+});
+
+test("the database refuses any end of a grant that is not an owner's choice or a real expiry", async () => {
+  const indefinite = await grant();
+  const end = (set: postgres.PendingQuery<postgres.Row[]>) => sql`UPDATE swarm.seat_admin_grants SET ${set}
+    WHERE grant_id = ${indefinite}::uuid`;
+  const cases: Array<[string, () => Promise<unknown>]> = [
+    ["replaced by a re-grant", () => end(sql`state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'replaced'`)],
+    ["an owner's end with no one named", () => end(sql`state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'owner_downgrade'`)],
+    ["an owner's end named for a plain member", () => end(sql`state = 'downgraded', ended_at = clock_timestamp(),
+      end_reason = 'owner_downgrade', ended_by_user_id = ${other.id}::uuid`)],
+    ["an owner's end named for someone unknown", () => end(sql`state = 'downgraded', ended_at = clock_timestamp(),
+      end_reason = 'owner_downgrade', ended_by_user_id = ${randomUUID()}::uuid`)],
+    ["an expiry of a grant with no end date", () => end(sql`state = 'expired', ended_at = clock_timestamp(), end_reason = 'expired'`)],
+    ["a seat revocation cascade", () => end(sql`state = 'ended', ended_at = clock_timestamp(), end_reason = 'seat_revoked'`)],
+    ["a lost owner role", () => end(sql`state = 'ended', ended_at = clock_timestamp(), end_reason = 'owner_lost_role'`)],
+  ];
+  for (const [name, update] of cases) await assert.rejects(async () => { await update(); }, refusedByGuard(name));
+  // The command role is held to the same rule.
+  await assert.rejects(() => sql.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    await tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'replaced'
+      WHERE grant_id = ${indefinite}::uuid`;
+  }), refusedByGuard("the command role"));
+  const [still] = await sql<{ state: string }[]>`SELECT state FROM swarm.seat_admin_grants WHERE grant_id = ${indefinite}::uuid`;
+  assert.equal(still!.state, "active", "the grant is still on");
+  assert.ok((await selfRead()).grants.some((g) => g.grant_id === indefinite), "and the agent still has it");
+
+  // An organization grant: only a live owner of the organization, or the grantor, ends it.
+  const org = await grant({ level: "organization", scope_names: ["role:organization_admin"], workspace_ids: [], organization_id: workspace });
+  await assert.rejects(async () => {
+    await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'owner_downgrade',
+      ended_by_user_id = ${other.id}::uuid WHERE grant_id = ${org}::uuid`;
+  }, refusedByGuard("an organization grant ended by a non-owner"));
+  await endGrant(org);
+  await endGrant(indefinite);
+});
+
+test("an expiry ends a grant only once its end date has passed; until it is marked, the agent sees it as expired", async () => {
+  const expiring = await grant({ expires_at: Date.now() + 86_400_000 });
+  await assert.rejects(async () => {
+    await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = clock_timestamp(), end_reason = 'expired'
+      WHERE grant_id = ${expiring}::uuid`;
+  }, refusedByGuard("an expiry before the end date"));
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    // expires_at must stay after created_at (a CHECK), so the grant is moved back in time whole.
+    await tx`UPDATE swarm.seat_admin_grants SET created_at = clock_timestamp() - interval '1 hour',
+      expires_at = clock_timestamp() - interval '1 second' WHERE grant_id = ${expiring}::uuid`;
+  });
+  const [{ expires_at: expiresAt }] = await sql<{ expires_at: Date }[]>`SELECT expires_at FROM swarm.seat_admin_grants
+    WHERE grant_id = ${expiring}::uuid`;
+  let self = await selfRead();
+  assert.ok(!self.grants.some((g) => g.grant_id === expiring), "past its end date it is not active");
+  let shown = self.ended.find((g) => g.grant_id === expiring);
+  assert.deepEqual([shown?.state, shown?.end_reason, shown?.ended_by, Date.parse(shown?.ended_at ?? "")],
+    ["expired", "expired", null, expiresAt.getTime()], "shown as expired at its end date before it is marked");
+  await assert.rejects(async () => {
+    await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = expires_at, end_reason = 'expired',
+      ended_by_user_id = ${owner.id}::uuid WHERE grant_id = ${expiring}::uuid`;
+  }, /seat_admin_grants_ended_by_check|only ends/, "an expiry names no one");
+  await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = expires_at, end_reason = 'expired'
+    WHERE grant_id = ${expiring}::uuid`;
+  self = await selfRead();
+  shown = self.ended.find((g) => g.grant_id === expiring);
+  assert.deepEqual([shown?.state, shown?.end_reason, shown?.ended_by], ["expired", "expired", null]);
+  const person = (await personRead(owner.id)).find((g) => g.grant_id === expiring);
+  assert.deepEqual([person?.state, person?.end_reason, person?.ended_by], ["expired", "expired", null]);
 });

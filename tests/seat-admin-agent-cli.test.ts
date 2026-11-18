@@ -55,18 +55,40 @@ test("each verb sends exactly one command kind, with ids only", () => {
 
 test("status lines: off, no grants, one line per grant", () => {
   assert.deepEqual(seatAdminStatusLines({ enabled: false }), ["Admin access is off."]);
-  assert.deepEqual(seatAdminStatusLines({ enabled: true, registry_version: 3, grants: [] }), ["No admin access."]);
+  assert.deepEqual(seatAdminStatusLines({ enabled: true, registry_version: 3, grants: [], ended: [] }), ["No admin access."]);
   const grant = { grant_id: "g", scope_names: [], capability_names: ["rename_workspace"] };
   assert.deepEqual(seatAdminStatusLines({ enabled: true, registry_version: 3, grants: [
     { ...grant, level: "workspace", workspace_ids: [workspace], organization_id: null, expires_at: null },
     { ...grant, level: "organization", workspace_ids: [], organization_id: agent, expires_at: "2026-12-01T00:00:00Z" },
-  ] }), [`workspace · workspaces ${workspace} · no end date`, `organization · organization ${agent} · ends 2026-12-01T00:00:00Z`]);
+  ], ended: [] }), [`workspace · workspaces ${workspace} · no end date`, `organization · organization ${agent} · ends 2026-12-01T00:00:00Z`]);
+});
+
+test("status lines: each ended grant says when, by whom and why, after the active grants", () => {
+  const ended = { level: "workspace" as const, workspace_ids: [workspace], organization_id: null };
+  assert.deepEqual(seatAdminStatusLines({ enabled: true, registry_version: 3, grants: [], ended: [
+    { ...ended, grant_id: "6a615ba4-0000-4000-8000-000000000001", state: "downgraded", end_reason: "owner_downgrade",
+      ended_at: "2026-11-17T21:04:09.123456+00:00", ended_by: "owner" },
+    { ...ended, grant_id: "7b726cb5-0000-4000-8000-000000000002", state: "downgraded", end_reason: "owner_downgrade",
+      ended_at: "2026-11-16T08:00:00Z", ended_by: "another_owner" },
+    { ...ended, level: "organization", workspace_ids: [], organization_id: agent, grant_id: "8c837dc6-0000-4000-8000-000000000003",
+      state: "expired", end_reason: "expired", ended_at: "2026-11-15T23:59:59.999Z", ended_by: null },
+  ] }), [
+    "No admin access.",
+    "Ended 2026-11-17 21:04Z by the owner (owner_downgrade): workspace grant 6a615ba4",
+    "Ended 2026-11-16 08:00Z by another owner (owner_downgrade): workspace grant 7b726cb5",
+    "Ended 2026-11-15 23:59Z (expired): organization grant 8c837dc6",
+  ]);
 });
 
 test("the self read names the selected workspace and uses the agent bearer", async () => {
-  const { calls, fetcher } = recorder([reply(200, { enabled: false }), reply(200, { enabled: true, registry_version: 3, grants: [] }), reply(403, { error: "forbidden" })]);
+  const ended = [{ grant_id: "g", level: "workspace", workspace_ids: [workspace], organization_id: null, state: "downgraded",
+    end_reason: "owner_downgrade", ended_at: "2026-11-17T21:04:00Z", ended_by: "owner" }];
+  const { calls, fetcher } = recorder([reply(200, { enabled: false }), reply(200, { enabled: true, registry_version: 3, grants: [] }),
+    reply(200, { enabled: true, registry_version: 3, grants: [], ended }), reply(403, { error: "forbidden" })]);
   assert.deepEqual(await readSeatAdminSelf(target, "swm_agent", workspace, fetcher), { enabled: false });
-  assert.deepEqual(await readSeatAdminSelf(target, "swm_agent", workspace, fetcher), { enabled: true, registry_version: 3, grants: [] });
+  assert.deepEqual(await readSeatAdminSelf(target, "swm_agent", workspace, fetcher), { enabled: true, registry_version: 3, grants: [], ended: [] },
+    "a server without the ended list");
+  assert.deepEqual(await readSeatAdminSelf(target, "swm_agent", workspace, fetcher), { enabled: true, registry_version: 3, grants: [], ended });
   await assert.rejects(readSeatAdminSelf(target, "swm_agent", workspace, fetcher), /HTTP 403/);
   assert.equal(calls[0]!.url, "https://api.example.test/functions/v1/read");
   assert.equal(calls[0]!.headers.authorization, "Bearer swm_agent");

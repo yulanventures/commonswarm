@@ -140,8 +140,8 @@ test("one active grant per agent; a grant only ends, once, and never reactivates
   for (const [name, update] of refused) {
     await assert.rejects(async () => { await update(); }, /only ends|never deleted|violates/, name);
   }
-  await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = statement_timestamp(), end_reason = 'owner_downgrade'
-    WHERE grant_id = ${first}::uuid`;
+  await sql`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = statement_timestamp(), end_reason = 'owner_downgrade',
+    ended_by_user_id = ${owner}::uuid WHERE grant_id = ${first}::uuid`;
   for (const [name, state, reason] of [["reactivate", "active", null], ["end again", "ended", "seat_revoked"]] as const) {
     await assert.rejects(async () => {
       await sql`UPDATE swarm.seat_admin_grants SET state = ${state}, ended_at = ${reason === null ? null : sql`statement_timestamp()`},
@@ -166,8 +166,8 @@ test("only the command role writes, only the end columns; people read only their
   }
   await sql.begin(async (tx) => {
     await tx.unsafe("SET LOCAL ROLE swarm_command");
-    await tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = statement_timestamp(), end_reason = 'owner_downgrade'
-      WHERE grant_id = ${grantId}::uuid`;
+    await tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = statement_timestamp(), end_reason = 'owner_downgrade',
+      ended_by_user_id = ${owner}::uuid WHERE grant_id = ${grantId}::uuid`;
   });
 
   const read = (claims: Record<string, unknown>) => sql.begin(async (tx) => {

@@ -265,3 +265,63 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
     dispose() { opener = null; if (dialog.open) dialog.close(); dialog.remove(); },
   };
 }
+
+export interface SeatAdminEndConfirmationOptions {
+  agentName: string;
+  level: SeatAdminRoleLevel;
+  confirm: () => void;
+  cancel?: () => void;
+}
+
+/** Turning admin access off asks first. Keep (the initial focus), Escape and closing send nothing; End access
+ * calls confirm once and closes. Append inside the app's token scope, then call open(). */
+export function buildSeatAdminEndConfirmation(doc: Document, options: SeatAdminEndConfirmationOptions) {
+  const id = `seat-admin-end-${++nextConfirmationId}`;
+  const dialog = element(doc, "dialog", "sa-confirm");
+  dialog.dataset.seatAdminEnd = options.level;
+  dialog.setAttribute("aria-labelledby", `${id}-title`);
+  dialog.setAttribute("aria-describedby", `${id}-body`);
+  const form = element(doc, "form", "sa-confirm__form");
+  const header = element(doc, "header", "sa-confirm__header");
+  const title = element(doc, "h2", "", `End admin access for ${options.agentName}?`);
+  title.id = `${id}-title`;
+  header.append(title);
+  const body = element(doc, "div", "sa-confirm__body");
+  const line = element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again.");
+  line.id = `${id}-body`;
+  body.append(line);
+  const footer = element(doc, "footer", "sa-confirm__footer");
+  const keep = action(doc, "Keep", () => { close(); options.cancel?.(); });
+  const end = element(doc, "button", "sa-button sa-button--primary", "End access");
+  end.type = "submit";
+  end.dataset.seatAdminEndConfirm = "";
+  footer.append(keep, end);
+  form.append(header, body, footer);
+  dialog.append(form);
+  let opener: HTMLElement | null = null;
+  let done = false;
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (done) return;
+    done = true;
+    end.disabled = true;
+    close();
+    options.confirm();
+  });
+  function close(): void {
+    if (dialog.open) dialog.close();
+    if (opener?.isConnected && !opener.closest("[inert], [hidden]")) opener.focus({ preventScroll: true });
+    opener = null;
+  }
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); options.cancel?.(); });
+  return {
+    dialog,
+    open(from?: HTMLElement) {
+      opener = from ?? (doc.activeElement instanceof HTMLElement ? doc.activeElement : null);
+      dialog.showModal();
+      keep.focus({ preventScroll: true });
+    },
+    close,
+    dispose() { opener = null; if (dialog.open) dialog.close(); dialog.remove(); },
+  };
+}

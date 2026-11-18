@@ -903,14 +903,20 @@ async function handle(
       return json(403, { error: "transport_unavailable" });
     }
     // An agent's own admin access (seat admin PR 4), after the ordinary admission above and under the final credential
-    // fence: off, {enabled:false}; on, only this credential's own active, unexpired grants. The workspace only admits the
-    // read; the grants are the principal's wherever they apply, and commands re-decide coverage.
+    // fence: off, {enabled:false}; on, only this credential's own active, unexpired grants, plus its own recently ended
+    // ones. The workspace only admits the read; the grants are the principal's wherever they apply, and commands
+    // re-decide coverage.
     if (body.resource === "seat_admin_self") {
       if (agent.is_revoked) return json(403, { error: "forbidden" });
       if (!seatAdminEnabled) return json(200, { enabled: false });
       // The workspace this read already admitted: the helper takes no lock beyond the admission's own.
-      const [row] = await tx<{ grants: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants`;
-      return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [] });
+      const [row] = await tx<{ self: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS self`;
+      // {grants, ended} since 20261118000003; before it (or after its rollback) the active list alone.
+      const self = row?.self;
+      const shaped = self !== null && typeof self === "object" && !Array.isArray(self) ? self as { grants?: unknown; ended?: unknown } : null;
+      const grants = Array.isArray(self) ? self : Array.isArray(shaped?.grants) ? shaped.grants : [];
+      const ended = Array.isArray(shaped?.ended) ? shaped.ended : [];
+      return json(200, { enabled: true, registry_version: 3, grants, ended });
     }
     if (isMemoryRead(body) && !brainMemoryEnabled) {
       return json(404, { error: "memory_unavailable", message: "Workspace memory isn't turned on here." });

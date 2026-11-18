@@ -1615,6 +1615,7 @@ import "../../styles/kylon-command-palette.css";
   } from "../../lib/connected-apps";
   import {
     buildSeatAdminConfirmation,
+    buildSeatAdminEndConfirmation,
     buildSeatAdminPanel,
     type SeatAdminDuration,
     type SeatAdminGrantDraft,
@@ -6464,7 +6465,12 @@ import "../../styles/kylon-command-palette.css";
       workspaceId: string;
     } | null = null;
 
+    // Turning admin access off asks first; one at a time, disposed with the grant dialog.
+    let activeSeatAdminEndDialog: ReturnType<typeof buildSeatAdminEndConfirmation> | null = null;
+
     const disposeSeatAdminDialog = (): void => {
+      activeSeatAdminEndDialog?.dispose();
+      activeSeatAdminEndDialog = null;
       const current = activeSeatAdminDialog;
       activeSeatAdminDialog = null;
       if (!current) return;
@@ -6610,7 +6616,25 @@ import "../../styles/kylon-command-palette.css";
               (resolved.activeGrants.organization?.grantId === grantId.toLowerCase()
                 ? "organization"
                 : "workspace");
-            void removeSeatAdminLevel(principalId, level, grantId, trigger);
+            disposeSeatAdminDialog();
+            const ending = buildSeatAdminEndConfirmation(document, {
+              agentName: resolved.panel.state === "hidden" ? "this agent" : resolved.panel.agentName,
+              level,
+              confirm: () => {
+                if (activeSeatAdminEndDialog !== ending) return;
+                activeSeatAdminEndDialog = null;
+                ending.dialog.remove();
+                void removeSeatAdminLevel(principalId, level, grantId, trigger);
+              },
+              cancel: () => {
+                if (activeSeatAdminEndDialog !== ending) return;
+                activeSeatAdminEndDialog = null;
+                ending.dialog.remove();
+              },
+            });
+            activeSeatAdminEndDialog = ending;
+            app.append(ending.dialog);
+            ending.open(trigger);
           },
           retry: () => {
             void refreshSeatAdminState(true);

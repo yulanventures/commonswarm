@@ -10,7 +10,7 @@ import { findChrome, launchChrome } from "../../../tests/chrome.js";
 // Credible negatives: optimistic toggling, an unresolved grant rendered Off, a guessed organization,
 // duplicate confirmation, expiry extended after it was shown, or clipped actions on a short screen.
 const script = `
-import { buildSeatAdminPanel, buildSeatAdminConfirmation } from './src/lib/seat-admin-view';
+import { buildSeatAdminPanel, buildSeatAdminConfirmation, buildSeatAdminEndConfirmation } from './src/lib/seat-admin-view';
 const root = document.querySelector('live-dashboard');
 const checks = [];
 const check = (name, pass) => checks.push({name, pass: !!pass});
@@ -122,6 +122,28 @@ try {
   choose.value = 'org-2'; choose.dispatchEvent(new Event('change')); orgGrant.click();
   check('organization confirmation keeps its own scope and no end date', orgCalls.length === 1 && orgCalls[0].level === 'organization' && orgCalls[0].scopeId === 'org-2' && orgCalls[0].expiresAt === null);
   org.dispose();
+
+  let ends = 0, kept = 0;
+  const ending = () => buildSeatAdminEndConfirmation(document,{agentName,level:'organization',confirm:()=>ends++,cancel:()=>kept++});
+  const keep = ending(); root.append(keep.dialog); keep.open(organization);
+  check('ending asks in plain words, names stay text', keep.dialog.querySelector('h2').textContent === 'End admin access for ' + agentName + '?'
+    && keep.dialog.textContent.includes('It stays off until you turn it on again.') && keep.dialog.querySelector('img') === null);
+  check('opening ends nothing and initial focus is Keep', ends === 0 && document.activeElement.textContent === 'Keep');
+  const endControls = [...keep.dialog.querySelectorAll('button')];
+  targets += endControls.length;
+  check('end actions have real 44px boxes', endControls.map(node => node.textContent).join() === 'Keep,End access' && endControls.every(node => {
+    const rect = node.getBoundingClientRect(); return rect.width >= 43.99 && rect.height >= 43.99;
+  }));
+  const endRect = keep.dialog.getBoundingClientRect();
+  check('end dialog fits the actual browser viewport', endRect.left >= 0 && endRect.top >= 0 && endRect.right <= innerWidth + .5 && endRect.bottom <= innerHeight + .5);
+  endControls[0].click();
+  check('Keep sends nothing, closes and returns focus to the switch', ends === 0 && kept === 1 && !keep.dialog.open && document.activeElement === organization
+    && organization.getAttribute('aria-checked') === 'true');
+  keep.dispose();
+  const end = ending(); root.append(end.dialog); end.open(organization);
+  const endButton = end.dialog.querySelector('[data-seat-admin-end-confirm]'); endButton.click(); endButton.click();
+  check('End access ends once and closes', ends === 1 && kept === 1 && !end.dialog.open);
+  end.dispose();
   check('no page overflow', document.documentElement.scrollWidth <= innerWidth);
 } catch (error) { check('fixture completed: ' + error.message, false); }
 document.documentElement.dataset.seatAdminResults = encodeURIComponent(JSON.stringify({checks,targets,width:innerWidth,height:innerHeight}));
