@@ -17,4 +17,13 @@ test("the isolated check strips that block for plain HTTP and proves it on its o
   for (const line of ["client certificate signed by the trust pool\" served", "no client certificate\" refused", "client certificate the pool did not sign\" refused"]) {
     assert.ok(check.includes(line), line);
   }
+  // The TLS cases are never skipped: without openssl the check fails before it starts.
+  assert.match(check, /for tool in curl openssl; do\n\s*command -v "\$tool" >\/dev\/null 2>&1 \|\| \{ echo "FAIL: /u);
+  assert.doesNotMatch(check, /SKIPPED/u);
+  // Both fixtures bind to loopback, the adapted listeners are checked, and no curl goes through a proxy.
+  assert.equal(check.match(/\\n\\tbind 127\.0\.0\.1\\n/gu)?.length, 2, "each fixture's site block binds to 127.0.0.1");
+  assert.equal(check.match(/^\s*loopback_only "\$work\/Caddyfile(?:\.tls)?"$/gmu)?.length, 2, "each fixture's listeners are checked");
+  const curls = check.split("\n").filter(line => /\bcurl\b/u.test(line) && !/^\s*#/u.test(line) && !/for tool in curl/u.test(line));
+  assert.ok(curls.length > 0);
+  for (const line of curls) assert.match(line, /local_curl|curl --noproxy '\*'/u, line.trim());
 });
