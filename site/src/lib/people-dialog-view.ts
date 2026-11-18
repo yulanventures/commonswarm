@@ -676,7 +676,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (invite.kind === "person") symbol.append(icon(doc, "invite"));
     const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "key" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
     copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
-    if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, invite.kind === "agent" ? "Remove" : "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
+    if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
       cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel(invite)); row.append(cancel); }
     inviteList.append(row);
   }

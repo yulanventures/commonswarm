@@ -82,7 +82,7 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei" }).stays[0], "History stays. Their other spaces are unaffected.");
   assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this unused key?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this key?");
 });
 
 // Role change (UI-SPEC 3.6). Expected strings are the spec's literals, not read back from the code under test.

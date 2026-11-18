@@ -7614,9 +7614,9 @@ import "../../styles/kylon-command-palette.css";
       if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, agent.transport === "hosted_mcp", button, notice, true); return; }
       if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
       if (action === "turn-off-key" && grant && agent && homeConnectionTokenMatches(agent, grant)) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
-      // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
-      const forgetAgent = (): void => {
-        if (!agent) return;
+      if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+        if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+        // Acceptance is the removal receipt. Older reads must not restore the pre-removal roster.
         ++requestVersion; ++catchUpGeneration; ++railOverviewGeneration; ++homeWorkspaceRead;
         removedAgents.set(id, agent.name); removedAgentOwners.set(id, agent.ownerUserId);
         agents = agents.filter(entry => entry.principalId !== id);
@@ -7628,11 +7628,7 @@ import "../../styles/kylon-command-palette.css";
         } : entry);
         renderRoster(); renderHomeSide(); renderHomeObjectPane();
         if (one<HTMLElement>("[data-mention-picker]")?.hidden === false) renderMentionPicker();
-        if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; }
-      };
-      if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
-        if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
-        forgetAgent(); }
+        if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; } }
       if (action === "remove-person") {
         await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`;
       }
@@ -7645,10 +7641,8 @@ import "../../styles/kylon-command-palette.css";
           person: (invitationId) => revokeWorkspaceInvitation(value, uuid(), workspaceId, invitationId),
           key: (tokenId) => revokeAgentToken(value, uuid(), workspaceId, tokenId),
           code: (joinCredentialId) => revokeAgentJoinCredential(value, uuid(), workspaceId, joinCredentialId),
-          agent: (principalId) => revokeAgentPrincipal(value, uuid(), workspaceId, principalId),
         });
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
-        if (invite.kind === "agent") forgetAgent();
         receipt = peopleInviteReceipt(invite); }
       if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
       await reloadPeopleDialog(workspaceId, id, receipt, action);

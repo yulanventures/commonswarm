@@ -6,11 +6,16 @@
 import type { AgentAccessStatus, PendingAgentAccess, PendingMemberInvite } from "./commonswarm";
 
 /** person: an email invitation. key: an agent key nobody has used. code: an agent connect code
- *  with places left. agent: an agent that was added and has never connected. */
-export type PeopleInviteKind = "person" | "key" | "code" | "agent";
+ *  with places left.
+ *
+ *  An agent with no key is not an invite and is never listed here. The pending read reports any
+ *  agent with no used key, and a hosted agent is created without one, so that read cannot tell a
+ *  connected agent from one that never connected (HezSec C1 on #501). Removing an agent is the
+ *  agent list's action, with its own confirmation. */
+export type PeopleInviteKind = "person" | "key" | "code";
 export interface PeopleInvite {
   kind: PeopleInviteKind;
-  /** The invitation, key, connect code or agent id: the id its cancel command names. */
+  /** The invitation, key or connect code id: the id its cancel command names. */
   id: string;
   workspaceId: string;
   /** The email, the agent's name, or "Connect code". */
@@ -38,7 +43,7 @@ const firstName = (name: string) => name.trim().split(/\s+/)[0] || name;
 const unusedKey = (entry: AgentAccessStatus, now: number) =>
   entry.firstUsedAt === null && entry.revokedAt === null && new Date(entry.expiresAt).getTime() > now;
 
-/** People first, then agents: unused keys, connect codes, agents that never connected. */
+/** People first, then agents: unused keys, then connect codes. */
 export function peopleInvites(input: PeopleInvitesInput): PeopleInvite[] {
   const { viewer, nameOf, relative, now } = input;
   const who = (userId: string, verb: string, fallback?: string) => {
@@ -61,37 +66,30 @@ export function peopleInvites(input: PeopleInvitesInput): PeopleInvite[] {
       // Only an owner or an admin reads invitations, and only they may revoke one.
       mayCancel: !!viewer?.elevated });
   }
-  const keyed = new Set<string>();
   for (const entry of input.access) {
     if (!unusedKey(entry, now)) continue;
-    keyed.add(entry.principalId);
     rows.push({ kind: "key", id: entry.tokenId, workspaceId: entry.workspaceId, name: entry.agentName,
       detail: line(whose(entry.ownerUserId), `made ${relative(entry.issuedAt)}`, `ends ${relative(entry.expiresAt)}`),
       mayCancel: mine(entry.ownerUserId) });
   }
-  const codes: PeopleInvite[] = [], agents: PeopleInvite[] = [];
   for (const entry of input.pending ?? []) {
-    if (entry.kind === "join" && entry.joinCredentialId !== null) {
-      codes.push({ kind: "code", id: entry.joinCredentialId, workspaceId: input.workspaceId, name: "Connect code",
-        detail: line(who(entry.ownerUserId, "made it", entry.issuerDisplay), relative(entry.issuedAt),
-          entry.seatsUsed !== null && entry.seatCap !== null ? `${entry.seatsUsed} of ${entry.seatCap} places used` : null,
-          entry.expiresAt ? `ends ${relative(entry.expiresAt)}` : null),
-        mayCancel: mine(entry.ownerUserId) });
-    } else if (entry.kind === "classic" && entry.principalId !== null && !keyed.has(entry.principalId)) {
-      agents.push({ kind: "agent", id: entry.principalId, workspaceId: input.workspaceId, name: entry.principalName ?? "Agent",
-        detail: line(whose(entry.ownerUserId, entry.issuerDisplay), `added ${relative(entry.issuedAt)}`, "never connected"),
-        mayCancel: mine(entry.ownerUserId) });
-    }
+    // Only connect codes. A "classic" row is an agent with no used key, connected or not: see PeopleInviteKind.
+    if (entry.kind !== "join" || entry.joinCredentialId === null) continue;
+    rows.push({ kind: "code", id: entry.joinCredentialId, workspaceId: input.workspaceId, name: "Connect code",
+      detail: line(who(entry.ownerUserId, "made it", entry.issuerDisplay), relative(entry.issuedAt),
+        entry.seatsUsed !== null && entry.seatCap !== null ? `${entry.seatsUsed} of ${entry.seatCap} places used` : null,
+        entry.expiresAt ? `ends ${relative(entry.expiresAt)}` : null),
+      mayCancel: mine(entry.ownerUserId) });
   }
-  return [...rows, ...codes, ...agents];
+  return rows;
 }
 
-/** The four ways an invite ends. Each takes the id its row carries: an invitation, a key, a connect code, an agent. */
+/** The three ways an invite ends. Each takes the id its row carries: an invitation, a key, a connect code.
+ *  None of them names an agent: cancelling an invite can never remove one. */
 export interface PeopleInviteSenders {
   person: (invitationId: string) => Promise<void>;
   key: (tokenId: string) => Promise<void>;
   code: (joinCredentialId: string) => Promise<void>;
-  agent: (principalId: string) => Promise<void>;
 }
 /** Ends one invite with the command for its kind and the row's own id. The server decides whether it may. */
 export function cancelPeopleInvite(invite: Pick<PeopleInvite, "kind" | "id">, send: PeopleInviteSenders): Promise<void> {
@@ -102,14 +100,12 @@ export function cancelPeopleInvite(invite: Pick<PeopleInvite, "kind" | "id">, se
 export function peopleInviteCancelLabel(invite: Pick<PeopleInvite, "kind" | "name">): string {
   if (invite.kind === "person") return `Cancel the invitation for ${invite.name}`;
   if (invite.kind === "key") return `Cancel the unused key for ${invite.name}`;
-  if (invite.kind === "code") return "Cancel this connect code";
-  return `Remove ${invite.name}, which never connected`;
+  return "Cancel this connect code";
 }
 export function peopleInviteReceipt(invite: Pick<PeopleInvite, "kind" | "name">): string {
   if (invite.kind === "person") return "Invitation canceled.";
-  if (invite.kind === "key") return "Unused key canceled.";
-  if (invite.kind === "code") return "Connect code canceled.";
-  return `${invite.name} removed.`;
+  if (invite.kind === "key") return "Key canceled.";
+  return "Connect code canceled.";
 }
 /** What the confirmation says stops and what stays, for each kind of invite. */
 export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "name">) {
@@ -117,13 +113,11 @@ export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "nam
   if (invite.kind === "person") return { title: "Cancel this invitation?", button: "Cancel invitation",
     stops: [`The invitation for ${name} stops working and leaves this list. No one has joined with it.`],
     stays: ["You can send a new invitation later."] };
-  if (invite.kind === "key") return { title: "Cancel this unused key?", button: "Cancel key",
-    stops: [`The unused key for ${name} stops working and leaves this list. No agent has used it.`],
+  // The key was unused when this list loaded. The server revokes it either way, so say what that means if it has been used since.
+  if (invite.kind === "key") return { title: "Cancel this key?", button: "Cancel key",
+    stops: [`The key for ${name} stops working and leaves this list. If ${name} has connected with it since this list loaded, ${name} is cut off, along with any access renewed from this key.`],
     stays: ["You can create a new key later."] };
-  if (invite.kind === "code") return { title: "Cancel this connect code?", button: "Cancel code",
+  return { title: "Cancel this connect code?", button: "Cancel code",
     stops: ["The connect code stops working and leaves this list. No more agents can join with it."],
     stays: ["Agents that already joined with it stay.", "You can make a new code later."] };
-  return { title: `Remove ${name}?`, button: `Remove ${name}`,
-    stops: [`${name} never connected. Its setup stops working, and it leaves this list and the agent list.`],
-    stays: ["You can add it again later."] };
 }
