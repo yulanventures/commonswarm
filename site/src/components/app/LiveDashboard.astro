@@ -10929,7 +10929,8 @@ import "../../styles/kylon-command-palette.css";
         title.textContent = connection.clientHost;
         const badge = document.createElement("span");
         badge.className = `dashboard__connected-app-state dashboard__connected-app-state--${connection.status}`;
-        badge.textContent = connection.status;
+        /* The words a person reads; the class keeps the stored state. "Disconnected" is what Disconnect app does. */
+        badge.textContent = { revoked: "Disconnected", ended: "Ended", pending: "Pending", active: "Active" }[connection.status];
         head.append(title, badge);
         const ownerId = session?.user.id, generation = connectedAppsGeneration;
         if (ownerId && !sampleMode) card.append(connectionEndDateEditor({
@@ -10943,7 +10944,7 @@ import "../../styles/kylon-command-palette.css";
         }));
         const workspacesTitle = document.createElement("p");
         workspacesTitle.className = "dashboard__connected-app-label";
-        workspacesTitle.textContent = "Consented workspaces";
+        workspacesTitle.textContent = "Approved workspaces";
         const workspaceList = document.createElement("ul");
         for (const workspace of connection.workspaces) {
           const row = document.createElement("li");
@@ -10952,7 +10953,7 @@ import "../../styles/kylon-command-palette.css";
         }
         const seatsTitle = document.createElement("p");
         seatsTitle.className = "dashboard__connected-app-label";
-        seatsTitle.textContent = `Agents in workspaces (${connection.seats.length}/10)`;
+        seatsTitle.textContent = `Agents using this connection (${connection.seats.length}/10)`;
         const seatList = document.createElement("ul");
         seatList.className = "dashboard__connected-app-seats";
         if (connection.seats.length === 0) {
@@ -10975,7 +10976,7 @@ import "../../styles/kylon-command-palette.css";
               const ownerSession = session;
               const generation = connectedAppsGeneration;
               revoke.disabled = true;
-              connectedAppsStatus(`Revoking ${seat.name}…`);
+              connectedAppsStatus(`Removing ${seat.name}…`);
               try {
                 await revokeConnectedAppSeat(ownerSession, {
                   grantId: connection.grantId,
@@ -10991,8 +10992,8 @@ import "../../styles/kylon-command-palette.css";
                 const durable = connectedApps
                   .find((entry) => entry.grantId === connection.grantId)?.seats
                   .find((entry) => entry.seatId === seat.seatId);
-                if (!durable?.revoked) throw new Error("The durable seat revocation is not visible yet. Reload before trying again.");
-                renderConnectedApps(`${seat.name} is revoked. Other seats are unchanged.`);
+                if (!durable?.revoked) throw new Error("The agent does not show as removed yet. Reload before trying again.");
+                renderConnectedApps(`${seat.name} is removed. The other agents are unchanged.`);
               } catch (error) {
                 connectedAppsStatus(readableError(error), true);
                 revoke.disabled = false;
@@ -11008,13 +11009,13 @@ import "../../styles/kylon-command-palette.css";
           const revoke = document.createElement("button");
           revoke.type = "button";
           revoke.className = "dashboard__button dashboard__button--danger";
-          revoke.textContent = "Revoke connection";
+          revoke.textContent = "Disconnect app";
           revoke.addEventListener("click", async () => {
             if (!session || revoke.disabled) return;
             const ownerSession = session;
             const generation = connectedAppsGeneration;
             revoke.disabled = true;
-            connectedAppsStatus(`Revoking ${connection.clientHost}…`);
+            connectedAppsStatus(`Disconnecting ${connection.clientHost}…`);
             try {
               await revokeConnectedAppGrant(ownerSession, connection);
               if (generation !== connectedAppsGeneration) return;
@@ -11024,9 +11025,9 @@ import "../../styles/kylon-command-palette.css";
               if (generation !== connectedAppsGeneration) return;
               connectedApps = loaded;
               if (connectedApps.find((entry) => entry.grantId === connection.grantId)?.status !== "revoked") {
-                throw new Error("The durable connection revocation is not visible yet. Reload before trying again.");
+                throw new Error("The app does not show as disconnected yet. Reload before trying again.");
               }
-              renderConnectedApps(`${connection.clientHost} is revoked. All of its hosted seats are stopped.`);
+              renderConnectedApps(`${connection.clientHost} is disconnected. All of its agents are stopped.`);
             } catch (error) {
               connectedAppsStatus(readableError(error), true);
               revoke.disabled = false;

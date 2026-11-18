@@ -33,8 +33,16 @@ test("Connected apps DOM uses textContent, durable rereads, and no browser owner
   const source = await readFile(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   assert.match(source, /data-connected-apps-open/u);
   assert.match(source, /loadConnectedApps/u);
-  assert.match(source, /durable connection revocation is not visible/u);
-  assert.match(source, /durable seat revocation is not visible/u);
+  // After each action the page reads the stored state again and says so if the change is not there yet.
+  assert.match(source, /The app does not show as disconnected yet\. Reload before trying again\./u);
+  assert.match(source, /The agent does not show as removed yet\. Reload before trying again\./u);
+  // One word for each action, wherever it appears: Disconnect app for the whole connection, Remove agent for one.
+  assert.match(source, /revoke\.textContent = "Disconnect app";/u);
+  assert.match(source, /revoke\.textContent = "Remove agent";/u);
+  assert.match(source, /"Approved workspaces"/u);
+  assert.match(source, /`Agents using this connection \(\$\{connection\.seats\.length\}\/10\)`/u);
+  assert.doesNotMatch(source, /Revoke connection|Consented workspaces|hosted seats are stopped|Revoking \$\{/u);
+  assert.match(source, /\{ revoked: "Disconnected", ended: "Ended", pending: "Pending", active: "Active" \}\[connection\.status\]/u);
   assert.doesNotMatch(source, /innerHTML\s*=.*connected/iu);
   assert.doesNotMatch(source, /connectedAppsStatus\(`\$\{readableError\(error\)\} Nothing was changed\.`/u);
   assert.doesNotMatch(source, /channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`/u);

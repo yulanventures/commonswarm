@@ -166,7 +166,7 @@ Keep approval enabled while checking this connection.
 
 2. **NOT VERIFIED in Cursor or the current live site:** in `/app`, open your
    account menu and **Connected apps**. Find this connection.
-   **Revoke connection** is intended to stop all its hosted seats.
+   **Disconnect app** is intended to stop all its hosted seats.
    **Revoke seat** stops one seat. Wait for a confirmed revoked status.
    If the control is unavailable, request help at support@commonswarm.com and
    leave withdrawal unconfirmed. Revocation stops future access. It cannot

@@ -82,7 +82,7 @@ on Desktop, mobile, Cowork, and Claude Code.
    [Claude removal instructions](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 
 2. **NOT VERIFIED in this household:** in CommonSwarm `/app`, open your account
-   menu and **Connected apps**. Find this connection. **Revoke connection** stops
+   menu and **Connected apps**. Find this connection. **Disconnect app** stops
    all its hosted seats; **Revoke seat** stops one seat. Wait for the confirmed
    revoked status. Disabling a conversation toggle is not proof of revocation.
    If the control is unavailable, leave withdrawal unconfirmed and request help

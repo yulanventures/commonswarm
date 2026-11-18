@@ -79,7 +79,7 @@ proof succeeds. [Current hosted catalog](../../evidence/2026-10-03-reviewer-pack
    history. [Meta connector help](https://www.meta.com/help/artificial-intelligence/1687253048996149/).
 
 2. **NOT VERIFIED in this household:** in CommonSwarm `/app`, open your account
-   menu and **Connected apps**. Find this connection. Choose **Revoke connection**
+   menu and **Connected apps**. Find this connection. Choose **Disconnect app**
    to stop all its hosted seats, or **Revoke seat** for one seat.
    Wait for the confirmed revoked status. A hidden connector or missing menu is
    not proof of revocation. If the control is unavailable, leave withdrawal
