@@ -231,8 +231,9 @@ export interface CatchUpData {
   state: CatchUpWorkspaceCardVM["state"];
   detail?: CatchUpDetail;
 }
+/** Every workspace the person belongs to is checked: a question in the ninth is as much theirs as one in the first. */
 export function initialCatchUpData(workspaces: readonly HomeWorkspace[]): CatchUpData[] {
-  return workspaces.map((workspace, index) => ({ workspace, state: index < 8 ? "loading" : "open" }));
+  return workspaces.map(workspace => ({ workspace, state: "loading" }));
 }
 function homePerson(people: HomePeople, id: string): PersonVM | undefined {
   return people.groups.find(group => group.person.id === id)?.person;
@@ -333,8 +334,7 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
 }
 /** Reconcile against the membership list, never let an overview add an unauthorized address. */
 export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map()): CatchUpData[] {
-  return data.map((entry, index) => {
-    if (index >= 8) return entry;
+  return data.map((entry) => {
     const row = overview.workspaces.find(workspace => workspace.workspace_id === entry.workspace.id);
     return row ? { ...entry, state: "ready", detail: catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sample, messages.get(row.workspace_id)) }
       : { ...entry, state: "failed" };
@@ -395,10 +395,20 @@ export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | nul
       agentsNeedingAttention: entry.detail ? [...entry.detail.people.groups.flatMap(group => group.agents), ...entry.detail.people.other].filter(agent => agent.state.attention).length : null,
       newMessagesSinceLastLooked: entry.detail?.newMessages ?? null })) };
 }
-/** Workers await the entire workspace read before taking another; never more than three in flight. */
+/** Where the overview already shows something waiting, that workspace is read first, most waiting first; the rest
+ *  keep their order. So the questions arrive before the workspaces with nothing to answer. Without an overview the
+ *  order is unchanged. */
+export function catchUpReadOrder(data: readonly CatchUpData[], overview: HomeOverview | null): CatchUpData[] {
+  const waiting = new Map((overview?.workspaces ?? []).map(row =>
+    [row.workspace_id, row.needs_you.asks.length + row.needs_you.assigned.length + row.needs_you.waiting.length]));
+  return data.map((entry, index) => ({ entry, index, waiting: waiting.get(entry.workspace.id) ?? 0 }))
+    .sort((left, right) => right.waiting - left.waiting || left.index - right.index).map(item => item.entry);
+}
+/** Every workspace is read. Workers await the entire workspace read before taking another; never more than three in
+ *  flight. */
 export async function fillCatchUpDetails(data: CatchUpData[], read: (workspace: HomeWorkspace) => Promise<CatchUpDetail>,
   update: (entry: CatchUpData) => void): Promise<void> {
-  const queue = data.slice(0, 8); let next = 0;
+  const queue = data; let next = 0;
   await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
     for (;;) {
       const entry = queue[next++]; if (!entry) return;

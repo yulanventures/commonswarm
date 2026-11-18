@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { catchUpNeedsYouMoreCount, catchUpNeedsYouVisible, catchUpSubline } from "./home-catchup.ts";
 import { homeBootRoute, resolveHomeRoute, homeViewTitle, mapHomePeople, mapHomeRail,
-  initialCatchUpData, mapCatchUp, fillCatchUpDetails, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNeedsYouCount, homeNotFound, homeFileCount, ASKS_UNAVAILABLE_ACTION } from "./home-map.ts";
+  initialCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNeedsYouCount, homeNotFound, homeFileCount, ASKS_UNAVAILABLE_ACTION } from "./home-map.ts";
 const now = Date.parse("2026-10-05T12:00:00Z");
 const workspaces = [{ id: "W", name: "Home" }, { id: "X", name: "Trip" }];
 const input = { viewerId: "zoe", now, sample: false, access: [], signals: [],
@@ -39,7 +39,7 @@ test("rail badges require measured counts for every workspace", () => {
 test("Catch up renders membership cards immediately and never converts unknown counts into zero", () => {
   const initial = initialCatchUpData(Array.from({ length: 10 }, (_, id) => ({ id: String(id), name: "Workspace " + id })));
   const vm = mapCatchUp(initial, "zoe", "Zoe", now, false);
-  assert.deepEqual(vm.workspaces.map(card => card.state), ["loading", "loading", "loading", "loading", "loading", "loading", "loading", "loading", "open", "open"]);
+  assert.deepEqual(vm.workspaces.map(card => card.state), Array(10).fill("loading"), "every workspace is checked, the ninth and tenth too");
   assert.ok(vm.workspaces.every(card => card.openTodos === null && card.lists === null && card.files === null && card.agentsNeedingAttention === null));
   const detail = { people: mapHomePeople(input), signals: [], openTodos: null, lists: null, files: 0, newMessages: null };
   const filled = mapCatchUp([{ ...initial[0], state: "ready", detail }], "zoe", "Zoe", now, false);
@@ -49,7 +49,7 @@ test("Catch up renders membership cards immediately and never converts unknown c
   const complete = mapCatchUp([{ ...initial[0], state: "ready", detail: { ...detail, needsYou: [] } }], "zoe", "Zoe", now, false);
   assert.equal(complete.emptySummary, null, "a complete overview may show the all-clear empty state");
 });
-test("fan-out checks only eight workspaces and limits pending reads to three, including failures", async () => {
+test("fan-out checks every workspace and limits pending reads to three, including failures", async () => {
   const initial = initialCatchUpData(Array.from({ length: 10 }, (_, id) => ({ id: String(id), name: String(id) })));
   const pending = []; const seen = []; const updates = []; let active = 0; let maximum = 0;
   const run = fillCatchUpDetails(initial, workspace => {
@@ -61,8 +61,20 @@ test("fan-out checks only eight workspaces and limits pending reads to three, in
   while (pending.length) { pending.shift()(); await new Promise(resolve => setImmediate(resolve)); }
   await run;
   assert.equal(maximum, 3); assert.equal(active, 0);
-  assert.deepEqual(seen, ["0", "1", "2", "3", "4", "5", "6", "7"]);
-  assert.equal(updates.length, 8); assert.equal(updates.find(entry => entry.workspace.id === "1").state, "failed");
+  assert.deepEqual(seen, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  assert.equal(updates.length, 10); assert.equal(updates.find(entry => entry.workspace.id === "1").state, "failed");
+});
+test("a question in the ninth workspace reaches Catch up, and workspaces with something waiting are read first", () => {
+  const many = Array.from({ length: 10 }, (_, id) => ({ id: "W" + id, name: "Workspace " + id }));
+  const row = id => ({ workspace_id: id, name: id, role: "member", last_seen_at: null, new_messages: 0, content: null,
+    people: [{ user_id: "zoe", display_name: "Zoe", role: "member", is_viewer: true, agents: [] }, { user_id: "amy", display_name: "Amy", role: "owner", is_viewer: false, agents: [] }],
+    needs_you: { asks: id === "W8" ? [{ signal_id: "ask-9", from: { kind: "user", id: "amy" }, created_at: "2026-10-05T11:59:00Z", until: "2026-10-06T12:00:00Z" }] : [], assigned: [], waiting: [] } });
+  const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: many.map(workspace => row(workspace.id)) };
+  const data = overviewCatchUpData(initialCatchUpData(many), overview, false);
+  assert.ok(data.every(entry => entry.state === "ready"), "the overview fills every workspace, not the first eight");
+  assert.equal(data[8].detail.people.groups.length, 2, "the ninth workspace has its own detail, as the first does");
+  assert.deepEqual(catchUpReadOrder(data, overview).map(entry => entry.workspace.id), ["W8", "W0", "W1", "W2", "W3", "W4", "W5", "W6", "W7", "W9"]);
+  assert.deepEqual(catchUpReadOrder(data, null).map(entry => entry.workspace.id), many.map(workspace => workspace.id), "without an overview the order is unchanged");
 });
 test("the overview cannot add a foreign workspace and missing content remains unknown", () => {
   const row = { workspace_id: "W", name: "Home", role: "owner", last_seen_at: null, new_messages: 4,
@@ -85,13 +97,13 @@ test("an object link distinguishes a failed read from confirmed absence in its o
   assert.equal(homeObjectState("foreign", ["A"], "ready"), "missing");
 });
 
-test("successful fallback reads, failed checks, and overflow workspaces have honest summaries", () => {
+test("successful fallback reads and failed checks have honest summaries, with no workspace left unchecked", () => {
   const detail = { people: mapHomePeople(input), signals: [], openTodos: null, lists: null, files: null, newMessages: null };
   assert.equal(mapCatchUp(workspaces.map(workspace => ({ workspace, state: "ready", detail })), "zoe", "Zoe", now, false).emptySummary, "Checked 2 of 2 workspaces.");
   assert.equal(mapCatchUp([{ workspace: workspaces[0], state: "ready", detail }, { workspace: workspaces[1], state: "failed" }], "zoe", "Zoe", now, false).emptySummary, "Checked 1 of 2 workspaces.");
   const entries = initialCatchUpData(Array.from({ length: 10 }, (_, id) => ({ id: String(id), name: String(id) })))
     .map(entry => entry.state === "loading" ? { ...entry, state: "ready", detail: { ...detail, needsYou: [] } } : entry);
-  assert.equal(mapCatchUp(entries, "zoe", "Zoe", now, false).emptySummary, "Checked 8 of 8 workspaces.");
+  assert.equal(mapCatchUp(entries, "zoe", "Zoe", now, false).emptySummary, null, "ten of ten checked and complete is the all-clear");
 });
 const overviewRow = { workspace_id: "W", name: "Home", role: "owner", last_seen_at: null, new_messages: 0, content: null,
   people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [] },
@@ -300,7 +312,7 @@ test("live Catch up keeps a successful overview when the ask queue fails, withou
     const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
       homeOverviewAsks: async () => { reads.push("overview-asks"); return []; },
       homeServer: () => ({ decisionQueue: async workspaceId => {
@@ -348,6 +360,40 @@ test("live Catch up keeps a successful overview when the ask queue fails, withou
       assert.equal(vm.needsYou[0].primary.action, ASKS_UNAVAILABLE_ACTION);
     }
   }
+});
+test("a workspace the overview leaves out stays unchecked through the loader; no other read calls it checked", async () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let loader;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "loadHomeCatchUp") loader = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.ok(loader);
+  const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
+  // The overview answers for Home only. Trip is a workspace the person belongs to that it left out.
+  const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [overviewRow] };
+  const paints = []; const reads = [];
+  const other = name => async workspaceId => { reads.push(`${name}:${workspaceId}`); return name === "roster" ? [] : name === "members" ? { members: [] } : []; };
+  const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+    sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces,
+    homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
+    initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
+    homeOverview: async () => overview,
+    homeOverviewAsks: async () => [],
+    homeServer: () => ({ decisionQueue: async workspaceId => { reads.push(`queue:${workspaceId}`); return askQueue([overviewAsk("Call the plumber?")]); } }),
+    feed: async workspaceId => { reads.push(`latest:${workspaceId}`); return []; },
+    // The compatibility reads. None of them may run for the workspace the overview left out.
+    memberRoster: other("members"), roster: other("roster"), agentAccessStatuses: other("access"), homeWorkingOn: other("working"), workspaceFiles: other("files"),
+    renderHomeCatchUp: () => paints.push(mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false)),
+  };
+  await runInNewContext(script, context);
+  const vm = paints.at(-1);
+  assert.deepEqual(vm.workspaces.map(card => card.state), ["ready", "failed"], "the omitted workspace stays could-not-be-checked");
+  assert.deepEqual(reads, ["queue:W", "latest:W"], "no read ran for the omitted workspace: its questions were never read, so nothing may call it checked");
+  assert.equal(context.homeOverviewCounts.get("X"), null, "its count is unknown, never zero");
+  assert.equal(vm.emptySummary, "Checked 1 of 2 workspaces.");
+  assert.equal(mapHomeRail(workspaces, { view: "catchup" }, null, false, context.homeOverviewCounts).catchUp.needsYou, null, "and the total is not drawn");
 });
 test("Catch up's Retry on unavailable asks reloads Catch up; other actions follow their link", () => {
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
@@ -569,7 +615,7 @@ test("Catch up names no assigner, skips a to-do read per card, and keeps one cou
     const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => ({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }),
       feed: async () => [],
       homeServer: () => ({ readTodo: async (workspaceId, todoId) => {
@@ -792,7 +838,7 @@ test("the live loader keeps the queue's list and does not treat a short feed as 
     const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
       homeOverview: async () => overview,
       homeServer: () => ({ decisionQueue }),
       feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },
