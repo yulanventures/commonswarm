@@ -75,6 +75,13 @@
   .sa-confirm[data-seat-admin-confirm="organization"] .sa-confirm__form { display: block; overflow-y: auto; overscroll-behavior: contain; }
   .sa-confirm[data-seat-admin-confirm="organization"] .sa-confirm__body { overflow: visible; }
 }
+/* The same on a short screen (a phone held sideways), for both grants: there is no room to pin the end date and the
+   actions and still show the explanation, so the form scrolls in reading order and Grant comes last. The end
+   confirmation is not a grant and keeps its pinned actions. */
+@media (height < 40rem) {
+  .sa-confirm[data-seat-admin-confirm] .sa-confirm__form { display: block; overflow-y: auto; overscroll-behavior: contain; }
+  .sa-confirm[data-seat-admin-confirm] .sa-confirm__body { overflow: visible; }
+}
 @media (forced-colors: active) {
   .sa-switch__track { forced-color-adjust: none; border-color: CanvasText; background: Canvas; }
   .sa-switch__track::after { background: CanvasText; }
