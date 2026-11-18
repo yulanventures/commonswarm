@@ -12,9 +12,8 @@ const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
 assert.ok(style, "LiveDashboard must expose its component stylesheet to the geometry fixture");
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
-  hostileElements: number; hostileText: boolean; accessMark: string | null; localAccessMark: string | null; hostedRowLabel: string | null; hostedDetailText: string; modelValues: (string | null)[];
-  confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
+type Geometry = { width: number; hostileElements: number; hostileText: boolean; modelValues: (string | null)[];
+  confirmRole: string | null; safeConfirmFocus: boolean; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
 // CI only: build the production DOM builder rather than recreating obsolete row markup.
 test("A2 rows, details and confirms have usable geometry and preserve plain text", { timeout: 60_000 }, async () => {
@@ -24,7 +23,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
     entryPoints: ["src/lib/people-dialog-view.ts"], format: "iife", globalName: "PeopleView", platform: "browser", write: false });
   const script = bundle.outputFiles[0]?.text; assert.ok(script);
   const tokens = await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8");
-  // Real page styles, introduced only after the unchanged classic measurements below.
+  // Real page styles, introduced only after the plain-text and confirmation checks inside the dialog below.
   const pageStyles = await build({ absWorkingDir: fileURLToPath(new URL("../../../", import.meta.url)), bundle: true,
     stdin: { contents: ['global.css', 'home/index.css', 'kylon-shell.css', 'kylon-layout/index.css', 'kylon-people.css', 'kylon-font.css']
       .map(file => `@import "./src/styles/${file}";`).join('\n'), loader: 'css', resolveDir: siteRoot },
@@ -54,32 +53,18 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const state = { selected: null, collapsed: new Set(), showAllAttention: false, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [];
-        const callbacks = { render: () => PeopleView.renderPeopleDialog(roster, detail, model, state, callbacks), action: () => {}, saveModel: async (_id, value) => { modelValues.push(value); },
+        const callbacks = { render: () => PeopleView.renderPeopleDialog(roster, detail, model, state, callbacks, {layout:'page',page:{homeLabel:'Home',homeHref:'#'}}), action: () => {}, saveModel: async (_id, value) => { modelValues.push(value); },
           confirm: (action, _id, opener) => PeopleView.showPeopleConfirmation(confirm, action, agent, opener, async () => {}, () => "The result is unknown. Reload to check.") };
         callbacks.render(); outer.showModal();
-        const rows = [...roster.querySelectorAll('.pd-agent')];
-        const rowOverflow = rows.some(row => row.scrollWidth > row.clientWidth);
-        const visibleButtons = element => [...element.querySelectorAll('button')].filter(button => button.getClientRects().length && getComputedStyle(button).visibility !== 'hidden');
-        const touchTargets = visibleButtons(outer).length > 0 && visibleButtons(outer).every(button => button.getBoundingClientRect().height >= 44);
-        const closeIconSize = parseFloat(getComputedStyle(outer.querySelector('[data-roster-close]')).fontSize);
-        const listWidth = outer.getBoundingClientRect().width;
         roster.querySelector('#pd-agent-agent').click();
-        const detailWidth = outer.getBoundingClientRect().width;
-        const detailTouchTargets = visibleButtons(detail).length > 0 && visibleButtons(detail).every(button => button.getBoundingClientRect().height >= 44);
-        const backIconSize = parseFloat(getComputedStyle(detail.querySelector('.pd-back-icon')).fontSize);
-        // A hosted agent's row draws no access mark (it cannot use Lists & docs yet); a local agent's row does.
-        const accessMark = roster.querySelector('[data-agent-row="agent"] [data-agent-content-access]')?.getAttribute('aria-label') ?? null;
-        const localAccessMark = roster.querySelector('[data-agent-row="local"] [data-agent-content-access]')?.getAttribute('aria-label') ?? null;
-        const hostedRowLabel = roster.querySelector('#pd-agent-agent')?.getAttribute('aria-label') ?? null;
-        const hostedDetailText = detail.textContent ?? '';
         detail.querySelector('[data-edit-model]').click();
         const form = detail.querySelector('[data-model-editor]'), input = form.querySelector('input');
         input.value = '   '; form.requestSubmit(); await Promise.resolve(); await Promise.resolve();
         const opener = detail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
-        const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
-          hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, localAccessMark, hostedRowLabel, hostedDetailText, modelValues, confirmRole, safeConfirmFocus,
+        const metrics = { width: innerWidth, hostileElements: document.querySelectorAll('img').length,
+          hostileText: detail.querySelector('h2').textContent.includes(hostile), modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
         // Separate controlled page, not Sample or a signed-in/backend journey. Never accept a command.

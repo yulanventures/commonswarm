@@ -1,6 +1,6 @@
 /** People & agents: roster and viewer rights in, detail controls and callbacks out.
  * Hosted and local owners share the Lists & docs flow and one approval command; the server decides. */
-import { AGENT_HOSTS, reconnectPrompt } from "./agent-hosts";
+import { reconnectPrompt } from "./agent-hosts";
 import { buildAgentRenameField, type RenameOutcome } from "./agent-rename";
 import { HOSTED_LISTS_NOTE } from "./hosted-lists-note";
 import { buildAgentModelEditor } from "./agent-model-editor";
@@ -33,8 +33,6 @@ export interface PeopleDialogState { selected: { type: "agent" | "person"; id: s
   roleRefusal?: { userId: string; name: string; text: string } | null;
   /** One entry per person whose role change is in flight. The entry object is the save's identity. */
   rolePending?: Map<string, { role: PeopleDialogRole }>; focusApplied?: string | null;
-  /** Builder-owned: the layout of the last render. A page keeps role drafts without a selected person. */
-  layout?: "dialog" | "page";
   /** Builder-owned: the row whose name is being edited, with its draft, the server's refusal and a save in flight. */
   rename?: { id: string; editor: number; value: string; error: string; pending: boolean } | null;
   /** Builder-owned: the hosted agent whose reconnect sentence is shown. */
@@ -62,9 +60,10 @@ export interface PeopleDialogOptions {
   focus?: PeopleDialogFocus;
   /** The tint used for an agent everywhere else in the app; null is neutral (its owner left). Without tintFor: position in the agent list. */
   tintFor?: (agentId: string) => 0 | 1 | 2 | 3 | null;
-  /** "dialog" (default) fills the roster dialog's list and detail. "page" builds one context roster and a main profile
+  /** The one layout: a roster with search, filters and actions in `root`, and the selected profile beside it.
+   * Accepted so existing callers need no change; it selects nothing. Was: "page" builds one context roster and a main profile
    * into `root`; the real shell can project that roster without cloning its controls. */
-  layout?: "dialog" | "page";
+  layout?: "page";
   page?: PeopleDialogPage;
 }
 export type PeopleDialogAction = "resume" | "new-key" | "remove-agent" | "turn-off-key" | "withdraw" | "remove-person" | "cancel-invite" | "connected-apps" | "allow";
@@ -92,12 +91,7 @@ export function peopleDialogGroups(model: PeopleDialogModel, query: string) {
     .filter(({ person, agents }) => !needle || person.name.toLocaleLowerCase().includes(needle) || agents.length);
   const other = model.agents.filter((agent) => !model.people.some((person) => person.id === agent.ownerId) && (!needle || matches(agent)));
   const invites = model.invites.filter((invite) => !needle || invite.name.toLocaleLowerCase().includes(needle));
-  const attention = [...groups.flatMap((group) => group.agents), ...other].filter((agent) => agent.status.attention);
-  return { groups, other, invites, attention };
-}
-export function peopleDialogCounts(model: PeopleDialogModel): string {
-  const attention = model.agents.filter((agent) => agent.status.attention).length;
-  return `${model.people.length} ${model.people.length === 1 ? "person" : "people"} · ${model.agents.length} ${model.agents.length === 1 ? "agent" : "agents"}${attention ? ` · ${attention} need attention` : ""}`;
+  return { groups, other, invites };
 }
 export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null {
   if (!agent.own || agent.accessReadState !== "succeeded") return null;
@@ -228,15 +222,16 @@ function button(doc: Document, text: string, click: (button: HTMLButtonElement) 
   const element = node(doc, "button", className, text); element.type = "button";
   element.addEventListener("click", () => click(element)); return element;
 }
-function icon(doc: Document, kind: "close" | "back" | "invite") {
+/** The envelope that marks a person's invitation. */
+function inviteIcon(doc: Document) {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", kind === "back" ? "pd-icon pd-back-icon" : "pd-icon");
+  svg.setAttribute("class", "pd-icon");
   svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
   svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.5");
   svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
   const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", kind === "close" ? "M6 6l12 12M18 6L6 18" : kind === "back" ? "M14 6l-6 6 6 6" : "M4 6h16v12H4zM4 7l8 6 8-6");
+  path.setAttribute("d", "M4 6h16v12H4zM4 7l8 6 8-6");
   svg.append(path); return svg;
 }
 /** No tint (null) is the neutral square of an agent whose owner left. */
@@ -279,7 +274,6 @@ let renameEditors = 0;
 export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model: PeopleDialogModel, state: PeopleDialogState, callbacks: PeopleDialogCallbacks, options: PeopleDialogOptions = {}): void {
   const doc = root.ownerDocument;
   const appliedFocus = options.focus ? peopleDialogApplyFocus(model, state, options.focus) : false;
-  const page = options.layout === "page"; state.layout = page ? "page" : "dialog";
   const tintOf = (agent: PeopleDialogAgent) => { if (!options.tintFor) return model.agents.indexOf(agent) % 4; const tint = options.tintFor(agent.id); return validTint(tint) ? tint : null; };
   const active = doc.activeElement as HTMLElement | null;
   const hadFocus = !!active && (root.contains(active) || detail.contains(active));
@@ -293,26 +287,23 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   root.replaceChildren(); detail.replaceChildren();
   const outer = root.closest<HTMLDialogElement>("[data-roster-dialog]");
   // One roster node: the shell projects it into desktop context and returns it to this page on phones.
-  let host: HTMLElement = root; let pageRoot: HTMLElement | null = null; let side: HTMLElement | null = null;
-  if (page) {
-    const nav = options.page ?? { homeLabel: model.workspaceName ?? "", homeHref: "" };
-    const frame = buildPeoplePage(doc, model, state, nav, callbacks.render);
-    pageRoot = frame.page; host = frame.host; side = frame.side; root.append(pageRoot);
-  }
+  const nav = options.page ?? { homeLabel: model.workspaceName ?? "", homeHref: "" };
+  const { page: pageRoot, host, side } = buildPeoplePage(doc, model, state, nav, callbacks.render);
+  root.append(pageRoot);
   const select = (type: "agent" | "person", id: string) => {
     host.querySelectorAll<HTMLDetailsElement>(".pd-row-actions[open]").forEach(menu => { menu.open = false; });
     if (type === "agent") { const agent = model.agents.find((candidate) => candidate.id === id); if (agent) state.collapsed.delete(agent.ownerId); }
     state.selected = state.selected?.id === id && state.selected.type === type ? null : { type, id };
     callbacks.render(); detail.scrollTop = 0;
-    if (page && state.selected) detail.scrollIntoView?.({ block: "nearest" });
-    (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: !page });
+    if (state.selected) detail.scrollIntoView?.({ block: "nearest" });
+    (state.selected ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-${type}-${id}`))?.focus({ preventScroll: false });
   };
   const back = () => { const selected = state.selected;
-    const missingRow = page && selected && !doc.getElementById(`pd-${selected.type}-${selected.id}`);
+    const missingRow = selected && !doc.getElementById(`pd-${selected.type}-${selected.id}`);
     state.selected = null;
     if (missingRow) state.filter = "all";
     if (missingRow && state.query && options.page?.onQuery) options.page.onQuery(""); else callbacks.render();
-    if (selected) (doc.getElementById(`pd-${selected.type}-${selected.id}`) ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? (page ? pageHeading(doc) : null))?.focus({ preventScroll: !page }); };
+    if (selected) (doc.getElementById(`pd-${selected.type}-${selected.id}`) ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc))?.focus({ preventScroll: false }); };
   const actionButton = (action: PeopleDialogAction, agent: PeopleDialogAgent, text: string, notice: HTMLElement, hook?: string) => {
     const element = button(doc, text, (opener) => {
       if (!peopleDialogCanAct(model, action, agent.id)) return;
@@ -335,7 +326,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   };
   const refocusRole = (personId: string, key: string) => {
     if (state.selected?.type === "person" && state.selected.id === personId)
-      (detail.querySelector<HTMLElement>(`[data-pd-focus="${key}"]`) ?? detail.querySelector<HTMLElement>("h2"))?.focus({ preventScroll: !page }); };
+      (detail.querySelector<HTMLElement>(`[data-pd-focus="${key}"]`) ?? detail.querySelector<HTMLElement>("h2"))?.focus({ preventScroll: false }); };
   // Role: a native select and Save. Lowering your own role asks first, in a native alertdialog. A refusal is shown from its stable code.
   const roleControl = (person: PeopleDialogPerson, roles: PeopleDialogRole[]) => {
     const draft = state.roleDraft?.userId === person.id ? state.roleDraft : null;
@@ -355,7 +346,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       if (refusal === null) { if (state.roleDraft?.userId === person.id) state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
       else {
         state.roleRefusal = { userId: person.id, name: person.name, text: refusal };
-        if (state.layout === "page" || (state.selected?.type === "person" && state.selected.id === person.id)) state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
+        state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
       }
       callbacks.render();
       refocusRole(person.id, `role-${person.id}`);
@@ -392,80 +383,17 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     }
     return holder;
   };
-  const { groups, other, invites, attention } = peopleDialogGroups(model, state.query);
-  // The page keeps attention on each agent's own row (its pill, its sentence and its one next action), not in a summary.
-  if (!page && attention.length) {
-    const box = node(doc, "section", "pd-attention"); const heading = node(doc, "h3", "", "⚠ Needs attention");
-    heading.id = "pd-attention-title"; box.setAttribute("aria-labelledby", heading.id);
-    const list = node(doc, "ul", "pd-attention-list"); list.id = "pd-attention-list";
-    for (const agent of state.showAllAttention ? attention : attention.slice(0, 3)) {
-      const row = node(doc, "li"); const jump = button(doc, "", () => {
-        state.collapsed.delete(agent.ownerId); callbacks.render(); const target = doc.getElementById(`pd-agent-${agent.id}`);
-        target?.scrollIntoView({ block: "nearest" }); target?.focus({ preventScroll: true });
-      }, "pd-attention-jump");
-      jump.append(node(doc, "strong", "", agent.name), node(doc, "span", "pd-muted", ` · ${agent.ownerName?.split(/\s+/)[0] ?? "Other agents"} — `), node(doc, "span", "pd-attention-reason", agent.status.label));
-      jump.setAttribute("aria-label", `Find ${agent.name}, ${agent.ownerName ?? "Other agents"}: ${agent.status.label}`);
-      const next = fix(agent, node(doc, "p"), true); row.append(jump); if (next) row.append(next); list.append(row);
-    }
-    box.append(heading, list);
-    if (attention.length > 3) { const more = button(doc, state.showAllAttention ? "Show fewer" : `Show ${attention.length - 3} more`, () => {
-      state.showAllAttention = !state.showAllAttention; callbacks.render(); root.querySelector<HTMLElement>('[data-pd-focus="more-attention"]')?.focus();
-    }); more.dataset.pdFocus = "more-attention"; more.setAttribute("aria-expanded", String(state.showAllAttention)); more.setAttribute("aria-controls", list.id); box.append(more); }
-    root.append(box);
-  }
-  if (!page && model.agents.length && !state.query.trim()) {
-    const strip = node(doc, "ul", "pd-portraits");
-    for (const person of model.people) {
-      const agents = model.agents.filter((agent) => agent.ownerId === person.id);
-      const entry = node(doc, "li"); const jump = button(doc, "", () => {
-        state.collapsed.delete(person.id); callbacks.render(); doc.getElementById(`pd-person-${person.id}`)?.focus();
-      }, "pd-portrait");
-      const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person); face.setAttribute("aria-hidden", "true");
-      const needsAttention = agents.some((agent) => agent.status.attention);
-      face.dataset.attention = String(needsAttention);
-      if (needsAttention) {
-        const mark = node(doc, "span", "pd-portrait-warning", "⚠"); mark.setAttribute("aria-hidden", "true"); face.append(mark);
-        jump.append(node(doc, "span", "pd-sr-only", "Needs attention. "));
-      }
-      jump.append(face, node(doc, "strong", "pd-ellipsis", peopleFirstName(person.name)));
-      const orbs = node(doc, "span", "pd-portrait-orbs"); agents.slice(0, 4).forEach((agent) => orbs.append(orb(doc, agent, tintOf(agent)))); jump.append(orbs);
-      if (agents.length > 4) jump.append(node(doc, "span", "pd-muted", `+${agents.length - 4}`));
-      jump.setAttribute("aria-label", `${person.name}, ${person.role}, ${agents.length} agents. ${needsAttention ? "Needs attention. " : ""}${agents.map((agent) => `${agent.name}: ${agent.status.label}`).join("; ")}`);
-      entry.append(jump); strip.append(entry);
-    }
-    root.append(strip);
-  }
-  if (!page && state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
-    const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
-  // The Invites tab already counts its rows; it needs a result line only for a search.
-  if (page && (state.query.trim() || (state.filter && state.filter !== "all" && state.filter !== "invites"))) {
+  const { groups, other, invites } = peopleDialogGroups(model, state.query);
+  // Attention stays on each agent's own row (its pill, its sentence and its one next action), not in a summary.
+  if (state.query.trim() || (state.filter && state.filter !== "all" && state.filter !== "invites")) {
     const people = state.filter === "agents" || state.filter === "invites" ? 0 : groups.length;
     const agents = state.filter === "people" || state.filter === "invites" ? 0 : groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-roster-result pd-muted", `${people} ${people === 1 ? "person" : "people"} · ${agents} ${agents === 1 ? "agent" : "agents"} · ${invites.length} pending ${invites.length === 1 ? "invitation or key" : "invitations or keys"}${!people && !agents && !invites.length ? ". No matches. Try another name." : ""}`);
     result.setAttribute("role", "status"); host.append(result);
   }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
-  const agentRow = (agent: PeopleDialogAgent) => {
-    if (page) return pageAgentRow(agent);
-    const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
-    const row = node(doc, "li", "pd-agent"); row.dataset.agentRow = agent.id; row.dataset.attention = String(agent.status.attention);
-    const disclosure = button(doc, "", () => select("agent", agent.id), "pd-agent-disclosure"); disclosure.id = `pd-agent-${agent.id}`;
-    disclosure.dataset.pdFocus = `agent-${agent.id}`;
-    disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
-    const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? peopleDialogAccessLabel(agent) : ""}`);
-    const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
-    if (approved && !agent.hosted) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
-    copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
-    disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
-    const notice = noticeFor(agent);
-    if (agent.status.attention && !model.sample) { const help = node(doc, "div", "pd-row-help"); help.append(node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) help.append(next); row.append(help); }
-    if (state.selected?.id !== agent.id && agent.receipt) row.append(notice);
-    const error = node(doc, "p", "pd-error"); error.setAttribute("role", "alert"); error.dataset.agentRowError = agent.id; error.hidden = true; row.append(error); return row;
-  };
   // Rename in the row: the draft, the server's refusal and a save in flight live in state, so a roster refresh keeps them.
-  const focusRow = (id: string) => doc.getElementById(`pd-agent-${id}`)?.focus({ preventScroll: !page });
+  const focusRow = (id: string) => doc.getElementById(`pd-agent-${id}`)?.focus({ preventScroll: false });
   const renameField = (agent: PeopleDialogAgent) => {
     const draft = state.rename!;
     const field = buildAgentRenameField(doc, { id: `pd-rename-${agent.id}`, label: "Name", current: agent.rawName ?? agent.name,
@@ -520,8 +448,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     });
     return block;
   };
-  // Compact context row: native disclosure opens the main profile; its native actions disclosure retains the actions.
-  const pageAgentRow = (agent: PeopleDialogAgent) => {
+  // Compact row: native disclosure opens the profile; its native actions disclosure retains the actions.
+  const agentRow = (agent: PeopleDialogAgent) => {
     const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
     const row = node(doc, "li", "pd-agent"); row.dataset.agentRow = agent.id; row.dataset.attention = String(agent.status.attention);
     const disclosure = button(doc, "", () => select("agent", agent.id), "pd-agent-disclosure"); disclosure.id = `pd-agent-${agent.id}`;
@@ -632,37 +560,25 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person); face.setAttribute("aria-hidden", "true");
       const copy = node(doc, "span", "pd-person-copy"); const name = node(doc, "strong", "pd-person-name", person.name); name.title = person.name;
       const roleText = node(doc, "span", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`);
-      copy.append(name); if (page) copy.append(doc.createTextNode(" ")); copy.append(roleText); personButton.append(face, copy); head.append(personButton);
-      if (page) pageHead(person, head, roleText);
-      else if (agents.length) { const toggle = button(doc, state.collapsed.has(person.id) ? "›" : "⌄", () => { state.collapsed.has(person.id) ? state.collapsed.delete(person.id) : state.collapsed.add(person.id); callbacks.render();
-        root.querySelector<HTMLElement>(`[data-pd-focus="collapse-${person.id}"]`)?.focus(); }, "pd-collapse");
-        toggle.dataset.pdFocus = `collapse-${person.id}`; toggle.setAttribute("aria-label", `${state.collapsed.has(person.id) ? "Show" : "Hide"} ${person.name}’s agents`);
-        toggle.setAttribute("aria-expanded", String(!state.collapsed.has(person.id))); toggle.setAttribute("aria-controls", `pd-group-${person.id}`); head.append(toggle); }
+      copy.append(name, doc.createTextNode(" "), roleText); personButton.append(face, copy); head.append(personButton);
+      pageHead(person, head, roleText);
     } else {
       const face = node(doc, "span", "pd-initials pd-neutral-avatar"); face.setAttribute("aria-hidden", "true");
       const copy = node(doc, "div", "pd-person-copy");
       copy.append(node(doc, "h3", "pd-person-name", "Other agents"), node(doc, "span", "pd-sr-only", "Their owner is no longer a member"));
       head.append(face, copy);
     }
-    if (!page || state.filter !== "agents") element.append(head);
+    if (state.filter !== "agents") element.append(head);
     const list = node(doc, "ul", "pd-agents-list"); if (person) list.id = `pd-group-${person.id}`;
-    list.hidden = !page && !!person && state.collapsed.has(person.id); agents.forEach((agent) => list.append(agentRow(agent)));
-    if (!page || state.filter !== "people") element.append(list);
-    if (!agents.length) { const none = node(doc, "p", "pd-empty-person", "No agents added yet."); if (page) none.classList.add("pd-sr-only"); element.append(none); } return element;
+    agents.forEach((agent) => list.append(agentRow(agent)));
+    if (state.filter !== "people") element.append(list);
+    if (!agents.length) element.append(node(doc, "p", "pd-empty-person pd-sr-only", "No agents added yet.")); return element;
   };
-  const invitesOnly = page && state.filter === "invites" && !model.sample;
-  if (!invitesOnly && (page || model.agents.length || state.query.trim() || model.people.length > 1)) groups.forEach(({ person, agents }) => {
-    if (!page || state.filter !== "agents" || agents.length) grid.append(card(person, agents));
+  const invitesOnly = state.filter === "invites" && !model.sample;
+  if (!invitesOnly) groups.forEach(({ person, agents }) => {
+    if (state.filter !== "agents" || agents.length) grid.append(card(person, agents));
   });
-  if (other.length && !invitesOnly && (!page || state.filter !== "people")) grid.append(card(null, other));
-  if (!page && !model.agents.length && !state.query.trim()) {
-    const empty = node(doc, "section", "pd-empty"); const art = node(doc, "div", "pd-empty-art"); art.setAttribute("aria-hidden", "true");
-    art.append(node(doc, "span", "pd-orbit"), node(doc, "span", "pd-initials", personLetters(model.people.find((person) => person.own)?.name ?? "Common Swarm")));
-    for (let index = 0; index < 4; index++) { const ball = node(doc, "span", "pd-orb"); ball.dataset.tint = String(index); art.append(ball); }
-    empty.append(art, node(doc, "h3", "", model.people.length <= 1 ? "It’s just you so far" : "A place for your agents, too"), node(doc, "p", "pd-muted", model.sample ? "People and their agents share a space here. Each agent has its own access to Lists & docs." : model.people.some((person) => person.own && person.role !== "member") ? "Add the agents you already use, and invite the people you share this space with." : "Add your first agent from an app you already use.")); const apps = node(doc, "div", "pd-app-chips"); apps.setAttribute("aria-label", "Apps that can join");
-    AGENT_HOSTS.filter((host) => host.joiner === "primary").forEach((host) => apps.append(node(doc, "span", "", host.name))); empty.append(apps); grid.append(empty);
-  }
-  if (!page && !groups.length && !other.length && !invites.length && state.query.trim()) { const empty = node(doc, "p", "pd-muted", "No people, agents or invitations match. Try another name."); empty.setAttribute("role", "status"); grid.append(empty); }
+  if (other.length && !invitesOnly && state.filter !== "people") grid.append(card(null, other));
   host.append(grid);
   // Invited: every invite says who made it and when, and every one the viewer may end has Cancel.
   const invited = node(doc, "section", "dashboard__roster-dialog-pending pd-invited"); invited.dataset.dialogAccessSection = "";
@@ -673,7 +589,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   for (const invite of invites) {
     const row = node(doc, "li", "pd-invite"); row.dataset.inviteKind = invite.kind;
     const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "person" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
-    if (invite.kind === "person") symbol.append(icon(doc, "invite"));
+    if (invite.kind === "person") symbol.append(inviteIcon(doc));
     const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "key" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
     copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
     if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
@@ -690,33 +606,26 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     }); retry.dataset.invitesRetry = ""; retry.dataset.pdFocus = "invites-retry"; load.append(retry); }
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
   invited.append(invitedTitle, inviteList, none, load, inviteError); host.append(invited);
-  if (page && side) {
-    side.append(detail);
-  }
+  side.append(detail);
 
   if (state.roleReceipt && (state.selected?.type !== "person" || state.roleReceipt.userId !== state.selected.id)) {
     const receipt = node(doc, "p", "pd-receipt", state.roleReceipt.text);
-    receipt.dataset.roleReceipt = ""; receipt.setAttribute("role", "status"); (page ? host : root).append(receipt);
+    receipt.dataset.roleReceipt = ""; receipt.setAttribute("role", "status"); host.append(receipt);
   }
   if (state.roleRefusal && (state.selected?.type !== "person" || state.roleRefusal.userId !== state.selected.id)) {
     const refusal = node(doc, "p", "pd-error", `${state.roleRefusal.name}: ${state.roleRefusal.text}`);
-    refusal.dataset.roleError = state.roleRefusal.userId; refusal.setAttribute("role", "alert"); (page ? host : root).append(refusal);
+    refusal.dataset.roleError = state.roleRefusal.userId; refusal.setAttribute("role", "alert"); host.append(refusal);
   }
-  if (!page && state.roleDraft && (state.selected?.type !== "person" || state.roleDraft.userId !== state.selected.id)) state.roleDraft = null;
   const selected = state.selected?.type === "agent" ? model.agents.find((agent) => agent.id === state.selected?.id) : model.people.find((person) => person.id === state.selected?.id);
   if (!selected) state.selected = null;
   detail.hidden = !state.selected; outer?.classList.toggle("has-detail", !!state.selected); pageRoot?.classList.toggle("has-detail", !!state.selected);
   const emptyProfile = side?.querySelector<HTMLElement>("[data-people-empty]"); if (emptyProfile) emptyProfile.hidden = !!state.selected;
   if (state.selected && selected) {
     const top = node(doc, "div", "pd-detail-top");
-    const backButton = button(doc, "", back, "pd-text-button pd-back");
-    backButton.append(icon(doc, "back"), node(doc, "span", "", "Back to everyone"));
     const closeButton = button(doc, "", back, "pd-close-detail");
-    if (page) {
-      const phoneLabel = node(doc, "span", "pd-close-phone"); const chevron = node(doc, "span", "", "‹"); chevron.setAttribute("aria-hidden", "true");
-      phoneLabel.append(chevron, node(doc, "span", "pd-sr-only", "Back to "), doc.createTextNode("People"));
-      closeButton.append(node(doc, "span", "pd-close-wide", "Close"), phoneLabel); closeButton.dataset.peopleProfileBack = "";
-    } else { closeButton.append(icon(doc, "close")); closeButton.setAttribute("aria-label", `Close ${selected.name} details`); top.append(backButton); }
+    const phoneLabel = node(doc, "span", "pd-close-phone"); const chevron = node(doc, "span", "", "‹"); chevron.setAttribute("aria-hidden", "true");
+    phoneLabel.append(chevron, node(doc, "span", "pd-sr-only", "Back to "), doc.createTextNode("People"));
+    closeButton.append(node(doc, "span", "pd-close-wide", "Close"), phoneLabel); closeButton.dataset.peopleProfileBack = "";
     top.append(closeButton); detail.append(top);
     const title = node(doc, "h2", "", selected.name); title.id = "pd-detail-title"; title.tabIndex = -1;
     const identity = node(doc, "div", "pd-detail-identity");
@@ -766,14 +675,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         technical.append(fact);
       } detail.append(technical);
       if (agent.mayManage && !model.sample) { const danger = node(doc, "section", "pd-danger-zone"); danger.append(node(doc, "h3", "", "Stop or remove")); const actions = node(doc, "div", "pd-danger-actions");
-        if (peopleDialogCanAct(model, "turn-off-key", agent.id)) { const stop = actionButton("turn-off-key", agent, page ? "Turn off key" : `Turn off key for ${agent.name}`, notice, "data-revoke-grant"); if (page) stop.setAttribute("aria-label", `Turn off key for ${agent.name}`); actions.append(stop); }
-        const remove = actionButton("remove-agent", agent, page ? (agent.hosted ? "Remove agent" : "Remove from this workspace") : `Remove ${agent.name}`, notice, "data-remove-agent"); if (page) remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); detail.append(danger); }
+        if (peopleDialogCanAct(model, "turn-off-key", agent.id)) { const stop = actionButton("turn-off-key", agent, "Turn off key", notice, "data-revoke-grant"); stop.setAttribute("aria-label", `Turn off key for ${agent.name}`); actions.append(stop); }
+        const remove = actionButton("remove-agent", agent, agent.hosted ? "Remove agent" : "Remove from this workspace", notice, "data-remove-agent"); remove.setAttribute("aria-label", `Remove agent: ${agent.name}`); actions.append(remove); danger.append(actions); detail.append(danger); }
       const error = node(doc, "p", "pd-error"); error.dataset.agentError = ""; error.setAttribute("role", "alert"); error.hidden = true; detail.append(error);
     } else {
       const person = selected as PeopleDialogPerson; const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person);
       const role = node(doc, "p", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`);
-      if (page) { const copy = node(doc, "div"); copy.append(title, role); identity.append(face, copy); }
-      else identity.append(face, title, role); detail.append(identity);
+      const copy = node(doc, "div"); copy.append(title, role); identity.append(face, copy); detail.append(identity);
       if (state.roleReceipt?.userId === person.id) { const done = node(doc, "p", "pd-receipt", state.roleReceipt.text); done.dataset.roleReceipt = ""; done.setAttribute("role", "status"); detail.append(done); }
       const roles = callbacks.changeRole ? peopleDialogRoleOptions(model, person.id) : [];
       if (roles.length) { const control = roleControl(person, roles); detail.append(control);
@@ -783,7 +691,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const list = node(doc, "ul", "pd-person-agents"); agents.forEach((agent) => { const entry = node(doc, "li"); entry.append(button(doc, agent.name, () => select("agent", agent.id))); list.append(entry); }); detail.append(list);
       if (!agents.length) detail.append(node(doc, "p", "pd-muted", "No agents added yet."));
       if (peopleDialogCanAct(model, "remove-person", person.id)) { const danger = node(doc, "section", "pd-danger-zone"); danger.append(node(doc, "h3", "", "Membership"));
-        const remove = button(doc, page ? "Remove person" : `Remove ${person.name}`, (opener) => callbacks.confirm("remove-person", person.id, opener), "pd-danger-button"); if (page) remove.setAttribute("aria-label", `Remove person: ${person.name}`); remove.dataset.removeMember = person.id; remove.dataset.pdFocus = `remove-person-${person.id}`; danger.append(remove); detail.append(danger); }
+        const remove = button(doc, "Remove person", (opener) => callbacks.confirm("remove-person", person.id, opener), "pd-danger-button"); remove.setAttribute("aria-label", `Remove person: ${person.name}`); remove.dataset.removeMember = person.id; remove.dataset.pdFocus = `remove-person-${person.id}`; danger.append(remove); detail.append(danger); }
     }
   }
   if (draft?.id && state.selected?.type === "agent" && state.selected.id === draft.id) {
@@ -792,16 +700,16 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (input && draft.value !== undefined) input.value = draft.value;
     if (active?.isConnected && !focusWithinDetail && !root.contains(active)) active.focus({ preventScroll: true });
   }
-  if (page) { const confirm = root.querySelector<HTMLDialogElement>("dialog[data-role-confirm]");
+  { const confirm = root.querySelector<HTMLDialogElement>("dialog[data-role-confirm]");
     if (confirm && !confirm.open && confirm.isConnected) { confirm.showModal(); (confirm.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? confirm).focus({ preventScroll: true }); } }
-  if (focusKey && !(page ? root : detail).querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
-    (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? (page ? pageHeading(doc) : null))?.focus({ preventScroll: true });
-    if (page && doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); } }
+  if (focusKey && !root.querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
+    (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc))?.focus({ preventScroll: true });
+    if (doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); } }
   // A refresh replaces headings too. Restore focus only when this render dropped it to body;
   // another control or a nested/sibling dialog owns any focus it acquired meanwhile.
   if (hadFocus && (!doc.activeElement || doc.activeElement === doc.body) && !doc.querySelector("dialog[open]:not([data-roster-dialog])")) {
     const fallback = (focusWithinDetail ? detail.querySelector<HTMLElement>("#pd-detail-title") : null)
-      ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? (page ? pageHeading(doc) : null);
+      ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc);
     if (fallback?.getClientRects().length && !fallback.closest("[hidden],[inert]")) fallback.focus({ preventScroll: true });
   }
 }

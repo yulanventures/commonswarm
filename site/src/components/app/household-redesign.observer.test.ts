@@ -170,12 +170,10 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(model, /const own = Boolean\(me && agent.ownerUserId === me.userId && !sampleMode/);
   assert.match(peopleView, /"data-withdraw-agent-access"/);
   assert.match(peopleView, /"data-agent-error"|dataset.agentError/);
-  assert.match(peopleView, /dataset.agentContentAccess/);
   assert.match(peopleView, /dataset.agentContentResult/);
   assert.match(peopleView, /"pd-quiet-link"/);
   assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
-  assert.match(peopleView, /"Can use Lists & docs"/);
   assert.match(script, /withdrawAgent\(id, agent.name, agent.transport === "hosted_mcp", button, notice, true\)/,
     "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
@@ -275,7 +273,8 @@ test("hosted and local owners use the same Allow controls and approval command; 
     const paint = () => renderPeopleDialog(dom.root as any, dom.detail as any, f.model(),
       { selected: { type: "agent", id: principal }, collapsed: new Set(), showAllAttention: false, query: "" },
       { render: () => {}, action: (action, id) => { actions.push([action, id]); }, saveModel: async () => {},
-        confirm: () => assert.fail("Allow opens the existing Lists & docs choices") });
+        confirm: () => assert.fail("Allow opens the existing Lists & docs choices") },
+      { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
     const allowButton = () => dom.detail.descendants().find(node => node.tag === "button" && node.textContent === "Allow");
     paint(); assert.ok(allowButton(), `${kind}: owner has Allow`);
     assert.equal(allowButton()!.attributes["data-allow-agent-access"], principal);
