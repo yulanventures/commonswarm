@@ -33,8 +33,8 @@ test("public pages have no serious or critical accessibility findings at phone a
   const dist = fileURLToPath(new URL("../dist/", import.meta.url));
   const axeSource = await readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
   const sitemap = await readFile(join(dist, "sitemap.xml"), "utf8");
-  // /app is the app, not a public page: without a session its shell is in a state no person sees, and its controls
-  // belong to the signed-in check that the workspace fixture will carry.
+  // /app is the app, not a public page. A build with no backend configured, as here, shows its sample workspace,
+  // which production never serves; the app's controls belong to the signed-in check the workspace fixture will carry.
   const pages = [...sitemap.matchAll(/<loc>https:\/\/commonswarm\.com(\/[^<]*)<\/loc>/gu)].map(([, path]) => path!)
     .filter(path => path !== "/app/");
   assert.ok(pages.length >= 10, `the sitemap should list the public pages, got ${pages.length}`);
