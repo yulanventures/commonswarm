@@ -29,6 +29,7 @@ import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, wit
 import { matrixResult } from "./witness-matrix.js";
 import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from "./hover-witness.js";
 import { runPictureChecks, type PictureCheck } from "./picture-check.js";
+import { freezeControlProblem, type FreezeCount } from "./freeze-control.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -431,6 +432,12 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   "dialog.channel-lead": [{ name: "channel-lead-select", rows: "dialog[data-channel-dialog][open] [data-channel-lead-select]", max: 1,
     prefer: "[data-channel-lead-select]", focus: true, require: ["[data-channel-lead-select]"] }],
 };
+/** The screens whose hover witnesses measure message rows as the signed-in viewer: where the frozen-receipt control
+ *  of a focused run has receipt calls to intercept, and so must be exercised. */
+const measuresFeed = (id: string): boolean => {
+  const screen = screens().find(candidate => candidate.id === id);
+  return !!screen && !screen.signedOut && screen.status !== "pending" && screen.viewer !== "invitee" && (HOVER_WITNESSES[id] ?? []).some(spec => spec.rows === FEED_ROWS);
+};
 /** Desktop widths for the hover pass only (the owner's screenshots are desktop), with a mouse and no touch. */
 const HOVER_VIEWPORTS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }] as const;
 
@@ -497,8 +504,10 @@ async function main(): Promise<void> {
   let hoverFailures = -1;
   const hoverDesktop: Record<string, unknown>[] = [];
   /** Diagnostic mode only: per frozen pass, how many receipt RPC calls the control intercepted, fetched and replayed. */
-  const freezeCounts: Array<{ pass: string; viewport: string; theme: string; intercepted: number; fetched: number; replayed: number }> = [];
-  const inviteeFreezeCounts: typeof freezeCounts = [];
+  const freezeCounts: FreezeCount[] = [];
+  const inviteeFreezeCounts: Array<Omit<FreezeCount, "screens" | "polled">> = [];
+  /** Diagnostic mode only: repeated receipt reads each batch made with normal polling, keyed "pass size theme". */
+  const polledNormally = new Map<string, number>();
   const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
   let pictureFailures = -1;
   const hoverShots: string[] = [];
@@ -595,6 +604,15 @@ async function main(): Promise<void> {
         const freezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
         const inviteeFreezeStats = { intercepted: 0, fetched: 0, replayed: 0 };
         if (freeze) { await freezeReceipts(signedIn, freezeStats); await freezeReceipts(invitee, inviteeFreezeStats); }
+        // With normal polling, only watch: a receipt read repeated with the same body is what the frozen pass of this
+        // batch will have to replay. Nothing is intercepted, so the capture is unchanged.
+        const receiptReads = new Set<string>();
+        const normalPolling = { repeats: 0 };
+        if (!freeze) signedIn.on("request", (request: { url(): string; postData(): string | null }) => {
+          if (!request.url().includes("/rest/v1/rpc/signal_delivery_receipts")) return;
+          const key = request.postData() ?? "";
+          if (receiptReads.has(key)) normalPolling.repeats += 1; else receiptReads.add(key);
+        });
         // tsx (esbuild keepNames) wraps nested functions in __name(); CHECKS runs in the page, so give it a no-op.
         // Also track in-flight fetches so background post-hydration loads (loadHomeWorkspace, householdDashboard,
         // skills, definitions) settle before setup steps interact with the DOM.
@@ -605,7 +623,7 @@ async function main(): Promise<void> {
         for (const c of [context, signedIn, invitee]) {
           await c.addInitScript({ content: `try { localStorage.setItem("commonswarm:theme", ${JSON.stringify(theme)}); for (const k of Object.keys(localStorage)) { if (k.startsWith("commonswarm:composer-draft:")) localStorage.removeItem(k); } const stored = sessionStorage.getItem("commonswarm-audit:stored"); if (stored) { sessionStorage.removeItem("commonswarm-audit:stored"); for (const [k, v] of Object.entries(JSON.parse(stored))) localStorage.setItem(k, String(v)); } } catch {}` });
         }
-        return { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats };
+        return { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats, normalPolling };
       };
 
       /** Open one manifest screen: load, wait for the app, run its setup steps, check ready, settle, re-check ready.
@@ -850,7 +868,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats, normalPolling } = await openContexts(viewport, theme, true, freeze);
         const batch = await runScreens(screens().filter(s => diagnosed(s.id, size)), async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -913,7 +931,8 @@ async function main(): Promise<void> {
           return entry;
         });
         report.push(...batch);
-        if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats });
+        if (freeze) freezeCounts.push({ pass: "mobile", viewport: size, theme, ...freezeStats, screens: batch.map(r => String(r.id)), polled: polledNormally.get(`mobile ${size} ${theme}`) ?? 0 });
+        else polledNormally.set(`mobile ${size} ${theme}`, normalPolling.repeats);
         // The second viewer's frozen captures are recorded apart and are not part of the exercised-control assertion: they count
         // as controlled only where this entry shows receipt calls intercepted and replayed.
         if (freeze && batch.some(r => screens().find(s => s.id === r.id)?.viewer === "invitee")) inviteeFreezeCounts.push({ pass: "mobile", viewport: size, theme, ...inviteeFreezeStats });
@@ -925,7 +944,7 @@ async function main(): Promise<void> {
       for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of HOVER_VIEWPORTS) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!hoverScreens.some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, noScript, invitee, freezeStats } = await openContexts(viewport, theme, false, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats, normalPolling } = await openContexts(viewport, theme, false, freeze);
         const batch = await runScreens(hoverScreens.filter(s => diagnosed(s.id, size)), async (screen) => {
           const state = screen.states?.length ? screen.states.join("+") : "default";
           const entry: Record<string, unknown> = { viewport: size, theme, id: screen.id, state, error: null, ...(freeze ? { freeze } : {}) };
@@ -940,7 +959,8 @@ async function main(): Promise<void> {
           return entry;
         });
         hoverDesktop.push(...batch);
-        if (freeze) freezeCounts.push({ pass: "desktop", viewport: size, theme, ...freezeStats });
+        if (freeze) freezeCounts.push({ pass: "desktop", viewport: size, theme, ...freezeStats, screens: batch.map(r => String(r.id)), polled: polledNormally.get(`desktop ${size} ${theme}`) ?? 0 });
+        else polledNormally.set(`desktop ${size} ${theme}`, normalPolling.repeats);
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
       // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
@@ -1009,12 +1029,9 @@ async function main(): Promise<void> {
   // The one witness whose finding fails the job (owner request): a hover or focus that moves or resizes anything.
   assert.equal(hoverFailures, 0, `${hoverFailures} hover witness(es) shifted layout or could not measure; see items[].hover[] and hoverDesktop[]`);
   assert.equal(pictureFailures, 0, `${pictureFailures} chat picture check(s) failed; see pictures[]`);
-  // A frozen diagnostic pass that never intercepted and replayed a receipt call controlled nothing.
-  if (DIAGNOSTIC) {
-    const idle = freezeCounts.filter(c => c.intercepted === 0 || c.replayed === 0);
-    assert.ok(freezeCounts.length > 0 && idle.length === 0,
-      `the receipt freeze control was not exercised in ${idle.map(c => `${c.pass} ${c.viewport} ${c.theme}`).join(", ") || "any pass"}; see diagnostic.freeze`);
-  }
+  // A frozen diagnostic pass that never intercepted and replayed a receipt call controlled nothing. It is only owed
+  // where a captured screen measures message rows (freeze-control.ts): a focused run of other screens has none to make.
+  if (DIAGNOSTIC) assert.equal(freezeControlProblem(DIAGNOSTIC.screens, freezeCounts, measuresFeed), null);
 }
 
 // Registered as one gated browser case: nothing starts unless RUN_BROWSER_TESTS=1 (CI only).
