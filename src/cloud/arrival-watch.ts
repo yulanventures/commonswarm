@@ -617,7 +617,6 @@ export async function acquireArrivalWatchSeatLocksReplacing(options: {
       replaced_watcher_id: holder.watcherId, replaced_pid: holderPid,
       watcher_id: options.watcherId.toLowerCase(), pid })}\n`);
   }
-  options.replacing?.(holderPid);
   const timeoutMs = options.timeoutMs ?? NOTIFY_TAKEOVER_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   let generation: number | null = null;
@@ -633,6 +632,7 @@ export async function acquireArrivalWatchSeatLocksReplacing(options: {
     if (generation === null) {
       try {
         generation = await options.claim();
+        options.replacing?.(holderPid);
       } catch (error) {
         if (!(error instanceof WakeLeaseTransientError) || options.signal.aborted) return await giveUp(error);
         failures += 1;

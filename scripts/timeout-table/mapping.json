@@ -4136,7 +4136,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/arrival-watch.ts:621",
+          "citation": "src/cloud/arrival-watch.ts:620",
           "detail": "Default of the takeover wait: options.timeoutMs ?? NOTIFY_TAKEOVER_TIMEOUT_MS.",
           "operation": {
             "name": "notify-same-host-takeover-site",

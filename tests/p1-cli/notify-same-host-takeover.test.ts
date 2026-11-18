@@ -154,7 +154,9 @@ async function fixture() {
       await new Promise(done => setTimeout(done, 25));
     }
   };
+  const supervisors: Array<{ stop(): void }> = [];
   const cleanup = async () => {
+    for (const supervisor of supervisors) supervisor.stop();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await new Promise<void>(done => server.close(() => done()));
     await rm(root, { recursive: true, force: true });
@@ -172,8 +174,10 @@ async function fixture() {
         current = start();
       }
     })();
-    return { exits, loop, current: () => current,
+    const supervisor = { exits, loop, current: () => current,
       stop: () => { stopped = true; current.child.kill("SIGKILL"); } };
+    supervisors.push(supervisor);
+    return supervisor;
   };
   return { start, leaseOf, lockPath, lockOwner, holding, cleanup, supervise, seen, root, credentials,
     stealFromAnotherHost(seat: SeatName = "first") {
@@ -207,6 +211,9 @@ test("a second start for the same seat replaces the first, which stops by itself
     assert.equal(ended.code, 0, ended.stderr);
     assert.match(ended.stderr, replaced);
     assert.match(ended.stderr, new RegExp(`pid ${b.child.pid}\\)`));
+    // The lease path: A's renewal was refused as superseded before it stopped.
+    assert.ok(f.seen.some(row => row.command.kind === "renew_wake_lease" && row.command.watcher_id === aWatcher &&
+      row.status === 409), "A's renewal was refused");
     assert.doesNotMatch(ended.stderr, /SIGTERM|SIGINT|already running/);
     const bWatcher = await f.holding(b);
     assert.notEqual(bWatcher, aWatcher);
@@ -337,18 +344,52 @@ test("under a restart-on-failure supervisor, a replaced watcher stays down and a
     b.child.kill("SIGKILL");
     await b.exit;
 
-    // Control: a takeover from another host is not a replacement. It exits 76 and is restarted.
+    // Control: any other stop is non-zero, so the supervisor brings the watcher back. Here, a crash.
     const control = f.supervise(1);
-    await f.holding(control.current());
-    f.stealFromAnotherHost();
+    const crashed = control.current();
+    await f.holding(crashed);
+    crashed.child.kill("SIGKILL");
     const deadline = Date.now() + 15_000;
     while (control.exits.length < 1 && Date.now() < deadline) await new Promise(done => setTimeout(done, 25));
-    assert.equal(control.exits[0]?.code, 76, control.exits[0]?.stderr);
-    assert.match(control.exits[0]!.stderr, /wake_lease_superseded/);
-    assert.doesNotMatch(control.exits[0]!.stderr, /notify_replaced/);
-    while (control.exits.length < 2 && Date.now() < deadline) await new Promise(done => setTimeout(done, 25));
-    assert.equal(control.exits.length, 2, "the supervisor restarted the watcher after its non-zero stop");
+    assert.equal(control.exits[0]?.signal, "SIGKILL");
+    assert.notEqual(control.current(), crashed, "the supervisor restarted the watcher after its non-zero stop");
+    await f.holding(control.current());
     control.stop();
     await control.loop;
   }
+});
+
+test("a takeover from another host is not a replacement: it keeps exit 76", { timeout: 30_000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.cleanup());
+  const a = f.start();
+  await f.holding(a);
+  f.stealFromAnotherHost();
+  const ended = await a.exit;
+  assert.equal(ended.code, 76, ended.stderr);
+  assert.match(ended.stderr, /wake_lease_superseded/);
+  assert.doesNotMatch(ended.stderr, /notify_replaced/);
+});
+
+test("an interrupt while waiting for the replaced watcher gives back the claim", { timeout: 30_000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.cleanup());
+  const hung = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { hung.kill("SIGKILL"); });
+  assert.ok(hung.pid);
+  await mkdir(join(f.root, "state", "cswarm", "arrival-cursors"), { recursive: true, mode: 0o700 });
+  await writeFile(f.lockPath(), `${JSON.stringify({ version: 1, pid: hung.pid, owner_id: randomUUID(),
+    watcher_id: randomUUID() })}\n`, { mode: 0o600 });
+  const b = f.start({ takeoverMs: 20_000 });
+  const deadline = Date.now() + 10_000;
+  while (!/replacing inbox --notify pid/.test(b.stderr()) && Date.now() < deadline) {
+    await new Promise(done => setTimeout(done, 25));
+  }
+  assert.notEqual(f.leaseOf(), null, b.stderr());
+  b.child.kill("SIGINT");
+  const ended = await b.exit;
+  assert.equal(ended.code, 130, ended.stderr);
+  assert.match(ended.stderr, /stopped because of SIGINT and this watcher's lease was released/);
+  assert.equal(f.leaseOf(), null);
+  assert.equal(hung.exitCode, null);
 });
