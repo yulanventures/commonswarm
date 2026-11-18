@@ -5991,6 +5991,9 @@ import "../../styles/kylon-command-palette.css";
       }
       await fillCatchUpDetails(catchUpReadOrder(catchUpData, overview), async workspace => {
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
+        // A workspace the overview left out has had none of its questions read. It stays "could not be checked": the
+        // compatibility reads below know nothing of what waits there and would otherwise call it checked.
+        if (overview && !previous) throw new Error("This workspace was not in the overview.");
         if (overview && previous) {
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
           // Waiting on you: the decision queue lists every open ask, oldest first, with its body. If it can't be read, the

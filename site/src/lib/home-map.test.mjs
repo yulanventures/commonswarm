@@ -361,6 +361,40 @@ test("live Catch up keeps a successful overview when the ask queue fails, withou
     }
   }
 });
+test("a workspace the overview leaves out stays unchecked through the loader; no other read calls it checked", async () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let loader;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "loadHomeCatchUp") loader = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.ok(loader);
+  const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
+  // The overview answers for Home only. Trip is a workspace the person belongs to that it left out.
+  const overview = { viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [overviewRow] };
+  const paints = []; const reads = [];
+  const other = name => async workspaceId => { reads.push(`${name}:${workspaceId}`); return name === "roster" ? [] : name === "members" ? { members: [] } : []; };
+  const context = { catchUpGeneration: 0, catchUpChoiceTickets: new Map(), catchUpChoiceErrors: new Map(), ASK_CHOICES_BATCH: 50, askChoices: async () => [], homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+    sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces,
+    homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
+    initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
+    homeOverview: async () => overview,
+    homeOverviewAsks: async () => [],
+    homeServer: () => ({ decisionQueue: async workspaceId => { reads.push(`queue:${workspaceId}`); return askQueue([overviewAsk("Call the plumber?")]); } }),
+    feed: async workspaceId => { reads.push(`latest:${workspaceId}`); return []; },
+    // The compatibility reads. None of them may run for the workspace the overview left out.
+    memberRoster: other("members"), roster: other("roster"), agentAccessStatuses: other("access"), homeWorkingOn: other("working"), workspaceFiles: other("files"),
+    renderHomeCatchUp: () => paints.push(mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false)),
+  };
+  await runInNewContext(script, context);
+  const vm = paints.at(-1);
+  assert.deepEqual(vm.workspaces.map(card => card.state), ["ready", "failed"], "the omitted workspace stays could-not-be-checked");
+  assert.deepEqual(reads, ["queue:W", "latest:W"], "no read ran for the omitted workspace: its questions were never read, so nothing may call it checked");
+  assert.equal(context.homeOverviewCounts.get("X"), null, "its count is unknown, never zero");
+  assert.equal(vm.emptySummary, "Checked 1 of 2 workspaces.");
+  assert.equal(mapHomeRail(workspaces, { view: "catchup" }, null, false, context.homeOverviewCounts).catchUp.needsYou, null, "and the total is not drawn");
+});
 test("Catch up's Retry on unavailable asks reloads Catch up; other actions follow their link", () => {
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
