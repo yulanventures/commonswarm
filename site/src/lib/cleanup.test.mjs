@@ -33,7 +33,8 @@ test("only the two existing commands are ever sent, and the stated consequence m
   assert.deepEqual(cleanupCommand("tombstone_file", "f1"), { kind: "file_tombstone", file_id: "f1" });
   assert.match(cleanupConsequence("remove_agent"), /from this workspace.*connection.*add it back/s);
   assert.doesNotMatch(cleanupConsequence("remove_agent"), /permanent|irreversibl|everywhere\./i);
-  assert.match(cleanupConsequence("tombstone_file"), /restored until they are purged/);
+  assert.equal(cleanupConsequence("tombstone_file"), "Removes each file. Removed files can be restored until they are permanently deleted.");
+  assert.doesNotMatch(cleanupConsequence("tombstone_file") + cleanupConsequence("remove_agent"), /tombstone|purge/i, "plain words on screen");
 });
 
 test("replies map to accepted, already done, refused, rate limited and unknown; lost is never failure", () => {

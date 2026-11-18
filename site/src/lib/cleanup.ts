@@ -42,7 +42,7 @@ export function cleanupCommand(operation: CleanupOperation, targetId: string): R
 export function cleanupConsequence(operation: CleanupOperation): string {
   return operation === "remove_agent"
     ? "Removes each agent from this workspace. Its connection and its other workspaces stay, and you can add it back. To retire an agent everywhere, use Your agents."
-    : "Tombstones each file. Tombstoned files can be restored until they are purged.";
+    : "Removes each file. Removed files can be restored until they are permanently deleted.";
 }
 
 export function freezePass(

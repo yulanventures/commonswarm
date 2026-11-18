@@ -95,10 +95,15 @@ const OUTCOME_LABEL: Record<CleanupOutcome, string> = {
   not_attempted: "not started",
 };
 
-/** The names a confirmation lists: up to 20, then a count. */
-export function confirmNames(labels: readonly string[]): string {
-  const shown = labels.slice(0, 20).join(", ");
-  return labels.length > 20 ? `${shown}, and ${labels.length - 20} more` : shown;
+/** The confirmation's final button says what it will do, and to how many: never a bare "Confirm". */
+export function confirmAction(operation: CleanupOperation, count: number): string {
+  return operation === "remove_agent"
+    ? `Remove ${count} ${count === 1 ? "agent" : "agents"}` : `Remove ${count} ${count === 1 ? "file" : "files"}`;
+}
+
+/** The confirmation's names, one to a line: up to 20, then one line with the count of the rest. */
+export function confirmNameLines(labels: readonly string[]): string[] {
+  return labels.length > 20 ? [...labels.slice(0, 20), `and ${labels.length - 20} more`] : [...labels];
 }
 
 export function summaryText(results: ReadonlyMap<string, CleanupOutcome>): string {
@@ -197,13 +202,16 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
   confirm.dataset.cleanupConfirm = "";
   confirm.hidden = true;
   const consequence = el("p", "cleanup__consequence");
-  const names = el("p", "cleanup__names");
+  const names = el("ul", "cleanup__names");
   const confirmRow = el("div", "cleanup__confirm-actions");
-  const go = el("button", "dashboard__danger-button", "Confirm");
+  const go = el("button", "dashboard__danger-button");
+  // Drawn as the destructive action it is, as the other account dialogs draw theirs.
+  go.dataset.tone = "danger";
   go.type = "button";
   go.dataset.cleanupGo = "";
   const back = el("button", "dashboard__text-button", "Back");
   back.type = "button";
+  back.dataset.cleanupBack = "";
   confirmRow.append(go, back);
   confirm.append(consequence, names, confirmRow);
 
@@ -224,7 +232,7 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
     const n = selected.size;
     count.textContent = n > CLEANUP_MAX_ITEMS ? `${n} selected; one pass takes at most ${CLEANUP_MAX_ITEMS}.` : `${n} selected`;
     act.textContent = operation === "remove_agent"
-      ? `Remove ${n} from this workspace…` : `Tombstone ${n} ${n === 1 ? "file" : "files"}…`;
+      ? `Remove ${n} from this workspace…` : `Remove ${n} ${n === 1 ? "file" : "files"}…`;
     act.disabled = n === 0 || n > CLEANUP_MAX_ITEMS || context() === null;
   };
 
@@ -284,20 +292,29 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
     if (disposed || chosen.length === 0 || opened === null) return;
     pass = freezePass(opened, operation, chosen, deps.newId);
     consequence.textContent = cleanupConsequence(operation);
-    names.textContent = confirmNames(pass.items.map((item) => item.label));
+    names.replaceChildren(...confirmNameLines(pass.items.map((item) => item.label)).map((line) => el("li", "cleanup__name", line)));
+    go.textContent = confirmAction(operation, pass.items.length);
+    // The confirmation is one question; the Agents and Files tabs come back with the list.
+    tabs.hidden = true;
     list.hidden = true;
     footer.hidden = true;
     filters.hidden = true;
     confirm.hidden = false;
-    go.focus();
+    // The confirmation opens on the way out: Enter or Space goes back, and the action takes a deliberate move.
+    back.focus();
   });
-  back.addEventListener("click", () => { pass = null; confirm.hidden = true; list.hidden = false; footer.hidden = false; filters.hidden = operation !== "tombstone_file"; });
+  back.addEventListener("click", () => {
+    pass = null; confirm.hidden = true; tabs.hidden = false; list.hidden = false; footer.hidden = false; filters.hidden = operation !== "tombstone_file";
+    // Back returns the keyboard to the button that opened the confirmation.
+    act.focus();
+  });
 
   const execute = async (only?: ReadonlySet<string>) => {
     if (disposed || pass === null) return;
     const frozen = pass;
     const mine = generation;
     confirm.hidden = true;
+    tabs.hidden = false;
     report.hidden = false;
     retry.hidden = true;
     go.disabled = true;

@@ -349,7 +349,16 @@ live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__label
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__detail { grid-column: 2; font-size: 0.875rem; color: var(--text-muted, inherit); overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__footer,
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__confirm-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-block-start: 12px; }
-live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__names { overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__names { margin: 12px 0 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__name { padding-block: 2px; }
+/* The final action's words clear 4.5:1 with room to spare in both themes: #b91c1c on the light surface, #f87171 on
+   the dark one. The theme's own danger colour only just reaches it here. */
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] { --k-cleanup-danger-text: #b91c1c; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] { --k-cleanup-danger-text: #f87171; }
+}
+:root[data-theme="dark"] live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] { --k-cleanup-danger-text: #f87171; }
+live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] button[data-cleanup-go][data-tone="danger"]:enabled { color: var(--k-cleanup-danger-text); }
 live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] .cleanup__report-list { overflow-wrap: anywhere; }
 @media (width <= 64rem) {
   live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog] :is(.cleanup__tab, .cleanup__age, .cleanup__gone, [data-cleanup-act], [data-cleanup-go], [data-cleanup-retry], .cleanup__confirm-actions button) { min-block-size: 44px; }
