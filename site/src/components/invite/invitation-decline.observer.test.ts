@@ -1,7 +1,8 @@
 /** The invitations card: a second tap where Decline was declines nothing. Synthetic HTTP only. */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { renderAstroFixture, compileFixtureFunction } from "../../../tests/astro-fixture";
 
 function installInvitationFixture() {
