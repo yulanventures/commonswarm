@@ -7829,6 +7829,14 @@ import "../../styles/kylon-command-palette.css";
         roster may arrive late, a failed read may be retried, a role may be changed. Called at every draw: when the role
         no longer matches the one the list was read for, the list is read again. Until that read succeeds its rows are
         pending and nothing acts on them. */
+    /** The Remove question opened from an Admins row, while it is open. */
+    let peopleAdminEndQuestion: ReturnType<typeof buildSeatAdminEndConfirmation> | null = null;
+    const retirePeopleAdminEndQuestion = (): void => {
+      const question = peopleAdminEndQuestion; peopleAdminEndQuestion = null;
+      if (!question) return;
+      if (activeSeatAdminEndDialog === question) activeSeatAdminEndDialog = null;
+      question.dialog.remove();
+    };
     const syncPeopleAdminAccessRole = (): void => {
       if (peopleAdminReadAsOwner === null || !peopleAdminKey() || peopleAdminAccess.key !== peopleAdminKey()) return;
       if (peopleAdminReadAsOwner !== peopleAdminViewerOwns()) void loadPeopleAdminAccess();
@@ -7859,8 +7867,18 @@ import "../../styles/kylon-command-palette.css";
       if (!value || !workspaceId || !key) return;
       const generation = ++peopleAdminGeneration;
       const current = (): boolean => generation === peopleAdminGeneration && key === peopleAdminKey();
-      const before = peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
-      peopleAdminReadAsOwner = peopleAdminViewerOwns();
+      let before = peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
+      const asOwner = peopleAdminViewerOwns();
+      // The role changed since the list on screen was read: that list belongs to the other role. It is dropped now, with
+      // any Remove question opened from it, whoever asked for this read; it is not kept as pending, and it cannot come
+      // back as the "last rows" of a read that fails.
+      if (before && peopleAdminReadAsOwner !== null && peopleAdminReadAsOwner !== asOwner) {
+        before = undefined;
+        retirePeopleAdminEndQuestion();
+        peopleAdminAccess = { key, access: { read: "pending", all: false, grants: [] } };
+        if (peopleDialogOpen()) renderDialogRoster();
+      }
+      peopleAdminReadAsOwner = asOwner;
       // A read is starting: what is on screen is no longer a current list. The rows stay to look at, as pending, and
       // nothing may act on them (no Remove, and an open question will not send) until this read succeeds.
       if (before) { peopleAdminAccess = { key, access: { ...before, read: "pending" } }; if (peopleDialogOpen()) renderDialogRoster(); }
@@ -7950,10 +7968,10 @@ import "../../styles/kylon-command-palette.css";
         agentName: label, level: grant.level, coverage: [peopleAdminCoverage(grant, workspace.name)],
         // An owner can end a grant another person gave, but cannot give it again.
         restoredBy: grant.giverId === value.user.id.toLowerCase() ? "you" : "owner",
-        confirm: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); void send(); },
-        cancel: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); },
+        confirm: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; peopleAdminEndQuestion = null; ending.dialog.remove(); void send(); },
+        cancel: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; peopleAdminEndQuestion = null; ending.dialog.remove(); },
       });
-      activeSeatAdminEndDialog = ending;
+      activeSeatAdminEndDialog = ending; peopleAdminEndQuestion = ending;
       app.append(ending.dialog);
       ending.open(opener);
     };
@@ -8130,7 +8148,7 @@ import "../../styles/kylon-command-palette.css";
       peopleDialogState.invite = null;
       // The Admins list ends with the dialog, and so does any read of it still in flight: a workspace switch, a sign-out
       // and a dead session all close the dialog first, so a read begun before cannot land after coming back.
-      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1; peopleAdminDialogLifetime += 1; peopleAdminReadAsOwner = null;
+      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1; peopleAdminDialogLifetime += 1; peopleAdminReadAsOwner = null; peopleAdminEndQuestion = null;
       peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
       parkPeopleHosts();
       if (restoreFocus && returned) {

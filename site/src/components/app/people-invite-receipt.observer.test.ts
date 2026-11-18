@@ -62,7 +62,7 @@ async function page() {
   runInContext(`
     var session = { user: { id: "u1" } }, activeWorkspaceId = "w1", requestVersion = 1, sampleMode = false;
     var workspaces = [{ id: "w1", name: "Rivera" }], pendingInvites = [], pendingAgentsLoadFailed = false, inviteIntent = null;
-    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminReadAsOwner = null;
+    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminReadAsOwner = null, peopleAdminEndQuestion = null;
     var peopleDialogInvite = null, peopleDialogInviteCleared = null, peopleDialogReturn = null, peopleDialogFocus = undefined, rosterFilter = "";
     var peopleDialogState = { selected: null, invite: { email: "", busy: false, error: "", madeId: "", copied: "" } };
     var peopleDialogOpen = () => one("[data-roster-dialog]").open === true;

@@ -9,7 +9,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused } from "../../lib/people/admins";
 
-const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant", "closeRosterDialog", "peopleAdminViewerOwns", "syncPeopleAdminAccessRole"];
+const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant", "closeRosterDialog", "peopleAdminViewerOwns", "retirePeopleAdminEndQuestion", "syncPeopleAdminAccessRole"];
 
 async function dashboardFunctions(names: string[]): Promise<string> {
   const raw = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
@@ -52,7 +52,7 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
     buildSeatAdminEndConfirmation: (_doc: unknown, opts: { confirm(): void; cancel(): void; agentName: string; level: string; coverage: string[]; restoredBy?: string }) => {
       calls.push(`ask:${opts.agentName}:${opts.level}:${opts.coverage.join("|")}`); calls.push(`restoredBy:${opts.restoredBy}`);
       // "hold": the question stays open; the test presses End access later through io.held.
-      return { dialog: { remove() {} }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
+      return { dialog: { remove() { calls.push("question removed"); } }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
     },
     disposeSeatAdminDialog: () => {}, renderDialogRoster: () => {}, document: {}, app: { append() {} },
     one: (selector: string) => (selector === "[data-roster-dialog]" ? { get open() { return runInContext("dialogOpen", context); }, close() { runInContext("dialogOpen = false", context); }, querySelectorAll: () => [] }
@@ -64,7 +64,7 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
     var session = { user: { id: "u1" } }, activeWorkspaceId = "w1", sampleMode = false;
     var workspaces = [{ id: "w1", name: "Rivera household", orgId: "org-1" }, { id: "w2", name: "Studio", orgId: "org-2" }, { id: "w3", name: "Unknown", orgId: "" }], members = [{ userId: "u1", role: "${options.role ?? "owner"}" }], agents = [{ principalId: "a1", name: "Atlas" }];
     var seatAdminStatusState = { phase: "idle" }, seatAdminGrantsState = { phase: "idle" };
-    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminReadAsOwner = null, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
+    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminReadAsOwner = null, peopleAdminEndQuestion = null, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
     var dialogOpen = true;
     var peopleDialogReturn = null, peopleDialogFocus = undefined, peopleDialogInviteCleared = null, peopleDialogState = { selected: null, invite: null };
     var window = { location: { search: "" }, history: { state: null, replaceState() {} }, dispatchEvent: (event) => { __events.push(event.type); } };
@@ -72,7 +72,8 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
   runInContext(`var peopleDialogOpen = () => dialogOpen === true;`, context);
   runInContext(await dashboardFunctions(NAMES), context);
   const run = <T>(code: string): T => runInContext(code, context) as T;
-  return { run, calls, ends, events, io, receipt };
+  const setRefresh = (refresh: () => Promise<void>) => { context.refreshSeatAdminState = refresh; };
+  return { run, calls, ends, events, io, receipt, setRefresh };
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -300,4 +301,37 @@ test("the list follows the viewer's role when it only becomes known, or changes,
   closed.run("closeRosterDialog(); members = [{ userId: 'u1', role: 'admin' }]; syncPeopleAdminAccessRole()"); await settle();
   assert.equal(closed.calls.filter(call => call === "all").length, before);
   assert.equal(closed.run("currentPeopleAdminAccess()"), undefined);
+});
+
+test("a demotion drops the owner's rows at once, through a held and then failed read of the viewer's own grants, and retires an open question", async () => {
+  const p = await page();
+  await p.run("loadPeopleAdminAccess()");
+  assert.deepEqual(plain(p.run<any>("currentPeopleAdminAccess()")).grants.map((row: any) => row.grantId), ["g1", "g2"]);
+  // The Remove question is open on another person's grant when the role is lowered.
+  p.io.confirm = "hold"; p.run("endPeopleAdminGrant('g1', {})"); assert.ok(p.io.held);
+  // The read of the viewer's own grants is held, so nothing arrives to replace the owner's rows.
+  let fail!: () => void;
+  p.run("seatAdminGrantsState = { phase: 'idle' }");
+  const held = new Promise<void>(resolve => { fail = resolve; });
+  p.setRefresh(async () => { await held; });
+  p.calls.length = 0;
+  p.run("members = [{ userId: 'u1', role: 'admin' }]; syncPeopleAdminAccessRole()");
+  const during = plain(p.run<any>("currentPeopleAdminAccess()"));
+  assert.deepEqual(during, { read: "pending", all: false, grants: [] }, "at that draw none of the owner's rows is left, not even as pending");
+  assert.ok(p.calls.includes("question removed"), "the open question is taken down");
+  p.io.held!(); await settle();
+  assert.equal(p.ends.length, 0, "and confirming it sends nothing");
+  // The held read now ends without the viewer's grants: the read has failed.
+  fail(); await settle(); await settle();
+  assert.deepEqual(plain(p.run<any>("currentPeopleAdminAccess()")), { read: "failed", all: false, grants: [], notices: {} },
+    "a failed read cannot bring the owner's rows back as the last ones shown");
+  assert.ok(!p.calls.includes("all"), "a member never asks for the owner's read");
+
+  // A refresh in the same role keeps its rows to look at, as before.
+  const same = await page(); let release!: (rows: unknown) => void;
+  await same.run("loadPeopleAdminAccess()");
+  same.io.all = () => new Promise(resolve => { release = resolve; });
+  const refreshing = same.run<Promise<void>>("loadPeopleAdminAccess()"); await settle();
+  assert.equal(plain(same.run<any>("currentPeopleAdminAccess()")).grants.length, 2, "same role: the rows stay, pending");
+  release([grant(1)]); await refreshing;
 });
