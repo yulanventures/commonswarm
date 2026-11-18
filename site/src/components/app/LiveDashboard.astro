@@ -638,15 +638,10 @@ import "../../styles/kylon-command-palette.css";
                   </label>
                 </fieldset>
                 <div class="dashboard__access-actions">
-                  {/* The label names the change from the choices above, with styles alone (kylon-lists.css):
-                      "Turn on for just me as Editor". Nothing chosen yet reads "Turn on Lists & docs". */}
+                  {/* The label names the change, built by the script from the same answer the command sends
+                      (householdConfirmLabel): "Turn on for just me · My access: Editor". */}
                   <button class="dashboard__button dashboard__button--primary" type="button" data-household-confirm>
-                    {/* One child, so the button's own gap does not space the parts apart. */}
-                    <span>Turn on<span data-confirm-part="none"> Lists &amp; docs</span>{(["shared", "personal"] as const).map((purpose) => (
-                      <span data-confirm-part={purpose}> for {PURPOSE_COPY[purpose].label.charAt(0).toLowerCase()}{PURPOSE_COPY[purpose].label.slice(1)}</span>
-                    ))}{CONTENT_ROLES.map((role) => (
-                      <span data-confirm-part={role}> as {CONTENT_ROLE_COPY[role].label}</span>
-                    ))}</span>
+                    <span data-household-confirm-label>Turn on Lists &amp; docs</span>
                   </button>
                   <p class="dashboard__access-result" data-household-consent-result role="status" aria-live="polite"></p>
                 </div>
@@ -1285,7 +1280,7 @@ import "../../styles/kylon-command-palette.css";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
-  import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
+  import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS, householdAccessChoice, householdConfirmLabel } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
   import { agentLabelInSentence, personTint } from "../../lib/home-names";
   import { homeAskAnswered, ASKS_UNAVAILABLE_ACTION } from "../../lib/home-map";
@@ -11466,6 +11461,17 @@ import "../../styles/kylon-command-palette.css";
     };
 
     /** Clear every household surface when the workspace or the session changes. */
+    /* What the access card sends, read in one place: the command and the button's label both use it. */
+    const householdChoice = () => householdAccessChoice(
+      viewerRole() === "owner",
+      one<HTMLInputElement>("[data-household-purpose]:checked")?.value,
+      one<HTMLInputElement>("[data-household-role]:checked")?.value,
+    );
+    const syncHouseholdConfirmLabel = (): void => {
+      const label = one<HTMLElement>("[data-household-confirm-label]");
+      if (label) label.textContent = householdConfirmLabel(viewerRole() === "owner", householdChoice());
+    };
+
     const resetHouseholdSurface = (): void => {
       listsAllowLanding = null;
       householdDashboard?.clear();
@@ -11491,6 +11497,7 @@ import "../../styles/kylon-command-palette.css";
       for (const input of all<HTMLInputElement>("[data-household-purpose], [data-household-role]")) {
         input.checked = false;
       }
+      syncHouseholdConfirmLabel();
       one<HTMLElement>("[data-household-agent-list]")?.replaceChildren();
       const card = one<HTMLElement>("[data-household-consent]");
       if (card) card.hidden = true;
@@ -12168,6 +12175,7 @@ import "../../styles/kylon-command-palette.css";
          first choice (owner_confirmation_required). A member joined through an invitation,
          which only works in a shared workspace, so their card asks only for their access. */
       if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
+      syncHouseholdConfirmLabel();
       const landing = listsAllowLanding;
       if (!landing) return;
       if (!householdCurrent(landing.scope) || landing.navigation !== homeNavigation || homeRoute.view !== "lists" || activeWorkspaceView !== "objects") {
@@ -12460,11 +12468,8 @@ import "../../styles/kylon-command-palette.css";
       const button = one<HTMLButtonElement>("[data-household-confirm]");
       if (!scope) return;
       const owner = viewerRole() === "owner";
-      const purpose = owner
-        ? one<HTMLInputElement>("[data-household-purpose]:checked")?.value
-        : "shared";
-      const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
-      if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
+      const { purpose, role } = householdChoice();
+      if (!purpose || !role) {
         if (notice) notice.textContent = owner
           ? "Choose who can use Lists & docs and your access first."
           : "Choose your access first.";
@@ -16088,6 +16093,9 @@ import "../../styles/kylon-command-palette.css";
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });
     syncComposerControls();
+    one<HTMLElement>("[data-household-consent]")?.addEventListener("change", () => {
+      syncHouseholdConfirmLabel();
+    });
     one<HTMLButtonElement>("[data-household-confirm]")?.addEventListener("click", () => {
       void confirmOwnAccess();
     });

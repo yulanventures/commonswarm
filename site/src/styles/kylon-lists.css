@@ -57,16 +57,7 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__choice-car
   border-radius: 6px; background: var(--k-shell-surface); overflow-wrap: anywhere;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__choice-card:has(input:checked) { border-color: var(--accent); background: var(--k-shell-subtle); }
-/* The access card's button names the change from the choices above it, with no script: each part of the
-   label shows while its choice is ticked, and "Lists & docs" stands in until something is chosen. */
-live-dashboard[data-kylon-shell] [data-household-consent] [data-confirm-part] { display: none; }
-live-dashboard[data-kylon-shell] [data-household-consent]:not(:has(:is([data-household-purpose],[data-household-role]):checked)) [data-confirm-part=none],
-live-dashboard[data-kylon-shell] [data-household-consent]:has([data-household-purpose][value=shared]:checked) [data-confirm-part=shared],
-live-dashboard[data-kylon-shell] [data-household-consent]:has([data-household-purpose][value=personal]:checked) [data-confirm-part=personal],
-live-dashboard[data-kylon-shell] [data-household-consent]:has([data-household-role][value=editor]:checked) [data-confirm-part=editor],
-live-dashboard[data-kylon-shell] [data-household-consent]:has([data-household-role][value=reader]:checked) [data-confirm-part=reader] { display: inline; }
-/* A member is not asked who can use it, so that part never shows for them even if a value lingers. */
-live-dashboard[data-kylon-shell] [data-household-consent]:has([data-household-purpose-set][hidden]) :is([data-confirm-part=shared],[data-confirm-part=personal]) { display: none; }
+/* The access card's button names the change, so its label can run long on a phone: let it wrap. */
 live-dashboard[data-kylon-shell] [data-household-consent] [data-household-confirm] { white-space: normal; text-align: center; }
 /* (0,3,2) beats the later legacy article-button rule (0,2,2). */
 live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view :is(button,a) {

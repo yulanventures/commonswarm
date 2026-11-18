@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
-import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS } from "../../lib/household-access";
+import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, householdAccessChoice, householdConfirmLabel } from "../../lib/household-access";
 import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
@@ -95,20 +95,44 @@ test("the Lists & docs access card has no lead paragraph, a named agents group, 
   assert.deepEqual([...card.matchAll(/<legend>([^<]+)<\/legend>/g)].map(match => match[1]), ["{PURPOSE_QUESTION}", "Your access", "Your agents"]);
   assert.match(card, /<input type="checkbox" data-household-allow-own-agents checked \/>/, "the agents choice keeps its default");
   assert.doesNotMatch(card, /data-household-(purpose|role)[^>]*\bchecked\b/, "who and which access are never preselected");
-  // The button's words come from the same constants as the choices, one part per choice.
+  // The button starts with the neutral label; the script writes the rest from what will be sent.
   const button = section(card, "data-household-confirm", "</button>");
-  assert.match(button, /Turn on<span data-confirm-part="none"> Lists &amp; docs<\/span>/);
-  assert.match(button, /<span data-confirm-part=\{purpose\}> for \{PURPOSE_COPY\[purpose\]\.label/);
-  assert.match(button, /<span data-confirm-part=\{role\}> as \{CONTENT_ROLE_COPY\[role\]\.label\}<\/span>/);
+  assert.match(button, /<span data-household-confirm-label>Turn on Lists &amp; docs<\/span>/);
   assert.doesNotMatch(button, /\bConfirm\b/);
-  // Which part shows is decided by styles from the ticked choices; a member is never shown the "who" part.
-  const styles = readFileSync(new URL("../../styles/kylon-lists.css", import.meta.url), "utf8");
-  assert.match(styles, /\[data-household-consent\] \[data-confirm-part\] \{ display: none; \}/);
-  for (const value of ["shared", "personal"]) assert.match(styles, new RegExp(`\\[data-household-purpose\\]\\[value=${value}\\]:checked\\) \\[data-confirm-part=${value}\\]`));
-  for (const value of ["editor", "reader"]) assert.match(styles, new RegExp(`\\[data-household-role\\]\\[value=${value}\\]:checked\\) \\[data-confirm-part=${value}\\]`));
-  assert.match(styles, /\[data-household-purpose-set\]\[hidden\]\) :is\(\[data-confirm-part=shared\],\[data-confirm-part=personal\]\) \{ display: none; \}/);
+  // One reader of the form feeds both the command and the label, so they cannot disagree.
+  const confirm = section(script, "const confirmOwnAccess = async", "const openHouseholdView = async");
+  assert.match(confirm, /const \{ purpose, role \} = householdChoice\(\);\s*if \(!purpose \|\| !role\) \{/);
+  assert.match(confirm, /\{ kind: "household_permissions", purpose, content_role: role \}/);
+  assert.doesNotMatch(confirm, /data-household-(purpose|role)/, "confirm reads the form only through householdChoice");
+  const sync = section(script, "const syncHouseholdConfirmLabel =", "const resetHouseholdSurface =");
+  assert.match(sync, /label\.textContent = householdConfirmLabel\(viewerRole\(\) === "owner", householdChoice\(\)\);/);
+  // The label is refreshed when a choice changes, when the card is drawn for a role, and when it is cleared.
+  assert.match(script, /one<HTMLElement>\("\[data-household-consent\]"\)\?\.addEventListener\("change", \(\) => \{\s*syncHouseholdConfirmLabel\(\);/);
+  assert.match(section(script, "const renderHouseholdAccess =", "const landing = listsAllowLanding;"), /purposeSet\.hidden = viewerRole\(\) !== "owner";\s*syncHouseholdConfirmLabel\(\);/);
+  assert.match(section(script, "const resetHouseholdSurface =", "const openWorkspace = async"), /input\.checked = false;\s*\}\s*syncHouseholdConfirmLabel\(\);/);
   assert.match(script, /"Choose who can use Lists & docs and your access first\."/);
   assert.match(script, /"Choose your access first\."/);
+});
+
+test("the access card's button says what will be sent: a member never sees an audience, whatever a hidden choice holds", () => {
+  const say = (owner: boolean, purpose?: string, role?: string) => {
+    const choice = householdAccessChoice(owner, purpose, role);
+    return { ...choice, label: householdConfirmLabel(owner, choice) };
+  };
+  // The owner: nothing, one half, both halves. The role is named as their own.
+  assert.deepEqual(say(true), { purpose: null, role: null, label: "Turn on Lists & docs" });
+  assert.deepEqual(say(true, "personal"), { purpose: "personal", role: null, label: "Turn on for just me" });
+  assert.deepEqual(say(true, undefined, "editor"), { purpose: null, role: "editor", label: "Turn on · My access: Editor" });
+  assert.deepEqual(say(true, "personal", "editor"), { purpose: "personal", role: "editor", label: "Turn on for just me · My access: Editor" });
+  assert.deepEqual(say(true, "shared", "reader"), { purpose: "shared", role: "reader", label: "Turn on for me and people I invite · My access: Reader" });
+  // A member with a Personal choice left ticked in the hidden group: the command sends shared, and the
+  // label names no audience at all. It must never say "just me".
+  for (const lingering of ["personal", "shared", undefined, "nonsense"]) {
+    assert.deepEqual(say(false, lingering, "editor"), { purpose: "shared", role: "editor", label: "Turn on · My access: Editor" });
+    assert.deepEqual(say(false, lingering), { purpose: "shared", role: null, label: "Turn on Lists & docs" });
+  }
+  // Values the command does not accept are never sent or named.
+  assert.deepEqual(say(true, "everyone", "admin"), { purpose: null, role: null, label: "Turn on Lists & docs" });
 });
 
 test("approving an agent uses the independent server command without changing the person's role", () => {
@@ -931,9 +955,11 @@ test("workspace change clears only the creation setup receipt and retires known 
     householdConnectionsReadState: "succeeded", listsAllowLanding: null,
     householdAccessGeneration: 1, householdAccessRequestedFor: "workspace", householdAccess: null,
     accessReads: createLatestRead(), connectionReads: createLatestRead(), stopHostJoinWatch: () => {},
+    labelSyncs: 0, syncHouseholdConfirmLabel() { ctx.labelSyncs += 1; },
   };
   const reset = execute(`${section(script, "const resetHouseholdSurface =", "const openWorkspace =")}; resetHouseholdSurface;`, ctx);
   reset();
+  assert.equal(ctx.labelSyncs, 1, "the access card's button label is rebuilt once its choices are cleared");
   assert.equal(receipt.textContent, "");
   assert.equal(receipt.hidden, true);
   assert.equal(receipt.dataset.setupWorkspaceId, undefined);
