@@ -7527,6 +7527,14 @@ import "../../styles/kylon-command-palette.css";
           }
         },
         reloadInvites: reloadPeopleInvites, reload: reloadPeopleRoster,
+        createInvite: async (email) => {
+          const invalid = inviteEmailValidationMessage(email); if (invalid) return { error: invalid };
+          const outcome = await createMemberInvite(email);
+          if (outcome.status === "error") return { error: outcome.message };
+          // The link is kept only by the workspace generation that asked for it, and only this invite's link will do.
+          return outcome.invitationId && outcome.invitationId === freshInviteId && freshInviteLink ? { madeId: freshInviteId } : { error: "This workspace reloaded before the link arrived. If the invite is in the list below, cancel it and create another." };
+        },
+        forgetInvite: () => resetFreshInviteResult(),
         confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
           if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
           const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
@@ -7560,6 +7568,7 @@ import "../../styles/kylon-command-palette.css";
           navigate: (href) => navigateHomeHref(href),
           // The invite form is a channel view, so it opens from the workspace.
           invite: () => { void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => openInvite("channel")); },
+          madeInviteLink: peopleDialogState.invite?.madeId && peopleDialogState.invite.madeId === freshInviteId && freshInviteWorkspaceId === workspace.id ? freshInviteLink : "",
           onQuery: (value) => { rosterFilter = value; peopleDialogState.collapsed.clear(); renderDialogRoster(); },
         } });
       if (peopleDialogState.selected?.type === "agent") {
@@ -7769,6 +7778,9 @@ import "../../styles/kylon-command-palette.css";
         window.history.replaceState(window.history.state, "", returned.href);
       }
       peopleDialogFocus = undefined; peopleDialogState.selected = null;
+      // A link made in the dialog is shown only there: closing the dialog forgets it. The invite stays in the list.
+      if (peopleDialogState.invite?.madeId && peopleDialogState.invite.madeId === freshInviteId) resetFreshInviteResult();
+      peopleDialogState.invite = null;
       peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
       parkPeopleHosts();
       if (restoreFocus && returned) {
@@ -14343,10 +14355,80 @@ import "../../styles/kylon-command-palette.css";
       });
     }
 
+    /** One email invite for the open workspace, for the invite page and for the People & agents dialog.
+        The answer carries a one-use credential, so only the workspace generation that asked may keep it: after a
+        switch or a reload the link is discarded ("stale"). `shown` runs once the link is held, before the list is read again. */
+    const createMemberInvite = async (email: string, shown: () => void = () => {}): Promise<{ status: "made" | "stale"; invitationId?: string } | { status: "error"; message: string }> => {
+      if (!session || !activeWorkspaceId) return { status: "stale" };
+      const inviteSession = session;
+      const submitOwner = {
+        workspaceId: activeWorkspaceId,
+        version: requestVersion,
+      };
+      const ownsInviteSubmit = (): boolean =>
+        isInviteSubmitCurrent(submitOwner, activeWorkspaceId, requestVersion);
+      let submittedIntent = inviteIntent;
+      if (!submittedIntent || submittedIntent.email !== email) {
+        submittedIntent = { email, commandId: uuid() };
+        inviteIntent = submittedIntent;
+      }
+      try {
+        const target = deployment();
+        const workspace = workspaces.find((entry) => entry.id === submitOwner.workspaceId);
+        if (!target || !workspace) throw new NoDeployment();
+        const created = await inviteWorkspaceMember(
+          inviteSession,
+          submittedIntent.commandId,
+          submitOwner.workspaceId,
+          email,
+        );
+        /* A stale success may have created a pending row in the submitted workspace,
+           where it remains visible and cancellable. Its one-use token is deliberately
+           discarded: rendering or persisting it in the next workspace would cross the
+           credential's tenancy boundary. */
+        if (!ownsInviteSubmit()) return { status: "stale" };
+        if (created.workspaceId !== submitOwner.workspaceId) {
+          throw new Error(
+            "CommonSwarm returned an invite for another workspace. No link was shown.",
+          );
+        }
+        freshInviteLink = memberInviteUrl(window.location.origin, {
+          v: 1,
+          url: target.url,
+          anon_key: target.anonKey,
+          workspace_id: created.workspaceId,
+          invitation_token: created.invitationToken,
+          workspace_name: created.workspaceName || workspace.name,
+          inviter_display_name: created.inviterDisplayName || accountName(inviteSession),
+          inviter_user_id: created.inviterUserId ?? inviteSession.user.id,
+        });
+        freshInviteId = created.invitationId;
+        freshInviteWorkspaceId = created.workspaceId;
+        if (inviteIntent === submittedIntent) inviteIntent = null;
+        shown();
+        const nextInvites = await pendingMemberInvites(created.workspaceId);
+        if (!ownsInviteSubmit()) return { status: "stale", invitationId: created.invitationId };
+        pendingInvites = nextInvites;
+        if (shouldRetireFreshInvite(freshInviteId, pendingInvites)) {
+          retireFreshInviteResult();
+        }
+        renderPendingAccess();
+        return { status: "made", invitationId: created.invitationId };
+      } catch (caught) {
+        if (!ownsInviteSubmit()) return { status: "stale" };
+        if (
+          inviteIntent === submittedIntent &&
+          !(caught instanceof CommandOutcomeUnknown)
+        ) {
+          inviteIntent = null;
+        }
+        return { status: "error", message: readableError(caught) };
+      }
+    };
+
     one<HTMLFormElement>("[data-invite-form]")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!session || !activeWorkspaceId) return;
-      const inviteSession = session;
       const submitOwner = {
         workspaceId: activeWorkspaceId,
         version: requestVersion,
@@ -14366,11 +14448,6 @@ import "../../styles/kylon-command-palette.css";
         emailInput?.focus();
         return;
       }
-      let submittedIntent = inviteIntent;
-      if (!submittedIntent || submittedIntent.email !== email) {
-        submittedIntent = { email, commandId: uuid() };
-        inviteIntent = submittedIntent;
-      }
       if (error) {
         error.textContent = "";
         error.hidden = true;
@@ -14380,81 +14457,36 @@ import "../../styles/kylon-command-palette.css";
         submit.textContent = "Creating a private link…";
       }
       try {
-        const target = deployment();
-        const workspace = workspaces.find((entry) => entry.id === submitOwner.workspaceId);
-        if (!target || !workspace) throw new NoDeployment();
-        const created = await inviteWorkspaceMember(
-          inviteSession,
-          submittedIntent.commandId,
-          submitOwner.workspaceId,
-          email,
-        );
-        /* A stale success may have created a pending row in the submitted workspace,
-           where it remains visible and cancellable. Its one-use token is deliberately
-           discarded: rendering or persisting it in the next workspace would cross the
-           credential's tenancy boundary. */
-        if (!ownsInviteSubmit()) return;
-        if (created.workspaceId !== submitOwner.workspaceId) {
-          throw new Error(
-            "CommonSwarm returned an invite for another workspace. No link was shown.",
-          );
-        }
-        freshInviteLink = memberInviteUrl(window.location.origin, {
-          v: 1,
-          url: target.url,
-          anon_key: target.anonKey,
-          workspace_id: created.workspaceId,
-          invitation_token: created.invitationToken,
-          workspace_name: created.workspaceName || workspace.name,
-          inviter_display_name: created.inviterDisplayName || accountName(inviteSession),
-          inviter_user_id: created.inviterUserId ?? inviteSession.user.id,
+        const outcome = await createMemberInvite(email, () => {
+          const link = one<HTMLElement>("[data-invite-link]");
+          const result = one<HTMLElement>("[data-invite-result]");
+          const form = one<HTMLFormElement>("[data-invite-form]");
+          const receipt = one<HTMLElement>("[data-invite-receipt]");
+          const copy = one<HTMLButtonElement>("[data-copy-invite]");
+          const done = one<HTMLButtonElement>("[data-invite-done]");
+          const status = one<HTMLElement>("[data-invite-status]");
+          if (link) {
+            link.textContent = freshInviteLink;
+            link.hidden = false;
+          }
+          if (receipt) receipt.textContent = "Private one-use link · expires in 7 days";
+          if (copy) {
+            copy.textContent = "Copy invite link";
+            delete copy.dataset.inviteComplete;
+          }
+          if (done) done.textContent = "Done";
+          if (status) status.textContent = "";
+          if (result) result.hidden = false;
+          if (form) form.hidden = true;
         });
-        freshInviteId = created.invitationId;
-        freshInviteWorkspaceId = created.workspaceId;
-        if (inviteIntent === submittedIntent) inviteIntent = null;
-        const link = one<HTMLElement>("[data-invite-link]");
-        const result = one<HTMLElement>("[data-invite-result]");
-        const form = one<HTMLFormElement>("[data-invite-form]");
-        const receipt = one<HTMLElement>("[data-invite-receipt]");
-        const copy = one<HTMLButtonElement>("[data-copy-invite]");
-        const done = one<HTMLButtonElement>("[data-invite-done]");
-        const status = one<HTMLElement>("[data-invite-status]");
-        if (link) {
-          link.textContent = freshInviteLink;
-          link.hidden = false;
-        }
-        if (receipt) receipt.textContent = "Private one-use link · expires in 7 days";
-        if (copy) {
-          copy.textContent = "Copy invite link";
-          delete copy.dataset.inviteComplete;
-        }
-        if (done) done.textContent = "Done";
-        if (status) status.textContent = "";
-        if (result) result.hidden = false;
-        if (form) form.hidden = true;
-        const nextInvites = await pendingMemberInvites(created.workspaceId);
-        if (!ownsInviteSubmit()) return;
-        pendingInvites = nextInvites;
-        if (shouldRetireFreshInvite(freshInviteId, pendingInvites)) {
-          retireFreshInviteResult();
-        }
-        renderPendingAccess();
-        if (freshInviteLink) {
+        if (outcome.status === "made" && freshInviteLink) {
           window.requestAnimationFrame(() => {
             if (!ownsInviteSubmit()) return;
             one<HTMLButtonElement>("[data-copy-invite]")?.focus({ preventScroll: true });
           });
         }
-      } catch (caught) {
-        if (!ownsInviteSubmit()) return;
-        if (
-          inviteIntent === submittedIntent &&
-          !(caught instanceof CommandOutcomeUnknown)
-        ) {
-          inviteIntent = null;
-        }
-        if (error) {
-          error.textContent = readableError(caught);
+        if (outcome.status === "error" && error) {
+          error.textContent = outcome.message;
           error.hidden = false;
         }
       } finally {

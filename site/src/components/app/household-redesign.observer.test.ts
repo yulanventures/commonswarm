@@ -390,6 +390,42 @@ test("every tab says loading, empty or could not load with Retry in the same pla
   paint("agents", { agents: [], read: "failed", sample: true }); assert.notEqual(note()?.dataset.tabState, "error", "a sample never reports a failed read");
 });
 
+test("Invite a person opens a form on the Invites tab, and the link shows only while the integration holds it", async () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom(); const sent: string[] = []; let forgotten = 0;
+  await f.load();
+  const state: any = { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab: "people" };
+  let link = "", answer: any = { error: "Enter a full email address." };
+  const callbacks: any = { render: () => paint(), action: () => {}, saveModel: async () => {}, confirm: () => {},
+    createInvite: async (email: string) => { sent.push(email); return answer; }, forgetInvite: () => { forgotten += 1; link = ""; } };
+  const model = () => { const base = f.model(); return { ...base, people: base.people.map((person: any) => ({ ...person, own: true, role: "owner" })) }; };
+  function paint() { renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks,
+    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", invite: () => { throw new Error("the older page is not used"); }, madeInviteLink: link } }); }
+  const find = (test: (node: any) => boolean) => dom.root.descendants().find(test) as any;
+  const byFocus = (key: string) => find(node => node.dataset?.pdFocus === key);
+  paint(); byFocus("page-invite").click();
+  assert.equal(state.tab, "invites", "the form lives on the Invites tab");
+  assert.equal(byFocus("page-invite"), undefined, "the form stands where the button was");
+  const input = () => byFocus("invite-email"); const form = () => find(node => node.tag === "form");
+  input().value = "  mei@  "; input().events.get("input")();
+  paint(); assert.equal(input().value, "  mei@  ", "a redraw keeps what was typed");
+  await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(sent, ["mei@"]);
+  assert.equal(find(node => node.dataset?.peopleInviteError !== undefined).textContent, "Enter a full email address.");
+  input().value = "mei@example.test"; input().events.get("input")();
+  answer = { madeId: "inv-1" }; link = "https://example.test/invite#one-use";
+  await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
+  assert.equal(form(), undefined); assert.equal(byFocus("invite-link").textContent, "https://example.test/invite#one-use");
+  assert.ok(find(node => node.tag === "p" && node.textContent.startsWith("Private one-use link for mei@example.test")));
+  link = ""; paint();
+  assert.equal(byFocus("invite-link"), undefined, "a link the integration dropped is not kept by the view");
+  assert.equal(state.invite, null); assert.ok(byFocus("page-invite"));
+  byFocus("page-invite").click(); answer = { madeId: "inv-2" }; link = "https://example.test/invite#second";
+  input().value = "sam@example.test"; input().events.get("input")();
+  await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
+  byFocus("invite-done").click();
+  assert.equal(forgotten, 1, "Done tells the integration to forget the link"); assert.equal(state.invite, null);
+});
+
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
   const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [];
   const principal = "00000000-0000-4000-8000-000000000001";

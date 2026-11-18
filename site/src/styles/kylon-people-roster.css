@@ -90,3 +90,23 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:has(>
     max-inline-size: 8em; padding: 4px 10px; white-space: normal; line-height: 1.3; text-align: center; text-wrap: balance;
   }
 }
+/* Inviting a person, at the top of the Invites tab: the form, then the link it made. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-invite-form, .pd-invite-made) { display: grid; gap: 8px; margin: 0 0 12px; padding: 12px 6px; border-block-end: 1px solid var(--k-shell-line); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-form label { font: 600 13px/1.5 var(--k-shell-font); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-form input {
+  inline-size: 100%; min-block-size: 44px; padding: 8px 12px; box-sizing: border-box; border: 1px solid var(--k-shell-control); border-radius: 6px;
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 16px/1.5 var(--k-shell-font);
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-invite-note, .pd-invite-receipt, .pd-invite-copied) { margin: 0; font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-copied:empty { display: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-invite-submit, .pd-invite-cancel) {
+  min-block-size: 44px; min-inline-size: 44px; padding: 6px 14px; box-sizing: border-box; border: 1px solid var(--k-shell-control); border-radius: 6px;
+  background: var(--k-shell-surface); color: var(--k-shell-ink); font: 500 14px/1.5 var(--k-shell-font); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-submit { border-color: var(--k-shell-ink); background: var(--k-shell-ink); color: var(--k-shell-surface); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-submit[aria-disabled="true"] { opacity: .6; cursor: progress; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-link {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--k-shell-line); border-radius: 6px; background: var(--k-shell-hover); color: var(--k-shell-ink);
+  font: 400 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 7.5em; overflow: auto;
+}

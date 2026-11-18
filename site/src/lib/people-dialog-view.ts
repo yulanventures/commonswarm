@@ -10,6 +10,7 @@ import { buildPeoplePage } from "./people-page";
 import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
+import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -42,7 +43,9 @@ export interface PeopleDialogState { selected: { type: "agent" | "person"; id: s
   /** Builder-owned: the row whose name is being edited, with its draft, the server's refusal and a save in flight. */
   rename?: { id: string; editor: number; value: string; error: string; pending: boolean } | null;
   /** Builder-owned: the hosted agent whose reconnect sentence is shown. */
-  reconnect?: string | null }
+  reconnect?: string | null;
+  /** The invite form on the Invites tab, while it is open or its link is shown. */
+  invite?: PeopleInviteDraft | null }
 /** The page layout's own navigation. Links keep real hrefs; `navigate` (when given) handles the click in place. */
 export interface PeopleDialogPage {
   /** The workspace name and its home route: the back link. */
@@ -56,8 +59,10 @@ export interface PeopleDialogPage {
   /** The existing agent page for one agent: each manageable agent row links to it as Manage. */
   agentHref?: (agentId: string) => string;
   navigate?: (href: string, event: MouseEvent) => void;
-  /** The existing invite flow. Shown only to an owner or an admin, never in a sample. */
+  /** The older invite page. Used only when the dialog has no `createInvite`. Shown only to an owner or an admin, never in a sample. */
   invite?: () => void;
+  /** The one-use link of the invite this dialog's form made, while it is still good. Never stored by the view. */
+  madeInviteLink?: string;
   /** The page's search field; the integration owns the query and rerender. */
   onQuery?: (value: string) => void;
 }
@@ -87,6 +92,10 @@ export interface PeopleDialogCallbacks {
   reloadInvites?: () => Promise<void> | void;
   /** Reads people and agents again after a failed load. Retry is hidden without this callback. */
   reload?: () => Promise<void> | void;
+  /** Makes an email invite from the form in the dialog. Answers with the new invite's id, or with the sentence to show. */
+  createInvite?: (email: string) => Promise<{ madeId: string } | { error: string }>;
+  /** The person is done with the link this dialog made: the integration forgets it. */
+  forgetInvite?: () => void;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -292,6 +301,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const hadFocus = !!active && (root.contains(active) || detail.contains(active));
   const refocusPrincipal = active?.closest<HTMLElement>("[data-agent-row]")?.dataset.agentRow;
   const focusKey = active && (root.contains(active) || detail.contains(active)) ? active.dataset.pdFocus : undefined;
+  const typing = focusKey === "invite-email" ? active as HTMLInputElement : null;
+  const inviteCaret = typing ? [typing.selectionStart ?? typing.value.length, typing.selectionEnd ?? typing.value.length] as const : null;
   const focusWithinDetail = !!active && detail.contains(active);
   const oldEditor = detail.querySelector<HTMLFormElement>("[data-model-editor]");
   const draft = oldEditor ? { id: oldEditor.dataset.modelEditor, value: oldEditor.querySelector<HTMLInputElement>("input")?.value } : null;
@@ -300,7 +311,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   root.replaceChildren(); detail.replaceChildren();
   const outer = root.closest<HTMLDialogElement>("[data-roster-dialog]");
   // One roster node: the shell projects it into desktop context and returns it to this page on phones.
-  const nav = options.page ?? { homeLabel: model.workspaceName ?? "", homeHref: "" };
+  const focusInvite = (key: string) => root.querySelector<HTMLElement>(`[data-pd-focus="${key}"]`)?.focus({ preventScroll: true });
+  // Invite a person opens the form on the Invites tab; without `createInvite` it still leaves for the older page.
+  const openInvite = () => { state.tab = "invites"; state.invite ??= newPeopleInviteDraft(); callbacks.render(); focusInvite("invite-email"); };
+  // A link that is gone (cancelled, used or expired) takes its block with it; the list already shows the change.
+  if (state.invite?.madeId && !options.page?.madeInviteLink) state.invite = null;
+  const page = options.page ?? { homeLabel: model.workspaceName ?? "", homeHref: "" };
+  const nav = callbacks.createInvite && !model.sample ? { ...page, invite: openInvite } : page;
   const { page: pageRoot, host, side } = buildPeoplePage(doc, model, state, nav, callbacks.render);
   root.append(pageRoot);
   const select = (type: "agent" | "person", id: string) => {
@@ -642,6 +659,32 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
   // With nothing to count, the tab's own line (none waiting, loading, could not load) is the whole answer.
   invitedTitle.hidden = invites.length === 0;
+  const inviteDraft = state.invite ?? null; const madeLink = inviteDraft?.madeId ? options.page?.madeInviteLink ?? "" : "";
+  if (inviteDraft && invitesOnly && callbacks.createInvite) {
+    const closeInvite = () => { state.invite = null; callbacks.render(); focusInvite("page-invite"); };
+    const handlers = {
+      input: (value: string) => { inviteDraft.email = value; },
+      cancel: closeInvite,
+      done: () => { callbacks.forgetInvite?.(); closeInvite(); },
+      submit: async () => {
+        inviteDraft.busy = true; inviteDraft.error = ""; callbacks.render();
+        let answer: { madeId: string } | { error: string };
+        try { answer = await callbacks.createInvite!(inviteDraft.email.trim()); }
+        catch { answer = { error: "The result is unknown. Check the list below before trying again." }; }
+        inviteDraft.busy = false;
+        if (state.invite !== inviteDraft) return;
+        if ("madeId" in answer) { inviteDraft.madeId = answer.madeId; inviteDraft.email = inviteDraft.email.trim(); } else inviteDraft.error = answer.error;
+        callbacks.render(); focusInvite("madeId" in answer ? "invite-copy" : "invite-email");
+      },
+      copy: async (shown: HTMLElement) => {
+        const say = (text: string) => { inviteDraft.copied = text; const status = shown.parentElement?.querySelector<HTMLElement>(".pd-invite-copied"); if (status) status.textContent = text; };
+        try { await doc.defaultView!.navigator.clipboard.writeText(madeLink); say("Copied. Send this link to them."); }
+        catch { const range = doc.createRange(); range.selectNodeContents(shown); const selection = doc.defaultView?.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+          say("The link is selected. Copy it from here."); }
+      },
+    };
+    invited.append(madeLink ? buildPeopleInviteMade(doc, inviteDraft, madeLink, handlers) : buildPeopleInviteForm(doc, inviteDraft, handlers));
+  }
   invited.append(invitedTitle); if (invitesOnly) { const note = tabNote(); if (note) invited.append(note); }
   invited.append(inviteList, inviteError); host.append(invited);
   side.append(detail);
@@ -742,7 +785,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (confirm && !confirm.open && confirm.isConnected) { confirm.showModal(); focusRoleConfirm(confirm); } }
   if (focusKey && !root.querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
     (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title") ?? pageHeading(doc))?.focus({ preventScroll: true });
-    if (doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); } }
+    if (doc.activeElement instanceof HTMLInputElement && doc.activeElement.type === "search") { const end = doc.activeElement.value.length; doc.activeElement.setSelectionRange(end, end); }
+    const retyping = doc.activeElement as HTMLInputElement | null;
+    if (inviteCaret && retyping?.dataset?.pdFocus === "invite-email") retyping.setSelectionRange(inviteCaret[0], inviteCaret[1]); }
   // A refresh replaces headings too. Restore focus only when this render dropped it to body;
   // another control or a nested/sibling dialog owns any focus it acquired meanwhile.
   if (hadFocus && (!doc.activeElement || doc.activeElement === doc.body) && !doc.querySelector("dialog[open]:not([data-roster-dialog])")) {

@@ -41,7 +41,8 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
   const host = make("div", "pd-page-main");
   const actions = make("div", "pd-page-actions");
   const action = peopleTabAction(tab, { sample: model.sample, mayInvite: model.people.some(person => person.own && person.role !== "member") });
-  if (action === "invite" && nav.invite) {
+  // While the form or its link is open on Invites, it stands where this button would.
+  if (action === "invite" && nav.invite && !(tab === "invites" && state.invite)) {
     const invite = make("button", "pd-page-primary", "Invite a person"); invite.type = "button";
     invite.dataset.peoplePageInvite = ""; invite.dataset.pdFocus = "page-invite";
     invite.addEventListener("click", () => nav.invite?.()); actions.append(invite);
