@@ -10,6 +10,8 @@ const sitemap = {
   hooks: {
     "astro:build:done": async ({ pages, dir }) => {
       const urls = pages
+        // The not-found page answers every wrong address; it is not a page to list.
+        .filter(({ pathname }) => !/^404(\/|\.html)?$/u.test(pathname))
         .map(({ pathname }) => new URL(pathname, SITE_ORIGIN).href)
         .sort()
         .map((url) => `  <url><loc>${url}</loc></url>`)

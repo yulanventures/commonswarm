@@ -1,0 +1,42 @@
+---
+import Base from "../layouts/Base.astro";
+import "../styles/public-theme.css";
+
+/*
+ * The page a wrong or stale address gets. Astro writes it to dist/404.html; the web server serves that file with
+ * status 404 (deploy/site/commonswarm-site.caddy, handle_errors) for every path that matches nothing.
+ *
+ * It is served at any path and depth, so every link and asset reference here must be root-relative.
+ */
+---
+
+<Base title="Page not found · CommonSwarm" description="This address does not match a page on CommonSwarm." path="/404" publicLook>
+  <meta slot="head" name="robots" content="noindex" />
+  <section class="page nf" aria-labelledby="nf-title">
+    <h1 id="nf-title">We can’t find that page.</h1>
+    <a class="btn btn--primary" href="/">Home</a>
+  </section>
+</Base>
+
+<style>
+  .nf {
+    display: grid;
+    justify-items: start;
+    align-content: center;
+    gap: var(--s-8);
+    min-block-size: min(60vh, 34rem);
+    padding-block: var(--s-16);
+  }
+
+  .nf h1 {
+    max-inline-size: 16ch;
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 8vw, 4rem);
+    font-weight: 650;
+    line-height: 1.05;
+    letter-spacing: -0.045em;
+    text-wrap: balance;
+  }
+</style>
