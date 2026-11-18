@@ -326,3 +326,51 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu .dashboard__use
   ) { min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] :is(.hm-menu__trigger, .hm-ws-header .hm-menu__trigger) { min-inline-size: 44px; min-block-size: 44px; }
 }
+
+/* Waiting on you: one count across every workspace, in the phone's top bar and in the workspace header. A link to
+   Catch up. The number has a reserved width, so the bar does not move as counts arrive. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none;
+  box-sizing: border-box; min-block-size: 36px; padding: 4px 10px;
+  border: 1px solid var(--k-shell-line); border-radius: 6px;
+  color: var(--k-shell-secondary); background: transparent;
+  font: 500 13px var(--k-shell-font); text-decoration: none; white-space: nowrap; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting .hm-rail__icon { flex: none; }
+/* Three characters wide whatever it holds ("", "7", "20+", "99+"), so a count arriving never moves the header. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting__count {
+  inline-size: 3ch; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+/* Something is waiting: the control reads as ink, not as chrome. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting[data-waiting] { color: var(--k-shell-ink); border-color: var(--k-shell-control); }
+/* Narrow headers and the phone bar: a 44px mark with the number as a badge on its corner. The badge is placed, not
+   laid out, so the control is one size whatever it counts and takes the least room a target can. The words stay in
+   the control's name. */
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting {
+    position: relative; inline-size: 44px; min-inline-size: 44px; block-size: 44px; padding: 0; border-color: transparent;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting__label {
+    position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting__count {
+    position: absolute; inset-block-start: 4px; inset-inline-start: 22px; box-sizing: border-box;
+    inline-size: auto; min-inline-size: 16px; block-size: 16px; padding: 0 4px; border-radius: 999px;
+    background: var(--k-shell-ink); color: var(--k-shell-surface); font-size: 10px; line-height: 16px;
+    box-shadow: 0 0 0 2px var(--k-shell-surface);
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting__count:empty { display: none; }
+  /* The badge says something is waiting; the box needs no outline to say it again. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting[data-waiting] { border-color: transparent; }
+}
+@media (width > 52rem) { live-dashboard.dashboard[data-kylon-shell] .cs-waiting--phone { display: none; } }
+/* Catch up has no workspace header. There the control sits where a header would put it: the far right of the top. */
+live-dashboard.dashboard[data-kylon-shell] [data-home-catchup] { position: relative; }
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting--page { position: absolute; inset-block-start: 10px; inset-inline-end: 20px; }
+@media (width <= 52rem) { live-dashboard.dashboard[data-kylon-shell] .cs-waiting--page { display: none; } }
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting { border-color: ButtonText; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting__count { border: 1px solid ButtonText; }
+}

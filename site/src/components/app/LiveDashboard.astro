@@ -1271,7 +1271,8 @@ import "../../styles/kylon-command-palette.css";
   import { addAgentStore, connectedHosts, forgetAddAgent, joinAttemptMatch, rememberJoinedHost } from "../../lib/add-agent";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
-  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
+  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice, DecisionQueue } from "../../lib/home/contract";
+  import { buildWaitingButton, updateWaitingButton, waitingTotal } from "../../lib/waiting-count";
   import type { TodoVM, AgentVM, NeedsYouVM } from "../../lib/home-types";
   import { homeConnectionAccess, homeConnectionTokenMatches, homeConnectionPolicy, mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
   import { agentPage } from "../../lib/home-agent";
@@ -5548,8 +5549,99 @@ import "../../styles/kylon-command-palette.css";
       if (!workspaceId) return;
       await openRosterDialog({ kind: "person", id }, workspaceId);
     };
+    /* ── Waiting on you: one count across every workspace ────────────────────────────────────
+     * Drawn in the phone's top bar and in the workspace header, outside the menu, and it opens Catch up. It is the
+     * number Catch up shows, computed the same way and kept in the same map (homeOverviewCounts).
+     *
+     * One overview read answers for every workspace. A workspace whose overview shows no question to the person is
+     * counted from that read alone (its to-dos and agent fixes); one that shows a question has its decision queue read
+     * too, which counts a re-raised ask once and leaves out one already answered. A workspace the overview leaves out,
+     * or whose queue cannot be read, is not counted: the total is then a minimum, never a zero.
+     *
+     * The workspace in view is counted too. An earlier decision left it out, because a single snapshot goes stale as
+     * its questions are answered; this is not a snapshot. It is read again after an answer, on return to the tab, and
+     * once a minute while the tab is visible. Cost: one request per refresh, plus up to two for each workspace that
+     * has an open question, three workspaces at a time. */
+    /* Where the control lives: after the title in the phone's top bar; last in the workspace header, which chat,
+       to-dos, files, wiki and an agent's page all share; and at the same far-right spot on Catch up, which has no
+       header. So on a desktop it is in one place whichever of those the person is reading. */
+    const WAITING_HOSTS = [[".cs-org-phone-title", "cs-waiting--phone"], ["[data-home-workspace-shell] .hm-ws-header__actions", ""],
+      ["[data-home-catchup]", "cs-waiting--page"]] as const;
+    const waitingLinks: (HTMLAnchorElement | undefined)[] = [];
+    let waitingGeneration = 0, waitingInFlight = false, waitingAgain = false, waitingTimer: number | undefined;
+    /** Catch up, unless that is where the person already is: a second press must not reload it or add to history. */
+    const openWaiting = (href: string): void => { if (homeRoute.view !== "catchup") navigateHomeHref(href); };
+    const syncWaitingButtons = (): void => {
+      const shown = !sampleMode && !!session && workspaces.length > 0;
+      const total = waitingTotal(workspaces.map(workspace => workspace.id), homeOverviewCounts);
+      WAITING_HOSTS.forEach(([selector, kind], index) => {
+        const host = shown ? one<HTMLElement>(selector) : null;
+        if (!host) { waitingLinks[index]?.remove(); return; }
+        const link = waitingLinks[index] ??= buildWaitingButton(document, routeHref({ view: "catchup" }), openWaiting);
+        if (kind) link.classList.add(kind);
+        if (index === 0) { if (host.nextElementSibling !== link) host.after(link); }
+        else if (host.lastElementChild !== link) host.append(link);
+        updateWaitingButton(link, total);
+      });
+    };
+    const refreshWaitingCounts = async (): Promise<void> => {
+      // Catch up counts for itself, into the same map, and starts by clearing it.
+      if (sampleMode || !session || homeRoute.view === "catchup") return;
+      if (waitingInFlight) { waitingAgain = true; return; }
+      waitingInFlight = true;
+      const generation = ++waitingGeneration, viewer = homeViewerId();
+      const live = (): boolean => generation === waitingGeneration && homeViewerId() === viewer && homeRoute.view !== "catchup";
+      try {
+        const overview = await homeOverview();
+        // No overview on this server: nothing is counted, and nothing is drawn as a number.
+        if (!overview || !live()) return;
+        const now = Date.parse(overview.generated_at);
+        const rows = new Map(overview.workspaces.map(row => [row.workspace_id, row]));
+        const counted = new Map<string, number | null>();
+        const countOf = (workspace: Workspace, queue: DecisionQueue, choices: ReadonlyMap<string, AskChoiceState> = new Map()): number | null =>
+          homeNeedsYouCount({ workspace, state: "ready", detail: catchUpDetailFromOverview(rows.get(workspace.id)!, overview.viewer_user_id, now, false, [], queue, choices) });
+        const toRead: Workspace[] = [];
+        for (const workspace of workspaces) {
+          const row = rows.get(workspace.id);
+          if (!row) counted.set(workspace.id, null);
+          else if (row.needs_you.asks.length > 0) { counted.set(workspace.id, null); toRead.push(workspace); }
+          else counted.set(workspace.id, countOf(workspace, { workspace_id: workspace.id, generated_at: overview.generated_at, total: 0, truncated: false, asks: [] }));
+        }
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(3, toRead.length) }, async () => {
+          for (;;) {
+            const workspace = toRead[next++]; if (!workspace) return;
+            const queue = await Promise.resolve().then(() => homeServer()?.decisionQueue(workspace.id) ?? null).catch(() => null);
+            // A queue that cannot be read leaves its workspace uncounted, even if it was counted before: the overview
+            // says something is waiting there and this read cannot say how much.
+            if (!queue) continue;
+            const ids = queue.asks.slice(0, ASK_CHOICES_BATCH).map(ask => ask.signal_id);
+            const choices = ids.length ? await askChoices(workspace.id, ids).catch(() => null) : null;
+            counted.set(workspace.id, countOf(workspace, queue, new Map((choices ?? []).map(choice => [choice.signalId, choice]))));
+          }
+        }));
+        if (!live()) return;
+        for (const [id, count] of counted) homeOverviewCounts.set(id, count);
+        renderHomeRail();
+      } catch {
+        // A failed overview changes nothing: what was counted stays, and what was not stays uncounted.
+      } finally {
+        waitingInFlight = false;
+        if (waitingAgain) { waitingAgain = false; void refreshWaitingCounts(); }
+      }
+    };
+    /** Soon, once: after an answer, an arrival or a return to the tab. */
+    const scheduleWaitingRefresh = (delay = 1_500): void => {
+      window.clearTimeout(waitingTimer);
+      waitingTimer = window.setTimeout(() => { void refreshWaitingCounts(); }, delay);
+    };
+    // Once a minute while the tab is visible, and on each return to it.
+    window.setInterval(() => { if (document.visibilityState === "visible") void refreshWaitingCounts(); }, 60_000);
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") scheduleWaitingRefresh(); });
     const renderHomeRail = (): void => {
       syncVisibleShell();
+      // The rail and the Waiting on you control read the same counts; they are redrawn together.
+      if (typeof syncWaitingButtons === "function") syncWaitingButtons();
       const orgs = organizationMenuItems(workspaces, activeWorkspaceId, selectedOrgId);
       const currentOrg = orgs.find(org => org.current);
       selectedOrgId = currentOrg?.id ?? null;
@@ -5871,7 +5963,7 @@ import "../../styles/kylon-command-palette.css";
          the same way. The placement owns the name and reads the label set above. */
       syncComposerPlacement();
       const key = homeStructureKey(vm);
-      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); return; }
+      if (key === homeShellKey && slot.childElementCount) { layout.syncMenu(); syncChannelLeadPill(); syncWaitingButtons(); return; }
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         channelSettings: (opener, editDescription) => openChannelDialog("settings", headerChannel?.channelId ?? null, opener, editDescription ? "description" : "name"),
         toggleStar: () => {
@@ -5905,6 +5997,8 @@ import "../../styles/kylon-command-palette.css";
         all<HTMLElement>("[data-home-workspace-shell] h1, .cs-org-phone-title h1").find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
       syncChannelLeadPill();
+      // The header was rebuilt: the Waiting on you control goes back into it.
+      syncWaitingButtons();
       syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
@@ -6046,6 +6140,7 @@ import "../../styles/kylon-command-palette.css";
        any other route reads it once too, so people and agents from the other workspaces are listed there as well.
        A failed or late read leaves the rail on the workspace in view; Catch up replaces this data with its own. */
     const loadRailOverview = async (): Promise<void> => {
+      if (typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh(0);
       if (sampleMode || homeRoute.view === "catchup" || catchUpData.some(entry => entry.detail)) return;
       const generation = ++railOverviewGeneration;
       const viewer = homeViewerId();
@@ -6056,9 +6151,7 @@ import "../../styles/kylon-command-palette.css";
         workspaceId !== activeWorkspaceId || homeRoute.view === "catchup" ||
         catchUpData.some(entry => entry.detail)) return;
       catchUpData = overviewCatchUpData(initialCatchUpData(workspaces), overview, sampleMode);
-      // The workspace in view shows its live needs-you items in the stream; a one-time snapshot count on its rail row would go
-      // stale as they are answered, so it gets none here (Lead decision; the mockup's current row has no badge).
-      for (const entry of catchUpData) if (entry.workspace.id !== activeWorkspaceId) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
+      // The counts are not taken from this snapshot: refreshWaitingCounts measures every workspace and keeps measuring.
       renderHomeRail();
     };
     const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }, onRetry?: () => void): void => {
@@ -8476,6 +8569,8 @@ import "../../styles/kylon-command-palette.css";
       } catch {
         result = { ok: false, status: 0, error: null, message: CHOICE_ANSWER_FAILED };
       }
+      // An answer, here or anywhere, changes what is waiting.
+      if (result.ok && typeof scheduleWaitingRefresh === "function") scheduleWaitingRefresh();
       // Stale: another account, workspace, request, reset or a newer click owns this ask now. Touch nothing.
       if (choiceTickets.get(signalId) !== ticket || !choiceTicketLive(ticket)) return;
       choiceTickets.delete(signalId);
