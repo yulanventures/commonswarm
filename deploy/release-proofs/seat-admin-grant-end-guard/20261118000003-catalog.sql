@@ -3,8 +3,8 @@ SELECT (SELECT count(*)=8 AND bool_and(p.proowner='swarm_admin'::regrole AND p.p
    AND p.proconfig=ARRAY['search_path=pg_catalog'] AND md5(p.prosrc)=e.digest)
  FROM (VALUES
   ('swarm.seat_admin_grants_end_guard()',true,'v','0464bcf9480d721f98b78bdc93d19435'),
-  ('swarm.stamp_admin_event_creation_xact()',false,'v','0f5107540abb4932b9b590bba6ea9c4a'),
-  ('swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)',true,'v','d51ddc4c0ff9f30dfd34cc764b352eab'),
+  ('swarm.stamp_admin_event_creation_xact()',false,'v','e933b17d55ef735bcb6c3503ee724fb8'),
+  ('swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)',true,'v','58d73adcbe790fa8289e5d98367d89c1'),
   ('swarm.expire_seat_admin_grant(uuid)',true,'v','7194275c57f6f5565403f29566506eda'),
   ('swarm.seat_admin_grant_end_actor(uuid,uuid)',false,'s','ede802ab44d0574a1d243a6cb25a6209'),
   ('swarm.agent_seat_admin_self_ended(bytea,uuid)',true,'v','5b08e1d3a15594fe633086c8647b5f20'),
@@ -21,6 +21,8 @@ SELECT (SELECT count(*)=8 AND bool_and(p.proowner='swarm_admin'::regrole AND p.p
    ('swarm.admin_events'::regclass,'admin_events_stamp_creation_xact',to_regprocedure('swarm.stamp_admin_event_creation_xact()'))))
  AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.admin_events'::regclass AND attname='creation_xact_id'
    AND NOT attisdropped AND atttypid='xid8'::regtype AND NOT attnotnull)
+ AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.admin_events'::regclass AND attname='creation_system_identifier'
+   AND NOT attisdropped AND atttypid='bigint'::regtype AND NOT attnotnull)
  AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','state','UPDATE')
  AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','ended_at','UPDATE')
  AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','end_reason','UPDATE')

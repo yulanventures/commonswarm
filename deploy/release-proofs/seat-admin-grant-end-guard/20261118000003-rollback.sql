@@ -37,7 +37,7 @@ DROP FUNCTION IF EXISTS swarm.end_seat_admin_grant(uuid, uuid, text, timestamptz
 DROP FUNCTION IF EXISTS swarm.expire_seat_admin_grant(uuid);
 DROP TRIGGER IF EXISTS admin_events_stamp_creation_xact ON swarm.admin_events;
 DROP FUNCTION IF EXISTS swarm.stamp_admin_event_creation_xact();
-ALTER TABLE swarm.admin_events DROP COLUMN IF EXISTS creation_xact_id;
+ALTER TABLE swarm.admin_events DROP COLUMN IF EXISTS creation_xact_id, DROP COLUMN IF EXISTS creation_system_identifier;
 DROP TRIGGER IF EXISTS seat_admin_grants_owner_or_expiry_end ON swarm.seat_admin_grants;
 DROP FUNCTION IF EXISTS swarm.seat_admin_grants_end_guard();
 DROP FUNCTION IF EXISTS swarm.seat_admin_grant_end_actor(uuid, uuid);

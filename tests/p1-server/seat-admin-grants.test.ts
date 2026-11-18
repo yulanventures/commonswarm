@@ -251,12 +251,35 @@ test("the command role cannot write a grant's end; an owner's end needs this tra
   }
   assert.equal(await stateOf(grantId), "active", "no unaudited end took effect");
 
+  // A record from another cluster: a logical restore can load the stamp columns with the data, before the trigger
+  // exists, and this cluster can later issue the same xid8. Here the record carries this very transaction's xid8 but
+  // another cluster's identifier, as an imported row would; it does not count.
+  await assert.rejects(() => sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.admin_accounts (owner_user_id, stream_id) VALUES (${owner}::uuid, ${randomUUID()}::uuid)
+      ON CONFLICT (owner_user_id) DO NOTHING`;
+    const [{ seq }] = await tx<{ seq: number }[]>`SELECT coalesce(max(seq), 0)::int + 1 AS seq FROM swarm.admin_events
+      WHERE owner_user_id = ${owner}::uuid`;
+    const event = { stream_kind: "account", owner_user_id: owner, seq, event_id: randomUUID(), command_id: "imported",
+      type: "AdminActionRecorded", actor_user: owner,
+      payload: { action: "end_seat_admin", target_kind: "seat_admin_grant", target_id: grantId, outcome: "accepted" } };
+    await tx.unsafe("SET LOCAL session_replication_role = replica"); // as a restore loads rows: no stamping trigger
+    await tx`INSERT INTO swarm.admin_events (owner_user_id, seq, event_id, command_id, event, creation_xact_id,
+        creation_system_identifier)
+      VALUES (${owner}::uuid, ${seq}, ${event.event_id}::uuid, 'imported', ${tx.json(event as postgres.JSONValue)},
+        pg_current_xact_id(), (SELECT system_identifier + 1 FROM pg_catalog.pg_control_system()))`;
+    await tx.unsafe("SET LOCAL session_replication_role = origin");
+    await tx.unsafe("SET LOCAL ROLE swarm_command");
+    await end(tx, "imported");
+  }), unaudited("a record stamped by another cluster"));
+  assert.equal(await stateOf(grantId), "active", "an imported record ends nothing");
+
   // Positive control: this transaction's record, appended after a savepoint, ends it and keeps who ended it.
   const [row] = await asCommand(async (tx) => {
     await tx.savepoint(async (sp) => { await recordEnd(sp, grantId, owner, "audited"); });
-    const [stamp] = await tx<{ ok: boolean }[]>`SELECT bool_and(creation_xact_id = pg_current_xact_id()) AS ok FROM swarm.admin_events
-      WHERE owner_user_id = ${owner}::uuid AND command_id = 'audited'`;
-    assert.equal(stamp!.ok, true, "the server stamps the top-level transaction, replacing the caller's value");
+    const [stamp] = await tx<{ ok: boolean }[]>`SELECT bool_and(creation_xact_id = pg_current_xact_id()
+        AND creation_system_identifier = (SELECT system_identifier FROM pg_catalog.pg_control_system())) AS ok
+      FROM swarm.admin_events WHERE owner_user_id = ${owner}::uuid AND command_id = 'audited'`;
+    assert.equal(stamp!.ok, true, "the server stamps the top-level transaction and this cluster, replacing the caller's values");
     return await end(tx, "audited");
   });
   assert.deepEqual([row!.state, row!.end_reason, row!.ended_by_user_id], ["downgraded", "owner_downgrade", owner]);

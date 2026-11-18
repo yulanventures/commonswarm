@@ -6,7 +6,7 @@ SELECT to_regprocedure('swarm.seat_admin_grants_end_guard()') IS NULL
  AND to_regprocedure('swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)') IS NULL
  AND to_regprocedure('swarm.expire_seat_admin_grant(uuid)') IS NULL
  AND to_regprocedure('swarm.stamp_admin_event_creation_xact()') IS NULL
- AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.admin_events'::regclass AND attname='creation_xact_id' AND NOT attisdropped)
+ AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.admin_events'::regclass AND attname IN ('creation_xact_id','creation_system_identifier') AND NOT attisdropped)
  AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='swarm.admin_events'::regclass AND tgname='admin_events_stamp_creation_xact')
  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='swarm.admin_events'::regclass AND tgname='admin_events_append_only' AND NOT tgisinternal)
  AND to_regprocedure('swarm.seat_admin_grant_end_actor(uuid,uuid)') IS NULL

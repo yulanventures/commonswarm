@@ -32,13 +32,16 @@ REVOKE UPDATE (state, ended_at, end_reason, ended_by_user_id) ON swarm.seat_admi
 GRANT UPDATE (grant_id) ON swarm.seat_admin_grants TO swarm_command;
 
 -- Same-transaction proof for admin history, savepoint-safe (as 20261022000992 does for signals): a row inserted after a
--- SAVEPOINT has a child xmin, while pg_current_xact_id() names the top-level transaction. Older rows stay NULL.
-ALTER TABLE swarm.admin_events ADD COLUMN creation_xact_id xid8;
+-- SAVEPOINT has a child xmin, while pg_current_xact_id() names the top-level transaction. The physical cluster's system
+-- identifier is stamped beside it: a logical restore can load these columns with the data before the trigger exists, and
+-- the target cluster can later issue the same xid8, so an imported row must never match. Older rows stay NULL.
+ALTER TABLE swarm.admin_events ADD COLUMN creation_xact_id xid8, ADD COLUMN creation_system_identifier bigint;
 CREATE FUNCTION swarm.stamp_admin_event_creation_xact() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
   -- Unconditionally replace caller input, including an explicit NULL or xid.
   NEW.creation_xact_id := pg_current_xact_id();
+  NEW.creation_system_identifier := (SELECT system_identifier FROM pg_catalog.pg_control_system());
   RETURN NEW;
 END;
 $$;
@@ -94,6 +97,7 @@ BEGIN
     SELECT 1 FROM swarm.admin_events e
     WHERE e.owner_user_id = g.owner_user_id AND e.command_id = p_command_id
       AND e.creation_xact_id = pg_current_xact_id()
+      AND e.creation_system_identifier = (SELECT system_identifier FROM pg_catalog.pg_control_system())
       AND e.event->>'type' = 'AdminActionRecorded'
       AND e.event->'payload'->>'action' = 'end_seat_admin'
       AND e.event->'payload'->>'outcome' = 'accepted'
