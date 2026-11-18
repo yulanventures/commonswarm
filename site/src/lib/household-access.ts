@@ -51,6 +51,11 @@ export function householdAccessChoice(owner: boolean, tickedPurpose: string | un
   return { purpose, role };
 }
 
+/** The decision the card is showing, as one comparable value: who is asking and what they would send. */
+export function householdDecisionKey(owner: boolean, choice: HouseholdAccessChoice): string {
+  return `${owner ? "owner" : "member"}|${choice.purpose ?? ""}|${choice.role ?? ""}`;
+}
+
 /**
  * The access card's button. It names who can use Lists & docs only when the owner is choosing that, and names
  * the role as the caller's own ("My access"), since this command never sets anyone else's role.

@@ -1280,7 +1280,7 @@ import "../../styles/kylon-command-palette.css";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
-  import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS, householdAccessChoice, householdConfirmLabel } from "../../lib/household-access";
+  import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
   import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
   import { agentLabelInSentence, personTint } from "../../lib/home-names";
   import { homeAskAnswered, ASKS_UNAVAILABLE_ACTION } from "../../lib/home-map";
@@ -6229,6 +6229,8 @@ import "../../styles/kylon-command-palette.css";
       renderHomeShell();
       renderHeaderRoster();
       renderDialogRoster();
+      // The Lists & docs access card follows the viewer's role, which this roster may just have changed.
+      if (typeof syncHouseholdConsentRole === "function") syncHouseholdConsentRole();
       renderedWakeMarkKey = wakeMarkKey();
       syncWorkspaceSettingsRoster();
       /* ONE CALL, AND ORDER STOPPED BEING LOAD-BEARING. There used to be three steps here in
@@ -11469,7 +11471,20 @@ import "../../styles/kylon-command-palette.css";
     );
     const syncHouseholdConfirmLabel = (): void => {
       const label = one<HTMLElement>("[data-household-confirm-label]");
-      if (label) label.textContent = householdConfirmLabel(viewerRole() === "owner", householdChoice());
+      if (!label) return;
+      const owner = viewerRole() === "owner";
+      const choice = householdChoice();
+      label.textContent = householdConfirmLabel(owner, choice);
+      // The decision on show, kept beside the words, so a press can be checked against it.
+      label.dataset.decision = householdDecisionKey(owner, choice);
+    };
+    /* The card is drawn for the viewer's settled role. A roster refresh can change that role while the card is
+       open (an owner made a member), so the roster's own repaint redraws this too. Only the owner chooses who
+       can use the workspace; the server refuses anyone else's first choice (owner_confirmation_required). */
+    const syncHouseholdConsentRole = (): void => {
+      const purposeSet = one<HTMLElement>("[data-household-purpose-set]");
+      if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
+      syncHouseholdConfirmLabel();
     };
 
     const resetHouseholdSurface = (): void => {
@@ -12160,7 +12175,6 @@ import "../../styles/kylon-command-palette.css";
     const renderHouseholdAccess = (landingReady: "access" | "content" | null = null): void => {
       const card = one<HTMLElement>("[data-household-consent]");
       const approvals = one<HTMLElement>("[data-household-agents]");
-      const purposeSet = one<HTMLElement>("[data-household-purpose-set]");
       const current = householdAccess.workspaceId === activeWorkspaceId;
       const confirmed = current && householdAccess.status === "ok";
       /* Nothing shows until household_access answers for this workspace, so a confirmed
@@ -12174,8 +12188,7 @@ import "../../styles/kylon-command-palette.css";
       /* Only the owner chooses who can see the workspace; the server refuses anyone else's
          first choice (owner_confirmation_required). A member joined through an invitation,
          which only works in a shared workspace, so their card asks only for their access. */
-      if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
-      syncHouseholdConfirmLabel();
+      syncHouseholdConsentRole();
       const landing = listsAllowLanding;
       if (!landing) return;
       if (!householdCurrent(landing.scope) || landing.navigation !== homeNavigation || homeRoute.view !== "lists" || activeWorkspaceView !== "objects") {
@@ -12467,6 +12480,15 @@ import "../../styles/kylon-command-palette.css";
       const notice = one<HTMLElement>("[data-household-consent-result]");
       const button = one<HTMLButtonElement>("[data-household-confirm]");
       if (!scope) return;
+      /* Send only the decision the button was showing when it was pressed. If the viewer's role or the
+         choices moved under it (a roster refresh can do that), redraw and ask for a fresh press. */
+      const label = one<HTMLElement>("[data-household-confirm-label]");
+      const shown = label?.dataset.decision;
+      syncHouseholdConsentRole();
+      if (label && shown !== label.dataset.decision) {
+        if (notice) notice.textContent = "This changed while it was open. Check the button, then press it again.";
+        return;
+      }
       const owner = viewerRole() === "owner";
       const { purpose, role } = householdChoice();
       if (!purpose || !role) {

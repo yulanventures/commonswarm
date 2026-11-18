@@ -35,7 +35,7 @@ import { agentPresenceLine } from '../../lib/agent-presence';
 import { wakePathMark } from '../../lib/wake-path';
 import { identityDisplayLabel } from '../../lib/identity-label';
 import { isTaggable } from '../../lib/mention-address';
-import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel } from '../../lib/household-access';
+import { removedAgentLabel, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from '../../lib/household-access';
 import { workspaceLeadLine, buildSharedCard } from '../../lib/home-side-cards';
 import type { HomeOverview } from '../../lib/home/contract';
 import { splitChoicePrompt } from '../../lib/choices';
@@ -789,7 +789,7 @@ test('People Allow lands from settled access, continues after consent, and retir
     'showChannelView', 'focusHomeView', 'householdScope', 'householdCurrent', 'readHouseholdAccess',
     'refreshHouseholdAccess', 'renderHouseholdAccess', 'openHouseholdView', 'loadHouseholdConnections',
     'renderAgentApprovals', 'connectionApproval', 'confirmOwnAccess', 'resetHouseholdSurface',
-    'householdChoice', 'syncHouseholdConfirmLabel',
+    'householdChoice', 'syncHouseholdConfirmLabel', 'syncHouseholdConsentRole',
     'allowAgentFromPeople', 'approveAgent']);
   // Execute the widget's real event registration, not a duplicated navigation callback.
   const dashboard = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
@@ -811,6 +811,7 @@ test('People Allow lands from settled access, continues after consent, and retir
   const fixture = (immediate = false, connections = [{ kind: 'local', principal_id: 'A', name: 'Helper', approval: null }]) => {
     const focus: LandingNode[] = [], scroll: LandingNode[] = [], frames: (() => void)[] = [];
     const replies: ((reply: unknown) => void)[] = [], calls: string[] = [], contentReplies: (() => void)[] = [];
+    const commands: Record<string, unknown>[] = [];
     const hostListeners = new Map<string, () => unknown>();
     const hostPicker = { addEventListener: (name: string, listener: () => unknown) => hostListeners.set(name, listener) };
     const document = { title: '', createElement: (tag: string) => new LandingNode(tag),
@@ -836,6 +837,7 @@ test('People Allow lands from settled access, continues after consent, and retir
     const purposeSet = new LandingNode('fieldset'), purpose = new LandingNode('input'), role = new LandingNode('input');
     purpose.value = 'shared'; role.value = 'editor';
     const confirm = new LandingNode('button'), notice = new LandingNode('p'), approvals = new LandingNode('section');
+    const confirmLabel = new LandingNode('span'); confirm.append(confirmLabel);
     const approvalTitle = new LandingNode('h2'), list = new LandingNode('ul'), empty = new LandingNode('p');
     purposeSet.append(purpose); card.append(purposeSet, role, confirm, notice); approvals.append(approvalTitle, list, empty);
     // B1's upcoming native order; the selected content does not determine access.
@@ -844,13 +846,13 @@ test('People Allow lands from settled access, continues after consent, and retir
     const nodes = new Map<string, LandingNode>([['.dashboard__channel', channel], ['#dashboard-lists-title', title],
       ['#dashboard-files-title', fileTitle], ['[data-household-consent]', card], ['[data-household-agents]', approvals],
       ['#dashboard-agent-approvals-title', approvalTitle], ['[data-household-purpose-set]', purposeSet],
-      ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm],
+      ['[data-household-consent-result]', notice], ['[data-household-confirm]', confirm], ['[data-household-confirm-label]', confirmLabel],
       ['[data-household-agent-list]', list], ['[data-household-agent-empty]', empty],
       ['[data-household-purpose]:checked', purpose], ['[data-household-role]:checked', role]]);
     const context = createContext({ ...MESSAGE_STATUS_STUBS,  document, hostPicker, URL, routeHref, resolveHomeRoute, homeViewTitle, createLatestRead, homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches,
       // The renderer's completion is independent of access/connection transport settlement.
       householdDashboard: { clear() {}, open: () => new Promise<void>(resolve => contentReplies.push(resolve)) },
-      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel,
+      peopleDialogCanAct, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, accessRefusalMessage, householdAccessChoice, householdConfirmLabel, householdDecisionKey,
       one: (selector: string) => selector.endsWith(':checked')
         ? (nodes.get(selector)?.checked ? nodes.get(selector) : null) : nodes.get(selector) ?? null,
       all: (selector: string) => selector === '[data-channel-view]' ? [objects, files]
@@ -861,7 +863,7 @@ test('People Allow lands from settled access, continues after consent, and retir
         requestAnimationFrame: (callback: () => void) => frames.push(callback), clearTimeout() {} },
       queueMicrotask() {},
       postCommand: async (_session: unknown, _request: string, command: { kind: string }) => {
-        calls.push(command.kind);
+        calls.push(command.kind); commands.push(command);
         if (command.kind === 'household_access') return immediate ? ok : new Promise(resolve => replies.push(resolve));
         if (command.kind === 'household_connections') return { status: 200, body: { status: 'ok', connections } };
         if (command.kind === 'household_permissions') return { status: 200, body: { status: 'committed' } };
@@ -880,7 +882,8 @@ test('People Allow lands from settled access, continues after consent, and retir
       let catchUpGeneration=0, homeDetailGeneration=0, homeDetailKey='', homeTodoRead=null, homeQueue=null;
       let homeQueueRead='pending', homeTodoSave='idle', homeTodoReceipt='', homeTodoNotice=null, signalExpiryTimer;
       const homeScroll=new Map(), unknownChannelId=null, layout={refreshTodoContext:replace=>replace()};
-      const keepConnectCredentialVisible=()=>false, uuid=()=>'request', viewerRole=()=>'owner';
+      let viewerRoleNow='owner';
+      const keepConnectCredentialVisible=()=>false, uuid=()=>'request', viewerRole=()=>viewerRoleNow;
       const peopleDialogModel=()=>({sample:false,agents:[{id:'A',own:true,accessReadState:'succeeded',access:null}]});
       const syncListsChrome=()=>{}, syncStandalonePage=()=>{}, syncFeedChrome=()=>{}, syncVisibleShell=()=>{};
       const parkPeopleHosts=()=>{}, renderHomeSide=()=>{}, renderHomeRail=()=>{}, renderHomeShell=()=>{}, loadRailOverview=()=>{};
@@ -891,7 +894,7 @@ test('People Allow lands from settled access, continues after consent, and retir
     `, context);
     runInContext(code + '\n' + listenerCode, context);
     const flushFrames = () => { for (const frame of frames.splice(0)) frame(); };
-    return { context, focus, scroll, calls, replies, title, card, purpose, role, approvalTitle, list, fileTitle, notice,
+    return { context, focus, scroll, calls, commands, replies, title, card, purpose, role, approvalTitle, list, fileTitle, notice, purposeSet, confirmLabel,
       flushFrames, finishContent: async () => { assert.ok(contentReplies.length, 'existing content render is pending'); contentReplies.shift()!(); await drain(); },
       allow: () => runInContext("peopleDialogAction('allow','A',{}, {})", context) as Promise<void>,
       navigate: (view: string) => runInContext(`navigateHome({view:'${view}',workspaceId:'W'},'push')`, context) as Promise<void>,
@@ -932,7 +935,9 @@ test('People Allow lands from settled access, continues after consent, and retir
   await runInContext('confirmOwnAccess()', consent.context);
   assert.equal(consent.calls.includes('household_permissions'), false, 'missing choices keep consent in place');
   assert.deepEqual(consent.scroll, [consent.card]);
-  consent.purpose.checked = true; consent.role.checked = true;
+  // Ticking a choice sends `change`, which redraws the label; the stand-in inputs are set directly, so say so.
+  consent.purpose.checked = true; consent.role.checked = true; runInContext('syncHouseholdConfirmLabel()', consent.context);
+  assert.equal(consent.confirmLabel.textContent, 'Turn on for me and people I invite · My access: Editor');
   const confirming = runInContext('confirmOwnAccess()', consent.context) as Promise<void>;
   await drain(); await consent.reply(ok); await confirming; // The existing post-confirm open starts its own normal access read.
   await consent.reply(ok); consent.flushFrames();
@@ -940,6 +945,40 @@ test('People Allow lands from settled access, continues after consent, and retir
   await consent.finishContent(); consent.flushFrames();
   assert.deepEqual(consent.scroll, [consent.card, consent.approvalTitle]);
   assert.equal(consent.focus.at(-1), consent.approvalTitle, 'successful confirmation continues the original Allow intent');
+  // An owner picks Just me and Editor. A roster refresh then makes them a member while the card is open, and
+  // nothing has redrawn the card yet. A press on the old label sends nothing; it redraws and asks again.
+  const sent = (f: ReturnType<typeof fixture>) => JSON.parse(JSON.stringify(f.commands.filter(command => command.kind === 'household_permissions')));
+  const demoted = fixture(); await demoted.allow(); await demoted.reply(refused); demoted.flushFrames();
+  demoted.purpose.value = 'personal'; demoted.purpose.checked = true; demoted.role.checked = true;
+  runInContext('syncHouseholdConfirmLabel()', demoted.context);
+  assert.equal(demoted.confirmLabel.textContent, 'Turn on for just me · My access: Editor');
+  runInContext("viewerRoleNow='member'", demoted.context);
+  // Not awaited: if this press did send, the test should fail on the next line, not wait for a reply.
+  void runInContext('confirmOwnAccess()', demoted.context); await drain();
+  assert.deepEqual(sent(demoted), [], 'a press on the stale label sends nothing');
+  assert.equal(demoted.confirmLabel.textContent, 'Turn on · My access: Editor', 'the button is redrawn for the member');
+  assert.equal(demoted.purposeSet.hidden, true, 'a member is no longer asked who can use it');
+  assert.equal(demoted.notice.textContent, 'This changed while it was open. Check the button, then press it again.');
+  // A fresh press on the member label sends what that label says: shared, with the selected role.
+  const fresh = runInContext('confirmOwnAccess()', demoted.context) as Promise<void>;
+  await drain(); await demoted.reply(ok); await fresh;
+  assert.deepEqual(sent(demoted), [{ kind: 'household_permissions', purpose: 'shared', content_role: 'editor' }]);
+  // When the roster's repaint has already redrawn the card, the label on show is current and one press is enough.
+  const redrawn = fixture(); await redrawn.allow(); await redrawn.reply(refused); redrawn.flushFrames();
+  redrawn.purpose.value = 'personal'; redrawn.purpose.checked = true; redrawn.role.checked = true;
+  runInContext("syncHouseholdConfirmLabel(); viewerRoleNow='member'; syncHouseholdConsentRole()", redrawn.context);
+  assert.equal(redrawn.confirmLabel.textContent, 'Turn on · My access: Editor');
+  assert.equal(redrawn.purposeSet.hidden, true);
+  const once = runInContext('confirmOwnAccess()', redrawn.context) as Promise<void>;
+  await drain(); await redrawn.reply(ok); await once;
+  assert.deepEqual(sent(redrawn), [{ kind: 'household_permissions', purpose: 'shared', content_role: 'editor' }]);
+  // The control: an owner whose role did not move sends Just me on the first press.
+  const steady = fixture(); await steady.allow(); await steady.reply(refused); steady.flushFrames();
+  steady.purpose.value = 'personal'; steady.purpose.checked = true; steady.role.checked = true;
+  runInContext('syncHouseholdConfirmLabel()', steady.context);
+  const first = runInContext('confirmOwnAccess()', steady.context) as Promise<void>;
+  await drain(); await steady.reply(ok); await first;
+  assert.deepEqual(sent(steady), [{ kind: 'household_permissions', purpose: 'personal', content_role: 'editor' }]);
   const repeated = fixture(); await repeated.allow(); await repeated.allow();
   await repeated.reply(ok); await repeated.finishContent();
   assert.deepEqual(repeated.scroll, [], 'an older Allow open cannot adopt a newer visit before its access settles');

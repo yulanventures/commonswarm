@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
-import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, householdAccessChoice, householdConfirmLabel } from "../../lib/household-access";
+import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS, householdAccessChoice, householdConfirmLabel, householdDecisionKey } from "../../lib/household-access";
 import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
 import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
@@ -102,13 +102,20 @@ test("the Lists & docs access card has no lead paragraph, a named agents group, 
   // One reader of the form feeds both the command and the label, so they cannot disagree.
   const confirm = section(script, "const confirmOwnAccess = async", "const openHouseholdView = async");
   assert.match(confirm, /const \{ purpose, role \} = householdChoice\(\);\s*if \(!purpose \|\| !role\) \{/);
+  // A press is checked against the decision the button was showing; a stale one redraws and sends nothing.
+  assert.match(confirm, /const shown = label\?\.dataset\.decision;\s*syncHouseholdConsentRole\(\);\s*if \(label && shown !== label\.dataset\.decision\) \{[\s\S]*?return;\s*\}\s*const owner = viewerRole\(\) === "owner";\s*const \{ purpose, role \}/);
   assert.match(confirm, /\{ kind: "household_permissions", purpose, content_role: role \}/);
   assert.doesNotMatch(confirm, /data-household-(purpose|role)/, "confirm reads the form only through householdChoice");
   const sync = section(script, "const syncHouseholdConfirmLabel =", "const resetHouseholdSurface =");
-  assert.match(sync, /label\.textContent = householdConfirmLabel\(viewerRole\(\) === "owner", householdChoice\(\)\);/);
+  assert.match(sync, /label\.textContent = householdConfirmLabel\(owner, choice\);/);
+  assert.match(sync, /label\.dataset\.decision = householdDecisionKey\(owner, choice\);/);
+  // The card follows the viewer's role: who is asked "who can use it", and the label, are redrawn together.
+  assert.match(sync, /const syncHouseholdConsentRole = \(\): void => \{\s*const purposeSet = one<HTMLElement>\("\[data-household-purpose-set\]"\);\s*if \(purposeSet\) purposeSet\.hidden = viewerRole\(\) !== "owner";\s*syncHouseholdConfirmLabel\(\);/);
+  // The roster's own repaint calls it, so every roster change that can move the viewer's role redraws the card.
+  assert.match(section(script, "const renderRoster = (): void => {", "renderedWakeMarkKey = wakeMarkKey();"), /if \(typeof syncHouseholdConsentRole === "function"\) syncHouseholdConsentRole\(\);\s*$/);
   // The label is refreshed when a choice changes, when the card is drawn for a role, and when it is cleared.
   assert.match(script, /one<HTMLElement>\("\[data-household-consent\]"\)\?\.addEventListener\("change", \(\) => \{\s*syncHouseholdConfirmLabel\(\);/);
-  assert.match(section(script, "const renderHouseholdAccess =", "const landing = listsAllowLanding;"), /purposeSet\.hidden = viewerRole\(\) !== "owner";\s*syncHouseholdConfirmLabel\(\);/);
+  assert.match(section(script, "const renderHouseholdAccess =", "const landing = listsAllowLanding;"), /syncHouseholdConsentRole\(\);\s*$/);
   assert.match(section(script, "const resetHouseholdSurface =", "const openWorkspace = async"), /input\.checked = false;\s*\}\s*syncHouseholdConfirmLabel\(\);/);
   assert.match(script, /"Choose who can use Lists & docs and your access first\."/);
   assert.match(script, /"Choose your access first\."/);
@@ -133,6 +140,10 @@ test("the access card's button says what will be sent: a member never sees an au
   }
   // Values the command does not accept are never sent or named.
   assert.deepEqual(say(true, "everyone", "admin"), { purpose: null, role: null, label: "Turn on Lists & docs" });
+  // The decision key tells an owner's "just me" from the member decision that a demotion turns it into.
+  assert.equal(householdDecisionKey(true, householdAccessChoice(true, "personal", "editor")), "owner|personal|editor");
+  assert.equal(householdDecisionKey(false, householdAccessChoice(false, "personal", "editor")), "member|shared|editor");
+  assert.notEqual(householdDecisionKey(true, householdAccessChoice(true, "shared", "editor")), householdDecisionKey(false, householdAccessChoice(false, "shared", "editor")));
 });
 
 test("approving an agent uses the independent server command without changing the person's role", () => {
