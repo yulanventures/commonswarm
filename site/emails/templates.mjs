@@ -1,9 +1,9 @@
 export const templates = [
   {
     key: "magic_link",
-    subject: "Your CommonSwarm sign-in link",
-    preheader: "Use this one-time link to sign in to CommonSwarm.",
-    variables: ["ConfirmationURL"],
+    subject: "Your CommonSwarm sign-in code",
+    preheader: "Use the code or the link inside to sign in to CommonSwarm.",
+    variables: ["Token", "ConfirmationURL"],
     cta: { label: "Sign in to CommonSwarm", urlVariable: "ConfirmationURL" },
   },
   {
