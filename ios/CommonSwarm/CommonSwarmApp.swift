@@ -209,6 +209,8 @@ private struct HistoryView: View {
     @ViewState private var restoreAnchor: HistoryAnchor?
     @ViewState private var restoreGeneration = 0
     @ViewState private var scrollToLatest = 0
+    @ViewState private var awayFromLatest = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var appearance
 
     var body: some View {
@@ -236,6 +238,11 @@ private struct HistoryView: View {
                     } else if history.retry == nil { ProgressView() }
                 }.scrollTargetLayout().padding()
             }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentSize.height - geometry.visibleRect.maxY > 24
+            } action: { _, away in
+                awayFromLatest = away
+            }
             .onPreferenceChange(HistoryAnchorKey.self) { readingAnchor = $0 }
             .onChange(of: restoreGeneration) {
                 if let anchor = restoreAnchor {
@@ -246,23 +253,21 @@ private struct HistoryView: View {
                 if let id = history.messages?.last?.id { reader.scrollTo(id, anchor: .bottom) }
             }
             .refreshable { await load() }
+            .overlay(alignment: .bottomTrailing) {
+                if awayFromLatest {
+                    JumpToLatestButton {
+                        guard let last = history.messages?.last else { return }
+                        if reduceMotion { reader.scrollTo(last.id, anchor: .bottom) }
+                        else { withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(last.id, anchor: .bottom) } }
+                    }
+                    .padding(.trailing, 12).padding(.bottom, 4)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                ConversationComposer(draft: draft, destination: item.name, send: { Task { await send() } })
+            }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
-            .safeAreaInset(edge: .bottom) {
-                VStack {
-                    if let failure = draft.failure, !draft.sending {
-                        HStack { Text(failure == .unconfirmed ? "Delivery unconfirmed" : "Couldn’t send message"); Button("Retry") { Task { await send() } }.disabled(draft.sending) }
-                    }
-                    HStack(alignment: .bottom) {
-                        TextField("Message " + item.name, text: $draft.text, axis: .vertical)
-                            .lineLimit(1...5).textFieldStyle(.roundedBorder)
-                        Button { Task { await send() } } label: {
-                            Image(systemName: "arrow.up.circle.fill").font(.title).frame(minWidth: 44, minHeight: 44)
-                        }.accessibilityLabel("Send message")
-                            .disabled(draft.sending || draft.submission != nil || draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.text.utf16.count > 8_000)
-                    }
-                }.padding(.horizontal).padding(.vertical, 6).background(.bar)
-            }
     }
 
     private func sender(_ message: Message) -> String {
