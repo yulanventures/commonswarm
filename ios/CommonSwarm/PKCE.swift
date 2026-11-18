@@ -3,7 +3,9 @@ import Foundation
 import Security
 
 enum SignInError: Error {
-    case invalidCallback, unavailable, refused, rateLimited, emailSignupDisabled
+    case invalidCallback, unavailable, refused, rateLimited, emailSignupDisabled, timedOut, invalidEmail
+
+    static let rateLimitMessage = "Too many attempts. Wait a moment and try again."
 }
 
 enum BrowserProvider: String {
@@ -77,6 +79,19 @@ struct EmailCodeAPI {
     let origin: URL
     let publicKey: String
 
+    static func sendFailureMessage(for error: Error) -> String {
+        switch error {
+        case SignInError.timedOut, URLError.timedOut:
+            return "Sending the code took too long. Try again."
+        case SignInError.invalidEmail:
+            return "Couldn’t send a code. Check the address and try again."
+        case SignInError.rateLimited:
+            return SignInError.rateLimitMessage
+        default:
+            return "Couldn’t send a code. Try again."
+        }
+    }
+
     func send(to email: String) async throws {
         struct Request: Encodable {
             let email: String
@@ -98,7 +113,23 @@ struct EmailCodeAPI {
 }
 
 private enum AuthRequest {
-    private struct Rejection: Decodable { let error_code: String }
+    private struct Rejection: Decodable {
+        let error_code: String
+        let msg: String?
+
+        var rejectsEmailAddress: Bool {
+            switch error_code {
+            case "email_address_invalid", "email_address_not_authorized":
+                return true
+            case "validation_failed":
+                // GoTrue also uses validation_failed for fields unrelated to the address.
+                return msg == "An email address is required" || msg == "An email address is too long"
+                    || msg?.hasPrefix("Unable to validate email address:") == true
+            default:
+                return false
+            }
+        }
+    }
 
     static func post(_ body: some Encodable, to url: URL, publicKey: String) async throws -> Data {
         var request = URLRequest(url: url)
@@ -111,8 +142,11 @@ private enum AuthRequest {
         let (data, response) = try await transport.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode
         if status == 429 { throw SignInError.rateLimited }
-        if status == 422, (try? JSONDecoder().decode(Rejection.self, from: data))?.error_code == "otp_disabled" {
-            throw SignInError.emailSignupDisabled
+        if status == 408 || status == 504 { throw SignInError.timedOut }
+        if let status, (400..<500).contains(status),
+           let rejection = try? JSONDecoder().decode(Rejection.self, from: data) {
+            if status == 422 && rejection.error_code == "otp_disabled" { throw SignInError.emailSignupDisabled }
+            if rejection.rejectsEmailAddress { throw SignInError.invalidEmail }
         }
         guard status == 200 else { throw SignInError.refused }
         try Task.checkCancellation()

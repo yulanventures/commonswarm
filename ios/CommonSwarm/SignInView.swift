@@ -144,7 +144,7 @@ private struct EmailSignInView: View {
                 focus = .code
                 message = resend ? "Check your email for the new code." : nil
             } catch {
-                if !Task.isCancelled { message = errorText(error, fallback: "Couldn’t send a code. Check the address and try again.") }
+                if !Task.isCancelled { message = EmailCodeAPI.sendFailureMessage(for: error) }
             }
         }
     }
@@ -168,7 +168,7 @@ private struct EmailSignInView: View {
     }
 
     private func errorText(_ error: Error, fallback: String) -> String {
-        if case SignInError.rateLimited = error { return "Too many attempts. Wait a moment and try again." }
+        if case SignInError.rateLimited = error { return SignInError.rateLimitMessage }
         return fallback
     }
 }

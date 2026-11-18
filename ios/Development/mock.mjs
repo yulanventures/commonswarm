@@ -94,6 +94,14 @@ const server = createServer(async (req, res) => {
     };
     if (req.method === "POST" && url.pathname === "/auth/v1/otp") {
       if (body.create_user !== false || url.search) return reply(400, {});
+      if (body.email === "slow@example.test") return reply(504, { error_code: "request_timeout" });
+      if (body.email === "invalid-address") return reply(400, {
+        error_code: "validation_failed", msg: "Unable to validate email address: invalid format",
+      });
+      if (body.email === "blocked@example.test") return reply(400, { error_code: "email_address_not_authorized" });
+      if (body.email === "server@example.test") return reply(500, { error_code: "email_address_invalid" });
+      if (body.email === "limited@example.test") return reply(429, {});
+      if (body.email === "bad-request@example.test") return reply(400, { error_code: "validation_failed" });
       if (body.email !== "reader@example.test") return reply(422, { code: 422, error_code: "otp_disabled" });
       recordEmailRequest(url, body);
       emailCodePending = true;
