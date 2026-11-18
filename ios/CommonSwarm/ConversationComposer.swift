@@ -49,6 +49,7 @@ struct ConversationComposer: View {
                 }
                 TextField(label, text: $draft.text, prompt: Text(""), axis: .vertical)
                     .lineLimit(1...5).textFieldStyle(.plain)
+                    .accessibilityLabel(Text(label))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
