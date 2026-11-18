@@ -1682,11 +1682,109 @@
         "click": ".hm-ws-header [data-admin-access-open]"
       },
       {
-        "waitFor": "admin-delegations dialog[open] [data-admin-refresh]:not([disabled])",
+        "waitFor": "admin-delegations dialog[open][data-admin-state=\"ready\"]",
         "settle": true
       }
     ],
-    "ready": "admin-delegations dialog[open] [data-admin-refresh]:not([disabled])",
+    "ready": "admin-delegations dialog[open][data-admin-state=\"ready\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "dialog.admin-history.history",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "waitFor": "admin-delegations dialog[open][data-admin-state=\"ready\"]",
+        "settle": true
+      },
+      {
+        "click": "admin-delegations dialog[open] [data-admin-pane=\"history\"]"
+      }
+    ],
+    "ready": "admin-delegations dialog[open] [data-admin-pane-body=\"history\"]:not([hidden])",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
+    "id": "dialog.admin-history.clients",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "waitFor": "admin-delegations dialog[open][data-admin-state=\"ready\"]",
+        "settle": true
+      },
+      {
+        "click": "admin-delegations dialog[open] [data-admin-pane=\"clients\"]"
+      }
+    ],
+    "ready": "admin-delegations dialog[open] [data-admin-pane-body=\"clients\"]:not([hidden])",
     "states": [
       "dense"
     ],

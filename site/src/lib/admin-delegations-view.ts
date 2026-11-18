@@ -24,6 +24,12 @@ export function adminApprovalLines(client: AdminClientView): string[] {
   ];
 }
 /** This is a UI affordance only; account commands enforce human ownership again. */
+/** A client's approval in two parts: what a person reads first, and the ids and event references behind More. */
+export function adminApprovalParts(client: AdminClientView): { lines: string[]; more: string[] } {
+  const lines = adminApprovalLines(client);
+  const references = client.approval ? 1 + (client.approval.withdrawal_event_id ? 1 : 0) : 0;
+  return { lines: lines.slice(0, lines.length - references), more: lines.slice(lines.length - references) };
+}
 export function adminClientAction(client: AdminClientView, ownerId: string): "approve" | "withdraw" | null {
   if (client.approval && client.approval.owner_user_id !== ownerId) return null;
   if (client.approval?.withdrawn_at) return null;
@@ -49,6 +55,26 @@ export function adminRenewalDiff(grant: AdminGrantView, policy: AdminSitePolicy)
 function policyLines(title: string, values: Record<string, unknown>): string[] {
   return Object.entries(values).filter(([, value]) => value !== null).map(([key, value]) =>
     `${title} · ${key.replaceAll("_", " ")}: ${Array.isArray(value) ? value.join(", ") || "none" : String(value)}.`);
+}
+/** What a person needs on the row before deciding whether a grant stays: whether it is active, what it reaches, what it
+ * may do and exactly when it ends, in their own time zone. Everything else adminGrantLines prints stays behind More.
+ * `past` follows the server's state alone (revoked or expired): it decides whether the row keeps its action, so it must
+ * never depend on this device's clock. A grant the server still calls active stays in the opening list with its action,
+ * marked expired when its end time has passed here. */
+export function adminGrantSummary(grant: AdminGrantView, policy: AdminSitePolicy, workspaceNames: ReadonlyMap<string, string> = new Map(), now = Date.now()): { past: boolean; lines: string[] } {
+  const state = grant.state === "active" && Date.parse(grant.expires_at) <= now ? "expired" : grant.state;
+  const past = grant.state === "revoked" || grant.state === "expired";
+  const end = `${new Date(grant.expires_at).toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
+  const names = grant.workspace_ids.map(id => workspaceNames.get(id.toLowerCase()) ?? id);
+  return { past, lines: [
+    `${state[0]!.toUpperCase()}${state.slice(1)} · ${grant.mode === "full_account" ? "Full account" : "Selected workspaces"}`,
+    ...(grant.issuance_status === "committed" ? [] : ["Issuance result unknown. This grant does not establish a usable admin connection."]),
+    ...(state !== "revoked" && state !== "expired" && grant.family && grant.family.state !== "active" ? [`Its connection is ${grant.family.state}.`] : []),
+    `${grant.workspace_selector === "owned_and_selected" ? "Existing and future owned workspaces, plus selected shared workspaces" : "Workspaces"}: ${names.join(", ") || "none"}`,
+    `Can: ${labels(grant.capability_names, policy).join(", ") || "no capability snapshot available"}`,
+    state === "expired" ? `Ended ${end}` : state === "revoked" ? `It was set to end ${end}` : `Ends ${end}`,
+    ...(past && grant.reason_code ? [`Reason: ${grant.reason_code}`] : []),
+  ] };
 }
 export function adminGrantLines(grant: AdminGrantView, policy: AdminSitePolicy, now = Date.now()): string[] {
   const state = grant.state === "active" && Date.parse(grant.expires_at) <= now ? "expired" : grant.state;

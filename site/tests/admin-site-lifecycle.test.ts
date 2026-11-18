@@ -7,7 +7,7 @@ import { parseAdminRecoveryPage } from "../../src/cloud/admin-delegations-contra
 import { readAdminIssuanceGate } from "../../src/cloud/admin-delegations-gate.js";
 import { fixture, policy, owner, foreign, at } from "../src/components/app/admin-delegations.fixture.js";
 import {
-  adminApprovalLines, adminClientAction, adminGateNotice, adminGrantLines, adminRenewalDiff,
+  adminApprovalLines, adminApprovalParts, adminClientAction, adminGateNotice, adminGrantLines, adminGrantSummary, adminRenewalDiff,
   assertAdminPageOwner, ADMIN_SITE_RENEWAL_GUIDANCE,
 } from "../src/lib/admin-delegations-view.js";
 
@@ -104,6 +104,46 @@ test("admin-site-lifecycle dependencies require an owned parent, including later
   }
 });
 
+test("admin-site-lifecycle a grant's row carries the decision: state, reach, permissions and the exact local end", () => {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone, now = Date.parse(at);
+  const end = `${new Date(grant.expires_at).toLocaleString()} (${zone})`;
+  const selected = { ...grant, mode: "granular" as const, workspace_selector: "selected" as const, workspace_ids: [owner, foreign] };
+  const active = adminGrantSummary(selected, policy, new Map([[owner, "Rivera household"]]), now);
+  assert.equal(active.past, false);
+  assert.equal(active.lines[0], "Active · Selected workspaces");
+  // A known workspace is named; an unknown one keeps its id, so rows stay distinguishable.
+  assert.ok(active.lines.includes(`Workspaces: Rivera household, ${foreign}`));
+  assert.ok(active.lines.some(line => line.startsWith("Can: ") && !line.includes("no capability snapshot")));
+  assert.equal(active.lines.at(-1), `Ends ${end}`);
+  // Full-account reach and future coverage are said outright.
+  const full = adminGrantSummary({ ...grant, mode: "full_account", workspace_selector: "owned_and_selected" }, policy, new Map(), now);
+  assert.equal(full.lines[0], "Active · Full account");
+  assert.ok(full.lines.some(line => line.startsWith("Existing and future owned workspaces, plus selected shared workspaces: ")));
+  // A grant whose issuance is unknown, or whose connection is not active, never reads as plainly usable.
+  assert.ok(adminGrantSummary({ ...grant, issuance_status: "unknown" }, policy, new Map(), now).lines.includes("Issuance result unknown. This grant does not establish a usable admin connection."));
+  assert.ok(adminGrantSummary({ ...grant, family: { provider_grant_id: "f", state: "suspended" } }, policy, new Map(), now).lines.includes("Its connection is suspended."));
+  // Revoked and expired grants are history: marked past, with when and why.
+  const revoked = adminGrantSummary({ ...grant, state: "revoked", reason_code: "owner_revoked" }, policy, new Map(), now);
+  assert.equal(revoked.past, true);
+  assert.equal(revoked.lines[0]!.split(" · ")[0], "Revoked");
+  assert.ok(revoked.lines.includes(`It was set to end ${end}`)); assert.equal(revoked.lines.at(-1), "Reason: owner_revoked");
+  const expired = adminGrantSummary({ ...grant, state: "expired", expires_at: at }, policy, new Map(), now);
+  assert.equal(expired.past, true); assert.equal(expired.lines[0]!.split(" · ")[0], "Expired"); assert.ok(expired.lines.some(line => line.startsWith("Ended ")));
+  // This device's clock never takes the action away: a grant the server calls active stays current, marked expired.
+  const clock = adminGrantSummary({ ...grant, state: "active", expires_at: at }, policy, new Map(), now);
+  assert.equal(clock.past, false); assert.equal(clock.lines[0]!.split(" · ")[0], "Expired");
+  // Suspended is not past: it can resume, so it stays in the opening list with its action.
+  assert.equal(adminGrantSummary({ ...grant, state: "suspended" }, policy, new Map(), now).past, false);
+  // A client's approval: who verified it and whether it is approved up front; ids and events behind More, none lost.
+  const parts = adminApprovalParts(client);
+  assert.deepEqual([...parts.lines, ...parts.more], adminApprovalLines(client));
+  assert.ok(parts.lines[0]!.startsWith("Verified publisher: ")); assert.ok(parts.lines[1]!.startsWith("Account-owner approval: "));
+  assert.ok(parts.more.length >= 1 && parts.more.every(line => /^(Approval owner|Withdrawal event) /.test(line)));
+  assert.deepEqual(adminApprovalParts({ ...client, approval: null }).more, []);
+  // Nothing the full card prints is lost: the detail lines are unchanged.
+  assert.ok(adminGrantLines(grant, policy, now).some(line => line.startsWith(`Grant ${grant.grant_id}.`)));
+});
+
 /** Minimal DOM for the real component script; no browser launch or rendering mock. */
 class ViewElement {
   children: ViewElement[] = [];
@@ -166,7 +206,8 @@ async function componentView(fetcher: typeof fetch) {
   };
   await settle(() => one("[data-admin-indicator-title]").textContent.length > 0);
   one("[data-admin-indicator]").click();
-  await settle(() => /Showing recorded|could not be verified/.test(one("[data-admin-status]").textContent));
+  // The dialog carries its read state for tools: a finished read says nothing in the status line.
+  await settle(() => ["ready", "refused"].includes(one("dialog").dataset.adminState ?? ""));
   return one;
 }
 
