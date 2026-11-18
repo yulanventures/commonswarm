@@ -326,3 +326,33 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu .dashboard__use
   ) { min-block-size: 44px; }
   live-dashboard.dashboard[data-kylon-shell] :is(.hm-menu__trigger, .hm-ws-header .hm-menu__trigger) { min-inline-size: 44px; min-block-size: 44px; }
 }
+
+/* Waiting on you: one count across every workspace, in the phone's top bar and in the workspace header. A link to
+   Catch up. The number has a reserved width, so the bar does not move as counts arrive. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none;
+  box-sizing: border-box; min-block-size: 36px; padding: 4px 10px;
+  border: 1px solid var(--k-shell-line); border-radius: 6px;
+  color: var(--k-shell-secondary); background: transparent;
+  font: 500 13px var(--k-shell-font); text-decoration: none; white-space: nowrap; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting .hm-rail__icon { flex: none; }
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting__count {
+  min-inline-size: 2ch; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--k-shell-ink);
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+/* Something is waiting: the control reads as ink, not as chrome. */
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting[data-waiting] { color: var(--k-shell-ink); border-color: var(--k-shell-control); }
+/* Narrow headers and the phone bar: the mark and the number. The words stay in the control's name. */
+@media (width <= 64rem) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting { min-inline-size: 44px; min-block-size: 44px; padding-inline: 8px; gap: 4px; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting__label {
+    position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+}
+live-dashboard.dashboard[data-kylon-shell] .cs-waiting--phone { border-color: transparent; }
+@media (width > 52rem) { live-dashboard.dashboard[data-kylon-shell] .cs-waiting--phone { display: none; } }
+@media (forced-colors: active) {
+  live-dashboard.dashboard[data-kylon-shell] .cs-waiting { border-color: ButtonText; }
+}
