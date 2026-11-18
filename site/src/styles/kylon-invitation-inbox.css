@@ -44,6 +44,8 @@ human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations_
   text-transform: none;
 }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__review > :is([data-audience], [data-disclosure], .human-invitations__private) { color: var(--k-shell-ink); }
+/* The disclosure's sentences each start a line and wrap as they need; no gap is added between them. */
+human-invitation-inbox[data-kylon-invite] [data-disclosure] > [data-disclosure-line] { display: block; }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__private strong { font-weight: 500; }
 human-invitation-inbox[data-kylon-invite][data-kylon-invite] .human-invitations__choices legend {
   margin-block-end: 8px;

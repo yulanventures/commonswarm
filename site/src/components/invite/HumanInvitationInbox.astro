@@ -592,6 +592,7 @@ import "../../styles/kylon-invitation-inbox.css";
   import { currentSession, client } from '../../lib/commonswarm';
   import { browserHumanInvitations } from '../../lib/human-invitations';
   import { createHumanInviteController } from '../../lib/human-invite-controller';
+  import { showDisclosure } from '../../lib/disclosure-lines';
   const root=document.querySelector<HTMLElement>('human-invitation-inbox');
   if(root && client()) {
     const one=<T extends HTMLElement>(selector:string)=>root.querySelector<T>(selector)!;
@@ -699,7 +700,7 @@ import "../../styles/kylon-invitation-inbox.css";
         one('[data-title]').textContent=view.preview.workspace_name;
         one('[data-join-name]').textContent=view.preview.workspace_name;
         one('[data-audience]').textContent=view.preview.audience.map(m=>`${m.display_name} (${m.role})`).join(', ');
-        one('[data-disclosure]').textContent=view.preview.disclosure;
+        showDisclosure(one('[data-disclosure]'),view.preview.disclosure);
         one('[data-expiry]').textContent='This invitation expires '+datetime(view.preview.expires_at)+'.';
       }
       const locked=view.confirmed_role!==null||view.busy;
