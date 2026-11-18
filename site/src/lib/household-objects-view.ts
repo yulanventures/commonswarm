@@ -522,6 +522,30 @@ export type HouseholdObjectsController = ReturnType<typeof createHouseholdObject
  * not survive static rendering, so callbacks are injected here, never serialized.
  * The shared escaped renderer is also used by all three Astro components.
  */
+/** The inputs whose contents live only in the page until the person sends them. */
+const REVIEW_FIELD = 'input[data-hh-review]';
+const ENTRY_FIELDS = [REVIEW_FIELD, 'input[data-hh-create-title]', 'input[data-hh-new-item]'] as const;
+type EntryField = { value: string; checked: boolean };
+/** Redraw for a display-only change without losing what a person has entered and not yet sent. The view's state
+ * does not hold the review tick, a typed new title or a typed new item, and a redraw replaces their elements, so
+ * they are read before it and written back after. The tick goes back only while the conflict is the same one: a
+ * new or changed conflict needs its own acknowledgement. */
+export function redrawKeepingEntries(root: { querySelector(selector: string): unknown }, conflictToken: () => string | null,
+  redraw: () => void): void {
+  const entries = ENTRY_FIELDS.map((selector) => {
+    const field = root.querySelector(selector) as EntryField | null;
+    return field ? { selector, value: field.value, checked: field.checked } : null;
+  });
+  const reviewed = conflictToken();
+  redraw();
+  const sameConflict = conflictToken() === reviewed;
+  for (const entry of entries) {
+    const field = entry && root.querySelector(entry.selector) as EntryField | null;
+    if (!entry || !field) continue;
+    field.value = entry.value;
+    if (entry.selector !== REVIEW_FIELD || sameConflict) field.checked = entry.checked;
+  }
+}
 export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdObjectsController): () => void {
   const unsubscribe = controller.subscribe((state) => {
     const active = root.ownerDocument.activeElement;
@@ -548,7 +572,9 @@ export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdOb
       case 'check-save': void controller.checkSave(); break;
       case 'recover': void controller.recoverDraft(); break;
       case 'history': void controller.moreHistory(); break;
-      case 'revision-ids': controller.toggleRevisionIds(); break;
+      case 'revision-ids':
+        redrawKeepingEntries(root, () => controller.getState().conflict?.current.revision.token ?? null, () => { controller.toggleRevisionIds(); });
+        break;
       case 'reviewed-save': void controller.save(root.querySelector<HTMLInputElement>('[data-hh-review]')?.checked === true); break;
       case 'toggle': {
         const content = selectedHouseholdObject(controller.getState())?.current.content;

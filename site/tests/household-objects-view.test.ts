@@ -9,6 +9,7 @@ import { decideHouseholdObject, emptyHouseholdObjectState, reduceHouseholdObject
 import {
   createHouseholdObjectsController, createHouseholdObjectsState, householdContentPatch,
   householdObjectsFixture, householdConflictFixture, renderHouseholdConflict, renderHouseholdContent,
+  redrawKeepingEntries,
   renderHouseholdObjectHistory, renderHouseholdObjects,
   type HouseholdActions, type HouseholdConflictView, type HouseholdSaveRequest,
 } from '../src/lib/household-objects-view.js';
@@ -177,6 +178,42 @@ test('revision ids are shown on request; the conflict review says who saved Base
   assert.equal(state.save_state, 'conflict'); assert.deepEqual(state.proposed, fixture.conflict.proposed);
   assert.equal(fixture.controller.toggleRevisionIds(), false);
   assert.doesNotMatch(renderHouseholdConflict(fixture.controller.getState()), new RegExp(`${base}|${current}`));
+});
+
+test('a display-only redraw keeps what was entered; the review tick survives only for the same conflict', () => {
+  // A page stand-in: a redraw replaces every field with a fresh, empty one, as assigning the view's HTML does.
+  const blank = () => ({ value: '', checked: false });
+  const page = (present: string[]) => {
+    const fields = new Map(present.map((selector) => [selector, blank()]));
+    return { fields, querySelector: (selector: string) => fields.get(selector) ?? null,
+      redraw: (next = present) => { fields.clear(); for (const selector of next) fields.set(selector, blank()); } };
+  };
+  const review = 'input[data-hh-review]', title = 'input[data-hh-create-title]', item = 'input[data-hh-new-item]';
+
+  // The conflict review: a tick made before showing the ids is still there after, and again after hiding them.
+  const conflict = page([review]);
+  conflict.fields.get(review)!.checked = true;
+  for (let press = 0; press < 2; press += 1) {
+    redrawKeepingEntries(conflict, () => 'current-1', () => conflict.redraw());
+    assert.equal(conflict.fields.get(review)!.checked, true);
+  }
+  // A new or changed conflict needs its own acknowledgement: the tick is not carried onto it.
+  let token = 'current-1';
+  redrawKeepingEntries(conflict, () => token, () => { token = 'current-2'; conflict.redraw(); });
+  assert.equal(conflict.fields.get(review)!.checked, false);
+
+  // A list: a typed new title and a typed new item both survive.
+  const list = page([title, item]);
+  list.fields.get(title)!.value = 'Packing list'; list.fields.get(item)!.value = 'Sun cream';
+  redrawKeepingEntries(list, () => null, () => list.redraw());
+  assert.deepEqual([list.fields.get(title)!.value, list.fields.get(item)!.value], ['Packing list', 'Sun cream']);
+
+  // A field the redraw no longer draws is left alone, and nothing is invented for one that was not there.
+  redrawKeepingEntries(list, () => null, () => list.redraw([title]));
+  assert.equal(list.fields.get(title)!.value, 'Packing list'); assert.equal(list.fields.has(item), false);
+  const empty = page([]);
+  redrawKeepingEntries(empty, () => null, () => empty.redraw([title]));
+  assert.equal(empty.fields.get(title)!.value, '');
 });
 
 test('conflicts require private recovery and review; the reviewed retry uses current base and a new request', async () => {
