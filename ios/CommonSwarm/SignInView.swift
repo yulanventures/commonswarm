@@ -16,7 +16,9 @@ struct SignInView: View {
                        let mark = UIImage(contentsOfFile: url.path) {
                         Image(uiImage: mark).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
                     }
-                    Text("CommonSwarm").font(.largeTitle.bold()).padding(.bottom, 12)
+                    Text("CommonSwarm").font(.largeTitle.bold())
+                        .lineLimit(1).minimumScaleFactor(0.4)
+                        .frame(maxWidth: .infinity).padding(.bottom, 12)
                     Button { start(.google) } label: { primaryLabel("Continue with Google") }
                         .buttonStyle(.borderedProminent).disabled(!canStart(.google))
                     Button { showEmail = true } label: { primaryLabel("Continue with email") }
@@ -112,7 +114,7 @@ private struct EmailSignInView: View {
                 if operation != nil { ProgressView().accessibilityLabel("Signing in") }
                 if let message { Text(message) }
             }
-            .navigationTitle(sentTo == nil ? "Sign in with email" : "Enter your code")
+            .navigationTitle(sentTo == nil ? "Email" : "Code")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { operation?.cancel(); dismiss() }
