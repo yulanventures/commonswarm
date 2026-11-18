@@ -1182,8 +1182,12 @@ import "../../styles/kylon-command-palette.css";
         type="search"
         class="cp-input"
         data-command-palette-input
-        placeholder="Jump to a teammate, channel, skill, or action…"
-        aria-label="Jump to a teammate, channel, skill, or action"
+        placeholder="Search or jump to…"
+        aria-label="Search people, channels and actions"
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="dashboard-command-palette-list"
+        aria-autocomplete="list"
         autocomplete="off"
         spellcheck="false"
       />
@@ -1199,7 +1203,7 @@ import "../../styles/kylon-command-palette.css";
         </svg>
       </button>
     </header>
-    <div class="cp-body" data-command-palette-list role="listbox" aria-label="Results"></div>
+    <div class="cp-body" id="dashboard-command-palette-list" data-command-palette-list role="listbox" aria-label="Results"></div>
   </dialog>
 
   <dialog
@@ -1298,7 +1302,9 @@ import "../../styles/kylon-command-palette.css";
   import { mountWorkspaceSkills } from "../../lib/workspace-skills-view";
   import {
     buildCommandPaletteItems,
+    commandPaletteStart,
     filterCommandPaletteItems,
+    rememberPalettePlace,
     renderCommandPaletteList,
     summarizeAgentRoutines,
     buildAgentRoutinesSection,
@@ -5837,6 +5843,20 @@ import "../../styles/kylon-command-palette.css";
       directHistory = { workspaceId, viewerId, partner, state: "ready", rows };
       renderFeed();
     };
+    /* Where this person has recently been in this workspace, on this device, newest first: the palette's start list.
+       Recorded as each place is opened, however it was reached.
+       Kept by the palette's own item ids, so a place that no longer exists simply is not offered. */
+    const paletteRecentKey = (): string => `commonswarm:palette-recent:${session?.user.id ?? "sample"}:${activeWorkspaceId ?? ""}`;
+    const paletteRecent = (): string[] => {
+      try {
+        const stored: unknown = JSON.parse(window.localStorage.getItem(paletteRecentKey()) ?? "[]");
+        return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+      } catch { return []; }
+    };
+    const rememberPaletteVisit = (id: string): void => {
+      if (sampleMode || !activeWorkspaceId) return;
+      try { window.localStorage.setItem(paletteRecentKey(), JSON.stringify(rememberPalettePlace(paletteRecent(), id))); } catch { /* storage is optional */ }
+    };
     /** Open the 1:1 Direct Message with one teammate: Chat filtered to the two of you, the composer
      *  addressed to them, and their profile in the Details column. */
     const openDirectMessage = async (
@@ -5845,6 +5865,7 @@ import "../../styles/kylon-command-palette.css";
       recipients: readonly ComposerRecipient[] = [{ kind: entity.kind, id: entity.id }],
     ): Promise<void> => {
       if (!activeWorkspaceId) return;
+      rememberPaletteVisit(`teammate:${entity.kind}:${entity.id}`);
       if (homeRoute.view !== "chat" || activeChannelId !== null) await navigateHome({ view: "chat", workspaceId: activeWorkspaceId }, "push");
       /* A THREAD REPLY ENDS HERE. A reply left open would keep the composer posting into its
          thread, in public, under a Direct Message's header. Closing it also retires a retry
@@ -13508,6 +13529,7 @@ import "../../styles/kylon-command-palette.css";
         ? GENERAL_CHANNEL_ID
         : channelById(channels, channelId)?.channelId ?? null;
       if (channelId !== null && next === null) return;
+      rememberPaletteVisit(next === null ? "channel:__all__" : next === GENERAL_CHANNEL_ID ? "channel:general" : `channel:${channelById(channels, next)?.slug ?? ""}`);
       /* A channel row leaves a Direct Message: the feed and the composer go back to the channel. */
       const leavingDm = !!activeDm;
       if (leavingDm) {
@@ -15228,6 +15250,12 @@ import "../../styles/kylon-command-palette.css";
       }
     };
 
+    const palettePlaceNow = (): string =>
+      activeDm ? `teammate:${activeDm.kind}:${activeDm.id}`
+        : activeChannelId === null ? "channel:__all__"
+        : activeChannelId === GENERAL_CHANNEL_ID ? "channel:general"
+        : `channel:${channelById(channels, activeChannelId)?.slug ?? ""}`;
+
     const renderCommandPalette = (): void => {
       const list = one<HTMLElement>("[data-command-palette-list]");
       const input = one<HTMLInputElement>("[data-command-palette-input]");
@@ -15255,17 +15283,25 @@ import "../../styles/kylon-command-palette.css";
         mayCreateChannel: viewerMayCreateChannel(),
         themeLabel: (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim() || undefined,
       });
-      commandPaletteFiltered = filterCommandPaletteItems(allItems, input?.value ?? "");
+      // Nothing typed: a few places and a few actions, not the roster. Typing searches everything.
+      commandPaletteFiltered = (input?.value ?? "").trim()
+        ? filterCommandPaletteItems(allItems, input?.value ?? "")
+        : commandPaletteStart(allItems, paletteRecent(), homeRoute.view === "chat" ? palettePlaceNow() : null);
       if (commandPaletteIndex >= commandPaletteFiltered.length) {
         commandPaletteIndex = 0;
       }
-      renderCommandPaletteList(
+      const selected = renderCommandPaletteList(
         document,
         list,
         commandPaletteFiltered,
         commandPaletteIndex,
         executeCommandPaletteItem,
       );
+      /* Focus stays in the search box, so the box names the selected row for assistive technology, and the row is
+         always inside the results pane: the first with its heading, any other by the shortest scroll. Enter can
+         then only run something the person can see. */
+      if (selected) input?.setAttribute("aria-activedescendant", selected.id); else input?.removeAttribute("aria-activedescendant");
+      if (commandPaletteIndex === 0) list.scrollTop = 0; else selected?.scrollIntoView({ block: "nearest" });
     };
 
     const openCommandPalette = (): void => {

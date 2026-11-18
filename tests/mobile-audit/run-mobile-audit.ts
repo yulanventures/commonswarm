@@ -29,6 +29,7 @@ import { CHECKS, GEOMETRY_WITNESS, runActivationWitness, runKeyboardWitness, wit
 import { matrixResult } from "./witness-matrix.js";
 import { hoverSummary, runHoverWitness, type HoverResult, type HoverSpec } from "./hover-witness.js";
 import { runPictureChecks, type PictureCheck } from "./picture-check.js";
+import { runPaletteChecks, type PaletteCheck } from "./palette-check.js";
 import { freezeControlProblem, type FreezeCount } from "./freeze-control.js";
 
 assert.equal(process.env.RUN_BROWSER_TESTS, "1", "the mobile audit runs in CI only (RUN_BROWSER_TESTS=1)");
@@ -146,6 +147,8 @@ const STARTER: Screen[] = [
 ];
 
 /** Overlay roots the generic rules cannot recognise, counted only while shown. */
+/** Where the command palette's keyboard check runs. The run fails unless every one of these ran. */
+const PALETTE_PROFILES = [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const;
 const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "app.entity-detail": ["[data-entity-panel]:not([hidden])"],
   // The recipient's profile, opened by Enter from the message Jump to present landed on.
@@ -533,6 +536,8 @@ async function main(): Promise<void> {
   const polledNormally = new Map<string, number>();
   const pictures: { viewport: string; theme: string; checks: PictureCheck[]; error: string | null }[] = [];
   let pictureFailures = -1;
+  const palette: { viewport: string; theme: string; checks: PaletteCheck[]; error: string | null }[] = [];
+  let paletteFailures = -1;
   const hoverShots: string[] = [];
   try {
     for (const fn of ["command", "read"]) {
@@ -1079,6 +1084,23 @@ async function main(): Promise<void> {
         pictures.push({ viewport: size, theme, ...result });
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
+      // Command palette keyboard check, on a desktop and on a phone: the selected row stays inside the results pane.
+      for (const [viewport, theme, desktop] of PALETTE_PROFILES) {
+        const size = `${viewport.width}x${viewport.height}`;
+        if (!general) { palette.push({ viewport: size, theme, checks: [], error: "general channel screen missing" }); continue; }
+        const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
+        const result = await runPaletteChecks(async () => {
+          const page = await signedIn.newPage();
+          await openScreen(page, general);
+          return page;
+        }, async (page, label) => {
+          const shot = `shots/dialog.command-palette--${label}--${size}--${theme}.png`;
+          await page.screenshot({ path: join(OUT, shot) });
+          hoverShots.push(shot);
+        });
+        palette.push({ viewport: size, theme, ...result });
+        await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
+      }
     } finally { await browser.close(); }
   } finally {
     /* Per topic kind, how many captures saw each answer to their join: {"cswarm-member:<id>:<id>": {"ok": 40}}. */
@@ -1107,14 +1129,18 @@ async function main(): Promise<void> {
         desktopCaptures: hoverDesktop.length, desktopCaptureErrors: hoverDesktop.filter(r => r.error).length, shots: hoverShots.length },
       // Chat pictures in the served app: every check must hold.
       pictures: { runs: pictures.length, checks: pictures.reduce((n, r) => n + r.checks.length, 0),
-        failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length } };
-    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures,
+        failedChecks: pictures.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: pictures.filter(r => r.error).length },
+      // The command palette's keyboard selection in the served app: every check must hold.
+      palette: { runs: palette.length, checks: palette.reduce((n, r) => n + r.checks.length, 0),
+        failedChecks: palette.reduce((n, r) => n + r.checks.filter(c => !c.ok).length, 0), errors: palette.filter(r => r.error).length } };
+    writeFileSync(join(OUT, "mobile-audit-report.json"), JSON.stringify({ run: process.env.GITHUB_RUN_ID ?? "local", summary, seedNotes, items: report, hoverDesktop, pictures, palette,
       ...(DIAGNOSTIC ? { diagnostic: { ...DIAGNOSTIC, freeze: freezeCounts, inviteeFreeze: inviteeFreezeCounts } } : {}) }, null, 2));
     console.log(JSON.stringify(summary));
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
     pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === 2 ? 0 : 1);
+    paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === PALETTE_PROFILES.length ? 0 : 1);
     await closeSite();
     functions.kill();
     await delay(1_000);
@@ -1129,6 +1155,7 @@ async function main(): Promise<void> {
   // The one witness whose finding fails the job (owner request): a hover or focus that moves or resizes anything.
   assert.equal(hoverFailures, 0, `${hoverFailures} hover witness(es) shifted layout or could not measure; see items[].hover[] and hoverDesktop[]`);
   assert.equal(pictureFailures, 0, `${pictureFailures} chat picture check(s) failed; see pictures[]`);
+  assert.equal(paletteFailures, 0, `${paletteFailures} command palette check(s) failed; see palette[]`);
   // A frozen diagnostic pass that never intercepted and replayed a receipt call controlled nothing. It is only owed
   // where a captured screen measures message rows (freeze-control.ts): a focused run of other screens has none to make.
   if (DIAGNOSTIC) assert.equal(freezeControlProblem(DIAGNOSTIC.screens, freezeCounts, measuresFeed), null);
