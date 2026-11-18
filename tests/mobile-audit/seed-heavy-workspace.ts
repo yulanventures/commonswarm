@@ -1002,13 +1002,16 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       }
     } catch (error) { note("seed_delegated_invitation", error); }
     // A connected app for the second viewer (dialog.connected-apps.connected): one active hosted connection with two
-    // agents, written as the p1-server fixtures write one, so the real card and its end-date editor are captured. It is
+    // agents and a third that was removed, written as the p1-server fixtures write one, so the real card, a removed row
+    // and the end-date editor are captured. It is
     // the invitee's and lives in a workspace of its own, so the owner's Connected apps stays empty (dialog.connected-apps)
     // and no roster, rail or chooser in {workspace} gains an agent.
     try {
       const person = people[2]!, appWorkspace = randomUUID(), grant = randomUUID(), digest = "a".repeat(64);
       if (invitee && ok("create_workspace connected app", await command(person.token, { kind: "create_workspace", workspace_id: appWorkspace, name: "Reading club" }, null))) {
-        const agents = [{ name: "Claude", principal: randomUUID(), seat: randomUUID() }, { name: "Claude for errands", principal: randomUUID(), seat: randomUUID() }];
+        const agents = [{ name: "Claude", principal: randomUUID(), seat: randomUUID(), removed: false },
+          { name: "Claude for errands", principal: randomUUID(), seat: randomUUID(), removed: false },
+          { name: "Claude on the old laptop", principal: randomUUID(), seat: randomUUID(), removed: true }];
         await sql.begin(async (tx) => {
           for (const agent of agents) await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
             VALUES (${agent.principal}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, ${agent.name}, 'hosted_mcp', true)`;
@@ -1019,8 +1022,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
               clock_timestamp(), clock_timestamp())`;
           await tx`INSERT INTO swarm.hosted_mcp_grant_workspaces (grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at)
             VALUES (${grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, decode(${digest}, 'hex'), ${randomUUID()}::uuid, clock_timestamp())`;
-          for (const agent of agents) await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
-            VALUES (${agent.seat}::uuid, ${grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, ${agent.principal}::uuid, ${agent.name}, clock_timestamp())`;
+          for (const agent of agents) await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at, revoked_at)
+            VALUES (${agent.seat}::uuid, ${grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, ${agent.principal}::uuid, ${agent.name},
+              clock_timestamp() - interval '2 days', CASE WHEN ${agent.removed}::boolean THEN clock_timestamp() - interval '1 day' END)`;
         });
         Object.assign(ids, { connectedAppWorkspace: appWorkspace, connectedAppGrant: grant });
         steps.push("seed_connected_app");
