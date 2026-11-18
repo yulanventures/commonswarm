@@ -812,7 +812,8 @@ test("create a seat, replayed after the grant ends or expires: refused, and no c
   refused(await createSeat("Expired grant seat", { commandId: expiringId }), "seat_admin_inactive", "replay after expiry");
   refused(await createSeat("After expiry seat"), "seat_admin_inactive", "a new call after expiry");
   const [{ live }] = await sql<{ live: number }[]>`SELECT count(*)::int AS live FROM swarm.agent_tokens t
-    JOIN swarm.agent_principals p USING (principal_id) WHERE p.name IN ('Ended grant seat', 'Expired grant seat') AND t.revoked_at IS NULL`;
+    JOIN swarm.agent_principals p USING (principal_id) WHERE p.workspace_id = ${workspace}::uuid
+      AND p.name IN ('Ended grant seat', 'Expired grant seat') AND t.revoked_at IS NULL`;
   assert.equal(live, 2, "each seat keeps its one first credential");
 });
 
@@ -856,7 +857,8 @@ test("create a seat: a full grant passes the seat to another covering grant; ref
     assert.deepEqual(over.body.grants, [{ grant_id: wsGrant, live: 10, total: 10 }, { grant_id: orgGrant, live: 10, total: 10 }]);
     assert.match(String(over.body.message), new RegExp(`${wsGrant} has 10 of 10 live and 10 of 50 in all; ${orgGrant} has 10 of 10 live`));
     const [audit] = await sql<{ detail: string }[]>`SELECT detail FROM swarm.audit_log
-      WHERE command_kind = 'create_agent_seat' AND outcome = 'quota' ORDER BY audit_id DESC LIMIT 1`;
+      WHERE command_kind = 'create_agent_seat' AND workspace_id = ${workspace}::uuid AND outcome = 'quota'
+      ORDER BY audit_id DESC LIMIT 1`;
     assert.match(audit!.detail, new RegExp(`seat_admin grant=${wsGrant} `), "the refusal is audited under the first covering grant");
 
     // A seat freed under the first grant is used again before the second.
