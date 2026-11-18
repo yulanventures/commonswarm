@@ -438,8 +438,20 @@ test("a replay answers again only while its conversation is still open to the ca
   const deeFirst = ok(await send(dee.jwt, { kind: "conversation_open", members: [user(cat), agent(deeBot)] }, deeOpen));
   assert.deepEqual(ok(await send(cat.jwt, { kind: "conversation_open", members: [user(dee), agent(deeBot)] }, catOpen)), opened,
     "while she is in it, her replay answers what the first call did");
+  // Posts to the group: a stored post names the members it went to.
+  const catPost = randomUUID();
+  const catNote = note({ conversation_id: group, body: "before leaving" });
+  ok(await send(cat.jwt, catNote, catPost));
+  const deePost = randomUUID();
+  const deeNote = note({ conversation_id: group, body: "staying" });
+  const deePosted = ok(await send(dee.jwt, deeNote, deePost));
   const catLeave = randomUUID();
   ok(await send(cat.jwt, { kind: "conversation_leave", conversation_id: group }, catLeave));
+  const postReplay = await send(cat.jwt, catNote, catPost);
+  assert.deepEqual([postReplay.status, postReplay.body], [404, hidden.body], "nor does her earlier post replay its recipients");
+  const deeReplay = ok(await send(dee.jwt, deeNote, deePost));
+  assert.deepEqual([(deeReplay.signal as Row).id, (deeReplay.signal as Row).recipients],
+    [(deePosted.signal as Row).id, (deePosted.signal as Row).recipients], "dee's post replays, recipients and all");
   const replayed = await send(cat.jwt, { kind: "conversation_open", members: [user(dee), agent(deeBot)] }, catOpen);
   assert.deepEqual([replayed.status, replayed.body], [404, hidden.body],
     "after she left, the replay is the hidden-id refusal: no roster");

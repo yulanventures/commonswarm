@@ -294,7 +294,8 @@ test("read marks are written to both tables and agree; today's writers are follo
 });
 
 /** Two transactions that overlap: `first` runs and holds its transaction open while `second` starts, then
- * commits after a pause; `second` finishes whenever its locks allow. */
+ * commits after a pause; `second` finishes whenever its locks allow. `second` must start its work when
+ * called (an async function), since a postgres.js query is sent only once awaited. */
 async function overlap(first: (tx: Tx) => Promise<unknown>, second: () => Promise<unknown>): Promise<void> {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
@@ -334,8 +335,10 @@ test("a frame chosen while a leave or a removal is in flight waits for it: the o
   let at = await frames();
   await overlap(
     (tx) => tx`SELECT swarm.conversation_leave(${w.id}::uuid, 'user', ${w.people.carol!}::uuid, ${group}::uuid)`,
-    () => sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
-      VALUES (${w.id}::uuid, ${message}::uuid, ${w.people.dave!}::uuid, ${"\u{1F44D}"})`,
+    async () => {
+      await sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
+        VALUES (${w.id}::uuid, ${message}::uuid, ${w.people.dave!}::uuid, ${"\u{1F44D}"})`;
+    },
   );
   assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1, [topic("dave")]: 1 },
     "the reaction is announced to those still in the group, and not to carol");
@@ -352,7 +355,7 @@ test("a frame chosen while a leave or a removal is in flight waits for it: the o
   await overlap(
     (tx) => tx`DELETE FROM swarm.channel_members WHERE workspace_id = ${w.id}::uuid AND channel_id = ${lock}::uuid
       AND member_kind = 'user' AND user_id = ${w.people.bob!}::uuid`,
-    () => post(sql, w, { from: w.people.alice!, channel: lock }),
+    async () => { await post(sql, w, { from: w.people.alice!, channel: lock }); },
   );
   assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1 }, "the post committed after bob's removal: only alice hears it");
 });

@@ -804,6 +804,10 @@ BEGIN
     v_kind := v_place.kind;
     v_conversation := v_place.conversation_id;
     PERFORM 1 FROM swarm.conversations AS c WHERE c.conversation_id = v_conversation FOR SHARE;
+    IF v_signal.channel_id IS NOT NULL THEN
+      PERFORM pg_advisory_xact_lock_shared(
+        hashtextextended('conversation-frames:' || p_workspace::text || ':' || v_signal.channel_id::text, 0));
+    END IF;
     IF v_place.audience = 'conversation' THEN
       IF v_place.kind IN ('general', 'public_channel') THEN
         RETURN QUERY SELECT m.user_id FROM swarm.memberships AS m
@@ -824,6 +828,10 @@ BEGIN
     WHERE c.workspace_id = p_workspace
       AND CASE WHEN v_signal.channel_id IS NULL THEN c.kind = 'general' ELSE c.conversation_id = v_signal.channel_id END
     FOR SHARE;
+    IF v_signal.channel_id IS NOT NULL THEN
+      PERFORM pg_advisory_xact_lock_shared(
+        hashtextextended('conversation-frames:' || p_workspace::text || ':' || v_signal.channel_id::text, 0));
+    END IF;
     IF v_signal.to_user_id IS NULL AND v_signal.to_agent_principal_id IS NULL AND v_signal.in_reply_to IS NULL
       AND NOT v_signal.has_recipients THEN
       IF v_signal.channel_id IS NOT NULL THEN
@@ -1029,10 +1037,12 @@ BEGIN
   RETURN NULL;
 END;
 $$;
-CREATE TRIGGER agent_workspace_memberships_conversation_upkeep
+-- Named to fire before the private-channel cleanup triggers on the same tables, so an agent's exit locks
+-- conversation rows before channel-access, as a person's removal does.
+CREATE TRIGGER agent_workspace_memberships_apply_conversations
   AFTER INSERT OR UPDATE OF revoked_at OR DELETE ON swarm.agent_workspace_memberships
   FOR EACH ROW EXECUTE FUNCTION swarm.conversation_agent_upkeep();
-CREATE TRIGGER agent_principals_conversation_upkeep
+CREATE TRIGGER agent_principals_apply_conversations
   AFTER INSERT OR UPDATE OF revoked_at ON swarm.agent_principals
   FOR EACH ROW EXECUTE FUNCTION swarm.conversation_agent_upkeep();
 
@@ -1056,14 +1066,14 @@ CREATE TRIGGER channels_sync_creator_member
   FOR EACH ROW WHEN (NEW.visibility = 'open') EXECUTE FUNCTION swarm.conversation_creator_joins();
 
 -- A person leaving a private channel (channel_member_remove, channel_leave, workspace removal) takes the
--- channel conversation's row FOR UPDATE, the lock frames are chosen under, so a post or reaction in flight
--- either commits first or sees them gone.
+-- channel's frame key exclusively; frame readers take it shared before they read the channel's members.
+-- Both take it last of their locks (lock order: conversation rows, then channel-access, then this key), so
+-- a post or reaction in flight either commits first or sees them gone, and the two never wait in a cycle.
 CREATE FUNCTION swarm.conversation_private_member_lock() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
-  PERFORM 1 FROM swarm.conversations AS c
-  WHERE c.conversation_id = OLD.channel_id AND c.workspace_id = OLD.workspace_id
-  FOR UPDATE;
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('conversation-frames:' || OLD.workspace_id::text || ':' || OLD.channel_id::text, 0));
   RETURN NULL;
 END;
 $$;
