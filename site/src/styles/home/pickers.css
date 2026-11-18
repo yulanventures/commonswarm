@@ -31,6 +31,20 @@
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
 .hm-picker-value { min-inline-size: 0; overflow-wrap: anywhere; }
+/* The closed assign picker is one row: who has the to-do, then the button that opens the chooser under it. */
+.hm-assign-current { display: flex; align-items: center; gap: 10px; inline-size: 100%; min-inline-size: 0; min-block-size: 44px; }
+.hm-assign-current > .hm-picker-value { flex: 1 1 auto; font-weight: 600; }
+.hm-assign-current > :is(.hm-assign-toggle, .hm-agent-orb, .hm-person-avatar, .hm-pick-letter) { flex: none; }
+.hm-assign-current .hm-agent-orb { border-radius: 9px; }
+.hm-picker .hm-assign-toggle.hm-assign-toggle {
+  min-block-size: 44px; min-inline-size: 44px; padding: 0 14px; border: 0; border-radius: 10px;
+  box-shadow: inset 0 0 0 1.5px var(--home-pill-border); background: var(--home-quiet); color: var(--home-ink);
+  font: inherit; font-size: var(--t-sm); font-weight: 600; cursor: pointer;
+}
+.hm-picker .hm-assign-toggle.hm-assign-toggle:hover { background: var(--home-soft); }
+.hm-picker .hm-assign-toggle.hm-assign-toggle:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px var(--home-focus), var(--home-focus-ring); }
+.hm-assign-chips[hidden] { display: none; }
+.hm-assign-current + .hm-assign-chips { margin-block-start: 12px; }
 .hm-picker > span.hm-picker-value { display: block; min-block-size: 44px; align-content: center; font-weight: 600; }
 
 .hm-picker-pop {
