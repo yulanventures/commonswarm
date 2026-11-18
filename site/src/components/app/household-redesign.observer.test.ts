@@ -88,6 +88,29 @@ test("Lists & docs access is two described radio groups, generated from the enfo
   assert.match(script, /if \(purposeSet\) purposeSet\.hidden = viewerRole\(\) !== "owner";/);
 });
 
+test("the Lists & docs access card has no lead paragraph, a named agents group, and a button that names the change", () => {
+  const card = section(markup, "data-household-consent", "</form>");
+  assert.doesNotMatch(card, /dashboard__access-lead|Confirm your access to Lists/);
+  // Three separate, named choices: who can use it (from PURPOSE_QUESTION), your access, your agents.
+  assert.deepEqual([...card.matchAll(/<legend>([^<]+)<\/legend>/g)].map(match => match[1]), ["{PURPOSE_QUESTION}", "Your access", "Your agents"]);
+  assert.match(card, /<input type="checkbox" data-household-allow-own-agents checked \/>/, "the agents choice keeps its default");
+  assert.doesNotMatch(card, /data-household-(purpose|role)[^>]*\bchecked\b/, "who and which access are never preselected");
+  // The button's words come from the same constants as the choices, one part per choice.
+  const button = section(card, "data-household-confirm", "</button>");
+  assert.match(button, /Turn on<span data-confirm-part="none"> Lists &amp; docs<\/span>/);
+  assert.match(button, /<span data-confirm-part=\{purpose\}> for \{PURPOSE_COPY\[purpose\]\.label/);
+  assert.match(button, /<span data-confirm-part=\{role\}> as \{CONTENT_ROLE_COPY\[role\]\.label\}<\/span>/);
+  assert.doesNotMatch(button, /\bConfirm\b/);
+  // Which part shows is decided by styles from the ticked choices; a member is never shown the "who" part.
+  const styles = readFileSync(new URL("../../styles/kylon-lists.css", import.meta.url), "utf8");
+  assert.match(styles, /\[data-household-consent\] \[data-confirm-part\] \{ display: none; \}/);
+  for (const value of ["shared", "personal"]) assert.match(styles, new RegExp(`\\[data-household-purpose\\]\\[value=${value}\\]:checked\\) \\[data-confirm-part=${value}\\]`));
+  for (const value of ["editor", "reader"]) assert.match(styles, new RegExp(`\\[data-household-role\\]\\[value=${value}\\]:checked\\) \\[data-confirm-part=${value}\\]`));
+  assert.match(styles, /\[data-household-purpose-set\]\[hidden\]\) :is\(\[data-confirm-part=shared\],\[data-confirm-part=personal\]\) \{ display: none; \}/);
+  assert.match(script, /"Choose who can use Lists & docs and your access first\."/);
+  assert.match(script, /"Choose your access first\."/);
+});
+
 test("approving an agent uses the independent server command without changing the person's role", () => {
   const approve = section(script, "const approveAgent = async (", "const withdrawAgent = async");
   assert.match(approve, /kind: "household_approve_connection"/);

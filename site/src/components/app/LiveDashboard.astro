@@ -603,10 +603,9 @@ import "../../styles/kylon-command-palette.css";
                 <h1 id="dashboard-lists-title" class="hm-pane-title" tabindex="-1">Lists</h1>
               </header>
               <form class="dashboard__access-card" data-household-consent hidden>
+                {/* One purpose: turn Lists & docs on. Three separate, named choices (who, your access, your
+                    agents), no lead paragraph, and a button that says what it will do. */}
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
-                <p class="dashboard__access-lead">
-                  Confirm your access to Lists &amp; docs in this workspace. The owner also chooses whether to invite people.
-                </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
                   <legend>{PURPOSE_QUESTION}</legend>
                   {(["shared", "personal"] as const).map((purpose) => (
@@ -631,13 +630,23 @@ import "../../styles/kylon-command-palette.css";
                     </label>
                   ))}
                 </fieldset>
-                <label class="dashboard__approval-default">
-                  <input type="checkbox" data-household-allow-own-agents checked />
-                  <span>Let my connected agents use Lists &amp; docs</span>
-                </label>
+                <fieldset class="dashboard__choice-cards">
+                  <legend>Your agents</legend>
+                  <label class="dashboard__choice-card">
+                    <input type="checkbox" data-household-allow-own-agents checked />
+                    <span><strong>Let my connected agents use Lists &amp; docs</strong></span>
+                  </label>
+                </fieldset>
                 <div class="dashboard__access-actions">
+                  {/* The label names the change from the choices above, with styles alone (kylon-lists.css):
+                      "Turn on for just me as Editor". Nothing chosen yet reads "Turn on Lists & docs". */}
                   <button class="dashboard__button dashboard__button--primary" type="button" data-household-confirm>
-                    Confirm
+                    {/* One child, so the button's own gap does not space the parts apart. */}
+                    <span>Turn on<span data-confirm-part="none"> Lists &amp; docs</span>{(["shared", "personal"] as const).map((purpose) => (
+                      <span data-confirm-part={purpose}> for {PURPOSE_COPY[purpose].label.charAt(0).toLowerCase()}{PURPOSE_COPY[purpose].label.slice(1)}</span>
+                    ))}{CONTENT_ROLES.map((role) => (
+                      <span data-confirm-part={role}> as {CONTENT_ROLE_COPY[role].label}</span>
+                    ))}</span>
                   </button>
                   <p class="dashboard__access-result" data-household-consent-result role="status" aria-live="polite"></p>
                 </div>
@@ -12457,8 +12466,8 @@ import "../../styles/kylon-command-palette.css";
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose who can use Lists & docs and your access, then confirm."
-          : "Choose your access, then confirm.";
+          ? "Choose who can use Lists & docs and your access first."
+          : "Choose your access first.";
         return;
       }
       const token = ++householdConfirms;
