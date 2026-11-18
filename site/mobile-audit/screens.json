@@ -3068,5 +3068,87 @@
       "create_workspace",
       "seed_channels"
     ]
+  },
+  {
+    "id": "app.chat.jump-present.recipient",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "focus": "[data-jump-present-button]",
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-feed-list] .dashboard__message[data-signal-id]:focus"
+      },
+      {
+        "press": "Tab"
+      },
+      {
+        "waitFor": "[data-feed-list] .dashboard__message[data-signal-id]:has(:is(.hm-author, .dashboard__message-meta) button:focus)"
+      },
+      {
+        "focus": ".dashboard__message:focus-within .dashboard__message-target .dashboard__message-entity"
+      }
+    ],
+    "ready": "[data-feed-list] .dashboard__message .dashboard__message-target .dashboard__message-entity:focus",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ],
+    "frame": [
+      "[data-feed-list] .dashboard__message .dashboard__message-target .dashboard__message-entity:focus"
+    ]
   }
 ]
