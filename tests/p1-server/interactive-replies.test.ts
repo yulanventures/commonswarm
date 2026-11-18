@@ -403,12 +403,17 @@ test("a click whose asker is gone says so: reply_refused names why", async () =>
     { name: "a person no longer in the workspace", fromKind: "user" },
   ]) {
     const askId = randomUUID();
+    // An asker that does not resolve can only be history now: a new post from one cannot be filed in a
+    // conversation and aborts (20261118000004). So it is written as before that migration, with the
+    // filing trigger off inside this transaction only.
     await sql.begin(async (tx) => {
+      await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
       await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
         VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${randomUUID()}::uuid, ${fromKind}, ${f.ownerId}::uuid,
           'ask', 'Still shipping?', statement_timestamp() + interval '1 hour')`;
       await tx`INSERT INTO swarm.ask_choices (signal_id, workspace_id, options)
         VALUES (${askId}::uuid, ${f.workspaceA}::uuid, ${tx.json(OPTIONS)}::jsonb)`;
+      await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
     });
     const refused = await answer(f.ownerJwt, askId, "ship");
     assert.equal(refused.status, 403, `${name}: ${JSON.stringify(refused.body)}`);

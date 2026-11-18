@@ -85,6 +85,9 @@ export async function postRefreshNote(env: SeedEnvironment, ids: Record<string, 
       await done.begin(async (tx) => {
         await tx`SET LOCAL session_replication_role = replica`;
         await tx`DELETE FROM swarm.signal_human_receipts WHERE signal_id = ${id}::uuid`;
+        // Its conversation row (20261118000004), which replica mode would otherwise leave behind.
+        const [{ filed }] = await tx<{ filed: boolean }[]>`SELECT to_regclass('swarm.conversation_signals') IS NOT NULL AS filed`;
+        if (filed) await tx`DELETE FROM swarm.conversation_signals WHERE signal_id = ${id}::uuid`;
         const removed = await tx`DELETE FROM swarm.signals WHERE id = ${id}::uuid`;
         if (removed.count !== 1) throw new Error(`refresh note ${id} was not removed`);
       });

@@ -229,10 +229,13 @@ test('store rechecks access, commits multiple events once, persists notice recei
         assert.notEqual(await waiting(), null, 'the unacked start notice is waiting');
         // Expire every message to this agent. Signals are append-only, so the trigger is set aside inside
         // this rolled-back transaction only.
+        // The pending conversation filing (20261118000004) runs first: a table with pending trigger events cannot be altered.
+        await tx`SET CONSTRAINTS swarm.signals_settle_conversation IMMEDIATE`;
         await tx`ALTER TABLE swarm.signals DISABLE TRIGGER USER`;
         await tx`UPDATE swarm.signals s SET until = clock_timestamp() - interval '1 second', created_at = least(created_at, clock_timestamp() - interval '2 seconds')
           FROM swarm.signal_deliveries d WHERE d.workspace_id = s.workspace_id AND d.signal_id = s.id AND d.recipient_agent_principal_id = ${g.principal}::uuid`;
         await tx`ALTER TABLE swarm.signals ENABLE TRIGGER USER`;
+        await tx`SET CONSTRAINTS swarm.signals_settle_conversation DEFERRED`;
         assert.equal(await waiting(), null, 'an expired message is no longer waiting');
       });
       await t.test('rate-limited notice commits the to-do and is never retried', async () => {

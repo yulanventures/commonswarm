@@ -1012,6 +1012,8 @@ test("the delivery ledger is written by two triggers and by nothing else", async
         "signal_recipients_enqueue_delivery",
         "signal_recipients_first_is_the_scalar",
         "signal_recipients_same_transaction",
+        // Re-checks the message's conversation at commit (20261118000004); it writes no delivery row.
+        "signal_recipients_settle_conversation",
       ],
       "changing this list means reading 20260905000020 first",
     );
@@ -1262,8 +1264,9 @@ test("recipient 0 has to be the signal's own scalar recipient", async () => {
   const write = async (tx: Tx) => {
     /* The constraint trigger is DEFERRED because the recipient set is not
      * complete until commit, and these transactions are rolled back on purpose,
-     * so it is forced to fire now. */
-    await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+     * so it is forced to fire now. Only this check: conversation filing (20261118000004) stays at
+     * commit, where the whole recipient set exists. */
+    await tx.unsafe("SET CONSTRAINTS swarm.signal_recipients_first_is_the_scalar IMMEDIATE");
     await insertSignal(tx, {
       id: signalId,
       workspaceId: f.workspaceA,
@@ -1308,7 +1311,7 @@ test("recipient positions have to be contiguous from zero", async () => {
   const f = newFixture();
   const signalId = randomUUID();
   const write = async (tx: Tx) => {
-    await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+    await tx.unsafe("SET CONSTRAINTS swarm.signal_recipients_first_is_the_scalar IMMEDIATE");
     await insertSignal(tx, {
       id: signalId,
       workspaceId: f.workspaceA,
