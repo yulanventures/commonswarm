@@ -338,7 +338,7 @@
 
 /* Neutral article furniture shared by orchestration, alternatives and guides. */
 .seo-page .seo-hero {
-  background: var(--bg-raised);
+  background: var(--bg);
   border-bottom: 0;
 }
 

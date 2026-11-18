@@ -1,0 +1,80 @@
+/* The public look: paper canvas, ink text, plum accent, the gold Sign up and the header and
+   footer that go with them. The homepage set it; pages join by template, one selector here. */
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) {
+  --lp-paper: #f8f7f3;
+  --lp-ink: #2c2c42;
+  --lp-muted: #636275;
+  --lp-line: #dcdbe3;
+  --lp-accent: #65518b;
+  --lp-surface: #ffffff;
+  --lp-sage: #ebe5f4;
+  --lp-peach: #f7e9dc;
+  --lp-blue: #e5eee2;
+  --lp-shadow: 44 44 66;
+  --bg: var(--lp-paper);
+  --elev-0: var(--lp-paper);
+  --elev-1: var(--lp-surface);
+  --text: var(--lp-ink);
+  --text-muted: var(--lp-muted);
+  --accent: var(--lp-accent);
+  --focus: #57427d;
+  --accent-hover: #57427d;
+  --accent-bright: #57427d;
+  --font-sans: "DM Sans", "DM Sans Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  --font-display: "Bricolage Grotesque", "Bricolage Grotesque Fallback", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+  background: var(--lp-paper);
+}
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) body { background: var(--lp-paper); color: var(--lp-ink); }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) .hdr { background: color-mix(in srgb, var(--lp-paper) 95%, transparent); border-bottom: 1px solid var(--lp-line); backdrop-filter: blur(14px); }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) .hdr__inner { max-width: 1248px; min-height: 82px; }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) .hdr__cta, :root:is([data-home], :has(main :is(.lp-home, .seo-page))) .mnav__cta { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; box-shadow: none; }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) :is(.hdr__cta,.mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) .hdr__progress { display: none; }
+:root:is([data-home], :has(main :is(.lp-home, .seo-page))) .ft { background: var(--lp-paper); border-color: var(--lp-line); }
+/* Article pages also carry the marketing skin, whose dark tokens outrank the block above. This
+   restates the public palette for them one step stronger, and maps the neutral surfaces, rules
+   and tints the article furniture reads, so cards, tables and code follow it in both themes.
+   Focus and hover colours are left to the blocks above and below, which already win. */
+:root[data-marketing]:has(main .seo-page) {
+  --bg: var(--lp-paper);
+  --elev-0: var(--lp-paper);
+  --elev-1: var(--lp-surface);
+  --elev-2: var(--lp-surface);
+  --elev-3: color-mix(in srgb, var(--lp-ink) 7%, var(--lp-paper));
+  --bg-raised: var(--lp-surface);
+  --surface: var(--lp-surface);
+  --surface-2: var(--elev-3);
+  --text: var(--lp-ink);
+  --text-muted: var(--lp-muted);
+  --accent: var(--lp-accent);
+  --border: var(--lp-line);
+  --border-strong: color-mix(in srgb, var(--lp-ink) 30%, var(--lp-paper));
+  --work-tint: var(--lp-sage);
+  --marketing-mint: var(--lp-blue);
+  --life-tint: var(--lp-peach);
+}
+:root:has(main .seo-page) .seo-page .btn--primary { background: #ffd84d; color: #2c2c42; border-color: #2c2c42; }
+:root:has(main .seo-page) .seo-page .btn--primary:hover { background: #f3c72f; border-color: #2c2c42; }
+@media (max-width: 620px) {
+  :root:is([data-home], :has(main :is(.lp-home, .seo-page))) .hdr__inner { min-height: 66px; }
+}
+@media (prefers-color-scheme: dark) {
+  :root:is([data-home], :has(main :is(.lp-home, .seo-page))):not([data-theme="light"]) {
+    --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
+    --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
+    --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
+    color-scheme: dark;
+  }
+  :root:is([data-home], :has(main :is(.lp-home, .seo-page))):not([data-theme="light"]) :is(.hdr__cta, .mnav__cta) { color: #2c2c42 !important; }
+  :root:is([data-home], :has(main :is(.lp-home, .seo-page))):not([data-theme="light"]) :is(.hdr__cta, .mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
+}
+:root[data-theme="dark"]:is([data-home], :has(main :is(.lp-home, .seo-page))) {
+  --lp-paper: #201d29; --lp-ink: #f4f1fa; --lp-muted: #c8c1d3; --lp-line: #575063; --lp-accent: #cdb9ee;
+  --lp-surface: #302b3a; --lp-sage: #3d354b; --lp-peach: #443931; --lp-blue: #303e37; --lp-shadow: 0 0 0;
+  --focus: #cdb9ee; --accent-hover: #decff5; --accent-bright: #decff5;
+  color-scheme: dark;
+}
+:root[data-theme="dark"]:is([data-home], :has(main :is(.lp-home, .seo-page))) :is(.hdr__cta, .mnav__cta) { color: #2c2c42 !important; }
+:root[data-theme="dark"]:is([data-home], :has(main :is(.lp-home, .seo-page))) :is(.hdr__cta, .mnav__cta):hover { background: #f3c72f; border-color: #2c2c42; }
