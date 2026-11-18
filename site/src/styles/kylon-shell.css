@@ -285,6 +285,15 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
 live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
   .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
 ):hover { background: var(--k-shell-hover); }
+/* An organization's name never widens its row past the account popover: the row keeps the whole name as
+   its accessible name, and sight gets an ellipsis (.dashboard__org-menu-name already asks for one). */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is([data-org-menu], .hm-menu__group, .hm-menu__item) {
+  min-inline-size: 0; max-inline-size: 100%;
+}
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu .hm-menu__group { grid-template-columns: minmax(0, 1fr); }
+/* The last row is the brand's link home. The wordmark's accent bar is for a heading; beside a menu row it
+   read as a stray line. */
+live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu .dashboard__user-menu-brand::after { display: none; }
 @media (width <= 52rem) {
   /* Reserve the fourth track whenever the actual workspace menu exists,
      including the interval before account entries are available. */
@@ -294,6 +303,16 @@ live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
   live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu :is(
     .dashboard__theme-toggle, .dashboard__user-menu-item, .dashboard__user-menu-brand
   ) { min-block-size: 44px; }
+  /* Phone: rows are 44px targets already, so nothing is added between them (the 8px gap made each row cost
+     52px), and the popover takes the room the screen has, up to 20rem, so a long name shows more of itself. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell .dashboard__user-menu.dashboard__user-menu {
+    gap: 0; inline-size: min(20rem, calc(100vw - 16px));
+  }
+  /* A long organization name gets a second line before the ellipsis. */
+  live-dashboard.dashboard[data-kylon-shell] .dashboard__user-menu .dashboard__org-menu-name {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    white-space: normal; overflow-wrap: anywhere;
+  }
 }
 @media (width > 52rem) {
   live-dashboard.dashboard[data-kylon-shell] .hm-ws-header .hm-menu__trigger { min-inline-size: 36px; }
