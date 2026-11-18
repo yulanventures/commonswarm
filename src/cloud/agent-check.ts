@@ -316,11 +316,16 @@ export async function checkAgentMessages(options: {
         };
         const directedIds = deliveryAckIds(presented);
         const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
-        const ackPending = async () => {
+        /* `shown` are the deliveries this run just presented: they go first, so a message the session was shown is
+         * observed in the same run whenever time allows, however long the older queue (entries waiting out a retry
+         * backoff included). The rest of the batch rotates through the older queue as before. */
+        const ackPending = async (shown: readonly string[] = []) => {
           const committed = await readCheckState(path);
           const queued = committed.pending_observed_ids ?? [];
           const start = queued.length === 0 ? 0 : (committed.pending_observed_next ?? 0) % queued.length;
-          const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
+          const first = shown.filter(id => queued.includes(id));
+          const rotated = [...queued.slice(start), ...queued.slice(0, start)].filter(id => !first.includes(id));
+          const batch = [...first, ...rotated].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
           const removed = new Set<string>();
           const retryUpdates = new Map<string, { attempts: number; first_at: number; next_at: number }>();
           type Retry = { attempts: number; first_at: number; next_at: number };
@@ -406,7 +411,11 @@ export async function checkAgentMessages(options: {
               }
             }).then(async () => {
               await replaceTurnContext(lastVisibleId);
-              try { await ackPending(); } catch { /* Never change MCP output. */ }
+              try {
+                await ackPending(deliveryAckIds(lastVisibleId === undefined
+                  ? presented
+                  : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1)));
+              } catch { /* Never change MCP output. */ }
               // Only the rows the response showed: a capped result leaves the rest for the next check.
               await markSeen(lastVisibleId === undefined
                 ? presented
@@ -417,7 +426,7 @@ export async function checkAgentMessages(options: {
               pending_observed_retries: queuedRetries(cached, pendingIds) }));
             await replaceTurnContext();
             ackAfterCommit = async () => {
-              try { await ackPending(); } finally { await markSeen(presented); }
+              try { await ackPending(directedIds); } finally { await markSeen(presented); }
             };
           }
         } else if (pendingIds.length > 0) {

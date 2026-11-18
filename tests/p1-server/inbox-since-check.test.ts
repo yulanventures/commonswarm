@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
-import { checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_DIRECT_TIMEOUT_MS, checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { readSignals } from "../../src/cloud/signals.js";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
@@ -275,17 +276,19 @@ test("a message inbox --notify printed is still waiting until check shows it; ch
   assert.equal(await seenMark(ask), 0, "and nobody marked it 👀 for the agent");
 
   // check returns the oldest unseen messages a page at a time, and the test above left more than a page waiting:
-  // run it as an agent would, until the ask comes up or nothing is left.
+  // run it as `cswarm check` does (its direct budget), until the ask comes up or nothing is left.
   let shown = false;
   for (let page = 0; page < 20 && !shown; page += 1) {
     let checked: AgentCheckResult | undefined;
-    await checkAgentMessages({ profilePath, present: async (result) => { checked = result; } });
+    await checkAgentMessages({ profilePath, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS, present: async (result) => { checked = result; } });
     shown = checked?.messages.some((message) => message.id === ask) === true;
     if (!shown && (checked?.messages.length ?? 0) === 0) break;
   }
   assert.ok(shown, "check shows what the watcher printed");
   const deadline = Date.now() + 15_000;
   while (((await delivery(ask))?.ack_outcome !== "observed" || await seenMark(ask) === 0) && Date.now() < deadline) await delay(250);
-  assert.equal((await delivery(ask))?.ack_outcome, "observed", "check observes it");
+  const checkState = await readFile(join(dirname(profilePath), "check.json"), "utf8").catch(() => "{}");
+  assert.equal((await delivery(ask))?.ack_outcome, "observed",
+    `check observes it in the run that showed it; check state: ${checkState.slice(0, 1500)}`);
   assert.equal(await seenMark(ask), 1, "and marks it 👀");
 });
