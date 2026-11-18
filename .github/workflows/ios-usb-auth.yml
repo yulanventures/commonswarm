@@ -1,0 +1,41 @@
+name: USB sign-in
+on:
+  pull_request:
+    paths:
+      - 'deploy/gotrue-usb/**'
+      - '.github/workflows/ios-usb-auth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provider-flow:
+    runs-on: ${{ vars.CI_RUNS_ON_LIGHT || vars.CI_RUNS_ON_NODE || vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    services:
+      db:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: usb-ci-fixture
+        ports:
+          - 5432/tcp
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify pinned GoTrue with a disposable database and mock provider
+        env:
+          DB_PORT: ${{ job.services.db.ports[5432] }}
+          DB_CONTAINER: ${{ job.services.db.id }}
+        run: |
+          set -euo pipefail
+          context=$(mktemp -d)
+          deploy/gotrue-usb/prepare.sh "$context/auth"
+          cd "$context/auth"
+          docker exec -i "$DB_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 < hack/init_postgres.sql
+          docker run --rm --network host -v "$PWD:/src:ro" -w /src \
+            -e "GOTRUE_DB_DATABASE_URL=postgres://supabase_auth_admin:root@127.0.0.1:$DB_PORT/postgres?sslmode=disable" \
+            -e GOTRUE_DB_MIGRATIONS_PATH=/src/migrations golang:1.27.0-alpine3.23 \
+            sh -ec 'go run . migrate -c hack/test.env && go test ./internal/api -run "^TestExternal$/(TestIOSUSBCodeOnly|TestSignupExternalGitHub_AuthorizationCode)$" -count=1'

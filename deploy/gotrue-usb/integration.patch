@@ -1,0 +1,76 @@
+diff --git a/internal/api/external.go b/internal/api/external.go
+index 41195d1..75d1040 100644
+--- a/internal/api/external.go
++++ b/internal/api/external.go
+@@ -62,6 +62,13 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+ 	}
+ 
+ 	redirectURL := utilities.GetReferrer(r, config)
++	if raw := query.Get("redirect_to"); isIOSUSBURI(raw) {
++		if !a.iosUSBStartAllowed(r, raw, linkingTargetUser) {
++			return "", iosUSBRefused()
++		}
++		redirectURL = raw
++		query.Del("redirect_to")
++	}
+ 	log := observability.GetLogEntry(r).Entry
+ 	log.WithField("provider", providerType).Info("Redirecting to external provider")
+ 	if err := validatePKCEParams(codeChallengeMethod, codeChallenge); err != nil {
+@@ -138,6 +145,9 @@ func (a *API) GetExternalProviderRedirectURL(w http.ResponseWriter, r *http.Requ
+ 
+ // ExternalProviderCallback handles the callback endpoint in the external oauth provider flow
+ func (a *API) ExternalProviderCallback(w http.ResponseWriter, r *http.Request) error {
++	if flow := getFlowState(r.Context()); isIOSUSBFlow(flow) {
++		return a.iosUSBCallback(w, r, flow)
++	}
+ 	rurl := a.getExternalRedirectURL(r)
+ 	u, err := url.Parse(rurl)
+ 	if err != nil {
+diff --git a/internal/api/token.go b/internal/api/token.go
+index 86dcc27..11e8d70 100644
+--- a/internal/api/token.go
++++ b/internal/api/token.go
+@@ -253,6 +253,16 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request)
+ 	var token *AccessTokenResponse
+ 	err = db.Transaction(func(tx *storage.Connection) error {
+ 		var terr error
++		if isIOSUSBFlow(flowState) {
++			// Serialize this single-use grant with other redeemers before issuing a session.
++			locked, lockErr := models.FindFlowStateByIDForUpdate(tx, flowState.ID.String())
++			if lockErr != nil || !a.iosUSBGrantAllowed(locked) || locked.UserID == nil ||
++				locked.UserID.String() != a.config.IOSUSBOwnerID || locked.AuthCodeIssuedAt == nil ||
++				locked.IsExpired(a.config.External.FlowStateExpiryDuration) ||
++				!iosUSBEligibleUser(user, a.requestAud(ctx, r)) {
++				return iosUSBRefused()
++			}
++		}
+ 		authMethod, err := models.ParseAuthenticationMethod(flowState.AuthenticationMethod)
+ 		if err != nil {
+ 			return err
+diff --git a/internal/conf/configuration.go b/internal/conf/configuration.go
+index 6772bf1..c7822e5 100644
+--- a/internal/conf/configuration.go
++++ b/internal/conf/configuration.go
+@@ -449,6 +449,7 @@ type ReloadingConfiguration struct {
+ 
+ // GlobalConfiguration holds all the configuration that applies to all instances.
+ type GlobalConfiguration struct {
++	IOSUSBOwnerID string `json:"-" envconfig:"IOS_USB_OWNER_ID"`
+ 	API           APIConfiguration
+ 	DB            DBConfiguration
+ 	External      ProviderConfiguration
+diff --git a/internal/utilities/request.go b/internal/utilities/request.go
+index f998874..a3595aa 100644
+--- a/internal/utilities/request.go
++++ b/internal/utilities/request.go
+@@ -92,6 +92,10 @@ var decimalIPAddressPattern = regexp.MustCompile("^[0-9]+$")
+ var regularHostname = regexp.MustCompile("^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$")
+ 
+ func IsRedirectURLValid(config *conf.GlobalConfiguration, redirectURL string) bool {
++	// This scheme has a single provider-specific, code-only success handler.
++	if strings.HasPrefix(strings.ToLower(redirectURL), "com.commonswarm.ios:") {
++		return false
++	}
+ 	if redirectURL == "" {
+ 		return false
+ 	}
