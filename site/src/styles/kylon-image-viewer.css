@@ -18,8 +18,11 @@ live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer {
   color: #fff;
   font-family: var(--k-shell-font);
 }
+/* One column that is the window's width and no wider: a long file name gives way with an ellipsis and can never
+   push Close off the edge. */
 live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer[open] {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
 }
 live-dashboard.dashboard[data-kylon-shell] dialog.cs-viewer::backdrop { background: transparent; }

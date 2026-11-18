@@ -321,18 +321,51 @@ export async function runPictureChecks(
     }
     await page.close();
 
-    // 2a. The viewer's code cannot be fetched (a tab left open across a release): the press opens the file, as it did before the viewer.
+    // 2a. The viewer's code cannot be fetched (a dropped connection, or a tab left open across a release). Nothing downloads and
+    // nothing navigates: the reader stays at the picture, which says so and offers Retry. With the code back, Retry opens the viewer.
+    let chunkDown = true, chunkAsked = 0, strayed = false;
     const stale = await open(async (p: any) => {
-      await p.route(VIEWER_CHUNK, (route: any) => route.fulfill({ status: 404, body: "not found" }));
+      await p.route(VIEWER_CHUNK, async (route: any) => {
+        chunkAsked++;
+        if (chunkDown) await route.fulfill({ status: 404, body: "not found" }); else await route.continue();
+      });
     });
+    stale.on("request", (request: any) => { if (signedFile(request)) strayed = true; });
+    stale.on("download", () => { strayed = true; });
+    const OPEN_FAILED = () => {
+      const link = document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image");
+      const note = link?.parentElement?.querySelector<HTMLElement>("[data-picture-open-failed]");
+      const button = note?.querySelector("button");
+      const frame = link?.querySelector(".hm-extras__image-frame")?.getBoundingClientRect();
+      if (!link || !note || !button || !frame) return null;
+      const n = note.getBoundingClientRect(), b = button.getBoundingClientRect();
+      return {
+        text: note.textContent, role: note.getAttribute("role"), button: { w: b.width, h: b.height },
+        overFrame: Math.max(Math.abs(n.left - frame.left), Math.abs(n.top - frame.top), Math.abs(n.width - frame.width), Math.abs(n.height - frame.height)) <= 1,
+        reached: document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) === button,
+        focus: document.activeElement === link ? "picture" : document.activeElement === button ? "retry" : document.activeElement === document.body ? "body" : "elsewhere",
+        url: location.pathname + location.search,
+      };
+    };
     const loadedStale = await until(stale, p => p.loaded);
-    if (loadedStale?.frame) {
-      const navigation = stale.waitForRequest(signedFile, { timeout: 15_000 }).then((request: any) => new URL(request.url()).pathname, () => null);
-      const x = loadedStale.frame.x + loadedStale.frame.w / 2, y = loadedStale.frame.y + loadedStale.frame.h / 2;
-      if (options.click) await stale.mouse.click(x, y); else await stale.touchscreen.tap(x, y);
-      const path = await navigation;
-      check("when the viewer cannot be fetched, the press opens the picture's own signed file", typeof path === "string" && !!loadedStale.fileId && path.includes(`/${loadedStale.fileId}/`), { path, fileId: loadedStale.fileId });
-    } else check("when the viewer cannot be fetched, the press opens the picture's own signed file", false, loadedStale);
+    const staleAt = await stale.evaluate(() => location.pathname + location.search);
+    await stale.evaluate(() => document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image")?.focus());
+    await stale.keyboard.press("Enter");
+    let refused: Awaited<ReturnType<typeof OPEN_FAILED>> = null;
+    for (const started = Date.now(); Date.now() - started < 10_000 && !refused;) { refused = await stale.evaluate(OPEN_FAILED); if (!refused) await stale.waitForTimeout(100); }
+    await stale.waitForTimeout(500);
+    check("when the viewer cannot be fetched, nothing downloads or navigates and no viewer opens", !!loadedStale?.loaded && chunkAsked >= 1 && !strayed && !!refused && refused.url === staleAt
+      && await stale.evaluate(VIEWER) === null, { loaded: loadedStale?.loaded, chunkAsked, strayed, refused, staleAt });
+    check("the picture says it could not be opened and offers Retry, with focus still on the picture", !!refused && /^Couldn't open picture\s*Retry$/u.test(refused.text ?? "") && refused.role === "alert"
+      && refused.overFrame && refused.reached && refused.button.w >= 44 && refused.button.h >= 44 && refused.focus === "picture", refused);
+    await shot(stale, "viewer-unavailable");
+    chunkDown = false;
+    await stale.keyboard.press("Tab");
+    const onRetryOpen = (await stale.evaluate(OPEN_FAILED))?.focus ?? null;
+    await stale.keyboard.press("Enter");
+    const recovered2 = await viewer(stale, v => !!v && v.loaded && v.state === "");
+    check("Tab reaches that Retry, and with the viewer's code back it opens the viewer", onRetryOpen === "retry" && !!recovered2 && fitted(recovered2) && await stale.evaluate(OPEN_FAILED) === null && !strayed,
+      { onRetryOpen, recovered: recovered2, strayed });
     await stale.close();
 
     // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
