@@ -346,7 +346,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       if (refusal === null) { if (state.roleDraft?.userId === person.id) state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
       else {
         state.roleRefusal = { userId: person.id, name: person.name, text: refusal };
-        state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
+        // Keep the attempted role in this person's select, unless the viewer has since started choosing a role for
+        // someone else: a refusal for one person must not discard another person's unsaved choice.
+        if (!state.roleDraft || state.roleDraft.userId === person.id) state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
       }
       callbacks.render();
       refocusRole(person.id, `role-${person.id}`);
@@ -738,7 +740,13 @@ export function showPeopleConfirmation(dialog: HTMLDialogElement, action: People
     const outer = dialog.closest<HTMLDialogElement>("[data-roster-dialog]");
     const fallback = outer?.querySelector<HTMLElement>("#pd-detail-title") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title")
       ?? pageHost()?.querySelector<HTMLElement>("#pd-detail-title") ?? (pageHost() ? pageHeading(doc) : null);
-    if (opener.isConnected && !opener.closest("[inert]")) opener.focus({ preventScroll: true }); else fallback?.focus({ preventScroll: true }); };
+    // A background refresh can redraw the roster while this question is open. Focus then returns to the same control
+    // by its focus key, not to the heading because the node that opened the question is gone.
+    const key = opener.dataset.pdFocus;
+    const redrawn = !opener.isConnected && key ? [...(outer ?? pageHost() ?? doc.body).querySelectorAll<HTMLElement>("[data-pd-focus]")]
+      .find((control) => control.dataset.pdFocus === key && control.getClientRects().length > 0) ?? null : null;
+    const target = opener.isConnected ? opener : redrawn;
+    if (target && !target.closest("[inert]")) target.focus({ preventScroll: true }); else fallback?.focus({ preventScroll: true }); };
   const actions = node(doc, "div", "pd-confirm-actions"); const cancel = button(doc, "Go back", close, "dashboard__button dashboard__button--secondary");
   const acceptLabel = pageHost() && action === "remove-agent" ? "Remove agent" : pageHost() && action === "remove-person" ? "Remove person" : copy.button;
   const accept = button(doc, acceptLabel, async () => {
