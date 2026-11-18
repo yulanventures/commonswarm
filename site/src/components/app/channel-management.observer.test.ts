@@ -127,12 +127,36 @@ async function observeChannelManagement() {
       await openSettings(); input("[data-channel-edit-description]", ""); await save();
       check(f.channelCommands.at(-1).command.purpose === null && !Object.hasOwn(f.channelCommands.at(-1).command, "slug"), "clear must send null without overwriting an unchanged name");
       await openSettings(); input("[data-channel-edit-description]", "Release decisions and references");
-      one<HTMLButtonElement>("[data-channel-settings-archive]")!.click();
-      one<HTMLButtonElement>("[data-channel-archive-cancel]")!.click();
+      // Archive waits behind More. Two real Enter presses starting on Archive channel archive nothing: the first opens
+      // the confirmation on Cancel, the second takes that Cancel.
+      const archives = () => f.channelCommands.filter((entry: any) => entry.command.kind === "channel_archive").length;
+      const more = one<HTMLDetailsElement>("[data-channel-settings-more]")!;
+      // A closed disclosure keeps its content's boxes, so the box test above cannot see it as hidden; the browser's own
+      // visibility check can.
+      check(!more.open && !one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility(), "Archive channel is not behind a closed More");
+      // And it cannot be reached there: it takes no focus, so neither Tab nor a script can land on it while More is closed.
+      const kept = document.activeElement;
+      one<HTMLButtonElement>("[data-channel-settings-archive]")!.focus();
+      check(document.activeElement === kept, "Archive channel took focus while More was closed");
+      await click("[data-channel-settings-more] > summary");
+      await wait("More open", () => more.open && one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility());
+      const sentBefore = archives();
+      one<HTMLButtonElement>("[data-channel-settings-archive]")!.focus();
+      await key("Enter");
+      await wait("archive confirmation", () => visible(one("[data-channel-archive-form]")));
+      check(document.activeElement === one("[data-channel-archive-cancel]"), "the archive confirmation did not open on Cancel");
+      await key("Enter");
+      await wait("back in settings", () => visible(one("[data-channel-rename-form]")) && !visible(one("[data-channel-archive-form]")));
+      check(archives() === sentBefore, "two Enter presses starting on Archive channel archived the channel");
+      check(more.open && document.activeElement === one("[data-channel-settings-archive]"), "returning from the confirmation lost More or the focus on Archive channel");
       check(one<HTMLTextAreaElement>("[data-channel-edit-description]")!.value === "Release decisions and references", "archive cancellation lost description draft");
       await save(); await openSettings(); one<HTMLButtonElement>("[data-channel-settings-archive]")!.click();
+      check(document.activeElement === one("[data-channel-archive-cancel]"), "the archive confirmation opened by a click is not on Cancel");
+      check(archives() === sentBefore, "opening the confirmation sent an archive");
+      // Deliberately choosing the named action sends exactly one.
       one<HTMLFormElement>("[data-channel-archive-form]")!.requestSubmit();
       await wait("archived in place", () => !settings().open && visible(one("[data-channel-archived]")));
+      check(archives() === sentBefore + 1, "choosing Archive channel did not send exactly one archive: " + archives());
       check(!visible(one("[data-composer]")), "archived channel still has a composer");
       check(!!one(`[data-rail-channel-menu="${f.activeChannel}"]`), "archived row lost its management door");
       shown<HTMLButtonElement>("[data-channel-unarchive]").click();
@@ -199,7 +223,7 @@ test("channel settings and directory preserve drafts, rights, native focus, arch
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
   let activePage: Page | null = null;
   const keyboard = async (key: string, shift: boolean) => {
-    assert.ok(key === "Tab" || key === "Escape");
+    assert.ok(key === "Tab" || key === "Escape" || key === "Enter");
     assert.ok(activePage);
     await activePage.keyboard.press(shift ? `Shift+${key}` : key);
   };

@@ -1024,7 +1024,11 @@ import "../../styles/kylon-command-palette.css";
       <select id="dashboard-channel-lead" data-channel-lead-select hidden></select>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
-        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
+        {/* The rare action waits behind More, away from Save. It still leads to its own confirmation. */}
+        <details class="cm-more" data-channel-settings-more>
+          <summary>More</summary>
+          <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
+        </details>
         <span class="cm-action-spacer" aria-hidden="true"></span>
         <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel data-channel-settings-close>Cancel</button>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-rename-submit>
@@ -13489,6 +13493,10 @@ import "../../styles/kylon-command-palette.css";
       const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
       const archive = one<HTMLButtonElement>("[data-channel-settings-archive]");
       if (archive) { archive.hidden = !manageable; archive.textContent = channel?.archivedAt ? UNARCHIVE_CHANNEL_LABEL : ARCHIVE_CHANNEL_LABEL; }
+      // More holds only that action: it goes when the action does. It starts closed, except on an archived channel,
+      // where bringing the channel back is what the dialog is opened for.
+      const more = one<HTMLDetailsElement>("[data-channel-settings-more]");
+      if (more) { more.hidden = !manageable; if (initialize) more.open = channel?.archivedAt != null; }
       const consequence = one<HTMLElement>("[data-channel-archive-consequence]"); if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
       for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) {
         submit.disabled = channelDialogPending;
@@ -13572,7 +13580,8 @@ import "../../styles/kylon-command-palette.css";
       const first = mode === "create" ? one<HTMLElement>("[data-channel-new-slug]")
         : mode === "settings" ? (focusOn === "lead" && lead && !lead.hidden ? lead
           : one<HTMLElement>(focusOn === "description" ? "[data-channel-edit-description]" : "[data-channel-rename-slug]"))
-        : one<HTMLElement>("[data-channel-archive-submit]");
+        // The archive confirmation opens on Cancel: a second Enter after the one that opened it must not archive.
+        : one<HTMLElement>("[data-channel-archive-cancel]");
       first?.focus({ preventScroll: true });
     };
     const closeChannelDialog = (): void => {
@@ -16340,7 +16349,8 @@ import "../../styles/kylon-command-palette.css";
       if (channel.archivedAt) { void submitChannelUnarchive(channel.channelId, "dialog", event.currentTarget as HTMLButtonElement); return; }
       channelArchiveBackToSettings = true; channelDialogMode = "archive";
       setChannelDialogError(""); renderChannelDialog(false);
-      one<HTMLElement>("[data-channel-archive-submit]")?.focus();
+      // On Cancel, never on the action: Enter on Archive channel followed by another Enter archives nothing.
+      one<HTMLElement>("[data-channel-archive-cancel]")?.focus();
     });
     one<HTMLButtonElement>("[data-channel-archive-cancel]")?.addEventListener("click", () => {
       if (!channelArchiveBackToSettings) { closeChannelDialog(); return; }
