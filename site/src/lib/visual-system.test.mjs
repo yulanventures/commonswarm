@@ -135,6 +135,35 @@ test("workspace chat composer spans the column and workspace switching paints sh
   assert.match(dashboard, /const claimsRead = homeWorkingOn\(selected\.id\);/u);
 });
 
+test("light muted ink clears WCAG AA where timestamps, rail labels and the composer placeholder sit", async () => {
+  const carbon = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
+  const light = (name) => carbon.match(new RegExp(`--k-shell-${name}:\\s*(#[0-9a-f]{6});`, "u"))?.[1];
+  const luminance = (hex) => {
+    const rgb = hex.slice(1).match(/../gu).map((x) => parseInt(x, 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  };
+  const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
+  const muted = light("muted");
+  // White is the message column; the grey fill is the rail, a hovered message row and the composer field.
+  for (const fill of ["surface", "subtle", "hover"]) {
+    const ratio = contrast(muted, light(fill));
+    assert.ok(ratio >= 4.5, `muted ink ${muted} on --k-shell-${fill} ${light(fill)} is ${ratio.toFixed(2)}:1, below 4.5:1`);
+  }
+  // It stays a quieter step than secondary ink.
+  assert.ok(contrast(muted, light("surface")) < contrast(light("secondary"), light("surface")));
+
+  // The three places read this token on those fills. If one of these moves, re-check its contrast.
+  const read = (file) => readFile(new URL(`../styles/${file}`, import.meta.url), "utf8");
+  const [channel, composer, shell] = await Promise.all([read("kylon-channel.css"), read("kylon-composer.css"), read("kylon-shell.css")]);
+  assert.match(channel, /\.dashboard__message \.hm-author__when \{\s*color: var\(--k-shell-muted, var\(--k-shell-secondary\)\);/u);
+  assert.match(channel, /\.dashboard__message:hover,[\s\S]{0,160}?\.dashboard__message:focus-within \{ background: var\(--k-shell-hover\); \}/u);
+  assert.match(composer, /\.dashboard__composer textarea::placeholder \{\s*color: var\(--k-shell-muted\);/u);
+  assert.match(composer, /\.dashboard__composer-input::before \{[^}]*background: var\(--k-shell-subtle\);/u);
+  assert.match(shell, /--home-rail-raised: var\(--k-shell-hover\);[\s\S]{0,400}?--home-rail-muted: var\(--k-shell-muted\);/u);
+  assert.match(carbon, /--k-shell-rail: var\(--k-shell-subtle\);/u);
+  assert.match(carbon, /--cs-rail-bg: var\(--k-shell-rail\);/u);
+});
+
 test("dark mode lifts surface off black, softens text contrast, and steps column backgrounds while keeping WCAG AA and light mode unchanged", async () => {
   const carbon = await readFile(new URL("../styles/carbon-theme.css", import.meta.url), "utf8");
   const kylonTokens = await readFile(new URL("../styles/kylon-tokens.css", import.meta.url), "utf8");

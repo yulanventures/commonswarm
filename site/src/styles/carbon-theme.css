@@ -19,7 +19,8 @@
   /* Chat message prose, one step softer than names (owner ask, 2026-11-17): 9.65:1 on white, 7.61:1 selected. */
   --k-shell-prose: #3f454f;
   --k-shell-secondary: #52525b;
-  --k-shell-muted: #71717a;
+  /* Timestamps, rail labels, placeholders: 5.28:1 on white, 4.80:1 on the grey fill (the old #71717a was 4.40:1 there). */
+  --k-shell-muted: #6b6b74;
   --k-shell-line: #e4e4e7;
   --k-shell-control: #71717a;
   --k-shell-selection-edge: #09090b;
