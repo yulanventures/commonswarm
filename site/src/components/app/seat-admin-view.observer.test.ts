@@ -35,8 +35,26 @@ const geometry = dialog => {
   }));
   const rect = dialog.getBoundingClientRect();
   check('dialog fits the actual browser viewport', rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + .5 && rect.bottom <= innerHeight + .5);
+  // The actions are pinned outside the scrolling part, except where the explanation cannot fit above them: the
+  // organization grant on the narrowest phones, and both grants on a short screen. There the confirmation is a single
+  // scrolling form with the actions at its end. They must be reachable by scrolling the form to its end, which is
+  // where it is left, so later focus checks do not move it.
+  const form = dialog.querySelector('.sa-confirm__form');
+  const oneScroll = getComputedStyle(form).overflowY === 'auto';
+  // The notice about permissions not available yet must be read before Grant: fully on screen beside pinned actions as
+  // the confirmation opens, or ahead of the actions in the one scrolling form. Measured before anything is scrolled.
+  const later = dialog.querySelector('[data-seat-admin-later]');
+  if (later) {
+    const notice = later.getBoundingClientRect(), scroller = dialog.querySelector('.sa-confirm__body').getBoundingClientRect();
+    const actionsTop = dialog.querySelector('footer').getBoundingClientRect().top;
+    check('the future-permissions notice is read before Grant', oneScroll
+      ? notice.height > 0 && notice.bottom <= actionsTop + .5
+      : notice.height > 0 && notice.top >= scroller.top - .5 && notice.bottom <= scroller.bottom + .5 && notice.bottom <= actionsTop + .5);
+  }
+  if (oneScroll) form.scrollTop = form.scrollHeight;
   const footer = dialog.querySelector('footer').getBoundingClientRect();
-  check('actions stay visible outside the scrolling permissions', footer.top >= rect.top && footer.bottom <= innerHeight);
+  check('actions stay visible outside the scrolling permissions', footer.top >= rect.top && footer.bottom <= innerHeight + .5);
+  check('one scrolling form only where the explanation cannot fit above pinned actions', oneScroll === (innerHeight < 640 || (innerWidth < 384 && dialog.getAttribute('data-seat-admin-confirm') === 'organization')));
   const body = dialog.querySelector('.sa-confirm__body');
   body.focus({preventScroll:true});
   check('permission scroller is in the keyboard focus order', body.tabIndex === 0 && document.activeElement === body);
