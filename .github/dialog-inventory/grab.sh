@@ -16,4 +16,5 @@ for down in [True,False]:
  time.sleep(.1)
 PY
 sleep 1
-import -window root "shots/prompt-$size.png"
+kill -0 "$browser_pid" || { cat /tmp/dialog-chrome.log; exit 1; }
+python3 .github/dialog-inventory/ximage.py "$size"
