@@ -396,6 +396,30 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
   /* 45px with its 1px bottom border, so the products inside get a full 44px (they measured 43). */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: auto; min-block-size: 45px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { min-inline-size: 44px; min-block-size: 44px; }
+  /* Tablets, landscape phones and narrow windows. The title and the lead share the first line, level with the header's
+     44px controls, and the description is one line of text under them: three stacked 44px rows took 128px of a screen
+     that can be 390px tall. The title takes its own width first; the lead has the rest, with room for its mark and a
+     few letters of its name even beside a long title, and its name gives way with an ellipsis. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy {
+    display: grid; grid-template-columns: minmax(0, max-content); grid-template-rows: minmax(44px, auto);
+    align-items: center; gap: 0 10px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy:has(> .hm-lead-pill) {
+    grid-template-columns: minmax(0, max-content) minmax(6.5rem, 1fr);
+  }
+  /* The first line is 44px with or without a lead, so the header does not change height when the lead arrives, and
+     the controls stay level with the title instead of centring against both lines. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header { align-items: start; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-channel-description {
+    grid-column: 1 / -1; justify-self: start;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { justify-self: start; }
+  /* The description's button has a 44px box of its own under the first line, only as wide as its text: the text at
+     the top and the rest of the box below it, inside the header. The lead's box and this one share an edge and never
+     overlap, and this one ends before the tab bar. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > button.hm-channel-description {
+    padding-block: 0 24px;
+  }
 }
 
 /* On short landscape screens, reserve bounded tracks for both the Wiki index and product rail. */
