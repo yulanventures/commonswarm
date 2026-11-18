@@ -259,11 +259,14 @@ export async function authorizeSeatAdminAction(tx: Sql, a: { principal_id: strin
   /** Every capability the one covering grant must carry (seatAdminRequiredCapabilities); `kind` alone when absent. */
   capabilities?: readonly string[];
   /** A replay re-decides coverage against the grant that authorized the original action, and no other. */
-  only_grant_id?: string }):
+  only_grant_id?: string;
+  /** Grants already found full for this action (create_agent_seat's per-grant ceiling): coverage passes to the next. */
+  exclude_grant_ids?: readonly string[] }):
   Promise<{ ok: true; value: SeatAdminAuthorized } | { ok: false; reason: string }> {
   const grants = (await tx<GrantRow[]>`SELECT * FROM swarm.seat_admin_grants
     WHERE principal_id = ${a.principal_id}::uuid AND owner_user_id = ${a.grantor_user_id}::uuid AND state = 'active' ORDER BY grant_id`)
-    .filter(g => a.only_grant_id === undefined || g.grant_id === a.only_grant_id);
+    .filter(g => (a.only_grant_id === undefined || g.grant_id === a.only_grant_id)
+      && !(a.exclude_grant_ids ?? []).includes(g.grant_id));
   const [workspace] = await tx<{ org_id: string | null; archived: boolean }[]>`SELECT org_id, archived_at IS NOT NULL AS archived
     FROM swarm.workspaces WHERE workspace_id = ${a.workspace_id}::uuid`;
   const [owner] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM swarm.memberships WHERE workspace_id = ${a.workspace_id}::uuid
