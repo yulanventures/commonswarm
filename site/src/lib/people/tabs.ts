@@ -4,11 +4,13 @@
  * dialog reopens on the tab last used in this page session.
  * (Admins joins when its read ships; see docs/design/2026-11-18-PEOPLE-AND-AGENTS-DIALOG.md.)
  */
+import type { PeopleRead } from "./states";
 export type PeopleTab = "people" | "agents" | "invites";
 export const PEOPLE_TAB_DEFAULT: PeopleTab = "agents";
 
-interface TabModel { people: readonly unknown[]; agents: readonly unknown[]; invites: readonly unknown[]; sample: boolean }
-export interface PeopleTabInfo { id: PeopleTab; label: string; count: number; selected: boolean; name: string }
+interface TabModel { people: readonly unknown[]; agents: readonly unknown[]; invites: readonly unknown[]; sample: boolean; read?: PeopleRead; pendingFailed?: boolean }
+/** `count` is null while it is not known: nothing has arrived and the read is still out or failed. A tab never says 0 for that. */
+export interface PeopleTabInfo { id: PeopleTab; label: string; count: number | null; selected: boolean; name: string }
 
 const LABELS: Record<PeopleTab, string> = { people: "People", agents: "Agents", invites: "Invites" };
 const isTab = (value: unknown): value is PeopleTab => value === "people" || value === "agents" || value === "invites";
@@ -27,8 +29,11 @@ export function peopleTabs(model: TabModel, requested: unknown): PeopleTabInfo[]
   const open = peopleTab(model, requested);
   const counts: Record<PeopleTab, number> = { people: model.people.length, agents: model.agents.length, invites: model.invites.length };
   const ids: PeopleTab[] = model.sample ? ["people", "agents"] : ["people", "agents", "invites"];
-  return ids.map((id) => ({ id, label: LABELS[id], count: counts[id], selected: id === open,
-    name: id === "invites" ? `Invites, ${counts[id]} waiting` : `${LABELS[id]}, ${counts[id]}` }));
+  const read = model.sample ? "ready" : model.read ?? "ready";
+  const unknown = (id: PeopleTab) => counts[id] === 0 && (read === "pending" || (id === "invites" ? !!model.pendingFailed : read === "failed"));
+  return ids.map((id) => unknown(id) ? { id, label: LABELS[id], count: null, selected: id === open, name: LABELS[id] }
+    : { id, label: LABELS[id], count: counts[id], selected: id === open,
+      name: id === "invites" ? `Invites, ${counts[id]} waiting` : `${LABELS[id]}, ${counts[id]}` });
 }
 
 /** The tab a person or an agent lives on: opening one from a link or from another profile shows its tab. */
