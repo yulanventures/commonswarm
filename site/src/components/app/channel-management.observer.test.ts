@@ -223,7 +223,7 @@ test("channel settings and directory preserve drafts, rights, native focus, arch
   const fonts = fileURLToPath(new URL("../../../public/fonts/", import.meta.url));
   let activePage: Page | null = null;
   const keyboard = async (key: string, shift: boolean) => {
-    assert.ok(key === "Tab" || key === "Escape");
+    assert.ok(key === "Tab" || key === "Escape" || key === "Enter");
     assert.ok(activePage);
     await activePage.keyboard.press(shift ? `Shift+${key}` : key);
   };
