@@ -38,6 +38,10 @@
 .sa-confirm .sa-select { box-sizing: border-box; inline-size: 100%; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; padding: 8px 32px 8px 12px; border: 1px solid var(--k-shell-control); border-radius: 6px; background-color: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 16px/1.5 var(--k-shell-font); text-overflow: ellipsis; }
 .sa-confirm .sa-select:disabled { opacity: .7; }
 .sa-confirm__line { margin: 0; color: var(--k-shell-ink); overflow-wrap: anywhere; }
+.sa-confirm__later { margin: -12px 0 0; color: var(--k-shell-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.sa-confirm__more > summary { display: flex; align-items: center; min-block-size: 44px; color: var(--k-shell-secondary); cursor: pointer; }
+.sa-confirm__more > summary:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+.sa-confirm__more > section + section { margin-block-start: 20px; }
 .sa-confirm__end-note { margin: -12px 0 0; color: var(--k-shell-secondary); font-size: 13px; overflow-wrap: anywhere; }
 .sa-confirm__notice { margin: 0; padding: 12px 20px; border-block-start: 1px solid var(--k-shell-line); color: var(--k-shell-ink); overflow-wrap: anywhere; }
 .sa-confirm__footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-block-start: 1px solid var(--k-shell-line); }
@@ -51,6 +55,9 @@
 @media (width <= 32rem) {
   .sa-confirm__header { padding: 16px; }
   .sa-confirm__body { padding: 16px; }
+  /* On a phone the decision's five facts sit closer, so the end date stays in view above the buttons. */
+  .sa-confirm__body:has(> [data-seat-admin-summary]) { gap: 14px; }
+  .sa-confirm__body:has(> [data-seat-admin-summary]) :is(.sa-confirm__later, .sa-confirm__end-note) { margin-block-start: -8px; }
   .sa-confirm__footer { padding: 12px 16px; }
   .sa-confirm__notice { padding: 10px 16px; }
   .sa-confirm .sa-button--primary { flex: 1 1 auto; }
