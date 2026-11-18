@@ -95,6 +95,12 @@ const OUTCOME_LABEL: Record<CleanupOutcome, string> = {
   not_attempted: "not started",
 };
 
+/** The confirmation's final button says what it will do, and to how many: never a bare "Confirm". */
+export function confirmAction(operation: CleanupOperation, count: number): string {
+  return operation === "remove_agent"
+    ? `Remove ${count} ${count === 1 ? "agent" : "agents"}` : `Tombstone ${count} ${count === 1 ? "file" : "files"}`;
+}
+
 /** The names a confirmation lists: up to 20, then a count. */
 export function confirmNames(labels: readonly string[]): string {
   const shown = labels.slice(0, 20).join(", ");
@@ -199,11 +205,12 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
   const consequence = el("p", "cleanup__consequence");
   const names = el("p", "cleanup__names");
   const confirmRow = el("div", "cleanup__confirm-actions");
-  const go = el("button", "dashboard__danger-button", "Confirm");
+  const go = el("button", "dashboard__danger-button");
   go.type = "button";
   go.dataset.cleanupGo = "";
   const back = el("button", "dashboard__text-button", "Back");
   back.type = "button";
+  back.dataset.cleanupBack = "";
   confirmRow.append(go, back);
   confirm.append(consequence, names, confirmRow);
 
@@ -285,11 +292,13 @@ export function mountCleanup(root: HTMLElement, deps: CleanupDeps): CleanupHandl
     pass = freezePass(opened, operation, chosen, deps.newId);
     consequence.textContent = cleanupConsequence(operation);
     names.textContent = confirmNames(pass.items.map((item) => item.label));
+    go.textContent = confirmAction(operation, pass.items.length);
     list.hidden = true;
     footer.hidden = true;
     filters.hidden = true;
     confirm.hidden = false;
-    go.focus();
+    // The confirmation opens on the way out: Enter or Space goes back, and the action takes a deliberate move.
+    back.focus();
   });
   back.addEventListener("click", () => { pass = null; confirm.hidden = true; list.hidden = false; footer.hidden = false; filters.hidden = operation !== "tombstone_file"; });
 

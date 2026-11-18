@@ -51,7 +51,7 @@ class FakeNode {
   replaceChildren(...nodes) { this.children = [...nodes]; this._text = ""; }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
   fire(type) { for (const fn of this.listeners[type] ?? []) fn(); }
-  focus() {}
+  focus() { this.ownerDocument.focused = this; }
   all() { return [this, ...this.children.filter((c) => typeof c !== "string").flatMap((c) => c.all())]; }
   querySelectorAll(selector) {
     const key = selector.replace(/^\[data-|\]$/g, "").replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
@@ -94,6 +94,36 @@ test("a switch mid-run scrubs at once, starts nothing more and never repaints fr
   assert.equal(root.children.length, 0, "late replies never repaint");
   handle.dispose();
   assert.equal(root.children.length, 0, "dispose is idempotent");
+});
+
+test("the confirmation names its final action, keeps the names and consequence in view, and opens on Back", async () => {
+  const { mountCleanup, confirmAction } = await import("./cleanup-view.ts");
+  assert.equal(confirmAction("remove_agent", 1), "Remove 1 agent"); assert.equal(confirmAction("remove_agent", 3), "Remove 3 agents");
+  assert.equal(confirmAction("tombstone_file", 1), "Tombstone 1 file"); assert.equal(confirmAction("tombstone_file", 12), "Tombstone 12 files");
+  const root = new FakeNode(fakeDoc, "div");
+  let sent = 0;
+  mountCleanup(root, {
+    context: () => ({ userId: "u1", workspaceId: "w1" }),
+    agents: () => Array.from({ length: 3 }, (_, i) => ({ id: `a${i}`, label: `Agent ${i}`, detail: "terminal" })),
+    files: async () => [],
+    send: async () => { sent++; return { status: 200, body: { status: "accepted" } }; },
+    newId: (() => { let n = 0; return () => `id-${++n}`; })(),
+  });
+  await flush();
+  const boxes = root.all().filter((node) => node.dataset.cleanupItem !== undefined);
+  for (const box of boxes.slice(0, 2)) { box.checked = true; box.fire("change"); }
+  find(root, "cleanupAct").fire("click");
+  const confirm = find(root, "cleanupConfirm"), go = find(root, "cleanupGo"), back = find(root, "cleanupBack");
+  assert.equal(confirm.hidden, false);
+  assert.equal(go.textContent, "Remove 2 agents", "the button says what it will do, and to how many");
+  assert.notEqual(go.textContent, "Confirm");
+  assert.equal(fakeDoc.focused, back, "the keyboard starts on the way out, not on the action");
+  assert.ok(confirm.textContent.includes("Agent 0") && confirm.textContent.includes("Agent 1"), "the names stay in view");
+  assert.ok(confirm.textContent.includes("Removes each agent from this workspace."), "so does what it does");
+  // Back sends nothing and returns to the list.
+  back.fire("click");
+  await flush();
+  assert.equal(confirm.hidden, true); assert.equal(sent, 0);
 });
 
 test("a delayed file list from a disposed mount never paints, and a new mount starts clean", async () => {
