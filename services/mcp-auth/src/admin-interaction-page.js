@@ -21,6 +21,32 @@ function limits(values) {
     .map(([key, value]) => `<dt>${e(LIMIT_LABELS[key])}</dt><dd>${e(value)}</dd>`).join("")}</dl>`;
 }
 function words(value) { return value.length ? value.map(e).join(", ") : "None"; }
+/**
+ * The page shown when an app asks for admin access it cannot have: it is not verified and approved, or it
+ * cannot prove possession of its access key. Same frame as the other connector pages, a heading that says
+ * what happened, the way forward (an ordinary connection), and the way back. Fixed text only.
+ */
+const ADMIN_REFUSALS = {
+  dpop_required: "This app cannot prove possession of its access key, so it cannot be given admin access.",
+  unauthorized_client: "Admin access needs an app whose publisher CommonSwarm has verified, and your approval as the account owner. This app does not have both yet.",
+};
+export function renderAdminRefusedPage(code) {
+  // Own keys only: a code such as "constructor" must not reach an inherited property.
+  const reason = Object.hasOwn(ADMIN_REFUSALS, code) ? ADMIN_REFUSALS[code] : ADMIN_REFUSALS.unauthorized_client;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Admin access unavailable</title>
+    <style>${CONSENT_STYLES}
+.admin-refused p{margin-top:12px}
+.admin-refused .admin-refused-next{color:var(--muted)}
+.admin-refused a{display:inline-flex;align-items:center;min-height:44px;margin-top:18px;color:var(--link);font-weight:700}
+.admin-refused a:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+</style></head>
+    <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Admin access</span></header>
+    <div class="card admin-refused"><h1>Admin access is not available for this app</h1>
+    <p>${e(reason)}</p>
+    <p class="admin-refused-next">You can still connect it the ordinary way: add CommonSwarm as a connector in the app and choose which workspaces it may use.</p>
+    <a href="https://commonswarm.com/app">Return to CommonSwarm</a></div></main></body></html>`;
+}
+
 /** Render consent copy from the shared issuance gate state supplied by the handler. */
 export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, version,
   workspaces = [], receipt, summary, scriptNonce, issuanceState }) {
