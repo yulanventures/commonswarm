@@ -1649,6 +1649,52 @@
     ]
   },
   {
+    "id": "dialog.admin-history",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-admin-access-open]"
+      },
+      {
+        "waitFor": "admin-delegations dialog[open] [data-admin-refresh]:not([disabled])",
+        "settle": true
+      }
+    ],
+    "ready": "admin-delegations dialog[open] [data-admin-refresh]:not([disabled])",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ]
+  },
+  {
     "id": "dialog.admin-access",
     "kind": "dialog",
     "path": "/app?w={workspace}&agent={agent}",
