@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { renderAdminConsentPage, FULL_ACCOUNT_WARNING } from '../src/admin-interaction-page.js';
+import { renderAdminConsentPage, FULL_ACCOUNT_WARNING, CHOSEN_COMPROMISE_WARNING, WORKER_READ_WARNING } from '../src/admin-interaction-page.js';
 import { createAdminManifest } from '../src/admin-consent.js';
 import { adminConsentOptions } from '../src/admin-policy.generated.js';
 
@@ -129,11 +129,13 @@ const RW2 = '20000000-0000-4000-8000-000000000002';
 // Full account takes every permission that can be granted today.
 const REVIEW_OPTIONS = adminConsentOptions().filter(option => option.available);
 const REVIEW_SCOPES = REVIEW_OPTIONS.map(option => option.scope);
-function confirmation(mode, overrides = {}) {
+function confirmation(mode, given = {}) {
+  const overrides = { ...given };
   const policy = { verification: { publisher_identity: 'Northwind Tools', verification_version: 3, client_id: 'https://ops.example/oauth.json' },
     approval: { owner_user_id: 'owner-1' }, metadata: { client_name: 'Northwind <Ops>' }, fullAccountEligible: true, resourceScopes: REVIEW_SCOPES };
   const selection = mode === 'full_account' ? { mode, workspace_ids: [RW1, RW2] }
-    : { mode, scope_names: ['admin:read', 'seats:create'], workspace_ids: [RW1] };
+    : { mode, scope_names: overrides.scopes ?? ['admin:read', 'seats:create'], workspace_ids: [RW1] };
+  delete overrides.scopes;
   const manifest = createAdminManifest(selection, policy, Date.UTC(2026, 10, 18, 22));
   manifest.connection_id = 'connection-1';
   return renderAdminConsentPage({ uid: 'review', version: 2, csrfToken: 'csrf', issuanceState: 'open', scriptNonce: 'nonce-1',
@@ -223,19 +225,56 @@ test('admin confirmation keeps every exact line, folded in one place', () => {
   }
 });
 
-test('admin confirmation of chosen permissions asks for no full-account confirmation', () => {
-  const tree = htmlTree(confirmation('granular'));
-  assert.equal(text(one(tree, node => node.tag === 'h1')), 'Give Northwind <Ops> these permissions?');
-  assert.equal(text(one(tree, node => node.tag === 'h2')), 'Chosen permissions');
+// One witness per kind of grant: the reach line and the warning say what that grant can do, and nothing more.
+const reachAndWarning = (html) => {
+  const tree = htmlTree(html);
   const facts = one(tree, node => node.tag === 'dl' && node.attrs.class === 'admin-facts');
-  assert.deepEqual(elements(facts).filter(node => node.tag === 'dt').map(text), ['Where', 'What it may do', 'Until']);
-  const values = elements(facts).filter(node => node.tag === 'dd').map(text);
-  assert.equal(values[0], 'Only the selected workspaces and expressly approved newly created workspaces. Selected workspaces: One');
-  assert.equal(values[1], 'Read-only, Create seats');
+  const warning = one(tree, node => node.attrs.class === 'admin-warning');
+  return { tree, rows: elements(facts).filter(node => node.tag === 'dt').map(text),
+    values: elements(facts).filter(node => node.tag === 'dd').map(text), warning: text(warning), warningId: warning.attrs.id };
+};
+
+test('a limited grant (read and invite in one workspace) claims no workspace creation, future reach or workers', () => {
+  const { tree, rows, values, warning, warningId } = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'invites:create'] }));
+  assert.equal(text(one(tree, node => node.tag === 'h1')), 'Give Northwind <Ops> these permissions?');
+  assert.deepEqual(rows, ['Where', 'What it may do', 'Until']);
+  assert.equal(values[0], 'Only the selected workspaces. Selected workspaces: One');
+  assert.equal(values[1], 'Read-only, Invite members');
+  assert.equal(warning, CHOSEN_COMPROMISE_WARNING);
+  assert.equal(warningId, 'grant-warning');
+  // Nothing in view says what this grant cannot do. (The exact list still names every limit.)
+  const inView = elements(tree).filter(node => ['h1', 'dd', 'dt'].includes(node.tag) || node.attrs.class === 'admin-warning').map(text).join(' ');
+  assert.doesNotMatch(inView, /create workspaces|future|newly created|Workers|change seats/iu);
   const form = one(tree, node => node.tag === 'form');
   assert.deepEqual(elements(form).filter(node => node.tag === 'input').map(node => node.attrs.name), ['csrf_token', 'summary_digest', 'selection_version']);
   assert.deepEqual(elements(form).filter(node => node.tag === 'button').map(text), ['Confirm chosen permissions']);
-  assert.equal(text(one(tree, node => node.attrs.id === 'full-account-warning')), FULL_ACCOUNT_WARNING);
+});
+
+test('a chosen grant that can create seats says its workers may read; one that can create workspaces keeps that reach', () => {
+  const seats = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'seats:create'] }));
+  assert.equal(seats.values[0], 'Only the selected workspaces. Selected workspaces: One');
+  assert.equal(seats.values[1], 'Read-only, Create seats');
+  assert.equal(seats.warning, `${WORKER_READ_WARNING} ${CHOSEN_COMPROMISE_WARNING}`);
+  assert.doesNotMatch(seats.warning, /create workspaces|future/iu);
+  // The control: with Create workspaces chosen, the reach names newly created workspaces and what applies there.
+  const creates = reachAndWarning(confirmation('granular', { scopes: ['admin:read', 'workspaces:create'] }));
+  assert.deepEqual(creates.rows, ['Where', 'What it may do', 'In workspaces it creates', 'Until']);
+  assert.equal(creates.values[0], 'Only the selected workspaces and expressly approved newly created workspaces. Selected workspaces: One');
+  assert.equal(creates.values[1], 'Read-only, Create workspaces');
+  assert.equal(creates.values[2], 'The same permissions');
+  assert.equal(creates.warning, CHOSEN_COMPROMISE_WARNING);
+  assert.equal(text(one(creates.tree, node => node.tag === 'h2')), 'Chosen permissions');
+});
+
+test('a full-account grant keeps its warning, its reach into future workspaces and its separate confirmation', () => {
+  const { tree, rows, values, warning, warningId } = reachAndWarning(confirmation('full_account'));
+  assert.deepEqual(rows, ['Where', 'What it may do', 'In workspaces it creates', 'Until']);
+  assert.equal(values[0], 'Existing and future workspaces you own, plus selected shared workspaces. Selected workspaces: One, Two');
+  assert.equal(warning, FULL_ACCOUNT_WARNING);
+  assert.equal(warningId, 'full-account-warning');
+  const confirm = one(tree, node => node.tag === 'input' && node.attrs.name === 'confirm_full_account');
+  assert.equal(confirm.attrs['aria-describedby'], 'full-account-warning');
+  assert.ok('required' in confirm.attrs && !('checked' in confirm.attrs));
 });
 
 test('the screen for an app that cannot have admin access is unchanged', () => {

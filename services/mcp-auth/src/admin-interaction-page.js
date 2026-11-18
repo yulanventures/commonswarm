@@ -3,6 +3,12 @@ import { escapeHtml as e, renderConsentDestination, BRAND_MARK, CONSENT_STYLES }
 
 export const FULL_ACCOUNT_WARNING = "This client can create workspaces and change seats and invitations within these limits. That includes future workspaces you own. Workers it creates may read workspace messages and files. If the client or agent host is compromised, someone else can use this access until it expires or you revoke it.";
 
+// Chosen permissions get a warning that claims only what that grant can do. The full-account text above says
+// the client can create workspaces and reach future ones, which a chosen grant often cannot.
+export const CHOSEN_COMPROMISE_WARNING = "If this app or its host is compromised, someone else could use the access listed above until it expires or you revoke it.";
+export const WORKER_READ_WARNING = "Workers it creates may read workspace messages and files.";
+const WORKER_CAPABILITIES = ["admin_create_seat", "admin_provision_seat"];
+
 const LIMIT_LABELS = {
   workspaces: "Workspaces created", live_seats: "Live seats", total_seats: "Seats created in total",
   invitations: "Invitations", live_agent_invitations: "Live agent invitations",
@@ -77,10 +83,15 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
     // dropped: the exact list holds each line it showed. Field names, tokens and the digest are unchanged.
     const full = manifest.mode === "full_account";
     const expiry = new Date(manifest.expires_at);
-    const coverage = manifest.workspace_selector === "owned_and_selected" ? "Existing and future workspaces you own, plus selected shared workspaces" : "Only the selected workspaces and expressly approved newly created workspaces";
+    const created = manifest.created_workspace_policy.scope_names;
+    // Reach, from the grant itself: future workspaces only for a full account, and newly created ones only
+    // when this grant carries permissions into workspaces it creates.
+    const coverage = manifest.workspace_selector === "owned_and_selected" ? "Existing and future workspaces you own, plus selected shared workspaces"
+      : created.length ? "Only the selected workspaces and expressly approved newly created workspaces" : "Only the selected workspaces";
+    const warning = full ? FULL_ACCOUNT_WARNING
+      : [WORKER_CAPABILITIES.some(name => selectedCapabilities.has(name)) ? WORKER_READ_WARNING : "", CHOSEN_COMPROMISE_WARNING].filter(Boolean).join(" ");
     // Built from the same granted capability list as the exact lines, so the two cannot disagree.
     const granted = options.filter(o => o.capability_names.some(name => selectedCapabilities.has(name))).map(o => o.label);
-    const created = manifest.created_workspace_policy.scope_names;
     const createdLabels = created.map(scope => options.find(o => o.scope === scope)?.label ?? scope);
     const sameAsGranted = createdLabels.length === granted.length && createdLabels.every(label => granted.includes(label));
     form = `<section aria-labelledby="summary"><h2 id="summary">${full ? "Full account" : "Chosen permissions"}</h2>
@@ -104,7 +115,7 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
       <p>Access ends (UTC): ${e(expiry.toISOString())}.</p>
       <p>Refresh cannot extend this deadline: ${e(new Date(manifest.refresh_deadline).toISOString())}.</p>
       </details>
-      <p id="full-account-warning" class="admin-warning">${e(FULL_ACCOUNT_WARNING)}</p></section>
+      <p id="${full ? "full-account-warning" : "grant-warning"}" class="admin-warning">${e(warning)}</p></section>
       <form method="post" action="/interaction/${encodeURIComponent(uid)}/consent">
         <input type="hidden" name="csrf_token" value="${e(summary.token)}">
         <input type="hidden" name="summary_digest" value="${e(summary.digest)}">
