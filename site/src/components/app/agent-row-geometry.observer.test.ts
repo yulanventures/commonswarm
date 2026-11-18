@@ -25,7 +25,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
   const tokens = await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8");
   // Real page styles, introduced only after the plain-text and confirmation checks inside the dialog below.
   const pageStyles = await build({ absWorkingDir: fileURLToPath(new URL("../../../", import.meta.url)), bundle: true,
-    stdin: { contents: ['global.css', 'home/index.css', 'kylon-shell.css', 'kylon-layout/index.css', 'kylon-people.css', 'kylon-font.css']
+    stdin: { contents: ['global.css', 'home/index.css', 'kylon-shell.css', 'kylon-layout/index.css', 'people-dialog.css', 'kylon-font.css']
       .map(file => `@import "./src/styles/${file}";`).join('\n'), loader: 'css', resolveDir: siteRoot },
     loader: { '.woff2': 'dataurl' }, write: false,
     plugins: [{ name: 'local-fonts', setup(builder) { builder.onResolve({ filter: /^\/fonts\// }, args =>

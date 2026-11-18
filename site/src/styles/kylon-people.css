@@ -1,5 +1,0 @@
-/* Page-only composition; classic roster dialogs retain their existing styles. */
-@import "./kylon-people-context.css";
-@import "./kylon-people-profile.css";
-@import "./kylon-people-shell.css";
-@import "./kylon-members-panel.css";
