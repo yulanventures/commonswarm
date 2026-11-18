@@ -221,6 +221,7 @@ import {
   type ConversationMember,
   departedGroupMember,
   isConversationCommandKind,
+  isConversationLeaveKind,
   parseConversationCommand,
   prefileConversationPost,
   reauthorizedConversationReplay,
@@ -17117,7 +17118,7 @@ async function handleTransaction(
           : undefined;
         if (replayedConversation !== undefined) {
           const reauthorized = await reauthorizedConversationReplay(tx, route.workspaceId, authActorIdentity(auth),
-            replayedConversation, kind === "conversation_leave");
+            replayedConversation, isConversationLeaveKind(kind));
           if (reauthorized !== null) return reauthorized.status === 404 ? reauthorized : decided(reauthorized);
         }
         return matches

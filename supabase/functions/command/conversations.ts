@@ -94,6 +94,11 @@ export function isConversationCommandKind(kind: unknown): kind is ConversationCo
   return (CONVERSATION_COMMAND_KINDS as readonly unknown[]).includes(kind);
 }
 
+/** A leave, whose finished replay stays acknowledged after the caller has left (C2). */
+export function isConversationLeaveKind(kind: unknown): boolean {
+  return kind === "conversation_leave";
+}
+
 export function parseConversationCommand(cmd: Record<string, unknown>): ConversationParse {
   const kind = cmd.kind;
   if (kind === "conversation_open") {
