@@ -160,12 +160,17 @@ test("membership follows the owner's Slack rules", async () => {
     users: live, agents: sorted(agents.lead, agents.poster, agents.reader, agents.wsLead, agents.idle),
   }, "#general: every live person, and every agent with a live seat");
   assert.deepEqual(await members(sql, rooms.led), { users: live, agents: [agents.lead] },
-    "a public channel: every live person, and the agent that leads it");
-  assert.deepEqual(await members(sql, rooms.posted), { users: live, agents: sorted(agents.poster, agents.wsLead) },
-    "an agent that posted there; the workspace lead leads a channel in workspace mode");
-  assert.deepEqual(await members(sql, rooms.read), { users: live, agents: sorted(agents.reader, agents.wsLead) },
-    "an agent with a read mark there");
-  assert.deepEqual(await members(sql, rooms.archived), { users: live, agents: [agents.wsLead] }, "archived public channels too");
+    "a public channel: every live person, and the agent named as its explicit lead");
+  assert.deepEqual(await members(sql, rooms.posted), { users: live, agents: [agents.poster] }, "an agent that posted there");
+  assert.deepEqual(await members(sql, rooms.read), { users: live, agents: [agents.reader] }, "an agent with a read mark there");
+  assert.deepEqual(await members(sql, rooms.archived), { users: live, agents: [] }, "archived public channels too");
+  // The workspace lead routes for every channel in workspace-lead mode, but like a Slack admin it is not joined
+  // to them: with no post and no read mark it is in #general only.
+  const [wsLeadRooms] = await sql<{ kinds: string[] }[]>`
+    SELECT array_agg(c.kind ORDER BY c.kind) AS kinds FROM swarm.conversation_members m
+    JOIN swarm.conversations c ON c.conversation_id = m.conversation_id
+    WHERE c.workspace_id = ${ws}::uuid AND m.member_agent_principal_id = ${agents.wsLead}::uuid`;
+  assert.deepEqual(wsLeadRooms!.kinds, ["general"]);
   assert.deepEqual(await members(sql, rooms.secret), { users: [], agents: [] }, "private channels stay in channel_members");
 
   const [prefs] = await sql<{ starred: boolean; rank: number | null; bob: string }[]>`

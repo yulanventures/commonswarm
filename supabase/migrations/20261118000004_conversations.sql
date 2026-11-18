@@ -1,8 +1,9 @@
 -- Conversations, step 1 of 6: one model for #general, channels, DMs and group DMs. Schema, filing and
 -- backfill only; inert.
 --
--- Every message belongs to at most one conversation. A message posted from now on is filed at commit,
--- unless a member of its set does not resolve (then it stays unmapped, as such history does). A conversation is a workspace's one #general ('general'), a channel ('public_channel' or
+-- Every message posted from now on belongs to exactly one conversation, or its transaction aborts; history
+-- that cannot be placed stays unmapped. A conversation is a workspace's one #general ('general'), a channel
+-- ('public_channel' or
 -- 'private_channel'; its conversation id IS its channel_id), a 1:1 ('dm', or a note to oneself) or a
 -- group of three to nine ('group_dm': the sender plus the existing eight-recipient cap).
 --
@@ -22,15 +23,17 @@
 -- A mapping row that already exists (a later edge may write one) is recomputed and must match; so must
 -- one written for an older message. Any mismatch aborts the whole transaction, and so does an addressed
 -- post to the founding set of a group someone has left (the group-leave fence): the deliveries and
--- realtime frames its earlier triggers queued roll back with it. A message whose set cannot be filed (a
--- member that does not resolve, or more than nine) stays unmapped, and the legacy read rule keeps
--- serving it exactly as today; the release proof counts them.
+-- realtime frames its earlier triggers queued roll back with it. A new message that cannot be placed (a
+-- member that does not resolve, more than nine, a reply under an unmapped root) aborts too
+-- (SQLSTATE CV001, constraint conversation_unfilable). History that cannot be placed stays unmapped, and
+-- the legacy read rule keeps serving it exactly as today; the release proof counts it.
 --
 -- Membership (swarm.conversation_members) is of record for 'general', 'public_channel', 'dm' and
 -- 'group_dm'. Private channels keep swarm.channel_members until they move (step 5). The backfill
 -- follows the owner's decision "it should work like Slack": every live person joins #general and every
 -- existing public channel; an agent with a live seat joins #general, and a public channel only where it
--- leads, has posted or has a read mark; a 1:1 or group has its founding members. Read marks
+-- is the channel's explicit lead (lead_mode 'agent'), has posted or has a read mark (the workspace lead
+-- is not auto-joined); a 1:1 or group has its founding members. Read marks
 -- (swarm.conversation_reads) are copied from both channel read tables; a NULL channel there is #general.
 -- swarm.conversations_backfill() is idempotent; the edge release (step 2) runs it again.
 --
@@ -499,8 +502,11 @@ BEGIN
     RETURN;
   END IF;
   IF v_expected.conversation_id IS NULL THEN
-    -- Cannot be placed: stays unmapped, and the legacy read rule serves it as today.
-    RETURN;
+    -- Every new message belongs to exactly one conversation: one that cannot be placed aborts its
+    -- transaction. (Only new messages reach here; history is filed by the backfill, which counts it.)
+    RAISE EXCEPTION 'message % cannot be filed in a conversation', p_signal
+      USING ERRCODE = 'CV001', CONSTRAINT = 'conversation_unfilable',
+        DETAIL = 'conversation_unfilable: ' || coalesce(v_expected.unplaced, 'unknown');
   END IF;
   INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
   VALUES (p_signal, p_workspace, v_expected.conversation_id, '-infinity', v_expected.audience);
@@ -617,7 +623,8 @@ BEGIN
   GET DIAGNOSTICS v_n = ROW_COUNT;
   v_members := v_members + v_n;
 
-  -- Agents with a live seat: #general, and a public channel they lead, have posted in or have read.
+  -- Agents with a live seat: #general, and a public channel they explicitly lead, have posted in or have
+  -- read. The workspace lead is not auto-joined to channels in workspace-lead mode.
   INSERT INTO swarm.conversation_members (conversation_id, workspace_id, member_agent_principal_id, joined_at)
   SELECT c.conversation_id, c.workspace_id, seat.principal_id, greatest(seat.added_at, c.created_at)
   FROM swarm.conversations AS c
@@ -633,12 +640,10 @@ BEGIN
         WHERE any_am.principal_id = p.principal_id AND any_am.workspace_id = p.workspace_id)
   ) AS seat ON seat.workspace_id = c.workspace_id
   LEFT JOIN swarm.channels AS ch ON ch.channel_id = c.channel_id AND ch.workspace_id = c.workspace_id
-  LEFT JOIN swarm.workspaces AS w ON w.workspace_id = c.workspace_id
   WHERE swarm.actor_can_access_channel(c.workspace_id, NULL, 'agent', seat.principal_id)
     AND (c.kind = 'general'
       OR (c.kind = 'public_channel' AND (
         (ch.lead_mode = 'agent' AND ch.lead_agent_principal_id = seat.principal_id)
-        OR (ch.lead_mode = 'workspace' AND w.lead_agent_principal_id = seat.principal_id)
         OR EXISTS (SELECT 1 FROM swarm.signals AS s
           WHERE s.workspace_id = c.workspace_id AND s.channel_id = c.channel_id
             AND s.from_kind = 'agent' AND s.from_principal = seat.principal_id)

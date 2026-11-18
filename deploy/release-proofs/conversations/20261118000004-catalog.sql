@@ -10,11 +10,11 @@ SELECT (SELECT count(*)=12 AND bool_and(p.proowner='swarm_admin'::regrole AND p.
   ('swarm.conversation_for_channel(uuid,uuid)','8dcb7a05d17875131479ef5f584458be',true),
   ('swarm.conversation_for_members(uuid,text,uuid,uuid[],uuid[],boolean,timestamptz)','6dc8e99a1a0b94fd3bf9d3e3f896cf77',true),
   ('swarm.conversation_placement(uuid,uuid,boolean)','8076976b324b7d892294f6ccc9ca8030',true),
-  ('swarm.file_conversation_signal(uuid,uuid)','77b789fb96be07812212f51543ec88cd',true),
+  ('swarm.file_conversation_signal(uuid,uuid)','0c110a11b77e30fd80bbe4a799d7fb7d',true),
   ('swarm.file_signal_conversation_at_commit()','3159a89424d1560a542452625b37be96',true),
   ('swarm.create_workspace_general()','f802577ca48071e623ed8d82a45079f5',true),
   ('swarm.sync_channel_conversation()','639234d3c3e4586f8a7dfbe6b1227a03',true),
-  ('swarm.conversations_backfill()','4d4316642dd16295fef712c8347f3591',true)
+  ('swarm.conversations_backfill()','05776ee76fcf6657e5a6a20d18181d23',true)
  ) e(signature,digest,definer) JOIN pg_proc p ON p.oid=to_regprocedure(e.signature))
  AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['swarm.conversation_identity_guard()','swarm.conversation_member_guard()','swarm.conversation_signal_guard()','swarm.conversation_general(uuid)','swarm.conversation_for_channel(uuid,uuid)','swarm.conversation_for_members(uuid,text,uuid,uuid[],uuid[],boolean,timestamptz)','swarm.conversation_placement(uuid,uuid,boolean)','swarm.file_conversation_signal(uuid,uuid)','swarm.file_signal_conversation_at_commit()','swarm.create_workspace_general()','swarm.sync_channel_conversation()','swarm.conversations_backfill()']) f(sig)
   CROSS JOIN unnest(ARRAY['anon','authenticated','swarm_read','swarm_command']) r(role)

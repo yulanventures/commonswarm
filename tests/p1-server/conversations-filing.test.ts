@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import {
-  channel, filed, general, localSql, members, post, refusedBy, space, type Space, type Sql,
+  channel, filed, general, localSql, members, post, refusedBy, space, type Message, type Space, type Sql,
 } from "../support/conversations-fixture.js";
 
 let sql: Sql;
@@ -14,7 +14,7 @@ let other: Space;
 before(async () => {
   sql = localSql();
   w = await space(sql, ["alice", "bob", "carol"], [["agentA", "alice"], ["agentB", "bob"]]);
-  other = await space(sql, ["olga"]);
+  other = await space(sql, ["olga"], [["outsider", "olga"]]);
 });
 after(async () => { await sql?.end({ timeout: 5 }); });
 
@@ -144,13 +144,63 @@ test("a mapping row is recomputed, never trusted: a wrong one aborts at commit, 
   const right = await post(sql, w, { from: w.people.alice!, to: [u("carol")], then: prefile(pair, "addressed") });
   assert.deepEqual(await filed(sql, right), { conversation: pair, kind: "dm", audience: "addressed" });
 
-  // A row for an older message is recomputed as well: a message that cannot be placed takes none.
-  const ghost = randomUUID();
-  const unplaceable = await post(sql, w, { from: ghost, to: [u("alice")] });
-  assert.equal(await filed(sql, unplaceable), null, "a sender that does not resolve leaves the message unmapped");
+  // A row for an older message is recomputed as well. History that cannot be placed is written the way the
+  // database held it before the migration: with the filing trigger off, inside this transaction only.
+  const unplaceable = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_user_id, kind, body, until)
+      VALUES (${unplaceable}::uuid, ${w.id}::uuid, ${randomUUID()}::uuid, 'user', ${w.people.alice!}::uuid, 'note',
+        'history', clock_timestamp() + interval '1 day')`;
+    await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
+  });
+  assert.equal(await filed(sql, unplaceable), null);
   await assert.rejects(sql`INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
     VALUES (${unplaceable}::uuid, ${w.id}::uuid, ${g}::uuid, statement_timestamp(), 'addressed')`,
   refusedBy("23514", "conversation_signals_placement"));
+});
+
+test("a new message that cannot be placed aborts: no message, no delivery, no mapping", async () => {
+  const left = (id: string) => sql<{ signals: number; deliveries: number; mapped: number }[]>`
+    SELECT (SELECT count(*)::int FROM swarm.signals WHERE id = ${id}::uuid) AS signals,
+      (SELECT count(*)::int FROM swarm.signal_deliveries WHERE signal_id = ${id}::uuid) AS deliveries,
+      (SELECT count(*)::int FROM swarm.conversation_signals WHERE signal_id = ${id}::uuid) AS mapped`;
+  // A person who is not a member of the workspace writing to an agent (whose delivery the insert queues),
+  // and an agent with no seat here writing to a member.
+  const cases: Array<[string, Message]> = [
+    ["a sender who is not a member", { from: randomUUID(), to: [a("agentB")] }],
+    ["an agent with no seat in this workspace", { from: other.agents.outsider!, fromKind: "agent", to: [u("alice")] }],
+  ];
+  // And a reply whose root is history that could not be filed (written as before the migration, below).
+  const root = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, kind, body, until)
+      VALUES (${root}::uuid, ${w.id}::uuid, ${randomUUID()}::uuid, 'user', 'note', 'unfiled history', clock_timestamp() + interval '1 day')`;
+    await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
+  });
+  assert.equal(await filed(sql, root), null);
+  // (Unaddressed history always files in #general; a root stays unfiled only if, as here, it was never filed.)
+  const unfilable = (reason: string) => (error: unknown) => {
+    const e = error as { code?: string; constraint_name?: string; detail?: string };
+    assert.equal(e.code, "CV001", String(error));
+    assert.equal(e.constraint_name, "conversation_unfilable", String(error));
+    assert.equal(e.detail, `conversation_unfilable: ${reason}`, String(error));
+    return true;
+  };
+  for (const [label, m] of cases) {
+    const id = randomUUID();
+    await assert.rejects(post(sql, w, { id, ...m }), unfilable("member_unresolved"), label);
+    assert.deepEqual({ ...(await left(id))[0]! }, { signals: 0, deliveries: 0, mapped: 0 }, label);
+  }
+  const reply = randomUUID();
+  await assert.rejects(post(sql, w, { id: reply, from: w.people.alice!, root }), unfilable("root_unfiled"));
+  assert.deepEqual({ ...(await left(reply))[0]! }, { signals: 0, deliveries: 0, mapped: 0 }, "a reply under an unfiled root");
+  // Positive controls: the same shapes from people and agents that resolve, as an old edge writes them, and a
+  // reply under a filed root, file normally.
+  assert.equal(await filed(sql, await post(sql, w, { from: w.people.alice!, root: await post(sql, w, { from: w.people.bob! }) })) !== null, true);
+  assert.equal((await filed(sql, await post(sql, w, { from: w.people.carol!, to: [a("agentB")] })))?.kind, "dm");
+  assert.equal((await filed(sql, await post(sql, w, { from: w.agents.agentA!, fromKind: "agent", to: [u("alice")] })))?.kind, "dm");
 });
 
 test("a cross-tenant root or conversation is refused by the composite keys", async () => {

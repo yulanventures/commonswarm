@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
 
@@ -33,6 +33,40 @@ let other: Person;
 let third: Person;
 let principal: string;
 let agentToken: string;
+const realtimeClients: SupabaseClient[] = [];
+
+type Listener = { name: string; frames: unknown[]; client: SupabaseClient; channel: RealtimeChannel };
+
+/** A real Realtime socket on a private topic, authenticated as the one it is for (a person's session, or
+ * anon for an agent's wake topic, which the wake id itself authorizes), recording every frame of `event`. */
+async function listen(name: string, bearer: string, topic: string, event: string): Promise<Listener> {
+  const client = createClient(local.API_URL, local.ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  realtimeClients.push(client);
+  await client.realtime.setAuth(bearer);
+  const frames: unknown[] = [];
+  const channel = client.channel(topic, { config: { private: true, broadcast: { ack: false, self: false } } });
+  channel.on("broadcast", { event }, (message) => { frames.push(message.payload); });
+  const status = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${name}: Realtime subscribe timed out`)), 15_000);
+    channel.subscribe((next) => {
+      if (next !== "SUBSCRIBED" && next !== "CHANNEL_ERROR" && next !== "TIMED_OUT") return;
+      clearTimeout(timer);
+      resolve(next);
+    });
+  });
+  assert.equal(status, "SUBSCRIBED", `${name} joins ${topic}`);
+  return { name, frames, client, channel };
+}
+
+async function framesArrive(listeners: Listener[], before: number[], label: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (listeners.some((l, i) => l.frames.length <= before[i]!)) {
+    if (Date.now() > deadline) {
+      throw new Error(`${label}: no frame on ${listeners.filter((l, i) => l.frames.length <= before[i]!).map((l) => l.name).join(", ")}`);
+    }
+    await delay(100);
+  }
+}
 
 function localEnvironment(): Local {
   const parsed = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
@@ -146,6 +180,7 @@ before(async () => {
 }, { timeout: 120_000 });
 
 after(async () => {
+  for (const client of realtimeClients) client.realtime.disconnect();
   if (functionProcess?.pid && functionProcess.exitCode === null) {
     try { process.kill(-functionProcess.pid, "SIGTERM"); } catch { /* already stopped */ }
     await Promise.race([new Promise((resolve) => functionProcess!.once("close", resolve)), delay(2_000)]);
@@ -195,15 +230,22 @@ test("today's edge posts every kind and each is filed at commit with its audienc
   const agentPair = await filed(toAgent);
   assert.equal(agentPair?.kind, "dm");
   assert.equal((await filed(fromAgent))?.conversation, agentPair!.conversation);
+  // Every message today's edge wrote has exactly one conversation: none of its posts reaches the
+  // unfilable abort, which would have failed the post above with a non-200.
+  const [unmapped] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM swarm.signals s
+    WHERE s.workspace_id = ${workspace}::uuid
+      AND NOT EXISTS (SELECT 1 FROM swarm.conversation_signals cs WHERE cs.signal_id = s.id)`;
+  assert.equal(unmapped!.n, 0);
 });
 
-test("an old-edge post to a group someone left is refused: no message, no delivery, no frame", { timeout: 90_000 }, async () => {
+test("an old-edge post to a group someone left is refused: no message, no delivery, no frame queued or on a socket", { timeout: 120_000 }, async () => {
   const founding = [{ kind: "user", id: other.id }, { kind: "user", id: third.id }, { kind: "agent", id: principal }];
-  // Every frame this workspace's people and agent can hear: the workspace topic, each person's own topic and the
-  // agent's wake topic (keyed by its wake id, not the workspace).
-  const [{ wake }] = await sql<{ wake: string }[]>`SELECT 'cswarm-wake:' || wake_id AS wake FROM swarm.agent_principals
+  const [{ wakeId }] = await sql<{ wakeId: string }[]>`SELECT wake_id AS "wakeId" FROM swarm.agent_principals
     WHERE principal_id = ${principal}::uuid`;
-  const frames = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages
+  const wake = `cswarm-wake:${wakeId}`;
+  // The queue: every frame this workspace's people and agent can hear, on the workspace topic, each person's
+  // own topic and the agent's wake topic (keyed by its wake id, not the workspace).
+  const queued = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages
     WHERE position(${workspace} in topic) > 0 OR topic = ${wake}`)[0]!.n;
   const orphanFrames = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages AS m
     WHERE (position(${workspace} in m.topic) > 0 OR m.topic = ${wake})
@@ -217,28 +259,49 @@ test("an old-edge post to a group someone left is refused: no message, no delive
       WHERE coalesce(payload -> 'payload' ->> 'signal_id', payload ->> 'signal_id') = ${id}) AS frames,
       (SELECT count(*)::int FROM swarm.signal_deliveries WHERE signal_id = ${id}::uuid) AS deliveries`)[0]!;
 
-  // Positive control: the same post before anyone leaves delivers to the agent and sends its frames.
+  // The wire: real sockets, each joined as the one its topic is for.
+  const onWorkspace = await listen("workspace topic (a group member)", other.jwt, `cswarm-signals:${workspace}`, "signal");
+  const otherMember = await listen("member topic (a group member)", other.jwt, `cswarm-member:${workspace}:${other.id}`, "signal");
+  const thirdMember = await listen("member topic (the member who leaves)", third.jwt, `cswarm-member:${workspace}:${third.id}`, "signal");
+  const onWake = await listen("agent wake topic", local.ANON_KEY, wake, "wake");
+  const sockets = [onWorkspace, otherMember, thirdMember, onWake];
+  const counts = () => sockets.map((l) => l.frames.length);
+
+  // Positive controls: a group post reaches the workspace and wake sockets, and a private-channel post with
+  // both people in it reaches both member sockets.
+  let at = counts();
   const first = await posted(owner.jwt, { to: founding });
   const sent = await traces(first);
   assert.ok(sent.frames > 0 && sent.deliveries === 1, JSON.stringify(sent));
+  await framesArrive([onWorkspace, onWake], [at[0]!, at[3]!], "a valid group post");
+  const both = await channel({ visibility: "private", members: [{ kind: "user", id: other.id }, { kind: "user", id: third.id }] });
+  at = counts();
+  await posted(owner.jwt, { channel: both.slug });
+  await framesArrive([otherMember, thirdMember], [at[1]!, at[2]!], "a valid private-channel post");
   const group = (await filed(first))!.conversation;
 
   await sql`UPDATE swarm.conversation_members SET left_at = statement_timestamp()
     WHERE conversation_id = ${group}::uuid AND member_user_id = ${third.id}::uuid`;
-  const [framesAt, deliveriesAt] = [await frames(), await deliveries()];
+  const [queuedAt, deliveriesAt] = [await queued(), await deliveries()];
+  const socketsAt = counts();
   const body = `after leaving ${randomUUID()}`;
   const refused = await send(owner.jwt, note({ body, to: founding }));
   assert.ok(refused.status >= 400, JSON.stringify(refused.body));
   assert.equal((await sql`SELECT 1 FROM swarm.signals WHERE workspace_id = ${workspace}::uuid AND body = ${body}`).length, 0);
   assert.equal(await deliveries(), deliveriesAt, "no delivery to the agent");
-  assert.equal(await frames(), framesAt, "no frame on the workspace, member or wake topics");
+  assert.equal(await queued(), queuedAt, "nothing queued for the workspace, member or wake topics");
   assert.equal(await orphanFrames(), 0, "no frame names a message that does not exist");
+  await delay(3_000);
+  assert.deepEqual(counts(), socketsAt, "no frame reaches any subscribed socket within 3 s of the refusal");
 
-  // The remaining set is another conversation and posts normally.
+  // The remaining set is another conversation and posts normally, and the same sockets hear it.
+  at = counts();
   const rest = await posted(owner.jwt, { to: [{ kind: "user", id: other.id }, { kind: "agent", id: principal }] });
   const restFiled = await filed(rest);
   assert.equal(restFiled?.kind, "group_dm");
   assert.notEqual(restFiled!.conversation, group);
   const restSent = await traces(rest);
   assert.ok(restSent.frames > 0 && restSent.deliveries === 1, JSON.stringify(restSent));
+  await framesArrive([onWorkspace, onWake], [at[0]!, at[3]!], "the remaining set's post");
+  for (const l of sockets) await l.client.removeChannel(l.channel);
 });
