@@ -35,8 +35,15 @@ const geometry = dialog => {
   }));
   const rect = dialog.getBoundingClientRect();
   check('dialog fits the actual browser viewport', rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + .5 && rect.bottom <= innerHeight + .5);
+  // The actions are pinned outside the scrolling part, except for the organization grant on the narrowest phones: that
+  // one is a single scrolling form with the actions at its end. There they must be reachable by scrolling the form to
+  // its end, which is where it is left, so later focus checks do not move it.
+  const form = dialog.querySelector('.sa-confirm__form');
+  const oneScroll = getComputedStyle(form).overflowY === 'auto';
+  if (oneScroll) form.scrollTop = form.scrollHeight;
   const footer = dialog.querySelector('footer').getBoundingClientRect();
-  check('actions stay visible outside the scrolling permissions', footer.top >= rect.top && footer.bottom <= innerHeight);
+  check('actions stay visible outside the scrolling permissions', footer.top >= rect.top && footer.bottom <= innerHeight + .5);
+  check('one scrolling form only on the narrowest phones, and only for the organization grant', oneScroll === (innerWidth < 384 && dialog.getAttribute('data-seat-admin-confirm') === 'organization'));
   const body = dialog.querySelector('.sa-confirm__body');
   body.focus({preventScroll:true});
   check('permission scroller is in the keyboard focus order', body.tabIndex === 0 && document.activeElement === body);

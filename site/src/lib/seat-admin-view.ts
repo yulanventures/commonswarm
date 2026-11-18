@@ -218,7 +218,8 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
     // The organization's first list refers to a workspace admin's powers; those six lines are shown with it, so the
     // actual actions can be read during this confirmation.
     if (options.level === "organization" && heading === "Available now") {
-      const detail = element(doc, "section", "sa-confirm__permissions");
+      // Its own class: the three fixed lists stay exactly three "permissions" sections; this one is their detail.
+      const detail = element(doc, "section", "sa-confirm__detail");
       detail.dataset.seatAdminWorkspacePowers = "";
       const lines = element(doc, "ul", "");
       for (const line of SEAT_ADMIN_ROLE_COPY["role:workspace_admin"].included) lines.append(element(doc, "li", "", line));

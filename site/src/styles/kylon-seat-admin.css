@@ -31,9 +31,9 @@
 .sa-confirm__header h2 { margin: 0; color: var(--k-shell-ink); font: 600 18px/1.4 var(--k-shell-font); letter-spacing: -.2px; overflow-wrap: anywhere; }
 .sa-confirm__body { display: grid; align-content: start; min-block-size: 0; gap: 20px; padding: 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .sa-confirm__body:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: -3px; }
-.sa-confirm__permissions h3 { margin: 0 0 8px; color: var(--k-shell-ink); font: 600 13px/1.5 var(--k-shell-font); }
-.sa-confirm__permissions ul { display: grid; gap: 6px; margin: 0; padding-inline-start: 20px; color: var(--k-shell-secondary); }
-.sa-confirm__permissions li { margin: 0; padding-inline-start: 2px; overflow-wrap: anywhere; }
+:is(.sa-confirm__permissions, .sa-confirm__detail) h3 { margin: 0 0 8px; color: var(--k-shell-ink); font: 600 13px/1.5 var(--k-shell-font); }
+:is(.sa-confirm__permissions, .sa-confirm__detail) ul { display: grid; gap: 6px; margin: 0; padding-inline-start: 20px; color: var(--k-shell-secondary); }
+:is(.sa-confirm__permissions, .sa-confirm__detail) li { margin: 0; padding-inline-start: 2px; overflow-wrap: anywhere; }
 .sa-confirm .sa-field { display: grid; min-inline-size: 0; gap: 6px; color: var(--k-shell-ink); font-weight: 500; }
 .sa-confirm .sa-select { box-sizing: border-box; inline-size: 100%; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%; padding: 8px 32px 8px 12px; border: 1px solid var(--k-shell-control); border-radius: 6px; background-color: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 16px/1.5 var(--k-shell-font); text-overflow: ellipsis; }
 .sa-confirm .sa-select:disabled { opacity: .7; }
@@ -67,11 +67,13 @@
   .sa-confirm__notice { padding: 10px 16px; }
   .sa-confirm .sa-button--primary { flex: 1 1 auto; }
 }
-/* A very short screen (a phone on its side) has no room to pin anything: the whole confirmation scrolls in order, so the
-   end date still comes before the buttons. */
-@media (height < 35rem) {
-  .sa-confirm__form { display: block; overflow-y: auto; }
-  .sa-confirm__body { overflow: visible; }
+/* On the narrowest phones the organization grant's explanation does not fit above pinned buttons. There the whole
+   confirmation is one scrolling form: the explanation, then the end date and the actions together. Grant comes into
+   view only after everything it depends on has been scrolled past. From 390 px wide, and for the shorter workspace
+   grant at every width, the end date and actions stay pinned. */
+@media (width < 24rem) {
+  .sa-confirm[data-seat-admin-confirm="organization"] .sa-confirm__form { display: block; overflow-y: auto; overscroll-behavior: contain; }
+  .sa-confirm[data-seat-admin-confirm="organization"] .sa-confirm__body { overflow: visible; }
 }
 @media (forced-colors: active) {
   .sa-switch__track { forced-color-adjust: none; border-color: CanvasText; background: Canvas; }

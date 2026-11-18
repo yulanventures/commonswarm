@@ -95,6 +95,8 @@ test("the organization grant has the same shape, and keeps both conditions on it
   assert.equal(more.tag, "details"); assert.notEqual(more.open, true); assert.equal(more.children[0].textContent, "Show permissions");
   const lists = more.children.slice(1);
   assert.deepEqual(lists.map((section) => section.children[0].textContent), ["Available now", "Workspace admin powers", "Included, not available yet", "Not allowed"]);
+  // The three fixed lists are the only "permissions" sections; the workspace admin's lines are marked as their detail.
+  assert.deepEqual(lists.map((section) => section.className), ["sa-confirm__permissions", "sa-confirm__detail", "sa-confirm__permissions", "sa-confirm__permissions"]);
   // The three fixed lists are verbatim; the workspace admin's six lines sit beside the list that refers to them.
   assert.deepEqual(lists.map((section) => section.children[1].children.map((line) => line.textContent)),
     [[...orgCopy.included], [...copy.included], [...orgCopy.deferred], [...orgCopy.excluded]]);
