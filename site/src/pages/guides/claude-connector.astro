@@ -114,22 +114,20 @@ const structuredData = {
       <section aria-labelledby={`claude-connector-${group.id}`} data-hosted-tool-group={group.id}>
         <h3 id={`claude-connector-${group.id}`}>{group.title}</h3>
         <p>{group.availability}</p>
-        <div class="seo-table-frame">
-          <div class="seo-table-wrap" tabindex="0" role="region" aria-labelledby={`claude-connector-${group.id}`}>
-            <table class="seo-table">
-              <thead><tr><th scope="col">Tool</th><th scope="col">What it does</th><th scope="col">Effect</th><th scope="col">Arguments</th></tr></thead>
-              <tbody>
-                {group.tools.map(tool => (
-                  <tr data-hosted-tool={tool.name}>
-                    <td><code>{tool.name}</code></td>
-                    <td data-tool-description>{tool.description}</td>
-                    <td data-tool-effect>{tool.annotations.readOnlyHint ? "Reads" : "Writes"}</td>
-                    <td data-tool-arguments><code>{toolArguments(tool.inputSchema)}</code></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div class="seo-table-wrap seo-table-wrap--entries">
+          <table class="seo-table seo-table--entries" role="table" aria-labelledby={`claude-connector-${group.id}`}>
+            <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Tool</th><th scope="col" role="columnheader">What it does</th><th scope="col" role="columnheader">Effect</th><th scope="col" role="columnheader">Arguments</th></tr></thead>
+            <tbody role="rowgroup">
+              {group.tools.map(tool => (
+                <tr role="row" data-hosted-tool={tool.name}>
+                  <td role="cell" data-tool-name><code>{tool.name}</code></td>
+                  <td role="cell" data-tool-description>{tool.description}</td>
+                  <td role="cell" data-tool-effect>{tool.annotations.readOnlyHint ? "Reads" : "Writes"}</td>
+                  <td role="cell" data-tool-arguments><code>{toolArguments(tool.inputSchema)}</code></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </section>
     ))}
