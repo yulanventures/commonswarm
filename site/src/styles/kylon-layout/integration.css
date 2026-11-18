@@ -396,6 +396,28 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
   /* 45px with its 1px bottom border, so the products inside get a full 44px (they measured 43). */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-frame__main > .cs-org-rail { block-size: auto; min-block-size: 45px; }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { min-inline-size: 44px; min-block-size: 44px; }
+  /* Tablets, landscape phones and narrow windows. The title and the lead share the first line, level with the header's
+     44px controls, and the description is one line of text under them: three stacked 44px rows took 128px of a screen
+     that can be 390px tall. The title keeps its width first and the lead's name gives way with an ellipsis. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy {
+    display: grid; grid-template-columns: minmax(0, max-content) auto; grid-template-rows: minmax(44px, auto);
+    justify-content: start; align-items: center; gap: 0 10px;
+  }
+  /* The first line is 44px with or without a lead, so the header does not change height when the lead arrives, and
+     the controls stay level with the title instead of centring against both lines. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header { align-items: start; }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-channel-description {
+    grid-column: 1 / -1; justify-self: start;
+  }
+  /* The description's button keeps a real 44px box around its text line: equal padding and negative margin, as the
+     author buttons in the feed do, and only as wide as its text. The header's lower padding holds the part below the
+     line, so the box never reaches the tab bar. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > button.hm-channel-description {
+    padding-block: 12px; margin-block: -12px;
+  }
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header:has(.hm-ws-header__copy > button.hm-channel-description) {
+    padding-block-end: 12px;
+  }
 }
 
 /* On short landscape screens, reserve bounded tracks for both the Wiki index and product rail. */
