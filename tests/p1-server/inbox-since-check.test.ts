@@ -277,18 +277,39 @@ test("a message inbox --notify printed is still waiting until check shows it; ch
 
   // check returns the oldest unseen messages a page at a time, and the test above left more than a page waiting:
   // run it as `cswarm check` does (its direct budget), until the ask comes up or nothing is left.
+  // Every observation and 👀 request check makes, with its answer, for the failure message below.
+  const exchanges: string[] = [];
+  const recording: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    const body = typeof init?.body === "string" ? init.body : "";
+    if (/ack_agent_delivery|add_reaction/.test(body)) {
+      const answer = await response.clone().text().catch(() => "<unreadable>");
+      exchanges.push(`${new Date().toISOString()} ${body.slice(0, 400)} => ${response.status} ${answer.slice(0, 400)}`);
+    }
+    return response;
+  };
   let shown = false;
   for (let page = 0; page < 20 && !shown; page += 1) {
     let checked: AgentCheckResult | undefined;
-    await checkAgentMessages({ profilePath, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS, present: async (result) => { checked = result; } });
+    await checkAgentMessages({ profilePath, fetcher: recording, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
+      present: async (result) => { checked = result; } });
     shown = checked?.messages.some((message) => message.id === ask) === true;
     if (!shown && (checked?.messages.length ?? 0) === 0) break;
   }
   assert.ok(shown, "check shows what the watcher printed");
   const deadline = Date.now() + 15_000;
   while (((await delivery(ask))?.ack_outcome !== "observed" || await seenMark(ask) === 0) && Date.now() < deadline) await delay(250);
-  const checkState = await readFile(join(dirname(profilePath), "check.json"), "utf8").catch(() => "{}");
-  assert.equal((await delivery(ask))?.ack_outcome, "observed",
-    `check observes it in the run that showed it; check state: ${checkState.slice(0, 1500)}`);
+  const checkState = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8").catch(() => "{}")) as Record<string, unknown>;
+  const [row] = await sql<Record<string, unknown>[]>`SELECT acked_at::text, ack_outcome, ack_via, lease_id, leased_by,
+      last_lease_id, last_leased_by, delivered_at::text, enqueued_at::text FROM swarm.signal_deliveries
+    WHERE signal_id = ${ask}::uuid AND recipient_agent_principal_id = ${principal}::uuid`;
+  assert.equal((await delivery(ask))?.ack_outcome, "observed", [
+    "check observes it in the run that showed it",
+    `ask=${ask}`,
+    `delivery=${JSON.stringify(row)}`,
+    `pending=${JSON.stringify({ ids: checkState.pending_observed_ids, next: checkState.pending_observed_next,
+      retries: checkState.pending_observed_retries, cursor: checkState.cursor })}`,
+    `exchanges:\n${exchanges.join("\n")}`,
+  ].join("\n"));
   assert.equal(await seenMark(ask), 1, "and marks it 👀");
 });
