@@ -54,6 +54,20 @@ function fixture(options = {}) {
   return [...nodes(root)];
 }
 
+test("the workspace ID sits after the settings and before Close workspace, with its copy button", () => {
+  const order = (options) => fixture(options)[0].children.map((node) => node.className || Object.keys(node.dataset)[0]);
+  // Everything a person may change comes first; the ID is last before the action that cannot be undone.
+  assert.deepEqual(order({ onCleanup: () => {}, moveDestinations: [{ id: "dest", name: "Yulan" }], onMove: async () => {} }), [
+    "dashboard__workspace-settings-title-row", "dashboard__workspace-settings-counts", "dashboard__workspace-cleanup",
+    "dashboard__workspace-move", "dashboard__workspace-identity", "dashboard__workspace-danger",
+  ]);
+  // With nothing else to show, it still follows the name and counts and precedes Close workspace.
+  assert.deepEqual(order({}).slice(-2), ["dashboard__workspace-identity", "dashboard__workspace-danger"]);
+  const identity = fixture({}).find((node) => node.className === "dashboard__workspace-identity");
+  assert.deepEqual(identity.children.map((node) => node.textContent ?? ""), ["Workspace ID", "workspace", "Copy workspace ID", ""]);
+  assert.ok("copyWorkspaceId" in identity.children[2].dataset);
+});
+
 test("settings offers only supplied destinations and sends the selected organization once while busy", async () => {
   let finish;
   const calls = [];
