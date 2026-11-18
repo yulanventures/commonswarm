@@ -29,27 +29,46 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
       .map(name => `<li>${e(o.label)} — ${e(name.replace(/^admin_/u, "").replaceAll("_", " "))}</li>`)).join("")
     : "";
   const unavailable = options.filter(o => !o.available).map(o => `<li>${e(o.label)} — unavailable</li>`).join("");
-  const identity = `<p>Signed in as <strong>${e(user.displayName || user.email || user.userId)}</strong> (${e(user.userId)})</p>
+  const technical = `<p>Signed in as <strong>${e(user.displayName || user.email || user.userId)}</strong> (${e(user.userId)})</p>
     <p>Client name (supplied by the client): ${e(policy?.metadata?.client_name ?? "Unnamed client")}</p>
     <p>Client ID: ${e(params.client_id)}</p><p>HTTPS client host: ${e(new URL(params.client_id).host)}</p>
     <p>Authorization returns to: ${e(new URL(params.redirect_uri).host)}</p>
     <p>${verified ? `Independently verified publisher: ${e(policy.verification.publisher_identity)}; active verification ${e(policy.verification.verification_version)}. Approved by account owner ${e(policy.approval.owner_user_id)}.` : "This client is unverified. Admin access is unavailable."}</p>`;
+  const issuanceLine = issuanceState === "open" ? "Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in /app." : "Admin connections are not available yet. Reviewing a selection does not connect the client.";
+  const choosing = verified && !manifest;
+  // The choice screen leads with who is asking and whose account answers; every other state keeps the full lines.
+  const identity = choosing
+    ? `<p class="admin-lead">Signed in as <strong>${e(user.displayName || user.email || user.userId)}</strong></p>
+    <p class="admin-lead">Verified publisher <strong>${e(policy.verification.publisher_identity)}</strong>, from <strong>${e(new URL(params.client_id).host)}</strong></p>`
+    : technical;
   const destination = renderConsentDestination({ clientName: policy?.metadata?.client_name,
     redirectUri: params.redirect_uri, metadataHost: new URL(params.client_id).hostname });
   let form = "";
   if (verified && !manifest) {
+    // The choice screen. One decision: how much this app may manage, where, and until when.
+    // What can be chosen stays visible; what cannot (not built yet, or not asked for) and the
+    // identifiers go under More. Field names, values and defaults are unchanged.
+    const offered = options.filter(o => o.available && requested.has(o.scope));
+    const notAvailable = [...options.filter(o => !o.available).map(o => o.label), "Billing changes"];
+    const notRequested = options.filter(o => o.available && !requested.has(o.scope)).map(o => o.label);
     form = `<form method="post" action="/interaction/${encodeURIComponent(uid)}/selection">
       <input type="hidden" name="csrf_token" value="${e(csrfToken)}">
       <input type="hidden" name="selection_version" value="${e(version)}">
-      <fieldset><legend>Choose permissions</legend><label><input type="radio" name="mode" value="granular" checked> Choose permissions</label>
-      ${policy.fullAccountEligible ? '<label><input type="radio" name="mode" value="full_account"> Full account (requires another confirmation)</label>' : ""}
-      ${options.map(o => `<label><input type="checkbox" name="scope_names" value="${e(o.scope)}"${o.scope === "admin:read" ? " checked" : ""}${!o.available || !requested.has(o.scope) ? " disabled" : ""}> ${e(o.label)}${!o.available ? " — unavailable" : ""}</label>`).join("")}
-      <p>Read-only views this connection's permissions, expiry and access status. It cannot read messages or files.</p>
-      <label><input type="checkbox" disabled> Billing changes are not available</label></fieldset>
-      <fieldset><legend>Selected workspaces (optional for account setup)</legend>${workspaces.map(w => `<label><input type="checkbox" name="workspace_ids" value="${e(w.id)}"> ${e(w.name)}</label>`).join("")}</fieldset>
-      <label>Access ends (UTC, at most thirty days)<input type="datetime-local" name="expires_at" value="${defaultExpiry}" required></label>
+      <fieldset><legend>How much access</legend>
+      <label><input type="radio" name="mode" value="granular" checked> <span>Only what I choose below</span></label>
+      ${policy.fullAccountEligible ? '<label><input type="radio" name="mode" value="full_account"> <span>Full account<small>Every permission this app asked for, in every workspace you own now and later. It asks you again first.</small></span></label>' : ""}</fieldset>
+      <fieldset><legend>What it may do</legend>
+      ${offered.map(o => `<label><input type="checkbox" name="scope_names" value="${e(o.scope)}"${o.scope === "admin:read" ? " checked" : ""}> <span>${e(o.label)}${o.scope === "admin:read" ? '<small>Its own permissions, end date and status. No messages or files.</small>' : ""}</span></label>`).join("")}</fieldset>
+      ${workspaces.length ? `<fieldset><legend>In which workspaces</legend>${workspaces.map(w => `<label><input type="checkbox" name="workspace_ids" value="${e(w.id)}"> <span>${e(w.name)}</span></label>`).join("")}</fieldset>` : ""}
+      <label class="admin-until">Until (UTC, at most thirty days)<input type="datetime-local" name="expires_at" value="${defaultExpiry}" required></label>
       ${destination}
-      <button type="submit">Review exact permissions and limits</button></form>`;
+      <p class="admin-state">${issuanceLine}</p>
+      <div class="admin-actions"><button type="submit">Review exact permissions and limits</button>
+      <a class="admin-quiet" href="https://commonswarm.com/app">Cancel</a></div>
+      <details class="admin-more"><summary>More</summary>
+      ${notAvailable.length ? `<p>Not available yet: ${notAvailable.map(e).join(", ")}.</p>` : ""}
+      ${notRequested.length ? `<p>Not asked for by this app: ${notRequested.map(e).join(", ")}.</p>` : ""}
+      ${technical}</details></form>`;
   } else if (manifest && summary) {
     const expiry = new Date(manifest.expires_at);
     form = `<section aria-labelledby="summary"><h2 id="summary">${manifest.mode === "full_account" ? "Full account" : "Chosen permissions"}</h2>
@@ -84,8 +103,26 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
 .admin-stack button{min-height:52px;padding:0 30px;border:0;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);font:inherit;font-size:17px;font-weight:700;cursor:pointer}
 .admin-stack button:hover{background:var(--primary-hover)}
 .admin-cancel{margin-top:22px}
+.admin-lead{color:var(--muted)}
+.admin-lead strong{color:var(--ink);overflow-wrap:anywhere}
+.admin-lead+.admin-lead{margin-top:6px}
+.admin-stack fieldset{border:0;min-width:0}
+.admin-stack legend{padding:0;font-family:var(--display);font-weight:700;font-size:19px}
+.admin-stack form label{display:flex;gap:12px;align-items:flex-start;min-height:44px;margin:0;padding:10px 0;border-bottom:1px solid var(--hair)}
+.admin-stack form label input[type=checkbox],.admin-stack form label input[type=radio]{flex:none;width:22px;height:22px;margin:1px 0 0;accent-color:var(--accent)}
+.admin-stack form label small{display:block;color:var(--muted);font-size:14px}
+.admin-stack form label.admin-until{display:block;border:0;font-weight:700}
+.admin-until input{display:block;width:100%;max-width:320px;min-height:44px;margin-top:8px;padding:0 12px;border:1.5px solid var(--border);border-radius:10px;background:var(--card);color:var(--ink);font:inherit;font-weight:400}
+.admin-stack form label span{min-width:0;overflow-wrap:anywhere}
+.admin-state{margin-top:16px;color:var(--muted)}
+.admin-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;margin-top:22px}
+.admin-quiet{display:inline-flex;align-items:center;min-height:44px;padding:0 6px;color:var(--link);font-weight:700}
+.admin-more{margin-top:22px;border-top:1px solid var(--hair);color:var(--muted);font-size:14px}
+.admin-more summary{display:flex;align-items:center;min-height:44px;color:var(--ink);font-size:16px;font-weight:700;cursor:pointer}
+.admin-more p{margin:0 0 10px;overflow-wrap:anywhere}
+.admin-stack :is(input,button,summary,a):focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 </style></head>
     <body><main class="page"><header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Admin access</span></header>
-    <div class="card admin-stack"><h1>Review admin access</h1>${identity}<p>${issuanceState === "open" ? "Confirming your selection connects the client with exactly your chosen permissions, and you can revoke this access in /app." : "Admin connections are not available yet. Reviewing a selection does not connect the client."}</p>${form}<form method="get" action="https://commonswarm.com/app" class="admin-cancel"><button type="submit">Cancel and return to /app</button></form></div></main>
+    <div class="card admin-stack"><h1>${choosing ? `${e(policy?.metadata?.client_name ?? "Unnamed client")} wants admin access` : "Review admin access"}</h1>${identity}${choosing ? "" : `<p>${issuanceLine}</p>`}${form}${choosing ? "" : '<form method="get" action="https://commonswarm.com/app" class="admin-cancel"><button type="submit">Cancel and return to /app</button></form>'}</div></main>
     ${manifest && scriptNonce ? `<script nonce="${e(scriptNonce)}">const expiry=document.getElementById("local-expiry");expiry.textContent=new Date(expiry.dateTime).toLocaleString();document.getElementById("expiry-zone").textContent=" (your local time)";</script>` : ""}</body></html>`;
 }
