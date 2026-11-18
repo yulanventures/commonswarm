@@ -67,12 +67,12 @@ const DIAGNOSTIC = ((): { screens: string[]; sizes: string[] } | null => {
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
-type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
+type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; abort(code?: string): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
 /** One setup step; fields run in this order: media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
- *  (with option), press, scroll, wait, settle.
+ *  (with option), press, scroll, storage, fault, wait, settle.
  *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
  *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
  *  focus: the element takes focus (element.focus()), with no pointer and no hit test: for a control that a hover or a tap
@@ -89,7 +89,9 @@ type Step = { media?: string; waitFor?: string; advance?: { workspace: string; o
   /** Load the page again with one localStorage item already in place, so the app starts with it (a draft saved by an
    *  earlier build, for example). Every page load clears stored composer drafts first, so the item is handed across
    *  the reload in sessionStorage and written after that clearing, by the same init script. */
-  storage?: { key: string; value: string } };
+  storage?: { key: string; value: string };
+  /** From here on the screen's faulted read waits instead of failing (see Screen.fault); it is let through after the screenshot. */
+  fault?: "hold" };
 export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: string; setup?: Step[]; ready?: string; signedOut?: boolean; status?: "pending"; reason?: string; states?: string[];
   /** Captured with JavaScript off (signed out): the page as a browser without scripts renders it, <noscript> included. */
   noJs?: true;
@@ -99,6 +101,13 @@ export interface Screen { id: string; kind: "view" | "dialog" | "route"; path: s
   frame?: string[];
   /** Seed steps (seed.json "steps") that must have been accepted; otherwise the capture is an error. */
   requiresSeed?: string[];
+  /** One read on this page made to fail: `request` is a URL glob naming that read alone. It is armed before the page loads
+   *  and fails every matching request, so the screenshot shows the app's own could-not-load state. A setup step
+   *  {"fault":"hold"} makes later matching requests wait instead, which holds a loading state through the screenshot.
+   *  After the screenshot and witnesses the fault is let go, `recover.click` (when given) is pressed, and `recover.expect`
+   *  must become visible: the proof that the real rows come back. The handler is removed and anything still waiting is
+   *  let through before the page closes, also when the capture fails. Not available on `alone` screens. */
+  fault?: { request: string; recover: { click?: string; expect: string } };
   /** The app's own update poll (a fetch of its page path) is answered with the served page plus one more /_astro/ asset,
    *  as after a deploy; the page's navigation itself is served unchanged. */
   newBuild?: true;
@@ -669,7 +678,22 @@ async function main(): Promise<void> {
         const channelVisible = !app.querySelector<HTMLElement>(".dashboard__channel")?.hidden;
         return !(channelVisible && app.getAttribute("data-channel-view") === "feed-pending");
       }, undefined, { timeout: 30_000 });
-      const openScreen = async (page: any, screen: Screen): Promise<boolean> => {
+      /** Screen.fault for one page. Counts say what the handler did, so a fault that never met its read is a capture error. */
+      const armFault = async (page: any, request: string) => {
+        const counts = { failed: 0, held: 0, passed: 0 };
+        let mode: "fail" | "hold" | "pass" = "fail";
+        const waiting: Array<() => void> = [];
+        const handler = async (route: Route) => {
+          if (mode === "fail") { counts.failed += 1; return route.abort("failed").catch(() => {}); }
+          if (mode === "hold") { counts.held += 1; await new Promise<void>(resolve => waiting.push(resolve)); } else counts.passed += 1;
+          return route.continue().catch(() => {});
+        };
+        await page.route(request, handler);
+        const release = () => { mode = "pass"; for (const go of waiting.splice(0)) go(); };
+        return { counts, hold: () => { mode = "hold"; }, release, remove: async () => { release(); await page.unroute(request, handler).catch(() => {}); } };
+      };
+      type Fault = Awaited<ReturnType<typeof armFault>>;
+      const openScreen = async (page: any, screen: Screen, fault: Fault | null = null): Promise<boolean> => {
         if (screen.newBuild) {
           const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
           await page.route((url: URL) => url.pathname === appPath, async (route: Route) => {
@@ -781,6 +805,7 @@ async function main(): Promise<void> {
             await page.reload({ waitUntil: "domcontentloaded" });
             await appBooted(page);
           }
+          if (step.fault === "hold") { if (!fault) throw new Error("a fault step needs the screen's fault"); fault.hold(); }
           if (step.wait) await page.waitForTimeout(step.wait);
           if (step.settle) await settle(page);
         }
@@ -878,8 +903,13 @@ async function main(): Promise<void> {
           if (unmet.length) return { ...entry, error: `seed precondition unmet: ${unmet.join(", ")}` };
           const page = await (screen.noJs ? noScript : screen.signedOut ? context : screen.viewer === "invitee" ? invitee : signedIn).newPage();
           const realtimeJoins = watchRealtimeJoins(page);
+          let fault: Fault | null = null;
           try {
-            entry.settledBeforeChecks = await openScreen(page, screen);
+            if (screen.fault) {
+              if (screen.alone) throw new Error("fault is not available on an alone screen");
+              fault = await armFault(page, fill(screen.fault.request, seed.ids));
+            }
+            entry.settledBeforeChecks = await openScreen(page, screen, fault);
             // The page's own scripts are off, not the audit's: give CHECKS and the witness their __name shim (a string, so
             // tsx cannot wrap it in __name itself).
             if (screen.noJs) await page.evaluate("globalThis.__name = globalThis.__name || ((f) => f)");
@@ -923,11 +953,22 @@ async function main(): Promise<void> {
               entry.activation = [];
               for (const spec of activationSpecs) (entry.activation as unknown[]).push(await runActivationWitness(page, spec));
             }
+            if (fault && screen.fault) {
+              const holds = (screen.setup ?? []).some(step => step.fault === "hold");
+              if (fault.counts.failed === 0) throw new Error("the fault never met its read");
+              if (holds && fault.counts.held === 0) throw new Error("the held read was never asked for");
+              // Let the read through, then prove the real rows come back: by Retry after a failure, by themselves after a hold.
+              fault.release();
+              if (screen.fault.recover.click) await page.click(fill(screen.fault.recover.click, seed.ids), { timeout: 8_000 });
+              await page.waitForSelector(fill(screen.fault.recover.expect, seed.ids), { state: "visible", timeout: 30_000 });
+              entry.fault = { ...fault.counts, recovered: true };
+            }
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
+            if (fault) entry.fault = { ...fault.counts, recovered: false };
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
-          } finally { await page.close(); }
+          } finally { await fault?.remove(); await page.close(); }
           return entry;
         });
         report.push(...batch);

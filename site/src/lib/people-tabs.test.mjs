@@ -34,3 +34,14 @@ test("a person lives on People and an agent on Agents; search names what it sear
   assert.equal(peopleSearchResult("agents", 2), "2 agents"); assert.equal(peopleSearchResult("people", 1), "1 person");
   assert.equal(peopleSearchResult("invites", 0), "0 invites. No matches. Try another name.");
 });
+
+test("a tab shows no count until one is known", () => {
+  const empty = { people: [], agents: [], invites: [], sample: false };
+  const counts = (model) => peopleTabs(model, "agents").map((tab) => tab.count);
+  assert.deepEqual(counts({ ...empty, read: "pending" }), [null, null, null]);
+  assert.deepEqual(counts({ ...empty, read: "failed" }), [null, null, 0], "invites have their own read");
+  assert.deepEqual(counts({ ...empty, pendingFailed: true }), [0, 0, null]);
+  assert.deepEqual(counts({ ...empty, agents: [{}], read: "failed" }), [null, 1, 0], "what did arrive is counted");
+  assert.deepEqual(counts(empty), [0, 0, 0]);
+  assert.equal(peopleTabs({ ...empty, read: "pending" }, "agents")[1].name, "Agents");
+});

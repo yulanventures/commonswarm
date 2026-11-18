@@ -27,8 +27,8 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
   for (const info of peopleTabs(model, tab)) {
     const choice = make("button", "", info.label); choice.type = "button"; choice.dataset.pdFocus = `tab-${info.id}`; choice.dataset.peopleTab = info.id;
     choice.setAttribute("aria-pressed", String(info.selected)); choice.setAttribute("aria-label", info.name);
-    const count = make("span", "pd-filter-count", String(info.count)); count.dataset.tabCount = info.id;
-    choice.append(doc.createTextNode(" "), count);
+    if (info.count !== null) { const count = make("span", "pd-filter-count", String(info.count)); count.dataset.tabCount = info.id;
+      choice.append(doc.createTextNode(" "), count); }
     choice.addEventListener("click", () => { state.tab = info.id; render(); }); tabs.append(choice);
   }
   head.append(tabs);

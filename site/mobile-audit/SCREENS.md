@@ -285,7 +285,7 @@ The starter IDs are preserved. Channel paths use confirmed IDs, not slugs; DM is
 | V05 | `app.chat.group` — candidate; other states pending |
 | V06 | `app.thread` — pending |
 | V07 | `app.composer` — pending |
-| V08 | `app.people` — candidate; other states pending |
+| V08 | `app.people` — candidate. Tab states (2026-11-18), each the app's own state with one read faulted by the runner (`fault`: armed before the page loads, let go after the screenshot, removed before the page closes): `app.people.agents-error`, `app.people.people-error` and `app.people.invites-error` fail that tab's read alone (`agent_principals`, `member_profiles`, `pending_invitations`) and show its could-not-load line with Retry; after the screenshot the read is let through, Retry is pressed and the seeded rows must return. `app.people.agents-loading` starts from the failed state, holds the read, presses Retry and shows Loading… through the screenshot; the rows must return once the read is let through. `app.people.agents-empty` and `app.people.invites-empty` are `{emptyWorkspace}` with no fault: a successful empty answer. Nothing is submitted. |
 | V09 | `app.agent` — candidate; `app.agent.queue` and `app.agent.queue.not-yet` candidates (Up next and Not yet each scrolled into frame): seeded `{agent}` with four Up next and two Not yet to-dos (`seed_agent_queue`: a hold with a note and one after another to-do); other states pending |
 | V10 | `app.todos` — dense candidate; `app.todos.empty` candidate with required seed grant |
 | V11 | `app.todo-detail` — candidate; `todo_create 0` required |

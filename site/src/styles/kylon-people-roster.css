@@ -66,14 +66,14 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite { di
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite .pd-agent-copy { flex: 1 1 140px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite strong { font: 600 14px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-filter-count { color: var(--k-shell-muted); font-weight: 500; font-variant-numeric: tabular-nums; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invited :is([data-invites-empty], .pd-invite-load) { margin: 0; padding: 10px 6px; font-size: 13px; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-load button {
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-tab-state { margin: 0; padding: 10px 6px; font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-tab-state[data-tab-state="error"] { color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-tab-state button {
   min-block-size: 44px; min-inline-size: 44px; padding: 6px; border: 0; border-radius: 6px; background: transparent;
   color: var(--k-shell-ink); font: 600 13px/1.5 var(--k-shell-font); text-decoration: underline;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-group-title { margin: 12px 6px 2px; color: var(--k-shell-muted); font: 600 12px/1.5 var(--k-shell-font); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-member-card:first-child > .pd-group-title { margin-block-start: 0; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-tab-empty { margin: 0; padding: 10px 6px; font-size: 13px; }
 /* One line per agent: the name is cut with an ellipsis (its title and the profile carry the whole of it); the status is a word. */
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-line { flex-wrap: nowrap; min-inline-size: 0; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-name-line > strong,

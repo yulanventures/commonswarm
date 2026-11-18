@@ -366,6 +366,30 @@ test("People Allow approves in place with the Lists & docs defaults, and only fa
   }
 });
 
+test("every tab says loading, empty or could not load with Retry in the same place", async () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom(); let reloads = 0, inviteReloads = 0;
+  await f.load();
+  const paint = (tab: string, over: Record<string, unknown>) => renderPeopleDialog(dom.root as any, dom.detail as any, { ...f.model(), ...over },
+    { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab } as any,
+    { render: () => {}, action: () => {}, saveModel: async () => {}, confirm: () => {}, reload: async () => { reloads += 1; }, reloadInvites: async () => { inviteReloads += 1; } },
+    { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } });
+  const note = () => dom.root.descendants().find(node => (node as any).dataset?.tabState !== undefined) as any;
+  const retry = () => dom.root.descendants().find(node => node.tag === "button" && (node as any).dataset?.tabRetry !== undefined) as any;
+  paint("agents", {}); assert.equal(note(), undefined, "a tab with rows has no note");
+  paint("agents", { agents: [], read: "pending" });
+  assert.equal(note()!.textContent, "Loading…"); assert.equal(note()!.attributes.role, "status"); assert.equal(retry(), undefined);
+  paint("agents", { agents: [] }); assert.equal(note()!.textContent, "No agents yet.");
+  paint("invites", {}); assert.equal(note()!.textContent, "No invites waiting.");
+  paint("agents", { agents: [], read: "failed" });
+  assert.equal(note()!.attributes.role, "alert"); assert.ok(note()!.textContent.startsWith("Agents could not load."));
+  assert.equal(retry()!.dataset.tabRetry, "agents"); await retry()!.click(); assert.deepEqual([reloads, inviteReloads], [1, 0]);
+  paint("people", { read: "failed" });
+  assert.ok(note()!.textContent.startsWith("This list may be out of date."), "rows that did arrive stay, under a line that says so");
+  paint("invites", { pendingFailed: true });
+  assert.ok(note()!.textContent.startsWith("Invites could not load.")); await retry()!.click(); assert.deepEqual([reloads, inviteReloads], [1, 1]);
+  paint("agents", { agents: [], read: "failed", sample: true }); assert.notEqual(note()?.dataset.tabState, "error", "a sample never reports a failed read");
+});
+
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
   const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [];
   const principal = "00000000-0000-4000-8000-000000000001";
@@ -396,7 +420,7 @@ function dialogConnectionsFixture() {
     session: { user: { id: "person" } }, activeWorkspaceId: "workspace", sampleMode: false,
     members: [{ userId: "person", name: "Tom", role: "owner" }],
     agents: [{ principalId: "principal", name: "Muse", ownerUserId: "person", model: null, transport: "local" }],
-    accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
+    accessStatuses: [], pendingAgentsLoadFailed: false, homePeopleReadState: "ready", people: new Map([["person", "Tom"]]),
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
     peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
     workspaces: [{id:"workspace",name:"Home"}], homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded,
@@ -714,7 +738,7 @@ function attachAgentReceiptFixture(f: ReturnType<typeof creationFixture>) {
     app: { ...f.ctx.app, addEventListener: (_name: string, callback: any) => { handler = callback; } },
     one: (selector: string) => selector === "agent-connect" ? {} : originalOne(selector),
     pendingWorkspaceId: "", pendingWorkspaceCreate: false, livePromptPrincipalId: "principal",
-    accessStatuses: [], pendingAgents: [], pendingAgentsLoadFailed: false,
+    accessStatuses: [], pendingAgents: [], pendingAgentsLoadFailed: false, homePeopleReadState: "ready",
     syncConnectWorkspace: () => {}, returnToChannel: () => {},
     // No Add an agent panel key is waiting here; that path has its own test in home-integration.
     finishPanelKeyMint: () => false,
