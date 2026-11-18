@@ -666,11 +666,15 @@
         "click": ".hm-ws-header [data-workspace-settings-item]"
       },
       {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary",
+        "click": "dialog[data-workspace-details-popover][open] [data-workspace-more] > summary"
+      },
+      {
         "waitFor": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]",
-        "scroll": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]"
+        "scroll": "dialog[data-workspace-details-popover][open] [data-workspace-close-submit]"
       }
     ],
-    "ready": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]",
+    "ready": "dialog[data-workspace-details-popover][open] [data-workspace-more][open] [data-copy-workspace-id]",
     "states": [
       "dense"
     ],

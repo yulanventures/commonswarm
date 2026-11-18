@@ -54,16 +54,26 @@ function fixture(options = {}) {
   return [...nodes(root)];
 }
 
-test("the workspace ID sits after the settings and before Close workspace, with its copy button", () => {
-  const order = (options) => fixture(options)[0].children.map((node) => node.className || Object.keys(node.dataset)[0]);
-  // Everything a person may change comes first; the ID is last before the action that cannot be undone.
-  assert.deepEqual(order({ onCleanup: () => {}, moveDestinations: [{ id: "dest", name: "Yulan" }], onMove: async () => {} }), [
-    "dashboard__workspace-settings-title-row", "dashboard__workspace-settings-counts", "dashboard__workspace-cleanup",
-    "dashboard__workspace-move", "dashboard__workspace-identity", "dashboard__workspace-danger",
-  ]);
-  // With nothing else to show, it still follows the name and counts and precedes Close workspace.
-  assert.deepEqual(order({}).slice(-2), ["dashboard__workspace-identity", "dashboard__workspace-danger"]);
-  const identity = fixture({}).find((node) => node.className === "dashboard__workspace-identity");
+test("the name, counts and channel rule stay in view; everything else is under More, with Close workspace last", () => {
+  const key = (node) => node.className || Object.keys(node.dataset)[0] || node.tag;
+  const top = (options) => fixture(options)[0].children.map(key);
+  const all = { onCleanup: () => {}, moveDestinations: [{ id: "dest", name: "Yulan" }], onMove: async () => {},
+    channelPolicy: { value: "members", onChange: async () => "members" } };
+  // In view: the name, the counts and who may create channels. Then one More.
+  assert.deepEqual(top(all).slice(0, 2), ["dashboard__workspace-settings-title-row", "dashboard__workspace-settings-counts"]);
+  assert.equal(top(all).length, 4, "name, counts, the channel rule and More");
+  assert.equal(top(all).at(-1), "dashboard__workspace-more");
+  assert.deepEqual(top({}), ["dashboard__workspace-settings-title-row", "dashboard__workspace-settings-counts", "dashboard__workspace-more"]);
+  // Under More, in order: clean-up, move, the workspace ID, and Close workspace last with its typed confirmation.
+  const more = fixture(all).find((node) => node.className === "dashboard__workspace-more");
+  assert.equal(more.tag, "details");
+  assert.notEqual(more.open, true, "More starts closed");
+  assert.deepEqual(more.children.map(key), ["summary", "dashboard__workspace-cleanup", "dashboard__workspace-move",
+    "dashboard__workspace-identity", "dashboard__workspace-danger"]);
+  assert.equal(more.children[0].textContent, "More");
+  const danger = more.children.at(-1);
+  assert.ok(danger.children.some((node) => "workspaceCloseForm" in node.dataset), "the typed confirmation sits with Close workspace");
+  const identity = more.children.find((node) => node.className === "dashboard__workspace-identity");
   assert.deepEqual(identity.children.map((node) => node.textContent ?? ""), ["Workspace ID", "workspace", "Copy workspace ID", ""]);
   assert.ok("copyWorkspaceId" in identity.children[2].dataset);
 });
