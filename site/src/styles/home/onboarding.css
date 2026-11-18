@@ -658,6 +658,7 @@
 .hm-ahp__crumb:focus-visible,
 .hm-ahp__link:focus-visible,
 .hm-ahp__button:focus-visible,
+.hm-ahp__fold > summary:focus-visible,
 .hm-ahp__how > summary:focus-visible,
 .hm-ahp__testing > summary:focus-visible {
   outline: none;
@@ -812,6 +813,33 @@
 @keyframes hm-ahp-pulse {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
+}
+
+/* "Already yours" as a fold: its heading is the control, with a marker that turns when it is open. */
+.hm-ahp__fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-block-size: 44px;
+  list-style: none;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.hm-ahp__fold > summary::-webkit-details-marker { display: none; }
+.hm-ahp__fold > summary::after {
+  content: "";
+  inline-size: 7px;
+  block-size: 7px;
+  flex: none;
+  border-inline-end: 1.8px solid currentColor;
+  border-block-end: 1.8px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--dur-2) var(--ease-standard);
+}
+.hm-ahp__fold[open] > summary::after { transform: rotate(45deg); }
+.hm-ahp__fold > summary > .hm-ahp__step-title { margin: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .hm-ahp__fold > summary::after { transition: none; }
 }
 
 .hm-ahp__how[hidden] { display: none; }

@@ -123,7 +123,7 @@ const PICKER_SCRIPT = (() => {
 
 const TAKEN = "Another agent in this workspace already uses that name, ignoring case. Choose another.";
 
-function picker() {
+function picker(extra?: (el: any) => any[]) {
   const dom = fakeDom();
   let defined: any;
   const context = createContext({
@@ -149,6 +149,7 @@ function picker() {
     el("div", { ahpView: "form" }),
     el("section", { ahpJoined: "" }, [title, el("div", { ahpRenameSlot: "" }), el("button", { ahpDone: "" }), el("button", { ahpApprove: "" }),
       el("button", { ahpAnother: "" }), renameButton, el("p", { ahpApproveStatus: "" })]),
+    ...(extra?.(el) ?? []),
   );
   element.connectedCallback();
   const sent: Array<[string, string]> = [];
@@ -263,6 +264,61 @@ test("joined card: without a rename handler there is no Rename, and a late answe
 /* ------------------------------------------------------------------------------------------------ */
 
 const status = { kind: "active", label: "Active", attention: false, sentence: "", fix: { allowed: false, action: null } } as unknown as PeopleDialogAgent["status"];
+test("Add an agent: picking an app folds Already yours; entry and reopening leave the app and the name alone", () => {
+  let scrolls = 0;
+  let fold: any, claude: any, muse: any, name: any;
+  const p = picker(el => {
+    const chip = (id: string) => {
+      const button = el("button", { ahpHost: id, ahpRoute: "connector" }, [el("span", { ahpHostName: "" })]);
+      button.scrollIntoView = () => { scrolls += 1; };
+      return button;
+    };
+    fold = el("details", { ahpYoursFold: "" }); fold.open = false;
+    claude = chip("claude"); muse = chip("muse"); name = el("input", { ahpName: "" });
+    return [fold, claude, muse, name, el("div", { ahpCompose: "" })];
+  });
+  // The stand-in element has no event target of its own; the panel announces each pick to its page.
+  const announced: string[] = [];
+  p.element.dispatchEvent = (sent: { type: string; detail: { host: string } }) => { announced.push(sent.detail.host); return true; };
+  const pressed = () => [claude, muse].map(chip => chip.attributes["aria-pressed"]);
+  // Entry opens the list, also when an app is chosen for the person (the last one used, or the one a link names).
+  p.element.reset("claude");
+  assert.equal(fold.open, true, "on entry the person's own agents are in view");
+  assert.deepEqual(pressed(), ["true", "false"]);
+  assert.equal(scrolls, 0);
+  // A name typed before picking.
+  name.value = "RidgeHQ Lead"; name.dispatch(event("input"));
+  // The person presses an app: the list folds, the pressed app stays on screen and keeps focus, the name stays.
+  muse.focus(); muse.dispatch(event("click"));
+  assert.equal(fold.open, false, "picking an app folds Already yours");
+  assert.deepEqual(pressed(), ["false", "true"]);
+  assert.equal(scrolls, 1, "the pressed app is kept in view after the list above it folds");
+  assert.equal(p.dom.doc.activeElement, muse, "focus stays on the app that was pressed");
+  assert.equal(name.value, "RidgeHQ Lead");
+  // Pressing another app while it is folded does not scroll again.
+  claude.dispatch(event("click"));
+  assert.deepEqual([fold.open, scrolls, pressed()], [false, 1, ["true", "false"]]);
+  // Reopening is the person's own press on the heading; it changes nothing else.
+  fold.open = true;
+  assert.deepEqual(pressed(), ["true", "false"]);
+  assert.equal(name.value, "RidgeHQ Lead");
+  assert.deepEqual(announced, ["claude", "muse", "claude"], "each pick is still announced once");
+  // Coming back to the form opens it again.
+  fold.open = false;
+  p.element.reset();
+  assert.equal(fold.open, true);
+});
+
+test("Add an agent: Already yours is a fold that starts open, and only a press on an app closes it", () => {
+  const markup = PICKER.slice(0, PICKER.indexOf("<script>"));
+  assert.match(markup, /<section class="hm-ahp__section hm-ahp__yours" data-ahp-yours aria-labelledby="ahp-yours-title" hidden>\s*(?:\{\/\*[\s\S]*?\*\/\}\s*)?<details class="hm-ahp__fold" data-ahp-yours-fold open>\s*<summary><h2 class="hm-ahp__step-title" id="ahp-yours-title">Already yours<\/h2><\/summary>\s*<div data-ahp-existing-list><\/div>\s*<\/details>/);
+  const script = PICKER.match(/<script>([\s\S]*?)<\/script>/)![1];
+  // showHost itself never folds: it also runs on entry. Only the app buttons' own press does.
+  const showHost = script.slice(script.indexOf("    showHost(id: string): void {"), script.indexOf("    showHost(id: string): void {") + 700);
+  assert.doesNotMatch(showHost.slice(0, showHost.indexOf("\n    }\n")), /foldYours|yours-fold/);
+  assert.match(script, /chip\.addEventListener\("click", \(\) => \{\s*this\.showHost\(chip\.dataset\.ahpHost \?\? ""\);\s*this\.#foldYours\(chip\);/);
+});
+
 const agent = (id: string, overrides: Partial<PeopleDialogAgent> = {}): PeopleDialogAgent => ({
   id, name: id, rawName: id, ownerId: "alex", ownerName: "Alex Rivera", model: null, app: null, hosted: false, status, receive: null,
   lastActive: "Not reported", technical: [], updateAvailable: false, access: null, accessReadState: "succeeded", key: null, liveKey: false,
