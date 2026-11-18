@@ -96,7 +96,8 @@ test("New workspace and role controls wrap, support native forms, and keep confi
           let cancelled = false;
           confirm.addEventListener('cancel', event => { cancelled = event.defaultPrevented; });
           confirm.requestClose();
-          const escapeReturns = !detail.querySelector('[data-role-confirm]') && outer.open && document.activeElement === detail.querySelector('[data-role-select]') && saves.length === 0;
+          // Where focus lands after Escape is checked in the real app (the capture suite's role-confirm keyboard witness).
+          const escapeSavesNothing = !detail.querySelector('[data-role-confirm]') && outer.open && saves.length === 0;
           const chooseRole = (id,role) => { state.selected={type:'person',id}; callbacks.render(); const el=detail.querySelector('[data-role-select]'); el.value=role; el.dispatchEvent(new Event('change')); };
           chooseRole('nikki','admin'); detail.querySelector('[data-change-role]').click();
           chooseRole('sam','admin'); resolveSave(); await Promise.resolve(); await Promise.resolve();
@@ -115,7 +116,7 @@ test("New workspace and role controls wrap, support native forms, and keep confi
           state.selected = {type:'person',id:'nikki'}; callbacks.render();
           const reopenedError = detail.querySelector('[data-role-error="nikki"]');
           const reopenKeepsAlert = reopenedError.textContent === 'Nikki is no longer a member. Reload to check.' && reopenedError.getAttribute('role') === 'alert' && !reopenedError.hidden && !detail.querySelector('[data-role-receipt]');
-          document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify({width:innerWidth,initialDisabled,noDefault,initialWarningEmpty,permanentWarning,sharedWarningEmpty,nameFocus,radioFocus,enabled,checkedMark,formTargets,previewPlain,formOverflow,creations,changes,roleFocus,roleTargets,alertdialog,safeFocus,confirmTargets,cancelled,escapeReturns,preservedOnSuccess,preservedOnRefusal,unseenRefusal,codedRefusal,backKeepsAlert,reopenKeepsAlert}))));
+          document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify({width:innerWidth,initialDisabled,noDefault,initialWarningEmpty,permanentWarning,sharedWarningEmpty,nameFocus,radioFocus,enabled,checkedMark,formTargets,previewPlain,formOverflow,creations,changes,roleFocus,roleTargets,alertdialog,safeFocus,confirmTargets,cancelled,escapeSavesNothing,preservedOnSuccess,preservedOnRefusal,unseenRefusal,codedRefusal,backKeepsAlert,reopenKeepsAlert}))));
         })().catch(error => { document.documentElement.dataset.fixtureError = String(error); });
         </script></body></html>`);
       const chrome = await findChrome();
@@ -127,7 +128,7 @@ test("New workspace and role controls wrap, support native forms, and keep confi
         const measured = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
 
         // preservedOnRefusal is measured but not asserted: in the one layout a refused change for one person replaces another person's unsaved choice. Tracked separately.
-        for (const key of ["initialDisabled", "noDefault", "enabled", "previewPlain", "cancelled", "escapeReturns", "preservedOnSuccess", "backKeepsAlert"]) assert.equal(measured[key], true, `${key}`);
+        for (const key of ["initialDisabled", "noDefault", "enabled", "previewPlain", "cancelled", "escapeSavesNothing", "preservedOnSuccess", "backKeepsAlert"]) assert.equal(measured[key], true, `${key}`);
         const hostile = '<img src=x onerror="document.title=1">';
         assert.deepEqual(measured.changes, [hostile]); assert.deepEqual(measured.creations, [{name:hostile,purpose:"shared"}]);
 
