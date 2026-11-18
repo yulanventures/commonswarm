@@ -121,3 +121,11 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant .pd-muted { font-size: 12px; overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > button { min-block-size: 44px; min-inline-size: 44px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; font: 500 13px/1.5 var(--k-shell-font); cursor: pointer; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > .pd-error { grid-column: 2 / -1; margin: 0; }
+/* Four tabs, each on one line with its count. On a narrow phone the type and the gap tighten first; a tab moves to a
+   second line (it never pushes the dialog wider) only when the counts are longer still. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters { flex-wrap: wrap; row-gap: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button { white-space: nowrap; }
+@media (width <= 26rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters.pd-page-filters { column-gap: 6px; justify-content: space-between; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters.pd-page-filters button { font-size: 14px; }
+}
