@@ -3599,5 +3599,36 @@
       "dialog[data-channel-dialog][open] [data-channel-archive-submit]",
       "dialog[data-channel-dialog][open] [data-channel-archive-cancel]"
     ]
+  },
+  {
+    "id": "dialog.all-channels",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "waitFor": "[data-home-all-channels]:visible"
+      },
+      {
+        "click": "[data-home-all-channels]:visible"
+      },
+      {
+        "waitFor": "dialog[data-channel-directory][open] .cm-directory-row a.cm-directory-copy"
+      }
+    ],
+    "ready": "dialog[data-channel-directory][open] .cm-directory-row a.cm-directory-copy",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ],
+    "frame": [
+      "dialog[data-channel-directory][open] .cm-directory-row:first-child a.cm-directory-copy"
+    ]
   }
 ]

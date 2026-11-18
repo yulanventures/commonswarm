@@ -103,7 +103,15 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-director
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 16px;
   padding: 12px 0; border-block-end: 1px solid var(--k-shell-line);
 }
-live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-copy { min-inline-size: 0; }
+/* The channel's name and description are the link that opens it: one full-width target per row, 44px at least. Its
+   padding is pulled back out, so the text keeps the list's edge and the hover fill reaches past it. */
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-copy {
+  display: block; box-sizing: border-box; min-inline-size: 0; min-block-size: 44px; align-content: center;
+  margin-inline: -8px; padding: 4px 8px; border-radius: 6px; color: var(--k-shell-ink); text-decoration: none; cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-copy:hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-copy:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-name { display: block; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-name { font-weight: 600; overflow-wrap: anywhere; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-description {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
@@ -113,13 +121,13 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-director
   display: inline-block; inline-size: 6px; block-size: 6px; margin-inline-start: 8px; border-radius: 50%; background: var(--k-shell-accent); vertical-align: middle;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-actions { display: flex; align-items: center; gap: 8px; }
-live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-open, .cm-directory-unarchive, .cm-directory-retry, .dashboard__button) {
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-unarchive, .cm-directory-retry, .dashboard__button) {
   display: inline-flex; align-items: center; justify-content: center; min-inline-size: 44px; min-block-size: 44px;
   padding: 8px 12px; border: 1px solid var(--k-shell-line); border-radius: var(--k-shell-radius);
   color: var(--k-shell-ink); background: transparent; font: 500 13px/20px var(--k-shell-font);
   text-decoration: none; white-space: normal; overflow-wrap: anywhere; box-shadow: none; cursor: pointer;
 }
-live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-open, .cm-directory-unarchive, .cm-directory-retry):hover { background: var(--k-shell-hover); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] :is(.cm-directory-unarchive, .cm-directory-retry):hover { background: var(--k-shell-hover); }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-unarchive:disabled { cursor: wait; opacity: .7; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-error { grid-column: 1 / -1; margin: 0; color: var(--danger, var(--k-shell-ink)); }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-directory] .cm-directory-footer { display: flex; justify-content: flex-end; flex: none; }

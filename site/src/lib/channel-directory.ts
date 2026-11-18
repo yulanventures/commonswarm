@@ -38,24 +38,31 @@ export function renderChannelDirectory(
     for (const row of group) {
       const item = node("li", "cm-directory-row");
       item.dataset.channelDirectoryRow = row.id;
-      const copy = node("div", "cm-directory-copy");
+      /* The channel's name is how it is opened: the name and its description are one link. There is no separate
+         "Open" beside every row. The link is named by the channel and described by its description. */
+      const copy = node("a", "cm-directory-copy");
+      copy.href = row.href;
+      copy.dataset.channelDirectoryAction = `open:${row.id}`;
+      copy.addEventListener("click", event => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); actions.open(row.id);
+      });
       const name = node("span", "cm-directory-name", `#${row.slug}`);
+      name.id = `cm-directory-name-${row.id}`;
+      copy.setAttribute("aria-labelledby", name.id);
       copy.append(name);
       if (!archived && row.unread === true) {
         const unread = node("span", "cm-directory-unread");
         unread.setAttribute("role", "img"); unread.setAttribute("aria-label", "Unread");
         name.append(unread);
       }
-      if (row.description) copy.append(node("p", "cm-directory-description", row.description));
+      if (row.description) {
+        const description = node("span", "cm-directory-description", row.description);
+        description.id = `cm-directory-description-${row.id}`;
+        copy.setAttribute("aria-describedby", description.id);
+        copy.append(description);
+      }
       const controls = node("div", "cm-directory-actions");
-      const open = node("a", "cm-directory-open", "Open");
-      open.href = row.href; open.setAttribute("aria-label", `Open #${row.slug}`);
-      open.dataset.channelDirectoryAction = `open:${row.id}`;
-      open.addEventListener("click", event => {
-        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-        event.preventDefault(); actions.open(row.id);
-      });
-      controls.append(open);
       if (archived && row.manageable) {
         const unarchive = node("button", "cm-directory-unarchive", "Unarchive");
         unarchive.type = "button"; unarchive.disabled = pending.has(row.id);
@@ -65,7 +72,8 @@ export function renderChannelDirectory(
         unarchive.addEventListener("click", () => actions.unarchive(row.id, unarchive));
         controls.append(unarchive);
       }
-      item.append(copy, controls);
+      item.append(copy);
+      if (controls.childElementCount) item.append(controls);
       const error = errors.get(row.id);
       if (error) { const message = node("p", "cm-directory-error", error); message.setAttribute("role", "alert"); item.append(message); }
       list.append(item);
