@@ -1344,6 +1344,7 @@ import "../../styles/kylon-command-palette.css";
     revokeAgentToken,
     resumeRenewalGrant,
     revokeWorkspaceInvitation,
+    revokeAgentJoinCredential,
     signInWithEmail,
     signInWithPassword,
     signInWithProvider,
@@ -1520,6 +1521,7 @@ import "../../styles/kylon-command-palette.css";
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
+  import { cancelPeopleInvite, peopleInvites, peopleInviteReceipt } from "../../lib/people-invites";
   import {
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
@@ -7384,14 +7386,10 @@ import "../../styles/kylon-command-palette.css";
               !["removed", "suspended"].includes(status.kind) && connectionPolicyState(familyPolicy, true, now) !== "ended"), own, mayManage,
             receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
         }),
-        invites: currentPendingAccessRows().map((row) => {
-          const key = accessStatuses.find((entry) => entry.tokenId === row.id);
-          const pending = row.kind === "pending" ? pendingAgents.find((entry) => (entry.principalId ?? entry.joinCredentialId ?? "") === row.id) : undefined;
-          return { id: row.id, kind: row.kind, name: pending?.kind === "join" ? "Agent connect code" : row.title,
-            detail: pending ? "Waiting for an agent to join" + (pending.kind === "join" && pending.seatsUsed !== null && pending.seatCap !== null ? ` · ${pending.seatsUsed} of ${pending.seatCap} places used` : "")
-              : row.kind === "invite" ? row.state.replace(/^Teammate invite/, "Invite sent") : row.state,
-            mayCancel: !sampleMode && (row.kind === "invite" ? elevated : row.kind === "agent" && !!me && (elevated || key?.ownerUserId === me.userId)) };
-        }),
+        invites: peopleInvites({ workspaceId: activeWorkspaceId, invites: pendingInvites, access: accessStatuses,
+          pending: sampleMode ? undefined : pendingAgents,
+          viewer: me && !sampleMode ? { userId: me.userId, elevated } : null,
+          nameOf: (userId) => people.get(userId) ?? null, relative: (iso) => formatTime(iso).relative, now }),
       };
     };
 
@@ -7476,6 +7474,7 @@ import "../../styles/kylon-command-palette.css";
             // The accepted command is the receipt; a failed follow-up read cannot undo it.
           }
         },
+        reloadInvites: reloadPeopleInvites,
         confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
           if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
           const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
@@ -7534,6 +7533,23 @@ import "../../styles/kylon-command-palette.css";
         if (mayFocus()) target?.focus({ preventScroll: true });
         window.requestAnimationFrame(() => target?.isConnected && mayFocus() && target.focus({ preventScroll: true })); }
       const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
+    };
+    /** Retry on the Invited section: the three reads again, each kept or replaced by its own result. */
+    const reloadPeopleInvites = async (): Promise<void> => {
+      const workspaceId = activeWorkspaceId, version = requestVersion, userId = session?.user.id;
+      if (!workspaceId || !userId || sampleMode) return;
+      const [invitesSettled, statusesSettled, nextPending] = await Promise.all([
+        pendingMemberInvites(workspaceId).then((rows) => ({ rows }), () => null),
+        agentAccessStatuses(workspaceId).then((rows) => ({ rows }), () => null),
+        loadPendingAccess(() => pendingAgentAccess(workspaceId)),
+      ]);
+      if (version !== requestVersion || workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+      if (invitesSettled) pendingInvites = invitesSettled.rows;
+      if (statusesSettled) accessStatuses = statusesSettled.rows;
+      if (!nextPending.failed) pendingAgents = nextPending.rows;
+      pendingAgentsLoadFailed = nextPending.failed || !invitesSettled || !statusesSettled;
+      renderPendingAccess();
+      if (peopleDialogOpen()) (one<HTMLElement>("[data-invites-retry]") ?? one<HTMLElement>("#dashboard-roster-pending-title"))?.focus({ preventScroll: true });
     };
     const peopleDialogFocusTarget = (action: PeopleDialogAction | undefined, id: string): HTMLElement | null => {
       if (action === "cancel-invite") {
@@ -7616,10 +7632,18 @@ import "../../styles/kylon-command-palette.css";
       if (action === "remove-person") {
         await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`;
       }
-      if (action === "cancel-invite") { const row = currentPendingAccessRows().find((entry) => entry.id === id); if (!row) return;
-        if (row.kind === "invite") await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
-        else await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
-        receipt = row.kind === "invite" ? "Invitation canceled." : "Unused key canceled."; }
+      if (action === "cancel-invite") {
+        // The row decides the command: its own id, in the workspace it was read from. The server decides the rest.
+        const invite = peopleDialogModel().invites.find((entry) => entry.id === id);
+        if (!invite || invite.workspaceId !== workspaceId) throw new Error("This invite is no longer here. Go back and check the list.");
+        const value = session;
+        await cancelPeopleInvite(invite, {
+          person: (invitationId) => revokeWorkspaceInvitation(value, uuid(), workspaceId, invitationId),
+          key: (tokenId) => revokeAgentToken(value, uuid(), workspaceId, tokenId),
+          code: (joinCredentialId) => revokeAgentJoinCredential(value, uuid(), workspaceId, joinCredentialId),
+        });
+        if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+        receipt = peopleInviteReceipt(invite); }
       if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
       await reloadPeopleDialog(workspaceId, id, receipt, action);
     };

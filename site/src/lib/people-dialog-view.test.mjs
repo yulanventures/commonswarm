@@ -7,7 +7,7 @@ import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, people
   peopleRoleBeginSave, peopleRoleFinishSave, peopleFirstName, PEOPLE_ROLE_REFUSAL_CODES } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
 const agent = (id, ownerId, overrides = {}) => ({ id, ownerId, name: id, app: null, model: null, ownerName: ownerId === "tom" ? "Tom Langridge" : "Mei Langridge", own: false, mayManage: false, liveKey: false, access: null, accessReadState: "succeeded", status: { kind: "active", attention: false, fix: { allowed: false } }, ...overrides });
-const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "invite", name: "friend@example.test", detail: "Invite sent · expires in 6 days", mayCancel: false }], sample: false });
+const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "person", name: "friend@example.test", detail: "Invite sent · expires in 6 days", mayCancel: false }], sample: false });
 
 test("counts separate people, agents and attention without asserting health", () => {
   const data = model(); data.agents[2].status.attention = true;
@@ -81,8 +81,8 @@ test("confirm consequences distinguish permanent identity removal, key timing an
   assert.equal(peopleConfirmationCopy("turn-off-key", { name: "Muse" }).stops[0], "Muse stops when its current access ends.");
   assert.equal(peopleConfirmationCopy("withdraw", { name: "Muse" }).stays[0], "Existing lists, docs and history stay.");
   assert.equal(peopleConfirmationCopy("remove-person", { name: "Mei" }).stays[0], "History stays. Their other spaces are unaffected.");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "invite" }).title, "Cancel this invitation?");
-  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "agent" }).title, "Cancel this unused key?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Mei", kind: "person" }).title, "Cancel this invitation?");
+  assert.equal(peopleConfirmationCopy("cancel-invite", { name: "Muse", kind: "key" }).title, "Cancel this key?");
 });
 
 // Role change (UI-SPEC 3.6). Expected strings are the spec's literals, not read back from the code under test.

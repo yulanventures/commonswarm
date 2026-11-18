@@ -1310,6 +1310,31 @@ export async function revokeAgentToken(
   }
 }
 
+/** Cancels one agent connect code. Agents that already joined with it keep their places. */
+export async function revokeAgentJoinCredential(
+  session: Session,
+  commandId: string,
+  workspaceId: string,
+  joinCredentialId: string,
+): Promise<void> {
+  const { status, body } = await postCommand(
+    session,
+    commandId,
+    { kind: "revoke_agent_join_credential", join_credential_id: joinCredentialId },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "CommonSwarm lost the cancellation result. Retry the list before trying again.",
+  );
+  // Someone else cancelled it first: the code is gone, which is what was asked for.
+  if (status === 409 && body.error === "already_revoked") return;
+  if (status !== 200 || body.status !== "accepted") {
+    throw new Error(
+      status === 403
+        ? "You cannot cancel this connect code. Nothing was changed."
+        : `Connect code cancellation was refused: ${String(body.reason ?? body.error ?? status)}.`,
+    );
+  }
+}
+
 /** Resume is an existing human-interactive command; server facts are re-read after it. */
 export async function resumeRenewalGrant(
   session: Session, commandId: string, workspaceId: string, renewalGrantId: string,

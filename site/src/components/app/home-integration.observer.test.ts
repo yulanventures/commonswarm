@@ -1850,7 +1850,7 @@ test('accepted agent removals leave every current surface immediately and after 
       let pendingAgentsLoadFailed=false, householdConnectionsReadState='pending', householdConnections=[], peopleDialogReceipts=new Map(), householdReceipts=new Map();
       let livePromptPrincipalId='', renderedWakeMarkKey='', pendingPollTimer, wakeRosterLastFetchedAt=0, wakeRosterRefreshInFlight=false;
       const app={dataset:{channelView:'feed'}}, uuid=()=> 'request', WAKE_ROSTER_REFRESH_TIMEOUT_MS=1, PENDING_POLL_TICK_MS=4000;
-      const currentPendingAccessRows=()=>[], peopleDialogState={selected:null}, householdAccess={status:'ok',workspaceId:'W'};
+      const currentPendingAccessRows=()=>[], peopleInvites=()=>[], pendingInvites=[], pendingAgents=[], peopleDialogState={selected:null}, householdAccess={status:'ok',workspaceId:'W'};
       const shouldPollPendingAccess=()=>true, pendingAccessKey=()=>'', renderedPendingAccessKey='', refreshPendingAccess=()=>{};
       const renderHomeShell=()=>{}, renderHeaderRoster=()=>{}, renderDialogRoster=()=>{}, renderHomeSide=()=>{}, renderHomeObjectPane=()=>{};
       const restoreComposerOnEntry=()=>{}, syncComposerAddress=()=>{}, renderComposerTo=()=>{}, renderSetupChecklist=()=>{}, composerHasRecipient=()=>false;

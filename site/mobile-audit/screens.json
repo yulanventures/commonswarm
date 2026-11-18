@@ -2192,6 +2192,51 @@
     ]
   },
   {
+    "id": "app.people.invites",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"filter-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"filter-invites\"]"
+      }
+    ],
+    "ready": "[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind=\"person\"]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "pending invite"
+    ],
+    "frame": [
+      "[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind=\"person\"]"
+    ]
+  },
+  {
+    "id": "dialog.people-invite-cancel",
+    "kind": "dialog",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"filter-invites\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"filter-invites\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind=\"person\"]",
+        "click": "[data-people-context] [data-dialog-access-section]:not([hidden]) button[data-pending-kind=\"person\"]"
+      }
+    ],
+    "ready": "dialog[data-people-confirm][open] #pd-confirm-title",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "pending invite"
+    ]
+  },
+  {
     "id": "menu.landing-preview",
     "kind": "view",
     "path": "/",

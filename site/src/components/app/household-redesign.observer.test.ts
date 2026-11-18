@@ -7,6 +7,7 @@ import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING, CONTENT_OPERATIONS, CONTENT_OPERATION_LABELS } from "../../lib/household-access";
 import { peopleDialogAccessUntil, peopleDialogCanAct, renderPeopleDialog, withdrawConfirmText } from "../../lib/people-dialog-view";
+import { peopleInvites } from "../../lib/people-invites";
 import { homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches } from "../../lib/home-map";
 import { HOSTED_LISTS_NOTE } from "../../lib/hosted-lists-note";
 import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
@@ -400,7 +401,7 @@ function dialogConnectionsFixture() {
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
     peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
     workspaces: [{id:"workspace",name:"Home"}], homeConnectionAccess, homeConnectionPolicy, homeConnectionTokenMatches, agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY, connectionPolicyCopy, connectionPolicyState, renewalGrantEnded,
-    agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
+    agentPresenceLine: () => null, wakePathMark: () => null, peopleInvites, pendingInvites: [], pendingAgents: [],
     formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
     householdScope: () => ({ workspaceId: ctx.activeWorkspaceId, session: ctx.session }),
     householdCurrent: (scope: any) => scope.workspaceId === ctx.activeWorkspaceId && scope.session === ctx.session,
