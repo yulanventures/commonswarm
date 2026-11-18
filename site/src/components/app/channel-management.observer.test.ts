@@ -134,6 +134,10 @@ async function observeChannelManagement() {
       // A closed disclosure keeps its content's boxes, so the box test above cannot see it as hidden; the browser's own
       // visibility check can.
       check(!more.open && !one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility(), "Archive channel is not behind a closed More");
+      // And it cannot be reached there: it takes no focus, so neither Tab nor a script can land on it while More is closed.
+      const kept = document.activeElement;
+      one<HTMLButtonElement>("[data-channel-settings-archive]")!.focus();
+      check(document.activeElement === kept, "Archive channel took focus while More was closed");
       await click("[data-channel-settings-more] > summary");
       await wait("More open", () => more.open && one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility());
       const sentBefore = archives();
