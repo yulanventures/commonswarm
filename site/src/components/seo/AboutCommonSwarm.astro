@@ -57,4 +57,14 @@ const { runtime = "standard" } = Astro.props;
     new ResizeObserver(sync).observe(region);
     sync();
   });
+
+  // A code block that scrolls sideways has to be reachable by keyboard; one that fits takes no tab stop.
+  document.querySelectorAll<HTMLElement>('.seo-page pre').forEach(block => {
+    const sync = () => {
+      if (block.scrollWidth > block.clientWidth + 1) block.tabIndex = 0;
+      else block.removeAttribute('tabindex');
+    };
+    new ResizeObserver(sync).observe(block);
+    sync();
+  });
 </script>

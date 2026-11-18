@@ -398,7 +398,8 @@
   margin: 0;
 }
 
-.seo-table-wrap:focus-visible {
+.seo-table-wrap:focus-visible,
+.seo-page pre:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;
   box-shadow: var(--focus-ring);
