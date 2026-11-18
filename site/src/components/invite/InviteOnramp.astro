@@ -48,7 +48,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     <p data-unusable-message>
       It may have expired, been cancelled, or already been used. Ask the sender for a new link.
     </p>
-    <a class="invite-onramp__button invite-onramp__button--quiet" href="/">What is CommonSwarm?</a>
+    {/* Most people who meet this are members opening an old link: the way into the app comes first. */}
+    <div class="invite-onramp__ways">
+      <a class="invite-onramp__button" href="/app">Open CommonSwarm</a>
+      <a class="invite-onramp__button invite-onramp__button--quiet" href="/">What is CommonSwarm?</a>
+    </div>
   </section>
 
   <section class="invite-onramp__panel invite-onramp__card" data-view="auth" hidden>
@@ -1191,6 +1195,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   /* The quiet outline is an inset 1.5px ring: a 1.5px border renders 1px in Chromium. */
+  /* Two ways on from a link that cannot be used: side by side where there is room, stacked full width on a phone. */
+  .invite-onramp__ways {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
   .invite-onramp :global(.invite-onramp__button--quiet) {
     color: var(--home-rail-strong);
     background: transparent;
