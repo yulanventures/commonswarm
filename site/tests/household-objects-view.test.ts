@@ -9,6 +9,7 @@ import { decideHouseholdObject, emptyHouseholdObjectState, reduceHouseholdObject
 import {
   createHouseholdObjectsController, createHouseholdObjectsState, householdContentPatch,
   householdObjectsFixture, householdConflictFixture, renderHouseholdConflict, renderHouseholdContent,
+  redrawKeepingEntries,
   renderHouseholdObjectHistory, renderHouseholdObjects,
   type HouseholdActions, type HouseholdConflictView, type HouseholdSaveRequest,
 } from '../src/lib/household-objects-view.js';
@@ -135,6 +136,84 @@ test('interrupted and pending saves keep their draft and reuse the original requ
   assert.deepEqual(calls[1], calls[0]); assert.deepEqual(calls[2], calls[0]);
   assert.equal(fixture.controller.getState().proposed, null);
   assert.equal(fixture.controller.getState().selected_id, null);
+});
+
+test('revision ids are shown on request; the conflict review says who saved Base and Current and when', async () => {
+  const fixture = setup('editor', { save: async () => ({ status: 'conflict', object_id: 'weekend',
+    current: fixture.conflict.current.revision, draft_id: 'draft-a' }) });
+  fixture.controller.select('weekend'); fixture.controller.stage(fixture.conflict.proposed);
+  await fixture.controller.save();
+  assert.equal(await fixture.controller.recoverDraft(), true);
+  const base = fixture.conflict.base.revision.token, current = fixture.conflict.current.revision.token;
+  const object = () => fixture.controller.getState().workspace.objects.find((item) => item.object_id === 'weekend')!;
+
+  // Off by default: no exact id is on the page, in the review or in the history, and the switch says so.
+  let state = fixture.controller.getState();
+  assert.equal(state.show_revision_ids, false);
+  let review = renderHouseholdConflict(state);
+  let history = renderHouseholdObjectHistory(object(), false, undefined, state.show_revision_ids);
+  assert.doesNotMatch(review, new RegExp(`${base}|${current}`));
+  // A history row still carries its id as the value its button opens; it is not shown as text.
+  assert.doesNotMatch(history, /<small>Revision|<code>/);
+  // Each copy of the switch names its place, so focus returns to the one that was pressed after a redraw.
+  assert.match(review, /<button type="button" data-hh-action="revision-ids" data-hh-value="conflict" aria-pressed="false">Show revision ids<\/button>/);
+  assert.match(history, /<button type="button" data-hh-action="revision-ids" data-hh-value="history" aria-pressed="false">Show revision ids<\/button>/);
+  // Base and Current stay two labelled versions, each with who saved it and a machine-readable time.
+  assert.match(review, /<section aria-label="Base"><h4>Base<\/h4><p class="hh-version-meta">Saved by Agent agent-a for person-a · <time datetime="[^"]+Z">/);
+  assert.match(review, /<section aria-label="Current"><h4>Current<\/h4><p class="hh-version-meta">Saved by Person person-b · <time datetime="[^"]+Z">/);
+  // The person's own draft was never saved, so it claims no author or time.
+  assert.match(review, /<section aria-label="Your proposed draft"><h4>Your proposed draft<\/h4>(?!<p class="hh-version-meta">)/);
+
+  // On: the exact ids are there to compare, labelled Base and Current, and each history row carries its own.
+  assert.equal(fixture.controller.toggleRevisionIds(), true);
+  state = fixture.controller.getState();
+  review = renderHouseholdConflict(state);
+  history = renderHouseholdObjectHistory(object(), false, undefined, state.show_revision_ids);
+  assert.match(review, new RegExp(`Base revision <code>${base}</code> · Current revision <code>${current}</code>`));
+  assert.match(review, /aria-pressed="true">Hide revision ids<\/button>/);
+  for (const version of object().history) assert.match(history, new RegExp(`Revision <code>${version.revision.token}</code>`));
+  assert.match(renderHouseholdObjects(state), new RegExp(`Revision <code>${object().history[0]!.revision.token}</code>`));
+
+  // It is display only: the draft, the conflict and the save state are untouched, and it turns off again.
+  assert.equal(state.save_state, 'conflict'); assert.deepEqual(state.proposed, fixture.conflict.proposed);
+  assert.equal(fixture.controller.toggleRevisionIds(), false);
+  assert.doesNotMatch(renderHouseholdConflict(fixture.controller.getState()), new RegExp(`${base}|${current}`));
+});
+
+test('a display-only redraw keeps what was entered; the review tick survives only for the same conflict', () => {
+  // A page stand-in: a redraw replaces every field with a fresh, empty one, as assigning the view's HTML does.
+  const blank = () => ({ value: '', checked: false });
+  const page = (present: string[]) => {
+    const fields = new Map(present.map((selector) => [selector, blank()]));
+    return { fields, querySelector: (selector: string) => fields.get(selector) ?? null,
+      redraw: (next = present) => { fields.clear(); for (const selector of next) fields.set(selector, blank()); } };
+  };
+  const review = 'input[data-hh-review]', title = 'input[data-hh-create-title]', item = 'input[data-hh-new-item]';
+
+  // The conflict review: a tick made before showing the ids is still there after, and again after hiding them.
+  const conflict = page([review]);
+  conflict.fields.get(review)!.checked = true;
+  for (let press = 0; press < 2; press += 1) {
+    redrawKeepingEntries(conflict, () => 'current-1', () => conflict.redraw());
+    assert.equal(conflict.fields.get(review)!.checked, true);
+  }
+  // A new or changed conflict needs its own acknowledgement: the tick is not carried onto it.
+  let token = 'current-1';
+  redrawKeepingEntries(conflict, () => token, () => { token = 'current-2'; conflict.redraw(); });
+  assert.equal(conflict.fields.get(review)!.checked, false);
+
+  // A list: a typed new title and a typed new item both survive.
+  const list = page([title, item]);
+  list.fields.get(title)!.value = 'Packing list'; list.fields.get(item)!.value = 'Sun cream';
+  redrawKeepingEntries(list, () => null, () => list.redraw());
+  assert.deepEqual([list.fields.get(title)!.value, list.fields.get(item)!.value], ['Packing list', 'Sun cream']);
+
+  // A field the redraw no longer draws is left alone, and nothing is invented for one that was not there.
+  redrawKeepingEntries(list, () => null, () => list.redraw([title]));
+  assert.equal(list.fields.get(title)!.value, 'Packing list'); assert.equal(list.fields.has(item), false);
+  const empty = page([]);
+  redrawKeepingEntries(empty, () => null, () => empty.redraw([title]));
+  assert.equal(empty.fields.get(title)!.value, '');
 });
 
 test('conflicts require private recovery and review; the reviewed retry uses current base and a new request', async () => {

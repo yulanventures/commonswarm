@@ -90,6 +90,9 @@ export interface HouseholdObjectsState {
   conflict_current: HouseholdRevisionRef | null;
   save_state: HouseholdSaveState;
   notice: string;
+  /** Whether the exact revision ids are shown beside history rows and in the conflict review. Off until asked for:
+   *  people compare by who saved and when; the ids are for matching one saved version against another exactly. */
+  show_revision_ids: boolean;
 }
 const esc = escapeMessageHtml;
 const sameRef = (a: HouseholdRevisionRef, b: HouseholdRevisionRef): boolean =>
@@ -114,7 +117,7 @@ function authorizedWorkspace(input: HouseholdWorkspaceView): HouseholdWorkspaceV
 }
 export function createHouseholdObjectsState(workspace: HouseholdWorkspaceView): HouseholdObjectsState {
   return { workspace: authorizedWorkspace(workspace), selected_id: null, opened_version: null, proposed: null,
-    conflict: null, draft_id: null, conflict_current: null, save_state: 'idle', notice: '' };
+    conflict: null, draft_id: null, conflict_current: null, save_state: 'idle', notice: '', show_revision_ids: false };
 }
 export function selectedHouseholdObject(state: HouseholdObjectsState): HouseholdObjectView | null {
   return state.workspace.objects.find((object) => object.object_id === state.selected_id) ?? null;
@@ -149,16 +152,24 @@ export function renderHouseholdContent(content: HouseholdContent | null): string
 }
 const button = (action: string, label: string, value = '', disabled = false, current = false): string =>
   `<button type="button" data-hh-action="${action}" data-hh-value="${esc(value)}"${disabled ? ' disabled' : ''}${current ? ' aria-current="true"' : ''}>${esc(label)}</button>`;
+/** The one switch for exact revision ids, drawn in the history and in the conflict review. Each copy names its place,
+ * so after the view redraws, focus returns to the copy that was pressed and not to the first one on the page. */
+const revisionIdsToggle = (shown: boolean, place: 'history' | 'conflict'): string =>
+  `<button type="button" data-hh-action="revision-ids" data-hh-value="${place}" aria-pressed="${shown}">${shown ? 'Hide revision ids' : 'Show revision ids'}</button>`;
+/** Who saved a version and when, as far as the server said. */
+const savedBy = (version: HouseholdVersionView, names?: HouseholdWorkspaceView['names']): string =>
+  `${esc(householdAttribution(version.author, names))} · <time datetime="${esc(stamp(version.occurred_at_server))}">${esc(localStamp(version.occurred_at_server))}</time>`;
 export function renderHouseholdObjectHistory(object: HouseholdObjectView | null, busy = false,
-  names?: HouseholdWorkspaceView['names']): string {
+  names?: HouseholdWorkspaceView['names'], showRevisionIds = false): string {
   if (!object) return '<p>Select a list or doc to see its history.</p>';
   return `<section class="hh-history" aria-label="Object history"><h3>History</h3>
     <p>Every saved version stays readable, including older ones.</p>
     <ol>${object.history.map((version) => `<li>${button('revision', version.title, version.revision.token, busy)}
       <span>${sameRef(version.revision, object.current.revision) ? 'Current' : version.live ? 'Earlier revision' : 'Retired · retained'}</span>
-      <p>${esc(householdAttribution(version.author, names))} · <time datetime="${esc(stamp(version.occurred_at_server))}">${esc(localStamp(version.occurred_at_server))}</time></p>
-      <small>Revision ${esc(version.revision.token)}</small></li>`).join('')}</ol>
-    ${object.next_history_cursor === null ? '<p>All returned history is shown.</p>' : button('history', 'Load more history', '', busy)}</section>`;
+      <p>${savedBy(version, names)}</p>${showRevisionIds ? `
+      <small>Revision <code>${esc(version.revision.token)}</code></small>` : ''}</li>`).join('')}</ol>
+    ${object.next_history_cursor === null ? '<p>All returned history is shown.</p>' : button('history', 'Load more history', '', busy)}
+    ${revisionIdsToggle(showRevisionIds, 'history')}</section>`;
 }
 export function renderHouseholdConflict(state: HouseholdObjectsState): string {
   const conflict = state.conflict;
@@ -170,10 +181,12 @@ export function renderHouseholdConflict(state: HouseholdObjectsState): string {
   const canSave = householdCanUpdate(state.workspace) && state.save_state === 'conflict' && conflict.proposed.kind !== 'file';
   return `<section class="hh-conflict" aria-label="Save conflict"><h3>Review the changes</h3>
     <p>Your retained draft is available to you. Compare all three versions before saving again.</p>
-    <div class="hh-comparison">${[
-      ['Base', conflict.base.content], ['Current', conflict.current.content], ['Your proposed draft', conflict.proposed],
-    ].map(([label, content]) => `<section aria-label="${label}"><h4>${label}</h4>${renderHouseholdContent(content as HouseholdContent)}</section>`).join('')}</div>
-    <p>Base revision ${esc(conflict.base.revision.token)} · Current revision ${esc(conflict.current.revision.token)}</p>
+    <div class="hh-comparison">${([
+      ['Base', conflict.base.content, conflict.base], ['Current', conflict.current.content, conflict.current], ['Your proposed draft', conflict.proposed, null],
+    ] as const).map(([label, content, version]) => `<section aria-label="${label}"><h4>${label}</h4>${version
+      ? `<p class="hh-version-meta">Saved by ${savedBy(version, state.workspace.names)}</p>` : ''}${renderHouseholdContent(content as HouseholdContent)}</section>`).join('')}</div>
+    ${state.show_revision_ids ? `<p class="hh-revision-ids">Base revision <code>${esc(conflict.base.revision.token)}</code> · Current revision <code>${esc(conflict.current.revision.token)}</code></p>` : ''}
+    ${revisionIdsToggle(state.show_revision_ids, 'conflict')}
     ${canSave ? `<label><input type="checkbox" data-hh-review /> I reviewed the current revision and my proposed changes.</label>
     ${button('reviewed-save', 'Save reviewed changes')}` : householdCanUpdate(state.workspace)
       ? '<p>Your proposed draft remains here while the save is checked.</p>'
@@ -217,7 +230,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
       ${renderHouseholdConflict(state)}
       ${busy && state.proposed ? `<section aria-label="Unsaved local changes"><h4>Your local changes</h4>${renderHouseholdContent(state.proposed)}</section>` : ''}
       ${state.save_state === 'unknown' || state.save_state === 'pending' ? button('check-save', 'Check this save') : ''}
-      ${renderHouseholdObjectHistory(object, busy, workspace.names)}` : workspace.objects.length ? '<p>Select a list, doc or file to read it.</p>' : ''}</article></div>`;
+      ${renderHouseholdObjectHistory(object, busy, workspace.names, state.show_revision_ids)}` : workspace.objects.length ? '<p>Select a list, doc or file to read it.</p>' : ''}</article></div>`;
 }
 
 /** Produce an explicit before-value patch. This never silently replaces a newer revision. */
@@ -381,6 +394,8 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
       } catch { if (active === generation && read === readGeneration) { state.notice = 'This revision could not be loaded. Try opening it again.'; publish(); } return false; }
     },
     backToCurrent() { if (locked()) return false; readGeneration++; state.opened_version = null; publish(); return true; },
+    /** Display only: nothing is read or saved, so it works while a save is being checked. */
+    toggleRevisionIds() { state.show_revision_ids = !state.show_revision_ids; publish(); return state.show_revision_ids; },
     async recoverDraft() {
       if (!state.draft_id || state.save_state !== 'conflict' || !state.conflict_current) return false;
       const active = generation, read = ++readGeneration, draftId = state.draft_id;
@@ -507,6 +522,30 @@ export type HouseholdObjectsController = ReturnType<typeof createHouseholdObject
  * not survive static rendering, so callbacks are injected here, never serialized.
  * The shared escaped renderer is also used by all three Astro components.
  */
+/** The inputs whose contents live only in the page until the person sends them. */
+const REVIEW_FIELD = 'input[data-hh-review]';
+const ENTRY_FIELDS = [REVIEW_FIELD, 'input[data-hh-create-title]', 'input[data-hh-new-item]'] as const;
+type EntryField = { value: string; checked: boolean };
+/** Redraw for a display-only change without losing what a person has entered and not yet sent. The view's state
+ * does not hold the review tick, a typed new title or a typed new item, and a redraw replaces their elements, so
+ * they are read before it and written back after. The tick goes back only while the conflict is the same one: a
+ * new or changed conflict needs its own acknowledgement. */
+export function redrawKeepingEntries(root: { querySelector(selector: string): unknown }, conflictToken: () => string | null,
+  redraw: () => void): void {
+  const entries = ENTRY_FIELDS.map((selector) => {
+    const field = root.querySelector(selector) as EntryField | null;
+    return field ? { selector, value: field.value, checked: field.checked } : null;
+  });
+  const reviewed = conflictToken();
+  redraw();
+  const sameConflict = conflictToken() === reviewed;
+  for (const entry of entries) {
+    const field = entry && root.querySelector(entry.selector) as EntryField | null;
+    if (!entry || !field) continue;
+    field.value = entry.value;
+    if (entry.selector !== REVIEW_FIELD || sameConflict) field.checked = entry.checked;
+  }
+}
 export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdObjectsController): () => void {
   const unsubscribe = controller.subscribe((state) => {
     const active = root.ownerDocument.activeElement;
@@ -533,6 +572,9 @@ export function mountHouseholdObjects(root: HTMLElement, controller: HouseholdOb
       case 'check-save': void controller.checkSave(); break;
       case 'recover': void controller.recoverDraft(); break;
       case 'history': void controller.moreHistory(); break;
+      case 'revision-ids':
+        redrawKeepingEntries(root, () => controller.getState().conflict?.current.revision.token ?? null, () => { controller.toggleRevisionIds(); });
+        break;
       case 'reviewed-save': void controller.save(root.querySelector<HTMLInputElement>('[data-hh-review]')?.checked === true); break;
       case 'toggle': {
         const content = selectedHouseholdObject(controller.getState())?.current.content;
