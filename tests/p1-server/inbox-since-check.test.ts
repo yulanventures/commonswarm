@@ -233,3 +233,52 @@ test("check and inbox --since return the same directed ask across timestamps, fi
   assert.notEqual(wrong.status, 0);
   assert.match(wrong.stderr, /workspace/i);
 });
+
+test("a message inbox --notify printed is still waiting until check shows it; check then observes it and marks it 👀", { timeout: 120_000 }, async () => {
+  assert.equal(functionReady, true);
+  const delivery = async (signalId: string) => (await sql<{ acked_at: string | null; ack_outcome: string | null }[]>`
+    SELECT acked_at::text, ack_outcome FROM swarm.signal_deliveries
+    WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${principal}::uuid`)[0];
+  const seenMark = async (signalId: string) => (await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM swarm.signal_reactions
+    WHERE signal_id = ${signalId}::uuid AND actor_agent_principal_id = ${principal}::uuid AND emoji = '👀'`)[0]!.n;
+
+  const watcher = spawn(process.execPath, ["dist/cli.js", "inbox", "--notify", "--json", "--url", local.API_URL,
+    "--anon-key", local.ANON_KEY, "--workspace-id", workspace, "--agent-token-file", credentialFile], {
+    cwd: resolve("."), env: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "xdg") }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let printed = "";
+  let stderr = "";
+  watcher.stdout.setEncoding("utf8").on("data", (chunk: string) => { printed += chunk; });
+  watcher.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const until = async (done: () => boolean, label: string) => {
+    const deadline = Date.now() + 45_000;
+    while (!done()) {
+      if (Date.now() > deadline || watcher.exitCode !== null) throw new Error(`${label}; stderr=${stderr}`);
+      await delay(200);
+    }
+  };
+  let ask = "";
+  try {
+    // The watcher's own attended-seat canary is its first arrival line: the watch loop is running.
+    await until(() => printed.includes('"type":"arrival"'), "the watcher never printed its canary");
+    ask = await postAsk("printed by the watcher, not yet seen");
+    await until(() => printed.includes(ask), "the watcher never printed the ask");
+    await delay(3_000); // longer than the watcher's former post-print observation budget
+  } finally {
+    watcher.kill("SIGTERM");
+    await new Promise((resolveExit) => watcher.once("exit", resolveExit));
+  }
+  const waiting = await delivery(ask);
+  assert.ok(waiting, "the ask has a delivery to the agent");
+  assert.equal(waiting.acked_at, null, "printed by the watcher, the delivery still waits for the session");
+  assert.equal(await seenMark(ask), 0, "and nobody marked it 👀 for the agent");
+
+  let checked: AgentCheckResult | undefined;
+  await checkAgentMessages({ profilePath, present: async (result) => { checked = result; } });
+  assert.ok(checked?.messages.some((message) => message.id === ask), "check shows what the watcher printed");
+  const deadline = Date.now() + 15_000;
+  while (((await delivery(ask))?.ack_outcome !== "observed" || await seenMark(ask) === 0) && Date.now() < deadline) await delay(250);
+  assert.equal((await delivery(ask))?.ack_outcome, "observed", "check observes it");
+  assert.equal(await seenMark(ask), 1, "and marks it 👀");
+});
