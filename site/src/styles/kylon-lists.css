@@ -57,6 +57,8 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__choice-car
   border-radius: 6px; background: var(--k-shell-surface); overflow-wrap: anywhere;
 }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .dashboard__choice-card:has(input:checked) { border-color: var(--accent); background: var(--k-shell-subtle); }
+/* The access card's button names the change, so its label can run long on a phone: let it wrap. */
+live-dashboard[data-kylon-shell] [data-household-consent] [data-household-confirm] { white-space: normal; text-align: center; }
 /* (0,3,2) beats the later legacy article-button rule (0,2,2). */
 live-dashboard.dashboard[data-kylon-shell] .dashboard__objects-view :is(button,a) {
   box-sizing: border-box; min-inline-size: 44px; min-block-size: 44px; max-inline-size: 100%;

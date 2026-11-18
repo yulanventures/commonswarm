@@ -39,6 +39,34 @@ export const PURPOSE_COPY: Readonly<Record<HouseholdPurpose, { label: string; de
   },
 });
 
+/**
+ * What the Lists & docs access card sends, from who is asking and what is ticked. Only the owner chooses who
+ * can use it; anyone else always sends "shared", whatever value a hidden choice may still hold. The button's
+ * label is built from this same answer, so the label cannot name something the command will not send.
+ */
+export interface HouseholdAccessChoice { purpose: HouseholdPurpose | null; role: HouseholdContentRole | null }
+export function householdAccessChoice(owner: boolean, tickedPurpose: string | undefined, tickedRole: string | undefined): HouseholdAccessChoice {
+  const purpose = !owner ? "shared" : tickedPurpose === "shared" || tickedPurpose === "personal" ? tickedPurpose : null;
+  const role = tickedRole === "editor" || tickedRole === "reader" ? tickedRole : null;
+  return { purpose, role };
+}
+
+/** The decision the card is showing, as one comparable value: who is asking and what they would send. */
+export function householdDecisionKey(owner: boolean, choice: HouseholdAccessChoice): string {
+  return `${owner ? "owner" : "member"}|${choice.purpose ?? ""}|${choice.role ?? ""}`;
+}
+
+/**
+ * The access card's button. It names who can use Lists & docs only when the owner is choosing that, and names
+ * the role as the caller's own ("My access"), since this command never sets anyone else's role.
+ */
+export function householdConfirmLabel(owner: boolean, choice: HouseholdAccessChoice): string {
+  const label = owner && choice.purpose ? PURPOSE_COPY[choice.purpose].label : "";
+  const audience = label ? ` for ${label.charAt(0).toLowerCase()}${label.slice(1)}` : "";
+  const access = choice.role ? ` · My access: ${CONTENT_ROLE_COPY[choice.role].label}` : "";
+  return audience || access ? `Turn on${audience}${access}` : "Turn on Lists & docs";
+}
+
 /** Creation describes the future audience; the legacy access card describes existing members. */
 export const CREATE_PURPOSE_DETAILS: Readonly<Record<HouseholdPurpose, string>> = Object.freeze({
   shared: "You can invite people, and they can use Lists & docs.",
