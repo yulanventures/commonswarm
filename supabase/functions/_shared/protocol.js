@@ -5127,6 +5127,7 @@ function brainTopicFromFileName(name) {
 var HOUSEHOLD_JOIN_RATE_PER_HOUR = 120;
 var HOUSEHOLD_JOIN_CONSENT_VERSION = "household-join-v1";
 var HOUSEHOLD_JOIN_DISCLOSURE = "Members can read shared workspace content and retained history, except directed messages restricted to their audience. Your personal and business spaces stay separate. You choose and authorize your own agents separately. Copies already read cannot be recalled.";
+var HOUSEHOLD_INVITE_DECLINED_REASON = "recipient_declined";
 var uuid3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function parseHumanInviteCommand(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -5134,8 +5135,9 @@ function parseHumanInviteCommand(value) {
   if (c.kind !== "household_invitation" || !ref || typeof ref !== "object" || Array.isArray(ref)) return null;
   const keys = ref.source === "delegated" ? ["source", "invitation_id"] : ["source", "token"];
   if (Object.keys(ref).length !== 2 || Object.keys(ref).some((k) => !keys.includes(k)) || !(ref.source === "delegated" ? typeof ref.invitation_id === "string" && uuid3.test(ref.invitation_id) : ref.source === "link" && typeof ref.token === "string" && /^swm_inv_[A-Za-z0-9_-]{43}$/.test(ref.token))) return null;
-  const allowed = c.action === "preview" ? ["kind", "action", "invitation"] : ["kind", "action", "invitation", "consent_version", "preview_digest", "content_role"];
+  const allowed = c.action === "preview" || c.action === "decline" ? ["kind", "action", "invitation"] : ["kind", "action", "invitation", "consent_version", "preview_digest", "content_role"];
   if (Object.keys(c).length !== allowed.length || Object.keys(c).some((k) => !allowed.includes(k))) return null;
+  if (c.action === "decline") return ref.source === "delegated" ? c : null;
   if (c.action !== "preview" && !(c.action === "accept" && c.consent_version === HOUSEHOLD_JOIN_CONSENT_VERSION && typeof c.preview_digest === "string" && /^[0-9a-f]{64}$/.test(c.preview_digest) && HOUSEHOLD_CONTENT_ROLES.includes(c.content_role))) return null;
   return c;
 }
@@ -5155,6 +5157,10 @@ function decideHumanInvite(command, facts) {
   const refuse2 = (reason) => ({ status: "refused", reason });
   if (!facts.human || !facts.identity_verified) return refuse2("human_sign_in_required");
   if (!facts.recipient_matches || facts.invitation_kind !== "member" || facts.role !== "member") return refuse2("invitation_unavailable");
+  if (command.action === "decline") {
+    if (facts.accepted_at !== null) return refuse2("invitation_unavailable");
+    return facts.revoked_at !== null || facts.expires_at <= facts.now ? { status: "already_declined" } : { status: "decline" };
+  }
   if (facts.accepted_at !== null) return facts.accepted_by === facts.user_id && facts.member_live ? { status: "already_joined" } : refuse2("invitation_unavailable");
   if (facts.membership_revoked_at !== null && (!Number.isFinite(facts.invitation_created_at) || facts.invitation_created_at <= facts.membership_revoked_at)) return refuse2("invitation_predates_removal");
   if (facts.revoked_at !== null || facts.expires_at <= facts.now || !facts.parent_live || !facts.inviter_can_invite || facts.personal_boundary)
@@ -6447,6 +6453,7 @@ export {
   HOUSEHOLD_DEFINITION_TOOLS,
   HOUSEHOLD_DEFINITION_TOOL_REGISTRY,
   HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT,
+  HOUSEHOLD_INVITE_DECLINED_REASON,
   HOUSEHOLD_JOIN_CONSENT_VERSION,
   HOUSEHOLD_JOIN_DISCLOSURE,
   HOUSEHOLD_JOIN_RATE_PER_HOUR,

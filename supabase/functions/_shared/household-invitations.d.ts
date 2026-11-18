@@ -22,7 +22,17 @@ export type HumanInviteCommand = {
     consent_version: string;
     preview_digest: string;
     content_role: 'reader' | 'editor';
+}
+/** The recipient turns down an invitation addressed to them. A link is a capability to join, not an inbox row, so only a delegated invitation can be declined. */
+ | {
+    kind: 'household_invitation';
+    action: 'decline';
+    invitation: Extract<HumanInviteRef, {
+        source: 'delegated';
+    }>;
 };
+/** The reason recorded on the invitation's revocation when its recipient declines it. */
+export declare const HOUSEHOLD_INVITE_DECLINED_REASON = "recipient_declined";
 export declare function parseHumanInviteCommand(value: unknown): HumanInviteCommand | null;
 export interface HumanInviteFacts {
     human: boolean;
@@ -53,7 +63,7 @@ export type LegacyRemovalRejoinRefusal = 'invitation_predates_removal';
  * or before that removal, or with no usable time, may not. */
 export declare function legacyRemovalRejoinRefusal(membershipRevokedAt: number | null, invitationCreatedAt: number): LegacyRemovalRejoinRefusal | null;
 export type HumanInviteDecision = {
-    status: 'preview' | 'join' | 'already_joined';
+    status: 'preview' | 'join' | 'already_joined' | 'decline' | 'already_declined';
 } | {
     status: 'refused';
     reason: string;

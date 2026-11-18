@@ -45,3 +45,35 @@ test('a failed inbox read is flagged as failed, unlike an empty inbox, and a ret
   fail=false;await controller.load();
   assert.equal(views.at(-1).failed,false);assert.equal(views.at(-1).message,'No pending invitations.');
 });
+
+const rows=()=>[{invitation_id:'keep',workspace_name:'Studio',inviter_display_name:'Sam'},{invitation_id:'drop',workspace_name:'Household',inviter_display_name:'Ana'}];
+test('declining removes only that invitation, and only after the server confirms',async()=>{
+  const sent=[],gate=deferred(),views=[];
+  const controller=createHumanInviteController({inbox:async()=>rows(),prepareDecline:id=>({send:async()=>{sent.push(id);await gate.promise;return {status:'declined'};}})},v=>views.push(v));
+  controller.setAccount('recipient');await controller.load();
+  const declined=controller.decline('drop');
+  assert.deepEqual(views.at(-1).invitations.map(row=>row.invitation_id),['keep','drop']);assert.equal(views.at(-1).busy,true);
+  gate.resolve();await declined;
+  assert.deepEqual(sent,['drop']);assert.deepEqual(views.at(-1).invitations.map(row=>row.invitation_id),['keep']);
+  assert.equal(views.at(-1).failed,false);assert.equal(views.at(-1).message,'Invitation declined.');
+  await controller.decline('not-in-the-list');assert.deepEqual(sent,['drop']);
+});
+test('a refused decline keeps the invitation; an unknown result retries the same request',async()=>{
+  const views=[];let prepared=0,sends=0,outcome='refused';
+  const controller=createHumanInviteController({inbox:async()=>rows(),prepareDecline:()=>{++prepared;return {send:async()=>{++sends;
+    if(outcome==='refused')throw new HumanInviteRefused('invitation_unavailable');if(outcome==='unknown')throw new Error('offline');return {status:'declined'};}};}},v=>views.push(v));
+  controller.setAccount('recipient');await controller.load();
+  await controller.decline('drop');
+  assert.equal(views.at(-1).failed,true);assert.deepEqual(views.at(-1).invitations.map(row=>row.invitation_id),['keep','drop']);
+  outcome='unknown';await controller.decline('drop');assert.equal(prepared,2);assert.match(views.at(-1).message,/unknown/);
+  outcome='ok';await controller.decline('drop');
+  assert.equal(prepared,2,'the retry reuses the request whose result was unknown');assert.equal(sends,3);
+  assert.deepEqual(views.at(-1).invitations.map(row=>row.invitation_id),['keep']);
+});
+test('a decline that settles after sign-out changes nothing for the next person',async()=>{
+  const gate=deferred(),views=[];
+  const controller=createHumanInviteController({inbox:async()=>rows(),prepareDecline:()=>({send:async()=>{await gate.promise;return {status:'declined'};}})},v=>views.push(v));
+  controller.setAccount('person-a');await controller.load();const declined=controller.decline('drop');
+  controller.setAccount('person-b');gate.resolve();await declined;
+  assert.equal(views.at(-1).account,'person-b');assert.deepEqual(views.at(-1).invitations,[]);assert.equal(views.at(-1).message,'');
+});

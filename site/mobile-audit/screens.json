@@ -1374,6 +1374,29 @@
     ]
   },
   {
+    "id": "app.invitation-inbox.decline",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "waitFor": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-decline]",
+        "click": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-decline]"
+      }
+    ],
+    "ready": "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-confirm]:not([hidden]) [data-row-decline-confirm]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation"
+    ],
+    "frame": [
+      "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-confirm]:not([hidden]) [data-row-decline-confirm]",
+      "human-invitation-inbox[data-placement=\"corner\"]:not([hidden]) [data-list]:not([hidden]) [data-row-confirm]:not([hidden]) [data-row-keep]"
+    ]
+  },
+  {
     "id": "app.update-toast",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.general}",

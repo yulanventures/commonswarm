@@ -100,9 +100,19 @@ import "../../styles/kylon-invitation-inbox.css";
   </dialog>
 
   <template data-row-template>
-    <li class="human-invitations__row">
+    <li class="human-invitations__row" data-invitation-row>
       <p><strong data-row-inviter></strong> invited you to <strong data-row-workspace></strong>.</p>
-      <button class="human-invitations__button" type="button" data-row-review>Review</button>
+      <div class="human-invitations__row-actions" data-row-actions>
+        <button class="human-invitations__button" type="button" data-row-review>Review</button>
+        <button class="human-invitations__button human-invitations__button--quiet" type="button" data-row-decline>Decline</button>
+      </div>
+      <div class="human-invitations__row-confirm" data-row-confirm hidden>
+        <p data-row-question></p>
+        <div class="human-invitations__row-actions">
+          <button class="human-invitations__button human-invitations__button--quiet" type="button" data-row-keep>Keep it</button>
+          <button class="human-invitations__button" type="button" data-row-decline-confirm>Decline invitation</button>
+        </div>
+      </div>
     </li>
   </template>
 </human-invitation-inbox>
@@ -196,6 +206,22 @@ import "../../styles/kylon-invitation-inbox.css";
   .human-invitations__row p {
     flex: 1 1 11rem;
     color: var(--text);
+  }
+
+  .human-invitations__row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+  }
+
+  .human-invitations__row-confirm {
+    flex: 1 1 100%;
+    display: grid;
+    gap: var(--s-2);
+  }
+
+  :is(.human-invitations__row-actions, .human-invitations__row-confirm)[hidden] {
+    display: none;
   }
 
   .human-invitations__title {
@@ -571,6 +597,10 @@ import "../../styles/kylon-invitation-inbox.css";
     let failureDismissed=false;
     let focusNext:'list'|'joined'|null=null;
     let dialogWanted=false;
+    /* The one row asking "Decline this invitation?". Declining is two taps: Decline, then Decline invitation. */
+    let confirmingId='';
+    const rowOf=(id:string)=>[...root.querySelectorAll<HTMLElement>('[data-invitation-row]')].find(item=>item.dataset.invitationRow===id)??null;
+    const visible=(node:HTMLElement|null):node is HTMLElement=>!!node?.getClientRects().length && !node.closest('[hidden],[inert]');
     const datetime=(ms:number)=>new Date(ms).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
     const paint=()=>{
       const view=lastView;
@@ -599,12 +629,45 @@ import "../../styles/kylon-invitation-inbox.css";
           item.querySelector('[data-row-workspace]')!.textContent=row.workspace_name;
           const review=item.querySelector<HTMLButtonElement>('[data-row-review]')!;
           review.setAttribute('aria-label','Review the invitation to '+row.workspace_name);
-          review.addEventListener('click',()=>{quiet=false;void controller.review(row.invitation_id);});
+          review.addEventListener('click',()=>{quiet=false;confirmingId='';void controller.review(row.invitation_id);});
+          item.dataset.invitationRow=row.invitation_id;
+          const decline=item.querySelector<HTMLButtonElement>('[data-row-decline]')!;
+          const keep=item.querySelector<HTMLButtonElement>('[data-row-keep]')!;
+          const confirm=item.querySelector<HTMLButtonElement>('[data-row-decline-confirm]')!;
+          decline.setAttribute('aria-label','Decline the invitation to '+row.workspace_name);
+          confirm.setAttribute('aria-label','Decline the invitation to '+row.workspace_name);
+          keep.setAttribute('aria-label','Keep the invitation to '+row.workspace_name);
+          item.querySelector('[data-row-question]')!.textContent='Decline the invitation to '+row.workspace_name+'? '+row.inviter_display_name+' can invite you again.';
+          const back=()=>{confirmingId='';paint();rowOf(row.invitation_id)?.querySelector<HTMLElement>('[data-row-decline]')?.focus({preventScroll:true});};
+          /* The safe choice takes focus first, as in the other confirmations. */
+          decline.addEventListener('click',()=>{confirmingId=row.invitation_id;paint();keep.focus({preventScroll:true});});
+          keep.addEventListener('click',back);
+          item.querySelector<HTMLElement>('[data-row-confirm]')!.addEventListener('keydown',event=>{
+            if(event.key!=='Escape' || lastView?.busy)return;
+            event.preventDefault();event.stopPropagation();back();
+          });
+          confirm.addEventListener('click',()=>{
+            quiet=false;
+            void controller.decline(row.invitation_id).then(()=>{
+              /* Declined: the row is gone. Focus the next invitation, or the channel title when the card has closed.
+                 Not confirmed: the question is still open, so its button takes focus back. */
+              const still=rowOf(row.invitation_id);
+              const target=still ? still.querySelector<HTMLElement>('[data-row-decline-confirm]')
+                : root.querySelector<HTMLElement>('[data-row-review]')??document.querySelector<HTMLElement>('live-dashboard [data-channel-name]');
+              if(visible(target) && (!document.activeElement || document.activeElement===document.body || root.contains(document.activeElement)))target.focus({preventScroll:true});
+            });
+          });
           items.push(item);
         }
         one('[data-invitations]').replaceChildren(...items);
       }
-      for(const button of root.querySelectorAll<HTMLButtonElement>('[data-row-review]'))button.disabled=view.busy;
+      if(confirmingId && !view.invitations.some(row=>row.invitation_id===confirmingId))confirmingId='';
+      for(const item of root.querySelectorAll<HTMLElement>('[data-invitation-row]')){
+        const confirming=item.dataset.invitationRow===confirmingId;
+        item.querySelector<HTMLElement>('[data-row-actions]')!.hidden=confirming;
+        item.querySelector<HTMLElement>('[data-row-confirm]')!.hidden=!confirming;
+      }
+      for(const button of root.querySelectorAll<HTMLButtonElement>('[data-row-review],[data-row-decline],[data-row-keep],[data-row-decline-confirm]'))button.disabled=view.busy;
 
       if(shownDigest!==(view.preview?.preview_digest??'')){
         shownDigest=view.preview?.preview_digest??'';
@@ -642,8 +705,8 @@ import "../../styles/kylon-invitation-inbox.css";
       }
     };
     const controller=createHumanInviteController(browserHumanInvitations(), view=>{lastView=view;paint();});
-    const setAccount=(id:string|null)=>{account=id;quiet=true;failureDismissed=false;focusNext=null;controller.setAccount(id);if(id)void controller.load();};
-    one('[data-refresh]').addEventListener('click',()=>{quiet=true;failureDismissed=false;void controller.load();});
+    const setAccount=(id:string|null)=>{account=id;quiet=true;failureDismissed=false;focusNext=null;confirmingId='';controller.setAccount(id);if(id)void controller.load();};
+    one('[data-refresh]').addEventListener('click',()=>{quiet=true;failureDismissed=false;confirmingId='';void controller.load();});
     one('[data-retry]').addEventListener('click',()=>{quiet=true;failureDismissed=false;focusNext='list';void controller.load();});
     one('[data-dismiss-failure]').addEventListener('click',()=>{failureDismissed=true;paint();});
     /* Not now and Escape both close the dialog; the close event is the one way back to the card. */

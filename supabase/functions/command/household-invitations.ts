@@ -2,7 +2,7 @@
  * command transaction. No delegated credential can enter this boundary. */
 import type postgres from 'npm:postgres@3.4.9';
 import { assertHouseholdContentServiceReady, writeHostedContentRestriction } from './household-content-access.ts';
-import { parseHumanInviteCommand, decideHumanInvite, HOUSEHOLD_JOIN_DISCLOSURE, HOUSEHOLD_JOIN_CONSENT_VERSION,
+import { parseHumanInviteCommand, decideHumanInvite, HOUSEHOLD_JOIN_DISCLOSURE, HOUSEHOLD_JOIN_CONSENT_VERSION, HOUSEHOLD_INVITE_DECLINED_REASON,
   reduceAdminAuthority, canonicalAdminJson, adminEffectiveCapabilities, adminGrantManifest, adminManifestValid } from '../_shared/protocol.js';
 import type { AdminAccountState, AdminAccountEvent, AdminGrant } from '../_shared/admin-authority.d.ts';
 import type { HumanInviteCommand, HumanInviteFacts, HumanInviteDecision } from '../_shared/household-invitations.d.ts';
@@ -30,12 +30,15 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
   const workspaceId = String(located.workspace_id), invitationId = String(located.invitation_id), inviter = String(located.inviter);
   let account: { stream_id: string; seq: number | string; projection: AdminAccountState } | undefined;
   let grant: AdminGrant | undefined;
+  // The grant this invitation was issued under, live or not: a decline is recorded against it either way.
+  let issuing: { grant_id: string; manifest_digest: string } | undefined;
   if (delegated) {
     await tx`SELECT user_id FROM swarm.users WHERE user_id=${inviter}::uuid FOR NO KEY UPDATE`; // Lock order: lockPrincipalName in command/index.ts.
     [account] = await tx<{ stream_id: string; seq: number | string; projection: AdminAccountState }[]>`SELECT stream_id,seq,projection FROM swarm.admin_accounts WHERE owner_user_id=${inviter}::uuid FOR UPDATE`;
     const grants = await tx`SELECT * FROM swarm.admin_grants WHERE owner_user_id=${inviter}::uuid ORDER BY grant_id FOR UPDATE`;
     const [bound] = await tx`SELECT parent_admin_grant_id FROM swarm.admin_routine_invitations WHERE invitation_id=${invitationId}::uuid`;
     const durable = grants.find(g => g.grant_id === bound?.parent_admin_grant_id);
+    if (durable) issuing = { grant_id: String(durable.grant_id), manifest_digest: String(durable.manifest_digest) };
     if (durable && account && account.projection.grants[String(durable.grant_id)]?.manifest_digest === durable.manifest_digest) grant = { ...account.projection.grants[String(durable.grant_id)], ...durable,
       expires_at: new Date(durable.expires_at as string).getTime(), refresh_deadline: new Date(durable.refresh_deadline as string).getTime() } as AdminGrant;
   }
@@ -73,9 +76,30 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
     invitation_created_at: new Date(invite.created_at as string).getTime() };
   const requestDigest = await digest(command.invitation.source === 'link' ? { ...command, invitation: { source: 'link', invitation_id: invitationId } } : command);
   const [prior] = await tx`SELECT request_hash,response FROM swarm.idempotency_keys WHERE principal_kind='user' AND principal_id=${human.user_id} AND command_id=${commandId}`;
-  if (command.action === 'accept' && prior && prior.request_hash !== requestDigest) return { status: 409, body: { error: 'command_id_conflict' } };
+  if (command.action !== 'preview' && prior && prior.request_hash !== requestDigest) return { status: 409, body: { error: 'command_id_conflict' } };
   const decision = decideHumanInvite(command, facts) as HumanInviteDecision;
   if (decision.status === 'refused') return { status: decision.reason === 'review_changed' ? 409 : 403, body: decision };
+  if (decision.status === 'decline' || decision.status === 'already_declined') {
+    const declined = { status: 'declined', invitation_id: invitationId, workspace_id: workspaceId };
+    // Already revoked or expired: it is gone from the recipient's list, which is what they asked for. Nothing is written.
+    if (decision.status === 'already_declined') return { status: 200, body: prior ? prior.response as Record<string, unknown> : declined };
+    await tx`UPDATE swarm.admin_routine_invitations SET revoked_at=${date(now)}
+      WHERE invitation_id=${invitationId}::uuid AND recipient_user_id=${human.user_id}::uuid AND accepted_at IS NULL AND revoked_at IS NULL`;
+    // The sender's account history records who ended it and why, as an agent's own revocation does. No membership changes.
+    const projected = account?.projection.routine?.invitations[invitationId];
+    if (account && issuing && projected && projected.revoked_at === null) {
+      const event: AdminAccountEvent = { stream_kind: 'account',owner_user_id: inviter,stream_id: account.stream_id,seq: Number(account.seq)+1,
+        event_id: crypto.randomUUID(),command_id: commandId,type: 'AdminInvitationRevoked',schema_version: 1,actor_user: human.user_id,
+        actor_agent_principal: null,actor_run: null,admin_identity_id: null,grant_id: issuing.grant_id,grant_manifest_digest: issuing.manifest_digest,
+        occurred_at_server: now,payload: { invitation_id: invitationId, invitation_kind: 'member', workspace_id: workspaceId, revoked_at: now, reason_code: HOUSEHOLD_INVITE_DECLINED_REASON } };
+      const next = reduceAdminAuthority(account.projection, event);
+      await tx`INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event) VALUES(${inviter}::uuid,${event.seq},${event.event_id}::uuid,${commandId},${tx.json(event as unknown as postgres.JSONValue)})`;
+      await tx`UPDATE swarm.admin_accounts SET seq=${event.seq},projection=${tx.json(next as unknown as postgres.JSONValue)} WHERE owner_user_id=${inviter}::uuid`;
+    }
+    await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
+      VALUES('user',${human.user_id},${commandId},${workspaceId}::uuid,${String(stream.stream_id)}::uuid,${requestDigest},${tx.json(declined)})`;
+    return { status: 200, body: declined };
+  }
   const [currentContent] = await tx`SELECT content_role FROM swarm.household_member_content_roles WHERE workspace_id=${workspaceId}::uuid AND user_id=${human.user_id}::uuid AND revoked_at IS NULL`;
   const joined = { status: 'joined', workspace_id: workspaceId, workspace_name: String(workspace.name), invitation_id: invitationId,
     content_role: currentContent?.content_role ?? null,
