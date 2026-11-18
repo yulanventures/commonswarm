@@ -425,3 +425,54 @@ test("frames reach each member's own topic only: not the workspace topic, a memb
   }
   for (const l of [onWorkspace, ...Object.values(sockets)]) await l.client.removeChannel(l.channel);
 });
+
+test("a replay answers again only while its conversation is still open to the caller; a completed leave stays acknowledged", { timeout: 90_000 }, async () => {
+  const hidden = await send(cat.jwt, { kind: "conversation_join", conversation_id: randomUUID() });
+  assert.equal(hidden.status, 404);
+
+  // A group: cat opens it, then leaves; dee stays.
+  const catOpen = randomUUID();
+  const opened = ok(await send(cat.jwt, { kind: "conversation_open", members: [user(dee), agent(deeBot)] }, catOpen));
+  const group = String((opened.conversation as Row).conversation_id);
+  const deeOpen = randomUUID();
+  const deeFirst = ok(await send(dee.jwt, { kind: "conversation_open", members: [user(cat), agent(deeBot)] }, deeOpen));
+  assert.deepEqual(ok(await send(cat.jwt, { kind: "conversation_open", members: [user(dee), agent(deeBot)] }, catOpen)), opened,
+    "while she is in it, her replay answers what the first call did");
+  // Posts to the group: a stored post names the members it went to.
+  const catPost = randomUUID();
+  const catNote = note({ conversation_id: group, body: "before leaving" });
+  ok(await send(cat.jwt, catNote, catPost));
+  const deePost = randomUUID();
+  const deeNote = note({ conversation_id: group, body: "staying" });
+  const deePosted = ok(await send(dee.jwt, deeNote, deePost));
+  const catLeave = randomUUID();
+  ok(await send(cat.jwt, { kind: "conversation_leave", conversation_id: group }, catLeave));
+  const postReplay = await send(cat.jwt, catNote, catPost);
+  assert.deepEqual([postReplay.status, postReplay.body], [404, hidden.body], "nor does her earlier post replay its recipients");
+  const deeReplay = ok(await send(dee.jwt, deeNote, deePost));
+  assert.deepEqual([(deeReplay.signal as Row).id, (deeReplay.signal as Row).recipients],
+    [(deePosted.signal as Row).id, (deePosted.signal as Row).recipients], "dee's post replays, recipients and all");
+  const replayed = await send(cat.jwt, { kind: "conversation_open", members: [user(dee), agent(deeBot)] }, catOpen);
+  assert.deepEqual([replayed.status, replayed.body], [404, hidden.body],
+    "after she left, the replay is the hidden-id refusal: no roster");
+  assert.deepEqual(ok(await send(cat.jwt, { kind: "conversation_leave", conversation_id: group }, catLeave)),
+    { status: "accepted", ok: true, event_ids: [], conversation_id: group }, "her own leave stays acknowledged, with nothing else");
+  assert.deepEqual(ok(await send(dee.jwt, { kind: "conversation_open", members: [user(cat), agent(deeBot)] }, deeOpen)), deeFirst,
+    "dee, still in it, replays in full");
+
+  // A private channel: ben marks it read, then is removed from it; ann stays.
+  const lock = `c2a-replay-${randomBytes(4).toString("hex")}`;
+  const priv = String(((ok(await send(ann.jwt, { kind: "channel_create", slug: lock, visibility: "private",
+    members: [user(ben)] })).channel as Row).channel_id));
+  const benMark = randomUUID();
+  const marked = ok(await send(ben.jwt, { kind: "conversation_mark_read", conversation_id: priv }, benMark));
+  assert.equal(marked.kind, "private_channel");
+  const annMark = randomUUID();
+  const annFirst = ok(await send(ann.jwt, { kind: "conversation_mark_read", conversation_id: priv }, annMark));
+  ok(await send(ann.jwt, { kind: "channel_member_remove", channel_id: priv, member: user(ben) }));
+  const benReplay = await send(ben.jwt, { kind: "conversation_mark_read", conversation_id: priv }, benMark);
+  assert.deepEqual([benReplay.status, benReplay.body], [404, hidden.body],
+    "after his removal, no channel kind and no read time");
+  assert.deepEqual(ok(await send(ann.jwt, { kind: "conversation_mark_read", conversation_id: priv }, annMark)), annFirst,
+    "ann, still in it, replays in full");
+});

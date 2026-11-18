@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   channel, filed, general, localSql, members, post, refusedBy, space, type Message, type Space, type Sql, type Tx,
 } from "../support/conversations-fixture.js";
@@ -292,14 +293,112 @@ test("read marks are written to both tables and agree; today's writers are follo
     WHERE conversation_id = ${g}::uuid AND member_user_id = ${w.people.bob!}::uuid`)[0]!.n, "muted");
 });
 
-test("step 2a grants the edge its ten commands and nothing else; no client role calls any of it", async () => {
+/** Two transactions that overlap: `first` runs and holds its transaction open while `second` starts, then
+ * commits after a pause; `second` finishes whenever its locks allow. `second` must start its work when
+ * called (an async function), since a postgres.js query is sent only once awaited. */
+async function overlap(first: (tx: Tx) => Promise<unknown>, second: () => Promise<unknown>): Promise<void> {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const a = sql.begin(async (tx) => { await first(tx); started(); await held; });
+  await ready;
+  const b = second();
+  await delay(800);
+  release();
+  await a;
+  await b;
+}
+
+test("history that was never filed tells only its sender and the people it addressed, never an addressed agent's owner", async () => {
+  // A message from before step 1 that the backfill left unmapped, as the fixture of step 1 writes history.
+  const history = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
+    await tx`INSERT INTO swarm.signals (id, workspace_id, from_principal, from_kind, to_agent_principal_id, kind, body, until)
+      VALUES (${history}::uuid, ${w.id}::uuid, ${w.people.alice!}::uuid, 'user', ${w.agents.agentB!}::uuid, 'note',
+        'history', clock_timestamp() + interval '1 day')`;
+    await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
+  });
+  assert.equal(await filed(sql, history), null, "the message has no conversation");
+  const at = await frames();
+  await sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
+    VALUES (${w.id}::uuid, ${history}::uuid, ${w.people.alice!}::uuid, ${"\u{1F440}"})`;
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1 },
+    "its sender hears the reaction; bob, who owns the agent it was addressed to, hears nothing");
+});
+
+test("a frame chosen while a leave or a removal is in flight waits for it: the one leaving hears nothing", async () => {
+  // A reaction in a group while carol's leave is uncommitted.
+  const group = idOf(await open(w.people.alice!, "user", [w.people.carol!, w.people.dave!]));
+  const message = await explicit(group, { from: w.people.alice!, to: [u("carol"), u("dave")] });
+  let at = await frames();
+  await overlap(
+    (tx) => tx`SELECT swarm.conversation_leave(${w.id}::uuid, 'user', ${w.people.carol!}::uuid, ${group}::uuid)`,
+    async () => {
+      await sql`INSERT INTO swarm.signal_reactions (workspace_id, signal_id, actor_user_id, emoji)
+        VALUES (${w.id}::uuid, ${message}::uuid, ${w.people.dave!}::uuid, ${"\u{1F44D}"})`;
+    },
+  );
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1, [topic("dave")]: 1 },
+    "the reaction is announced to those still in the group, and not to carol");
+
+  // A post in a private channel while bob's removal from it is uncommitted.
+  const lock = await channel(sql, w, w.people.alice!, "private");
+  await sql`INSERT INTO swarm.channel_members (workspace_id, channel_id, member_kind, user_id, is_manager, added_by_kind, added_by_principal)
+    VALUES (${w.id}::uuid, ${lock}::uuid, 'user', ${w.people.alice!}::uuid, true, 'user', ${w.people.alice!}::uuid),
+      (${w.id}::uuid, ${lock}::uuid, 'user', ${w.people.bob!}::uuid, false, 'user', ${w.people.alice!}::uuid)`;
+  at = await frames();
+  await post(sql, w, { from: w.people.alice!, channel: lock });
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1, [topic("bob")]: 1 }, "both members hear a post");
+  at = await frames();
+  await overlap(
+    (tx) => tx`DELETE FROM swarm.channel_members WHERE workspace_id = ${w.id}::uuid AND channel_id = ${lock}::uuid
+      AND member_kind = 'user' AND user_id = ${w.people.bob!}::uuid`,
+    async () => { await post(sql, w, { from: w.people.alice!, channel: lock }); },
+  );
+  assert.deepEqual(delta(await frames(), at), { [topic("alice")]: 1 }, "the post committed after bob's removal: only alice hears it");
+});
+
+test("an explicit read cursor follows the read rule 2a serves: an agent left off a group post cannot mark through it", async () => {
+  const group = idOf(await open(w.people.bob!, "user", [w.people.alice!], [w.agents.agentA!, w.agents.agentB!]));
+  const mark = async (by: string, through: string) => await asEdge(async (tx) => (await tx<{ r: Result }[]>`
+    SELECT swarm.conversation_mark_read(${w.id}::uuid, 'agent', ${by}::uuid, ${group}::uuid, ${through}::uuid) AS r`)[0]!.r);
+  const cursor = async () => (await sql<{ at: Date | null }[]>`SELECT read_through_at AS at FROM swarm.conversation_reads
+    WHERE conversation_id = ${group}::uuid AND member_agent_principal_id = ${w.agents.agentB!}::uuid`)[0]?.at?.getTime() ?? null;
+  const named = await explicit(group, { from: w.agents.agentA!, fromKind: "agent", to: [u("bob"), u("alice"), a("agentB")] });
+  assert.equal((await mark(w.agents.agentB!, named)).status, "ok", "the agent it named marks through it");
+  const before = await cursor();
+  const omitted = await explicit(group, { from: w.agents.agentA!, fromKind: "agent", to: [u("bob"), u("alice")] });
+  const refused = await mark(w.agents.agentB!, omitted);
+  const unknown = await mark(w.agents.agentB!, randomUUID());
+  assert.equal(refused.status, "signal_not_found");
+  assert.deepEqual(refused, unknown, "the same answer as an unknown message");
+  assert.equal(await cursor(), before, "and its cursor stays where it was");
+});
+
+test("who left a group is told only to a live sender of this workspace", async () => {
+  const s = await space(sql, ["rae", "sid", "tia"]);
+  const g = idOf(await open(s.people.rae!, "user", [s.people.sid!, s.people.tia!], [], false, s));
+  assert.equal((await command("conversation_leave", s.people.tia!, "user", g, s)).changed, true);
+  const departed = async (kind: string, actor: string, users: string[]) => await asEdge(async (tx) => (await tx<{ n: string | null }[]>`
+    SELECT swarm.conversation_group_departed(${s.id}::uuid, ${kind}, ${actor}::uuid, ${users}::uuid[], '{}'::uuid[]) AS n`)[0]!.n);
+  assert.equal(await departed("user", s.people.rae!, [s.people.sid!, s.people.tia!]), "tia", "a live sender of the set is told");
+  assert.equal(await departed("robot", randomUUID(), [s.people.rae!, s.people.sid!, s.people.tia!]), null,
+    "no actor that is not a person or agent of this workspace");
+  assert.equal(await departed("user", randomUUID(), [s.people.sid!, s.people.tia!]), null, "nor one that does not exist");
+  await sql`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${s.id}::uuid AND user_id = ${s.people.sid!}::uuid`;
+  assert.equal(await departed("user", s.people.sid!, [s.people.rae!, s.people.tia!]), null, "nor one removed from the workspace");
+});
+
+test("step 2a grants the edge its eleven calls and nothing else; no client role calls any of it", async () => {
   const edge = ["conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)", "conversation_join(uuid,text,uuid,uuid)",
     "conversation_leave(uuid,text,uuid,uuid)", "conversation_invite(uuid,text,uuid,uuid,uuid[],uuid[])",
     "conversation_remove(uuid,text,uuid,uuid,text,uuid)", "conversation_mark_read(uuid,text,uuid,uuid,uuid)",
     "conversation_set_notify(uuid,text,uuid,uuid,text,boolean,integer)",
     "conversation_post_route(uuid,text,uuid,uuid,uuid[],uuid[])", "conversation_prefile(uuid,uuid,uuid)",
-    "conversation_group_departed(uuid,text,uuid,uuid[],uuid[])"];
-  const internal = ["conversation_check_route(uuid,uuid,uuid)", "send_signal_frames(uuid,uuid)",
+    "conversation_group_departed(uuid,text,uuid,uuid[],uuid[])", "conversation_visible(uuid,text,uuid,uuid)"];
+  const internal = ["conversation_check_route(uuid,uuid,uuid)", "conversation_private_member_lock()", "send_signal_frames(uuid,uuid)",
     "signal_frame_readers(uuid,uuid)", "conversation_member_join(uuid,uuid,text,uuid)", "conversation_next_generation(uuid,text,uuid)",
     "conversation_target(uuid,text,uuid,uuid)", "conversation_lock_workspace(uuid)"];
   const can = async (role: string, fn: string) => (await sql<{ ok: boolean }[]>`
