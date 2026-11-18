@@ -1491,12 +1491,12 @@
     "path": "/app?w={approvalWorkspace}&v=people",
     "setup": [
       {
-        "waitFor": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
-        "scroll": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+        "waitFor": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalAgent}\"]",
+        "scroll": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalAgent}\"]",
         "settle": true
       }
     ],
-    "ready": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
+    "ready": "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalAgent}\"]",
     "states": [
       "dense"
     ],
@@ -1504,8 +1504,8 @@
       "seed_lists_approval"
     ],
     "frame": [
-      "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalSetupAgent}\"]",
-      "dialog[data-roster-dialog][open] #pd-agent-{approvalSetupAgent}"
+      "dialog[data-roster-dialog][open] [data-row-allow-agent-access=\"{approvalAgent}\"]",
+      "dialog[data-roster-dialog][open] #pd-agent-{approvalAgent}"
     ],
     "never": {
       "request": "/functions/v1/command",
