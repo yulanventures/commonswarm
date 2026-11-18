@@ -260,7 +260,18 @@ async function observeConnectionApp() {
       return;
     }
     const editable = ["renewal", "hosted", "dated", "legacy-permanent", "confirmation", "session-reset", "stale-family", "rotation"].includes(f.scenario);
-    await wait(() => f.overviewReads > 0 && visible(form()) === editable, "owner/live/policy mount admission");
+    // On a Connected apps card the controls are closed behind "Edit end date"; that button stands in for them here.
+    const editButton = () => field("[data-end-date-edit]");
+    const openCard = async (why: string) => {
+      if (!f.hosted) return;
+      await wait(() => !!editButton() && visible(editButton()), why + ": Edit end date offered");
+      editButton().click();
+      await wait(() => visible(form()), why + ": Edit end date opens the controls");
+    };
+    if (f.hosted) {
+      await wait(() => f.overviewReads > 0 && !visible(form()) && (!!editButton() && visible(editButton())) === editable, "hosted card admission");
+      if (editable) await openCard("mount");
+    } else await wait(() => f.overviewReads > 0 && visible(form()) === editable, "owner/live/policy mount admission");
     if (["unknown", "malformed", "hosted-unknown", "hosted-malformed", "key-ended", "connection-off", "removed", "unbound"].includes(f.scenario))
       assert(!editor().textContent.includes("Stays connected until you remove it"), "unknown or terminal promised permanence");
     if (["ended", "elapsed-fence", "hosted-ended"].includes(f.scenario))
@@ -347,18 +358,38 @@ async function observeConnectionApp() {
       assert(!/saved\./.test(notice()), "success preceded the follow-up HTTP response");
       f.holdRead = false; f.releaseRead(); f.releaseRead = null;
       await wait(() => notice() === "End date saved.", "save receipt");
-      assert(document.activeElement === field("[data-end-date-toggle]"), "save lost focus");
+      // A saved card closes its controls and hands the keyboard back to "Edit end date"; elsewhere focus stays on the first control.
+      if (f.hosted) {
+        assert(document.activeElement === editButton() && !visible(form()), "save did not close the card's controls onto Edit end date");
+        assert(editor().textContent.includes("Connection ends"), "the saved date is not shown on the card");
+        await openCard("after save");
+      } else assert(document.activeElement === field("[data-end-date-toggle]"), "save lost focus");
       field("[data-end-date-value]").value = "2036-03-04T05:06";
       field("[data-end-date-value]").dispatchEvent(new Event("input"));
       form().requestSubmit();
       await wait(() => notice() === "End date saved.", "extend receipt");
+      await openCard("after extend");
       field("[data-end-date-toggle]").click(); form().requestSubmit();
       await wait(() => notice() === "End date is off.", "clear receipt");
+      if (f.hosted) {
+        assert(editor().textContent.includes("No end date") && !visible(form()), "a cleared card does not say No end date with its controls closed");
+        // Cancel and Escape keep what is saved, close the controls and return the keyboard to Edit end date; the dialog stays open.
+        await openCard("cancel");
+        field("[data-end-date-toggle]").click();
+        field("[data-end-date-cancel]").click();
+        assert(!visible(form()) && document.activeElement === editButton() && !field("[data-end-date-toggle]").checked, "Cancel did not restore the saved state and focus");
+        await openCard("escape");
+        field("[data-end-date-toggle]").click();
+        form().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        assert(!visible(form()) && document.activeElement === editButton() && one("[data-connected-apps-dialog]").open, "Escape did not close only the editor");
+        assert(editor().textContent.includes("No end date"), "Cancel or Escape changed what is saved");
+      }
       const expectedKind = f.hosted ? "hosted" : "renewal", expectedId = f.hosted ? f.hostedId : f.renewal;
       const sent = writes();
       assert(sent.length === 3 && sent.every((r: any) => r.workspace_id === f.workspace && r.command.connection_kind === expectedKind && r.command.grant_id === expectedId), "wrong workspace or family identity");
       assert(sent[2].command.connection_expires_at === null, "clear must send explicit NULL");
       assert(Date.parse(sent[0].command.connection_expires_at) === new Date("2035-02-03T04:05").getTime(), "local time conversion");
+      await openCard("refusals");
       f.mode = "deny"; edit(); form().requestSubmit();
       await wait(() => /not confirmed/.test(notice()), "refusal reread");
       assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, "refusal changed fixture state");
@@ -374,7 +405,10 @@ async function observeConnectionApp() {
         assert(writes().length === count + 1, row.mode + " did not reach command HTTP");
         assert(f.reads === reads, row.mode + " required an unnecessary policy read");
         assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, row.mode + " changed saved state");
-        assert(editor().textContent.includes("Stays connected until you remove it"), row.mode + " changed canonical summary");
+        // The saved state is still "no end date": a card says so in two words, the other editors in a sentence.
+        assert(editor().textContent.includes(f.hosted ? "No end date" : "Stays connected until you remove it"), row.mode + " changed canonical summary");
+        // A refused save leaves the card's controls open with the entered date, ready to correct.
+        if (f.hosted) assert(visible(form()) && visible(field("[data-end-date-value]")), row.mode + " closed the card's controls on a refusal");
         assert(!field("[data-end-date-save]").disabled && !field("[data-end-date-value]").disabled &&
           !visible(field("[data-end-date-check]")), row.mode + " blocked correction on a read-only Check");
         assert(field("[data-end-date-value]").value === "2035-02-03T04:05", row.mode + " discarded the draft");

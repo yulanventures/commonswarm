@@ -2168,21 +2168,141 @@
         "click": "[data-connected-apps-open]"
       },
       {
-        "waitFor": "dialog[data-connected-apps-dialog][open] [data-end-date-toggle]",
-        "click": "dialog[data-connected-apps-dialog][open] [data-end-date-toggle]"
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]"
       },
       {
-        "waitFor": "dialog[data-connected-apps-dialog][open] [data-end-date-value]",
-        "scroll": "dialog[data-connected-apps-dialog][open] [data-end-date-save]"
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-toggle]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-toggle]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-value]",
+        "scroll": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-cancel]"
       }
     ],
-    "ready": "dialog[data-connected-apps-dialog][open] [data-end-date-value]",
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-value]",
     "states": [
       "dense"
     ],
     "requiresSeed": [
       "seed_delegated_invitation",
       "seed_connected_app"
+    ],
+    "frame": [
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-save]",
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-cancel]"
+    ]
+  },
+  {
+    "id": "dialog.connected-apps.connected.dated",
+    "kind": "dialog",
+    "path": "/app?w={connectedAppWorkspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]",
+        "scroll": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]"
+      }
+    ],
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation",
+      "seed_connected_app"
+    ],
+    "frame": [
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]"
+    ]
+  },
+  {
+    "id": "dialog.connected-apps.connected.end-date.saved",
+    "kind": "dialog",
+    "path": "/app?w={connectedAppWorkspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-edit]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-value]",
+        "scroll": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-cancel]"
+      }
+    ],
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-value]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation",
+      "seed_connected_app"
+    ],
+    "frame": [
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-save]",
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppDatedGrant}\"] [data-end-date-cancel]"
+    ]
+  },
+  {
+    "id": "dialog.connected-apps.connected.end-date.escaped",
+    "kind": "dialog",
+    "path": "/app?w={connectedAppWorkspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-toggle]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-toggle]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-value]",
+        "press": "Escape"
+      }
+    ],
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]:focus",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation",
+      "seed_connected_app"
+    ],
+    "frame": [
+      "dialog[data-connected-apps-dialog][open] [data-connection-end-date$=\":hosted:{connectedAppGrant}\"] [data-end-date-edit]"
     ]
   },
   {

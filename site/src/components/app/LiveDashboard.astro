@@ -6398,7 +6398,7 @@ import "../../styles/kylon-command-palette.css";
      */
     // Drafts follow the signed-in owner, workspace and exact connection, across refreshes.
     let connectionSettingsGeneration = 0;
-    const connectionDateDrafts = new Map<string, { enabled: boolean; value: string; dirty: boolean; busy: boolean; needsCheck: boolean; notice: string }>();
+    const connectionDateDrafts = new Map<string, { enabled: boolean; value: string; dirty: boolean; busy: boolean; needsCheck: boolean; notice: string; editing?: boolean }>();
     // The roster's latest token cannot prove run/device eligibility. Require the
     // server's current family classification before promising continuity or editing.
     const renewalConnectionLive = (grant: AgentAccessStatus): boolean =>
@@ -6432,13 +6432,18 @@ import "../../styles/kylon-command-palette.css";
       current: () => { policy: ConnectionPolicy; live: boolean; owner: boolean } | null;
       isCurrent: () => boolean;
       reread: () => Promise<void>;
+      /** Connected apps: the card shows the saved end date; the editing controls open from one "Edit end date". */
+      collapsed?: boolean;
     }): HTMLElement => {
+      const collapsed = options.collapsed === true;
       const section = document.createElement("section"); section.className = "dashboard__connection-end-date";
       section.dataset.connectionEndDate = options.key;
       const heading = document.createElement("h3"); heading.textContent = "End date";
       const summary = document.createElement("p");
       const notice = document.createElement("p"); notice.setAttribute("role", "status"); notice.setAttribute("aria-live", "polite");
-      section.append(heading, summary, notice);
+      const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit end date";
+      edit.className = "dashboard__text-button"; edit.dataset.endDateEdit = ""; edit.hidden = true;
+      section.append(heading, summary, edit, notice);
       const localDate = (value: string | null | undefined): string => {
         if (!value) return "";
         const date = new Date(value);
@@ -6462,20 +6467,27 @@ import "../../styles/kylon-command-palette.css";
       save.className = "dashboard__button dashboard__button--secondary"; save.dataset.endDateSave = "";
       const check = document.createElement("button"); check.type = "button"; check.textContent = "Check saved end date";
       check.className = "dashboard__text-button"; check.dataset.endDateCheck = "";
-      for (const [field, control] of [["toggle", toggle], ["value", date], ["save", save], ["check", check]] as const) {
+      const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancel";
+      cancel.className = "dashboard__button dashboard__button--secondary"; cancel.dataset.endDateCancel = ""; cancel.hidden = !collapsed;
+      for (const [field, control] of [["toggle", toggle], ["value", date], ["save", save], ["check", check], ["edit", edit], ["cancel", cancel]] as const) {
         control.dataset.endDateField = field; control.dataset.pdFocus = `${options.key}:${field}`;
       }
-      form.append(toggleLabel, dateLabel, save, check); section.append(form);
+      form.append(toggleLabel, dateLabel, save, cancel, check); section.append(form);
       const update = (): void => {
         const latest = options.current();
         const policy = latest?.policy ?? {};
         const policyState = connectionPolicyState(policy, latest?.live === true);
         const editable = options.isCurrent() && latest?.owner === true && (policyState === "permanent" || policyState === "dated");
-        summary.textContent = connectionPolicyCopy(policy, latest?.live === true);
+        // The card says what is saved in a few words: the date, or that there is none.
+        summary.textContent = collapsed && policyState === "permanent" ? "No end date" : connectionPolicyCopy(policy, latest?.live === true);
         if (!state.dirty && !state.busy && !state.needsCheck) {
           state.enabled = typeof policy.connectionExpiresAt === "string"; state.value = localDate(policy.connectionExpiresAt);
         }
-        form.hidden = !editable && !state.needsCheck;
+        // On a card the controls stay closed until "Edit end date" is pressed. An outcome that must be checked keeps them open.
+        const open = !collapsed || state.editing === true || state.needsCheck;
+        form.hidden = (!editable && !state.needsCheck) || !open;
+        edit.hidden = !collapsed || !editable || open;
+        cancel.disabled = state.busy || state.needsCheck;
         toggle.checked = state.enabled; date.value = state.value; dateLabel.hidden = !state.enabled;
         toggle.disabled = date.disabled = !editable || state.busy || state.needsCheck;
         date.disabled ||= !state.enabled;
@@ -6485,6 +6497,24 @@ import "../../styles/kylon-command-palette.css";
       };
       const edited = (): void => { state.enabled = toggle.checked; state.value = date.value; state.dirty = true; state.notice = ""; update(); };
       toggle.addEventListener("change", edited); date.addEventListener("input", edited);
+      edit.addEventListener("click", () => {
+        state.editing = true; state.notice = ""; update();
+        (state.enabled ? date : toggle).focus({ preventScroll: true });
+      });
+      /* Cancel and Escape leave what is saved as it is: the draft goes back to the saved end date, the controls close and
+         the keyboard returns to "Edit end date". Escape is taken here so it closes the editor, not the whole dialog. */
+      const closeEditing = (): void => {
+        if (!collapsed || state.busy || state.needsCheck) return;
+        const policy = options.current()?.policy;
+        state.enabled = typeof policy?.connectionExpiresAt === "string"; state.value = localDate(policy?.connectionExpiresAt);
+        state.dirty = false; state.notice = ""; state.editing = false; update();
+        if (!edit.hidden) edit.focus({ preventScroll: true });
+      };
+      cancel.addEventListener("click", closeEditing);
+      form.addEventListener("keydown", event => {
+        if (!collapsed || event.key !== "Escape" || state.editing !== true || state.busy || state.needsCheck) return;
+        event.preventDefault(); event.stopPropagation(); closeEditing();
+      });
       check.addEventListener("click", async () => {
         if (state.busy || !options.isCurrent()) return;
         state.busy = true; state.notice = "Checking saved end date…"; update();
@@ -6526,10 +6556,14 @@ import "../../styles/kylon-command-palette.css";
           const confirmed = writeError === null && fresh?.owner === true && ["permanent", "dated"].includes(connectionPolicyState(fresh.policy, fresh.live)) &&
             (desired === null ? fresh.policy.connectionExpiresAt === null : Date.parse(fresh.policy.connectionExpiresAt ?? "") === Date.parse(desired));
           state.needsCheck = false;
-          if (confirmed) { state.dirty = false; state.notice = desired === null ? "End date is off." : "End date saved."; }
+          // A confirmed save closes the card's controls; the receipt stays beside the saved date.
+          if (confirmed) { state.dirty = false; state.notice = desired === null ? "End date is off." : "End date saved."; if (collapsed) state.editing = false; }
           else state.notice = writeError === null ? "The end date was not confirmed. Review the saved connection settings before saving again." : writeError instanceof Error ? writeError.message : readableError(writeError);
         } catch { state.needsCheck = true; state.notice = "The result is unknown. Check the saved end date before saving again."; }
-        finally { state.busy = false; if (options.isCurrent()) { if (section.isConnected) { update(); (state.needsCheck ? check : toggle).focus({ preventScroll: true }); } else { refreshConnectionDateViews(); Array.from(app.querySelectorAll<HTMLElement>("[data-connection-end-date]")).find(element => element.dataset.connectionEndDate === options.key)?.querySelector<HTMLElement>(`[data-end-date-field="${state.needsCheck ? "check" : "toggle"}"]`)?.focus({ preventScroll: true }); } } }
+        finally { state.busy = false; if (options.isCurrent()) {
+          // Where the keyboard goes afterwards: Check when the outcome is unknown; "Edit end date" when a card's controls closed; else the first control.
+          const after = state.needsCheck ? "check" : collapsed && state.editing !== true ? "edit" : "toggle";
+          if (section.isConnected) { update(); ({ check, edit, toggle })[after].focus({ preventScroll: true }); } else { refreshConnectionDateViews(); Array.from(app.querySelectorAll<HTMLElement>("[data-connection-end-date]")).find(element => element.dataset.connectionEndDate === options.key)?.querySelector<HTMLElement>(`[data-end-date-field="${after}"]`)?.focus({ preventScroll: true }); } } }
       });
       update(); return section;
     };
@@ -11321,6 +11355,7 @@ import "../../styles/kylon-command-palette.css";
         head.append(title, badge);
         const ownerId = session?.user.id, generation = connectedAppsGeneration;
         if (ownerId && !sampleMode) card.append(connectionEndDateEditor({
+          collapsed: true,
           key: `${ownerId}:${connection.homeWorkspaceId}:hosted:${connection.grantId}`,
           workspaceId: connection.homeWorkspaceId, kind: "hosted", grantId: connection.grantId,
           isCurrent: () => session?.user.id === ownerId && connectedAppsGeneration === generation && !sampleMode,
