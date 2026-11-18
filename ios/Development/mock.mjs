@@ -123,10 +123,11 @@ const server = createServer(async (req, res) => {
       return issueSession();
     }
     if (req.method === "POST" && url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "refresh_token") {
+      if (!refreshTokens.has(body.refresh_token)) return reply(400, { error_code: "refresh_token_not_found" });
       if (upgrade && ++refreshAttempts === 2) {
         return reply(503, {});
       }
-      if (!refreshTokens.delete(body.refresh_token)) return reply(400, { error_code: "refresh_token_not_found" });
+      refreshTokens.delete(body.refresh_token);
       return issueSession();
     }
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});

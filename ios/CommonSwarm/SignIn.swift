@@ -7,9 +7,10 @@ final class SignIn: ObservableObject {
     @Published private(set) var pending = false
     @Published private(set) var failed = false
 
-    enum Startup { case waiting, restoring, ready, retryRestore, retrySignOut }
+    enum Startup { case waiting, waitingForUnlock, restoring, ready, retryRestore, retrySignOut }
     @Published private(set) var startup = Startup.waiting
     private let deployment = Deployment.current
+    private lazy var storage = deployment.map { SessionPersistence(origin: $0.origin) }
     private var tokens: LoginTokens?
     private var rotation: Task<Void, Error>?
     // GoTrue may already have rotated before a temporary device-storage error.
@@ -91,23 +92,26 @@ final class SignIn: ObservableObject {
     }
 
     func restore() async {
-        guard startup == .waiting || startup == .retryRestore else { return }
-        guard let deployment else { startup = .ready; return }
+        guard startup == .waiting || startup == .waitingForUnlock || startup == .retryRestore else { return }
+        guard let deployment, let storage else { startup = .ready; return }
         startup = .restoring
-        if UserDefaults.standard.bool(forKey: signOutMarker) {
-            signOut()
-            return
-        }
         do {
-            guard let saved = try RefreshKeychain(origin: deployment.origin).read() else {
-                startup = .ready
-                return
+            try await storage.restore(unlocked: UIApplication.shared.isProtectedDataAvailable) { saved in
+                try await self.rotate(saved, deployment)
             }
-            try await rotate(saved, deployment)
             startup = .ready
+        } catch SessionStorageError.locked {
+            startup = .waitingForUnlock
+        } catch SessionStorageError.pendingSignOut {
+            startup = .retrySignOut
         } catch {
             if startup == .restoring { startup = .retryRestore }
         }
+    }
+
+    func didUnlock() async {
+        if startup == .waitingForUnlock { await restore() }
+        else if startup == .retrySignOut { signOut() }
     }
 
     func completeEmailSignIn(_ result: LoginTokens) throws {
@@ -117,8 +121,8 @@ final class SignIn: ObservableObject {
     }
 
     private func accept(_ result: LoginTokens) throws {
-        guard let deployment else { throw SignInError.unavailable }
-        try RefreshKeychain(origin: deployment.origin).save(SavedLogin(userID: result.userID, refreshToken: result.refreshToken))
+        guard let storage else { throw SignInError.unavailable }
+        try storage.keychain.save(SavedLogin(userID: result.userID, refreshToken: result.refreshToken))
         tokens = result
         if session == nil {
             session = HumanSession(userID: result.userID) { [weak self] in
@@ -164,8 +168,6 @@ final class SignIn: ObservableObject {
         try await task.value
     }
 
-    private var signOutMarker: String { "signOutPending." + (deployment?.origin.absoluteString ?? "") }
-
     func signOut() {
         finish()
         rotation?.cancel()
@@ -174,12 +176,9 @@ final class SignIn: ObservableObject {
         tokens = nil
         session?.signOut()
         session = nil
-        guard let deployment else { startup = .ready; return }
-        // A failed Keychain deletion must still honor sign-out after a relaunch.
-        UserDefaults.standard.set(true, forKey: signOutMarker)
+        guard let storage else { startup = .ready; return }
         do {
-            try RefreshKeychain(origin: deployment.origin).remove()
-            UserDefaults.standard.removeObject(forKey: signOutMarker)
+            try storage.signOut()
             startup = .ready
         } catch {
             startup = .retrySignOut

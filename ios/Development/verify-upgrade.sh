@@ -5,6 +5,9 @@ cd "$(dirname "$0")/../.."
 udid=${1:?Pass the exact booted simulator UDID}
 xcrun simctl list devices booted | grep -F "($udid) (Booted)" >/dev/null
 scratch=$(mktemp -d)
+xcodebuild -quiet test -project ios/CommonSwarm.xcodeproj -scheme SessionStorage \
+    -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
+    -resultBundlePath "$scratch/storage.xcresult"
 node ios/Development/mock.mjs --upgrade >"$scratch/fixture.log" 2>&1 &
 fixture=$!
 trap 'kill "$fixture" 2>/dev/null || true; wait "$fixture" 2>/dev/null || true' EXIT

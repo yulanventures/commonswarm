@@ -1,12 +1,7 @@
 import Foundation
 import Security
 
-struct SavedLogin: Codable {
-    let userID: UUID
-    let refreshToken: String
-}
-
-struct RefreshKeychain {
+struct RefreshKeychain: LoginKeychain {
     let origin: URL
 
     // The default application access group is stable for in-place updates on the same team.
@@ -25,6 +20,7 @@ struct RefreshKeychain {
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecInteractionNotAllowed { throw SessionStorageError.locked }
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw StorageError(status: status) }
         return try JSONDecoder().decode(SavedLogin.self, from: data)
@@ -32,12 +28,13 @@ struct RefreshKeychain {
 
     func save(_ login: SavedLogin) throws {
         let values: [CFString: Any] = [kSecValueData: try JSONEncoder().encode(login),
-                                       kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlock]
+                                       kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         var status = SecItemUpdate(item as CFDictionary, values as CFDictionary)
         if status == errSecItemNotFound {
             let newItem = item.merging(values) { _, value in value }
             status = SecItemAdd(newItem as CFDictionary, nil)
         }
+        if status == errSecInteractionNotAllowed { throw SessionStorageError.locked }
         guard status == errSecSuccess else { throw StorageError(status: status) }
     }
 

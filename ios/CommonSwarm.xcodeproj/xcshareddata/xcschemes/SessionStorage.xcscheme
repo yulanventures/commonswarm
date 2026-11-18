@@ -1,0 +1,19 @@
+<Scheme version="1.7">
+  <BuildAction>
+    <BuildActionEntries>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000007001" BuildableName="CommonSwarm.app" BlueprintName="CommonSwarm" ReferencedContainer="container:CommonSwarm.xcodeproj" />
+      </BuildActionEntry>
+      <BuildActionEntry buildForTesting="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="0000000000000000000DB008" BuildableName="SessionStorageTests.xctest" BlueprintName="SessionStorageTests" ReferencedContainer="container:CommonSwarm.xcodeproj" />
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB">
+    <Testables>
+      <TestableReference skipped="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="0000000000000000000DB008" BuildableName="SessionStorageTests.xctest" BlueprintName="SessionStorageTests" ReferencedContainer="container:CommonSwarm.xcodeproj" />
+      </TestableReference>
+    </Testables>
+  </TestAction>
+</Scheme>

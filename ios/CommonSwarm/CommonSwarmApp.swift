@@ -47,6 +47,8 @@ private struct SessionView: View {
         Group {
             if auth.startup == .waiting || auth.startup == .restoring {
                 ProgressView("Restoring sign-in")
+            } else if auth.startup == .waitingForUnlock {
+                ProgressView("Waiting for unlock")
             } else if auth.startup == .retryRestore {
                 RetryView(text: "Couldn’t restore sign-in", action: auth.restore)
             } else if auth.startup == .retrySignOut {
@@ -59,6 +61,9 @@ private struct SessionView: View {
                 SignInView(auth: auth, deployment: Deployment.current, window: window)
             }
         }.task { await auth.restore() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
+            Task { await auth.didUnlock() }
+        }
         .background(WindowAnchor { window = $0 }.frame(width: 0, height: 0))
     }
 }
