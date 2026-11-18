@@ -13,3 +13,5 @@ The reduced-transparency captures also have Increase Contrast and Reduce Motion 
 The on-device XCTest contrast audit passed for the changed controls in light mode. In dark mode it flagged the prompt. The captured element shows common glyph-interior pixels of RGB 195/195/195 over RGB 18/18/18, about 10.6:1 by the WCAG sRGB formula. That measurement is specific to the pictured background. The audit also reported existing timeline labels.
 
 The production app’s reader test used the normal sign-in entry point. It checked the same message stayed in place after an older page loaded, repeated that check through an older-page retry, then tapped Latest and found the final message visible and the button dismissed.
+
+On the iPhone SE, the keyboard stayed open and the draft occupied two lines before and after tapping Latest. The final message ended at 334.9 pt and the draft began at 349 pt, leaving 14.1 pt between them. The same draft text remained editable. [Keyboard comparison](keyboard.jpg)
