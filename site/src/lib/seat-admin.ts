@@ -8,6 +8,7 @@
  */
 import type { Session } from "@supabase/supabase-js";
 import { deployment, postCommand } from "./commonswarm";
+import { buildSeatAdminEndConfirmation } from "./seat-admin-view";
 import type {
   SeatAdminAccess,
   SeatAdminDuration,
@@ -75,6 +76,8 @@ export interface SeatAdminGrantRow {
   createdAt: string;
   endedAt: string | null;
   endReason: string | null;
+  /** The person who ended it (an owner's end), when known; null for an expiry or an unattributed end. */
+  endedBy: string | null;
 }
 
 export type SeatAdminMutationOutcome =
@@ -296,6 +299,8 @@ export function parseSeatAdminGrantRecord(entry: unknown, nowMs = Date.now()): S
       ? entry.end_reason
       : undefined;
   if (endReason === undefined) return null;
+  // Attribution only: an unknown or malformed actor shows as an unattributed end, never a refused row.
+  const endedBy = typeof entry.ended_by === "string" && UUID_RE.test(entry.ended_by) ? entry.ended_by.toLowerCase() : null;
 
   let effectiveState: SeatAdminGrantState = entry.state;
   if (effectiveState === "active" && expiresAt !== null && Date.parse(expiresAt) <= nowMs) {
@@ -314,6 +319,7 @@ export function parseSeatAdminGrantRecord(entry: unknown, nowMs = Date.now()): S
     createdAt: entry.created_at,
     endedAt,
     endReason,
+    endedBy,
   };
 }
 
@@ -956,19 +962,33 @@ function formatGrantLevelLabel(level: SeatAdminGrantRow["level"]): string {
   return "Scoped admin (v1)";
 }
 
-function formatGrantStateLabel(grant: SeatAdminGrantRow): string {
+/** Who ended a grant, as the viewer reads it: "you", "another_owner", or null when unknown or not a person's end. */
+export function seatAdminEndedBy(grant: SeatAdminGrantRow, viewerUserId?: string | null): "you" | "another_owner" | null {
+  if (grant.state === "active" || grant.state === "expired" || !grant.endedBy) return null;
+  return viewerUserId && grant.endedBy === viewerUserId.toLowerCase() ? "you" : "another_owner";
+}
+
+/** The history row's state line. The machine reason stays in the row's data, not in the words. */
+export function seatAdminGrantStateLabel(grant: SeatAdminGrantRow, viewerUserId?: string | null): string {
   if (grant.state === "active") {
     return grant.expiresAt ? `Active · Ends ${formatHistoryDate(grant.expiresAt)}` : "Active · Until removed";
   }
-  const endedWhen = grant.endedAt ? ` ${formatHistoryDate(grant.endedAt)}` : "";
-  const reasonSuffix = grant.endReason ? ` (${grant.endReason})` : "";
   if (grant.state === "expired") {
-    return `Expired ${formatHistoryDate(grant.expiresAt)}`;
+    return `Expired ${formatHistoryDate(grant.endedAt ?? grant.expiresAt)}`;
   }
-  if (grant.state === "downgraded") {
-    return `Downgraded${endedWhen}${reasonSuffix}`;
+  const when = grant.endedAt ? ` ${formatHistoryDate(grant.endedAt)}` : "";
+  const by = seatAdminEndedBy(grant, viewerUserId);
+  return `Ended${when}${by === "you" ? " by you" : by === "another_owner" ? " by another owner" : ""}`;
+}
+
+/** What a grant covers, by name where known: its organization, its workspaces. */
+export function seatAdminGrantCoverage(grant: SeatAdminGrantRow, names: {
+  workspacesById?: ReadonlyMap<string, string>; organizationsById?: ReadonlyMap<string, string>;
+}): string[] {
+  if (grant.level === "organization" && grant.organizationId) {
+    return [names.organizationsById?.get(grant.organizationId) ?? `Organization ${grant.organizationId}`];
   }
-  return `Ended${endedWhen}${reasonSuffix}`;
+  return grant.workspaceIds.map(id => names.workspacesById?.get(id) ?? `Workspace ${id}`);
 }
 
 export function renderSeatAdminHistoryList(
@@ -979,6 +999,9 @@ export function renderSeatAdminHistoryList(
     workspacesById?: ReadonlyMap<string, string>;
     organizationsById?: ReadonlyMap<string, string>;
     busy?: boolean;
+    /** The signed-in person, so an end they made reads "by you". */
+    viewerUserId?: string | null;
+    /** Called only after the person confirms End access for that row; opening, Keep and Escape send nothing. */
     onRemove: (grant: SeatAdminGrantRow, button: HTMLButtonElement) => void;
   },
 ): void {
@@ -995,6 +1018,10 @@ export function renderSeatAdminHistoryList(
     card.dataset.adminSeatGrant = grant.grantId;
     card.dataset.adminSeatLevel = grant.level;
     card.dataset.adminSeatState = grant.state;
+    // Structured detail for tools and tests: the machine reason and who ended it.
+    if (grant.endReason) card.dataset.adminSeatEndReason = grant.endReason;
+    const endedBy = seatAdminEndedBy(grant, options.viewerUserId);
+    if (endedBy) card.dataset.adminSeatEndedBy = endedBy;
 
     const agentName =
       options.agentsByPrincipalId?.get(grant.principalId) ??
@@ -1003,21 +1030,19 @@ export function renderSeatAdminHistoryList(
     title.textContent = `${agentName} · ${formatGrantLevelLabel(grant.level)}`;
 
     const scopeLine = doc.createElement("p");
+    const coverage = seatAdminGrantCoverage(grant, options);
     if (grant.level === "organization" && grant.organizationId) {
       const orgName = options.organizationsById?.get(grant.organizationId);
       scopeLine.textContent = orgName ? `Organization: ${orgName}` : `Organization ${grant.organizationId}`;
     } else if (grant.workspaceIds.length > 0) {
-      const labels = grant.workspaceIds.map(id => {
-        const wsName = options.workspacesById?.get(id);
-        return wsName ? wsName : `Workspace ${id}`;
-      });
-      scopeLine.textContent = `Workspace: ${labels.join(", ")}`;
+      scopeLine.textContent = `Workspace: ${coverage.join(", ")}`;
     } else {
       scopeLine.textContent = `Scopes: ${grant.scopeNames.join(", ")}`;
     }
 
     const stateLine = doc.createElement("p");
-    stateLine.textContent = formatGrantStateLabel(grant);
+    stateLine.dataset.adminSeatStateLabel = "";
+    stateLine.textContent = seatAdminGrantStateLabel(grant, options.viewerUserId);
 
     card.append(title, scopeLine, stateLine);
 
@@ -1028,7 +1053,17 @@ export function renderSeatAdminHistoryList(
       button.dataset.tone = "danger";
       button.dataset.adminSeatRemove = grant.grantId;
       button.disabled = Boolean(options.busy);
-      button.addEventListener("click", () => options.onRemove(grant, button));
+      button.addEventListener("click", () => {
+        if (button.disabled || container.querySelector("dialog[data-seat-admin-end]")) return;
+        const ending = buildSeatAdminEndConfirmation(doc, {
+          agentName, level: grant.level, coverage, scopeNames: grant.scopeNames,
+          confirm: () => { ending.dialog.remove(); options.onRemove(grant, button); },
+          cancel: () => { ending.dialog.remove(); },
+        });
+        // Inside the list, so the account dialog's tokens apply and a re-render disposes it unsent.
+        container.append(ending.dialog);
+        ending.open(button);
+      });
       card.append(button);
     }
 

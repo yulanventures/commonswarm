@@ -6617,9 +6617,11 @@ import "../../styles/kylon-command-palette.css";
                 ? "organization"
                 : "workspace");
             disposeSeatAdminDialog();
+            const switchScope = resolved.panel.state === "hidden" ? undefined : resolved.panel[level]?.scope.name;
             const ending = buildSeatAdminEndConfirmation(document, {
               agentName: resolved.panel.state === "hidden" ? "this agent" : resolved.panel.agentName,
               level,
+              coverage: [switchScope || (level === "workspace" ? "this workspace" : "this organization")],
               confirm: () => {
                 if (activeSeatAdminEndDialog !== ending) return;
                 activeSeatAdminEndDialog = null;

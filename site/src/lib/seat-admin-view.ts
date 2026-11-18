@@ -268,9 +268,27 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
 
 export interface SeatAdminEndConfirmationOptions {
   agentName: string;
-  level: SeatAdminRoleLevel;
+  /** The grant being ended: its level and what it actually covers (workspace or organization names). */
+  level: SeatAdminLevel;
+  coverage: readonly string[];
+  /** A scoped grant's own scope names, shown so the person sees exactly what ends. */
+  scopeNames?: readonly string[];
   confirm: () => void;
   cancel?: () => void;
+}
+
+const LEVEL_WORDS: Record<SeatAdminLevel, string> = { workspace: "workspace", organization: "organization", scoped: "scoped" };
+
+/** "Studio", "Studio and Ops", "A, B and C". */
+function names(list: readonly string[]): string {
+  if (list.length <= 1) return list[0] ?? "";
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/** The question the end confirmation asks, naming the grant's level and coverage. */
+export function seatAdminEndQuestion(agentName: string, level: SeatAdminLevel, coverage: readonly string[]): string {
+  const where = names(coverage.filter(name => name.trim() !== ""));
+  return `End ${LEVEL_WORDS[level]} admin access for ${agentName}${where ? ` in ${where}` : ""}?`;
 }
 
 /** Turning admin access off asks first. Keep (the initial focus), Escape and closing send nothing; End access
@@ -283,13 +301,15 @@ export function buildSeatAdminEndConfirmation(doc: Document, options: SeatAdminE
   dialog.setAttribute("aria-describedby", `${id}-body`);
   const form = element(doc, "form", "sa-confirm__form");
   const header = element(doc, "header", "sa-confirm__header");
-  const title = element(doc, "h2", "", `End admin access for ${options.agentName}?`);
+  const title = element(doc, "h2", "", seatAdminEndQuestion(options.agentName, options.level, options.coverage));
   title.id = `${id}-title`;
   header.append(title);
   const body = element(doc, "div", "sa-confirm__body");
-  const line = element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again.");
-  line.id = `${id}-body`;
-  body.append(line);
+  body.id = `${id}-body`;
+  if (options.level === "scoped" && options.scopeNames?.length) {
+    body.append(element(doc, "p", "sa-confirm__line", `Scopes: ${options.scopeNames.join(", ")}`));
+  }
+  body.append(element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again."));
   const footer = element(doc, "footer", "sa-confirm__footer");
   const keep = action(doc, "Keep", () => { close(); options.cancel?.(); });
   const end = element(doc, "button", "sa-button sa-button--primary", "End access");

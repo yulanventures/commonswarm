@@ -704,8 +704,9 @@ async function observeSeatAdminApp() {
         () => document.querySelector<HTMLDialogElement>('dialog[data-seat-admin-end="workspace"]'),
         "end confirmation",
       )) as HTMLDialogElement;
-      assert(keepDialog.open && keepDialog.textContent!.includes("End admin access for") &&
-        keepDialog.textContent!.includes("It stays off until you turn it on again."), "end confirmation asks in plain words");
+      const keepTitle = keepDialog.querySelector("h2")?.textContent ?? "";
+      assert(keepDialog.open && keepTitle.startsWith("End workspace admin access for ") && / in .+\?$/u.test(keepTitle) &&
+        keepDialog.textContent!.includes("It stays off until you turn it on again."), "end confirmation names the workspace grant: " + keepTitle);
       assert(document.activeElement?.textContent === "Keep", "Keep has the initial focus");
       findDialogBtn(keepDialog, "Keep")!.click();
       await tick();

@@ -1,6 +1,7 @@
 ---
 import { ADMIN_AVAILABILITY, ADMIN_REGISTRY_VERSION, adminAvailabilityDigest } from "../../../../src/protocol/admin-policy";
 import "../../styles/kylon-account-dialogs.css";
+import "../../styles/kylon-seat-admin.css";
 const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDigest(ADMIN_REGISTRY_VERSION), definitions: ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION] };
 ---
 <admin-delegations hidden data-kylon-account data-admin-policy={JSON.stringify(policy)}>
@@ -323,6 +324,8 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         workspacesById,
         organizationsById,
         busy: seatBusy,
+        viewerUserId: ownSession.user.id,
+        // Runs only after the person confirms End access for this row.
         onRemove: async (g, button) => {
           if (!session || seatBusy) return;
           const activeSession = session, callGen = generation;
