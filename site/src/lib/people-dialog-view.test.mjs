@@ -2,20 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { HOSTED_LISTS_NOTE } from "./hosted-lists-note.ts";
-import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogAccessLabel, peopleDialogCanAct, peopleConfirmationCopy,
+import { peopleDialogGroups, peopleDialogAccessUntil, peopleDialogAccessLabel, peopleDialogCanAct, peopleConfirmationCopy,
   peopleDialogRoleOptions, peopleRoleSelfConfirmCopy, peopleRoleReceipt, peopleRoleRefusal, peopleRoleErrorCode, peopleDialogApplyFocus,
   peopleRoleBeginSave, peopleRoleFinishSave, peopleFirstName, PEOPLE_ROLE_REFUSAL_CODES } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
 const agent = (id, ownerId, overrides = {}) => ({ id, ownerId, name: id, app: null, model: null, ownerName: ownerId === "tom" ? "Tom Langridge" : "Mei Langridge", own: false, mayManage: false, liveKey: false, access: null, accessReadState: "succeeded", status: { kind: "active", attention: false, fix: { allowed: false } }, ...overrides });
 const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "person", name: "friend@example.test", detail: "Invite sent · expires in 6 days", mayCancel: false }], sample: false });
 
-test("counts separate people, agents and attention without asserting health", () => {
-  const data = model(); data.agents[2].status.attention = true;
-  assert.equal(peopleDialogCounts(data), "2 people · 4 agents · 1 need attention");
-  data.agents[2].status.attention = false; assert.equal(peopleDialogCounts(data), "2 people · 4 agents");
-  assert.equal(peopleDialogCounts({ ...data, people: [data.people[0]], agents: [] }), "1 person · 0 agents");
-});
-test("grouping filters people, agents, invitations and matching attention by names and labels", () => {
+test("grouping filters people, agents and invitations by names and labels", () => {
   const data = model();
   assert.deepEqual(peopleDialogGroups(data, "").groups.map((group) => [group.person.id, group.agents.map((agent) => agent.id)]), [["tom",["Claude"]],["mei",["Dot","Muse"]]]);
   assert.deepEqual(peopleDialogGroups(data, "").other.map((agent) => agent.id), ["Orphan"]);
@@ -27,10 +21,6 @@ test("grouping filters people, agents, invitations and matching attention by nam
   assert.deepEqual(peopleDialogGroups(data, "invite sent").invites, []);
   assert.deepEqual(peopleDialogGroups(data, "re").invites, []);
   assert.deepEqual(peopleDialogGroups(data, "absent").invites, []);
-  data.agents[0].status.attention = true; data.agents[2].status.attention = true;
-  assert.deepEqual(peopleDialogGroups(data, "spark").attention.map((agent) => agent.id), ["Muse"]);
-  assert.deepEqual(peopleDialogGroups(data, "Mei").attention.map((agent) => agent.id), ["Muse"]);
-  assert.deepEqual(peopleDialogGroups(data, "absent").attention, []);
 });
 test("Lists & docs facts require ownership and a successful connections read", () => {
   const value = agent("Muse", "mei", { own: true, access: { until: null } });
@@ -188,7 +178,7 @@ test("every first name in the dialog trims the same way", () => {
 });
 test("the self-change confirm is a native alertdialog with its own Escape, not an inline group", () => {
   const source = readFileSync(new URL("./people-dialog-view.ts", import.meta.url), "utf8");
-  const start = source.indexOf("const roleControl"); const end = source.indexOf("const { groups, other, invites, attention }");
+  const start = source.indexOf("const roleControl"); const end = source.indexOf("const { groups, other, invites }");
   const body = source.slice(start, end);
   assert.ok(start > 0 && end > start, "roleControl located");
   assert.match(body, /"dialog", "pd-confirm hm-role-confirm"/);
