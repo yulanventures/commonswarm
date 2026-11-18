@@ -537,3 +537,70 @@ test("a direct cswarm check outlives the hook budget and observes its whole page
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }
 });
+
+test("a check observes the message it just showed first, even behind a full queue of older acknowledgements in backoff", { timeout: 40_000 }, async () => {
+  const shown = { ...signal(1), id: "99999999-1111-4111-8111-111111111111", body: "shown now",
+    created_at: new Date(Date.UTC(2026, 8, 16, 1, 0, 0)).toISOString() };
+  const acks: Array<Record<string, unknown>> = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", chunk => raw += chunk);
+    request.on("end", () => {
+      const body = JSON.parse(raw || "{}") as Record<string, unknown>;
+      const reply = (status: number, value: unknown) =>
+        response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (body.resource === "members") return reply(200, {
+        members: [{ user_id: OWNER_ID, display_name: "Owner" }],
+        agents: [{ principal_id: PRINCIPAL_ID, name: "Agent", owner_user_id: OWNER_ID }],
+        identity: { credential_valid: true, principal_id: PRINCIPAL_ID, workspace_id: WORKSPACE_ID, owner_user_id: OWNER_ID },
+      });
+      if (body.resource === "signals") {
+        return reply(200, { signals: [shown], capabilities: { sender_owner_relation: 1, cursor_after: 1 } });
+      }
+      const command = body.command as Record<string, unknown> | undefined;
+      if (command?.kind === "ack_agent_delivery") {
+        acks.push(command);
+        const ids = command.signal_ids as string[];
+        return reply(200, { status: "accepted", ok: true, event_ids: [], outcome: "observed", signal_ids: ids,
+          observed_signal_ids: ids, refused: [] });
+      }
+      return reply(200, { status: "accepted", ok: true, event_ids: [] });
+    });
+  });
+  await new Promise<void>(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const profilePath = await profile();
+    const stored = JSON.parse(await readFile(profilePath, "utf8"));
+    await writeFile(profilePath, JSON.stringify({ ...stored, url: `http://127.0.0.1:${address.port}` }), { mode: 0o600 });
+    // A full batch of older acknowledgements, each waiting out a retry backoff that ends later than this run.
+    const older = Array.from({ length: 20 }, (_, index) => `${String(index + 1).padStart(8, "0")}-2222-4222-8222-222222222222`);
+    const now = Date.now();
+    await writeFile(join(dirname(profilePath), "check.json"), JSON.stringify({ version: 1, cursor: null, messages: [],
+      pending_observed_ids: older, pending_observed_next: 0,
+      pending_observed_retries: Object.fromEntries(older.map(id => [id, { attempts: 1, first_at: now, next_at: now + 3_600_000 }])) }),
+    { mode: 0o600 });
+    const home = await mkdtemp(join(root, "shown-first-home-"));
+    const child = spawn(process.execPath, ["--import", tsxImport, cliPath, "check", "--profile", profilePath, "--json"], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "config"), SWARM_AGENT_STATE_DIR: join(home, "agent-state") },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    const status = await new Promise<number | null>(resolveStatus => child.once("close", resolveStatus));
+    assert.equal(status, 0, stderr);
+    assert.deepEqual(JSON.parse(stdout).messages.map((message: { id: string }) => message.id), [shown.id]);
+    assert.deepEqual(acks.flatMap(ack => ack.signal_ids as string[]), [shown.id],
+      "the shown message is observed in this run; the older entries still wait out their backoff");
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.equal(state.pending_observed_ids.includes(shown.id), false);
+    assert.deepEqual([...state.pending_observed_ids].sort(), [...older].sort(), "the older entries stay queued");
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+  }
+});

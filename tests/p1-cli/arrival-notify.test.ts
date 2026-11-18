@@ -25,7 +25,7 @@ const NEW_SIGNAL = "22222222-2222-4222-8222-222222222222";
 const BROADCAST_SIGNAL = "55555555-5555-4555-8555-555555555555";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
 
-test("inbox --notify flushes readable lines and best-effort attests only the rendered broadcast", { timeout: 15_000 }, async () => {
+test("inbox --notify flushes readable lines and acknowledges nothing: no observation, no 👀, no seen report", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-arrival-cli-"));
   const xdg = join(root, "state");
   const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -36,17 +36,16 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     ack_outcome: null,
   };
   const receiptBefore = structuredClone(receipt);
-  // SIGTERM goes out only after both lines are rendered AND the server has seen the best-effort
-  // attest (signals_seen), the seen mark (add_reaction), the delivery observation
-  // (ack_agent_delivery) and the attended-seat canary (post_signal), never on a fixed delay that a
-  // loaded runner can beat.
+  // SIGTERM goes out only after both lines are rendered AND the server has seen the attended-seat
+  // canary (post_signal), never on a fixed delay that a loaded runner can beat. Before the canary, the
+  // old watcher had already sent its seen report and 👀 for the batch, so stopping here is enough to
+  // catch them; the delivery observation ran in the background and is caught when it lands first.
   let rendered = false;
   let stopped = false;
   let stop = (): void => {};
   const commandKinds = () => requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
   const maybeStop = () => {
-    if (stopped || !rendered || !commandKinds().includes("signals_seen") || !commandKinds().includes("add_reaction") ||
-        !commandKinds().includes("ack_agent_delivery") || !commandKinds().includes("post_signal")) return;
+    if (stopped || !rendered || !commandKinds().includes("post_signal")) return;
     stopped = true;
     stop();
   };
@@ -76,7 +75,7 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
           event_ids: [], signal_id: command.signal_id, emoji: command.emoji, added: true }));
         return;
       }
-      // The attest and the observation both fail here: the watcher carries on regardless.
+      // Answered only so a watcher that still acknowledged would carry on to the assertions below.
       if (req.url === "/functions/v1/command" &&
           (command?.kind === "signals_seen" || command?.kind === "ack_agent_delivery")) {
         res.writeHead(503, { "content-type": "application/json" }).end(
@@ -236,51 +235,23 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     assert.doesNotMatch(lines[0]!, new RegExp(url));
     assert.doesNotMatch(lines[0]!, /anon-key-for-arrival-test/);
     assert.doesNotMatch(lines[0]!, new RegExp(TOKEN));
-    /* A notify seat without a detached listener posts one attended-seat canary to prove its watcher path. */
+    /* A notify seat without a detached listener posts one attended-seat canary to prove its watcher path.
+     * Nothing else: the lines went to this process's stdout, which nothing proves the agent's session
+     * read, so the watcher neither observes the delivery, nor marks it 👀, nor reports the broadcast seen.
+     * `cswarm check` in the session does that for what it shows. */
+    const kinds = requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
+    for (const acknowledgement of ["ack_agent_delivery", "add_reaction", "signals_seen"]) {
+      assert.equal(kinds.includes(acknowledgement), false, `the watcher sent ${acknowledgement}: ${JSON.stringify(kinds)}`);
+    }
     assert.deepEqual(
       requests.map(({ path }) => path),
-      [
-        "/functions/v1/command",
-        "/functions/v1/read",
-        "/functions/v1/command",
-        "/functions/v1/command",
-        "/functions/v1/command",
-        "/functions/v1/command",
-        "/functions/v1/command",
-      ],
+      ["/functions/v1/command", "/functions/v1/read", "/functions/v1/command", "/functions/v1/command"],
     );
     assert.equal((requests[0]?.body.command as Record<string, unknown>).kind, "claim_wake_lease");
     assert.equal(requests[1]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
     assert.equal(requests[1]?.body.after_id, OLD_SIGNAL);
     assert.equal(requests[1]?.body.include_reactions, true);
-    /* The broadcast attest, the seen mark and the delivery observation go out after the batch's lines
-     * are written; their order is not fixed, and the observation runs in the background, so it may
-     * also land after the canary. */
-    const middle = requests.slice(2, 6).map(({ body }) => body.command as Record<string, unknown>);
-    assert.deepEqual(middle.map((command) => command.kind).sort(),
-      ["ack_agent_delivery", "add_reaction", "post_signal", "signals_seen"]);
-    const afterBatch = middle.filter((command) => command.kind !== "post_signal");
-    assert.deepEqual(
-      afterBatch.find((command) => command.kind === "ack_agent_delivery"),
-      { kind: "ack_agent_delivery", signal_ids: [NEW_SIGNAL], lease_id: null, listener_instance_id: null,
-        outcome: "observed", last_error_code: null, surfaced: true, unclaimed: true },
-      "only the ask addressed to this agent is observed, and its failure stops nothing",
-    );
-    assert.deepEqual(
-      afterBatch.find((command) => command.kind === "signals_seen")?.signal_ids,
-      [BROADCAST_SIGNAL],
-      "a directed line is rendered but only the rendered broadcast is attested",
-    );
-    assert.deepEqual(
-      afterBatch.find((command) => command.kind === "add_reaction"),
-      { kind: "add_reaction", signal_id: NEW_SIGNAL, emoji: "\u{1F440}", source: "ack" },
-      "only the ask addressed to this agent is marked seen",
-    );
-    // The canary follows the batch's attest and seen mark (it waits for both); the release is last.
-    const kinds = requests.map(({ body }) => (body.command as Record<string, unknown> | undefined)?.kind);
-    assert.ok(kinds.indexOf("post_signal") > kinds.indexOf("add_reaction"));
-    assert.ok(kinds.indexOf("post_signal") > kinds.indexOf("signals_seen"));
-    assert.equal(kinds[6], "release_wake_lease");
+    assert.deepEqual(kinds.slice(2), ["post_signal", "release_wake_lease"]);
     assert.deepEqual(receipt, receiptBefore);
 
     const stored = JSON.parse(await readFile(cursorStore.location, "utf8")) as {

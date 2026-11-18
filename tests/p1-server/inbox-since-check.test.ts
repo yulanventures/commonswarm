@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
-import { checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_DIRECT_TIMEOUT_MS, checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { readSignals } from "../../src/cloud/signals.js";
 import { awaitFunctionRunning, observeFunctionCli } from "../support/edge-readiness.js";
@@ -232,4 +233,83 @@ test("check and inbox --since return the same directed ask across timestamps, fi
   });
   assert.notEqual(wrong.status, 0);
   assert.match(wrong.stderr, /workspace/i);
+});
+
+test("a message inbox --notify printed is still waiting until check shows it; check then observes it and marks it 👀", { timeout: 120_000 }, async () => {
+  assert.equal(functionReady, true);
+  const delivery = async (signalId: string) => (await sql<{ acked_at: string | null; ack_outcome: string | null }[]>`
+    SELECT acked_at::text, ack_outcome FROM swarm.signal_deliveries
+    WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${principal}::uuid`)[0];
+  const seenMark = async (signalId: string) => (await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM swarm.signal_reactions
+    WHERE signal_id = ${signalId}::uuid AND actor_agent_principal_id = ${principal}::uuid AND emoji = '👀'`)[0]!.n;
+
+  const watcher = spawn(process.execPath, ["dist/cli.js", "inbox", "--notify", "--json", "--url", local.API_URL,
+    "--anon-key", local.ANON_KEY, "--workspace-id", workspace, "--agent-token-file", credentialFile], {
+    cwd: resolve("."), env: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "xdg") }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let printed = "";
+  let stderr = "";
+  watcher.stdout.setEncoding("utf8").on("data", (chunk: string) => { printed += chunk; });
+  watcher.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const until = async (done: () => boolean, label: string) => {
+    const deadline = Date.now() + 45_000;
+    while (!done()) {
+      if (Date.now() > deadline || watcher.exitCode !== null) throw new Error(`${label}; stderr=${stderr}`);
+      await delay(200);
+    }
+  };
+  let ask = "";
+  try {
+    // The watcher's own attended-seat canary is its first arrival line: the watch loop is running.
+    await until(() => printed.includes('"type":"arrival"'), "the watcher never printed its canary");
+    ask = await postAsk("printed by the watcher, not yet seen");
+    await until(() => printed.includes(ask), "the watcher never printed the ask");
+    await delay(3_000); // longer than the watcher's former post-print observation budget
+  } finally {
+    watcher.kill("SIGTERM");
+    await new Promise((resolveExit) => watcher.once("exit", resolveExit));
+  }
+  const waiting = await delivery(ask);
+  assert.ok(waiting, "the ask has a delivery to the agent");
+  assert.equal(waiting.acked_at, null, "printed by the watcher, the delivery still waits for the session");
+  assert.equal(await seenMark(ask), 0, "and nobody marked it 👀 for the agent");
+
+  // check returns the oldest unseen messages a page at a time, and the test above left more than a page waiting:
+  // run it as `cswarm check` does (its direct budget), until the ask comes up or nothing is left.
+  // Every observation and 👀 request check makes, with its answer, for the failure message below.
+  const exchanges: string[] = [];
+  const recording: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    const body = typeof init?.body === "string" ? init.body : "";
+    if (/ack_agent_delivery|add_reaction/.test(body)) {
+      const answer = await response.clone().text().catch(() => "<unreadable>");
+      exchanges.push(`${new Date().toISOString()} ${body.slice(0, 400)} => ${response.status} ${answer.slice(0, 400)}`);
+    }
+    return response;
+  };
+  let shown = false;
+  for (let page = 0; page < 20 && !shown; page += 1) {
+    let checked: AgentCheckResult | undefined;
+    await checkAgentMessages({ profilePath, fetcher: recording, timeoutMs: AGENT_CHECK_DIRECT_TIMEOUT_MS,
+      present: async (result) => { checked = result; } });
+    shown = checked?.messages.some((message) => message.id === ask) === true;
+    if (!shown && (checked?.messages.length ?? 0) === 0) break;
+  }
+  assert.ok(shown, "check shows what the watcher printed");
+  const deadline = Date.now() + 15_000;
+  while (((await delivery(ask))?.ack_outcome !== "observed" || await seenMark(ask) === 0) && Date.now() < deadline) await delay(250);
+  const checkState = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8").catch(() => "{}")) as Record<string, unknown>;
+  const [row] = await sql<Record<string, unknown>[]>`SELECT acked_at::text, ack_outcome, ack_via, lease_id, leased_by,
+      last_lease_id, last_leased_by, delivered_at::text, enqueued_at::text FROM swarm.signal_deliveries
+    WHERE signal_id = ${ask}::uuid AND recipient_agent_principal_id = ${principal}::uuid`;
+  assert.equal((await delivery(ask))?.ack_outcome, "observed", [
+    "check observes it in the run that showed it",
+    `ask=${ask}`,
+    `delivery=${JSON.stringify(row)}`,
+    `pending=${JSON.stringify({ ids: checkState.pending_observed_ids, next: checkState.pending_observed_next,
+      retries: checkState.pending_observed_retries, cursor: checkState.cursor })}`,
+    `exchanges:\n${exchanges.join("\n")}`,
+  ].join("\n"));
+  assert.equal(await seenMark(ask), 1, "and marks it 👀");
 });
