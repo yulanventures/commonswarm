@@ -7,7 +7,7 @@ import { catchUpSubline } from "./home-catchup.ts";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { initialCatchUpData, overviewCatchUpData, fillCatchUpDetails } from "./home-map.ts";
+import { initialCatchUpData, overviewCatchUpData, fillCatchUpDetails, catchUpReadOrder } from "./home-map.ts";
 
 const now = Date.parse("2026-11-04T12:00:00Z");
 const ask = (id, createdAt, extra = {}) => ({ signal_id: id, from: { kind: "agent", id: "A", name: "Claude" }, body: `Body ${id}`,
@@ -117,7 +117,7 @@ test("the live Catch up loader takes asks from the queue; when the queue can't b
       askChoices: async (workspaceId, ids) => { choiceReads.push([workspaceId, ids]); return choiceRows; }, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: [{ id: "W", name: "Home" }],
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpReadOrder, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
       homeServer: () => ({ decisionQueue: async workspaceId => { reads.push(`queue:${workspaceId}`); return decisionQueue(); } }),
       homeOverviewAsks: async () => { reads.push("asks"); return []; },

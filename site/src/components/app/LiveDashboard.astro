@@ -1245,7 +1245,7 @@ import "../../styles/kylon-command-palette.css";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { createListsChrome } from "../../lib/lists-chrome";
   import { cleanupAgentRows, cleanupFileRows, mountCleanup, type CleanupHandle } from "../../lib/cleanup-view";
-  import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
+  import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails, catchUpReadOrder,
     overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, homeRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, myAccountAgents, mintAgentReconnectCode, setWorkspaceLead, homeOverview, homeWorkingOn, feed, directMessages, renameAgent } from "../../lib/commonswarm";
   import { RenameAttempts, type RenameOutcome } from "../../lib/agent-rename";
@@ -5980,7 +5980,7 @@ import "../../styles/kylon-command-palette.css";
       try { overview = await homeOverview(); }
       catch {
         if (!live()) return;
-        catchUpData = catchUpData.map((entry, index) => index < 8 ? { ...entry, state: "failed" } : entry);
+        catchUpData = catchUpData.map(entry => ({ ...entry, state: "failed" }));
         renderHomeCatchUp(); return;
       }
       if (!live()) return;
@@ -5989,7 +5989,7 @@ import "../../styles/kylon-command-palette.css";
         for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
         renderHomeCatchUp();
       }
-      await fillCatchUpDetails(catchUpData, async workspace => {
+      await fillCatchUpDetails(catchUpReadOrder(catchUpData, overview), async workspace => {
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
         if (overview && previous) {
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
