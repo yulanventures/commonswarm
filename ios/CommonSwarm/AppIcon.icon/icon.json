@@ -21,7 +21,7 @@
       "name": "Arc",
       "layers": [
         {
-          "image-name": "Arc.svg",
+          "image-name": "Arc.png",
           "name": "Arc",
           "fill-specializations": [
             {
@@ -48,7 +48,7 @@
       "name": "Signal",
       "layers": [
         {
-          "image-name": "Signal.svg",
+          "image-name": "Signal.png",
           "name": "Signal",
           "fill-specializations": [
             {
