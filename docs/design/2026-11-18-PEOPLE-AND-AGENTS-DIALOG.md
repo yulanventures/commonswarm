@@ -106,8 +106,9 @@ All on Nov 18, 2026.
 | Invite form inside the dialog | #570 |
 | Server read of every admin grant in a workspace, for its owners | #516 |
 | Admins tab | #576 |
+| Cleanup: dead option and state removed, the dialog's styles in one file, unused styles removed | #588, #594, #601 |
 
-Smaller fixes along the way: keyboard focus after a confirmation and across a redraw (#517, #556).
+Smaller fixes along the way: keyboard focus after a confirmation and across a redraw (#517, #556); the Remove confirmation no longer tells an owner they can turn another person's grant back on (#592); the Admins list follows the viewer's role when it becomes known or changes (#603).
 
 ### Where it differs from the design above
 
@@ -120,6 +121,6 @@ Smaller fixes along the way: keyboard focus after a confirmation and across a re
 
 ### Not done
 
-- **One module and one stylesheet.** The logic that was added lives in `site/src/lib/people/`, but the main view is still one file, its styles are still spread over several stylesheets, and the dashboard still holds the wiring.
-- **Reading only the changed rows after an action.** An action still reloads the workspace. Security review of the invite form and the Admins tab relies on that reload ending the workspace's current load, so changing it needs its own review.
+- **One module.** The logic that was added lives in `site/src/lib/people/`, and the dialog's own styles are now one file (`site/src/styles/people-dialog.css`). The main view is still one file, and the dashboard still holds the wiring.
+- **Reading only the changed rows after an action. Decided against (Nov 18).** An action still reloads the workspace. Security review of the invite form and the Admins tab relies on that reload ending the workspace's current load. To be looked at again only if it is measurably slow with real workspaces.
 - **Listing invites an agent sent for you.** Deferred, as the table above says: nothing in production can create one.
