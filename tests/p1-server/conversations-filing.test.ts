@@ -132,12 +132,16 @@ test("a mapping row is recomputed, never trusted: a wrong one aborts at commit, 
     await tx`INSERT INTO swarm.conversation_signals (signal_id, workspace_id, conversation_id, created_at, audience)
       VALUES (${id}::uuid, ${w.id}::uuid, ${conversation}::uuid, statement_timestamp(), ${audience})`;
   };
-  // The INSERT itself succeeds; the refusal comes at commit.
-  for (const [label, conversation, audience] of [
-    ["another conversation", g, "addressed"], ["the right conversation, the wrong audience", pair, "conversation"],
+  // The INSERT itself succeeds; the refusal comes at commit. (A 1:1's own post for audience 'conversation' is
+  // step 2a's explicit post, checked by its route rule instead: tests/p1-server/conversations-route.test.ts.)
+  const room = await channel(sql, w, w.people.alice!);
+  for (const [label, conversation, audience, inRoom] of [
+    ["another conversation", g, "addressed", false],
+    ["the right conversation, the wrong audience", room, "conversation", true],
   ] as const) {
     const body = `prefiled ${randomUUID()}`;
-    await assert.rejects(post(sql, w, { from: w.people.alice!, to: [u("carol")], body, then: prefile(conversation, audience) }),
+    await assert.rejects(post(sql, w, { from: w.people.alice!, to: [u("carol")], body, then: prefile(conversation, audience),
+      ...(inRoom ? { channel: room } : {}) }),
       refusedBy("23514", "conversation_signals_placement"), label);
     assert.equal((await sql`SELECT 1 FROM swarm.signals WHERE body = ${body}`).length, 0, label);
   }
@@ -237,11 +241,13 @@ test("the group-leave fence: an old-edge post to a group someone left is refused
       (SELECT count(*)::int FROM swarm.signals WHERE id = ${id}::uuid) AS signals`)[0]!;
   const allFrames = async () => (await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM realtime.messages`)[0]!.n;
 
-  // Positive control: before anyone leaves, the post delivers to the agent and sends its frames.
+  // Positive control: before anyone leaves, the post delivers to the agent and sends its frames (since step 2a,
+  // bare frames on its people's own topics, so counted by the queue rather than by the message's id).
+  const framesAtStart = await allFrames();
   const before = await post(sql, w, { from: w.people.alice!, to: founding });
   const group = (await filed(sql, before))!.conversation;
   const sent = await traces(before);
-  assert.ok(sent.deliveries === 1 && sent.signals === 1 && sent.frames > 0, JSON.stringify(sent));
+  assert.ok(sent.deliveries === 1 && sent.signals === 1 && await allFrames() > framesAtStart, JSON.stringify(sent));
 
   // Nobody can leave in this step, so carol leaves in SQL.
   await sql`UPDATE swarm.conversation_members SET left_at = statement_timestamp()
@@ -258,12 +264,13 @@ test("the group-leave fence: an old-edge post to a group someone left is refused
     refusedBy("23514", "conversation_group_member_left"));
 
   // The remaining set is a different set and files normally, into a different conversation.
+  const framesAtRest = await allFrames();
   const remaining = await post(sql, w, { from: w.people.alice!, to: [u("bob"), a("agentB")] });
   const rest = await filed(sql, remaining);
   assert.equal(rest?.kind, "group_dm");
   assert.notEqual(rest!.conversation, group);
   const restSent = await traces(remaining);
-  assert.ok(restSent.deliveries === 1 && restSent.signals === 1 && restSent.frames > 0, JSON.stringify(restSent));
+  assert.ok(restSent.deliveries === 1 && restSent.signals === 1 && await allFrames() > framesAtRest, JSON.stringify(restSent));
   // An addressed channel post to the same set keeps its channel rule.
   const room = await channel(sql, w, w.people.alice!);
   const inRoom = await post(sql, w, { from: w.people.alice!, channel: room, to: founding });

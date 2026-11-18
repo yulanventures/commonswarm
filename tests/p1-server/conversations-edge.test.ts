@@ -267,13 +267,14 @@ test("an old-edge post to a group someone left is refused: no message, no delive
   const sockets = [onWorkspace, otherMember, thirdMember, onWake];
   const counts = () => sockets.map((l) => l.frames.length);
 
-  // Positive controls: a group post reaches the workspace and wake sockets, and a private-channel post with
-  // both people in it reaches both member sockets.
+  // Positive controls: a group post reaches the members' own and the wake sockets, and a private-channel post
+  // with both people in it reaches both member sockets. Since step 2a (20261118000005) nothing reaches the
+  // workspace topic: its socket stays silent throughout.
   let at = counts();
   const first = await posted(owner.jwt, { to: founding });
   const sent = await traces(first);
-  assert.ok(sent.frames > 0 && sent.deliveries === 1, JSON.stringify(sent));
-  await framesArrive([onWorkspace, onWake], [at[0]!, at[3]!], "a valid group post");
+  assert.ok(sent.deliveries === 1, JSON.stringify(sent));
+  await framesArrive([otherMember, thirdMember, onWake], [at[1]!, at[2]!, at[3]!], "a valid group post");
   const both = await channel({ visibility: "private", members: [{ kind: "user", id: other.id }, { kind: "user", id: third.id }] });
   at = counts();
   await posted(owner.jwt, { channel: both.slug });
@@ -301,7 +302,8 @@ test("an old-edge post to a group someone left is refused: no message, no delive
   assert.equal(restFiled?.kind, "group_dm");
   assert.notEqual(restFiled!.conversation, group);
   const restSent = await traces(rest);
-  assert.ok(restSent.frames > 0 && restSent.deliveries === 1, JSON.stringify(restSent));
-  await framesArrive([onWorkspace, onWake], [at[0]!, at[3]!], "the remaining set's post");
+  assert.ok(restSent.deliveries === 1, JSON.stringify(restSent));
+  await framesArrive([otherMember, onWake], [at[1]!, at[3]!], "the remaining set's post");
+  assert.equal(onWorkspace.frames.length, 0, "the workspace topic heard nothing at all");
   for (const l of sockets) await l.client.removeChannel(l.channel);
 });
