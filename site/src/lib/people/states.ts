@@ -17,8 +17,8 @@ export interface PeopleTabView {
   rows: boolean;
 }
 
-const NOUN: Record<PeopleTab, string> = { people: "People", agents: "Agents", invites: "Invites" };
-const EMPTY: Record<PeopleTab, string> = { people: "No people yet.", agents: "No agents yet.", invites: "No invites waiting." };
+const NOUN: Record<PeopleTab, string> = { people: "People", agents: "Agents", invites: "Invites", admins: "Admins" };
+const EMPTY: Record<PeopleTab, string> = { people: "No people yet.", agents: "No agents yet.", invites: "No invites waiting.", admins: "No admins yet." };
 
 export function peopleTabView(input: { tab: PeopleTab; read: PeopleRead; invitesFailed: boolean; shown: number; searching: boolean }): PeopleTabView {
   const { tab, read, shown, searching } = input;

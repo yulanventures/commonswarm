@@ -438,6 +438,51 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
     "a cleared link is said at the top of the Invites tab");
 });
 
+test("Admins lists who can manage, the admin access given to agents, and Remove only where the server would accept it", async () => {
+  const f = dialogConnectionsFixture(), dom = approvalDom(); const ended: string[] = [];
+  await f.load();
+  const g = (n: number, over: Record<string, unknown> = {}) => ({ grantId: `00000000-0000-4000-8000-00000000000${n}`, principalId: `p${n}`, agentName: `Agent ${n}`,
+    giverId: "someone", giverName: "Sam Rivera", level: "workspace", expiresAt: null, mayEnd: true, ...over });
+  const state: any = { selected: null, collapsed: new Set(), showAllAttention: false, query: "", tab: "admins" };
+  let access: any = { read: "ready", all: true, grants: [g(1), g(2, { level: "organization", mayEnd: false })], notices: { [g(1).grantId]: "Refused." } };
+  const callbacks: any = { render: () => paint(), action: () => {}, saveModel: async () => {}, confirm: () => {}, endAdmin: (grantId: string) => { ended.push(grantId); } };
+  const model = () => { const base = f.model(); return { ...base, adminAccess: access,
+    people: [...base.people.map((person: any) => ({ ...person, own: true, role: "owner" })), { id: "m", name: "Mei", role: "member", own: false, mayRemove: false }] }; };
+  function paint() { renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks, { layout: "page", page: { homeLabel: "Home", homeHref: "/app" } }); }
+  const all = (test: (node: any) => boolean) => dom.root.descendants().filter(test) as any[];
+  paint();
+  assert.equal(all(node => node.dataset?.pdFocus?.startsWith("person-")).length, 1, "only owners and admins are listed");
+  const rows = all(node => node.dataset?.adminGrant !== undefined);
+  assert.deepEqual(rows.map(row => row.dataset.adminLevel), ["workspace", "organization"]);
+  assert.ok(all(node => node.tag === "h3" && node.textContent === "Admin access given to agents").length);
+  const removes = all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined);
+  assert.deepEqual(removes.map(button => button.dataset.endAdmin), [g(1).grantId], "no Remove where the server would refuse");
+  assert.equal(removes[0].attributes["aria-label"], "Remove admin access: Agent 1");
+  removes[0].click(); assert.deepEqual(ended, [g(1).grantId]);
+  assert.deepEqual(all(node => node.dataset?.adminGrantNotice !== undefined).map(node => [node.textContent, node.hidden]), [["Refused.", false], ["", true]]);
+  // This fixture's nodes cannot take focus; the selection and the tab are settled before the view moves it.
+  try { all(node => node.dataset?.pdFocus?.startsWith("person-"))[0].click(); } catch { /* focus */ }
+  assert.equal(state.selected?.type, "person"); assert.equal(state.tab, "admins", "opening a person from Admins stays on Admins");
+  state.selected = null; access = { read: "ready", all: false, grants: [] }; paint();
+  assert.ok(all(node => node.tag === "h3" && node.textContent === "Admin access you gave to agents").length, "a partial list says it is partial");
+  assert.ok(all(node => node.dataset?.adminAccessState === "empty" && node.textContent === "No active admin grants from you here.").length);
+  access = { read: "failed", all: true, grants: [] }; paint();
+  assert.ok(all(node => node.dataset?.adminAccessState === "error" && node.textContent.startsWith("Admin access could not load.")).length);
+  access = { read: "failed", all: true, grants: [g(1)] }; paint();
+  assert.equal(all(node => node.dataset?.adminGrant !== undefined).length, 1, "rows kept under a failed read stay to look at");
+  assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "but offer no Remove until a read succeeds");
+  access = { read: "ready", all: true, grants: [g(1, { agentName: "Atlas", principalId: "aaaaaaaa-1" }), g(2, { agentName: "Atlas", principalId: "bbbbbbbb-2" })] }; paint();
+  assert.deepEqual(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).map(button => button.attributes["aria-label"]),
+    ["Remove admin access: Atlas (agent aaaaaaaa)", "Remove admin access: Atlas (agent bbbbbbbb)"], "same-named agents are told apart beside Remove");
+  assert.deepEqual(all(node => node.dataset?.adminGrantId !== undefined).map(node => node.textContent), ["agent aaaaaaaa", "agent bbbbbbbb"],
+    "the id is its own field on the row, outside the name that may be cut short");
+  assert.deepEqual(all(node => node.dataset?.adminGrant !== undefined).map(row => row.descendants().find((node: any) => node.tag === "strong").textContent), ["Atlas", "Atlas"]);
+  access = { read: "pending", all: true, grants: [g(1)] }; paint();
+  assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "no Remove while the list is being read again");
+  access = undefined; paint();
+  assert.equal(all(node => node.dataset?.adminAccess !== undefined).length, 0, "with agent admin access off, the tab lists people only");
+});
+
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {
   const f = dialogConnectionsFixture(), dom = approvalDom(), actions: any[] = [];
   const principal = "00000000-0000-4000-8000-000000000001";

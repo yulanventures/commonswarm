@@ -111,3 +111,23 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-link
   margin: 0; padding: 10px 12px; border: 1px solid var(--k-shell-line); border-radius: 6px; background: var(--k-shell-hover); color: var(--k-shell-ink);
   font: 400 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 7.5em; overflow: auto;
 }
+/* Admins: admin access given to agents, one row each, acted on in place. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-access { margin-block-start: 12px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grants { margin: 0; padding: 0; list-style: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant {
+  display: grid; grid-template-columns: 32px minmax(0,1fr) auto; align-items: center; gap: 0 10px; min-block-size: 56px; padding: 8px 6px; box-sizing: border-box;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant strong { display: block; font: 600 14px/1.5 var(--k-shell-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant .pd-muted { display: block; font-size: 12px; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+/* What tells two look-alike rows apart: kept whole, in the line that wraps, never inside the name's ellipsis. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant-id { white-space: nowrap; font-weight: 600; color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > button { min-block-size: 44px; min-inline-size: 44px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; font: 500 13px/1.5 var(--k-shell-font); cursor: pointer; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > .pd-error { grid-column: 2 / -1; margin: 0; }
+/* Four tabs, each on one line with its count. On a narrow phone the type and the gap tighten first; a tab moves to a
+   second line (it never pushes the dialog wider) only when the counts are longer still. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters { flex-wrap: wrap; row-gap: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters button { white-space: nowrap; }
+@media (width <= 26rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters.pd-page-filters { column-gap: 6px; justify-content: space-between; }
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-page-filters.pd-page-filters button { font-size: 14px; }
+}
