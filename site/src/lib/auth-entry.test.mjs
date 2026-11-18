@@ -20,6 +20,9 @@ test("only the signup address opens the create-account screen", () => {
 test("each screen names itself and links to the other", () => {
   assert.equal(AUTH_ENTRY_COPY["sign-in"].title, "Sign in");
   assert.equal(AUTH_ENTRY_COPY.create.title, "Create an account");
+  /* Returning people keep their wording; a new person is not asked to "sign in". */
+  assert.equal(AUTH_ENTRY_COPY["sign-in"].emailLink, "Email me a sign-in link");
+  assert.equal(AUTH_ENTRY_COPY.create.emailLink, "Email me a link");
   assert.equal(authEntryFromSearch(new URL(AUTH_ENTRY_COPY["sign-in"].otherHref, "https://x").search), "create");
   assert.equal(authEntryFromSearch(new URL(AUTH_ENTRY_COPY.create.otherHref, "https://x").search), "sign-in");
 });

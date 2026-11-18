@@ -133,7 +133,7 @@ import "../../styles/kylon-command-palette.css";
               Sign in
             </button>
             <button class="dashboard__button dashboard__button--secondary" type="button" data-email-link>
-              Email me a sign-in link
+              {AUTH_ENTRY_COPY["sign-in"].emailLink}
             </button>
           </div>
         </form>
@@ -2788,6 +2788,8 @@ import "../../styles/kylon-command-palette.css";
       for (const part of all<HTMLElement>("[data-signin-only]")) part.hidden = entry === "create";
       const password = one<HTMLInputElement>("#dashboard-password");
       if (password) password.disabled = entry === "create";
+      const emailLink = one<HTMLButtonElement>("[data-email-link]");
+      if (emailLink) emailLink.textContent = copy.emailLink;
       const other = one<HTMLAnchorElement>("[data-auth-entry-switch]");
       if (other) { other.textContent = copy.otherLabel; other.href = copy.otherHref; }
     };

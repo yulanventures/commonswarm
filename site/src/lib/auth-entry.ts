@@ -18,8 +18,8 @@ export function authEntryFromSearch(search: string): AuthEntry {
   return new URLSearchParams(search).has(CREATE_ACCOUNT_PARAM) ? "create" : "sign-in";
 }
 
-/** The heading of each screen, and the one link on it that leads to the other. */
-export const AUTH_ENTRY_COPY: Record<AuthEntry, { title: string; otherLabel: string; otherHref: string }> = {
-  "sign-in": { title: "Sign in", otherLabel: "Create an account", otherHref: CREATE_ACCOUNT_HREF },
-  create: { title: "Create an account", otherLabel: "Sign in to an existing account", otherHref: SIGN_IN_HREF },
+/** The heading of each screen, its emailed-link button, and the one link on it that leads to the other. */
+export const AUTH_ENTRY_COPY: Record<AuthEntry, { title: string; emailLink: string; otherLabel: string; otherHref: string }> = {
+  "sign-in": { title: "Sign in", emailLink: "Email me a sign-in link", otherLabel: "Create an account", otherHref: CREATE_ACCOUNT_HREF },
+  create: { title: "Create an account", emailLink: "Email me a link", otherLabel: "Sign in to an existing account", otherHref: SIGN_IN_HREF },
 };
