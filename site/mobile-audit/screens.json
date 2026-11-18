@@ -1865,7 +1865,12 @@
         "scroll": "[data-signal-id=\"{message.groupedBroadcast}\"]"
       },
       {
+        "media": "(hover: hover)",
         "hover": "[data-signal-id=\"{message.groupedBroadcast}\"]"
+      },
+      {
+        "media": "(hover: none)",
+        "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-markdown"
       },
       {
         "click": "[data-signal-id=\"{message.groupedBroadcast}\"] .dashboard__message-reply"
@@ -5002,6 +5007,143 @@
     ],
     "frame": [
       "dialog[data-channel-directory][open] .cm-directory-row:first-child a.cm-directory-copy"
+    ]
+  },
+  {
+    "id": "app.chat.recipient.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.addressedOwn}\"] .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.addressedOwn}\"]"
+      },
+      {
+        "tap": "[data-signal-id=\"{message.addressedOwn}\"] .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      }
+    ],
+    "ready": "body:not(:has([data-reaction-picker])) [data-entity-panel]:not([hidden]) [data-entity-panel-body]:has-text(\"Atlas Research\")",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_addressed",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "app.chat.jump-present.recipient.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "focus": "[data-jump-present-button]",
+        "press": "Enter"
+      },
+      {
+        "waitFor": "[data-feed-list] .dashboard__message[data-signal-id]:focus"
+      },
+      {
+        "tap": "[data-feed-list] .dashboard__message[data-signal-id]:focus .dashboard__message-target .dashboard__message-entity[data-entity-id=\"{agent}\"]"
+      }
+    ],
+    "ready": "body:not(:has([data-reaction-picker])) [data-entity-panel]:not([hidden]) [data-entity-panel-body]:has-text(\"Atlas Research\")",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent"
+    ]
+  },
+  {
+    "id": "app.chat.row-tools.tap",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"] [data-reaction-add]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-signal-id=\"{message.unreacted}\"]"
+      },
+      {
+        "tap": "[data-signal-id=\"{message.unreacted}\"] .dashboard__message-markdown"
+      },
+      {
+        "waitFor": "[data-signal-id=\"{message.unreacted}\"]:focus"
+      },
+      {
+        "tap": "[data-reaction-add=\"{message.unreacted}\"]"
+      }
+    ],
+    "ready": "[data-reaction-picker=\"{message.unreacted}\"] [data-reaction-option]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels",
+      "seed_unreacted"
     ]
   }
 ]
