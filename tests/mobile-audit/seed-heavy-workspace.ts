@@ -972,15 +972,22 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     } catch (error) { note("seed_todo_offer", error); }
     // The Lists & docs agent approval (app.lists-approval), in a workspace of its own so no other capture changes: one own local
     // agent with a live connection (device, run, renewal grant and token rows, as the p1-server household fixtures build) and
-    // no Lists approval yet, so the People dialog offers Allow and the approvals list shows its card.
+    // no Lists approval yet, so the approvals list shows its card. A second own agent, Fern, has no connection at all: the
+    // People dialog's Allow approves a connected agent in place, and only an agent without a connection lands on Lists
+    // (the setup fallback), where Sprout's card is. Pressing Fern's Allow therefore reaches the card and approves nothing.
+    // Sprout carries a long name: its People row is the one that offers Allow Lists & docs (Fern's row offers New key, since
+    // it has no key), so that row shows the action beside a name that has to be cut.
     try {
       const approvalWorkspace = randomUUID();
       const ready = ok("create_workspace approval", await command(owner.token, { kind: "create_workspace", workspace_id: approvalWorkspace, name: "Garden projects", org_id: workspace }, null))
-        && ok("create_agent_principal approval", await command(owner.token, { kind: "create_agent_principal", name: "Sprout", model: "claude-opus-5-5" }, approvalWorkspace))
+        && ok("create_agent_principal approval", await command(owner.token, { kind: "create_agent_principal", name: "Sprout Greenhouse Watering & Seedling Schedules Agent", model: "claude-opus-5-5" }, approvalWorkspace))
+        && ok("create_agent_principal approval setup", await command(owner.token, { kind: "create_agent_principal", name: "Fern", model: "claude-opus-5-5" }, approvalWorkspace))
         && ok("household_permissions approval", await command(owner.token, { kind: "household_permissions", purpose: "shared", content_role: "editor" }, approvalWorkspace));
       const [agent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
-        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Sprout' AND transport = 'local'` : [];
-      if (agent) {
+        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Sprout Greenhouse Watering & Seedling Schedules Agent' AND transport = 'local'` : [];
+      const [setupAgent] = ready ? await sql<{ principal_id: string }[]>`SELECT principal_id FROM swarm.agent_principals
+        WHERE workspace_id = ${approvalWorkspace}::uuid AND name = 'Fern' AND transport = 'local'` : [];
+      if (agent && setupAgent) {
         const device = randomUUID(), run = randomUUID(), family = randomUUID(), token = randomUUID();
         await sql.begin(async (tx) => {
           await tx`INSERT INTO swarm.devices (device_id, user_id, label) VALUES (${device}::uuid, ${owner.id}::uuid, 'Audit laptop')`;
@@ -991,9 +998,9 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
             VALUES (${token}::uuid, ${agent.principal_id}::uuid, ${run}::uuid, '["post_signal"]', ${createHash("sha256").update(randomBytes(32)).digest()},
               clock_timestamp() + interval '1 day', ${randomUUID()}::uuid, ${family}::uuid)`;
         });
-        Object.assign(ids, { approvalWorkspace, approvalAgent: agent.principal_id });
+        Object.assign(ids, { approvalWorkspace, approvalAgent: agent.principal_id, approvalSetupAgent: setupAgent.principal_id });
         steps.push("seed_lists_approval");
-      } else if (ready) note("seed_lists_approval", "the Sprout agent principal was not found as a local agent");
+      } else if (ready) note("seed_lists_approval", "the Sprout or Fern agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_approval", error); }
     // A second viewer with a delegated invitation (app.invitation-inbox, dialog.invitation-review). The invitee already belongs
     // to {workspace}, so the inbox shows as the corner card above the composer rather than atop the create-workspace screen.
