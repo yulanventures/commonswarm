@@ -2056,13 +2056,16 @@ function siteContentTypes(): { caddy: Array<{ path: string; type: string }>; fil
   const matchers = new Map<string, string>();
   for (const match of caddy.matchAll(/^\s*@([A-Za-z]+) path (\S+)\s*$/gm)) {
     assert.equal(matchers.has(match[1]!), false, `duplicate Caddy matcher @${match[1]}`);
-    assert.match(match[2]!, /^(?:\/[A-Za-z0-9._/-]+|\*\.[a-z0-9]+)$/, `unmodeled Caddy path pattern ${match[2]}`);
+    // A directory prefix (`/_astro/*`) is allowed for headers other than Content-Type; the rules
+    // below still refuse it for Content-Type, which this model resolves by exact path or extension.
+    assert.match(match[2]!, /^(?:\/[A-Za-z0-9._/-]+|\/[A-Za-z0-9._-]+\/\*|\*\.[a-z0-9]+)$/, `unmodeled Caddy path pattern ${match[2]}`);
     matchers.set(match[1]!, match[2]!);
   }
   const rules = [...caddy.matchAll(/^\s*header @([A-Za-z]+) Content-Type "([^"]+)"\s*$/gm)].flatMap((match) => {
     const path = matchers.get(match[1]!);
     // handle_errors' @notFound is an expression matcher for error responses, not a served file.
     if (path === undefined) { assert.equal(match[1], "notFound", `Content-Type header without a path matcher: @${match[1]}`); return []; }
+    assert.ok(!path.endsWith("/*"), `unmodeled Content-Type for a directory prefix: @${match[1]} ${path}`);
     return [{ path, type: match[2]! }];
   });
   assert.ok(rules.some((rule) => rule.path === "*.js"), "the committed Caddy config sets the .js Content-Type");
