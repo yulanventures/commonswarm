@@ -384,6 +384,12 @@ exactly those keys:
 | `channels` | see [Channels](#channels) |
 | `files` | see [Workspace files](#workspace-files) |
 
+Conversations: the server files each new message in one conversation, #general, a channel, a direct
+message or a group of up to nine, by where it was posted: a channel message in its channel, a thread
+reply with its root, an unaddressed message (mentions do not address) in #general, and a message
+addressed with `to_user_id`, `to_agent_principal_id` or `to` outside any channel in the direct message
+or group of its sender and recipients. Nothing in this API changes yet: post and read as above.
+
 Two behaviours worth knowing:
 
 - A malformed or over-specified body is `400 invalid_request`. There is no partial

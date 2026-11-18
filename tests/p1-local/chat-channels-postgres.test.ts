@@ -445,6 +445,9 @@ test("the edge that predates this migration still writes a legal row", async () 
          * against live data, because unfiled rows exist and always will. This
          * is the arm that makes "channel_id is nullable for the life of v1" a
          * measured property of this database rather than a promise in a comment. */
+        // Conversation filing (20261118000004) is deferred to commit; run it now, or the ALTER below
+        // stops at the pending trigger events before it reaches the data.
+        await tx.unsafe("SET CONSTRAINTS swarm.signals_settle_conversation IMMEDIATE");
         await assert.rejects(
           tx.savepoint((sp) =>
             sp.unsafe(
