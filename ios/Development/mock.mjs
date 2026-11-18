@@ -1,10 +1,15 @@
 // Simulator fixture. All state is synthetic and disappears when the process exits.
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 let origin;
-const callback = "com.commonswarm.ios://auth/callback";
+const callbacks = new Map([
+  ["github", "com.commonswarm.ios://auth/callback"],
+  ["google", "https://commonswarm.com/ios/auth/callback"],
+]);
 const me = "00000000-0000-4000-8000-000000000001";
 const agent = "00000000-0000-4000-8000-000000000002";
 const workspace = "00000000-0000-4000-8000-000000000003";
@@ -21,6 +26,12 @@ if (review) {
 }
 let olderPageInterrupted = false;
 const codes = new Map();
+let emailCodePending = false;
+const emailWire = {};
+// Record the actual Swift request, with stable key order for the CI fixture.
+function recordEmailRequest(url, body) {
+  if (verify) emailWire[url.pathname] = Object.fromEntries(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
+}
 const receipts = new Map();
 const refuseNextLookup = new Set();
 const sessions = new Set();
@@ -53,6 +64,8 @@ const server = createServer(async (req, res) => {
       return reply(200, authenticatedRequests);
     }
     if (req.method === "GET" && url.pathname === "/auth/v1/authorize") {
+      const callback = callbacks.get(url.searchParams.get("provider"));
+      if (!callback) return reply(400, {});
       const redirect = new URL(url.searchParams.get("redirect_to"));
       const state = redirect.searchParams.get("state");
       const challenge = url.searchParams.get("code_challenge");
@@ -74,14 +87,32 @@ const server = createServer(async (req, res) => {
       body = JSON.parse(data);
     }
     if (req.headers.apikey !== "local-fixture") return reply(401, {});
+    const issueSession = () => {
+      const session = randomBytes(32).toString("hex");
+      sessions.add(session);
+      return reply(200, { access_token: session, user: { id: me } });
+    };
+    if (req.method === "POST" && url.pathname === "/auth/v1/otp") {
+      if (body.create_user !== false || url.search) return reply(400, {});
+      if (body.email !== "reader@example.test") return reply(422, { code: 422, error_code: "otp_disabled" });
+      recordEmailRequest(url, body);
+      emailCodePending = true;
+      return reply(200, {});
+    }
+    if (req.method === "POST" && url.pathname === "/auth/v1/verify") {
+      if (!emailCodePending || body.email !== "reader@example.test" || body.token !== "012345" || body.type !== "email" || url.search) {
+        return reply(403, {});
+      }
+      recordEmailRequest(url, body);
+      emailCodePending = false;
+      return issueSession();
+    }
     if (req.method === "POST" && url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "pkce") {
       const pending = codes.get(body.auth_code);
       if (!pending || pending.expires <= Date.now() || typeof body.code_verifier !== "string" ||
           createHash("sha256").update(body.code_verifier).digest("base64url") !== pending.challenge) return reply(400, {});
       codes.delete(body.auth_code);
-      const session = randomBytes(32).toString("hex");
-      sessions.add(session);
-      return reply(200, { access_token: session, user: { id: me } });
+      return issueSession();
     }
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
@@ -139,5 +170,11 @@ server.listen(verify ? 0 : 8765, "127.0.0.1", () => {
   if (!verify) return console.log("Simulator fixture listening on loopback port 8765");
   const child = spawn(process.argv[3], [String(server.address().port), ...process.argv.slice(4)], { stdio: "inherit" });
   child.once("error", () => { process.exitCode = 1; server.close(); });
-  child.once("exit", (status) => { process.exitCode = status ?? 1; server.close(); });
+  child.once("exit", (status) => {
+    if (status === 0 && process.argv[4]) {
+      writeFileSync(join(dirname(process.argv[4]), "email-code.json"), JSON.stringify(emailWire, null, 2) + "\n");
+    }
+    process.exitCode = status ?? 1;
+    server.close();
+  });
 });

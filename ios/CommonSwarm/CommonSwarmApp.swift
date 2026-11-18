@@ -21,7 +21,7 @@ private struct WindowAnchor: UIViewRepresentable {
     func updateUIView(_ uiView: Probe, context: Context) { uiView.onWindow = onWindow }
 }
 
-private struct Deployment {
+struct Deployment {
     let origin: URL
     let publicKey: String
 
@@ -49,21 +49,7 @@ private struct SessionView: View {
                                signOut: auth.signOut)
                     .id(session.userID)
             } else {
-                VStack(spacing: 16) {
-                    if let url = Bundle.main.url(forResource: "BrandMark", withExtension: "png"),
-                       let mark = UIImage(contentsOfFile: url.path) {
-                        Image(uiImage: mark).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                    }
-                    Text("CommonSwarm").font(.largeTitle.bold())
-                    Button("Sign in") {
-                        if let deployment = Deployment.current, let window {
-                            auth.start(origin: deployment.origin, publicKey: deployment.publicKey, window: window)
-                        }
-                    }.buttonStyle(.borderedProminent)
-                        .disabled(auth.pending || window == nil || Deployment.current == nil)
-                    if auth.failed { Text("Couldn’t sign in. Try again.") }
-                    if Deployment.current == nil { Text("Sign-in is unavailable in this build.") }
-                }
+                SignInView(auth: auth, deployment: Deployment.current, window: window)
             }
         }.background(WindowAnchor { window = $0 }.frame(width: 0, height: 0))
     }

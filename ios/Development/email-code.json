@@ -1,0 +1,11 @@
+{
+  "/auth/v1/otp": {
+    "create_user": false,
+    "email": "reader@example.test"
+  },
+  "/auth/v1/verify": {
+    "email": "reader@example.test",
+    "token": "012345",
+    "type": "email"
+  }
+}
