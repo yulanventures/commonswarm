@@ -10873,6 +10873,8 @@ import "../../styles/kylon-command-palette.css";
         agents = nextAgents;
         people = nextRoster.names;
         members = nextRoster.members;
+        // Both lists just arrived whole, so a load that failed earlier no longer describes them.
+        homePeopleReadState = "ready";
         const rosterIds = new Set(nextAgents.map((agent) => agent.principalId));
         /* A principal queued DURING the flight is not in the captured snapshot, but the
            fresh roster may already know it: prune those from the queue so they cannot
@@ -11190,6 +11192,7 @@ import "../../styles/kylon-command-palette.css";
             agents = nextAgents;
             people = nextRoster.names;
             members = nextRoster.members;
+            homePeopleReadState = "ready";
             renderRoster();
           }).catch(() => { /* The roster refreshes on its own schedule. */ });
         },
