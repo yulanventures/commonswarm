@@ -331,13 +331,20 @@ export function filterCommandPaletteItems(
   return kinds.flatMap((kind) => scored.filter((entry) => entry.item.category === kind).map((entry) => entry.item));
 }
 
+/**
+ * Draws the results as a listbox: each group of rows is a named group, each row an option with an id, so the search
+ * box (a combobox that keeps focus) can name the selected row with aria-activedescendant. Returns the selected row,
+ * or null when there are no results.
+ */
 export function renderCommandPaletteList(
   doc: Document,
   container: HTMLElement,
   items: readonly CommandPaletteItem[],
   activeIndex: number,
   onSelect: (item: CommandPaletteItem) => void,
-): void {
+): HTMLElement | null {
+  let active: HTMLElement | null = null;
+  let groups = 0;
   container.replaceChildren();
   if (items.length === 0) {
     const empty = doc.createElement("p");
@@ -345,7 +352,7 @@ export function renderCommandPaletteList(
     empty.dataset.commandPaletteEmpty = "";
     empty.textContent = "No matching teammates, channels, or actions.";
     container.append(empty);
-    return;
+    return null;
   }
 
   let currentGroup: string | null = null;
@@ -361,18 +368,26 @@ export function renderCommandPaletteList(
       const heading = doc.createElement("h3");
       heading.className = "cp-group__title";
       heading.textContent = group;
+      heading.id = `cp-group-${groups++}`;
+      section.setAttribute("role", "group");
+      section.setAttribute("aria-labelledby", heading.id);
       currentGroupList = doc.createElement("ul");
       currentGroupList.className = "cp-group__list";
+      currentGroupList.setAttribute("role", "presentation");
       section.append(heading, currentGroupList);
       container.append(section);
     }
 
     const li = doc.createElement("li");
     li.className = "cp-item";
+    li.setAttribute("role", "presentation");
     const button = doc.createElement("button");
     button.type = "button";
     button.className = "cp-item__button";
+    button.id = `cp-option-${index}`;
+    button.setAttribute("role", "option");
     if (index === activeIndex) {
+      active = button;
       button.classList.add("cp-item__button--active");
       button.setAttribute("aria-selected", "true");
     } else {
@@ -409,6 +424,7 @@ export function renderCommandPaletteList(
     li.append(button);
     currentGroupList.append(li);
   });
+  return active;
 }
 
 function formatRoutineGateBadge(

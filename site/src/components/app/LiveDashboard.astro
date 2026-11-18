@@ -1181,6 +1181,10 @@ import "../../styles/kylon-command-palette.css";
         data-command-palette-input
         placeholder="Search or jump to…"
         aria-label="Search people, channels and actions"
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="dashboard-command-palette-list"
+        aria-autocomplete="list"
         autocomplete="off"
         spellcheck="false"
       />
@@ -1196,7 +1200,7 @@ import "../../styles/kylon-command-palette.css";
         </svg>
       </button>
     </header>
-    <div class="cp-body" data-command-palette-list role="listbox" aria-label="Results"></div>
+    <div class="cp-body" id="dashboard-command-palette-list" data-command-palette-list role="listbox" aria-label="Results"></div>
   </dialog>
 
   <dialog
@@ -15249,13 +15253,18 @@ import "../../styles/kylon-command-palette.css";
       if (commandPaletteIndex >= commandPaletteFiltered.length) {
         commandPaletteIndex = 0;
       }
-      renderCommandPaletteList(
+      const selected = renderCommandPaletteList(
         document,
         list,
         commandPaletteFiltered,
         commandPaletteIndex,
         executeCommandPaletteItem,
       );
+      /* Focus stays in the search box, so the box names the selected row for assistive technology, and the row is
+         always inside the results pane: the first with its heading, any other by the shortest scroll. Enter can
+         then only run something the person can see. */
+      if (selected) input?.setAttribute("aria-activedescendant", selected.id); else input?.removeAttribute("aria-activedescendant");
+      if (commandPaletteIndex === 0) list.scrollTop = 0; else selected?.scrollIntoView({ block: "nearest" });
     };
 
     const openCommandPalette = (): void => {
