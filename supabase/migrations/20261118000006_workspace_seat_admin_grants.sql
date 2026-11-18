@@ -9,17 +9,24 @@
 -- member, a stranger, an agent credential) and any unknown or archived workspace get NULL, so the read never says
 -- whether a workspace exists.
 --
--- What it lists: grants still in force (active, end date not passed) that cover the workspace. A scoped or workspace
--- grant covers the workspaces it names; an organization grant covers every workspace of its organization and names
--- none. A grant's row state says nothing about whether its grantor is still an owner; the command re-checks that at
--- use. The list is of grants on record, so an owner can see and end one that no longer has effect.
+-- What it lists: grants still in force (active, end date not passed) that concern this workspace.
+--  * A scoped or workspace grant that names the workspace.
+--  * An organization grant for the workspace's organization, but only when its agent has, or once had, a seat in
+--    this workspace (a row in agent_workspace_memberships, revoked or not). An organization grant names no workspace
+--    and its agent need not be in every one, so without this an owner would read the name of an agent, and of the
+--    person who gave it admin access, that have never had anything to do with their workspace (HezSec on #516;
+--    HezLead's ruling: "all admin access in THIS workspace").
+-- These are grants on record, not a statement of current authority: a grant stays listed after its giver loses
+-- their role or the agent's seat here is removed, so an owner can find it and end it. The command re-checks
+-- authority at use. Ended and expired grants are not listed.
 --
 -- may_end repeats end_seat_admin's own rule, so the page offers Remove only where the command would accept it: the
 -- grantor; for a scoped or workspace grant a live owner of a covered workspace, which the viewer is; for an
 -- organization grant a live owner of that organization. The command still decides.
 --
 -- Disclosure, beyond what the viewer could already read: the grant's level and end date, the agent's name, and the
--- display name of the person who gave it. No manifest, digest, scope list of other workspaces, or organization id.
+-- display name of the person who gave it (shown even when that person is not a member of this workspace, because the
+-- agent is or was). No manifest, digest, scope list of other workspaces, or organization id.
 CREATE FUNCTION swarm_read.workspace_seat_admin_grants(p_workspace_id uuid)
 RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -53,7 +60,9 @@ BEGIN
   LEFT JOIN swarm.users u ON u.user_id = g.owner_user_id
   WHERE g.state = 'active' AND (g.expires_at IS NULL OR g.expires_at > statement_timestamp())
    AND ((g.level <> 'organization' AND p_workspace_id = ANY(g.workspace_ids))
-     OR (g.level = 'organization' AND g.organization_id = org))));
+     OR (g.level = 'organization' AND g.organization_id = org AND EXISTS (
+       SELECT 1 FROM swarm.agent_workspace_memberships seat
+       WHERE seat.principal_id = g.principal_id AND seat.workspace_id = p_workspace_id)))));
 END;
 $$;
 ALTER FUNCTION swarm_read.workspace_seat_admin_grants(uuid) OWNER TO swarm_admin;

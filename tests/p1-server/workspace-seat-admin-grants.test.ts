@@ -12,7 +12,7 @@ import postgres from "postgres";
 let sql: postgres.Sql;
 let admin: SupabaseClient;
 let founder: string, coOwner: string, workspaceAdmin: string, member: string, stranger: string;
-let workspace: string, elsewhere: string, archived: string;
+let organization: string, workspace: string, sibling: string, elsewhere: string, archived: string;
 const grants: Record<string, string> = {};
 const agents: Record<string, string> = {};
 
@@ -24,11 +24,17 @@ async function createUser(label: string): Promise<string> {
   return created.data.user!.id;
 }
 
+/** An agent whose home is `home`. Creating it records its seat there (agent_workspace_memberships). */
 async function agent(name: string, owner: string, home = workspace): Promise<string> {
   const principal = randomUUID();
   await sql`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
     VALUES (${principal}::uuid, ${home}::uuid, ${owner}::uuid, ${name})`;
   return (agents[name] = principal);
+}
+/** A seat in another workspace, as adding an existing agent to it records; `removed` leaves the row, revoked. */
+async function seat(principal: string, owner: string, target: string, removed = false): Promise<void> {
+  await sql`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by, revoked_at)
+    VALUES (${principal}::uuid, ${target}::uuid, ${owner}::uuid, ${owner}::uuid, ${removed ? sql`statement_timestamp()` : null})`;
 }
 
 type Level = "scoped" | "workspace" | "organization";
@@ -64,21 +70,35 @@ before(async () => {
   admin = createClient(status.API_URL, status.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
   [founder, coOwner, workspaceAdmin, member, stranger] = await Promise.all(
     ["founder", "co-owner", "admin", "member", "stranger"].map((label) => createUser(`ws-admin-read-${label}`)));
-  workspace = randomUUID(); elsewhere = randomUUID(); archived = randomUUID();
+  organization = randomUUID(); workspace = randomUUID(); sibling = randomUUID(); elsewhere = randomUUID(); archived = randomUUID();
   await sql.begin(async (tx) => {
     await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${founder}::uuid, 'Founder Person'), (${coOwner}::uuid, 'Co Owner'),
       (${workspaceAdmin}::uuid, 'Admin Person'), (${member}::uuid, 'Member Person'), (${stranger}::uuid, 'Stranger Person')`;
-    // Each workspace starts its own organization, with its creator as that organization's owner.
-    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${workspace}::uuid, 'AdminReadHome', ${founder}::uuid),
+    // One organization with its own id and two workspaces. Its founder owns it; owning a workspace in it does not.
+    await tx`INSERT INTO swarm.organizations (id, slug, display_name, created_by)
+      VALUES (${organization}::uuid, ${`admin-read-${organization.replaceAll("-", "")}`.slice(0, 48)}, 'AdminReadOrganization', ${founder}::uuid)`;
+    await tx`INSERT INTO swarm.org_memberships (org_id, principal_kind, principal_id, role) VALUES (${organization}::uuid, 'user', ${founder}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by, org_id) VALUES
+      (${workspace}::uuid, 'AdminReadHome', ${founder}::uuid, ${organization}::uuid),
+      (${sibling}::uuid, 'AdminReadSibling', ${founder}::uuid, ${organization}::uuid)`;
+    // These two start their own organizations.
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES
       (${elsewhere}::uuid, 'AdminReadElsewhere', ${founder}::uuid), (${archived}::uuid, 'AdminReadArchived', ${founder}::uuid)`;
     await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES
       (${workspace}::uuid, ${founder}::uuid, 'owner'), (${workspace}::uuid, ${coOwner}::uuid, 'owner'),
       (${workspace}::uuid, ${workspaceAdmin}::uuid, 'admin'), (${workspace}::uuid, ${member}::uuid, 'member'),
+      (${sibling}::uuid, ${founder}::uuid, 'owner'),
       (${elsewhere}::uuid, ${founder}::uuid, 'owner'), (${archived}::uuid, ${founder}::uuid, 'owner')`;
   });
   await grant("coOwnerWorkspace", coOwner, await agent("Pixel", coOwner), "workspace", workspace);
   await grant("founderScoped", founder, await agent("Harbor", founder), "scoped", workspace, { expires: "statement_timestamp() + interval '30 days'" });
-  await grant("founderOrganization", founder, await agent("Atlas", founder), "organization", workspace);
+  // Three organization grants for agents whose home is the sibling workspace: one also seated here, one whose seat
+  // here was removed, and one that has never been here.
+  await seat(await agent("Atlas", founder, sibling), founder, workspace);
+  await grant("organizationSeatedHere", founder, agents.Atlas, "organization", organization);
+  await seat(await agent("Relay", founder, sibling), founder, workspace, true);
+  await grant("organizationFormerSeat", founder, agents.Relay, "organization", organization);
+  await grant("organizationNeverHere", founder, await agent("Quill", founder, sibling), "organization", organization);
   await grant("elsewhere", founder, await agent("Orbit", founder, elsewhere), "workspace", elsewhere);
   await grant("pastEndDate", founder, await agent("Ledger", founder), "workspace", workspace,
     { created: "statement_timestamp() - interval '10 days'", expires: "statement_timestamp() - interval '1 day'" });
@@ -88,30 +108,46 @@ before(async () => {
 
 after(async () => { await sql?.end({ timeout: 5 }); });
 
-test("an owner sees every grant in force that covers the workspace, including another person's", async () => {
+const here = () => [grants.coOwnerWorkspace, grants.founderScoped, grants.organizationSeatedHere, grants.organizationFormerSeat].sort();
+
+test("an owner sees every grant in force that concerns the workspace, including another person's", async () => {
   const seen = await read(person(founder));
   assert.ok(seen);
   const byId = new Map(seen.grants.map((row) => [row.grant_id, row]));
-  assert.deepEqual([...byId.keys()].sort(), [grants.coOwnerWorkspace, grants.founderScoped, grants.founderOrganization].sort(),
-    "the three grants in force here; not the one for another workspace, nor the one past its end date");
+  assert.deepEqual([...byId.keys()].sort(), here(),
+    "the workspace and scoped grants that name it, and the organization grants of agents seated here now or before");
   const pixel = byId.get(grants.coOwnerWorkspace)!;
   assert.deepEqual({ agent: pixel.agent_name, principal: pixel.principal_id, by: pixel.owner_user_id, name: pixel.owner_display, level: pixel.level, ends: pixel.expires_at },
     { agent: "Pixel", principal: agents.Pixel, by: coOwner, name: "Co Owner", level: "workspace", ends: null });
   assert.equal(byId.get(grants.founderScoped)!.level, "scoped");
   assert.ok(byId.get(grants.founderScoped)!.expires_at, "a set end date is returned");
-  assert.equal(byId.get(grants.founderOrganization)!.level, "organization");
+  assert.deepEqual([byId.get(grants.organizationSeatedHere)!.level, byId.get(grants.organizationSeatedHere)!.agent_name], ["organization", "Atlas"]);
+  assert.equal(byId.get(grants.organizationFormerSeat)!.agent_name, "Relay", "a removed seat keeps its grant on record here");
   assert.deepEqual(Object.keys(pixel).sort(), ["agent_name", "created_at", "expires_at", "grant_id", "level", "may_end", "owner_display", "owner_user_id", "principal_id"],
     "no manifest, digest, scope list, workspace list or organization id");
-  // The co-owner is an owner of the workspace too, and sees the same three.
-  assert.deepEqual((await read(person(coOwner)))!.grants.map((row) => row.grant_id).sort(), [...byId.keys()].sort());
+  // The co-owner is an owner of the workspace too, and sees the same four.
+  assert.deepEqual((await read(person(coOwner)))!.grants.map((row) => row.grant_id).sort(), here());
+});
+
+test("an organization grant for an agent that was never in this workspace is not listed, and nothing about it leaks", async () => {
+  for (const viewer of [founder, coOwner]) {
+    const text = JSON.stringify(await read(person(viewer)));
+    for (const hidden of [grants.organizationNeverHere, agents.Quill, "Quill"]) assert.ok(!text.includes(hidden), `${hidden} is not returned`);
+  }
+  // It is listed where that agent does have a seat: its home, the sibling workspace of the same organization.
+  const atSibling = (await read(person(founder), sibling))!.grants;
+  assert.deepEqual(atSibling.map((row) => row.agent_name).sort(), ["Atlas", "Quill", "Relay"]);
+  // And the workspace-level grants that name this workspace are not listed at the sibling.
+  assert.ok(!atSibling.some((row) => [grants.coOwnerWorkspace, grants.founderScoped].includes(row.grant_id)));
 });
 
 test("may_end follows the end command: any owner for a workspace or scoped grant, only an organization owner or the grantor for an organization grant", async () => {
   const mayEnd = async (userId: string) => Object.fromEntries((await read(person(userId)))!.grants.map((row) => [row.grant_id, row.may_end]));
-  assert.deepEqual(await mayEnd(founder), { [grants.coOwnerWorkspace]: true, [grants.founderScoped]: true, [grants.founderOrganization]: true },
-    "the founder owns the workspace and its organization");
-  assert.deepEqual(await mayEnd(coOwner), { [grants.coOwnerWorkspace]: true, [grants.founderScoped]: true, [grants.founderOrganization]: false },
-    "a workspace owner who does not own the organization cannot end the organization grant");
+  assert.deepEqual(await mayEnd(founder), { [grants.coOwnerWorkspace]: true, [grants.founderScoped]: true,
+    [grants.organizationSeatedHere]: true, [grants.organizationFormerSeat]: true }, "the founder owns the workspace and its organization");
+  assert.deepEqual(await mayEnd(coOwner), { [grants.coOwnerWorkspace]: true, [grants.founderScoped]: true,
+    [grants.organizationSeatedHere]: false, [grants.organizationFormerSeat]: false },
+    "a workspace owner who does not own the organization cannot end an organization grant");
 });
 
 test("only a live owner signed in as a person reads; everyone else learns nothing, not even that the workspace exists", async () => {
@@ -131,7 +167,7 @@ test("only a live owner signed in as a person reads; everyone else learns nothin
   }
 });
 
-test("a former owner stops seeing the list, and an ended grant leaves it", async () => {
+test("a former owner stops seeing the list; their grant stays on record for the others; an ended grant leaves it", async () => {
   await sql`UPDATE swarm.memberships SET role = 'admin' WHERE workspace_id = ${workspace}::uuid AND user_id = ${coOwner}::uuid`;
   assert.equal(await read(person(coOwner)), null, "no longer an owner");
   await sql`UPDATE swarm.memberships SET role = 'owner', revoked_at = statement_timestamp() WHERE workspace_id = ${workspace}::uuid AND user_id = ${coOwner}::uuid`;
@@ -143,5 +179,5 @@ test("a former owner stops seeing the list, and an ended grant leaves it", async
   });
   const after = (await read(person(founder)))!.grants.map((row) => row.grant_id);
   assert.ok(!after.includes(grants.pastEndDate));
-  assert.equal(after.length, 3, "the co-owner's grant is still on record and still listed for the remaining owner");
+  assert.deepEqual(after.sort(), here(), "the former owner's grant is still on record and still listed for the remaining owner");
 });
