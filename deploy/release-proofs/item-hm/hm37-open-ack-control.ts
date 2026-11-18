@@ -335,7 +335,7 @@ async function loadRuntime(releaseRoot: string): Promise<Runtime> {
   const authPath = new URL("supabase/functions/_shared/hosted-seat-auth.ts", base);
   const tlsPath = new URL("supabase/functions/_shared/database-options.ts", base);
   const adapterPath = new URL("services/mcp-auth/src/postgres-adapter.js", base);
-  const functionalPath = new URL("deploy/release-proofs/item-hm/20260928000004-functional.sql", base);
+  const functionalPath = new URL("deploy/release-proofs/item-hm/20261113000001-hosted-check-functional.sql", base);
   for (const url of [commandPath, authPath, tlsPath, adapterPath, functionalPath]) {
     const info = await Deno.stat(url);
     if (!info.isFile) fail("release input is not a file");
