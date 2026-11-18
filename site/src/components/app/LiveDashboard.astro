@@ -1122,7 +1122,12 @@ import "../../styles/kylon-command-palette.css";
     <header class="dashboard__workspace-details-dialog-head">
       <h2 id="dashboard-signout-others-title">Sign out other devices?</h2>
     </header>
-    <p class="dashboard__connected-apps-intro" id="dashboard-signout-others-description">Every other browser and device signed in to your account is signed out and loses access within an hour. This one stays signed in.</p>
+    {/* Which sessions end and which one stays, as two lines: the same facts the one sentence gave. Both lines are
+        the dialog's description. */}
+    <div class="dashboard__connected-apps-intro dashboard__signout-others-effect" id="dashboard-signout-others-description">
+      <p><strong>Signed out:</strong> every other browser and device signed in to your account. They lose access within an hour.</p>
+      <p><strong>Stays signed in:</strong> this one.</p>
+    </div>
     <p class="dashboard__connected-apps-status" data-signout-others-status role="status" aria-live="polite"></p>
     <div class="dashboard__signout-others-actions">
       <button class="dashboard__danger-button" type="button" data-signout-others-confirm>Sign out other devices</button>
