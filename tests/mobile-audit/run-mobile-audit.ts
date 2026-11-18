@@ -865,10 +865,10 @@ async function main(): Promise<void> {
         return results;
       };
 
-      for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of VIEWPORTS) {
+      for (const freeze of PASSES) for (const theme of THEMES) for (const viewport of [...VIEWPORTS, { width: 1280, height: 800 }]) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!screens().some(s => diagnosed(s.id, size))) continue;
-        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats, normalPolling } = await openContexts(viewport, theme, true, freeze);
+        const { context, signedIn, noScript, invitee, freezeStats, inviteeFreezeStats, normalPolling } = await openContexts(viewport, theme, viewport.width < 1280, freeze);
         const batch = await runScreens(screens().filter(s => diagnosed(s.id, size)), async (screen) => {
           // The capture's identity follows the manifest entry's declared states (e.g. "empty").
           const state = screen.states?.length ? screen.states.join("+") : "default";
@@ -884,6 +884,20 @@ async function main(): Promise<void> {
             // tsx cannot wrap it in __name itself).
             if (screen.noJs) await page.evaluate("globalThis.__name = globalThis.__name || ((f) => f)");
             Object.assign(entry, await page.evaluate(CHECKS));
+            // Inventory only. Record counts from the top dialog, including its scrollable content.
+            entry.dialogInventory = await page.evaluate(() => {
+              const dialogs = Array.from(document.querySelectorAll<HTMLElement>("dialog[open], [role='dialog'][aria-modal='true']"));
+              const root = dialogs.filter(el => el.checkVisibility()).at(-1);
+              if (!root) return null;
+              const count = (selector: string) => Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(el => el.checkVisibility()).length;
+              return {
+                words: root.innerText.trim().split(/\s+/).filter(Boolean).length,
+                paragraphs: count("p"),
+                toggles: count("input[type='checkbox'], [role='switch'], [role='checkbox']"),
+                radios: count("input[type='radio'], [role='radio']"),
+                actions: count("button, a[href]"),
+              };
+            });
             entry.realtime = realtimeJoins();
             const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}.png`;
             await page.screenshot({ path: join(OUT, shot) });
