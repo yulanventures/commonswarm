@@ -1,0 +1,80 @@
+{
+  "fill": {
+    "solid": "srgb:0.97255,0.96863,0.95294,1.00000"
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "solid": "srgb:0.13333,0.13333,0.19608,1.00000"
+      }
+    },
+    {
+      "appearance": "tinted",
+      "value": {
+        "solid": "srgb:0.13333,0.13333,0.13333,1.00000"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Arc",
+      "layers": [
+        {
+          "image-name": "Arc.png",
+          "name": "Arc",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.97255,0.96863,0.95294,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:0.83922,0.83922,0.83922,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      }
+    },
+    {
+      "name": "Signal",
+      "layers": [
+        {
+          "image-name": "Signal.png",
+          "name": "Signal",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.50196,0.37255,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "iOS"
+    ]
+  }
+}

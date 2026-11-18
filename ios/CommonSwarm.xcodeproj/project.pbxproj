@@ -202,6 +202,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 INFOPLIST_FILE = Configuration/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "CommonSwarm";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -227,6 +228,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 INFOPLIST_FILE = Configuration/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "CommonSwarm";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
