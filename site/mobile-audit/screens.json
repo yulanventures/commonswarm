@@ -1460,6 +1460,8 @@
       }
     ],
     "ready": "[data-household-agents]:not([hidden]) [data-household-agent-list] .dashboard__approval",
+    "status": "pending",
+    "reason": "Since #460 the approval card shows only on a landing from the People dialog's Allow, and that Allow now approves in place whenever the agent has a live connection and Lists access is confirmed. The seed has exactly that, so no step reaches the card without submitting an approval. Needs a seeded own agent with no live connection in {approvalWorkspace}: its Allow lands here and approves nothing.",
     "states": [
       "dense"
     ],
