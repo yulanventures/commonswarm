@@ -383,6 +383,13 @@ exactly those keys:
 | `channels` | see [Channels](#channels) |
 | `files` | see [Workspace files](#workspace-files) |
 
+Direct messages: a message outside any channel that is addressed to people or agents (`to_user_id`,
+`to_agent_principal_id` or `to`) is a direct message. The server files each one in a conversation for
+its sender and recipients (`swarm.conversations`, up to nine members). A message's conversation is a row
+in its own insert-only table, `swarm.conversation_signals`, not a column on the message, because
+messages are append-only. Nothing in this API changes yet: post and read direct messages as addressed
+signals, as above.
+
 Two behaviours worth knowing:
 
 - A malformed or over-specified body is `400 invalid_request`. There is no partial
