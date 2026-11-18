@@ -389,6 +389,7 @@ async function observeConnectionApp() {
       assert(sent.length === 3 && sent.every((r: any) => r.workspace_id === f.workspace && r.command.connection_kind === expectedKind && r.command.grant_id === expectedId), "wrong workspace or family identity");
       assert(sent[2].command.connection_expires_at === null, "clear must send explicit NULL");
       assert(Date.parse(sent[0].command.connection_expires_at) === new Date("2035-02-03T04:05").getTime(), "local time conversion");
+      await openCard("refusals");
       f.mode = "deny"; edit(); form().requestSubmit();
       await wait(() => /not confirmed/.test(notice()), "refusal reread");
       assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, "refusal changed fixture state");
@@ -404,7 +405,10 @@ async function observeConnectionApp() {
         assert(writes().length === count + 1, row.mode + " did not reach command HTTP");
         assert(f.reads === reads, row.mode + " required an unnecessary policy read");
         assert(f.grant.connection_expires_at === null && f.connection.connection_expires_at === null, row.mode + " changed saved state");
-        assert(editor().textContent.includes("Stays connected until you remove it"), row.mode + " changed canonical summary");
+        // The saved state is still "no end date": a card says so in two words, the other editors in a sentence.
+        assert(editor().textContent.includes(f.hosted ? "No end date" : "Stays connected until you remove it"), row.mode + " changed canonical summary");
+        // A refused save leaves the card's controls open with the entered date, ready to correct.
+        if (f.hosted) assert(visible(form()) && visible(field("[data-end-date-value]")), row.mode + " closed the card's controls on a refusal");
         assert(!field("[data-end-date-save]").disabled && !field("[data-end-date-value]").disabled &&
           !visible(field("[data-end-date-check]")), row.mode + " blocked correction on a read-only Check");
         assert(field("[data-end-date-value]").value === "2035-02-03T04:05", row.mode + " discarded the draft");
