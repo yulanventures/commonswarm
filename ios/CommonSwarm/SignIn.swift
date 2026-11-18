@@ -19,17 +19,21 @@ final class SignIn: ObservableObject {
         func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { window }
     }
 
-    func start(origin: URL, publicKey: String, window: ASPresentationAnchor) {
+    func start(_ provider: BrowserProvider, origin: URL, publicKey: String, window: ASPresentationAnchor) {
         guard !pending else { return }
-        guard let attempt = try? SignInAttempt() else { failed = true; return }
+        guard let attempt = try? SignInAttempt(provider: provider) else { failed = true; return }
         let id = UUID()
         let expires = ContinuousClock.now.advanced(by: .seconds(300))
         current = id
         presenter = Presenter(window)
         failed = false
         pending = true
-        let browser = ASWebAuthenticationSession(url: attempt.authorize(at: origin),
-                                                 callback: .customScheme("com.commonswarm.ios")) {
+        let callback: ASWebAuthenticationSession.Callback
+        switch provider {
+        case .google: callback = .https(host: "commonswarm.com", path: "/ios/auth/callback")
+        case .github: callback = .customScheme("com.commonswarm.ios")
+        }
+        let browser = ASWebAuthenticationSession(url: attempt.authorize(at: origin), callback: callback) {
             [weak self] url, error in
             Task { @MainActor in
                 guard let self, self.current == id, self.browser != nil else { return }
@@ -76,6 +80,11 @@ final class SignIn: ObservableObject {
         presenter = nil
         pending = false
         self.failed = failed
+    }
+
+    func completeEmailSignIn(_ result: HumanSession) {
+        finish()
+        session = result
     }
 
     func signOut() {

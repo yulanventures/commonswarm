@@ -32,6 +32,14 @@ enum Verify {
         for text in invalid {
             try expect((try? attempt.code(from: URL(string: text)!)) == nil, "invalid callback refused")
         }
+        let google = try SignInAttempt(provider: .google)
+        let (_, googleResponse) = try await browser.data(from: google.authorize(at: origin))
+        guard let location = (googleResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
+              let googleURL = URL(string: location) else { throw Failure.mismatch("Google HTTPS callback") }
+        _ = try google.code(from: googleURL)
+        let customReturn = URL(string: location.replacingOccurrences(of: "https://commonswarm.com/ios/auth", with: "com.commonswarm.ios://auth"))!
+        try expect((try? google.code(from: customReturn)) == nil, "Google refuses custom-scheme return")
+
         let wrong = try? await other.exchange(code: code, at: origin, publicKey: "local-fixture")
         try expect(wrong == nil, "wrong verifier refused")
         let session = try await attempt.exchange(code: code, at: origin, publicKey: "local-fixture")
@@ -148,11 +156,14 @@ enum Verify {
         } catch is CancellationError {}
         try expect(try await control("count") == count, "no retired bearer dispatched")
 
-        let next = try SignInAttempt()
-        let (_, nextResponse) = try await browser.data(from: next.authorize(at: origin))
-        guard let nextLocation = (nextResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
-              let nextURL = URL(string: nextLocation) else { throw Failure.mismatch("new login") }
-        let fresh = try await next.exchange(code: next.code(from: nextURL), at: origin, publicKey: "local-fixture")
+        let emailAPI = EmailCodeAPI(origin: origin, publicKey: "local-fixture")
+        let email = "reader@example.test"
+        try await emailAPI.send(to: "unknown@example.test")
+        try await emailAPI.send(to: email)
+        try expect((try? await emailAPI.verify(email: email, code: "999999")) == nil, "wrong email code refused")
+        let fresh = try await emailAPI.verify(email: email, code: "012345")
+        try expect(fresh.userID == session.userID, "email signs into the existing account")
+        try expect((try? await emailAPI.verify(email: email, code: "012345")) == nil, "email code consumed")
         let freshAPI = ConversationAPI(origin: origin, publicKey: "local-fixture", session: fresh)
         try expect(fresh.composer(workspace: ws.id, conversation: dm.id).text.isEmpty, "fresh session has no old draft")
         try expect(try await freshAPI.workspaces().first?.id == ws.id, "new login can read")

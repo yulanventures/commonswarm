@@ -43,10 +43,16 @@ final class ReaderPositionTests: XCTestCase {
     func testReadingPositionSurvivesPrependAndOlderRetry() throws {
         continueAfterFailure = false
         app.launch()
+        try tap("Continue with email")
+        let address = app.textFields["Email address"]
+        address.tap()
+        address.typeText("reader@example.test")
+        try tap("Send code")
+        let code = app.secureTextFields["Email code"]
+        XCTAssertTrue(code.waitForExistence(timeout: 5))
+        code.tap()
+        code.typeText("012345")
         try tap("Sign in")
-        let consent = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Continue"]
-        if consent.waitForExistence(timeout: 2) { consent.tap() }
-        if app.alerts.buttons["Continue"].exists { app.alerts.buttons["Continue"].tap() }
         try tap("Simulator workspace")
         try tap("#general")
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))

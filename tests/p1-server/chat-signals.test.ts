@@ -376,6 +376,37 @@ test("a body that predates channels still posts, and one that names a channel la
   assert.equal(signalOf(filed.body).channel_id, channel.channel_id);
 });
 
+test("the native iOS email-code requests cannot create an account and verify the existing user once", async () => {
+  const wire = readFileSync(new URL("../../ios/Development/email-code.json", import.meta.url), "utf8");
+  const requests = JSON.parse(wire) as Record<string, Record<string, unknown>>;
+  async function post(path: string, email: string, code?: string) {
+    let body = JSON.stringify(requests[path]).replace("reader@example.test", email);
+    if (code) body = body.replace("012345", code);
+    return fetch(local.API_URL + path, {
+      method: "POST", redirect: "error",
+      headers: { apikey: local.ANON_KEY, "content-type": "application/json" }, body,
+    });
+  }
+
+  const unknown = await post("/auth/v1/otp", `absent-${randomUUID()}@example.test`);
+  assert.equal(unknown.status, 422);
+  assert.equal((await unknown.json()).error_code, "otp_disabled");
+
+  const owner = await admin.auth.admin.getUserById(f.ownerId);
+  assert.ifError(owner.error);
+  const email = owner.data.user?.email;
+  assert.ok(email);
+  // Obtain a real code from local GoTrue without requiring an email delivery service in CI.
+  const issued = await admin.auth.admin.generateLink({ type: "magiclink", email });
+  assert.ifError(issued.error);
+  const code = issued.data.properties?.email_otp;
+  assert.ok(code);
+  const result = await post("/auth/v1/verify", email, code);
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).user.id, f.ownerId);
+  assert.equal((await post("/auth/v1/verify", email, code)).status, 403);
+});
+
 test("the native iOS DM envelope files an agent message and replays one receipt", async () => {
   const wire = readFileSync(new URL("../../ios/Development/post-agent.json", import.meta.url), "utf8");
   // Only substitute seeded IDs. Missing, extra, null and misspelled wire fields reach the real validator.
