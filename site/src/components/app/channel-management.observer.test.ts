@@ -131,9 +131,11 @@ async function observeChannelManagement() {
       // the confirmation on Cancel, the second takes that Cancel.
       const archives = () => f.channelCommands.filter((entry: any) => entry.command.kind === "channel_archive").length;
       const more = one<HTMLDetailsElement>("[data-channel-settings-more]")!;
-      check(!more.open && !visible(one("[data-channel-settings-archive]")), "Archive channel is not behind a closed More");
+      // A closed disclosure keeps its content's boxes, so the box test above cannot see it as hidden; the browser's own
+      // visibility check can.
+      check(!more.open && !one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility(), "Archive channel is not behind a closed More");
       await click("[data-channel-settings-more] > summary");
-      await wait("More open", () => more.open && visible(one("[data-channel-settings-archive]")));
+      await wait("More open", () => more.open && one<HTMLElement>("[data-channel-settings-archive]")!.checkVisibility());
       const sentBefore = archives();
       one<HTMLButtonElement>("[data-channel-settings-archive]")!.focus();
       await key("Enter");
