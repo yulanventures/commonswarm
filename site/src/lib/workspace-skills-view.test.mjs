@@ -19,6 +19,16 @@ test("with skills, the count is said in plain words under the heading", () => {
   assert.match(html, /<h3>Skills<\/h3>\s*<p class="hh-skills-count" data-skills-count>3 of 20<\/p>/);
 });
 
+test("the rule that removes a skill is said in full beside Add skill, only to someone who can add one", () => {
+  const rule = "Use a new skill within 14 days to keep it. After its first use, it expires 60 days after its last use or edit.";
+  const html = renderWorkspaceSkillsHtml(base);
+  assert.match(html, new RegExp(`<textarea[^>]*data-skill-input-body></textarea>\\s*<p class="hh-skills-rule" data-skills-rule>${rule.replaceAll(".", "\\.")}</p>\\s*<div>\\s*<button type="submit"`));
+  assert.doesNotMatch(html.slice(0, html.indexOf("<form")), /expires|14 days/, "the heading stays clear of it");
+  assert.doesNotMatch(renderWorkspaceSkillsHtml({ ...base, can_edit: false }), /data-skills-rule/);
+  // The sixty comes from the server's answer, so the sentence stays true if that number changes.
+  assert.match(renderWorkspaceSkillsHtml({ ...base, ttl_days: 45 }), /it expires 45 days after its last use or edit\./);
+});
+
 test("the builders' shorthand is gone in every state", () => {
   for (const data of [base, { ...base, skills: [skill("a")] }, { ...base, can_edit: false }]) {
     assert.doesNotMatch(renderWorkspaceSkillsHtml(data), /Hints, never gates|hh-eyebrow|d expiry|\d+\/20/);
