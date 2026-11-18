@@ -192,7 +192,9 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
     <input type="text" class="hh-create-input" data-hh-create-title placeholder="New list or doc title…" aria-label="New list or doc title" />
     <div class="hh-create-actions">${button('create-list', '+ New list', '', busy)}${button('create-doc', '+ New doc', '', busy)}</div>
   </div>` : '';
-  return `<header><div class="hh-workspace-identity"><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2></div>
+  // No heading here: the pane is already titled Lists and the app's bar names the workspace. Who it is shared
+  // with and what this person may do stay in sight, as two quiet sentences.
+  return `<header>
     <div class="hh-workspace-meta"><p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
     <p>Content role: <strong>${esc(workspace.content_role === 'editor' ? 'Editor' : workspace.content_role === 'reader' ? 'Reader' : 'Not confirmed')}</strong>. You can ${esc(capabilities.length === 0 ? 'not open them yet'
       : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p></div></header>

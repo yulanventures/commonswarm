@@ -91,7 +91,10 @@ test('the empty view tells a person how lists are made, in plain words', () => {
   assert.match(html, /No lists or docs yet\. Ask an agent: “Create a CommonSwarm list called Groceries\.”/);
   // With nothing to select, the view does not also ask the person to select something.
   assert.doesNotMatch(html, /Select a list, doc or file to read it\./);
-  assert.match(html, /<p class="hh-eyebrow">Lists &amp; docs<\/p>/);
+  // The pane's own title and the app's bar already say "Lists" and the workspace's name: the view repeats neither,
+  // and still says who the lists are shared with and what this person may do.
+  assert.doesNotMatch(html, /hh-eyebrow|hh-workspace-identity|<h2>Our household<\/h2>/);
+  assert.match(html, /<header>\s*<div class="hh-workspace-meta"><p>Shared with: Person A, Person B\.<\/p>\s*<p>Content role: <strong>/);
   assert.doesNotMatch(html, /Household objects<\/p>|Approved operations|retained history/);
 });
 
