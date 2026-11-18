@@ -345,6 +345,9 @@ export interface SeatAdminEndConfirmationOptions {
   coverage: readonly string[];
   /** A scoped grant's own scope names, shown so the person sees exactly what ends. */
   scopeNames?: readonly string[];
+  /** Who could give this access again. "you" (the default) when the person ending it is the one who gave it;
+   *  "owner" when someone else gave it (a workspace owner ending another member's agent's access cannot turn it back on). */
+  restoredBy?: "you" | "owner";
   confirm: () => void;
   cancel?: () => void;
 }
@@ -365,6 +368,11 @@ export function seatAdminEndQuestion(agentName: string, level: SeatAdminLevel, c
   const list = named(coverage);
   const where = list.length > 1 ? `${list.length} workspaces` : list[0] ?? "";
   return `End ${LEVEL_WORDS[level]} admin access for ${agentName}${where ? ` in ${where}` : ""}?`;
+}
+
+/** What the end confirmation says happens next. It must not promise the person something they cannot do. */
+export function seatAdminEndConsequence(restoredBy: "you" | "owner"): string {
+  return restoredBy === "owner" ? "It stays off until the agent’s owner turns it on again." : "It stays off until you turn it on again.";
 }
 
 /** Turning admin access off asks first. Keep (the initial focus), Escape and closing send nothing; End access
@@ -401,7 +409,7 @@ export function buildSeatAdminEndConfirmation(doc: Document, options: SeatAdminE
     body.setAttribute("role", "region");
     body.setAttribute("aria-label", "Admin access being ended");
   }
-  body.append(element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again."));
+  body.append(element(doc, "p", "sa-confirm__line", seatAdminEndConsequence(options.restoredBy ?? "you")));
   const footer = element(doc, "footer", "sa-confirm__footer");
   const keep = action(doc, "Keep", () => { close(); options.cancel?.(); });
   const end = element(doc, "button", "sa-button sa-button--primary", "End access");

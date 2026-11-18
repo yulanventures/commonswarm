@@ -7909,6 +7909,8 @@ import "../../styles/kylon-command-palette.css";
       disposeSeatAdminDialog();
       const ending = buildSeatAdminEndConfirmation(document, {
         agentName: label, level: grant.level, coverage: [peopleAdminCoverage(grant, workspace.name)],
+        // An owner can end a grant another person gave, but cannot give it again.
+        restoredBy: grant.giverId === value.user.id.toLowerCase() ? "you" : "owner",
         confirm: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); void send(); },
         cancel: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); },
       });
