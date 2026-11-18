@@ -7,9 +7,9 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
-import { peopleAdminCoverage } from "../../lib/people/admins";
+import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused } from "../../lib/people/admins";
 
-const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant"];
+const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant", "closeRosterDialog"];
 
 async function dashboardFunctions(names: string[]): Promise<string> {
   const raw = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
@@ -33,30 +33,37 @@ const grant = (n: number, over: Record<string, unknown> = {}) => ({ grantId: `g$
 async function page(options: { role?: string; enabled?: boolean } = {}) {
   const calls: string[] = []; const ends: Array<{ commandId: string; grantId: string }> = []; const events: string[] = [];
   let token = 0;
-  const io: { all: null | (() => Promise<unknown>); end: null | (() => Promise<any>); confirm: boolean } = { all: null, end: null, confirm: true };
+  const io: { all: null | (() => Promise<unknown>); end: null | (() => Promise<any>); confirm: boolean | "hold"; held: null | (() => void) } = { all: null, end: null, confirm: true, held: null };
   const context = createContext({
-    peopleAdminCoverage, uuid: () => `cmd-${++token}`, CustomEvent: class { constructor(public type: string) {} },
-    window: { dispatchEvent: (event: { type: string }) => { events.push(event.type); } },
+    peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, URLSearchParams, uuid: () => `cmd-${++token}`, CustomEvent: class { constructor(public type: string) {} },
+    __events: events,
     readWorkspaceAdminGrants: async () => { calls.push("all"); return io.all ? io.all() : [grant(1), grant(2, { level: "organization", mayEnd: false })]; },
     refreshSeatAdminState: async () => { calls.push("mine"); runInContext(`seatAdminStatusState = { phase: "loaded", status: { enabled: ${options.enabled !== false} } };
       seatAdminGrantsState = { phase: "loaded", grants: [
         { grantId: "MINE-1", principalId: "A1", level: "workspace", workspaceIds: ["W1"], expiresAt: null, state: "active" },
         { grantId: "mine-2", principalId: "a1", level: "workspace", workspaceIds: ["other"], expiresAt: null, state: "active" },
-        { grantId: "mine-3", principalId: "gone", level: "organization", workspaceIds: [], expiresAt: null, state: "active" },
+        { grantId: "mine-3", principalId: "gone", level: "organization", organizationId: "org-1", workspaceIds: [], expiresAt: null, state: "active" },
+        { grantId: "org-here", principalId: "a1", level: "organization", organizationId: "ORG-1", workspaceIds: [], expiresAt: null, state: "active" },
+        { grantId: "org-other", principalId: "a1", level: "organization", organizationId: "org-2", workspaceIds: [], expiresAt: null, state: "active" },
+        { grantId: "org-unknown", principalId: "a1", level: "organization", organizationId: null, workspaceIds: [], expiresAt: null, state: "active" },
         { grantId: "mine-4", principalId: "a1", level: "workspace", workspaceIds: ["w1"], expiresAt: null, state: "ended" }] };`, context); },
     endSeatAdmin: async (_session: unknown, commandId: string, grantId: string) => { ends.push({ commandId, grantId }); return io.end ? io.end() : { kind: "accepted" }; },
     buildSeatAdminEndConfirmation: (_doc: unknown, opts: { confirm(): void; cancel(): void; agentName: string; level: string; coverage: string[] }) => {
       calls.push(`ask:${opts.agentName}:${opts.level}:${opts.coverage.join("|")}`);
-      return { dialog: { remove() {} }, open() { if (io.confirm) opts.confirm(); else opts.cancel(); } };
+      // "hold": the question stays open; the test presses End access later through io.held.
+      return { dialog: { remove() {} }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
     },
     disposeSeatAdminDialog: () => {}, renderDialogRoster: () => {}, peopleDialogOpen: () => true, document: {}, app: { append() {} }, one: () => null,
+    all: () => [], parkPeopleHosts: () => {}, erasePeopleDialogInvite: () => {},
     seatAdminRemoveCommandIds: new Map(),
   });
   runInContext(`
     var session = { user: { id: "u1" } }, activeWorkspaceId = "w1", sampleMode = false;
-    var workspaces = [{ id: "w1", name: "Rivera household" }], members = [{ userId: "u1", role: "${options.role ?? "owner"}" }], agents = [{ principalId: "a1", name: "Atlas" }];
+    var workspaces = [{ id: "w1", name: "Rivera household", orgId: "org-1" }, { id: "w2", name: "Studio", orgId: "org-2" }, { id: "w3", name: "Unknown", orgId: "" }], members = [{ userId: "u1", role: "${options.role ?? "owner"}" }], agents = [{ principalId: "a1", name: "Atlas" }];
     var seatAdminStatusState = { phase: "idle" }, seatAdminGrantsState = { phase: "idle" };
     var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
+    var peopleDialogReturn = null, peopleDialogFocus = undefined, peopleDialogInviteCleared = null, peopleDialogState = { selected: null, invite: null };
+    var window = { location: { search: "" }, history: { state: null, replaceState() {} }, dispatchEvent: (event) => { __events.push(event.type); } };
   `, context);
   runInContext(await dashboardFunctions(NAMES), context);
   const run = <T>(code: string): T => runInContext(code, context) as T;
@@ -74,8 +81,9 @@ test("an owner reads every grant on record; anyone else only what they gave; off
   assert.ok(!member.calls.includes("all"), "a non-owner never asks for the workspace's whole list");
   const own = plain(member.run<any>("currentPeopleAdminAccess()"));
   assert.equal(own.all, false);
-  assert.deepEqual(own.grants, [{ grantId: "mine-1", principalId: "a1", agentName: "Atlas", giverId: "u1", giverName: null, level: "workspace", expiresAt: null, mayEnd: true }],
-    "only active grants for this workspace, for agents in its roster, named from the roster");
+  assert.deepEqual(own.grants.map((row: any) => [row.grantId, row.level]), [["mine-1", "workspace"], ["org-here", "organization"]],
+    "only active grants for this workspace or its own organization, for agents in its roster");
+  assert.deepEqual(own.grants[0], { grantId: "mine-1", principalId: "a1", agentName: "Atlas", giverId: "u1", giverName: null, level: "workspace", expiresAt: null, mayEnd: true });
 
   const off = await page({ enabled: false });
   await off.run("loadPeopleAdminAccess()");
@@ -86,7 +94,7 @@ test("a server answer of null (not an owner, or the read not deployed yet) falls
   const p = await page(); p.io.all = async () => null;
   await p.run("loadPeopleAdminAccess()");
   const access = plain(p.run<any>("currentPeopleAdminAccess()"));
-  assert.equal(access.all, false); assert.deepEqual(access.grants.map((row: any) => row.grantId), ["mine-1"]);
+  assert.equal(access.all, false); assert.deepEqual(access.grants.map((row: any) => row.grantId), ["mine-1", "org-here"]);
 });
 
 test("a failed read keeps what was shown and says so; a read that lands after a workspace switch is dropped", async () => {
@@ -137,4 +145,64 @@ test("declining the question sends nothing; an unknown outcome keeps its command
   p.run("endPeopleAdminGrant('g1', {})"); await settle(); await settle();
   assert.equal(p.ends[3].commandId, "cmd-2", "a refusal spent its command id; the next try is a new command");
   assert.deepEqual(p.events, ["commonswarm:seat-admin-changed"]);
+});
+
+test("the fallback lists an organization grant only in that organization's own workspaces", async () => {
+  // The same agent sits in both workspaces, which belong to different organizations.
+  const p = await page({ role: "admin" });
+  await p.run("loadPeopleAdminAccess()");
+  const ids = () => plain(p.run<any>("currentPeopleAdminAccess()")).grants.map((row: any) => row.grantId);
+  assert.deepEqual(ids(), ["mine-1", "org-here"], "in organization 1: its grant, not organization 2's");
+  p.run("closeRosterDialog(); activeWorkspaceId = 'w2'; members = [{ userId: 'u1', role: 'admin' }]"); await p.run("loadPeopleAdminAccess()");
+  assert.deepEqual(ids(), ["org-other"], "in organization 2: only its own, so 'this organization' can never end the other one's grant");
+  p.run("closeRosterDialog(); activeWorkspaceId = 'w3'"); await p.run("loadPeopleAdminAccess()");
+  assert.deepEqual(ids(), [], "a workspace whose organization is not known lists no organization grant; a grant without one is never listed");
+});
+
+test("a refusal clears every row; a read held across leaving and coming back never lands", async () => {
+  const p = await page();
+  await p.run("loadPeopleAdminAccess()");
+  p.io.all = async () => { throw new WorkspaceAdminGrantsRefused("no"); };
+  await p.run("loadPeopleAdminAccess()");
+  assert.deepEqual(plain(p.run("currentPeopleAdminAccess()")), { read: "failed", all: false, grants: [], notices: {} }, "signed out or not allowed: nothing shown before stays");
+
+  const back = await page(); let release!: (rows: unknown) => void;
+  back.io.all = () => new Promise(resolve => { release = resolve; });
+  const loading = back.run<Promise<void>>("loadPeopleAdminAccess()"); await settle();
+  // A workspace switch, a sign-out and a dead session all close the dialog before anything else.
+  back.run("closeRosterDialog(); activeWorkspaceId = 'w2'"); back.run("closeRosterDialog(); activeWorkspaceId = 'w1'");
+  release([grant(9)]); await loading;
+  assert.equal(back.run("currentPeopleAdminAccess()"), undefined, "back in the first workspace with no new read: the old read is not accepted");
+});
+
+test("a question held open across a changed list sends nothing", async () => {
+  for (const [why, change] of [
+    ["the grant left the list", async (p: any) => { p.io.all = async () => [grant(2)]; await p.run("loadPeopleAdminAccess()"); }],
+    ["the server would no longer accept an end", async (p: any) => { p.io.all = async () => [grant(1, { mayEnd: false })]; await p.run("loadPeopleAdminAccess()"); }],
+    ["the read was refused", async (p: any) => { p.io.all = async () => { throw new WorkspaceAdminGrantsRefused("no"); }; await p.run("loadPeopleAdminAccess()"); }],
+    ["the read failed and the rows are only kept to look at", async (p: any) => { p.io.all = async () => { throw new Error("down"); }; await p.run("loadPeopleAdminAccess()"); }],
+    ["the workspace changed", async (p: any) => { p.run("closeRosterDialog(); activeWorkspaceId = 'w2'"); }],
+    ["the account changed", async (p: any) => { p.run("session = { user: { id: 'u9' } }"); }],
+  ] as const) {
+    const p = await page();
+    await p.run("loadPeopleAdminAccess()");
+    p.io.confirm = "hold"; p.run("endPeopleAdminGrant('g1', {})"); assert.ok(p.io.held, why);
+    await change(p);
+    p.io.held!(); await settle(); await settle();
+    assert.equal(p.ends.length, 0, `no command when ${why}`); assert.deepEqual(p.events, [], why);
+  }
+  const still = await page();
+  await still.run("loadPeopleAdminAccess()");
+  still.io.confirm = "hold"; still.run("endPeopleAdminGrant('g1', {})");
+  await still.run("loadPeopleAdminAccess()");
+  still.io.held!(); await settle(); await settle();
+  assert.deepEqual(still.ends.map(end => end.grantId), ["g1"], "a refresh that still shows the same usable row lets the end go through");
+});
+
+test("rows that would read the same are told apart in the question", async () => {
+  const p = await page();
+  p.io.all = async () => [grant(1, { agentName: "Atlas", principalId: "aaaaaaaa-1111" }), grant(2, { agentName: "Atlas", principalId: "bbbbbbbb-2222" })];
+  await p.run("loadPeopleAdminAccess()"); p.calls.length = 0;
+  p.run("endPeopleAdminGrant('g2', {})"); await settle();
+  assert.deepEqual(p.calls.filter(call => call.startsWith("ask")), ["ask:Atlas (agent bbbbbbbb):workspace:Rivera household"]);
 });

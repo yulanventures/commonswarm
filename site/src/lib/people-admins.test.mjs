@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminPeople, workspaceAdminGrantsNotDeployed } from "./people/admins.ts";
+import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, workspaceAdminGrantsNotDeployed, workspaceAdminGrantsRefused } from "./people/admins.ts";
 
 const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 const row = (over = {}) => ({ grant_id: id(1), principal_id: id(2), agent_name: "Atlas", owner_user_id: id(3), owner_display: "Sam Rivera",
@@ -41,4 +41,14 @@ test("people who can manage are owners and admins; ending a wider grant says how
 test("a server without the read yet is not a failed read; any other refusal is", () => {
   for (const [status, code] of [[404, undefined], [400, "PGRST202"], [400, "42883"]]) assert.equal(workspaceAdminGrantsNotDeployed(status, code), true, `${status} ${code}`);
   for (const [status, code] of [[500, undefined], [401, "PGRST301"], [403, "42501"], [400, undefined]]) assert.equal(workspaceAdminGrantsNotDeployed(status, code), false, `${status} ${code}`);
+});
+
+test("a refusal is told apart from a failure, and look-alike rows from each other", () => {
+  assert.equal(workspaceAdminGrantsRefused(401), true); assert.equal(workspaceAdminGrantsRefused(403), true);
+  for (const status of [404, 500, 503, 400]) assert.equal(workspaceAdminGrantsRefused(status), false, String(status));
+  const g = (grantId, principalId, agentName, level = "workspace") => ({ grantId, principalId, agentName, giverId: "u", giverName: null, level, expiresAt: null, mayEnd: true });
+  const rows = [g("11111111-g", "aaaaaaaa-p", "Atlas"), g("22222222-g", "bbbbbbbb-p", "Atlas"), g("33333333-g", "cccccccc-p", "Pixel"), g("44444444-g", "cccccccc-p", "Pixel", "organization"),
+    g("55555555-g", "dddddddd-p", "Twin"), g("66666666-g", "dddddddd-p", "Twin")];
+  assert.deepEqual(rows.map((row) => peopleAdminLabel(row, rows)), ["Atlas (agent aaaaaaaa)", "Atlas (agent bbbbbbbb)", "Pixel", "Pixel", "Twin (grant 55555555)", "Twin (grant 66666666)"],
+    "two agents with one name carry the agent's id; one agent's two levels need nothing; one agent's two grants of a level carry the grant's id");
 });

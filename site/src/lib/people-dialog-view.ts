@@ -11,7 +11,7 @@ import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } f
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
 import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
-import { peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminPeople, type PeopleAdminAccess } from "./people/admins";
+import { peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, type PeopleAdminAccess } from "./people/admins";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -674,12 +674,15 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         // Drawn from the read's own names: the agent may no longer be in this workspace's roster.
         const row = node(doc, "li", "pd-admin-grant"); row.dataset.adminGrant = grant.grantId; row.dataset.adminLevel = grant.level;
         const symbol = node(doc, "span", "pd-orb", (grant.agentName.trim()[0] ?? "?").toUpperCase()); symbol.setAttribute("aria-hidden", "true");
-        const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", grant.agentName); name.title = grant.agentName;
+        // Same-named agents, and one agent's look-alike grants, are told apart here, on Remove and in its question.
+        const label = peopleAdminLabel(grant, access.grants);
+        const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", label); name.title = label;
         copy.append(name, node(doc, "span", "pd-muted", peopleAdminDetail(grant, viewerId))); row.append(symbol, copy);
         const said = access.notices?.[grant.grantId] ?? "";
         const notice = node(doc, "p", "pd-error", said); notice.setAttribute("role", "alert"); notice.hidden = !said; notice.dataset.adminGrantNotice = "";
-        if (grant.mayEnd && callbacks.endAdmin) { const remove = button(doc, "Remove", (opener) => callbacks.endAdmin?.(grant.grantId, opener), "pd-danger-button");
-          remove.dataset.endAdmin = grant.grantId; remove.dataset.pdFocus = `end-admin-${grant.grantId}`; remove.setAttribute("aria-label", `Remove admin access: ${grant.agentName}`); row.append(remove); }
+        // Remove needs a list that was just read: rows kept under a failed read are for looking at, not for acting on.
+        if (grant.mayEnd && callbacks.endAdmin && access.read === "ready") { const remove = button(doc, "Remove", (opener) => callbacks.endAdmin?.(grant.grantId, opener), "pd-danger-button");
+          remove.dataset.endAdmin = grant.grantId; remove.dataset.pdFocus = `end-admin-${grant.grantId}`; remove.setAttribute("aria-label", `Remove admin access: ${label}`); row.append(remove); }
         row.append(notice); list.append(row);
       }
       section.append(list); grid.append(section);

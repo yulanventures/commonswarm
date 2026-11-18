@@ -468,6 +468,12 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   assert.ok(all(node => node.dataset?.adminAccessState === "empty" && node.textContent === "No active admin grants from you here.").length);
   access = { read: "failed", all: true, grants: [] }; paint();
   assert.ok(all(node => node.dataset?.adminAccessState === "error" && node.textContent.startsWith("Admin access could not load.")).length);
+  access = { read: "failed", all: true, grants: [g(1)] }; paint();
+  assert.equal(all(node => node.dataset?.adminGrant !== undefined).length, 1, "rows kept under a failed read stay to look at");
+  assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "but offer no Remove until a read succeeds");
+  access = { read: "ready", all: true, grants: [g(1, { agentName: "Atlas", principalId: "aaaaaaaa-1" }), g(2, { agentName: "Atlas", principalId: "bbbbbbbb-2" })] }; paint();
+  assert.deepEqual(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).map(button => button.attributes["aria-label"]),
+    ["Remove admin access: Atlas (agent aaaaaaaa)", "Remove admin access: Atlas (agent bbbbbbbb)"], "same-named agents are told apart beside Remove");
   access = undefined; paint();
   assert.equal(all(node => node.dataset?.adminAccess !== undefined).length, 0, "with agent admin access off, the tab lists people only");
 });

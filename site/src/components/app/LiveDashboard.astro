@@ -1301,7 +1301,7 @@ import "../../styles/kylon-command-palette.css";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
   import { renderPeopleDialog, withdrawConfirmText, peopleDialogCanAct, showPeopleConfirmation,
     type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
-  import { peopleAdminCoverage, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
+  import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, type PeopleAdminAccess, type PeopleAdminGrant } from "../../lib/people/admins";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
@@ -7696,7 +7696,13 @@ import "../../styles/kylon-command-palette.css";
     const ownPeopleAdminGrants = (workspaceId: string, userId: string): PeopleAdminGrant[] =>
       seatAdminGrantsState.phase !== "loaded" ? [] : seatAdminGrantsState.grants.flatMap((grant) => {
         const agent = agents.find((entry) => entry.principalId.toLowerCase() === grant.principalId.toLowerCase());
-        const here = grant.level === "organization" || grant.workspaceIds.some((id) => id.toLowerCase() === workspaceId.toLowerCase());
+        // An organization grant belongs here only when it is for this workspace's own organization. An agent can sit
+        // in two organizations; without this its grant for the other one would be listed, and ended, from here.
+        // When either organization is not known, the row is left out.
+        const organization = (workspaces.find((entry) => entry.id === workspaceId)?.orgId ?? "").toLowerCase();
+        const here = grant.level === "organization"
+          ? !!organization && !!grant.organizationId && grant.organizationId.toLowerCase() === organization
+          : grant.workspaceIds.some((id) => id.toLowerCase() === workspaceId.toLowerCase());
         if (!agent || grant.state !== "active" || !here) return [];
         return [{ grantId: grant.grantId.toLowerCase(), principalId: grant.principalId.toLowerCase(), agentName: agent.name, giverId: userId.toLowerCase(),
           giverName: null, level: grant.level, expiresAt: grant.expiresAt, mayEnd: true }];
@@ -7729,9 +7735,12 @@ import "../../styles/kylon-command-palette.css";
           if (seatAdminGrantsState.phase !== "loaded") throw new Error("Admin access could not load.");
           next = { read: "ready", all: false, grants: ownPeopleAdminGrants(workspaceId, value.user.id) };
         }
-      } catch {
+      } catch (error) {
         if (!current()) return;
-        next = { read: "failed", all: before?.all ?? false, grants: before?.grants ?? [] };
+        // Refused (signed out, or no longer allowed to ask): every row and its Remove go. A transient failure keeps
+        // the last rows to look at, under the could-not-load line; the view offers no Remove until a read succeeds.
+        next = error instanceof WorkspaceAdminGrantsRefused ? { read: "failed", all: false, grants: [] }
+          : { read: "failed", all: before?.all ?? false, grants: before?.grants ?? [] };
       }
       // A refusal shown on a row stays until its grant is gone.
       const notices = Object.fromEntries(Object.entries(before?.notices ?? {}).filter(([grantId]) => next.grants.some((grant) => grant.grantId === grantId)));
@@ -7742,8 +7751,14 @@ import "../../styles/kylon-command-palette.css";
     const endPeopleAdminGrant = (grantId: string, opener: HTMLButtonElement): void => {
       const value = session, key = peopleAdminKey();
       const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId);
-      const grant = currentPeopleAdminAccess()?.grants.find((entry) => entry.grantId === grantId && entry.mayEnd);
+      /** The row as the list has it right now, and only if the list was just read and the server would accept an end. */
+      const usableRow = (): PeopleAdminGrant | undefined => {
+        const access = key && key === peopleAdminKey() ? currentPeopleAdminAccess() : undefined;
+        return access?.read === "ready" ? access.grants.find((entry) => entry.grantId === grantId && entry.mayEnd) : undefined;
+      };
+      const grant = usableRow();
       if (!value || !key || !workspace || !grant || peopleAdminEnding.has(grantId)) return;
+      const label = peopleAdminLabel(grant, currentPeopleAdminAccess()?.grants ?? [grant]);
       const say = (text: string): void => {
         if (peopleAdminAccess.key !== key || !peopleAdminAccess.access) return;
         const notices = { ...(peopleAdminAccess.access.notices ?? {}) };
@@ -7751,6 +7766,14 @@ import "../../styles/kylon-command-palette.css";
         peopleAdminAccess = { key, access: { ...peopleAdminAccess.access, notices } };
       };
       const send = async (): Promise<void> => {
+        // The question may have stood open across a refresh. Nothing is sent unless this exact row is still in the
+        // list, for the same account and workspace, and still one the server would end.
+        if (session?.user.id !== value.user.id || !usableRow()) {
+          say("This access changed while you were deciding. Nothing was sent.");
+          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = "This access changed while you were deciding. Nothing was sent.";
+          if (peopleDialogOpen()) renderDialogRoster();
+          return;
+        }
         peopleAdminEnding.add(grantId); say("");
         const commandId = seatAdminRemoveCommandIds.get(grantId) ?? uuid();
         seatAdminRemoveCommandIds.set(grantId, commandId);
@@ -7765,13 +7788,13 @@ import "../../styles/kylon-command-palette.css";
         await loadPeopleAdminAccess();
         if (key !== peopleAdminKey()) return;
         if (outcome.kind === "accepted") {
-          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = `Admin access removed from ${grant.agentName}.`;
+          const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = `Admin access removed from ${label}.`;
         }
         if (peopleDialogOpen()) (one<HTMLElement>(`[data-pd-focus="end-admin-${grantId}"]`) ?? one<HTMLElement>("#pd-admin-access-title"))?.focus({ preventScroll: true });
       };
       disposeSeatAdminDialog();
       const ending = buildSeatAdminEndConfirmation(document, {
-        agentName: grant.agentName, level: grant.level, coverage: [peopleAdminCoverage(grant, workspace.name)],
+        agentName: label, level: grant.level, coverage: [peopleAdminCoverage(grant, workspace.name)],
         confirm: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); void send(); },
         cancel: () => { if (activeSeatAdminEndDialog !== ending) return; activeSeatAdminEndDialog = null; ending.dialog.remove(); },
       });
@@ -7950,6 +7973,9 @@ import "../../styles/kylon-command-palette.css";
       // and an answer still in flight finds no form to hand its link to. The invite itself stays pending in the list.
       erasePeopleDialogInvite(); peopleDialogInviteCleared = null;
       peopleDialogState.invite = null;
+      // The Admins list ends with the dialog, and so does any read of it still in flight: a workspace switch, a sign-out
+      // and a dead session all close the dialog first, so a read begun before cannot land after coming back.
+      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1;
       peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
       parkPeopleHosts();
       if (restoreFocus && returned) {

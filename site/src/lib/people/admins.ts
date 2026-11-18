@@ -66,6 +66,24 @@ export function workspaceAdminGrantsNotDeployed(status: number, code: unknown): 
   return status === 404 || code === "PGRST202" || code === "42883";
 }
 
+/** The server refused the read itself: the viewer is signed out or may not ask. Unlike a transient failure, nothing
+ *  shown before may stay on screen after this. */
+export class WorkspaceAdminGrantsRefused extends Error {}
+export const workspaceAdminGrantsRefused = (status: number): boolean => status === 401 || status === 403;
+
+/**
+ * The name a row, its Remove and its confirmation use. Two agents can share a name, and one agent can hold two
+ * grants that read the same, so a name that is not enough on this list carries the start of an id: the agent's when
+ * another agent has the name, the grant's when the same agent has another row of the same level.
+ */
+export function peopleAdminLabel(grant: PeopleAdminGrant, all: readonly PeopleAdminGrant[]): string {
+  const sameName = all.filter((other) => other.agentName === grant.agentName);
+  const otherAgent = sameName.some((other) => other.principalId !== grant.principalId);
+  const twin = sameName.some((other) => other !== grant && other.grantId !== grant.grantId && other.principalId === grant.principalId && other.level === grant.level);
+  if (twin) return `${grant.agentName} (grant ${grant.grantId.slice(0, 8)})`;
+  return otherAgent ? `${grant.agentName} (agent ${grant.principalId.slice(0, 8)})` : grant.agentName;
+}
+
 export const peopleAdminLevelName = (level: PeopleAdminLevel): string =>
   level === "workspace" ? "Workspace admin" : level === "organization" ? "Organization admin" : "Scoped admin";
 
