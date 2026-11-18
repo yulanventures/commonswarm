@@ -197,7 +197,8 @@ const fixtureEnv = (path: string, extra: Record<string, string> = {}) => ({ [har
 test("live staging facts are read from the reviewed compose files", () => {
   assert.equal(live.project, "commonswarm-supabase-stack");
   assert.deepEqual([...live.containers].sort(), [
-    "commonswarm-gotrue", "commonswarm-postgres", "commonswarm-postgrest", "commonswarm-realtime", "commonswarm-storage-api",
+    "commonswarm-auth-templates", "commonswarm-gotrue", "commonswarm-postgres", "commonswarm-postgrest",
+    "commonswarm-realtime", "commonswarm-storage-api",
   ]);
   assert.equal(live.network, "commonswarm-net");
   assert.deepEqual(live.ports, [9000, 18001, 18002, 18003, 18004]);
