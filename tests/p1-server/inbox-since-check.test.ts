@@ -274,9 +274,16 @@ test("a message inbox --notify printed is still waiting until check shows it; ch
   assert.equal(waiting.acked_at, null, "printed by the watcher, the delivery still waits for the session");
   assert.equal(await seenMark(ask), 0, "and nobody marked it 👀 for the agent");
 
-  let checked: AgentCheckResult | undefined;
-  await checkAgentMessages({ profilePath, present: async (result) => { checked = result; } });
-  assert.ok(checked?.messages.some((message) => message.id === ask), "check shows what the watcher printed");
+  // check returns the oldest unseen messages a page at a time, and the test above left more than a page waiting:
+  // run it as an agent would, until the ask comes up or nothing is left.
+  let shown = false;
+  for (let page = 0; page < 20 && !shown; page += 1) {
+    let checked: AgentCheckResult | undefined;
+    await checkAgentMessages({ profilePath, present: async (result) => { checked = result; } });
+    shown = checked?.messages.some((message) => message.id === ask) === true;
+    if (!shown && (checked?.messages.length ?? 0) === 0) break;
+  }
+  assert.ok(shown, "check shows what the watcher printed");
   const deadline = Date.now() + 15_000;
   while (((await delivery(ask))?.ack_outcome !== "observed" || await seenMark(ask) === 0) && Date.now() < deadline) await delay(250);
   assert.equal((await delivery(ask))?.ack_outcome, "observed", "check observes it");
