@@ -57,7 +57,24 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] {
   line-height: 1.55;
 }
 
+/* The recovery screen paints its own background, so it spans the screen: as a centred column it left a
+   band of the page colour down both edges of a phone. Its content keeps the same measure, in the middle,
+   clear of a notch or home indicator. */
+live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] {
+  box-sizing: border-box;
+  inline-size: auto;
+  margin-inline: 0;
+  grid-template-columns: minmax(0, 42rem);
+  justify-content: center;
+  padding: max(var(--s-12), env(safe-area-inset-top)) max(var(--gutter), env(safe-area-inset-right))
+    max(var(--s-12), env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
+}
+
 live-dashboard.dashboard[data-kylon-shell] [data-panel="workspace-error"] .dashboard__gateway-mark {
+  min-block-size: 44px;
+  align-items: center;
+  justify-self: start;
+
   color: var(--k-shell-ink);
   font-family: var(--k-shell-font);
   font-size: 16px;
