@@ -135,6 +135,22 @@ export interface SeatAdminConfirmationState {
 }
 let nextConfirmationId = 0;
 
+/** What a workspace admin can do today: the "Available now" list of the fixed copy in two sentences, in the security
+ * reviewer's words. It keeps "member" on invitations and says what removing a member takes with it. The title already
+ * names the agent, so the sentences say "This agent" and "It": a long name said three times pushed the end date out of
+ * view on a narrow phone. The list itself stays verbatim under Show permissions; a test fails if that list changes
+ * without this summary being reread. */
+export function workspaceAdminSummary(): string {
+  return "This agent can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. It can also remove eligible members, which removes their agents and Lists & docs access from this workspace.";
+}
+/** The grant also records permissions that are not switched on yet. That is said beside the decision, with their count
+ * from the fixed list. "If": a release can leave this grant ineligible, and an action may never become available. */
+export function workspaceAdminLater(count: number): string {
+  return count === 1
+    ? "This grant also includes 1 permission that isn’t available yet. If it’s enabled for this grant while it’s active, this agent can use it without another approval."
+    : `This grant also includes ${count} permissions that aren’t available yet. If they’re enabled for this grant while it’s active, this agent can use them without another approval.`;
+}
+
 /** Append dialog inside the app's token scope, then call open(). One instance per intent.
  * Navigation/account changes dispose it; auth return creates a new, reconfirmed intent.
  * No request, optimistic grant, feature flag or credential is owned by this renderer. */
@@ -168,14 +184,38 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   }
   scope.value = options.scopes.some(item => item.id === options.scopeId) ? options.scopeId! : "";
   scopeLabel.append(scope);
+  /* The workspace grant leads with the decision: who, where, what it can do, what comes later, and when it ends. The
+     full lists follow under Show permissions. The organization grant keeps its layout until its own change. */
+  const decisionFirst = options.level === "workspace";
+  // One workspace to choose from is not a choice: its name is said outright. The field still carries the value.
+  const only = decisionFirst && options.scopes.length === 1 && scope.value === options.scopes[0]!.id ? options.scopes[0]! : null;
   body.append(scopeLabel);
+  if (only) {
+    scopeLabel.hidden = true;
+    const where = element(doc, "p", "sa-confirm__line", `Workspace: ${only.name}`);
+    where.dataset.seatAdminScopeName = "";
+    body.append(where);
+  }
   const copy = SEAT_ADMIN_ROLE_COPY[options.level === "workspace" ? "role:workspace_admin" : "role:organization_admin"];
+  const sections: HTMLElement[] = [];
   for (const [heading, lines] of [["Available now", copy.included], ["Included, not available yet", copy.deferred], ["Not allowed", copy.excluded]] as const) {
     const section = element(doc, "section", "sa-confirm__permissions");
     const list = element(doc, "ul", "");
     for (const line of lines) list.append(element(doc, "li", "", line));
     section.append(element(doc, "h3", "", heading), list);
-    body.append(section);
+    sections.push(section);
+  }
+  if (decisionFirst) {
+    const can = element(doc, "p", "sa-confirm__line", workspaceAdminSummary());
+    can.dataset.seatAdminSummary = "";
+    body.append(can);
+    if (copy.deferred.length) {
+      const later = element(doc, "p", "sa-confirm__later", workspaceAdminLater(copy.deferred.length));
+      later.dataset.seatAdminLater = "";
+      body.append(later);
+    }
+  } else {
+    body.append(...sections);
   }
   const endLabel = element(doc, "label", "sa-field");
   endLabel.append(element(doc, "span", "", "End date"));
@@ -199,6 +239,13 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   duration.addEventListener("change", updateEnd);
   updateEnd();
   body.append(endLabel, endNote);
+  if (decisionFirst) {
+    // Every line of the three lists, unchanged, one press away.
+    const more = element(doc, "details", "sa-confirm__more");
+    more.dataset.seatAdminPermissions = "";
+    more.append(element(doc, "summary", "", "Show permissions"), ...sections);
+    body.append(more);
+  }
   const notice = element(doc, "p", "sa-confirm__notice");
   notice.hidden = true;
   notice.setAttribute("role", "status");
