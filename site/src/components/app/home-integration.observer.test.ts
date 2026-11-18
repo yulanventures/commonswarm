@@ -553,7 +553,7 @@ test('a signal page settling after a same-workspace view change retains data wit
   // renderFeed keeps keyboard focus across its rebuild: include that real helper and its own dependencies.
   const code = await dashboardFunctions(['FEED_FOCUSABLE', 'controlIdentity', 'feedIdentity', 'keepFeedFocus', 'syncListsChrome', 'addAgentViewOpen',
     'showChannelView', 'renderFeed', 'loadSignals', 'forgetFetchedPostedIds', 'prunePostedRows', 'rowShowsOnScreen', 'visibleReceiptSignalIds',
-    'refreshDeliveryReceipts']);
+    'receiptRows', 'refreshDeliveryReceipts']);
   for (const [route, workspaceView, channelView] of [
     ['files', 'files', 'files'], ['wiki', 'brain', 'brain'], ['lists', 'objects', 'objects'],
     ['chat', 'signals', 'connect'], ['add-agent', 'signals', 'agent-choice'],
@@ -616,6 +616,37 @@ test('a signal page settling after a same-workspace view change retains data wit
     assert.equal(composer.hidden, false);
     assert.equal(emptyTitle.textContent, 'No messages yet.');
   }
+});
+test('receipts are read for the open Direct Message\'s own history rows, not only the loaded page', async () => {
+  // A DM shows its own history read beside the loaded page. A history row outside the page had no receipt reader.
+  const code = await dashboardFunctions(['receiptRows', 'refreshDeliveryReceipts']);
+  const read: string[] = [];
+  let paints = 0;
+  const context = createContext({ browserDeliveryReceiptCandidates, BROWSER_RECEIPT_REQUESTS_PER_TICK,
+    browserDeliveryReceipts: async (_workspaceId: string, signalId: string) => { read.push(signalId); return {}; },
+    visibleReceiptSignalIds: () => new Set(['page-row', 'history-row']),
+    addAgentViewOpen: () => false, renderFeed: () => { paints += 1; }, syncReceiptMarkers: () => {},
+  });
+  runInContext(`
+    const activeWorkspaceId='W', requestVersion=1, sampleMode=false, session={user:{id:'viewer'}};
+    var activeDm={kind:'agent',id:'atlas'};
+    const row=(id,createdAt)=>({id,createdAt,kind:'note',to:'viewer',toAgent:null});
+    var signals=[row('page-row','2026-11-18T10:00:00Z')];
+    var directHistory={workspaceId:'W',viewerId:'viewer',partner:{kind:'agent',id:'atlas'},state:'ready',
+      rows:[row('page-row','2026-11-18T10:00:00Z'),row('history-row','2026-11-16T10:00:00Z')]};
+    const deliveryReceiptCache=new Map(), seenAwaitingRead=new Map(); let seenAckEpoch=0;
+    let deliveryReceiptRefreshOwner='', deliveryReceiptRefreshAgain=false;
+  `, context);
+  runInContext(code, context);
+  await runInContext("refreshDeliveryReceipts('W',1)", context);
+  assert.deepEqual([...read].sort(), ['history-row', 'page-row'], 'the history row is read, and the row in both lists once');
+  assert.equal(runInContext("deliveryReceiptCache.has('history-row')", context), true);
+  assert.equal(paints, 1, 'the feed is painted again with the loaded receipts');
+  // Another conversation's history is not this view's: with the DM closed only the page is read.
+  read.length = 0;
+  runInContext('deliveryReceiptCache.clear(); activeDm=null;', context);
+  await runInContext("refreshDeliveryReceipts('W',1)", context);
+  assert.deepEqual(read, ['page-row']);
 });
 test('Lists retains Refresh across Files and Wiki, then restores channel nodes and route focus', async () => {
   const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');

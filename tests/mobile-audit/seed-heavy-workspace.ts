@@ -446,6 +446,19 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           )`;
         steps.push("seed_dm");
       } catch (error) { note("seed_dm", error); }
+      // A DM longer than the loaded page and than two screens at every audit size (app.chat.dm): 80 short notes from the agent to the
+      // viewer, eleven minutes apart so none groups, starting two days back: inside the span of the 240 messages above,
+      // so none of them is the workspace's oldest message, and seen by the viewer like the rest (seed_viewer_seen).
+      try {
+        await sql`INSERT INTO swarm.signals (
+            id, workspace_id, from_principal, from_kind, to_user_id, to_agent_principal_id, in_reply_to,
+            about, kind, body, until, created_at, channel_id, thread_root_id, broadcast_to_channel
+          ) SELECT gen_random_uuid(), ${workspace}::uuid, ${ids.agent}::uuid, 'agent', ${owner.id}::uuid, NULL, NULL,
+            NULL, 'note', 'Quote ' || n || ': it includes the flue test and the expansion vessel check.',
+            statement_timestamp() + interval '25 days', statement_timestamp() - interval '2 days' + (n * interval '11 minutes'),
+            NULL, NULL, false FROM generate_series(1, 80) AS n`;
+        steps.push("seed_dm_history");
+      } catch (error) { note("seed_dm_history", error); }
       // The owner's hover report (Nov 10), newest in the general channel: an agent's long message addressed to the
       // viewer, the viewer's own long message addressed to an agent, and a second one that groups under it.
       try {
