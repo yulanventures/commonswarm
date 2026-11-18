@@ -1,9 +1,10 @@
 -- Rollback for 20261118000003 (seat admin grant end guard): put swarm_read.my_seat_admin_grants back exactly as
 -- 20261110000004_seat_admin_status.sql defines it (owner and grants carry over through CREATE OR REPLACE), then drop
--- the agent's ended-grants read, the end guard, the end-actor helper and ended_by_user_id. swarm.agent_seat_admin_self
--- was not changed. Who ended each grant stays in the grantors' admin history.
--- Roll the edge back first: this release's end_seat_admin writes ended_by_user_id and its seat_admin_self read calls
--- swarm.agent_seat_admin_self_ended.
+-- the agent's ended-grants read, the two end functions, the admin_events creation stamp, the end guard, the end-actor
+-- helper and ended_by_user_id, and give the command role back its direct end. swarm.agent_seat_admin_self was not
+-- changed. Who ended each grant stays in the grantors' admin history.
+-- Roll the edge back first: this release's end_seat_admin and lazy expiry call the end functions and its
+-- seat_admin_self read calls swarm.agent_seat_admin_self_ended.
 SET search_path = swarm, pg_catalog, public;
 CREATE OR REPLACE FUNCTION swarm_read.my_seat_admin_grants()
 RETURNS jsonb
@@ -32,9 +33,17 @@ BEGIN
 END;
 $$;
 DROP FUNCTION IF EXISTS swarm.agent_seat_admin_self_ended(bytea, uuid);
+DROP FUNCTION IF EXISTS swarm.end_seat_admin_grant(uuid, uuid, text, timestamptz);
+DROP FUNCTION IF EXISTS swarm.expire_seat_admin_grant(uuid);
+DROP TRIGGER IF EXISTS admin_events_stamp_creation_xact ON swarm.admin_events;
+DROP FUNCTION IF EXISTS swarm.stamp_admin_event_creation_xact();
+ALTER TABLE swarm.admin_events DROP COLUMN IF EXISTS creation_xact_id;
 DROP TRIGGER IF EXISTS seat_admin_grants_owner_or_expiry_end ON swarm.seat_admin_grants;
 DROP FUNCTION IF EXISTS swarm.seat_admin_grants_end_guard();
 DROP FUNCTION IF EXISTS swarm.seat_admin_grant_end_actor(uuid, uuid);
 ALTER TABLE swarm.seat_admin_grants DROP CONSTRAINT IF EXISTS seat_admin_grants_ended_by_check;
 ALTER TABLE swarm.seat_admin_grants DROP COLUMN IF EXISTS ended_by_user_id;
+-- The command role's direct end, exactly as 20261109000001 granted it, and no lock-only column.
+REVOKE UPDATE (grant_id) ON swarm.seat_admin_grants FROM swarm_command;
+GRANT UPDATE (state, ended_at, end_reason) ON swarm.seat_admin_grants TO swarm_command;
 RESET search_path;

@@ -151,7 +151,7 @@ test("one active grant per agent; a grant only ends, once, and never reactivates
   await insert(grantRow(principal)); // the agent can be upgraded again with a new grant
 });
 
-test("only the command role writes, only the end columns; people read only their own grants", async () => {
+test("only the command role writes, and ends only through the audited end; people read only their own grants", async () => {
   const principal = await agent("privileges");
   const grantId = await insert(grantRow(principal), "swarm_command");
   await assert.rejects(() => sql.begin(async (tx) => {
@@ -164,10 +164,11 @@ test("only the command role writes, only the end columns; people read only their
       await tx`SELECT count(*) FROM swarm.seat_admin_grants`;
     }), /permission denied/, role);
   }
+  // The command role ends a grant only through the audited end, never by writing the row.
   await sql.begin(async (tx) => {
     await tx.unsafe("SET LOCAL ROLE swarm_command");
-    await tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = statement_timestamp(), end_reason = 'owner_downgrade',
-      ended_by_user_id = ${owner}::uuid WHERE grant_id = ${grantId}::uuid`;
+    await recordEnd(tx, grantId, owner, "end-for-read");
+    await tx`SELECT grant_id FROM swarm.end_seat_admin_grant(${grantId}::uuid, ${owner}::uuid, 'end-for-read', clock_timestamp())`;
   });
 
   const read = (claims: Record<string, unknown>) => sql.begin(async (tx) => {
@@ -183,6 +184,106 @@ test("only the command role writes, only the end columns; people read only their
     await tx.unsafe("SET LOCAL ROLE anon");
     await tx`SELECT swarm_read.my_seat_admin_grants()`;
   }), /permission denied/, "anon can't call the read");
+});
+
+/** The accepted end_seat_admin record the command edge appends before ending a grant, in the caller's transaction. */
+async function recordEnd(tx: postgres.TransactionSql, grantId: string, actor: string, commandId: string,
+  patch: { target?: string; outcome?: string } = {}) {
+  await tx`INSERT INTO swarm.admin_accounts (owner_user_id, stream_id) VALUES (${owner}::uuid, ${randomUUID()}::uuid)
+    ON CONFLICT (owner_user_id) DO NOTHING`;
+  const [{ seq }] = await tx<{ seq: number }[]>`SELECT coalesce(max(seq), 0)::int + 1 AS seq FROM swarm.admin_events
+    WHERE owner_user_id = ${owner}::uuid`;
+  const event = { stream_kind: "account", owner_user_id: owner, seq, event_id: randomUUID(), command_id: commandId,
+    type: "AdminActionRecorded", actor_user: actor,
+    payload: { action: "end_seat_admin", target_kind: "seat_admin_grant", target_id: patch.target ?? grantId, outcome: patch.outcome ?? "accepted" } };
+  // A caller-supplied stamp is replaced by the server's.
+  await tx`INSERT INTO swarm.admin_events (owner_user_id, seq, event_id, command_id, event, creation_xact_id)
+    VALUES (${owner}::uuid, ${seq}, ${event.event_id}::uuid, ${commandId}, ${tx.json(event as postgres.JSONValue)}, '1'::xid8)`;
+}
+const stateOf = async (grantId: string) =>
+  (await sql<{ state: string }[]>`SELECT state FROM swarm.seat_admin_grants WHERE grant_id = ${grantId}::uuid`)[0]!.state;
+const asCommand = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
+  await tx.unsafe("SET LOCAL ROLE swarm_command");
+  return await run(tx);
+});
+const unaudited = (name: string) => (error: unknown) => {
+  assert.equal((error as { code?: string }).code, "42501", `${name}: ${String(error)}`);
+  assert.equal((error as { detail?: string }).detail, "seat_admin_end_unaudited", name);
+  return true;
+};
+
+test("the command role cannot write a grant's end; an owner's end needs this transaction's accepted record", async () => {
+  const principal = await agent("audited-end");
+  const grantId = await insert(grantRow(principal));
+  for (const [name, end] of [
+    ["an owner downgrade naming the grantor", (tx: postgres.TransactionSql) => tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded',
+      ended_at = statement_timestamp(), end_reason = 'owner_downgrade', ended_by_user_id = ${owner}::uuid WHERE grant_id = ${grantId}::uuid`],
+    ["an expiry", (tx: postgres.TransactionSql) => tx`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = statement_timestamp(),
+      end_reason = 'expired' WHERE grant_id = ${grantId}::uuid`],
+  ] as const) {
+    await assert.rejects(() => asCommand(async (tx) => { await end(tx); }), /permission denied/, name);
+  }
+  assert.equal(await stateOf(grantId), "active", "a direct write ends nothing");
+
+  const end = (tx: postgres.TransactionSql, commandId: string, actor = owner) =>
+    tx`SELECT * FROM swarm.end_seat_admin_grant(${grantId}::uuid, ${actor}::uuid, ${commandId}, clock_timestamp())`;
+  await assert.rejects(() => asCommand((tx) => end(tx, "no-record")), unaudited("no record"));
+  // A record committed earlier, for this very grant, actor and command id, is not this transaction's.
+  await asCommand((tx) => recordEnd(tx, grantId, owner, "earlier"));
+  await assert.rejects(() => asCommand((tx) => end(tx, "earlier")), unaudited("a record from an earlier transaction"));
+  // Another grant's earlier end, replayed under its command id.
+  const otherGrant = await insert(grantRow(await agent("audited-other")));
+  await asCommand(async (tx) => {
+    await recordEnd(tx, otherGrant, owner, "other-end");
+    await tx`SELECT grant_id FROM swarm.end_seat_admin_grant(${otherGrant}::uuid, ${owner}::uuid, 'other-end', clock_timestamp())`;
+  });
+  await assert.rejects(() => asCommand((tx) => end(tx, "other-end")), unaudited("another grant's earlier end"));
+  for (const [name, record, call] of [
+    ["a record for another grant", { target: otherGrant }, {}],
+    ["a refused record", { outcome: "refused" }, {}],
+    ["a record by another actor", {}, { actor: other }],
+    ["a record under another command id", {}, { commandId: "elsewhere" }],
+  ] as const) {
+    await assert.rejects(() => asCommand(async (tx) => {
+      await recordEnd(tx, grantId, owner, "same-tx", record);
+      await end(tx, (call as { commandId?: string }).commandId ?? "same-tx", (call as { actor?: string }).actor ?? owner);
+    }), unaudited(name));
+  }
+  assert.equal(await stateOf(grantId), "active", "no unaudited end took effect");
+
+  // Positive control: this transaction's record, appended after a savepoint, ends it and keeps who ended it.
+  const [row] = await asCommand(async (tx) => {
+    await tx.savepoint(async (sp) => { await recordEnd(sp, grantId, owner, "audited"); });
+    const [stamp] = await tx<{ ok: boolean }[]>`SELECT bool_and(creation_xact_id = pg_current_xact_id()) AS ok FROM swarm.admin_events
+      WHERE owner_user_id = ${owner}::uuid AND command_id = 'audited'`;
+    assert.equal(stamp!.ok, true, "the server stamps the top-level transaction, replacing the caller's value");
+    return await end(tx, "audited");
+  });
+  assert.deepEqual([row!.state, row!.end_reason, row!.ended_by_user_id], ["downgraded", "owner_downgrade", owner]);
+  assert.equal(await stateOf(grantId), "downgraded");
+});
+
+test("an expiry ends only a grant whose end date has passed", async () => {
+  const principal = await agent("audited-expiry");
+  const grantId = await insert(grantRow(principal, { expires: "statement_timestamp() + interval '1 day'" }));
+  const expire = () => asCommand(async (tx) =>
+    (await tx<{ ended: boolean }[]>`SELECT swarm.expire_seat_admin_grant(${grantId}::uuid) AS ended`)[0]!.ended);
+  assert.equal(await expire(), false, "an early expiry changes nothing");
+  assert.equal(await stateOf(grantId), "active");
+  const indefinite = await insert(grantRow(await agent("audited-indefinite")));
+  assert.equal((await asCommand(async (tx) =>
+    (await tx<{ ended: boolean }[]>`SELECT swarm.expire_seat_admin_grant(${indefinite}::uuid) AS ended`)[0]!.ended)), false,
+    "a grant with no end date never expires");
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE swarm.seat_admin_grants SET created_at = clock_timestamp() - interval '1 hour',
+      expires_at = clock_timestamp() - interval '1 second' WHERE grant_id = ${grantId}::uuid`;
+  });
+  assert.equal(await expire(), true, "a due expiry ends it");
+  const [row] = await sql<{ state: string; end_reason: string; same: boolean; ended_by_user_id: string | null }[]>`
+    SELECT state, end_reason, ended_at = expires_at AS same, ended_by_user_id FROM swarm.seat_admin_grants WHERE grant_id = ${grantId}::uuid`;
+  assert.deepEqual({ ...row }, { state: "expired", end_reason: "expired", same: true, ended_by_user_id: null });
+  assert.equal(await expire(), false, "and only once");
 });
 
 test("the command role learns only whether a person is a live owner of a live organization", async () => {

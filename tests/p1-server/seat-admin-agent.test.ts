@@ -997,12 +997,12 @@ test("the database refuses any end of a grant that is not an owner's choice or a
     ["a lost owner role", () => end(sql`state = 'ended', ended_at = clock_timestamp(), end_reason = 'owner_lost_role'`)],
   ];
   for (const [name, update] of cases) await assert.rejects(async () => { await update(); }, refusedByGuard(name));
-  // The command role is held to the same rule.
+  // The command role cannot write an end at all; it ends grants only through the audited end functions.
   await assert.rejects(() => sql.begin(async (tx) => {
     await tx.unsafe("SET LOCAL ROLE swarm_command");
     await tx`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = clock_timestamp(), end_reason = 'replaced'
       WHERE grant_id = ${indefinite}::uuid`;
-  }), refusedByGuard("the command role"));
+  }), /permission denied/, "the command role");
   const [still] = await sql<{ state: string }[]>`SELECT state FROM swarm.seat_admin_grants WHERE grant_id = ${indefinite}::uuid`;
   assert.equal(still!.state, "active", "the grant is still on");
   assert.ok((await selfRead()).grants.some((g) => g.grant_id === indefinite), "and the agent still has it");
@@ -1017,7 +1017,7 @@ test("the database refuses any end of a grant that is not an owner's choice or a
   await endGrant(indefinite);
 });
 
-test("an expiry ends a grant only once its end date has passed; until it is marked, the agent sees it as expired", async () => {
+test("an expiry ends a grant only once its end date has passed; until the grant flow marks it, the agent sees it as expired", async () => {
   const expiring = await grant({ expires_at: Date.now() + 86_400_000 });
   await assert.rejects(async () => {
     await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = clock_timestamp(), end_reason = 'expired'
@@ -1040,9 +1040,11 @@ test("an expiry ends a grant only once its end date has passed; until it is mark
     await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = expires_at, end_reason = 'expired',
       ended_by_user_id = ${owner.id}::uuid WHERE grant_id = ${expiring}::uuid`;
   }, /seat_admin_grants_ended_by_check|only ends/, "an expiry names no one");
-  await sql`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = expires_at, end_reason = 'expired'
-    WHERE grant_id = ${expiring}::uuid`;
+  // Granting again marks the lapsed grant expired (the command's lazy expiry, through swarm.expire_seat_admin_grant).
+  const renewed = await grant();
+  assert.notEqual(renewed, expiring);
   self = await selfRead();
+  assert.ok(self.grants.some((g) => g.grant_id === renewed), "the new grant is active");
   shown = self.ended.find((g) => g.grant_id === expiring);
   assert.deepEqual([shown?.state, shown?.end_reason, shown?.ended_by], ["expired", "expired", null]);
   const person = (await personRead(owner.id)).find((g) => g.grant_id === expiring);

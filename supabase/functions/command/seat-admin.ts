@@ -188,9 +188,9 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
     let existing = facts.principal ? await activeGrant(tx, command) : undefined;
     const now = await clock(tx); // after every lock wait
     if (existing && existing.expires_at !== null && existing.expires_at.getTime() <= now) {
-      await tx`UPDATE swarm.seat_admin_grants SET state = 'expired', ended_at = ${existing.expires_at}, end_reason = 'expired'
-        WHERE grant_id = ${existing.grant_id}::uuid`;
-      existing = undefined;
+      // The database ends it only once its end date has passed; otherwise it is still the active grant.
+      const [expired] = await tx<{ ended: boolean }[]>`SELECT swarm.expire_seat_admin_grant(${existing.grant_id}::uuid) AS ended`;
+      if (expired?.ended) existing = undefined;
     }
     const decision = decideSeatAdminGrant(command, {
       now, actor,
@@ -232,14 +232,15 @@ export async function seatAdminTransaction(tx: Sql, input: Record<string, unknow
   }
   let ended = grant!;
   if (!decision.already_ended) {
-    // The person who ended it is kept on the row; the database refuses an end by anyone without a say over the grant.
-    const rows = await tx<GrantRow[]>`UPDATE swarm.seat_admin_grants SET state = 'downgraded', ended_at = ${new Date(now)},
-        end_reason = 'owner_downgrade', ended_by_user_id = ${human.user_id}::uuid WHERE grant_id = ${grant!.grant_id}::uuid RETURNING *`;
-    ended = rows[0]!;
+    // The accepted record first: the database ends a grant only with this same transaction's end_seat_admin event for
+    // it, this person and this command id, keeps who ended it, and refuses anyone without a say over the grant.
     await record(tx, owner, account, human.user_id, commandId, now, { action: 'end_seat_admin', target_kind: 'seat_admin_grant',
       target_id: grant!.grant_id, workspace_id: null, level: grant!.level, principal_id: grant!.principal_id,
       manifest_digest: grant!.manifest_digest, request_digest: requestDigest, outcome: 'accepted', reason_code: null,
       next_action: 'none', recovery_kind: 'none' });
+    const rows = await tx<GrantRow[]>`SELECT * FROM swarm.end_seat_admin_grant(${grant!.grant_id}::uuid, ${human.user_id}::uuid,
+      ${commandId}, ${new Date(now)})`;
+    ended = rows[0]!;
   }
   return await finish({ status: 200, body: { status: 'accepted', seat_admin_grant: publicGrant(ended, now) } });
 }

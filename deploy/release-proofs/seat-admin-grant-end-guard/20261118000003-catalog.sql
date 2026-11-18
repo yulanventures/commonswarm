@@ -1,8 +1,11 @@
 -- Read-only catalog and body verification for 20261118000003 (seat admin grant end guard).
-SELECT (SELECT count(*)=5 AND bool_and(p.proowner='swarm_admin'::regrole AND p.prosecdef=e.definer AND p.provolatile=e.volatility::"char"
+SELECT (SELECT count(*)=8 AND bool_and(p.proowner='swarm_admin'::regrole AND p.prosecdef=e.definer AND p.provolatile=e.volatility::"char"
    AND p.proconfig=ARRAY['search_path=pg_catalog'] AND md5(p.prosrc)=e.digest)
  FROM (VALUES
   ('swarm.seat_admin_grants_end_guard()',true,'v','0464bcf9480d721f98b78bdc93d19435'),
+  ('swarm.stamp_admin_event_creation_xact()',false,'v','0f5107540abb4932b9b590bba6ea9c4a'),
+  ('swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)',true,'v','d51ddc4c0ff9f30dfd34cc764b352eab'),
+  ('swarm.expire_seat_admin_grant(uuid)',true,'v','7194275c57f6f5565403f29566506eda'),
   ('swarm.seat_admin_grant_end_actor(uuid,uuid)',false,'s','ede802ab44d0574a1d243a6cb25a6209'),
   ('swarm.agent_seat_admin_self_ended(bytea,uuid)',true,'v','5b08e1d3a15594fe633086c8647b5f20'),
   ('swarm.agent_seat_admin_self(bytea,uuid)',true,'v','10f48cae6f710f79d2c18bbc92fe1a87'),
@@ -11,11 +14,29 @@ SELECT (SELECT count(*)=5 AND bool_and(p.proowner='swarm_admin'::regrole AND p.p
  AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.seat_admin_grants'::regclass AND attname='ended_by_user_id'
    AND NOT attisdropped AND atttypid='uuid'::regtype AND NOT attnotnull)
  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='swarm.seat_admin_grants'::regclass AND conname='seat_admin_grants_ended_by_check' AND contype='c')
- AND (SELECT count(*)=2 FROM pg_trigger WHERE NOT tgisinternal AND tgenabled='O' AND (tgrelid,tgname,tgfoid) IN (
+ AND (SELECT count(*)=4 FROM pg_trigger WHERE NOT tgisinternal AND tgenabled='O' AND (tgrelid,tgname,tgfoid) IN (
    ('swarm.seat_admin_grants'::regclass,'seat_admin_grants_forward_only',to_regprocedure('swarm.seat_admin_grants_forward_only()')),
-   ('swarm.seat_admin_grants'::regclass,'seat_admin_grants_owner_or_expiry_end',to_regprocedure('swarm.seat_admin_grants_end_guard()'))))
- AND has_column_privilege('swarm_command','swarm.seat_admin_grants','ended_by_user_id','UPDATE')
+   ('swarm.seat_admin_grants'::regclass,'seat_admin_grants_owner_or_expiry_end',to_regprocedure('swarm.seat_admin_grants_end_guard()')),
+   ('swarm.admin_events'::regclass,'admin_events_append_only',to_regprocedure('swarm.prevent_append_only_mutation()')),
+   ('swarm.admin_events'::regclass,'admin_events_stamp_creation_xact',to_regprocedure('swarm.stamp_admin_event_creation_xact()'))))
+ AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.admin_events'::regclass AND attname='creation_xact_id'
+   AND NOT attisdropped AND atttypid='xid8'::regtype AND NOT attnotnull)
+ AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','state','UPDATE')
+ AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','ended_at','UPDATE')
+ AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','end_reason','UPDATE')
+ AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','ended_by_user_id','UPDATE')
  AND NOT has_column_privilege('swarm_command','swarm.seat_admin_grants','owner_user_id','UPDATE')
+ AND has_column_privilege('swarm_command','swarm.seat_admin_grants','grant_id','UPDATE')
+ AND NOT has_table_privilege('swarm_command','swarm.seat_admin_grants','UPDATE')
+ AND has_function_privilege('swarm_command','swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)','EXECUTE')
+ AND NOT has_function_privilege('swarm_read','swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)','EXECUTE')
+ AND NOT has_function_privilege('authenticated','swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)','EXECUTE')
+ AND NOT has_function_privilege('anon','swarm.end_seat_admin_grant(uuid,uuid,text,timestamptz)','EXECUTE')
+ AND has_function_privilege('swarm_command','swarm.expire_seat_admin_grant(uuid)','EXECUTE')
+ AND NOT has_function_privilege('swarm_read','swarm.expire_seat_admin_grant(uuid)','EXECUTE')
+ AND NOT has_function_privilege('authenticated','swarm.expire_seat_admin_grant(uuid)','EXECUTE')
+ AND NOT has_function_privilege('anon','swarm.expire_seat_admin_grant(uuid)','EXECUTE')
+ AND NOT has_function_privilege('swarm_command','swarm.stamp_admin_event_creation_xact()','EXECUTE')
  AND NOT has_function_privilege('swarm_command','swarm.seat_admin_grants_end_guard()','EXECUTE')
  AND NOT has_function_privilege('authenticated','swarm.seat_admin_grants_end_guard()','EXECUTE')
  AND NOT has_function_privilege('swarm_command','swarm.seat_admin_grant_end_actor(uuid,uuid)','EXECUTE')
