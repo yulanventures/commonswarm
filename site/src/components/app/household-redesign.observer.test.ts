@@ -419,6 +419,11 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
   await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
   assert.equal(form(), undefined); assert.equal(byFocus("invite-link").textContent, "https://example.test/invite#one-use");
   assert.ok(find(node => node.tag === "p" && node.textContent.startsWith("Private one-use link for mei@example.test")));
+  // Copy asks the integration at the click and copies only the link its block shows.
+  let asked = 0; callbacks.currentInviteLink = () => { asked += 1; return ""; };
+  byFocus("invite-copy").click(); await Promise.resolve();
+  assert.equal(asked, 1); assert.equal(find(node => node.tag === "p" && node.textContent.startsWith("Copied")), undefined, "a link that is no longer current is not copied");
+  delete callbacks.currentInviteLink;
   link = ""; paint();
   assert.equal(byFocus("invite-link"), undefined, "a link the integration dropped is not kept by the view");
   assert.equal(state.invite, null); assert.ok(byFocus("page-invite"));
@@ -427,6 +432,10 @@ test("Invite a person opens a form on the Invites tab, and the link shows only w
   await form().events.get("submit")({ preventDefault() {} }); await Promise.resolve(); await Promise.resolve();
   byFocus("invite-done").click();
   assert.equal(forgotten, 1, "Done tells the integration to forget the link"); assert.equal(state.invite, null);
+  renderPeopleDialog(dom.root as any, dom.detail as any, model(), state, callbacks,
+    { layout: "page", page: { homeLabel: "Home", homeHref: "/app", inviteNotice: "The link for mei@example.test was cleared when this workspace reloaded." } });
+  assert.ok(find(node => node.dataset?.peopleInviteNotice !== undefined && node.textContent.startsWith("The link for mei@example.test was cleared")),
+    "a cleared link is said at the top of the Invites tab");
 });
 
 test("the People page puts Allow Lists & docs on an own seat's row, one click each", async () => {

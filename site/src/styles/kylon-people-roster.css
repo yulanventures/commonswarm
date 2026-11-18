@@ -98,6 +98,7 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-form
   background: var(--k-shell-surface); color: var(--k-shell-ink); font: 400 16px/1.5 var(--k-shell-font);
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-invite-note, .pd-invite-receipt, .pd-invite-copied) { margin: 0; font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-notice { margin: 0 0 12px; padding: 10px 6px; font-size: 13px; color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-copied:empty { display: none; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] :is(.pd-invite-submit, .pd-invite-cancel) {

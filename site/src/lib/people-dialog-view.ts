@@ -63,6 +63,8 @@ export interface PeopleDialogPage {
   invite?: () => void;
   /** The one-use link of the invite this dialog's form made, while it is still good. Never stored by the view. */
   madeInviteLink?: string;
+  /** Said at the top of the Invites tab when a link was cleared while its invite stayed pending. */
+  inviteNotice?: string;
   /** The page's search field; the integration owns the query and rerender. */
   onQuery?: (value: string) => void;
 }
@@ -96,6 +98,9 @@ export interface PeopleDialogCallbacks {
   createInvite?: (email: string) => Promise<{ madeId: string } | { error: string }>;
   /** The person is done with the link this dialog made: the integration forgets it. */
   forgetInvite?: () => void;
+  /** The link the integration holds for this dialog right now. Copy asks at the click, and copies only when it is
+   *  the same link the block shows. */
+  currentInviteLink?: () => string;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -677,6 +682,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         callbacks.render(); focusInvite("madeId" in answer ? "invite-copy" : "invite-email");
       },
       copy: async (shown: HTMLElement) => {
+        // Only the link this block shows, and only while its receipt is still the current one.
+        if (state.invite !== inviteDraft || (callbacks.currentInviteLink && callbacks.currentInviteLink() !== madeLink)) { callbacks.render(); return; }
         const say = (text: string) => { inviteDraft.copied = text; const status = shown.parentElement?.querySelector<HTMLElement>(".pd-invite-copied"); if (status) status.textContent = text; };
         try { await doc.defaultView!.navigator.clipboard.writeText(madeLink); say("Copied. Send this link to them."); }
         catch { const range = doc.createRange(); range.selectNodeContents(shown); const selection = doc.defaultView?.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
@@ -685,6 +692,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     };
     invited.append(madeLink ? buildPeopleInviteMade(doc, inviteDraft, madeLink, handlers) : buildPeopleInviteForm(doc, inviteDraft, handlers));
   }
+  if (invitesOnly && options.page?.inviteNotice) { const cleared = node(doc, "p", "pd-muted pd-invite-notice", options.page.inviteNotice);
+    cleared.setAttribute("role", "status"); cleared.dataset.peopleInviteNotice = ""; invited.append(cleared); }
   invited.append(invitedTitle); if (invitesOnly) { const note = tabNote(); if (note) invited.append(note); }
   invited.append(inviteList, inviteError); host.append(invited);
   side.append(detail);
