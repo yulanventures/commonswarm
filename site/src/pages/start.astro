@@ -32,7 +32,7 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
         taken there now.
       </p>
     </div>
-    <a class="handoff__button" href="/app?signup" data-open-app>Continue to CommonSwarm</a>
+    <a class="handoff__button" href="/app" data-open-app>Continue to CommonSwarm</a>
     <noscript>
       <p class="handoff__note">
         JavaScript is off, so this saved link cannot carry its sign-in details forward
@@ -46,8 +46,6 @@ const description = "Continue to CommonSwarm to open a workspace for home or wor
   (() => {
     const target = new URL("/app", window.location.origin);
     target.search = window.location.search;
-    /* /start is where new people are sent, so it opens the create-account screen (lib/auth-entry.ts). */
-    target.searchParams.set("signup", "");
     target.hash = window.location.hash;
     document.querySelector("[data-open-app]")?.setAttribute("href", target.href);
     window.location.replace(target.href);

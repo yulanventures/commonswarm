@@ -15,7 +15,7 @@
     "kind": "view",
     "path": "/app?signup",
     "setup": [],
-    "ready": "[data-panel=\"signed-out\"]:not([hidden]) #dashboard-password:disabled",
+    "ready": "[data-panel=\"signed-out\"]:not([hidden]):has(#dashboard-password:disabled)",
     "states": [
       "dense"
     ],

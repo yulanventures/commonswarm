@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { AUTH_ENTRY_COPY, CREATE_ACCOUNT_HREF, SIGN_IN_HREF, authEntryFromSearch } from "./auth-entry.ts";
+import { AUTH_PROVIDERS } from "./auth-providers.ts";
+import { parseRoute, routeHref } from "./home-route.ts";
 
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
@@ -49,4 +51,14 @@ test("the create-account screen takes the password away and keeps the form submi
   assert.match(dashboard, /password\.disabled = entry === "create"/u);
   /* Enter on the create screen sends the link, never a password sign-in. */
   assert.match(dashboard, /if \(authEntry === "create"\) \{ one<HTMLButtonElement>\("\[data-email-link\]"\)\?\.click\(\); return; \}/u);
+});
+
+test("a signed-in person who follows Sign up gets the app, and the address drops the word on the next move", () => {
+  assert.deepEqual(parseRoute("?signup"), parseRoute(""));
+  assert.deepEqual(parseRoute("?signup&w=4ee87734-f8f3-46a5-8c9f-5ff7744e403c&v=todos"), parseRoute("?w=4ee87734-f8f3-46a5-8c9f-5ff7744e403c&v=todos"));
+  assert.equal(routeHref(parseRoute("?signup")).includes("signup"), false);
+});
+
+test("the provider buttons read true on Sign in, Create an account and the invite page", () => {
+  for (const provider of AUTH_PROVIDERS) assert.equal(provider.label, `Continue with ${provider.name}`);
 });
