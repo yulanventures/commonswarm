@@ -273,19 +273,27 @@ function pickerDocument(rows, { picker = true } = {}) {
   const window = { addEventListener: (name, listener) => { listeners.push([`window:${name}`, listener]); } };
   const fire = (name, event) => { for (const [type, listener] of listeners) if (type === name) listener(event); };
   new Function("document", "window", readFileSync(new URL("../src/consent-submit.js", import.meta.url), "utf8"))(document, window);
+  // A real radio group clears its other members; the stand-in does it by hand.
+  const check = (index) => { nodes.forEach((node, at) => { node.home.checked = at === index; }); };
   return {
     document, nodes, needed,
+    auto: () => document.documentElement.dataset.homeAuto,
     homes: () => nodes.map((node) => node.home.checked),
     tick(index, ticked) { nodes[index].pick.checked = ticked; fire("change", { target: nodes[index].pick }); },
-    // A real radio group clears its other members; the stand-in does it by hand.
-    choose(index) { nodes.forEach((node, at) => { node.home.checked = at === index; }); fire("change", { target: nodes[index].home }); },
-    restore(state) { state.forEach(([ticked, home], at) => { nodes[at].pick.checked = ticked; nodes[at].home.checked = home; }); fire("window:pageshow", { persisted: false }); },
+    // The person picks a Home: the browser checks the radio, then sends click and change.
+    choose(index) { check(index); fire("click", { target: nodes[index].home }); fire("change", { target: nodes[index].home }); },
+    // The browser restores form state: values change with no click. Some browsers send change afterwards.
+    restore(state, { persisted = false } = {}) {
+      state.forEach(([ticked, home], at) => { nodes[at].pick.checked = ticked; nodes[at].home.checked = home; });
+      for (const node of nodes) { fire("change", { target: node.pick }); fire("change", { target: node.home }); }
+      fire("window:pageshow", { persisted });
+    },
   };
 }
 
 test("the picker script sends one workspace as Home, and leaves the choice to the person with two or more", () => {
   const picker = pickerDocument([{}, {}, {}]);
-  assert.equal(picker.document.documentElement.dataset.homeAuto, "one");
+  assert.equal(picker.auto(), "one");
   assert.deepEqual(picker.homes(), [false, false, false]);
   // One ticked: that one is Home and the form says so (the hidden choice is filled in, never left stale).
   picker.tick(1, true);
@@ -293,49 +301,76 @@ test("the picker script sends one workspace as Home, and leaves the choice to th
   assert.equal(picker.needed.textContent, "");
   // A second tick makes it a real choice: the filled-in Home is cleared and the page asks.
   picker.tick(0, true);
-  assert.equal(picker.document.documentElement.dataset.homeAuto, "choose");
+  assert.equal(picker.auto(), "choose");
   assert.deepEqual(picker.homes(), [false, false, false]);
   assert.equal(picker.needed.textContent, "Choose which one is Home.");
-  // The person's own choice is kept, and the ask goes away.
+  // The person's own pick is kept, and the ask goes away.
   picker.choose(0);
   assert.deepEqual(picker.homes(), [true, false, false]);
   assert.equal(picker.needed.textContent, "");
   picker.tick(2, true);
   assert.deepEqual(picker.homes(), [true, false, false]);
+  // Down to their Home alone and back up: the pick was theirs, so it stays.
+  picker.tick(1, false); picker.tick(2, false);
+  assert.equal(picker.auto(), "one");
+  assert.deepEqual(picker.homes(), [true, false, false]);
+  picker.tick(1, true); picker.tick(2, true);
+  assert.deepEqual(picker.homes(), [true, false, false]);
   // Unticking the Home row clears its Home while two remain, and the page asks again.
   picker.tick(0, false);
   assert.deepEqual(picker.homes(), [false, false, false]);
   assert.equal(picker.needed.textContent, "Choose which one is Home.");
+  // A row that was once their Home is not their Home again just because it is ticked again.
+  picker.tick(0, true);
+  assert.deepEqual(picker.homes(), [false, false, false]);
   // Back to one: that one is Home. Back to none: no Home.
-  picker.tick(1, false);
-  assert.equal(picker.document.documentElement.dataset.homeAuto, "one");
+  picker.tick(0, false); picker.tick(1, false);
+  assert.equal(picker.auto(), "one");
   assert.deepEqual(picker.homes(), [false, false, true]);
   picker.tick(2, false);
   assert.deepEqual(picker.homes(), [false, false, false]);
 });
 
-test("the picker script keeps a Home the person chose, and follows ticks the browser restores", () => {
-  // Chosen with two ticked, then down to one and back to two: the choice was theirs, so it stays.
-  const chosen = pickerDocument([{ ticked: true, home: true }, { ticked: true }]);
-  assert.deepEqual(chosen.homes(), [true, false]);
-  chosen.tick(1, false);
-  chosen.tick(1, true);
-  assert.deepEqual(chosen.homes(), [true, false]);
-  // Dropping to the other workspace moves Home with it, since one workspace has one possible Home.
-  chosen.tick(0, false);
-  assert.deepEqual(chosen.homes(), [false, true]);
-  // A reload can restore ticks after the script first ran: the page catches up when it is shown.
+test("with two or more ticked, only a Home the person picked on this page is sent", () => {
+  // A fresh script meets one ticked workspace whose Home is already checked (restored by the browser, or
+  // rendered by the server from an earlier one-workspace answer). It carries no proof of a pick, so a second
+  // tick clears it and the page asks.
+  for (const arrive of [
+    () => pickerDocument([{ ticked: true, home: true }, {}]),
+    () => { const fresh = pickerDocument([{}, {}]); fresh.restore([[true, true], [false, false]]); return fresh; },
+  ]) {
+    const picker = arrive();
+    assert.deepEqual(picker.homes(), [true, false]);
+    picker.tick(1, true);
+    assert.deepEqual(picker.homes(), [false, false]);
+    assert.equal(picker.needed.textContent, "Choose which one is Home.");
+  }
+  // Two ticked with a Home already checked, on arrival or restored into a fresh page: cleared, and asked.
+  const rendered = pickerDocument([{ ticked: true, home: true }, { ticked: true }]);
+  assert.deepEqual(rendered.homes(), [false, false]);
+  assert.equal(rendered.needed.textContent, "Choose which one is Home.");
   const restored = pickerDocument([{}, {}]);
-  restored.restore([[true, false], [true, false]]);
-  assert.equal(restored.document.documentElement.dataset.homeAuto, "choose");
+  restored.restore([[true, false], [true, true]]);
+  assert.equal(restored.auto(), "choose");
+  assert.deepEqual(restored.homes(), [false, false]);
   assert.equal(restored.needed.textContent, "Choose which one is Home.");
+  // The control: a Home the person picked survives a return to the same live page.
+  const live = pickerDocument([{ ticked: true }, { ticked: true }]);
+  live.choose(1);
+  live.restore([[true, false], [true, true]], { persisted: true });
+  assert.deepEqual(live.homes(), [false, true]);
+  assert.equal(live.needed.textContent, "");
+  // A restore that moves the checked radio away from their pick does not move their Home with it.
+  live.restore([[true, true], [true, false]], { persisted: true });
+  assert.deepEqual(live.homes(), [false, true]);
+  // Restored down to one ticked: that one is Home.
   restored.restore([[true, false], [false, true]]);
   assert.deepEqual(restored.homes(), [true, false]);
   // A locked selection is carried by hidden fields; its disabled controls are left as rendered.
   assert.deepEqual(pickerDocument([{ ticked: true, home: true, locked: true }]).homes(), [true]);
-  assert.deepEqual(pickerDocument([{ ticked: true, locked: true }]).homes(), [false]);
+  assert.deepEqual(pickerDocument([{ ticked: true, locked: true }, { ticked: true, home: true, locked: true }]).homes(), [false, true]);
   // A page with no picker is not marked.
-  assert.equal(pickerDocument([], { picker: false }).document.documentElement.dataset.homeAuto, undefined);
+  assert.equal(pickerDocument([], { picker: false }).auto(), undefined);
 });
 
 test("the picker says what the app can reach directly above Allow, and ties hiding Home to its script", () => {
@@ -353,6 +388,13 @@ test("the picker says what the app can reach directly above Allow, and ties hidi
   assert.equal(html.match(/type="checkbox" name="workspace_ids"/gu).length, 3);
   assert.equal(html.match(/type="radio" name="home_workspace_id"/gu).length, 3);
   assert.doesNotMatch(html, /name="home_workspace_id"[^>]* checked/u);
+  // Each Home choice names its workspace for assistive technology; the visible pill stays short.
+  const homes = elements(form).filter((node) => node.tag === "input" && node.attrs.name === "home_workspace_id");
+  assert.deepEqual(homes.map((node) => node.attrs["aria-label"]),
+    ["Home workspace for Workspace One", "Home workspace for Workspace Two", "Home workspace for Workspace Three"]);
+  assert.equal(text(one(form, (node) => node.tag === "legend")), "Select at least one workspace");
+  const locked = htmlTree(page({ selectionLocked: true, homeWorkspaceId: W1 }));
+  assert.equal(text(one(locked, (node) => node.tag === "legend")), "Selected workspaces");
   // The ask for Home is a status message that starts empty; the script fills it in.
   const needed = one(form, (node) => node.attrs.class === "home-needed");
   assert.deepEqual([needed.attrs.role, needed.attrs["data-text"], text(needed)], ["status", "Choose which one is Home.", ""]);

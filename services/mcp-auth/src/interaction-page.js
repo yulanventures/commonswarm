@@ -339,7 +339,7 @@ export function renderConsentPage({
       : "";
     return `<li class="workspace-choice">
       ${hidden}<label class="workspace-pick"><input type="checkbox" name="workspace_ids" value="${escapeHtml(workspace.id)}"${checked}${fixed}> <span>${escapeHtml(workspace.name)}</span></label>
-      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed}> Home workspace</label>
+      <label class="home-choice"><input type="radio" name="home_workspace_id" value="${escapeHtml(workspace.id)}"${homeWorkspaceId === workspace.id ? " checked" : ""}${fixed} aria-label="Home workspace for ${escapeHtml(workspace.name)}"> Home workspace</label>
     </li>`;
   }).join("");
   const lockedHome = selectionLocked && homeWorkspaceId !== null
@@ -386,7 +386,7 @@ ${CONSENT_STYLES}
     <input type="hidden" name="selection_version" value="${escapeHtml(selectionVersion)}">
     <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">
     ${lockedHome}
-    <fieldset><legend>Select at least one workspace</legend>
+    <fieldset><legend>${selectionLocked ? "Selected workspaces" : "Select at least one workspace"}</legend>
       ${pickerHelp ? `<p class="picker-help">${pickerHelp}</p>` : ""}
       <ul class="workspace-list${longList ? " is-long" : ""}">${workspaceRows}${emptyRow}</ul>
       <p class="picker-foot"><span>${countText}</span><span class="picker-selected" aria-hidden="true"></span></p>

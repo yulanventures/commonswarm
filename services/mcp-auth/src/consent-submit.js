@@ -21,12 +21,14 @@ window.addEventListener("pageshow", (event) => {
 
 // The workspace picker asks which workspace is Home only when two or more are ticked; the page hides the
 // choice otherwise. What is sent always matches what is shown:
+// - none ticked: no Home;
 // - one ticked: that workspace is Home, and the form says so;
-// - two or more: the person chooses. A Home this script filled in for a single workspace is cleared first,
-//   and so is the Home of a row that is unticked, so the choice is never made for them;
-// - none: no Home.
+// - two or more: only a Home the person picked on this page, in this visit. Any other checked Home is
+//   cleared and the page asks: one this script filled in for a single workspace, one the server rendered,
+//   or one the browser restored after a reload or a return to the page.
+// A pick is recorded from a click (pointer or keyboard), which restoring a form never produces.
 // A locked selection (disabled controls, carried by hidden fields) is left as rendered.
-let filledIn = null;
+let picked = null;
 const syncHome = () => {
   const rows = [...document.querySelectorAll(".workspace-choice")].map((row) => ({
     pick: row.querySelector('input[type="checkbox"][name="workspace_ids"]'),
@@ -35,21 +37,23 @@ const syncHome = () => {
   const ticked = rows.filter((row) => row.pick.checked);
   const choose = ticked.length >= 2;
   document.documentElement.dataset.homeAuto = choose ? "choose" : "one";
+  if (!ticked.some((row) => row.home === picked)) picked = null;
   for (const row of rows) {
     if (row.home.disabled) continue;
-    if (!row.pick.checked || (choose && row.home === filledIn)) row.home.checked = false;
-  }
-  if (choose || ticked.length === 0) filledIn = null;
-  if (ticked.length === 1 && !ticked[0].home.disabled && !ticked[0].home.checked) {
-    ticked[0].home.checked = true;
-    filledIn = ticked[0].home;
+    row.home.checked = row.pick.checked && (choose ? row.home === picked : true);
   }
   const needed = document.querySelector(".home-needed");
   if (needed) needed.textContent = choose && !rows.some((row) => row.home.checked) ? needed.dataset.text : "";
 };
 if (document.querySelector(".workspace-list")) {
+  document.addEventListener("click", (event) => {
+    const home = event.target;
+    if (home?.name !== "home_workspace_id" || home.type !== "radio" || home.disabled || !home.checked) return;
+    picked = home;
+    syncHome();
+  });
   document.addEventListener("change", (event) => {
-    if (event.target?.name === "workspace_ids" || event.target?.name === "home_workspace_id") syncHome();
+    if (event.target?.name === "workspace_ids") syncHome();
   });
   // A reload or a return to this page can restore ticks after this script first ran.
   window.addEventListener("pageshow", syncHome);
