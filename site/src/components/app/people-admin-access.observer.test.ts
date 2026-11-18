@@ -9,7 +9,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import { peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused } from "../../lib/people/admins";
 
-const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant", "closeRosterDialog"];
+const NAMES = ["peopleAdminKey", "currentPeopleAdminAccess", "ownPeopleAdminGrants", "loadPeopleAdminAccess", "endPeopleAdminGrant", "closeRosterDialog", "peopleAdminViewerOwns", "syncPeopleAdminAccessRole"];
 
 async function dashboardFunctions(names: string[]): Promise<string> {
   const raw = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
@@ -64,7 +64,7 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
     var session = { user: { id: "u1" } }, activeWorkspaceId = "w1", sampleMode = false;
     var workspaces = [{ id: "w1", name: "Rivera household", orgId: "org-1" }, { id: "w2", name: "Studio", orgId: "org-2" }, { id: "w3", name: "Unknown", orgId: "" }], members = [{ userId: "u1", role: "${options.role ?? "owner"}" }], agents = [{ principalId: "a1", name: "Atlas" }];
     var seatAdminStatusState = { phase: "idle" }, seatAdminGrantsState = { phase: "idle" };
-    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
+    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminReadAsOwner = null, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
     var dialogOpen = true;
     var peopleDialogReturn = null, peopleDialogFocus = undefined, peopleDialogInviteCleared = null, peopleDialogState = { selected: null, invite: null };
     var window = { location: { search: "" }, history: { state: null, replaceState() {} }, dispatchEvent: (event) => { __events.push(event.type); } };
@@ -265,4 +265,39 @@ test("the question says who can give the access again: you for a grant you gave,
   p.run("endPeopleAdminGrant('g1', {})"); p.run("endPeopleAdminGrant('g2', {})");
   assert.deepEqual(p.calls.filter(call => call.startsWith("restoredBy")), ["restoredBy:you", "restoredBy:owner"],
     "an owner ending another member's grant is not told they can turn it back on");
+});
+
+test("the list follows the viewer's role when it only becomes known, or changes, after the dialog opened", async () => {
+  // Opened while the workspace is still loading: the roster has not arrived, so the viewer's role is not known yet.
+  const early = await page();
+  early.run("members = []");
+  await early.run("loadPeopleAdminAccess()");
+  assert.equal(plain(early.run<any>("currentPeopleAdminAccess()")).all, false, "with no roster yet the viewer is not known to be an owner");
+  assert.ok(!early.calls.includes("all"), "and the owner's read is not asked for on a guess");
+  early.run("members = [{ userId: 'u1', role: 'owner' }]; syncPeopleAdminAccessRole()");
+  assert.equal(plain(early.run<any>("currentPeopleAdminAccess()")).read, "pending", "while the owner's list is being read, nothing on screen may be acted on");
+  await settle(); await settle();
+  assert.equal(plain(early.run<any>("currentPeopleAdminAccess()")).all, true, "once the roster says owner, the owner's full list is read");
+  const reads = early.calls.filter(call => call === "all").length;
+  early.run("syncPeopleAdminAccessRole(); syncPeopleAdminAccessRole()"); await settle();
+  assert.equal(early.calls.filter(call => call === "all").length, reads, "a draw with the same role reads nothing again");
+
+  // The viewer's role is lowered while the owner's full list is on screen.
+  const demoted = await page();
+  await demoted.run("loadPeopleAdminAccess()");
+  assert.equal(plain(demoted.run<any>("currentPeopleAdminAccess()")).grants.length, 2);
+  demoted.run("members = [{ userId: 'u1', role: 'admin' }]; syncPeopleAdminAccessRole()");
+  const after = plain(demoted.run<any>("currentPeopleAdminAccess()"));
+  assert.equal(after.all, false, "at that draw a former owner no longer holds every grant on screen");
+  assert.deepEqual(after.grants.map((row: any) => row.grantId), ["mine-1", "org-here"], "only what they gave themselves");
+  demoted.io.confirm = true; demoted.run("endPeopleAdminGrant('g1', {})"); await settle();
+  assert.equal(demoted.ends.length, 0, "and another person's grant can no longer be ended from here");
+
+  // Closing the dialog forgets the role the list was read for, so a later draw does not read for a closed dialog.
+  const closed = await page();
+  await closed.run("loadPeopleAdminAccess()");
+  const before = closed.calls.filter(call => call === "all").length;
+  closed.run("closeRosterDialog(); members = [{ userId: 'u1', role: 'admin' }]; syncPeopleAdminAccessRole()"); await settle();
+  assert.equal(closed.calls.filter(call => call === "all").length, before);
+  assert.equal(closed.run("currentPeopleAdminAccess()"), undefined);
 });

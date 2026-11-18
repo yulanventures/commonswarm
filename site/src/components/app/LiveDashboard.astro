@@ -7618,6 +7618,7 @@ import "../../styles/kylon-command-palette.css";
       const detail = peopleDetailHost();
       const endDateFocus = connectionDateFocus(detail);
       settlePeopleDialogInvite();
+      syncPeopleAdminAccessRole();
       const model: PeopleDialogModel = { ...peopleDialogModel(), adminAccess: currentPeopleAdminAccess() }; peopleDialogState.query = rosterFilter;
       if (peopleDialogState.selected === null && session && !sampleMode) {
         const reauth = readSeatAdminReauthIntent(session.user.id);
@@ -7821,6 +7822,17 @@ import "../../styles/kylon-command-palette.css";
     let peopleAdminGeneration = 0;
     /** One per opening of the dialog: closing it ends the lifetime, and a later answer has no dialog to report to. */
     let peopleAdminDialogLifetime = 0;
+    /** The role the list on screen was read for: true as an owner, false as anyone else, null when nothing was read. */
+    let peopleAdminReadAsOwner: boolean | null = null;
+    const peopleAdminViewerOwns = (): boolean => members.find((member) => member.userId === session?.user.id)?.role === "owner";
+    /** The viewer's role decides which list is read, and it can become known or change after the dialog opened: the
+        roster may arrive late, a failed read may be retried, a role may be changed. Called at every draw: when the role
+        no longer matches the one the list was read for, the list is read again. Until that read succeeds its rows are
+        pending and nothing acts on them. */
+    const syncPeopleAdminAccessRole = (): void => {
+      if (peopleAdminReadAsOwner === null || !peopleAdminKey() || peopleAdminAccess.key !== peopleAdminKey()) return;
+      if (peopleAdminReadAsOwner !== peopleAdminViewerOwns()) void loadPeopleAdminAccess();
+    };
     const peopleAdminEnding = new Set<string>();
     const peopleAdminKey = (): string => session && activeWorkspaceId && !sampleMode ? `${session.user.id}:${activeWorkspaceId}` : "";
     const currentPeopleAdminAccess = (): PeopleAdminAccess | undefined => {
@@ -7848,6 +7860,7 @@ import "../../styles/kylon-command-palette.css";
       const generation = ++peopleAdminGeneration;
       const current = (): boolean => generation === peopleAdminGeneration && key === peopleAdminKey();
       const before = peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
+      peopleAdminReadAsOwner = peopleAdminViewerOwns();
       // A read is starting: what is on screen is no longer a current list. The rows stay to look at, as pending, and
       // nothing may act on them (no Remove, and an open question will not send) until this read succeeds.
       if (before) { peopleAdminAccess = { key, access: { ...before, read: "pending" } }; if (peopleDialogOpen()) renderDialogRoster(); }
@@ -7863,7 +7876,7 @@ import "../../styles/kylon-command-palette.css";
       if (peopleDialogOpen()) renderDialogRoster();
       let next: PeopleAdminAccess;
       try {
-        const owner = members.find((member) => member.userId === value.user.id)?.role === "owner";
+        const owner = peopleAdminViewerOwns();
         const all = owner ? await readWorkspaceAdminGrants(value, workspaceId) : null;
         if (!current()) return;
         if (all) next = { read: "ready", all: true, grants: all };
@@ -8117,7 +8130,7 @@ import "../../styles/kylon-command-palette.css";
       peopleDialogState.invite = null;
       // The Admins list ends with the dialog, and so does any read of it still in flight: a workspace switch, a sign-out
       // and a dead session all close the dialog first, so a read begun before cannot land after coming back.
-      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1; peopleAdminDialogLifetime += 1;
+      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1; peopleAdminDialogLifetime += 1; peopleAdminReadAsOwner = null;
       peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
       parkPeopleHosts();
       if (restoreFocus && returned) {
