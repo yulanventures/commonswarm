@@ -1,6 +1,7 @@
--- Read-only rollback catalog verification for 20261118000003: the earlier read bodies are back; the guard, the helper
--- and ended_by_user_id are gone; the forward-only trigger stays.
+-- Read-only rollback catalog verification for 20261118000003: the earlier read bodies are in place; the ended-grants
+-- read, the guard, the helper and ended_by_user_id are gone; the forward-only trigger stays.
 SELECT to_regprocedure('swarm.seat_admin_grants_end_guard()') IS NULL
+ AND to_regprocedure('swarm.agent_seat_admin_self_ended(bytea,uuid)') IS NULL
  AND to_regprocedure('swarm.seat_admin_grant_end_actor(uuid,uuid)') IS NULL
  AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='swarm.seat_admin_grants'::regclass AND attname='ended_by_user_id' AND NOT attisdropped)
  AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='swarm.seat_admin_grants'::regclass AND conname='seat_admin_grants_ended_by_check')

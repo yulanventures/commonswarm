@@ -910,13 +910,10 @@ async function handle(
       if (agent.is_revoked) return json(403, { error: "forbidden" });
       if (!seatAdminEnabled) return json(200, { enabled: false });
       // The workspace this read already admitted: the helper takes no lock beyond the admission's own.
-      const [row] = await tx<{ self: unknown }[]>`SELECT swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS self`;
-      // {grants, ended} since 20261118000003; before it (or after its rollback) the active list alone.
-      const self = row?.self;
-      const shaped = self !== null && typeof self === "object" && !Array.isArray(self) ? self as { grants?: unknown; ended?: unknown } : null;
-      const grants = Array.isArray(self) ? self : Array.isArray(shaped?.grants) ? shaped.grants : [];
-      const ended = Array.isArray(shaped?.ended) ? shaped.ended : [];
-      return json(200, { enabled: true, registry_version: 3, grants, ended });
+      const [row] = await tx<{ grants: unknown; ended: unknown }[]>`SELECT
+        swarm.agent_seat_admin_self(${tokenHash!}, ${body.workspace_id}::uuid) AS grants,
+        swarm.agent_seat_admin_self_ended(${tokenHash!}, ${body.workspace_id}::uuid) AS ended`;
+      return json(200, { enabled: true, registry_version: 3, grants: row?.grants ?? [], ended: row?.ended ?? [] });
     }
     if (isMemoryRead(body) && !brainMemoryEnabled) {
       return json(404, { error: "memory_unavailable", message: "Workspace memory isn't turned on here." });

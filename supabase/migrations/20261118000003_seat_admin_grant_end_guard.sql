@@ -11,8 +11,9 @@
 -- Anything else, including a cascade or a 'replaced' re-grant, is refused. The trigger is named to fire after
 -- seat_admin_grants_forward_only, which still owns the shape of the change (active to one terminal state, once).
 --
--- The agent's own read (agent_seat_admin_self) now returns {grants, ended}: grants is the unchanged active list,
--- ended is at most 10 of the agent's own ended grants, newest first, including grants whose end date has passed.
+-- The agent's own read: agent_seat_admin_self is unchanged (the active list alone, so an edge released before this
+-- keeps working); agent_seat_admin_self_ended lists at most 10 of the agent's own ended grants, newest first,
+-- including grants whose end date has passed.
 -- The person's read (my_seat_admin_grants) adds ended_by to each row.
 
 ALTER TABLE swarm.seat_admin_grants ADD COLUMN ended_by_user_id uuid;
@@ -67,33 +68,25 @@ $$;
 ALTER FUNCTION swarm.seat_admin_grant_end_actor(uuid, uuid) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.seat_admin_grant_end_actor(uuid, uuid) FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION swarm.agent_seat_admin_self(p_hash bytea, p_workspace uuid) RETURNS jsonb
+-- The agent's own ended grants, beside agent_seat_admin_self (unchanged: the active list alone), with the same
+-- credential check. At most 10, newest first; a grant past its end date counts as expired before it is marked.
+-- ended_by names a role, never another person: the agent's owner, or another owner of a covered target.
+CREATE FUNCTION swarm.agent_seat_admin_self_ended(p_hash bytea, p_workspace uuid) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
  ctx record;
- active jsonb;
- ended jsonb;
+ result jsonb;
 BEGIN
  SELECT * INTO ctx FROM swarm.agent_delivery_read_context(p_hash, p_workspace);
  IF NOT FOUND OR ctx.is_revoked THEN
   RAISE EXCEPTION 'LOCAL_CREDENTIAL_DENIED' USING ERRCODE = '42501', DETAIL = 'LOCAL_CREDENTIAL_DENIED';
  END IF;
  SELECT coalesce(jsonb_agg(jsonb_build_object(
-   'grant_id', g.grant_id, 'level', g.level, 'scope_names', to_jsonb(g.scope_names), 'workspace_ids', to_jsonb(g.workspace_ids),
-   'organization_id', g.organization_id, 'capability_names', coalesce(g.manifest -> 'capability_names', '[]'::jsonb),
-   'expires_at', g.expires_at) ORDER BY g.grant_id), '[]'::jsonb)
- INTO active
- FROM swarm.seat_admin_grants g
- WHERE g.principal_id = ctx.principal_id AND g.owner_user_id = ctx.owner_user_id AND g.state = 'active'
-   AND (g.expires_at IS NULL OR g.expires_at > clock_timestamp());
- -- This agent's own ended grants, newest first: a grant past its end date counts as expired before it is marked.
- -- ended_by names a role, never another person: the agent's owner, or another owner of a covered target.
- SELECT coalesce(jsonb_agg(jsonb_build_object(
    'grant_id', e.grant_id, 'level', e.level, 'workspace_ids', to_jsonb(e.workspace_ids), 'organization_id', e.organization_id,
    'state', e.state, 'end_reason', e.end_reason, 'ended_at', e.ended_at,
    'ended_by', CASE WHEN e.actor IS NULL THEN NULL WHEN e.actor = e.owner_user_id THEN 'owner' ELSE 'another_owner' END)
    ORDER BY e.ended_at DESC, e.grant_id), '[]'::jsonb)
- INTO ended
+ INTO result
  FROM (SELECT r.*, coalesce(r.ended_by_user_id, CASE WHEN r.end_reason = 'owner_downgrade'
          THEN swarm.seat_admin_grant_end_actor(r.owner_user_id, r.grant_id) END) AS actor
    FROM (SELECT g.grant_id, g.level, g.workspace_ids, g.organization_id, g.owner_user_id, g.ended_by_user_id,
@@ -104,9 +97,12 @@ BEGIN
      WHERE g.principal_id = ctx.principal_id AND g.owner_user_id = ctx.owner_user_id
        AND (g.state <> 'active' OR g.expires_at <= clock_timestamp())
      ORDER BY CASE WHEN g.state = 'active' THEN g.expires_at ELSE g.ended_at END DESC, g.grant_id LIMIT 10) r) e;
- RETURN jsonb_build_object('grants', active, 'ended', ended);
+ RETURN result;
 END;
 $$;
+ALTER FUNCTION swarm.agent_seat_admin_self_ended(bytea, uuid) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm.agent_seat_admin_self_ended(bytea, uuid) FROM PUBLIC, anon, authenticated, swarm_command;
+GRANT EXECUTE ON FUNCTION swarm.agent_seat_admin_self_ended(bytea, uuid) TO swarm_read;
 
 CREATE OR REPLACE FUNCTION swarm_read.my_seat_admin_grants()
 RETURNS jsonb

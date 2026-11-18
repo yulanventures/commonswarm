@@ -1,30 +1,10 @@
--- Rollback for 20261118000003 (seat admin grant end guard): put swarm.agent_seat_admin_self back exactly as
--- 20261111000001_seat_admin_self.sql defines it and swarm_read.my_seat_admin_grants exactly as
--- 20261110000004_seat_admin_status.sql defines it (owners and grants carry over through CREATE OR REPLACE), then drop
--- the end guard, the end-actor helper and ended_by_user_id. Who ended each grant stays in the grantors' admin history.
--- Roll the edge back first: this release's end_seat_admin writes ended_by_user_id.
+-- Rollback for 20261118000003 (seat admin grant end guard): put swarm_read.my_seat_admin_grants back exactly as
+-- 20261110000004_seat_admin_status.sql defines it (owner and grants carry over through CREATE OR REPLACE), then drop
+-- the agent's ended-grants read, the end guard, the end-actor helper and ended_by_user_id. swarm.agent_seat_admin_self
+-- was not changed. Who ended each grant stays in the grantors' admin history.
+-- Roll the edge back first: this release's end_seat_admin writes ended_by_user_id and its seat_admin_self read calls
+-- swarm.agent_seat_admin_self_ended.
 SET search_path = swarm, pg_catalog, public;
-CREATE OR REPLACE FUNCTION swarm.agent_seat_admin_self(p_hash bytea, p_workspace uuid) RETURNS jsonb
-LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
-DECLARE
- ctx record;
- result jsonb;
-BEGIN
- SELECT * INTO ctx FROM swarm.agent_delivery_read_context(p_hash, p_workspace);
- IF NOT FOUND OR ctx.is_revoked THEN
-  RAISE EXCEPTION 'LOCAL_CREDENTIAL_DENIED' USING ERRCODE = '42501', DETAIL = 'LOCAL_CREDENTIAL_DENIED';
- END IF;
- SELECT coalesce(jsonb_agg(jsonb_build_object(
-   'grant_id', g.grant_id, 'level', g.level, 'scope_names', to_jsonb(g.scope_names), 'workspace_ids', to_jsonb(g.workspace_ids),
-   'organization_id', g.organization_id, 'capability_names', coalesce(g.manifest -> 'capability_names', '[]'::jsonb),
-   'expires_at', g.expires_at) ORDER BY g.grant_id), '[]'::jsonb)
- INTO result
- FROM swarm.seat_admin_grants g
- WHERE g.principal_id = ctx.principal_id AND g.owner_user_id = ctx.owner_user_id AND g.state = 'active'
-   AND (g.expires_at IS NULL OR g.expires_at > clock_timestamp());
- RETURN result;
-END;
-$$;
 CREATE OR REPLACE FUNCTION swarm_read.my_seat_admin_grants()
 RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -51,6 +31,7 @@ BEGIN
     SELECT r.grant_id FROM swarm.seat_admin_grants r WHERE r.owner_user_id = viewer ORDER BY r.created_at DESC LIMIT 100))));
 END;
 $$;
+DROP FUNCTION IF EXISTS swarm.agent_seat_admin_self_ended(bytea, uuid);
 DROP TRIGGER IF EXISTS seat_admin_grants_owner_or_expiry_end ON swarm.seat_admin_grants;
 DROP FUNCTION IF EXISTS swarm.seat_admin_grants_end_guard();
 DROP FUNCTION IF EXISTS swarm.seat_admin_grant_end_actor(uuid, uuid);
