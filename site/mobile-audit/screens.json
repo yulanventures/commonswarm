@@ -1666,6 +1666,70 @@
     ]
   },
   {
+    "id": "dialog.connected-apps.connected.agents",
+    "kind": "dialog",
+    "path": "/app?w={connectedAppWorkspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] .dashboard__connected-app button.dashboard__button--danger",
+        "scroll": "dialog[data-connected-apps-dialog][open] .dashboard__connected-app button.dashboard__button--danger"
+      }
+    ],
+    "ready": "dialog[data-connected-apps-dialog][open] [data-connected-apps-list] .dashboard__connected-app button.dashboard__button--danger",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation",
+      "seed_connected_app"
+    ]
+  },
+  {
+    "id": "dialog.connected-apps.connected.end-date",
+    "kind": "dialog",
+    "path": "/app?w={connectedAppWorkspace}",
+    "viewer": "invitee",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "click": "[data-user-menu-trigger]"
+      },
+      {
+        "click": "[data-connected-apps-open]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-end-date-toggle]",
+        "click": "dialog[data-connected-apps-dialog][open] [data-end-date-toggle]"
+      },
+      {
+        "waitFor": "dialog[data-connected-apps-dialog][open] [data-end-date-value]",
+        "scroll": "dialog[data-connected-apps-dialog][open] [data-end-date-save]"
+      }
+    ],
+    "ready": "dialog[data-connected-apps-dialog][open] [data-end-date-value]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "seed_delegated_invitation",
+      "seed_connected_app"
+    ]
+  },
+  {
     "id": "dialog.signout-others",
     "kind": "dialog",
     "path": "/app?w={workspace}",

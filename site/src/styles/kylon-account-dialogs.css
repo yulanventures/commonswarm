@@ -127,8 +127,22 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
   gap: 8px 16px;
   padding-block: 4px;
 }
+/* An agent's name takes the room it needs and wraps; Remove agent stays at the trailing edge of its row at every
+   width, so the buttons line up down the card. */
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats > li > span {
   min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+/* End date is one of the card's sections, so its heading is drawn as the other section labels are and the app's
+   name leads the card. */
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date {
+  margin-block: 0;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date h3 {
+  margin-block-start: 8px;
+  font: 400 12px/18px var(--k-shell-font);
+  color: var(--k-shell-secondary);
+  letter-spacing: 0;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats button {
   flex: none;
@@ -181,10 +195,6 @@ admin-delegations[data-kylon-account] > dialog :is(article, li) {
 @media (width <= 440px) {
   :is(live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog], live-dashboard.dashboard[data-kylon-shell] [data-signout-others-dialog], live-dashboard.dashboard[data-kylon-shell] [data-password-dialog], live-dashboard.dashboard[data-kylon-shell] [data-cleanup-dialog], admin-delegations[data-kylon-account] > dialog) {
     padding: 20px;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app-seats > li {
-    align-items: flex-start;
-    flex-wrap: wrap;
   }
   admin-delegations[data-kylon-account] > dialog nav {
     display: grid;
