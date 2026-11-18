@@ -201,6 +201,35 @@ try {
   check('End access ends exactly that row, once', removed.length === 1 && removed[0] === 'a0000000-0000-4000-8000-000000000003'
     && !scopedDialog.isConnected && document.activeElement === removeButton('a0000000-0000-4000-8000-000000000003'));
   list.remove();
+
+  // A scoped grant over 10 unnamed workspaces with every scope: a short heading, details scroll, actions stay put.
+  const wide = buildSeatAdminEndConfirmation(document, { agentName: 'Atlas', level: 'scoped',
+    coverage: Array.from({ length: 10 }, (_, i) => 'Workspace ' + String(i).padStart(8, '0') + '-0000-4000-8000-000000000000'),
+    scopeNames: ['admin:read', 'invites:create', 'invites:revoke', 'onboarding:connect', 'seats:create', 'seats:renew', 'seats:revoke', 'workspaces:rename'],
+    confirm: () => ends++, cancel: () => kept++ });
+  root.append(wide.dialog); wide.open(organization);
+  const wideTitle = wide.dialog.querySelector('h2'), wideBody = wide.dialog.querySelector('.sa-confirm__body');
+  check('many workspaces are counted in the heading', wideTitle.textContent === 'End scoped admin access for Atlas in 10 workspaces?'
+    && wide.dialog.querySelector('[data-seat-admin-end-workspaces]').textContent.includes('Workspace 00000009-0000-4000-8000-000000000000'));
+  const titleHeight = wideTitle.getBoundingClientRect().height;
+  check('the heading stays short (' + Math.round(titleHeight) + ' px)', innerWidth >= 800 && innerHeight <= 420 ? titleHeight <= 64 : titleHeight <= 80);
+  check('Keep still has the initial focus', document.activeElement.textContent === 'Keep');
+  const lastScope = wide.dialog.querySelector('[data-seat-admin-end-scopes]');
+  lastScope.scrollIntoView({ block: 'end' });
+  const bodyRect = wideBody.getBoundingClientRect(), scopeRect = lastScope.getBoundingClientRect();
+  check('the last scope is reachable inside the scrolling body', lastScope.textContent.endsWith('workspaces:rename')
+    && scopeRect.bottom <= bodyRect.bottom + 1 && scopeRect.top >= bodyRect.top - 1 && wideBody.tabIndex === 0);
+  const wideRect = wide.dialog.getBoundingClientRect();
+  const wideButtons = [...wide.dialog.querySelectorAll('footer button')];
+  check('both actions stay whole inside the dialog and the viewport', wideButtons.length === 2 && wideButtons.every(node => {
+    const rect = node.getBoundingClientRect();
+    return rect.width >= 43.99 && rect.height >= 43.99 && rect.top >= wideRect.top - .5 && rect.bottom <= wideRect.bottom + .5
+      && rect.left >= wideRect.left - .5 && rect.right <= wideRect.right + .5 && rect.top >= 0 && rect.bottom <= innerHeight + .5;
+  }) && wideRect.bottom <= innerHeight + .5 && wideRect.top >= 0);
+  const endsBefore = ends;
+  wideButtons[0].click();
+  check('Keep on the long dialog sends nothing', ends === endsBefore && !wide.dialog.open);
+  wide.dispose();
   check('no page overflow', document.documentElement.scrollWidth <= innerWidth);
 } catch (error) { check('fixture completed: ' + error.message, false); }
 document.documentElement.dataset.seatAdminResults = encodeURIComponent(JSON.stringify({checks,targets,width:innerWidth,height:innerHeight}));

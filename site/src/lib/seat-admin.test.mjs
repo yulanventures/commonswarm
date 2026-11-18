@@ -145,7 +145,10 @@ test("grant history: who ended it, in words; the machine reason stays in the dat
 test("the end confirmation names the grant's level and what it covers", () => {
   assert.equal(seatAdminEndQuestion("Atlas", "workspace", ["Studio"]), "End workspace admin access for Atlas in Studio?");
   assert.equal(seatAdminEndQuestion("Atlas", "organization", ["Acme"]), "End organization admin access for Atlas in Acme?");
-  assert.equal(seatAdminEndQuestion("Atlas", "scoped", ["Studio", "Ops", "Lab"]), "End scoped admin access for Atlas in Studio, Ops and Lab?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", ["Studio"]), "End scoped admin access for Atlas in Studio?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", ["Studio", "Ops", "Lab"]), "End scoped admin access for Atlas in 3 workspaces?");
+  assert.equal(seatAdminEndQuestion("Atlas", "scoped", Array.from({ length: 10 }, (_, i) => `Workspace ${i}`)),
+    "End scoped admin access for Atlas in 10 workspaces?");
   assert.equal(seatAdminEndQuestion("Atlas", "workspace", []), "End workspace admin access for Atlas?");
   const [org, scoped] = parseSeatAdminGrants({ grants: [
     { grant_id: ORG_GRANT_ID, principal_id: AGENT_ID, level: "organization", organization_id: ORG_1, scope_names: ["role:organization_admin"],

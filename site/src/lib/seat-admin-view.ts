@@ -285,9 +285,13 @@ function names(list: readonly string[]): string {
   return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
 }
 
-/** The question the end confirmation asks, naming the grant's level and coverage. */
+const named = (coverage: readonly string[]) => coverage.filter(name => name.trim() !== "");
+
+/** The question the end confirmation asks, naming the grant's level and coverage. More than one workspace is
+ * counted, not listed, so the heading stays short; the names go in the dialog body. */
 export function seatAdminEndQuestion(agentName: string, level: SeatAdminLevel, coverage: readonly string[]): string {
-  const where = names(coverage.filter(name => name.trim() !== ""));
+  const list = named(coverage);
+  const where = list.length > 1 ? `${list.length} workspaces` : list[0] ?? "";
   return `End ${LEVEL_WORDS[level]} admin access for ${agentName}${where ? ` in ${where}` : ""}?`;
 }
 
@@ -304,10 +308,26 @@ export function buildSeatAdminEndConfirmation(doc: Document, options: SeatAdminE
   const title = element(doc, "h2", "", seatAdminEndQuestion(options.agentName, options.level, options.coverage));
   title.id = `${id}-title`;
   header.append(title);
+  // The details scroll inside the body; the heading and both actions stay in view.
   const body = element(doc, "div", "sa-confirm__body");
   body.id = `${id}-body`;
-  if (options.level === "scoped" && options.scopeNames?.length) {
-    body.append(element(doc, "p", "sa-confirm__line", `Scopes: ${options.scopeNames.join(", ")}`));
+  const coverage = named(options.coverage);
+  const scopes = options.level === "scoped" ? options.scopeNames ?? [] : [];
+  if (coverage.length > 1) {
+    const where = element(doc, "p", "sa-confirm__line", `Workspaces: ${names(coverage)}`);
+    where.dataset.seatAdminEndWorkspaces = "";
+    body.append(where);
+  }
+  if (scopes.length) {
+    const scopeLine = element(doc, "p", "sa-confirm__line", `Scopes: ${scopes.join(", ")}`);
+    scopeLine.dataset.seatAdminEndScopes = "";
+    body.append(scopeLine);
+  }
+  if (coverage.length > 1 || scopes.length) {
+    // Scrollable details are reachable from the keyboard too.
+    body.tabIndex = 0;
+    body.setAttribute("role", "region");
+    body.setAttribute("aria-label", "Admin access being ended");
   }
   body.append(element(doc, "p", "sa-confirm__line", "It stays off until you turn it on again."));
   const footer = element(doc, "footer", "sa-confirm__footer");
