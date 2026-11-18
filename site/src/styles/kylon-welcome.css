@@ -114,17 +114,36 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a {
   position: relative;
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-inline-size: 44px;
-  min-block-size: 44px;
-  /* Wrapped lines reserve the full height of each link's real hit box. */
-  margin-block: 0;
-  padding-inline: 2px;
+  /* A link stays on one line, so its ring and its touch area have one box to follow. */
+  white-space: nowrap;
   color: var(--k-shell-ink);
   text-underline-offset: 3px;
+}
+
+/* Touch: each link keeps a 44px target without the sentence paying for it in line height. The note
+   reserves the room above and below itself (44px less the 18px from a line's edge to the far side of
+   its text); the first link's target grows up from its text and the last one's grows down, so the two
+   never overlap however the sentence wraps, and neither leaves the note. */
+@media (width <= 64rem), (any-pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note {
+    padding-block: 26px;
+  }
+
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a::before {
+    content: "";
+    position: absolute;
+    inset-inline: -2px;
+    min-inline-size: 44px;
+    block-size: 44px;
+  }
+
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:first-of-type::before {
+    inset-block-end: 0;
+  }
+
+  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:last-of-type::before {
+    inset-block-start: 0;
+  }
 }
 
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__auth-divider {
@@ -197,20 +216,10 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
   box-shadow: none;
 }
 
-/* Keep the 44px link target; draw focus around its text, clear of wrapped prose. */
+/* The ring follows the words, not the touch target. */
 live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
-  outline: none;
-}
-
-live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-  inset-block: calc(50% - .7em);
-  inset-inline: 2px;
+  outline-offset: 2px;
   border-radius: 2px;
-  outline: 2px solid var(--k-shell-focus);
-  outline-offset: 0;
 }
 
 @media (width <= 34rem) {
@@ -234,13 +243,6 @@ live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed
 
 @media (forced-colors: active) {
   live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] :is(a, button, input):focus-visible {
-    outline-color: Highlight;
-  }
-  /* Replace the global forced full-target outline with the visible Highlight pseudo. */
-  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible {
-    outline: none !important;
-  }
-  live-dashboard.dashboard[data-kylon-shell] [data-panel="signed-out"][data-signed-out-onramp] .dashboard__legal-note a:focus-visible::after {
     outline-color: Highlight;
   }
 }
