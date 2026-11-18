@@ -465,7 +465,7 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   assert.equal(state.selected?.type, "person"); assert.equal(state.tab, "admins", "opening a person from Admins stays on Admins");
   state.selected = null; access = { read: "ready", all: false, grants: [] }; paint();
   assert.ok(all(node => node.tag === "h3" && node.textContent === "Admin access you gave to agents").length, "a partial list says it is partial");
-  assert.ok(all(node => node.dataset?.adminAccessState === "empty" && node.textContent === "You have not given an agent admin access here.").length);
+  assert.ok(all(node => node.dataset?.adminAccessState === "empty" && node.textContent === "No active admin grants from you here.").length);
   access = { read: "failed", all: true, grants: [] }; paint();
   assert.ok(all(node => node.dataset?.adminAccessState === "error" && node.textContent.startsWith("Admin access could not load.")).length);
   access = undefined; paint();

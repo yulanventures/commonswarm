@@ -65,15 +65,17 @@ const day = (iso: string): string => new Intl.DateTimeFormat("en-US", { month: "
 
 /** The line under an agent's name: what was given, who gave it, and when it ends. */
 export function peopleAdminDetail(grant: PeopleAdminGrant, viewerId: string): string {
-  const giver = grant.giverId === viewerId.toLowerCase() ? "you gave it" : grant.giverName ? `${grant.giverName} gave it` : "given by someone not listed here";
+  // A missing name says nothing about whether the grantor is a member here, so the line does not guess.
+  const giver = grant.giverId === viewerId.toLowerCase() ? "granted by you" : grant.giverName ? `granted by ${grant.giverName}` : "grantor name unavailable";
   return `${peopleAdminLevelName(grant.level)} · ${giver} · ${grant.expiresAt ? `ends ${day(grant.expiresAt)}` : "no end date"}`;
 }
 
 /** The section's heading says whether the list is everything or only the viewer's own. */
 export const peopleAdminHeading = (access: Pick<PeopleAdminAccess, "all">): string =>
   access.all ? "Admin access given to agents" : "Admin access you gave to agents";
+/** Ended and expired grants drop out of the list, so the empty line speaks of active grants only. */
 export const peopleAdminEmpty = (access: Pick<PeopleAdminAccess, "all">): string =>
-  access.all ? "No agent has been given admin access here." : "You have not given an agent admin access here.";
+  access.all ? "No active admin grants for agents here." : "No active admin grants from you here.";
 
 /** The people who can manage the workspace. */
 export const peopleAdminPeople = <P extends { role?: string }>(people: readonly P[]): P[] =>
