@@ -1022,7 +1022,11 @@ import "../../styles/kylon-command-palette.css";
       <select id="dashboard-channel-lead" data-channel-lead-select hidden></select>
       <p class="dashboard__form-error" role="alert" data-channel-dialog-error hidden></p>
       <div class="dashboard__channel-form-actions">
-        <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
+        {/* The rare action waits behind More, away from Save. It still leads to its own confirmation. */}
+        <details class="cm-more" data-channel-settings-more>
+          <summary>More</summary>
+          <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-settings-archive>Archive channel</button>
+        </details>
         <span class="cm-action-spacer" aria-hidden="true"></span>
         <button class="dashboard__button dashboard__button--secondary" type="button" data-channel-dialog-cancel data-channel-settings-close>Cancel</button>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-channel-rename-submit>
@@ -13412,6 +13416,10 @@ import "../../styles/kylon-command-palette.css";
       const close = one<HTMLButtonElement>("[data-channel-settings-close]"); if (close) close.textContent = manageable ? "Cancel" : "Close";
       const archive = one<HTMLButtonElement>("[data-channel-settings-archive]");
       if (archive) { archive.hidden = !manageable; archive.textContent = channel?.archivedAt ? UNARCHIVE_CHANNEL_LABEL : ARCHIVE_CHANNEL_LABEL; }
+      // More holds only that action: it goes when the action does. It starts closed, except on an archived channel,
+      // where bringing the channel back is what the dialog is opened for.
+      const more = one<HTMLDetailsElement>("[data-channel-settings-more]");
+      if (more) { more.hidden = !manageable; if (initialize) more.open = channel?.archivedAt != null; }
       const consequence = one<HTMLElement>("[data-channel-archive-consequence]"); if (consequence) consequence.textContent = ARCHIVE_CHANNEL_CONSEQUENCE;
       for (const submit of all<HTMLButtonElement>("[data-channel-create-submit], [data-channel-rename-submit], [data-channel-archive-submit], [data-channel-settings-archive], [data-channel-archive-cancel]")) {
         submit.disabled = channelDialogPending;

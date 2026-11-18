@@ -40,6 +40,32 @@ live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] :is(input, text
 }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form-actions { flex-wrap: wrap; align-items: center; }
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-action-spacer { flex: 1; }
+/* Channel settings: Cancel and Save sit together. Archive waits behind More, at the other end, and opens under it. */
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more { min-inline-size: 0; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more[hidden] { display: none; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more[open] { flex: 1 1 100%; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more > summary {
+  display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box; min-inline-size: 44px; min-block-size: 36px;
+  padding: 0 10px; border-radius: 6px; color: var(--k-shell-secondary); font: 500 13px var(--k-shell-font); cursor: pointer;
+}
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more > summary:hover { background: var(--k-shell-hover); color: var(--k-shell-ink); }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more > summary:focus-visible { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; }
+live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more > .dashboard__button { margin-block-start: 8px; }
+@media (width <= 64rem), (pointer: coarse) {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .cm-more > summary { min-block-size: 44px; }
+}
+/* A phone: More on its own line, then Cancel and Save side by side, each half the width. */
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .dashboard__channel-form-actions {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch;
+  }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .cm-more { grid-column: 1 / -1; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .cm-action-spacer { display: none; }
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .dashboard__channel-form-actions > .dashboard__button { inline-size: 100%; }
+  /* A reader has only Close: it takes the whole line. */
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .dashboard__channel-form-actions > .dashboard__button:only-of-type,
+  live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] [data-channel-rename-form] .dashboard__channel-form-actions:has(> [data-channel-rename-submit][hidden]) > [data-channel-settings-close] { grid-column: 1 / -1; }
+}
 live-dashboard.dashboard[data-kylon-shell] [data-channel-dialog] .dashboard__channel-form .dashboard__button:disabled:not([aria-busy="true"]) {
   border-style: solid; cursor: not-allowed; opacity: .5;
 }
