@@ -7,6 +7,7 @@ import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
 import { personTint } from "./home-names";
 import { buildPeoplePage } from "./people-page";
+import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } from "./people-invites";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -18,7 +19,7 @@ export interface PeopleDialogAgent {
   /** The agent's own name; `name` may carry a short id suffix where names repeat. */
   rawName?: string;
 }
-export interface PeopleDialogInvite { id: string; kind: "invite" | "agent" | "pending"; name: string; detail: string; mayCancel: boolean }
+export type PeopleDialogInvite = PeopleInvite;
 /** `workspaceName` is the viewer's name for this workspace; it is used only in the role refusal copy. */
 export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean; workspaceName?: string }
 export type PeopleDialogRole = PeopleDialogPerson["role"];
@@ -27,7 +28,7 @@ export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; r
 /** Open the dialog with one person or one agent selected. */
 export interface PeopleDialogFocus { kind: "person" | "agent"; id: string }
 /** Role drafts, outcomes, pending saves and initial focus are builder-owned and optional. */
-export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string; filter?: "all" | "people" | "agents";
+export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string; filter?: "all" | "people" | "agents" | "invites";
   roleDraft?: { userId: string; role: PeopleDialogRole; confirming: boolean; error?: string } | null; roleReceipt?: { userId: string; text: string } | null;
   roleRefusal?: { userId: string; name: string; text: string } | null;
   /** One entry per person whose role change is in flight. The entry object is the save's identity. */
@@ -77,6 +78,8 @@ export interface PeopleDialogCallbacks {
   changeRole?: (change: PeopleDialogRoleChange) => Promise<void>;
   /** rename_agent. A refusal resolves with the server's sentence; Rename is hidden without this callback. */
   rename?: (id: string, name: string, editor: number) => Promise<RenameOutcome>;
+  /** Reads the invites again after a failed load. Retry is hidden without this callback. */
+  reloadInvites?: () => Promise<void> | void;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -135,6 +138,7 @@ export function withdrawConfirmText(name: string, hosted: boolean): string {
 }
 export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name: string; hosted?: boolean; kind?: string }) {
   const name = item.name;
+  if (action === "cancel-invite") return peopleInviteConfirmCopy({ name, kind: (item.kind ?? "person") as PeopleInvite["kind"] });
   if (action === "remove-agent") return { title: `Remove ${name}?`, button: `Remove ${name}`,
     stops: item.hosted ? [`${name} will lose access to this space. Its identity and every connection will end.`, "This cannot be undone."] : [`${name} will lose access to this workspace immediately.`],
     stays: [`Its history stays as “${name} (removed)”.`, ...(item.hosted ? ["Its owner can connect a new agent with the same name."] : [])] };
@@ -147,13 +151,9 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
   if (action === "withdraw") return { title: "Withdraw Lists & docs?", button: "Withdraw access",
     stops: [`${name} will no longer be able to use Lists & docs here.`],
     stays: ["Existing lists, docs and history stay.", "You can allow access again on the Lists & docs card."] };
-  if (action === "remove-person") return { title: `Remove ${name}?`, button: `Remove ${name}`,
+  return { title: `Remove ${name}?`, button: `Remove ${name}`,
     stops: [`${name} will lose membership of this space.`, "This removal cannot be undone; they would need a new invitation to join again."],
     stays: ["History stays. Their other spaces are unaffected."] };
-  return { title: item.kind === "invite" ? "Cancel this invitation?" : "Cancel this unused key?",
-    button: item.kind === "invite" ? "Cancel invitation" : "Cancel key",
-    stops: [item.kind === "invite" ? `The invitation for ${name} will no longer work. No one has joined with it.` : `The unused key for ${name} will no longer work. No agent has used it.`],
-    stays: [item.kind === "invite" ? "You can send a new invitation later." : "You can create a new key later."] };
 }
 
 const ROLE_LABELS: Record<PeopleDialogRole, string> = { owner: "Owner", admin: "Admin", member: "Member" };
@@ -438,8 +438,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (!page && state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
   if (page && (state.query.trim() || (state.filter && state.filter !== "all"))) {
-    const people = page && state.filter === "agents" ? 0 : groups.length;
-    const agents = page && state.filter === "people" ? 0 : groups.reduce((count, group) => count + group.agents.length, other.length);
+    const people = state.filter === "agents" || state.filter === "invites" ? 0 : groups.length;
+    const agents = state.filter === "people" || state.filter === "invites" ? 0 : groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-roster-result pd-muted", `${people} ${people === 1 ? "person" : "people"} · ${agents} ${agents === 1 ? "agent" : "agents"} · ${invites.length} pending ${invites.length === 1 ? "invitation or key" : "invitations or keys"}${!people && !agents && !invites.length ? ". No matches. Try another name." : ""}`);
     result.setAttribute("role", "status"); host.append(result);
   }
@@ -649,10 +649,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (!page || state.filter !== "people") element.append(list);
     if (!agents.length) { const none = node(doc, "p", "pd-empty-person", "No agents added yet."); if (page) none.classList.add("pd-sr-only"); element.append(none); } return element;
   };
-  if (page || model.agents.length || state.query.trim() || model.people.length > 1) groups.forEach(({ person, agents }) => {
+  const invitesOnly = page && state.filter === "invites" && !model.sample;
+  if (!invitesOnly && (page || model.agents.length || state.query.trim() || model.people.length > 1)) groups.forEach(({ person, agents }) => {
     if (!page || state.filter !== "agents" || agents.length) grid.append(card(person, agents));
   });
-  if (other.length && (!page || state.filter !== "people")) grid.append(card(null, other));
+  if (other.length && !invitesOnly && (!page || state.filter !== "people")) grid.append(card(null, other));
   if (!page && !model.agents.length && !state.query.trim()) {
     const empty = node(doc, "section", "pd-empty"); const art = node(doc, "div", "pd-empty-art"); art.setAttribute("aria-hidden", "true");
     art.append(node(doc, "span", "pd-orbit"), node(doc, "span", "pd-initials", personLetters(model.people.find((person) => person.own)?.name ?? "Common Swarm")));
@@ -662,24 +663,32 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   }
   if (!page && !groups.length && !other.length && !invites.length && state.query.trim()) { const empty = node(doc, "p", "pd-muted", "No people, agents or invitations match. Try another name."); empty.setAttribute("role", "status"); grid.append(empty); }
   host.append(grid);
-  // Invited remains the same server-derived pending set, with plain presentation.
+  // Invited: every invite says who made it and when, and every one the viewer may end has Cancel.
   const invited = node(doc, "section", "dashboard__roster-dialog-pending pd-invited"); invited.dataset.dialogAccessSection = "";
-  invited.hidden = model.sample || (!invites.length && !model.pendingFailed); invited.setAttribute("aria-labelledby", "dashboard-roster-pending-title");
+  invited.hidden = model.sample || (!invitesOnly && !invites.length && !model.pendingFailed); invited.setAttribute("aria-labelledby", "dashboard-roster-pending-title");
   const invitedTitle = node(doc, "h3", "pd-muted", "Invited · "); invitedTitle.id = "dashboard-roster-pending-title"; invitedTitle.tabIndex = -1;
   const count = node(doc, "span", "", String(invites.length)); count.dataset.dialogAccessCount = ""; invitedTitle.append(count);
   const inviteList = node(doc, "ul", "pd-invite-list"); inviteList.dataset.dialogAccessList = "";
   for (const invite of invites) {
-    const row = node(doc, "li", "pd-invite"); const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "invite" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
-    if (invite.kind === "invite") symbol.append(icon(doc, "invite"));
-    const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "agent" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
+    const row = node(doc, "li", "pd-invite"); row.dataset.inviteKind = invite.kind;
+    const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "person" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
+    if (invite.kind === "person") symbol.append(icon(doc, "invite"));
+    const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "key" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
     copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
-    if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
-      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", `Cancel ${invite.kind === "invite" ? "invite" : "unused key"} for ${invite.name}`); row.append(cancel); }
+    if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, invite.kind === "agent" ? "Remove" : "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
+      cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", peopleInviteCancelLabel(invite)); row.append(cancel); }
     inviteList.append(row);
   }
-  const load = node(doc, "p", "pd-muted", "Invited: could not load"); load.dataset.pendingLoadNote = ""; load.hidden = !model.pendingFailed;
+  const none = node(doc, "p", "pd-muted", state.query.trim() ? "No invites match." : "No invites waiting."); none.dataset.invitesEmpty = "";
+  none.hidden = !invitesOnly || invites.length > 0 || model.pendingFailed;
+  const load = node(doc, "p", "pd-muted pd-invite-load", "Invites could not load. "); load.dataset.pendingLoadNote = ""; load.hidden = !model.pendingFailed;
+  if (model.pendingFailed) load.setAttribute("role", "alert");
+  if (callbacks.reloadInvites) { const retry = button(doc, "Retry", async (opener) => {
+      if (opener.disabled) return; opener.disabled = true; opener.setAttribute("aria-busy", "true");
+      try { await callbacks.reloadInvites?.(); } finally { if (opener.isConnected) { opener.disabled = false; opener.removeAttribute("aria-busy"); } }
+    }); retry.dataset.invitesRetry = ""; retry.dataset.pdFocus = "invites-retry"; load.append(retry); }
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
-  invited.append(invitedTitle, inviteList, load, inviteError); host.append(invited);
+  invited.append(invitedTitle, inviteList, none, load, inviteError); host.append(invited);
   if (page && side) {
     side.append(detail);
   }

@@ -27,9 +27,16 @@ export function buildPeoplePage(doc: Document, model: PeopleDialogModel, state: 
     search.addEventListener("input", () => nav.onQuery?.(search.value)); head.append(search);
   }
   const filters = make("div", "pd-page-filters"); filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "Show roster");
-  for (const [value, label] of [["all", "Members"], ["people", "People"], ["agents", "Agents"]] as const) {
+  // The sample workspace has no invites to show, so it has no Invites filter.
+  const choices = [["all", "Members"], ["people", "People"], ["agents", "Agents"], ...(model.sample ? [] : [["invites", "Invites"]])] as Array<[NonNullable<PeopleDialogState["filter"]>, string]>;
+  if (model.sample && state.filter === "invites") state.filter = "all";
+  for (const [value, label] of choices) {
     const filter = make("button", "", label); filter.type = "button"; filter.dataset.pdFocus = `filter-${value}`;
     filter.setAttribute("aria-pressed", String((state.filter ?? "all") === value));
+    if (value === "invites" && model.invites.length) {
+      const count = make("span", "pd-filter-count", String(model.invites.length)); count.dataset.invitesCount = "";
+      filter.append(" ", count); filter.setAttribute("aria-label", `Invites, ${model.invites.length} waiting`);
+    }
     filter.addEventListener("click", () => { state.filter = value; render(); }); filters.append(filter);
   }
   head.insertBefore(filters, head.querySelector("input"));

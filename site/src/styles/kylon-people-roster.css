@@ -65,3 +65,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invited h3 
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 6px; border-block-start: 1px solid var(--k-shell-line); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite .pd-agent-copy { flex: 1 1 140px; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite strong { font: 600 14px/1.5 var(--k-shell-font); white-space: normal; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-filter-count { color: var(--k-shell-muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invited :is([data-invites-empty], .pd-invite-load) { margin: 0; padding: 10px 6px; font-size: 13px; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-invite-load button {
+  min-block-size: 44px; min-inline-size: 44px; padding: 6px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--k-shell-ink); font: 600 13px/1.5 var(--k-shell-font); text-decoration: underline;
+}
