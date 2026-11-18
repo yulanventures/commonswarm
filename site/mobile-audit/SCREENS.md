@@ -38,7 +38,6 @@ Seed one dense workspace (12 long-named agents, 5 people, mixed providers/avatar
 | R16 | /support | SC screen | `site/src/pages/support.astro:6` | Base | Default; long scroll; header mobile menu; footer; keyboard links; code/table overflow where present |
 | R17 | /terms | SC screen | `site/src/pages/terms.astro:300` | Base, LegalDoc | Default; long scroll; header mobile menu; footer; keyboard links; code/table overflow where present |
 
-
 ## Native dialog inventory
 
 The November 3 baseline comprises 11 static declarations and 3 dynamic families; D15 adds the restored outer People & agents modal. Counts are definitions, not instances: role-change confirmations can repeat per member.
@@ -60,7 +59,6 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | D13 | Details sheet | `site/src/lib/kylon-shell/channel-details.ts:9` | .cs-details-sheet | [data-channel-details-toggle] | phone sheet vs desktop side pane; person/agent/entity selection; long details; close/back/Escape |
 | D14 | Own-role lowering confirmation | `site/src/lib/people-dialog-view.ts:362` | .hm-role-confirm / [data-role-confirm] | own role select + Save | cancel/confirm, refusal/busy, focus restoration; disposable owner only |
 | D15 | People & agents outer modal | `site/src/components/app/LiveDashboard.astro` | dialog[data-roster-dialog] | existing roster/person doors; cold ?v=people | dense roster; desktop columns/phone sheet; selected detail; accepted receipt; native nested confirmation; Esc/opener return; workspace/route/sign-out retirement |
-
 
 ## App screens and state families
 
@@ -89,7 +87,6 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | V21 | Invitation inbox overlay | `site/src/components/invite/HumanInvitationInbox.astro:41` | [data-invitations], [data-failure], [data-joined] | 0 hidden; many cards; checking failed/retry/dismiss; joined CTA; create-screen flow vs composer clearance |
 | V22 | Update and toast | `site/src/components/app/LiveDashboard.astro:1113` | [data-update-notice], Toast component | new build notice, dismiss/reload with draft; success/error toast and keyboard; safe area/composer overlap |
 
-
 ## Menus, popovers and inline disclosures (not new route/dialog counts)
 
 | ID | Surface | Source | Trigger/hook | Required states |
@@ -106,8 +103,6 @@ The November 3 baseline comprises 11 static declarations and 3 dynamic families;
 | M10 | Landing interactive preview | `site/src/components/landing/WorkspacePreview.astro:7` | [data-preview-tab], [data-open-preview], [data-example-item] | all tabs, synchronized checkboxes, narrow scrolling, long text; not real backend data |
 | M11 | Download install disclosures | `site/src/components/download/InstallPanel.astro:6` | platform controls and details/summary within InstallPanel | all OS instructions, copied/error commands, long command line; HR selector mapping |
 | M12 | Workspace resize separators | `site/src/lib/kylon-shell/resizers.ts:208` | .cs-resizer | five separators; small viewport clamps, keyboard/reset, orientation; not tooltips or dialogs |
-
-
 
 ### Additional source-confirmed views and menus from Track 1A
 
@@ -138,7 +133,6 @@ State codes for manifest joins: `L` loading; `E` empty; `X` read/network error; 
 
 ## Existing fixture sources (availability, not executed coverage)
 
-
 - `site/scripts/provider-fixtures.ts`
 
 - `site/src/components/app/admin-delegations.fixture.ts`
@@ -155,11 +149,9 @@ State codes for manifest joins: `L` loading; `E` empty; `X` read/network error; 
 
 - `site/src/lib/message-markdown-fixtures.ts`
 
-
 ## Source evidence appendix: declared panels/views and dialogs
 
 These exact declarations supplement stable IDs above; use them to match harness state selectors without assuming visibility. Line numbers bind only to baseline.
-
 
 ### `site/src/components/app/LiveDashboard.astro`
 
@@ -194,7 +186,6 @@ These exact declarations supplement stable IDs above; use them to match harness 
 | 1492 | `* Top-level dashboard panels only. AgentConnect reuses data-panel=… for its own` |
 | 1500 | `app.querySelector<HTMLElement>(`.dashboard__root > [data-panel="${name}"]`);` |
 
-
 ### `site/src/components/invite/InviteOnramp.astro`
 
 | Line | Declaration |
@@ -218,7 +209,6 @@ These exact declarations supplement stable IDs above; use them to match harness 
 | 1279 | `[data-view="review"] > .invite-onramp__choices + .invite-onramp__choices { margin-block-start: 26px; }` |
 | 1280 | `[data-view="review"] > .invite-onramp__facts { margin-block-start: 22px; }` |
 
-
 ### `site/src/components/connect/AgentConnect.astro`
 
 | Line | Declaration |
@@ -236,14 +226,12 @@ These exact declarations supplement stable IDs above; use them to match harness 
 | 1107 | `.ac[data-state="working"] [data-panel="working"],` |
 | 1108 | `.ac[data-state="done"] [data-panel="result"] {` |
 
-
 ### `site/src/components/invite/HumanInvitationInbox.astro`
 
 | Line | Declaration |
 | --- | --- |
 | 12 | `*   the review   a centered modal <dialog> (a bottom sheet on a phone) with the same content as` |
 | 64 | `<dialog class="human-invitations__dialog" data-review-dialog aria-labelledby="human-invitations-review-title">` |
-
 
 ### `site/src/components/SiteHeader.astro`
 
@@ -346,6 +334,8 @@ Private channel capture: `app.chat.private` is a private channel the viewer is a
 Unread capture: `app.chat.unread-bar` opens `#renovation`, 40 messages from others in the last hour that the viewer has not seen and has no read position in: more than the first page, so the first unread message is above the screen at every size. The bar over the top of the feed reads "40 unread · Jump to first unread" beside "Mark as read" (just "Jump to first unread" once the mark on view has landed, which a focused capture does at once), both wholly on screen; hovering or focusing either moves nothing (a desktop hover witness). Opening the channel marks it read, so the runner puts it back before each capture (`unread`, captured `alone`). It needs a server with read positions (mark_channel_read); an older one shows no bar and the capture fails on its ready condition.
 
 Direct message history: the lead agent's DM (`app.chat.dm`) holds 80 older notes from the agent, more than the loaded page of the workspace, so most of its rows come from the conversation's own history read. Their receipts must load like the page's: the hover witness waits for every receipt on screen, and at the tall sizes those rows are on screen.
+
+Jump to present captures: `app.chat.jump-present` opens `#household` and scrolls up through several loaded pages, and `app.chat.dm.jump-present` does the same in the direct messages with the lead agent (the seed gives that DM 80 short notes from the agent, so it is longer than two screens at every size). More than one screen above the newest message, the "Jump to present" pill is at the lower right of the feed, wholly on screen; hovering or focusing it moves nothing (a desktop hover witness). `app.chat.jump-present.back` then focuses the pill and presses Enter: the pill is gone, the newest message is on screen, and focus is in the composer, or on a phone on the newest message.
 
 Additional detail captures: `app.wiki.topic`, `app.wiki.editor`, `app.add-agent.existing`, `app.chat.history` (a channel whose newest messages are past their `until`: the notes stay, the status and the agent's note to itself do not). `app.chat.starred` (a starred channel: the Starred section in the rail, the pressed star and the bell in the header, and a muted row below) and `menu.notifications` (a muted channel's three notification levels: the bell's menu on a wide screen, the ⋯ menu's group on a phone). `menu.star-order` (the ⋯ of a starred row, where Move up and Move down change the viewer's own order; the seeded Channels list is in an order its owner chose, not by name). `app.chat.dm` separately tracks V05 (the header names the other party; its rows carry no recipient and the channel lead marker is absent, which the ready condition requires); `app.definitions.diff` tracks the V24 family. Additional invite, failure, keyboard, permission and write-outcome variants remain unbound and require dedicated entries before claiming coverage.
 

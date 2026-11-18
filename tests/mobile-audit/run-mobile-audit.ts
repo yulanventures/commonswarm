@@ -368,6 +368,11 @@ const HOVER_WITNESSES: Record<string, HoverSpec[]> = {
   // `prefer` names the jump button (one of the rows), which also photographs it at rest and on hover.
   "app.chat.unread-bar": [{ name: "unread-bar", rows: "[data-unread-bar]:not([hidden]) button", max: 2, focus: true,
     prefer: "[data-unread-jump]", require: ["[data-unread-jump]", "[data-unread-mark]"] }],
+  // Jump to present changes colour on hover and focus, never size, in a channel and in a DM.
+  "app.chat.jump-present": [{ name: "jump-present", rows: "[data-jump-present]:not([hidden]) button", max: 1, focus: true,
+    require: ["[data-jump-present-button]"] }],
+  "app.chat.dm.jump-present": [{ name: "jump-present", rows: "[data-jump-present]:not([hidden]) button", max: 1, focus: true,
+    require: ["[data-jump-present-button]"] }],
   // Decision cards: hovering a card's message or focusing its first option row must not move anything.
   "app.catchup.choice": [{ name: "catchup-choice", rows: "[data-home-catchup]:not([hidden]) .hm-catchup-needs [data-needs-you]",
     prefer: '[data-needs-you="{message.choiceOpen}"]', require: ['[data-needs-you="{message.choiceOpen}"]'], max: 1, focus: true,

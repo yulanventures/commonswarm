@@ -26,7 +26,7 @@ import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
-import { MARK_AS_READ_LABEL as MARK_AS_READ } from "../../lib/channel-reads";
+import { JUMP_TO_PRESENT_LABEL as JUMP_TO_PRESENT, MARK_AS_READ_LABEL as MARK_AS_READ } from "../../lib/channel-reads";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
 /* The name of the unfiltered view, in the markup as well as in the script. It was typed in
    three places and generated in the script, so the static "# all-signals" even carried a
@@ -576,6 +576,17 @@ import "../../styles/kylon-command-palette.css";
                 <p class="dashboard__feed-more-error" data-load-older-error role="alert" hidden></p>
               </div>
               <ol class="dashboard__feed" data-feed-list></ol>
+              {/* Under the feed while the newest message is more than a screen below the view. It takes no height in
+                  the scroller, so showing or hiding it never moves the transcript. The end mark is what it watches. */}
+              <div class="dashboard__feed-end" data-feed-end aria-hidden="true"></div>
+              <div class="dashboard__jump-present" data-jump-present hidden>
+                <button class="dashboard__jump-present-button" type="button" data-jump-present-button>
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <path d="M8 2.5V13M3.5 8.5 8 13l4.5-4.5"></path>
+                  </svg>
+                  <span>{JUMP_TO_PRESENT}</span>
+                </button>
+              </div>
             </section>
 
             {/* LISTS & DOCS (redesign, 2026-10-04). Two plain steps replace the raw consent form:
@@ -16299,6 +16310,38 @@ import "../../styles/kylon-command-palette.css";
         syncChannelRead();
       });
     }, { passive: true });
+    /* ── Jump to present ─────────────────────────────────────────────────────────────────────
+     * A reader more than one screen above the newest message gets one control back to it: the same control in
+     * channels, #general and DMs, which share this scroller. The feed's end mark is watched, not the scroll position
+     * read, so a scroll, a rebuilt list and a resized window all arrive the same way and nothing runs per scroll event.
+     * The margin is the one screen: the mark counts as near while it is within a screen below the view. */
+    const jumpPresent = one<HTMLElement>("[data-jump-present]");
+    /** Focus never leaves the conversation with the control: it goes to the composer, or on a phone (where that would
+     *  raise the keyboard) to the newest message. */
+    const keepFocusFromJumpPresent = (): void => {
+      if (!jumpPresent?.contains(document.activeElement)) return;
+      const newest = window.matchMedia?.("(max-width: 52rem)").matches
+        ? [...all<HTMLElement>("[data-feed-list] .dashboard__message[data-signal-id]")].reverse().find(row => row.getBoundingClientRect().height > 0)
+        : null;
+      (newest ?? one<HTMLElement>("[data-composer-input]"))?.focus({ preventScroll: true });
+    };
+    const jumpPresentScroller = feedScroller(), feedEnd = one<HTMLElement>("[data-feed-end]");
+    if (jumpPresent && jumpPresentScroller && feedEnd && "IntersectionObserver" in window) {
+      new IntersectionObserver((entries) => {
+        const entry = entries[entries.length - 1];
+        // A feed that is not on screen has no height to be a screen above anything.
+        const shown = !!entry && !entry.isIntersecting && (entry.rootBounds?.height ?? 0) > 0;
+        if (shown === !jumpPresent.hidden) return;
+        if (!shown) keepFocusFromJumpPresent();
+        jumpPresent.hidden = !shown;
+      }, { root: jumpPresentScroller, rootMargin: "0px 0px 100% 0px" }).observe(feedEnd);
+    }
+    one<HTMLButtonElement>("[data-jump-present-button]")?.addEventListener("click", () => {
+      scrollToNewest();
+      // Focus moves before the control goes, so it never passes through the page.
+      keepFocusFromJumpPresent();
+      if (jumpPresent) jumpPresent.hidden = true;
+    });
     one<HTMLButtonElement>("[data-unread-jump]")?.addEventListener("click", () => { void jumpToFirstUnread(); });
     one<HTMLButtonElement>("[data-unread-mark]")?.addEventListener("click", () => {
       const viewId = channelReadViewId();

@@ -8,6 +8,8 @@ export const MARK_AS_READ_LABEL = "Mark as read";
 export const MARK_ALL_AS_READ_LABEL = "Mark all as read";
 export const UNREAD_DIVIDER_LABEL = "Unread";
 export const JUMP_TO_FIRST_UNREAD_LABEL = "Jump to first unread";
+/** The feed's way back to the newest message, for a reader more than a screen up in history. */
+export const JUMP_TO_PRESENT_LABEL = "Jump to present";
 /** The bar's action while the first unread message is still older than every page loaded so far. */
 export const CONTINUE_LOADING_LABEL = "Continue loading";
 /** Older pages one Jump (or Continue loading) loads, at most, toward a first unread message above the loaded ones. */

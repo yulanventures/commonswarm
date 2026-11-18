@@ -2871,5 +2871,202 @@
       "dialog[data-channel-dialog][open] [data-channel-rename-submit]",
       "dialog[data-channel-dialog][open] [data-channel-lead-select]"
     ]
+  },
+  {
+    "id": "app.chat.jump-present",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "[data-jump-present]:not([hidden]) [data-jump-present-button]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ],
+    "frame": [
+      "[data-jump-present-button]"
+    ]
+  },
+  {
+    "id": "app.chat.dm.jump-present",
+    "kind": "view",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "press": "ControlOrMeta+k"
+      },
+      {
+        "waitFor": "dialog[data-command-palette][open] [data-command-palette-input]"
+      },
+      {
+        "type": "[data-command-palette-input]",
+        "text": "Atlas"
+      },
+      {
+        "click": "[data-command-palette-item=\"teammate:agent:{agent}\"]"
+      },
+      {
+        "waitFor": "[data-entity-panel]:not([hidden]) [data-entity-panel-close]"
+      },
+      {
+        "click": "[data-entity-panel-close]"
+      },
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      }
+    ],
+    "ready": "live-dashboard:has([data-composer-input][aria-label^=\"Message Atlas\"]) [data-jump-present]:not([hidden]) [data-jump-present-button]",
+    "states": [
+      "dense"
+    ],
+    "alone": true,
+    "requiresSeed": [
+      "create_workspace",
+      "create_agent_principal Atlas Research & Long-Running Investigations Agent",
+      "seed_dm",
+      "seed_dm_history"
+    ],
+    "frame": [
+      "[data-jump-present-button]"
+    ]
+  },
+  {
+    "id": "app.chat.jump-present.back",
+    "kind": "view",
+    "path": "/app?w={workspace}&c={channel.general}",
+    "setup": [
+      {
+        "waitFor": "[data-channel-view=\"feed\"]:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "scroll": "[data-feed-list] .dashboard__message[data-signal-id]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "waitFor": "[data-jump-present]:not([hidden]) [data-jump-present-button]"
+      },
+      {
+        "settle": true
+      },
+      {
+        "focus": "[data-jump-present-button]",
+        "press": "Enter"
+      }
+    ],
+    "ready": "live-dashboard:has([data-jump-present][hidden]):has(:is([data-composer-input], [data-feed-list] .dashboard__message[data-signal-id]):focus) [data-composer]:not([hidden]) [data-composer-input]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_channels"
+    ]
   }
 ]
