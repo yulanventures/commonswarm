@@ -37,11 +37,12 @@
 --    emitter (swarm.wake_workspace_signal) is dropped and reactions move off it. Each reader of a new
 --    message gets a bare {"v": 1} on their own topic (cswarm-member:<workspace>:<user>), sent by the
 --    deferred filer when the message's mapping row is checked, at commit, after validation, under the
---    conversation's row lock (FOR SHARE here; FOR UPDATE on every membership change, and on every
---    conversation in the workspace when someone leaves it). Readers: every live person in the
---    workspace for #general and public channels, the private channel's members, a 1:1's or group's
---    live people; a message for a narrower audience reaches only its sender and people recipients
---    among those. An agent's owner is never a reader by ownership. Agents keep their wake topic.
+--    conversation's row lock (FOR SHARE here and for a reaction; FOR UPDATE on every membership change,
+--    a person's removal from a private channel included, and on every conversation in the workspace
+--    when someone leaves it). Readers: every live person in the workspace for #general and public
+--    channels, the private channel's members, a 1:1's or group's live people; a message for a narrower
+--    audience, and addressed history never filed, reaches only its sender and people recipients among
+--    those. An agent's owner is never a reader by ownership. Agents keep their wake topic.
 -- 5. Release: swarm.conversations_backfill() runs once more at the end (messages and read marks since
 --    step 1, and step 1's membership rule for anyone added since). After this migration it is not run
 --    again: its public-channel rule would enrol new members in every channel.
@@ -414,7 +415,11 @@ BEGIN
     FROM swarm.conversation_signals AS cs
     JOIN swarm.signals AS s ON s.id = cs.signal_id AND s.workspace_id = cs.workspace_id
     WHERE cs.signal_id = p_through AND cs.conversation_id = p_conversation AND cs.workspace_id = p_workspace
-      AND (cs.audience = 'conversation'
+      -- The read rule 2a serves (swarm_read.signals): a message for everyone, or one the caller sent or is
+      -- addressed by. A group post's all-member audience is read by step 2b, not yet.
+      AND ((s.to_user_id IS NULL AND s.to_agent_principal_id IS NULL AND s.in_reply_to IS NULL
+          AND NOT EXISTS (SELECT 1 FROM swarm.signal_recipients AS any_r
+            WHERE any_r.signal_id = s.id AND any_r.workspace_id = s.workspace_id))
         OR (s.from_kind = p_actor_kind AND s.from_principal = p_actor)
         OR (p_actor_kind = 'user' AND s.to_user_id = p_actor)
         OR (p_actor_kind = 'agent' AND s.to_agent_principal_id = p_actor)
@@ -598,6 +603,11 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
   v_id uuid;
 BEGIN
+  -- Only a live sender of this workspace learns who left a group of its own set.
+  IF p_actor_kind IS NULL OR p_actor_kind NOT IN ('user', 'agent')
+    OR NOT swarm.actor_can_access_channel(p_workspace, NULL, p_actor_kind, p_actor) THEN
+    RETURN NULL;
+  END IF;
   SELECT c.conversation_id INTO v_id
   FROM swarm.conversations AS c
   WHERE c.workspace_id = p_workspace AND c.kind = 'group_dm'
@@ -607,6 +617,16 @@ BEGIN
   ORDER BY c.generation DESC LIMIT 1;
   RETURN CASE WHEN v_id IS NULL THEN NULL ELSE swarm.conversation_departed_name(v_id) END;
 END;
+$$;
+
+-- Before a stored conversation answer is replayed: may the caller still open that conversation? The
+-- same visibility the commands check (swarm.conversation_target).
+CREATE FUNCTION swarm.conversation_visible(p_workspace uuid, p_actor_kind text, p_actor uuid, p_conversation uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+  SELECT coalesce((SELECT t.visible
+    FROM swarm.conversation_target(p_workspace, p_actor_kind, p_actor, p_conversation) AS t
+    WHERE t.kind IS NOT NULL), false)
 $$;
 
 -- ---------------------------------------------------------------------------------------------------
@@ -753,13 +773,18 @@ $$;
 -- Realtime.
 
 -- Who hears that a message moved: the people who may read it, from its placement and audience (see the
--- header, point 4). A message with no placement (history only) keeps its pre-2a audience, without the
--- workspace topic.
+-- header, point 4). Readers are chosen under the conversation's row lock (FOR SHARE), the lock every
+-- membership change takes FOR UPDATE, so a reaction or post serialises with a leave or removal that is
+-- in flight. A message with no placement (history only) locks its channel's or #general's row; if it was
+-- for everyone it keeps its pre-2a audience, and if it was addressed only its sender and the people it
+-- was addressed to hear of it: never an agent's owner by ownership.
 CREATE FUNCTION swarm.signal_frame_readers(p_workspace uuid, p_signal uuid) RETURNS SETOF uuid
-LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
   v_signal record;
   v_place record;
+  v_kind text;
+  v_conversation uuid;
   v_visibility text;
 BEGIN
   SELECT s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id, s.in_reply_to,
@@ -776,6 +801,9 @@ BEGIN
   JOIN swarm.conversations AS c ON c.conversation_id = cs.conversation_id AND c.workspace_id = cs.workspace_id
   WHERE cs.signal_id = p_signal AND cs.workspace_id = p_workspace;
   IF FOUND THEN
+    v_kind := v_place.kind;
+    v_conversation := v_place.conversation_id;
+    PERFORM 1 FROM swarm.conversations AS c WHERE c.conversation_id = v_conversation FOR SHARE;
     IF v_place.audience = 'conversation' THEN
       IF v_place.kind IN ('general', 'public_channel') THEN
         RETURN QUERY SELECT m.user_id FROM swarm.memberships AS m
@@ -791,58 +819,49 @@ BEGIN
       END IF;
       RETURN;
     END IF;
-    RETURN QUERY
-      SELECT DISTINCT a.user_id
-      FROM (
-        SELECT CASE WHEN v_signal.from_kind = 'user' THEN v_signal.from_principal END AS user_id
-        UNION ALL SELECT v_signal.to_user_id
-        UNION ALL SELECT sr.recipient_user_id FROM swarm.signal_recipients AS sr
-          WHERE sr.signal_id = p_signal AND sr.workspace_id = p_workspace
-      ) AS a
-      WHERE a.user_id IS NOT NULL AND swarm.is_member(p_workspace, a.user_id)
-        AND CASE
-          WHEN v_place.kind IN ('dm', 'group_dm') THEN EXISTS (
-            SELECT 1 FROM swarm.conversation_members AS m
-            WHERE m.conversation_id = v_place.conversation_id AND m.member_user_id = a.user_id AND m.left_at IS NULL)
-          WHEN v_place.kind = 'private_channel' THEN
-            swarm.actor_can_access_channel(p_workspace, v_place.channel_id, 'user', a.user_id)
-          ELSE true END;
-    RETURN;
-  END IF;
-  IF v_signal.to_user_id IS NULL AND v_signal.to_agent_principal_id IS NULL AND v_signal.in_reply_to IS NULL
-    AND NOT v_signal.has_recipients THEN
-    IF v_signal.channel_id IS NOT NULL THEN
-      SELECT c.visibility INTO v_visibility
-      FROM swarm.channels AS c
-      WHERE c.workspace_id = p_workspace AND c.channel_id = v_signal.channel_id;
-      IF v_visibility = 'private' THEN
-        RETURN QUERY SELECT cm.user_id FROM swarm.channel_members AS cm
-          WHERE cm.workspace_id = p_workspace AND cm.channel_id = v_signal.channel_id AND cm.member_kind = 'user'
-            AND swarm.actor_can_access_channel(p_workspace, v_signal.channel_id, 'user', cm.user_id);
-        RETURN;
-      ELSIF v_visibility IS DISTINCT FROM 'open' THEN
-        RETURN;
+  ELSE
+    PERFORM 1 FROM swarm.conversations AS c
+    WHERE c.workspace_id = p_workspace
+      AND CASE WHEN v_signal.channel_id IS NULL THEN c.kind = 'general' ELSE c.conversation_id = v_signal.channel_id END
+    FOR SHARE;
+    IF v_signal.to_user_id IS NULL AND v_signal.to_agent_principal_id IS NULL AND v_signal.in_reply_to IS NULL
+      AND NOT v_signal.has_recipients THEN
+      IF v_signal.channel_id IS NOT NULL THEN
+        SELECT c.visibility INTO v_visibility
+        FROM swarm.channels AS c
+        WHERE c.workspace_id = p_workspace AND c.channel_id = v_signal.channel_id;
+        IF v_visibility = 'private' THEN
+          RETURN QUERY SELECT cm.user_id FROM swarm.channel_members AS cm
+            WHERE cm.workspace_id = p_workspace AND cm.channel_id = v_signal.channel_id AND cm.member_kind = 'user'
+              AND swarm.actor_can_access_channel(p_workspace, v_signal.channel_id, 'user', cm.user_id);
+          RETURN;
+        ELSIF v_visibility IS DISTINCT FROM 'open' THEN
+          RETURN;
+        END IF;
       END IF;
+      RETURN QUERY SELECT m.user_id FROM swarm.memberships AS m
+        WHERE m.workspace_id = p_workspace AND m.revoked_at IS NULL AND swarm.is_member(p_workspace, m.user_id);
+      RETURN;
     END IF;
-    RETURN QUERY SELECT m.user_id FROM swarm.memberships AS m
-      WHERE m.workspace_id = p_workspace AND m.revoked_at IS NULL AND swarm.is_member(p_workspace, m.user_id);
-    RETURN;
   END IF;
+  -- A narrower audience, placed or not: its sender and the people it is addressed to, who can still read
+  -- where it is.
   RETURN QUERY
-    SELECT DISTINCT party.user_id
+    SELECT DISTINCT a.user_id
     FROM (
-      SELECT v_signal.to_user_id AS user_id
+      SELECT CASE WHEN v_signal.from_kind = 'user' THEN v_signal.from_principal END AS user_id
+      UNION ALL SELECT v_signal.to_user_id
       UNION ALL SELECT sr.recipient_user_id FROM swarm.signal_recipients AS sr
         WHERE sr.signal_id = p_signal AND sr.workspace_id = p_workspace
-      UNION ALL SELECT p.owner_user_id FROM swarm.agent_principals AS p
-        WHERE p.principal_id IN (
-          SELECT v_signal.to_agent_principal_id
-          UNION ALL SELECT sr.recipient_agent_principal_id FROM swarm.signal_recipients AS sr
-            WHERE sr.signal_id = p_signal AND sr.workspace_id = p_workspace)
-    ) AS party
-    WHERE party.user_id IS NOT NULL AND swarm.is_member(p_workspace, party.user_id)
-      AND (v_signal.channel_id IS NULL
-        OR swarm.actor_can_access_channel(p_workspace, v_signal.channel_id, 'user', party.user_id));
+    ) AS a
+    WHERE a.user_id IS NOT NULL AND swarm.is_member(p_workspace, a.user_id)
+      AND CASE
+        WHEN v_kind IN ('dm', 'group_dm') THEN EXISTS (
+          SELECT 1 FROM swarm.conversation_members AS m
+          WHERE m.conversation_id = v_conversation AND m.member_user_id = a.user_id AND m.left_at IS NULL)
+        WHEN v_signal.channel_id IS NOT NULL THEN
+          swarm.actor_can_access_channel(p_workspace, v_signal.channel_id, 'user', a.user_id)
+        ELSE true END;
 END;
 $$;
 
@@ -1036,6 +1055,22 @@ CREATE TRIGGER channels_sync_creator_member
   AFTER INSERT ON swarm.channels
   FOR EACH ROW WHEN (NEW.visibility = 'open') EXECUTE FUNCTION swarm.conversation_creator_joins();
 
+-- A person leaving a private channel (channel_member_remove, channel_leave, workspace removal) takes the
+-- channel conversation's row FOR UPDATE, the lock frames are chosen under, so a post or reaction in flight
+-- either commits first or sees them gone.
+CREATE FUNCTION swarm.conversation_private_member_lock() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+BEGIN
+  PERFORM 1 FROM swarm.conversations AS c
+  WHERE c.conversation_id = OLD.channel_id AND c.workspace_id = OLD.workspace_id
+  FOR UPDATE;
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER channel_members_lock_conversation
+  AFTER DELETE ON swarm.channel_members
+  FOR EACH ROW WHEN (OLD.member_kind = 'user') EXECUTE FUNCTION swarm.conversation_private_member_lock();
+
 -- Every write of today's read positions, from any writer, is copied forward into conversation_reads.
 -- A position with no message (a person's "through now", an agent's "through now" marker id) is kept
 -- as a moment with no id.
@@ -1131,6 +1166,8 @@ ALTER FUNCTION swarm.conversation_post_route(uuid, text, uuid, uuid, uuid[], uui
 ALTER FUNCTION swarm.conversation_prefile(uuid, uuid, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.conversation_group_departed(uuid, text, uuid, uuid[], uuid[]) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.conversation_check_route(uuid, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.conversation_visible(uuid, text, uuid, uuid) OWNER TO swarm_admin;
+ALTER FUNCTION swarm.conversation_private_member_lock() OWNER TO swarm_admin;
 ALTER FUNCTION swarm.signal_frame_readers(uuid, uuid) OWNER TO swarm_admin;
 ALTER FUNCTION swarm.send_signal_frames(uuid, uuid) OWNER TO postgres;
 ALTER FUNCTION swarm.conversation_lock_workspace(uuid) OWNER TO swarm_admin;
@@ -1150,6 +1187,7 @@ REVOKE ALL ON FUNCTION swarm.conversation_member_join(uuid, uuid, text, uuid),
   swarm.conversation_set_notify(uuid, text, uuid, uuid, text, boolean, integer),
   swarm.conversation_post_route(uuid, text, uuid, uuid, uuid[], uuid[]), swarm.conversation_prefile(uuid, uuid, uuid),
   swarm.conversation_group_departed(uuid, text, uuid, uuid[], uuid[]), swarm.conversation_check_route(uuid, uuid, uuid),
+  swarm.conversation_visible(uuid, text, uuid, uuid), swarm.conversation_private_member_lock(),
   swarm.signal_frame_readers(uuid, uuid), swarm.send_signal_frames(uuid, uuid),
   swarm.conversation_lock_workspace(uuid), swarm.conversation_person_upkeep(), swarm.conversation_agent_upkeep(),
   swarm.conversation_creator_joins(), swarm.conversation_reads_follow(), swarm.conversation_preferences_follow()
@@ -1162,7 +1200,8 @@ GRANT EXECUTE ON FUNCTION swarm.conversation_open(uuid, text, uuid, uuid[], uuid
   swarm.conversation_mark_read(uuid, text, uuid, uuid, uuid),
   swarm.conversation_set_notify(uuid, text, uuid, uuid, text, boolean, integer),
   swarm.conversation_post_route(uuid, text, uuid, uuid, uuid[], uuid[]), swarm.conversation_prefile(uuid, uuid, uuid),
-  swarm.conversation_group_departed(uuid, text, uuid, uuid[], uuid[])
+  swarm.conversation_group_departed(uuid, text, uuid, uuid[], uuid[]),
+  swarm.conversation_visible(uuid, text, uuid, uuid)
 TO swarm_command;
 
 -- ---------------------------------------------------------------------------------------------------

@@ -223,6 +223,7 @@ import {
   isConversationCommandKind,
   parseConversationCommand,
   prefileConversationPost,
+  reauthorizedConversationReplay,
   routeConversationPost,
 } from "./conversations.ts";
 import { choiceOptionText } from "./choice-text.ts";
@@ -17102,6 +17103,13 @@ async function handleTransaction(
               ...(await optionalWakeForPrincipal(tx, auth.agent.principal_id)),
             },
           };
+        }
+        /* A stored conversation answer names a conversation and what was in it: it replays only while the
+         * caller may still open that conversation (the replay row above keeps its tags either way). */
+        if (matches && isConversationCommandKind(kind)) {
+          const reauthorized = await reauthorizedConversationReplay(tx, route.workspaceId, authActorIdentity(auth),
+            kind, record(existing.response) ?? {});
+          if (reauthorized !== null) return reauthorized.status === 404 ? reauthorized : decided(reauthorized);
         }
         return matches
           ? decided(replayResult(kind==="mint_agent_token" || kind===RENEW_AGENT_TOKEN_KIND
