@@ -84,3 +84,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent-statu
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent > :is(.pd-rename, .pd-reconnect-sentence, .pd-receipt, .pd-error) { grid-column: 1 / -1; }
 /* The selected row is marked by its own highlight; the older page style also indented it and added a second band. */
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-agent:has(> .pd-agent-disclosure[aria-expanded="true"]) { margin-inline: 0; padding-inline: 0; background: transparent; }
+/* On a phone the one long row action takes two lines, so a long name keeps most of its room. */
+@media (width <= 30rem) {
+  live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-row-repair[data-row-allow-agent-access] {
+    max-inline-size: 8em; padding: 4px 10px; white-space: normal; line-height: 1.3; text-align: center; text-wrap: balance;
+  }
+}

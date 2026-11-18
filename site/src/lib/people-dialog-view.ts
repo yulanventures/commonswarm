@@ -490,7 +490,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     // One click per seat: an own agent not yet allowed into Lists & docs gets the action on its row, in the
     // repair slot, unless a repair already holds it.
     else if (!model.sample && peopleDialogCanAct(model, "allow", agent.id)) {
-      const allow = actionButton("allow", agent, "Allow", notice, "data-row-allow-agent-access");
+      // The row says what is allowed: for a connected agent this one tap grants it.
+      const allow = actionButton("allow", agent, "Allow Lists & docs", notice, "data-row-allow-agent-access");
       allow.className = "pd-row-repair"; allow.setAttribute("aria-label", `Allow Lists & docs: ${agent.name}`);
       allow.dataset.pdFocus = `row-allow-${agent.id}`; row.append(allow);
     }
