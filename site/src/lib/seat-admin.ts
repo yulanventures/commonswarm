@@ -397,7 +397,7 @@ export function buildGrantSeatAdminCommand(draft: SeatAdminGrantDraft): Record<s
 
 export async function readSeatAdminStatus(
   session: Session,
-): Promise<{ ok: true; status: SeatAdminStatusResponse } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; status: SeatAdminStatusResponse } | { ok: false; code: string; message: string; httpStatus?: number }> {
   const d = deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
@@ -417,7 +417,7 @@ export async function readSeatAdminStatus(
         isRecord(raw) && typeof raw.message === "string"
           ? raw.message
           : "Could not check agent admin availability.";
-      return { ok: false, code, message };
+      return { ok: false, code, message, httpStatus: response.status };
     }
     const status = parseSeatAdminStatus(raw);
     if (!status) {
@@ -431,7 +431,7 @@ export async function readSeatAdminStatus(
 
 export async function readMySeatAdminGrants(
   session: Session,
-): Promise<{ ok: true; grants: SeatAdminGrantRow[] } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; grants: SeatAdminGrantRow[] } | { ok: false; code: string; message: string; httpStatus?: number }> {
   const d = deployment();
   if (!d) return { ok: false, code: "no_deployment", message: "No CommonSwarm deployment is configured." };
   try {
@@ -454,7 +454,7 @@ export async function readMySeatAdminGrants(
         isRecord(raw) && typeof raw.message === "string"
           ? raw.message
           : "Could not load agent admin access.";
-      return { ok: false, code, message };
+      return { ok: false, code, message, httpStatus: response.status };
     }
     const grants = parseSeatAdminGrants(raw);
     if (!grants) {
@@ -1026,6 +1026,17 @@ export function renderSeatAdminHistoryList(
     container.append(empty);
     return;
   }
+  const named = (grant: SeatAdminGrantRow): string => options.agentsByPrincipalId?.get(grant.principalId) ?? `Agent ${grant.principalId.slice(0, 8)}`;
+  // Agent names are not unique. Two agents that share a name carry a short agent id, before the action and in its
+  // confirmation; two grants that would still read the same carry a short grant id as well.
+  const holders = new Map<string, Set<string>>();
+  for (const grant of grants) holders.set(named(grant), (holders.get(named(grant)) ?? new Set()).add(grant.principalId));
+  const shownName = (grant: SeatAdminGrantRow): string =>
+    (holders.get(named(grant))?.size ?? 0) > 1 ? `${named(grant)} (agent ${grant.principalId.slice(0, 8)})` : named(grant);
+  const reads = (grant: SeatAdminGrantRow): string => [shownName(grant), grant.level, grant.organizationId ?? "", [...grant.workspaceIds].sort().join(","),
+    grant.scopeNames.join(","), seatAdminGrantStateLabel(grant, options.viewerUserId)].join("|");
+  const alike = new Map<string, number>();
+  for (const grant of grants) alike.set(reads(grant), (alike.get(reads(grant)) ?? 0) + 1);
   for (const grant of grants) {
     const card = doc.createElement("article");
     card.dataset.adminSeatGrant = grant.grantId;
@@ -1036,9 +1047,7 @@ export function renderSeatAdminHistoryList(
     const endedBy = seatAdminEndedBy(grant, options.viewerUserId);
     if (endedBy) card.dataset.adminSeatEndedBy = endedBy;
 
-    const agentName =
-      options.agentsByPrincipalId?.get(grant.principalId) ??
-      `Agent ${grant.principalId.slice(0, 8)}`;
+    const agentName = (alike.get(reads(grant)) ?? 0) > 1 ? `${shownName(grant)}, grant ${grant.grantId.slice(0, 8)}` : shownName(grant);
     const title = doc.createElement("h4");
     title.textContent = `${agentName} · ${formatGrantLevelLabel(grant.level)}`;
 

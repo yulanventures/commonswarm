@@ -10,6 +10,7 @@ import {
   adminApprovalLines, adminApprovalParts, adminClientAction, adminGateNotice, adminGrantLines, adminGrantSummary, adminRenewalDiff,
   assertAdminPageOwner, ADMIN_SITE_RENEWAL_GUIDANCE,
 } from "../src/lib/admin-delegations-view.js";
+import { parseSeatAdminGrants, renderSeatAdminHistoryList } from "../src/lib/seat-admin.js";
 
 const grant = fixture.grants[0]!, client = fixture.clients[0]!;
 const session = { access_token: "synthetic-human", user: { id: owner } };
@@ -167,7 +168,7 @@ class ViewElement {
   dataset: Record<string, string> = {};
   hidden = false; disabled = false; open = false;
   private content = "";
-  private listeners = new Map<string, () => void>();
+  private listeners = new Map<string, (event: { preventDefault(): void }) => void>();
   get textContent(): string { return this.content + this.children.map(child => child.textContent).join(""); }
   set textContent(value: string) { this.content = value; this.children = []; }
   // The shared agent list builds its rows through the container's own document.
@@ -177,13 +178,18 @@ class ViewElement {
   append(...children: ViewElement[]): void { this.children.push(...children); }
   replaceChildren(...children: ViewElement[]): void { this.content = ""; this.children = children; }
   setAttribute(): void {}
-  addEventListener(event: string, callback: () => void): void { this.listeners.set(event, callback); }
-  click(): void { this.listeners.get("click")?.(); }
+  addEventListener(event: string, callback: (event: { preventDefault(): void }) => void): void { this.listeners.set(event, callback); }
+  fire(event: string): void { this.listeners.get(event)?.({ preventDefault() {} }); }
+  click(): void { this.fire("click"); }
+  focus(): void {}
+  remove(): void {}
+  /** Every element under this one, itself included. */
+  all(): ViewElement[] { return [this, ...this.children.flatMap(child => child.all())]; }
   showModal(): void { this.open = true; }
   close(): void { this.open = false; }
 }
 
-async function componentView(fetcher: typeof fetch) {
+async function componentView(fetcher: typeof fetch, adminPostCommand?: (...args: unknown[]) => unknown) {
   const component = new URL("../src/components/app/AdminDelegations.astro", import.meta.url);
   const script = (await readFile(component, "utf8")).split("<script>")[1]!.split("</script>")[0]!;
   const bundle = await build({ stdin: { contents: script, loader: "ts", resolveDir: new URL(".", component).pathname },
@@ -195,7 +201,7 @@ async function componentView(fetcher: typeof fetch) {
         export const currentSession = async () => globalThis.humanSession;
         export const client = () => ({ auth: { onAuthStateChange() {} } });
         export const uuid = () => "unused";
-        export const postCommand = () => { throw new Error("Unexpected command"); };
+        export const postCommand = (...args) => { if (globalThis.adminPostCommand) return globalThis.adminPostCommand(...args); throw new Error("Unexpected command"); };
         export const myOrganizations = async () => [];
         export const myWorkspaces = async () => [];
       ` }));
@@ -210,11 +216,11 @@ async function componentView(fetcher: typeof fetch) {
     querySelectorAll: (selectors: string) => selectors === "[data-admin-view]" ? [] : selectors.split(", ").map(one),
   });
   root.dataset.adminPolicy = JSON.stringify(policy);
-  const context = createContext({ humanSession: session, fetch: fetcher, Element: ViewElement, AbortSignal, AbortController,
+  const context = createContext({ humanSession: session, adminPostCommand, CustomEvent: class { constructor(public type: string) {} }, fetch: fetcher, Element: ViewElement, AbortSignal, AbortController,
     setTimeout, clearTimeout, console, Error, URL, Headers, Request, Response, TextEncoder, TextDecoder,
     document: { querySelector: (selector: string) => selector === "admin-delegations" ? root : null,
       createElement: () => new ViewElement(), addEventListener() {} },
-    window: { addEventListener() {}, setTimeout, setInterval() {} },
+    window: { addEventListener() {}, dispatchEvent() {}, setTimeout, setInterval() {} },
   });
   runInContext(bundle.outputFiles[0]!.text, context);
   // Wait for the actual read lifecycle; no delay or timeout is mocked in the loader.
@@ -232,25 +238,28 @@ async function componentView(fetcher: typeof fetch) {
   return one;
 }
 
+const AGENT = "55555555-5555-4555-8555-555555555555", AGENT_GRANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const agentGrant = (patch: Record<string, unknown> = {}) => ({ grant_id: AGENT_GRANT, principal_id: AGENT, level: "workspace", organization_id: null,
+  scope_names: ["role:workspace_admin"], workspace_ids: [owner], expires_at: null, state: "active", created_at: at, ended_at: null, ...patch });
+const agentStatus = { enabled: true, registry_version: 3, agents: [{ principal_id: AGENT, name: "Atlas", eligible: { workspace: [owner], organization: [] }, active_grant_ids: [] }] };
+const turn = async (until: () => boolean) => { for (let i = 0; i < 300 && !until(); ++i) await new Promise<void>(resolve => setImmediate(resolve)); };
+const idle = async () => { for (let i = 0; i < 60; ++i) await new Promise<void>(resolve => setImmediate(resolve)); };
+
 test("admin-site-lifecycle agent rows follow the server's state, and a refused read clears them and drops a read still on its way", async () => {
-  const agent = "55555555-5555-4555-8555-555555555555";
-  let refuse = false, release!: () => void;
+  let refuse = false, hold = false, agentReads = 0, release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const one = await componentView(async (url, options) => {
     if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
     if (String(url).includes("/rpc/my_seat_admin_grants")) {
-      // After the refusal, the agent read is still on its way when the main read is refused.
-      if (refuse) await held;
+      ++agentReads;
+      if (hold) await held;
       // The server calls this grant active; its end time is long past on any device clock.
-      return Response.json({ grants: [{ grant_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", principal_id: agent, level: "workspace", organization_id: null,
-        scope_names: ["role:workspace_admin"], workspace_ids: [owner], expires_at: "2020-01-01T00:00:00.000Z", state: "active", created_at: at, ended_at: null }] });
+      return Response.json({ grants: [agentGrant({ expires_at: "2020-01-01T00:00:00.000Z" })] });
     }
     const body = JSON.parse(String(options?.body));
-    if (body.resource === "seat_admin_status") return Response.json({ enabled: true, registry_version: 3,
-      agents: [{ principal_id: agent, name: "Atlas", eligible: { workspace: [owner], organization: [] }, active_grant_ids: [] }] });
+    if (body.resource === "seat_admin_status") return Response.json(agentStatus);
     return Response.json({ ...fixture, grants: refuse ? [{ ...grant, owner_user_id: foreign }] : [grant], clients: [], workers: [], coverage: [], actions: [] });
   });
-  const turn = async (until: () => boolean) => { for (let i = 0; i < 200 && !until(); ++i) await new Promise<void>(resolve => setImmediate(resolve)); };
   const current = one("[data-admin-seat-grants]"), past = one("[data-admin-past-seat-grants]");
   await turn(() => current.children.length > 0 || past.children.length > 0);
   // A fast device clock does not file a server-active grant under Past grants or take its action away.
@@ -259,6 +268,12 @@ test("admin-site-lifecycle agent rows follow the server's state, and a refused r
   assert.ok(current.children[0]!.children.some(child => child.textContent === "Remove admin access"));
   assert.ok(current.children[0]!.textContent.includes("has passed on this device"));
 
+  // A second full refresh succeeds, and its agent read is still on its way...
+  hold = true;
+  one("[data-admin-refresh]").click();
+  await turn(() => agentReads === 2);
+  assert.equal(agentReads, 2);
+  // ...when a third is refused.
   refuse = true;
   one("[data-admin-refresh]").click();
   await turn(() => one("dialog").dataset.adminState === "refused");
@@ -267,11 +282,116 @@ test("admin-site-lifecycle agent rows follow the server's state, and a refused r
   assert.equal(one("[data-admin-seat-section]").hidden, true);
   // The agent read that was already on its way now answers. It must not draw anything.
   release();
-  for (let i = 0; i < 50; ++i) await new Promise<void>(resolve => setImmediate(resolve));
+  await idle();
   assert.equal(current.children.length, 0, "a late agent read does not repopulate cleared rows");
   assert.equal(past.children.length, 0);
+  assert.equal(agentReads, 2, "and a refused view starts no agent read of its own");
   // Nothing claims "none" after a refusal.
   assert.equal(one("[data-admin-empty]").hidden, true); assert.equal(one("[data-admin-clients]").children.length, 0);
+});
+
+test("admin-site-lifecycle a Remove that answers after a refusal draws nothing and reads nothing", async () => {
+  let refuse = false, agentReads = 0, releaseMain!: () => void, answerRemove!: (value: unknown) => void;
+  const mainHeld = new Promise<void>(resolve => { releaseMain = resolve; });
+  const removeHeld = new Promise<unknown>(resolve => { answerRemove = resolve; });
+  let removes = 0;
+  const one = await componentView(async (url, options) => {
+    if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
+    if (String(url).includes("/rpc/my_seat_admin_grants")) { ++agentReads; return Response.json({ grants: [agentGrant()] }); }
+    const body = JSON.parse(String(options?.body));
+    if (body.resource === "seat_admin_status") return Response.json(agentStatus);
+    if (refuse) await mainHeld;
+    return Response.json({ ...fixture, grants: refuse ? [{ ...grant, owner_user_id: foreign }] : [grant], clients: [], workers: [], coverage: [], actions: [] });
+  }, () => { ++removes; return removeHeld; });
+  const current = one("[data-admin-seat-grants]");
+  await turn(() => current.children.length > 0);
+  assert.equal(agentReads, 1);
+  // A refresh is under way (its read will be refused)...
+  refuse = true;
+  one("[data-admin-refresh]").click();
+  await idle();
+  // ...when the person confirms Remove on a row that is still on screen.
+  current.children[0]!.children.find(child => child.textContent === "Remove admin access")!.click();
+  const ending = current.all().find(node => node.dataset.seatAdminEnd !== undefined)!;
+  // The confirmation is a dialog holding one form; End access submits it.
+  assert.ok(ending.children[0]!.all().some(node => node.dataset.seatAdminEndConfirm !== undefined));
+  ending.children[0]!.fire("submit");
+  await turn(() => removes === 1);
+  assert.equal(removes, 1, "the Remove was sent once");
+  // The refresh is refused: everything is cleared.
+  releaseMain();
+  await turn(() => one("dialog").dataset.adminState === "refused");
+  assert.equal(current.children.length, 0);
+  // The Remove now answers "accepted". Its result must not be drawn into the refused view, nor start an agent read.
+  answerRemove({ status: 200, body: { status: "accepted", seat_admin_grant: agentGrant({ state: "downgraded", ended_at: at, end_reason: "owner_downgrade" }) } });
+  await idle();
+  assert.equal(current.children.length, 0, "a late Remove does not redraw agent rows");
+  assert.equal(one("[data-admin-past-seat-grants]").children.length, 0);
+  assert.equal(agentReads, 1, "and it starts no agent read while the view is refused");
+  assert.equal(one("dialog").dataset.adminState, "refused");
+  assert.ok(one("[data-admin-status]").textContent.includes("could not be verified"));
+});
+
+test("admin-site-lifecycle an agent read that is not allowed clears the whole view; one that fails in passing keeps it and offers Retry", async () => {
+  let agentAnswer: () => Response = () => Response.json(agentStatus);
+  const one = await componentView(async (url, options) => {
+    if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
+    if (String(url).includes("/rpc/my_seat_admin_grants")) return Response.json({ grants: [agentGrant()] });
+    const body = JSON.parse(String(options?.body));
+    if (body.resource === "seat_admin_status") return agentAnswer();
+    const page: typeof fixture = { ...fixture, grants: [], clients: [], workers: [], coverage: [], actions: [] };
+    if (body.resource === "admin_grants") page.grants = [grant];
+    if (body.resource === "admin_history") page.actions = fixture.actions;
+    return Response.json(page);
+  });
+  const clientRows = one("[data-admin-grants]"), agentRows = one("[data-admin-seat-grants]"), history = one("[data-admin-actions]");
+  await turn(() => agentRows.children.length > 0);
+  assert.equal(clientRows.children.length, 1); assert.equal(agentRows.children.length, 1); assert.equal(history.children.length, 1);
+
+  // A passing failure of the agent read: the client rows stay, and the agent section says what happened with Retry.
+  agentAnswer = () => Response.json({ error: "temporarily_unavailable", message: "Could not check agent admin availability." }, { status: 503 });
+  one("[data-admin-refresh]").click();
+  await turn(() => !one("[data-admin-seat-retry]").hidden);
+  assert.equal(one("[data-admin-seat-retry]").hidden, false);
+  assert.equal(one("dialog").dataset.adminState, "ready");
+  assert.equal(clientRows.children.length, 1, "client rows stay through a passing agent failure");
+  assert.equal(one("[data-admin-empty]").hidden, true, "and a failed agent read is not counted as none");
+
+  // The agent reader says this person is not allowed: everything already drawn is cleared, client rows included.
+  agentAnswer = () => Response.json({ error: "forbidden" }, { status: 403 });
+  one("[data-admin-refresh]").click();
+  await turn(() => one("dialog").dataset.adminState === "refused");
+  assert.equal(one("dialog").dataset.adminState, "refused");
+  assert.equal(clientRows.children.length, 0, "client grants are cleared");
+  assert.equal(agentRows.children.length, 0); assert.equal(history.children.length, 0);
+  assert.equal(one("[data-admin-seat-retry]").hidden, true);
+  assert.ok(one("[data-admin-status]").textContent.includes("could not be verified"));
+});
+
+test("admin-site-lifecycle agents that share a name are told apart before Remove and in its confirmation", () => {
+  const other = "66666666-6666-4666-8666-666666666666";
+  const rows = parseSeatAdminGrants({ grants: [agentGrant(), agentGrant({ grant_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", principal_id: other })] })!;
+  const names = new Map([[AGENT, "Atlas"], [other, "Atlas"]]);
+  const list = new ViewElement();
+  renderSeatAdminHistoryList(list as never, rows, { agentsByPrincipalId: names, workspacesById: new Map([[owner, "Studio"]]), onRemove() {} });
+  const titles = list.children.map(card => card.children[0]!.textContent);
+  assert.deepEqual(titles, ["Atlas (agent 55555555) · Workspace admin", "Atlas (agent 66666666) · Workspace admin"]);
+  const effects = list.children.map(card => card.all().find(node => node.dataset.adminSeatEffect !== undefined)!.textContent);
+  assert.deepEqual(effects, ["Removing ends Atlas (agent 55555555)'s admin access in Studio.", "Removing ends Atlas (agent 66666666)'s admin access in Studio."]);
+  // The confirmation the second row opens names the same agent.
+  list.children[1]!.children.find(child => child.textContent === "Remove admin access")!.click();
+  const ending = list.all().find(node => node.dataset.seatAdminEnd !== undefined)!;
+  assert.ok(ending.textContent.includes("Atlas (agent 66666666)") && !ending.textContent.includes("55555555"));
+  // A lone agent keeps its plain name.
+  const lone = new ViewElement();
+  renderSeatAdminHistoryList(lone as never, rows.slice(0, 1), { agentsByPrincipalId: names, workspacesById: new Map([[owner, "Studio"]]), onRemove() {} });
+  assert.equal(lone.children[0]!.children[0]!.textContent, "Atlas · Workspace admin");
+  // Two grants for one agent that would read the same carry their grant ids as well.
+  const twins = parseSeatAdminGrants({ grants: [agentGrant(), agentGrant({ grant_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })] })!;
+  const twinList = new ViewElement();
+  renderSeatAdminHistoryList(twinList as never, twins, { agentsByPrincipalId: names, workspacesById: new Map([[owner, "Studio"]]), onRemove() {} });
+  assert.deepEqual(twinList.children.map(card => card.children[0]!.textContent),
+    ["Atlas, grant aaaaaaaa · Workspace admin", "Atlas, grant bbbbbbbb · Workspace admin"]);
 });
 
 test("admin-site-lifecycle renders owned dependencies and plain renewal labels, then clears foreign rows", async () => {

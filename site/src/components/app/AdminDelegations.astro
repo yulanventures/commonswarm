@@ -336,6 +336,24 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         one<HTMLElement>("[data-admin-indicator-detail]").textContent = "Review access or try again.";
       }
     };
+    /* Any read that says this person may not see this view, the main one or an agent one, clears everything the view
+       drew: client grants, approvals, history, coverage, agent rows and the workspace names. It also takes a new
+       generation, so a read or a Remove still on its way finds itself out of date and draws nothing. The view then
+       stays cleared until a full refresh succeeds. */
+    const refuseView = (message: string): void => {
+      ++generation;
+      grants = []; actions = []; clients = []; workers = []; coverage = [];
+      grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null;
+      clearSeats(); seatActive = seatPast = -1; forgetNames(); scopeLine();
+      busy = false; loaded = false; dialog.dataset.adminState = "refused"; render(); status(message);
+    };
+    const denied = (result: { httpStatus?: number }): boolean => result.httpStatus === 401 || result.httpStatus === 403;
+    /* The agent rows are read only after the main read has answered yes, so nothing of theirs is drawn beside a
+       refusal, not even for a moment. */
+    const refresh = async (): Promise<void> => {
+      await load();
+      if (dialog.dataset.adminState === "ready") await loadSeatAdmin();
+    };
     type Collection = "grants" | "actions" | "clients" | "workers" | "coverage";
     const load = async (more?: Collection): Promise<void> => {
       if (!session || busy) return;
@@ -359,12 +377,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         busy = false; loaded = true; dialog.dataset.adminState = "ready"; render(); status("");
       } catch (error) {
         if (generation !== at) return;
-        // A refused/foreign projection must not leave previously rendered private rows behind.
-        grants = []; actions = []; clients = []; workers = []; coverage = [];
-        grantsBefore = actionsBefore = clientsBefore = workersBefore = coverageBefore = null;
-        // The agent rows and the workspace names go too, and any read of them still on its way is dropped.
-        clearSeats(); seatActive = seatPast = -1; forgetNames(); scopeLine();
-        busy = false; loaded = false; dialog.dataset.adminState = "refused"; render(); status(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
+        refuseView(error instanceof AdminRecoveryReadError ? error.message : "Admin access could not be verified for your account. Refresh or sign in again.");
       }
     };
     const loadSeatAdmin = async (): Promise<void> => {
@@ -380,7 +393,8 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       const statusResult = await readSeatAdminStatus(ownSession);
       if (stale()) return;
       if (!statusResult.ok) {
-        // A read that failed is not an answer of "none": say what happened and offer Retry.
+        if (denied(statusResult)) { refuseView("Admin access could not be verified for your account. Refresh or sign in again."); return; }
+        // A read that failed in passing is not an answer of "none": say what happened and offer Retry.
         container.replaceChildren(text("p", statusResult.message)); pastContainer.replaceChildren();
         section.hidden = false; retry.hidden = false;
         return;
@@ -400,6 +414,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
       ]);
       if (stale()) return;
       if (!grantsResult.ok) {
+        if (denied(grantsResult)) { refuseView("Admin access could not be verified for your account. Refresh or sign in again."); return; }
         container.replaceChildren(text("p", grantsResult.message)); pastContainer.replaceChildren();
         section.hidden = false;
         retry.hidden = false;
@@ -443,7 +458,15 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
           }
           seatStatus("Removing agent admin access…");
           const outcome = await endSeatAdmin(activeSession, requestId, g.grantId);
-          if (generation !== callGen || session?.user.id !== activeSession.user.id) return;
+          if (session?.user.id !== activeSession.user.id) return;
+          if (generation !== callGen) {
+            /* The view was refreshed or refused while this was on its way, so this result may not be drawn into it.
+               After a refusal nothing is read or drawn until a full refresh succeeds. If the view has since been read
+               again in full, its agent rows are read again so the list shows what is true now. */
+            seatBusy = false;
+            if (dialog.dataset.adminState === "ready") void loadSeatAdmin();
+            return;
+          }
           seatBusy = false;
           if (outcome.kind === "accepted") {
             seatEndRequestIds.delete(g.grantId);
@@ -486,11 +509,11 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         workspaceNames = new Map(rows.filter(row => row.id && row.name?.trim()).map(row => [row.id.toLowerCase(), row.name.trim()]));
         scopeLine(); if (!busy) render();
       }).catch(() => {});
-      void load(); void loadSeatAdmin();
+      void refresh();
     };
     one("[data-admin-indicator]").addEventListener("click", () => open(indicatorView));
     one("[data-admin-close]").addEventListener("click", () => dialog.close());
-    one("[data-admin-refresh]").addEventListener("click", () => { void load(); void loadSeatAdmin(); void indicator(); });
+    one("[data-admin-refresh]").addEventListener("click", () => { void refresh(); void indicator(); });
     one("[data-admin-seat-retry]").addEventListener("click", () => { void loadSeatAdmin(); });
     one("[data-admin-more-grants]").addEventListener("click", () => { void load("grants"); });
     one("[data-admin-more-actions]").addEventListener("click", () => { void load("actions"); });
