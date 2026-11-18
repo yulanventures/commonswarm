@@ -13503,7 +13503,8 @@ import "../../styles/kylon-command-palette.css";
       const first = mode === "create" ? one<HTMLElement>("[data-channel-new-slug]")
         : mode === "settings" ? (focusOn === "lead" && lead && !lead.hidden ? lead
           : one<HTMLElement>(focusOn === "description" ? "[data-channel-edit-description]" : "[data-channel-rename-slug]"))
-        : one<HTMLElement>("[data-channel-archive-submit]");
+        // The archive confirmation opens on Cancel: a second Enter after the one that opened it must not archive.
+        : one<HTMLElement>("[data-channel-archive-cancel]");
       first?.focus({ preventScroll: true });
     };
     const closeChannelDialog = (): void => {
@@ -16236,7 +16237,8 @@ import "../../styles/kylon-command-palette.css";
       if (channel.archivedAt) { void submitChannelUnarchive(channel.channelId, "dialog", event.currentTarget as HTMLButtonElement); return; }
       channelArchiveBackToSettings = true; channelDialogMode = "archive";
       setChannelDialogError(""); renderChannelDialog(false);
-      one<HTMLElement>("[data-channel-archive-submit]")?.focus();
+      // On Cancel, never on the action: Enter on Archive channel followed by another Enter archives nothing.
+      one<HTMLElement>("[data-channel-archive-cancel]")?.focus();
     });
     one<HTMLButtonElement>("[data-channel-archive-cancel]")?.addEventListener("click", () => {
       if (!channelArchiveBackToSettings) { closeChannelDialog(); return; }
