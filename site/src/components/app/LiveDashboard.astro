@@ -280,7 +280,9 @@ import "../../styles/kylon-command-palette.css";
               aria-controls="dashboard-user-menu"
               aria-label="Your account, profile and account settings"
             >
-              <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark data-user-avatar aria-hidden="true">U</span>
+              {/* The initials are drawn from the attribute (home/shell.css), not written as text: the button's visible
+                  words are then the name alone, which its accessible name contains (WCAG 2.5.3). */}
+              <span class="dashboard__org-mark dashboard__user-trigger-mark" data-org-mark data-user-avatar data-initials="U" aria-hidden="true"></span>
               <span class="dashboard__user-trigger-brand" data-org-name data-rail-account>Your account</span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
@@ -5544,7 +5546,7 @@ import "../../styles/kylon-command-palette.css";
       const name = one<HTMLElement>("[data-org-name]");
       if (name) name.textContent = viewerLabel;
       const mark = one<HTMLElement>("[data-org-mark]");
-      if (mark) mark.textContent = avatarMark;
+      if (mark) { mark.dataset.initials = avatarMark; mark.textContent = ""; }
       one<HTMLElement>("[data-user-menu-trigger]")?.setAttribute("aria-label", `${viewerLabel}, profile and account settings`);
       const orgSlot = one<HTMLElement>("[data-org-menu]");
       const orgKey = JSON.stringify(orgs);
