@@ -664,6 +664,20 @@ test("a public message that mentions the seat's agent arrives in its check, and 
   const opened = await runHarness<HarnessResult>(fixture, { operation: "single" });
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   assert.deepEqual((opened.body.signals as Array<{ id: string }>).map((signal) => signal.id), [mineId]);
+
+  // The HM37 harness checks every hosted batch with a functional proof. The September proof predates mentions and
+  // refuses this open batch; the current one, which the harness runs, accepts it.
+  const proof = async (file: string) => {
+    const source = await readFile(new URL(`../../deploy/release-proofs/item-hm/${file}`, import.meta.url), "utf8");
+    const query = source.slice(0, source.indexOf("\\gset")).trim().replace(/;\s*$/u, "");
+    return await sql.begin(async (tx) => {
+      await tx.unsafe("SET LOCAL ROLE swarm_command");
+      const [row] = await tx.unsafe<{ functional_ok: boolean }[]>(query);
+      return row?.functional_ok;
+    });
+  };
+  assert.equal(await proof("20260928000004-functional.sql"), false, "the released proof predates mention batches");
+  assert.equal(await proof("20261113000001-hosted-check-functional.sql"), true, "the current proof accepts them");
 });
 
 test("a check marks each ask and note it returns with one 👀 by the seat's agent, once, and its result is unchanged", async () => {
