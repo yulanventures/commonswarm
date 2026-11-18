@@ -15,6 +15,7 @@ for _ in {1..50}; do
 done
 grep -q 'listening' "$scratch/fixture.log"
 test "$(curl -fsS http://127.0.0.1:8765/fixture/upgrade-stage)" = '"sign-in"'
+marker=$(uuidgen)
 for version in 2 3; do
     xcodebuild -quiet test -project ios/CommonSwarm.xcodeproj -scheme HistoryUI \
         -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
@@ -23,7 +24,12 @@ for version in 2 3; do
     app=$(xcrun simctl get_app_container "$udid" com.commonswarm.ios app)
     test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Info.plist")" = "$version"
     data=$(xcrun simctl get_app_container "$udid" com.commonswarm.ios data)
-    if [[ "$version" = 2 ]]; then first_data="$data"; else test "$first_data" = "$data"; fi
+    # iOS may move a preserved data container to a new URL during an update.
+    if [[ "$version" = 2 ]]; then
+        echo "$marker" > "$data/Documents/upgrade-witness"
+    else
+        test "$(cat "$data/Documents/upgrade-witness")" = "$marker"
+    fi
 done
 test "$(curl -fsS http://127.0.0.1:8765/fixture/upgrade-stage)" = '"complete"'
-echo "Build 2 to 3 passed in the same app container. Results: $scratch"
+echo "Build 2 to 3 preserved sign-in and app data. Results: $scratch"
