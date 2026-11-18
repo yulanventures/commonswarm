@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { privateCommandFailureCapture } from "../support/admin-principal-lock-order-harness.mjs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -374,6 +374,53 @@ test("a body that predates channels still posts, and one that names a channel la
   );
   assert.equal(filed.status, 200, JSON.stringify(filed.body));
   assert.equal(signalOf(filed.body).channel_id, channel.channel_id);
+});
+
+test("the native iOS DM envelope files an agent message and replays one receipt", async () => {
+  const wire = readFileSync(new URL("../../ios/Development/post-agent.json", import.meta.url), "utf8");
+  // Only substitute seeded IDs. Missing, extra, null and misspelled wire fields reach the real validator.
+  const body = wire.replaceAll("00000000-0000-4000-8000-000000000003", f.workspace)
+    .replaceAll("00000000-0000-4000-8000-000000000002", f.principal);
+  const post = async () => {
+    const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${f.ownerJwt}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+      body,
+    });
+    assert.equal(response.status, 200);
+    const receipt = await response.json();
+    assert.equal(receipt.status, "accepted");
+    return signalOf(receipt);
+  };
+  const first = await post();
+  assert.equal(first.to_agent, f.principal);
+  assert.equal(first.to, null);
+  assert.equal(first.channel_id, null);
+  assert.equal(first.body, "iOS contract");
+  assert.equal((await post()).id, first.id);
+});
+
+test("the native iOS channel draft stays bound to its original channel after a rename", async () => {
+  const slug = `ios-${randomBytes(4).toString("hex")}`;
+  const privateChannel = await send(f.ownerJwt, {
+    kind: "channel_create", slug, visibility: "private", members: [{ kind: "user", id: f.otherId }],
+  });
+  assert.equal(privateChannel.status, 200);
+  const original = (privateChannel.body.channel as Record<string, unknown>).channel_id;
+  const renamed = await send(f.ownerJwt, { kind: "channel_rename", channel_id: original, slug: slug + "-private" });
+  assert.equal(renamed.status, 200);
+  const openChannel = await send(f.ownerJwt, { kind: "channel_create", slug, visibility: "open" });
+  assert.equal(openChannel.status, 200);
+  const marker = `iOS bound message ${randomUUID()}`;
+  const draft = installedPost({ channel: slug, expected_channel_id: original, body: marker });
+  const stale = await send(f.ownerJwt, draft);
+  assert.equal(stale.status, 404);
+  assert.equal(stale.body.error, "channel_not_found");
+  const rows = await sql`SELECT id FROM swarm.signals WHERE workspace_id = ${f.workspace}::uuid AND body = ${marker}`;
+  assert.equal(rows.length, 0);
+  const fresh = await send(f.ownerJwt, { ...draft, channel: slug + "-private" });
+  assert.equal(fresh.status, 200);
+  assert.equal(signalOf(fresh.body).channel_id, original);
 });
 
 test("an agent may create a channel with a token that carries only post_signal", async () => {

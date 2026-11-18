@@ -1,0 +1,17 @@
+{
+  "client_version" : "0.1.0",
+  "command" : {
+    "about" : null,
+    "body" : "iOS contract",
+    "in_reply_to" : null,
+    "kind" : "post_signal",
+    "signal_kind" : "note",
+    "to_agent_principal_id" : "00000000-0000-4000-8000-000000000002",
+    "to_user_id" : null
+  },
+  "command_id" : "ABCD0000-0000-4000-8000-000000000001",
+  "stream" : {
+    "kind" : "workspace"
+  },
+  "workspace_id" : "00000000-0000-4000-8000-000000000003"
+}

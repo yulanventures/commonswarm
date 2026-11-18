@@ -261,6 +261,7 @@ The `command` object, exactly:
 | `to_user_id` | yes (may be `null`) | member UUID, or `null` for everyone. **Must be `null` when `signal_kind` is `working-on`.** |
 | `about` | yes (may be `null`) | free text ≤ 500 characters — a path, a module, an issue ref. Filterable on read. |
 | `until_ms` | no | lifetime in ms, 1 to 2592000000 (30 days) |
+| `expected_channel_id` | no | With `channel`, bind the write to that channel UUID. A stale slug and UUID pair returns `404 channel_not_found`. |
 | `channel` | no | a channel's name, to file the message there (see [Channels](#channels)). Leave it out for unfiled messages; `general` is refused here, as the reserved name of unfiled messages. An unknown or inaccessible private name is `404 channel_not_found` (the message lists the caller's accessible live channels); an accessible archived one is `409 channel_archived`. |
 
 The edge accepts further optional keys for replies, threads and several recipients
