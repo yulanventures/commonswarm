@@ -7,6 +7,12 @@ document.addEventListener("submit", (event) => {
     event.preventDefault();
     return;
   }
+  // Before the form is serialized, and before this submit counts: bring the picker's Home in line with what
+  // the person picked. Form state can be restored after the last picker event, with no event of its own.
+  if (homeStillNeeded(event.target)) {
+    event.preventDefault();
+    return;
+  }
   submitted = true;
   disabledButtons = [...document.querySelectorAll('button[type="submit"]')]
     .filter((button) => !button.disabled);
@@ -42,9 +48,21 @@ const syncHome = () => {
     if (row.home.disabled) continue;
     row.home.checked = row.pick.checked && (choose ? row.home === picked : true);
   }
+  // Home is still owed when it is a real choice the person can make and none is checked.
+  const open = ticked.filter((row) => !row.home.disabled);
+  const owed = choose && open.length > 0 && !rows.some((row) => row.home.checked);
   const needed = document.querySelector(".home-needed");
-  if (needed) needed.textContent = choose && !rows.some((row) => row.home.checked) ? needed.dataset.text : "";
+  if (needed) needed.textContent = owed ? needed.dataset.text : "";
+  return owed ? open[0].home : null;
 };
+// True when this submit is the picker's form and Home must be picked first; the first choice takes focus.
+function homeStillNeeded(form) {
+  const list = document.querySelector(".workspace-list");
+  if (!list || !form?.contains?.(list)) return false;
+  const first = syncHome();
+  first?.focus?.();
+  return first !== null;
+}
 if (document.querySelector(".workspace-list")) {
   document.addEventListener("click", (event) => {
     const home = event.target;

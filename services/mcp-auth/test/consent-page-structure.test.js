@@ -262,13 +262,19 @@ function pickerDocument(rows, { picker = true } = {}) {
     home: { type: "radio", name: "home_workspace_id", checked: !!row.home, disabled: !!row.locked },
   }));
   const needed = { textContent: "", dataset: { text: "Choose which one is Home." } };
+  const list = {};
+  const focused = [];
+  for (const node of nodes) node.home.focus = () => { focused.push(nodes.indexOf(node)); };
+  const buttons = [{ disabled: false }];
+  const consentForm = { contains: (node) => node === list };
+  const otherForm = { contains: () => false };
   const document = {
     documentElement: { dataset: {} },
     addEventListener: (name, listener) => { listeners.push([name, listener]); },
-    querySelector: (selector) => !picker ? null : selector === ".workspace-list" ? {} : selector === ".home-needed" ? needed : null,
+    querySelector: (selector) => !picker ? null : selector === ".workspace-list" ? list : selector === ".home-needed" ? needed : null,
     querySelectorAll: (selector) => selector === ".workspace-choice"
       ? nodes.map((node) => ({ querySelector: (inner) => inner.includes("workspace_ids") ? node.pick : node.home }))
-      : [],
+      : selector === 'button[type="submit"]' ? buttons : [],
   };
   const window = { addEventListener: (name, listener) => { listeners.push([`window:${name}`, listener]); } };
   const fire = (name, event) => { for (const [type, listener] of listeners) if (type === name) listener(event); };
@@ -288,6 +294,15 @@ function pickerDocument(rows, { picker = true } = {}) {
       for (const node of nodes) { fire("change", { target: node.pick }); fire("change", { target: node.home }); }
       fire("window:pageshow", { persisted });
     },
+    // The browser restores form state late: after the last event the picker hears, with no event of its own.
+    restoreSilently(state) { state.forEach(([ticked, home], at) => { nodes[at].pick.checked = ticked; nodes[at].home.checked = home; }); },
+    // Allow is pressed. Returns whether the native POST went ahead, and what it would carry as Home.
+    submit({ form = consentForm } = {}) {
+      let prevented = false;
+      fire("submit", { target: form, defaultPrevented: false, preventDefault() { prevented = true; } });
+      return { sent: !prevented, homes: nodes.map((node) => node.home.checked) };
+    },
+    focused, buttons, otherForm,
   };
 }
 
@@ -371,6 +386,47 @@ test("with two or more ticked, only a Home the person picked on this page is sen
   assert.deepEqual(pickerDocument([{ ticked: true, locked: true }, { ticked: true, home: true, locked: true }]).homes(), [false, true]);
   // A page with no picker is not marked.
   assert.equal(pickerDocument([], { picker: false }).auto(), undefined);
+});
+
+test("Allow reconciles Home with the person's pick before the form is sent", () => {
+  // Restored after the last picker event, then Allow with no event in between: one ticked with its Home
+  // becomes two ticked with that Home. Nobody picked it, so the submit is stopped and the page asks.
+  const late = pickerDocument([{}, {}]);
+  late.tick(0, true);
+  late.restoreSilently([[true, true], [true, false]]);
+  assert.deepEqual(late.submit(), { sent: false, homes: [false, false] });
+  assert.equal(late.needed.textContent, "Choose which one is Home.");
+  assert.deepEqual(late.focused, [0], "focus moves to the first Home choice");
+  // Stopping to ask is not a submit: the buttons stay live and the next Allow goes through once Home is picked.
+  assert.equal(late.buttons[0].disabled, false);
+  late.choose(1);
+  assert.deepEqual(late.submit(), { sent: true, homes: [false, true] });
+  assert.equal(late.buttons[0].disabled, true);
+  assert.equal(late.submit().sent, false, "a second submit is still refused");
+  // A direct submit on a fresh page that the browser filled in silently, with no picker event at all.
+  const direct = pickerDocument([{}, {}]);
+  direct.restoreSilently([[true, false], [true, true]]);
+  assert.deepEqual(direct.submit(), { sent: false, homes: [false, false] });
+  // The control: a Home the person picked is sent, even when a late restore moved the checked radio.
+  const picked = pickerDocument([{ ticked: true }, { ticked: true }]);
+  picked.choose(1);
+  picked.restoreSilently([[true, true], [true, false]]);
+  assert.deepEqual(picked.submit(), { sent: true, homes: [false, true] });
+  // One workspace: sent with itself as Home, also when a late restore unchecked or moved it.
+  const single = pickerDocument([{}, {}]);
+  single.tick(1, true);
+  single.restoreSilently([[false, true], [true, false]]);
+  assert.deepEqual(single.submit(), { sent: true, homes: [false, true] });
+  // None ticked: nothing to ask on the page; the server answers that one, as before.
+  assert.deepEqual(pickerDocument([{}, {}]).submit(), { sent: true, homes: [false, false] });
+  // A locked selection is sent as rendered, with or without a Home on its disabled controls.
+  assert.deepEqual(pickerDocument([{ ticked: true, locked: true }, { ticked: true, home: true, locked: true }]).submit(), { sent: true, homes: [false, true] });
+  assert.deepEqual(pickerDocument([{ ticked: true, locked: true }, { ticked: true, locked: true }]).submit(), { sent: true, homes: [false, false] });
+  // Another form on the page (switch account) is never held back by the picker.
+  const other = pickerDocument([{ ticked: true }, { ticked: true }]);
+  assert.equal(other.submit({ form: other.otherForm }).sent, true);
+  // A page with no picker submits as before.
+  assert.equal(pickerDocument([], { picker: false }).submit().sent, true);
 });
 
 test("the picker says what the app can reach directly above Allow, and ties hiding Home to its script", () => {
