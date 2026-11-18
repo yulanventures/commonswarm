@@ -1,5 +1,5 @@
 import { revokeHostedWorkspaceApproval } from "./admin-routine.ts";
-import { CommandTimer, cfRayOf, slowCommandLine } from "./slow-command-log.ts";
+import { CommandTimer, slowCommandLine } from "./slow-command-log.ts";
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -1444,6 +1444,10 @@ const WORKSPACE_COMMAND_KINDS = [
   ...HOUSEHOLD_SURFACE_KINDS,
   "household_legacy",
 ] as const;
+/** Every command kind this edge handles, for the slow-command log: anything else is logged as "other". */
+const SLOW_LOG_COMMAND_KINDS: ReadonlySet<string> = new Set<string>([
+  ...COMMAND_KINDS, ...TASK_COMMAND_KINDS, ...CONNECT_COMMAND_KINDS, ...WORKSPACE_COMMAND_KINDS, ...HOSTED_MANAGEMENT_KINDS,
+]);
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
 import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY, ADMIN_INVITATIONS_LIVE_PER_PERSON } from "../_shared/protocol.js";
 /* Worker scopes are shared by ordinary minting and delegated provisioning.
@@ -19481,7 +19485,8 @@ async function handleTransaction(
     throw error;
   }));
   timer.mark("end");
-  const slow = slowCommandLine({ commandKind: kind, timer, status: response.status, cfRay: commandCfRay.get(body) ?? null });
+  const slow = slowCommandLine({ commandKind: kind, knownKinds: SLOW_LOG_COMMAND_KINDS, timer, status: response.status,
+    requestId: commandRequestIds.get(body) ?? crypto.randomUUID() });
   if (slow !== null) console.log(slow);
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
@@ -19560,8 +19565,8 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
   }
 }
 
-/** The request's CF-Ray, keyed by its parsed body, for the slow-command log line (see slow-command-log.ts). */
-const commandCfRay = new WeakMap<object, string | null>();
+/** The server's request id for a command, keyed by its parsed body, for the slow-command log line. */
+const commandRequestIds = new WeakMap<object, string>();
 
 async function handlePostRequest(request: Request): Promise<Response> {
   const credential = bearer(request);
@@ -19574,7 +19579,6 @@ async function handlePostRequest(request: Request): Promise<Response> {
   // refused as unauthenticated, like any other anonymous command.
   if (!parsed.ok) return credential === null && parsed.response.status === 400 ? json(401, { error: "unauthenticated" }) : parsed.response;
   const body = parsed.body;
-  if (body !== null && typeof body === "object") commandCfRay.set(body, cfRayOf(request.headers.get("cf-ray")));
 
   // Ordinary DPoP remains on ordinary authentication. An explicit admin-resource
   // request may enter the verifier even when its token is malformed or foreign.
@@ -19732,6 +19736,7 @@ let verifiedHuman: VerifiedHuman | null = null;
   }
 
   const requestId = crypto.randomUUID();
+  if (body !== null && typeof body === "object") commandRequestIds.set(body, requestId);
   try {
     const result = await handleTransaction(
       body,

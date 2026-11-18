@@ -9,9 +9,9 @@
  *   commit     the last step to the transaction's end (the commit and its deferred triggers)
  * A phase the request never reached (a refusal before the plan, for example) is null.
  *
- * The line names the command kind, durations, the HTTP status, whether the workspace stream was locked and the
- * request's CF-Ray. It never carries ids, tokens, bodies or names: the CF-Ray is a Cloudflare request id that lets
- * operations join the line to its proxy entry, nothing more.
+ * The line names the command kind (only a kind the edge knows; anything else is "other"), durations, the HTTP
+ * status, whether the workspace stream was locked and a server-generated request id (the one command_failures rows
+ * carry). Nothing in it comes from the request: no ids, tokens, bodies, names or client-supplied headers.
  */
 export const SLOW_COMMAND_LOG_MS = 1500;
 
@@ -67,24 +67,20 @@ export class CommandTimer {
   }
 }
 
-const CF_RAY = /^[0-9a-f]{16}-[A-Z]{3}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** Cloudflare's request id when it has its usual shape; anything else is dropped rather than logged. */
-export function cfRayOf(header: string | null): string | null {
-  return header !== null && CF_RAY.test(header) ? header : null;
-}
-
-/** The log line for a slow command, or null when it was fast enough. Only fixed fields; nothing caller-supplied
- * beyond a command kind already restricted to a known shape. */
+/** The log line for a slow command, or null when it was fast enough. Only fixed fields: the kind is logged only
+ * when it is one the edge knows (`knownKinds`), and the request id is the server's own UUID. */
 export function slowCommandLine(input: {
   commandKind: string;
+  knownKinds: ReadonlySet<string>;
   timer: CommandTimer;
   status: number;
-  cfRay: string | null;
+  requestId: string;
 }): string | null {
   const { total_ms, phase_ms } = input.timer.phases();
   if (total_ms < SLOW_COMMAND_LOG_MS) return null;
-  const kind = /^[a-z][a-z0-9_]{0,63}$/.test(input.commandKind) ? input.commandKind : "unknown";
+  const kind = input.knownKinds.has(input.commandKind) ? input.commandKind : "other";
   return JSON.stringify({
     event: "command_slow",
     command_kind: kind,
@@ -93,6 +89,6 @@ export function slowCommandLine(input: {
     status: Number.isInteger(input.status) ? input.status : 0,
     stream_locked: input.timer.streamLocked,
     attempts: input.timer.attempts,
-    cf_ray: input.cfRay,
+    request_id: UUID.test(input.requestId) ? input.requestId : null,
   });
 }
