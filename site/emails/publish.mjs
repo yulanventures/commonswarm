@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { templates } from "./templates.mjs";
 import { renderTemplate } from "./render.mjs";
 
-/** The auth email templates released with GoTrue. The artifact is served read-only on the private
- * stack network by the `auth-templates` service (deploy/supabase-stack/compose.yaml), and GoTrue
- * loads it with an absolute private URL (GOTRUE_MAILER_TEMPLATES_MAGIC_LINK). Site deploys never
+/** The auth email templates released with GoTrue. The artifact is served read-only by the
+ * `auth-templates` service (deploy/supabase-stack/compose.yaml) on an internal network that only GoTrue
+ * joins, and GoTrue loads it by absolute URL (GOTRUE_MAILER_TEMPLATES_MAGIC_LINK). Site deploys never
  * touch it. Every other email keeps GoTrue's built-in template until it is listed here. */
 export const PUBLISHED_TEMPLATE_KEYS = ["magic_link"];
 

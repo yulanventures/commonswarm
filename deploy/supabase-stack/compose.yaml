@@ -117,12 +117,16 @@ services:
     networks:
       commonswarm-net:
         ipv4_address: 172.31.0.11
+      # Only for fetching the reviewed email templates; internal, so egress stays on commonswarm-net.
+      auth-templates-net: {}
 
   # Auth email templates, released with GoTrue: a pinned, read-only directory of reviewed bytes
-  # (built by `node site/emails/publish.mjs`, digests in its SHA256SUMS), served only on the
-  # private stack network. GoTrue fetches it by absolute URL (GOTRUE_MAILER_TEMPLATES_MAGIC_LINK);
-  # site deploys and the CDN are never in this path. If it is down, GoTrue keeps its last good copy
-  # or its built-in link-only email.
+  # (built by `node site/emails/publish.mjs`, digests in its SHA256SUMS). It sits alone with GoTrue
+  # on `auth-templates-net`, an internal network with no gateway that no other container joins, so
+  # nothing on the shared bridge can reach or stand in for it. GoTrue fetches it by absolute URL
+  # (GOTRUE_MAILER_TEMPLATES_MAGIC_LINK=http://auth-templates:8080/magic_link.html); site deploys
+  # and the CDN are never in this path. If it is down, GoTrue keeps its last good copy or its
+  # built-in link-only email.
   auth-templates:
     image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     container_name: commonswarm-auth-templates
@@ -142,8 +146,7 @@ services:
     volumes:
       - ${COMMONSWARM_AUTH_TEMPLATES_DIR:-/srv/commonswarm/auth-templates/current}:/srv/auth-templates:ro
     networks:
-      commonswarm-net:
-        ipv4_address: 172.31.0.16
+      auth-templates-net: {}
 
   postgrest:
     image: public.ecr.aws/supabase/postgrest:v14.18@sha256:c7cd7e265a85b05248abf53f4473fcec7e327c282d0bd0cf60f1551996d09fcf
@@ -251,3 +254,6 @@ networks:
   commonswarm-net:
     name: commonswarm-net
     external: true
+  # GoTrue and auth-templates only. Internal: no gateway, no route out, no other member.
+  auth-templates-net:
+    internal: true

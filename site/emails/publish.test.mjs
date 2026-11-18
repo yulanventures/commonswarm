@@ -51,7 +51,7 @@ test("the release artifact is exactly the rendered templates, with their pinned 
   }
 });
 
-test("GoTrue's templates are served read-only on the private stack network, never from the site", async () => {
+test("GoTrue's templates are served read-only on an internal network only GoTrue joins, never from the site", async () => {
   const compose = await readFile(join(repoRoot, "deploy/supabase-stack/compose.yaml"), "utf8");
   const start = compose.indexOf("\n  auth-templates:\n");
   assert.ok(start > 0, "the stack defines the auth-templates service");
@@ -60,7 +60,13 @@ test("GoTrue's templates are served read-only on the private stack network, neve
   assert.match(block, /read_only: true/);
   assert.match(block, /:\/srv\/auth-templates:ro\n/, "the reviewed bytes are mounted read-only");
   assert.doesNotMatch(block, /ports:/, "no host port: only GoTrue's network reaches it");
-  assert.match(block, /ipv4_address: 172\.31\.0\.16/);
+  // Isolated from the shared bridge: its only network is internal, and GoTrue is its only peer.
+  assert.match(block, /    networks:\n      auth-templates-net: \{\}\n/, "auth-templates joins only its own network");
+  assert.doesNotMatch(block, /commonswarm-net/, "auth-templates is not on the shared bridge");
+  const members = [...compose.matchAll(/^  ([a-z-]+):\n(?:(?!^  [a-z-]+:\n)[\s\S])*?^      auth-templates-net:/gm)].map((m) => m[1]);
+  assert.deepEqual(members.sort(), ["auth-templates", "gotrue"], "only GoTrue shares that network");
+  const networks = compose.slice(compose.search(/^networks:$/m));
+  assert.match(networks, /\n  auth-templates-net:\n    internal: true\n/, "the network is internal: no gateway, no route out");
   const sitePackage = await readFile(join(repoRoot, "site/package.json"), "utf8");
   assert.doesNotMatch(sitePackage, /publish\.mjs|auth-email/, "site builds never publish auth templates");
 });
