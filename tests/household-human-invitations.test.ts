@@ -27,6 +27,24 @@ test('consumed invitation retries do not revive removed members or borrow a diff
   assert.equal(decideHumanInvite(command,{...joined,member_live:false}).status,'refused');
   assert.equal(decideHumanInvite(command,{...joined,user_id:'another',recipient_matches:false}).status,'refused');
 });
+test('only the recipient can decline, and declining never depends on whether joining is still possible',()=>{
+  const decline=parseHumanInviteCommand({kind:'household_invitation',action:'decline',invitation:command.invitation}) as HumanInviteCommand;
+  assert.ok(decline);
+  assert.deepEqual(decideHumanInvite(decline,facts),{status:'decline'});
+  // The sender lost the right to invite, the grant ended, the workspace is personal: the recipient may still say no.
+  for(const changed of [{parent_live:false},{inviter_can_invite:false},{personal_boundary:true},{member_live:true},{membership_revoked_at:80,invitation_created_at:80}])
+    assert.deepEqual(decideHumanInvite(decline,{...facts,...changed}),{status:'decline'},JSON.stringify(changed));
+  for(const changed of [{human:false},{identity_verified:false},{recipient_matches:false},{invitation_kind:'agent' as const},{role:'owner'}])
+    assert.equal(decideHumanInvite(decline,{...facts,...changed}).status,'refused',JSON.stringify(changed));
+  // Already ended is already declined; nothing is left to write. A joined invitation cannot be declined.
+  assert.deepEqual(decideHumanInvite(decline,{...facts,revoked_at:99}),{status:'already_declined'});
+  assert.deepEqual(decideHumanInvite(decline,{...facts,expires_at:100}),{status:'already_declined'});
+  assert.deepEqual(decideHumanInvite(decline,{...facts,accepted_at:90,accepted_by:'recipient',member_live:true}),{status:'refused',reason:'invitation_unavailable'});
+  // A link is a capability to join, not an inbox row: it cannot be declined. No extra fields ride along.
+  assert.equal(parseHumanInviteCommand({kind:'household_invitation',action:'decline',invitation:{source:'link',token:LEGACY_INVITE_TOKEN}}),null);
+  assert.equal(parseHumanInviteCommand({kind:'household_invitation',action:'decline',invitation:command.invitation,content_role:'editor'}),null);
+  assert.equal(parseHumanInviteCommand({kind:'household_invitation',action:'decline',invitation:command.invitation,reason_code:'anything'}),null);
+});
 test('legacy acceptance compares the verified email only when a household boundary exists',()=>{
   assert.equal(legacyHouseholdAcceptRefusal(false,'person@example.test','other@example.test'),null);
   assert.equal(legacyHouseholdAcceptRefusal(true,'person@example.test','person@example.test'),'recipient_consent_required');

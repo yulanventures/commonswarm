@@ -54,16 +54,41 @@ try {
     return decision.events.find(e=>e.type==='AdminMemberInvited').payload.invitation_id;
   });
   phase='issue';
-  const valid=await issue(),expired=await issue(),revoked=await issue(),parent=await issue();
+  const valid=await issue(),expired=await issue(),revoked=await issue(),parent=await issue(),declinable=await issue();
   const inbox=async user=>await db.begin(async tx=>{await tx`SET LOCAL ROLE swarm_read`;await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;return await tx`SELECT * FROM swarm_read.human_invitations()`;});
   phase='recipient-inbox';
-  assert.equal((await inbox(recipient)).length,4);assert.equal((await inbox(other)).length,0);assert.equal((await inbox(owner)).length,0);
+  assert.equal((await inbox(recipient)).length,5);assert.equal((await inbox(other)).length,0);assert.equal((await inbox(owner)).length,0);
   phase='negative-invitations';
   await db`UPDATE swarm.admin_routine_invitations SET expires_at=clock_timestamp()-interval '1 second' WHERE invitation_id=${expired}::uuid`;
   await db`UPDATE swarm.admin_routine_invitations SET revoked_at=clock_timestamp() WHERE invitation_id=${revoked}::uuid`;
   assert.equal((await call(command(ref(valid)),{...worker,user_id:other})).status,403);
   assert.equal((await call(command(ref(valid)),null)).status,403);
   assert.equal((await call(command(ref(expired)))).status,403);assert.equal((await call(command(ref(revoked)))).status,403);
+  phase='decline';
+  const accountSeq0=async()=>Number((await db`SELECT seq FROM swarm.admin_accounts WHERE owner_user_id=${owner}::uuid`)[0].seq);
+  // Only the recipient may decline. Another person's attempt changes nothing.
+  assert.equal((await call(command(ref(declinable),'decline'),{...worker,user_id:other})).status,403);
+  assert.equal((await call(command(ref(declinable),'decline'),null)).status,403);
+  assert.equal((await db`SELECT revoked_at FROM swarm.admin_routine_invitations WHERE invitation_id=${declinable}::uuid`)[0].revoked_at,null);
+  const beforeDecline=await accountSeq0(),declineRequest=id();
+  const said=await call(command(ref(declinable),'decline'),worker,declineRequest);
+  assert.equal(said.status,200);assert.equal(said.body.status,'declined');
+  // It leaves the recipient's inbox, joins nobody, and the sender's account history names the recipient as the one who ended it.
+  assert.equal((await inbox(recipient)).filter(row=>row.invitation_id===declinable).length,0);
+  assert.equal((await db`SELECT count(*)::int AS n FROM swarm.memberships WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`)[0].n,0);
+  assert.equal(await accountSeq0(),beforeDecline+1);
+  const [declineEvent]=await db`SELECT event FROM swarm.admin_events WHERE owner_user_id=${owner}::uuid AND seq=${beforeDecline+1}`;
+  assert.equal(declineEvent.event.type,'AdminInvitationRevoked');assert.equal(declineEvent.event.actor_user,recipient);
+  assert.equal(declineEvent.event.admin_identity_id,null);assert.equal(declineEvent.event.payload.reason_code,'recipient_declined');
+  const [declinedAccount]=await db`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${owner}::uuid`;
+  assert.equal(typeof declinedAccount.projection.routine.invitations[declinable].revoked_at,'number');
+  // The same request again, and a new one, both answer declined and write nothing more.
+  assert.equal((await call(command(ref(declinable),'decline'),worker,declineRequest)).body.status,'declined');
+  assert.equal((await call(command(ref(declinable),'decline'))).body.status,'declined');
+  assert.equal(await accountSeq0(),beforeDecline+1);
+  // A declined invitation can no longer be reviewed or joined; the others are untouched.
+  assert.equal((await call(command(ref(declinable)))).status,403);
+  assert.equal((await inbox(recipient)).filter(row=>row.invitation_id===valid).length,1);
   phase='preview';
   const preview=await call(command(ref(valid)));assert.equal(preview.status,200);assert.equal(preview.body.status,'preview');
   const accept=command(ref(valid),'accept',{consent_version:preview.body.consent_version,preview_digest:preview.body.preview_digest,content_role:'reader'}),request=id();
@@ -78,6 +103,9 @@ try {
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.agent_principals WHERE owner_user_id=${recipient}::uuid`)[0].n,0);
   assert.equal((await db`SELECT content_role FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`)[0].content_role,'reader');
   assert.equal((await call({...accept,content_role:'editor'},worker,request)).status,409);
+  // An invitation already joined with cannot be declined: leaving a workspace is a different act.
+  assert.equal((await call(command(ref(valid),'decline'))).status,403);
+  assert.equal((await db`SELECT count(*)::int AS n FROM swarm.memberships WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid AND revoked_at IS NULL`)[0].n,1);
   phase='revoked-access';
   await db`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`;
   assert.equal((await call(accept,worker,request)).status,403);

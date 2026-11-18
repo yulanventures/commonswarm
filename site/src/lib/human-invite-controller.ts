@@ -8,6 +8,8 @@ export interface HumanInviteView { account: string | null; invitations: Awaited<
  * rows, previews and pending requests before starting another read. */
 export function createHumanInviteController(api: Client, render: (view: HumanInviteView) => void) {
   let generation = 0, selectedId = '', request: ReturnType<Client['prepareAcceptance']> | null = null;
+  // One decline request per invitation while its result is unknown: a retry repeats it, never sends a second.
+  let declining: { id: string; request: ReturnType<Client['prepareDecline']> } | null = null;
   let view: HumanInviteView = { account:null,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false };
   const publish = () => render({ ...view, invitations: [...view.invitations] });
   const current = (version: number) => version === generation && view.account !== null;
@@ -16,7 +18,7 @@ export function createHumanInviteController(api: Client, render: (view: HumanInv
     : 'The result could not be read. Check again.';
   return {
     setAccount(account: string | null) {
-      ++generation; selectedId='';request=null;
+      ++generation; selectedId='';request=null;declining=null;
       view={account,invitations:[],preview:null,joined:false,message:'',busy:false,confirmed_role:null,failed:false}; publish();
     },
     async load() {
@@ -40,6 +42,18 @@ export function createHumanInviteController(api: Client, render: (view: HumanInv
         if (!request) { request=api.prepareAcceptance({source:'delegated',invitation_id:selectedId},view.preview,role); view.confirmed_role=role; publish(); }
         const result=await request.send(); if(current(version)){view.joined=true;view.preview=null;view.message=`You joined ${String(result.workspace_name)}.`;} }
       catch(error){if(current(version)){view.failed=true;if(error instanceof HumanInviteRefused){request=null;view.confirmed_role=null;view.preview=null;view.message=failure(error);}else view.message='The join result is unknown. Retry to check the same request.';}}
+      finally{if(current(version)){view.busy=false;publish();}}
+    },
+    /** The recipient turns the invitation down. It leaves the list only once the server has confirmed. */
+    async decline(id: string) {
+      if (!view.account || view.busy || !view.invitations.some(row => row.invitation_id === id)) return;
+      const version=++generation;request=null;view.confirmed_role=null;view.preview=null;view.joined=false;view.busy=true;view.failed=false;publish();
+      if (declining?.id !== id) declining={id,request:api.prepareDecline(id)};
+      try { await declining.request.send();
+        if(current(version)){declining=null;view.invitations=view.invitations.filter(row=>row.invitation_id!==id);view.message='Invitation declined.';} }
+      catch(error){if(current(version)){view.failed=true;
+        if(error instanceof HumanInviteRefused){declining=null;view.message='This invitation is unavailable. Check again.';}
+        else view.message='The result is unknown. Decline again to check the same request.';}}
       finally{if(current(version)){view.busy=false;publish();}}
     },
   };

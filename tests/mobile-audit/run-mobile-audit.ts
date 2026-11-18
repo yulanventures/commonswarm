@@ -138,6 +138,7 @@ const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
   "menu.account": ["[data-user-menu]:not([hidden])"],
   // The invitation inbox is a fixed corner card above the composer when the viewer already has a workspace.
   "app.invitation-inbox": ['human-invitation-inbox[data-placement="corner"]:not([hidden])'],
+  "app.invitation-inbox.decline": ['human-invitation-inbox[data-placement="corner"]:not([hidden])'],
   // The update notice is a fixed <aside> card floating over the feed and composer.
   "app.update-toast": ["[data-update-notice]:not([hidden])"],
   // An opened receipt is a card over the message: the row's floating tool bar for a settled receipt, the badge's own

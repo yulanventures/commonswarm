@@ -18,7 +18,7 @@ export function humanInvitationClient(options: { url: string; anonKey: string; a
       if (response.status >= 500) throw new HumanInviteUnknown();
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) throw new HumanInviteRefused(String(body.reason ?? body.error ?? 'request_refused'));
-      if (!(command.action === 'preview' ? ['preview','joined'] : ['joined']).includes(String(body.status))) throw new HumanInviteUnknown();
+      if (!(command.action === 'preview' ? ['preview','joined'] : command.action === 'decline' ? ['declined'] : ['joined']).includes(String(body.status))) throw new HumanInviteUnknown();
       return body;
     } catch (error) { if (error instanceof HumanInviteRefused) throw error; throw new HumanInviteUnknown(); }
     finally { clearTimeout(timer); }
@@ -42,6 +42,13 @@ export function humanInvitationClient(options: { url: string; anonKey: string; a
         if (!Array.isArray(body.invitations)) throw new HumanInviteUnknown();
         return body.invitations;
       } finally { clearTimeout(timer); }
+    },
+    /** Turns down one invitation addressed to the signed-in person. `send` repeats the same request, so an unknown result can be retried safely. */
+    prepareDecline(invitationId: string) {
+      const requestId = options.requestId();
+      const command: HumanInviteCommand = {kind:'household_invitation',action:'decline',invitation:{source:'delegated',invitation_id:invitationId}};
+      let receipt: Record<string, unknown> | null = null;
+      return { requestId, send: async () => receipt ?? (receipt = await send(requestId,command)) };
     },
   };
 }
