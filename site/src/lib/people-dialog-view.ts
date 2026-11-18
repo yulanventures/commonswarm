@@ -11,7 +11,7 @@ import { peopleInviteCancelLabel, peopleInviteConfirmCopy, type PeopleInvite } f
 import { peopleSearchResult, peopleTabOf, type PeopleTab } from "./people/tabs";
 import { peopleTabView, type PeopleRead } from "./people/states";
 import { buildPeopleInviteForm, buildPeopleInviteMade, newPeopleInviteDraft, type PeopleInviteDraft } from "./people/invite-form";
-import { peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, type PeopleAdminAccess } from "./people/admins";
+import { peopleAdminDetail, peopleAdminDiscriminator, peopleAdminEmpty, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, type PeopleAdminAccess } from "./people/admins";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -675,9 +675,13 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         const row = node(doc, "li", "pd-admin-grant"); row.dataset.adminGrant = grant.grantId; row.dataset.adminLevel = grant.level;
         const symbol = node(doc, "span", "pd-orb", (grant.agentName.trim()[0] ?? "?").toUpperCase()); symbol.setAttribute("aria-hidden", "true");
         // Same-named agents, and one agent's look-alike grants, are told apart here, on Remove and in its question.
-        const label = peopleAdminLabel(grant, access.grants);
-        const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", label); name.title = label;
-        copy.append(name, node(doc, "span", "pd-muted", peopleAdminDetail(grant, viewerId))); row.append(symbol, copy);
+        const label = peopleAdminLabel(grant, access.grants), id = peopleAdminDiscriminator(grant, access.grants);
+        const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", grant.agentName); name.title = label;
+        // The id is its own field at the start of the line that wraps. The name above may be cut with an ellipsis; this never is.
+        const facts = node(doc, "span", "pd-muted");
+        if (id) { const which = node(doc, "span", "pd-admin-grant-id", id); which.dataset.adminGrantId = ""; facts.append(which, doc.createTextNode(" · ")); }
+        facts.append(doc.createTextNode(peopleAdminDetail(grant, viewerId)));
+        copy.append(name, facts); row.append(symbol, copy);
         const said = access.notices?.[grant.grantId] ?? "";
         const notice = node(doc, "p", "pd-error", said); notice.setAttribute("role", "alert"); notice.hidden = !said; notice.dataset.adminGrantNotice = "";
         // Remove needs a list that was just read: rows kept under a failed read are for looking at, not for acting on.

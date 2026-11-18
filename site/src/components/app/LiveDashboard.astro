@@ -7686,6 +7686,8 @@ import "../../styles/kylon-command-palette.css";
        and the tab lists people only. Held per account and workspace, so a switch never shows another one's rows. */
     let peopleAdminAccess: { key: string; access: PeopleAdminAccess | undefined } = { key: "", access: undefined };
     let peopleAdminGeneration = 0;
+    /** One per opening of the dialog: closing it ends the lifetime, and a later answer has no dialog to report to. */
+    let peopleAdminDialogLifetime = 0;
     const peopleAdminEnding = new Set<string>();
     const peopleAdminKey = (): string => session && activeWorkspaceId && !sampleMode ? `${session.user.id}:${activeWorkspaceId}` : "";
     const currentPeopleAdminAccess = (): PeopleAdminAccess | undefined => {
@@ -7713,6 +7715,9 @@ import "../../styles/kylon-command-palette.css";
       const generation = ++peopleAdminGeneration;
       const current = (): boolean => generation === peopleAdminGeneration && key === peopleAdminKey();
       const before = peopleAdminAccess.key === key ? peopleAdminAccess.access : undefined;
+      // A read is starting: what is on screen is no longer a current list. The rows stay to look at, as pending, and
+      // nothing may act on them (no Remove, and an open question will not send) until this read succeeds.
+      if (before) { peopleAdminAccess = { key, access: { ...before, read: "pending" } }; if (peopleDialogOpen()) renderDialogRoster(); }
       if (seatAdminStatusState.phase !== "loaded") await refreshSeatAdminState(true);
       if (!current()) return;
       // Off, or not known to be on: no section and no read.
@@ -7721,7 +7726,7 @@ import "../../styles/kylon-command-palette.css";
         if (peopleDialogOpen()) renderDialogRoster();
         return;
       }
-      peopleAdminAccess = { key, access: before ? { ...before, read: before.read === "failed" ? "pending" : before.read } : { read: "pending", all: false, grants: [] } };
+      peopleAdminAccess = { key, access: before ? { ...before, read: "pending" } : { read: "pending", all: false, grants: [] } };
       if (peopleDialogOpen()) renderDialogRoster();
       let next: PeopleAdminAccess;
       try {
@@ -7749,7 +7754,7 @@ import "../../styles/kylon-command-palette.css";
     };
     /** Remove on an Admins row: the same question, command and per-grant command id as the agent profile's switch. */
     const endPeopleAdminGrant = (grantId: string, opener: HTMLButtonElement): void => {
-      const value = session, key = peopleAdminKey();
+      const value = session, key = peopleAdminKey(), lifetime = peopleAdminDialogLifetime;
       const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId);
       /** The row as the list has it right now, and only if the list was just read and the server would accept an end. */
       const usableRow = (): PeopleAdminGrant | undefined => {
@@ -7783,10 +7788,12 @@ import "../../styles/kylon-command-palette.css";
         // The agent's own profile and the account's Admin access list read their state again; this tab reads its own below.
         if (outcome.kind === "accepted") window.dispatchEvent(new CustomEvent("commonswarm:seat-admin-changed"));
         peopleAdminEnding.delete(grantId);
-        if (key !== peopleAdminKey()) return;
+        // The command is settled above for everyone. What follows belongs to the dialog that asked: if it has been
+        // closed since (and perhaps reopened), no read is started for it, and no receipt or focus is given to another.
+        if (lifetime !== peopleAdminDialogLifetime || key !== peopleAdminKey() || !peopleDialogOpen()) return;
         if (outcome.kind !== "accepted") say(outcome.message);
         await loadPeopleAdminAccess();
-        if (key !== peopleAdminKey()) return;
+        if (lifetime !== peopleAdminDialogLifetime || key !== peopleAdminKey() || !peopleDialogOpen()) return;
         if (outcome.kind === "accepted") {
           const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = `Admin access removed from ${label}.`;
         }
@@ -7975,7 +7982,7 @@ import "../../styles/kylon-command-palette.css";
       peopleDialogState.invite = null;
       // The Admins list ends with the dialog, and so does any read of it still in flight: a workspace switch, a sign-out
       // and a dead session all close the dialog first, so a read begun before cannot land after coming back.
-      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1;
+      peopleAdminAccess = { key: "", access: undefined }; peopleAdminGeneration += 1; peopleAdminDialogLifetime += 1;
       peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
       parkPeopleHosts();
       if (restoreFocus && returned) {

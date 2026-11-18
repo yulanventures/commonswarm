@@ -33,6 +33,7 @@ const grant = (n: number, over: Record<string, unknown> = {}) => ({ grantId: `g$
 async function page(options: { role?: string; enabled?: boolean } = {}) {
   const calls: string[] = []; const ends: Array<{ commandId: string; grantId: string }> = []; const events: string[] = [];
   let token = 0;
+  const receipt = { textContent: "" };
   const io: { all: null | (() => Promise<unknown>); end: null | (() => Promise<any>); confirm: boolean | "hold"; held: null | (() => void) } = { all: null, end: null, confirm: true, held: null };
   const context = createContext({
     peopleAdminCoverage, peopleAdminLabel, WorkspaceAdminGrantsRefused, URLSearchParams, uuid: () => `cmd-${++token}`, CustomEvent: class { constructor(public type: string) {} },
@@ -53,7 +54,9 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
       // "hold": the question stays open; the test presses End access later through io.held.
       return { dialog: { remove() {} }, open() { if (io.confirm === "hold") io.held = () => opts.confirm(); else if (io.confirm) opts.confirm(); else opts.cancel(); } };
     },
-    disposeSeatAdminDialog: () => {}, renderDialogRoster: () => {}, peopleDialogOpen: () => true, document: {}, app: { append() {} }, one: () => null,
+    disposeSeatAdminDialog: () => {}, renderDialogRoster: () => {}, document: {}, app: { append() {} },
+    one: (selector: string) => (selector === "[data-roster-dialog]" ? { get open() { return runInContext("dialogOpen", context); }, close() { runInContext("dialogOpen = false", context); }, querySelectorAll: () => [] }
+      : selector === "[data-people-receipt]" ? receipt : null),
     all: () => [], parkPeopleHosts: () => {}, erasePeopleDialogInvite: () => {},
     seatAdminRemoveCommandIds: new Map(),
   });
@@ -61,13 +64,15 @@ async function page(options: { role?: string; enabled?: boolean } = {}) {
     var session = { user: { id: "u1" } }, activeWorkspaceId = "w1", sampleMode = false;
     var workspaces = [{ id: "w1", name: "Rivera household", orgId: "org-1" }, { id: "w2", name: "Studio", orgId: "org-2" }, { id: "w3", name: "Unknown", orgId: "" }], members = [{ userId: "u1", role: "${options.role ?? "owner"}" }], agents = [{ principalId: "a1", name: "Atlas" }];
     var seatAdminStatusState = { phase: "idle" }, seatAdminGrantsState = { phase: "idle" };
-    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
+    var peopleAdminAccess = { key: "", access: undefined }, peopleAdminGeneration = 0, peopleAdminDialogLifetime = 0, peopleAdminEnding = new Set(), activeSeatAdminEndDialog = null;
+    var dialogOpen = true;
     var peopleDialogReturn = null, peopleDialogFocus = undefined, peopleDialogInviteCleared = null, peopleDialogState = { selected: null, invite: null };
     var window = { location: { search: "" }, history: { state: null, replaceState() {} }, dispatchEvent: (event) => { __events.push(event.type); } };
   `, context);
+  runInContext(`var peopleDialogOpen = () => dialogOpen === true;`, context);
   runInContext(await dashboardFunctions(NAMES), context);
   const run = <T>(code: string): T => runInContext(code, context) as T;
-  return { run, calls, ends, events, io };
+  return { run, calls, ends, events, io, receipt };
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -208,4 +213,47 @@ test("rows that would read the same are told apart in the question", async () =>
   await p.run("loadPeopleAdminAccess()"); p.calls.length = 0;
   p.run("endPeopleAdminGrant('g2', {})"); await settle();
   assert.deepEqual(p.calls.filter(call => call.startsWith("ask")), ["ask:Atlas (agent bbbbbbbb):workspace:Rivera household"]);
+});
+
+test("a refresh in flight retires Remove: the rows stay as pending, and a question confirmed meanwhile sends nothing", async () => {
+  const p = await page();
+  await p.run("loadPeopleAdminAccess()");
+  p.io.confirm = "hold"; p.run("endPeopleAdminGrant('g1', {})"); assert.ok(p.io.held);
+  let release!: (rows: unknown) => void;
+  p.io.all = () => new Promise(resolve => { release = resolve; });
+  const refreshing = p.run<Promise<void>>("loadPeopleAdminAccess()"); await settle();
+  const during = plain(p.run<any>("currentPeopleAdminAccess()"));
+  assert.equal(during.read, "pending", "what is on screen is no longer a current list"); assert.equal(during.grants.length, 2, "the rows stay to look at");
+  p.io.held!(); await settle(); await settle();
+  assert.equal(p.ends.length, 0, "confirming while the read is out sends nothing, whatever the read will say");
+  p.io.confirm = true; p.run("endPeopleAdminGrant('g1', {})"); await settle();
+  assert.equal(p.ends.length, 0, "and Remove cannot start a new question either");
+  release([grant(2)]); await refreshing;
+  assert.equal(p.ends.length, 0); assert.deepEqual(p.events, []);
+});
+
+test("a Remove answered after its dialog closed is settled, but starts no read and gives no receipt to another dialog", async () => {
+  for (const reopen of [false, true]) {
+    const p = await page(); let answer!: (outcome: unknown) => void;
+    await p.run("loadPeopleAdminAccess()");
+    p.io.end = () => new Promise(resolve => { answer = resolve; });
+    p.run("endPeopleAdminGrant('g1', {})"); await settle();
+    assert.equal(p.ends.length, 1);
+    p.run("closeRosterDialog()");
+    if (reopen) { p.run("dialogOpen = true"); await p.run("loadPeopleAdminAccess()"); }
+    const reads = p.calls.filter(call => call === "all").length;
+    answer({ kind: "accepted" }); await settle(); await settle();
+    assert.deepEqual(p.events, ["commonswarm:seat-admin-changed"], "the command is settled and the other surfaces are told");
+    assert.equal(p.run("seatAdminRemoveCommandIds.size"), 0, "its command id is spent"); assert.equal(p.run("peopleAdminEnding.size"), 0);
+    assert.equal(p.calls.filter(call => call === "all").length, reads, `no read is started for a dialog that ${reopen ? "is not the one that asked" : "is closed"}`);
+    assert.equal(p.receipt.textContent, "", "and no receipt is announced there");
+    if (reopen) assert.deepEqual(plain(p.run<any>("currentPeopleAdminAccess()")).notices, {}, "nor a notice put on its rows");
+  }
+  const refused = await page(); let answer!: (outcome: unknown) => void;
+  await refused.run("loadPeopleAdminAccess()");
+  refused.io.end = () => new Promise(resolve => { answer = resolve; });
+  refused.run("endPeopleAdminGrant('g1', {})"); await settle();
+  refused.run("closeRosterDialog(); dialogOpen = true"); await refused.run("loadPeopleAdminAccess()");
+  answer({ kind: "refused", message: "Only its owner can end this." }); await settle(); await settle();
+  assert.deepEqual(plain(refused.run<any>("currentPeopleAdminAccess()")).notices, {}, "a refusal that arrives late is not shown on the reopened dialog's row");
 });

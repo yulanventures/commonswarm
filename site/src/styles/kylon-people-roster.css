@@ -118,7 +118,9 @@ live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant
   display: grid; grid-template-columns: 32px minmax(0,1fr) auto; align-items: center; gap: 0 10px; min-block-size: 56px; padding: 8px 6px; box-sizing: border-box;
 }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant strong { display: block; font: 600 14px/1.5 var(--k-shell-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant .pd-muted { font-size: 12px; overflow-wrap: anywhere; }
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant .pd-muted { display: block; font-size: 12px; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+/* What tells two look-alike rows apart: kept whole, in the line that wraps, never inside the name's ellipsis. */
+live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant-id { white-space: nowrap; font-weight: 600; color: var(--k-shell-ink); }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > button { min-block-size: 44px; min-inline-size: 44px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; font: 500 13px/1.5 var(--k-shell-font); cursor: pointer; }
 live-dashboard.dashboard[data-kylon-shell] [data-people-context] .pd-admin-grant > .pd-error { grid-column: 2 / -1; margin: 0; }
 /* Four tabs, each on one line with its count. On a narrow phone the type and the gap tighten first; a tab moves to a

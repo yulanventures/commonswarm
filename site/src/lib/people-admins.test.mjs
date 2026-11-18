@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, workspaceAdminGrantsNotDeployed, workspaceAdminGrantsRefused } from "./people/admins.ts";
+import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminDiscriminator, peopleAdminHeading, peopleAdminLabel, peopleAdminPeople, workspaceAdminGrantsNotDeployed, workspaceAdminGrantsRefused } from "./people/admins.ts";
 
 const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 const row = (over = {}) => ({ grant_id: id(1), principal_id: id(2), agent_name: "Atlas", owner_user_id: id(3), owner_display: "Sam Rivera",
@@ -51,4 +51,6 @@ test("a refusal is told apart from a failure, and look-alike rows from each othe
     g("55555555-g", "dddddddd-p", "Twin"), g("66666666-g", "dddddddd-p", "Twin")];
   assert.deepEqual(rows.map((row) => peopleAdminLabel(row, rows)), ["Atlas (agent aaaaaaaa)", "Atlas (agent bbbbbbbb)", "Pixel", "Pixel", "Twin (grant 55555555)", "Twin (grant 66666666)"],
     "two agents with one name carry the agent's id; one agent's two levels need nothing; one agent's two grants of a level carry the grant's id");
+  assert.deepEqual(rows.map((row) => peopleAdminDiscriminator(row, rows)), ["agent aaaaaaaa", "agent bbbbbbbb", "", "", "grant 55555555", "grant 66666666"],
+    "the id part on its own, for the row's separate field");
 });

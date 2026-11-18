@@ -474,6 +474,11 @@ test("Admins lists who can manage, the admin access given to agents, and Remove 
   access = { read: "ready", all: true, grants: [g(1, { agentName: "Atlas", principalId: "aaaaaaaa-1" }), g(2, { agentName: "Atlas", principalId: "bbbbbbbb-2" })] }; paint();
   assert.deepEqual(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).map(button => button.attributes["aria-label"]),
     ["Remove admin access: Atlas (agent aaaaaaaa)", "Remove admin access: Atlas (agent bbbbbbbb)"], "same-named agents are told apart beside Remove");
+  assert.deepEqual(all(node => node.dataset?.adminGrantId !== undefined).map(node => node.textContent), ["agent aaaaaaaa", "agent bbbbbbbb"],
+    "the id is its own field on the row, outside the name that may be cut short");
+  assert.deepEqual(all(node => node.dataset?.adminGrant !== undefined).map(row => row.descendants().find((node: any) => node.tag === "strong").textContent), ["Atlas", "Atlas"]);
+  access = { read: "pending", all: true, grants: [g(1)] }; paint();
+  assert.equal(all(node => node.tag === "button" && node.dataset?.endAdmin !== undefined).length, 0, "no Remove while the list is being read again");
   access = undefined; paint();
   assert.equal(all(node => node.dataset?.adminAccess !== undefined).length, 0, "with agent admin access off, the tab lists people only");
 });

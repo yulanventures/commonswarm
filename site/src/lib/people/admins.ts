@@ -77,11 +77,16 @@ export const workspaceAdminGrantsRefused = (status: number): boolean => status =
  * another agent has the name, the grant's when the same agent has another row of the same level.
  */
 export function peopleAdminLabel(grant: PeopleAdminGrant, all: readonly PeopleAdminGrant[]): string {
+  const id = peopleAdminDiscriminator(grant, all);
+  return id ? `${grant.agentName} (${id})` : grant.agentName;
+}
+/** The id part on its own ("agent aaaaaaaa", "grant 11111111"), or nothing when the name is enough. The row shows it
+ *  as its own field, outside the name, so a long name cut with an ellipsis can never hide it. */
+export function peopleAdminDiscriminator(grant: PeopleAdminGrant, all: readonly PeopleAdminGrant[]): string {
   const sameName = all.filter((other) => other.agentName === grant.agentName);
   const otherAgent = sameName.some((other) => other.principalId !== grant.principalId);
   const twin = sameName.some((other) => other !== grant && other.grantId !== grant.grantId && other.principalId === grant.principalId && other.level === grant.level);
-  if (twin) return `${grant.agentName} (grant ${grant.grantId.slice(0, 8)})`;
-  return otherAgent ? `${grant.agentName} (agent ${grant.principalId.slice(0, 8)})` : grant.agentName;
+  return twin ? `grant ${grant.grantId.slice(0, 8)}` : otherAgent ? `agent ${grant.principalId.slice(0, 8)}` : "";
 }
 
 export const peopleAdminLevelName = (level: PeopleAdminLevel): string =>
