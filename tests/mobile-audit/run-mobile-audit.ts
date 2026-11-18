@@ -149,6 +149,9 @@ const STARTER: Screen[] = [
 ];
 
 /** Overlay roots the generic rules cannot recognise, counted only while shown. */
+/** Where the picture check runs: desktops with a mouse and phones. The run fails unless every one of these ran. */
+const PICTURE_PROFILES = [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false],
+  [{ width: 360, height: 740 }, "light", false], [{ width: 1024, height: 1366 }, "dark", true]] as const;
 /** Where the command palette's keyboard check runs. The run fails unless every one of these ran. */
 const PALETTE_PROFILES = [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const;
 const DECLARED_OVERLAYS: Record<string, DeclaredOverlay[]> = {
@@ -1070,8 +1073,7 @@ async function main(): Promise<void> {
       }
       // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
-      for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false],
-        [{ width: 360, height: 740 }, "light", false], [{ width: 1024, height: 1366 }, "dark", true]] as const) {
+      for (const [viewport, theme, desktop] of PICTURE_PROFILES) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);
@@ -1143,7 +1145,7 @@ async function main(): Promise<void> {
     captureErrors = summary.errors;
     witnessFailures = summary.witnesses.witnessErrors + summary.witnesses.keyboard.error + summary.witnesses.activation.error;
     hoverFailures = summary.hover.shifted + summary.hover.error + summary.hover.desktopCaptureErrors;
-    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === 2 ? 0 : 1);
+    pictureFailures = summary.pictures.failedChecks + summary.pictures.errors + (summary.pictures.runs === PICTURE_PROFILES.length ? 0 : 1);
     paletteFailures = summary.palette.failedChecks + summary.palette.errors + (summary.palette.runs === PALETTE_PROFILES.length ? 0 : 1);
     await closeSite();
     functions.kill();
