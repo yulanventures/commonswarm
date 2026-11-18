@@ -65,6 +65,8 @@ const DIAGNOSTIC = ((): { screens: string[]; sizes: string[] } | null => {
   return { screens: screenList, sizes: sizeList.length > 0 ? sizeList : selectableSizes() };
 })();
 const PASSES = DIAGNOSTIC ? [false, true] : [false];
+/** How many times a capture may press the app's own Try again when boot lands on the sign-in-check recovery panel. */
+const BOOT_RETRIES = 2;
 /** The few Playwright route members the freeze control uses (Playwright is loaded dynamically, untyped). */
 type FrozenResponse = { status: number; headers: Record<string, string>; body: Buffer };
 type Route = { request(): { postData(): string | null; resourceType(): string }; continue(): Promise<void>; abort(code?: string): Promise<void>; fulfill(response: FrozenResponse): Promise<void>;
@@ -696,6 +698,26 @@ async function main(): Promise<void> {
         return { counts, hold: () => { mode = "hold"; }, release, remove: async () => { release(); await page.unroute(request, handler).catch(() => {}); } };
       };
       type Fault = Awaited<ReturnType<typeof armFault>>;
+      // The app gives its sign-in check four seconds at boot, then shows a recovery panel with Try again
+      // (site/src/lib/commonswarm.ts boundedAuth). On a busy runner the check is sometimes slower, and a capture that
+      // lands on that panel can never reach its screen. The panel's own button is the designed way back, so press it and
+      // wait for boot again, at most BOOT_RETRIES times. Each press is counted on the capture's report entry
+      // (bootRetries) and in the summary: a retry is recorded, never silent.
+      const RECOVERY_RETRY = '[data-panel="workspace-error"]:not([hidden]) [data-retry-workspaces]';
+      const bootRetries = new WeakMap<object, number>();
+      const recoverBoot = async (page: any): Promise<void> => {
+        for (let attempt = 1; attempt <= BOOT_RETRIES; attempt++) {
+          if (!(await page.locator(RECOVERY_RETRY).isVisible().catch(() => false))) return;
+          bootRetries.set(page, attempt);
+          await page.click(RECOVERY_RETRY, { timeout: 5_000 });
+          // The press starts a new boot; wait for the panel to give way before judging the boot again.
+          await page.waitForFunction(() => {
+            const app = document.querySelector("live-dashboard");
+            return app?.getAttribute("data-state") === "loading" || document.querySelector<HTMLElement>('[data-panel="workspace-error"]')?.hidden !== false;
+          }, undefined, { timeout: 5_000 }).catch(() => {});
+          await appBooted(page);
+        }
+      };
       const openScreen = async (page: any, screen: Screen, fault: Fault | null = null): Promise<boolean> => {
         if (screen.newBuild) {
           const appPath = new URL(fill(screen.path, seed.ids), "http://x").pathname;
@@ -715,6 +737,8 @@ async function main(): Promise<void> {
         }
         await page.goto(`http://127.0.0.1:${SITE_PORT}${fill(screen.path, seed.ids)}`, { waitUntil: "domcontentloaded" });
         await appBooted(page);
+        // A capture that breaks a read on purpose (screen.fault) owns its own recovery; leave its states alone.
+        if (!fault) await recoverBoot(page);
         await page.waitForFunction(({ id, hasWorkspace }: { id: string; hasWorkspace: boolean }) => {
           if (hasWorkspace && !document.querySelector('[data-home-workspace-shell] [data-home-pane="todos"]')) return false;
           if (id.startsWith("app.definitions") && !document.querySelector('.household-definitions [data-def-action="select"]')) return false;
@@ -982,7 +1006,12 @@ async function main(): Promise<void> {
             console.log(JSON.stringify({ phase: "capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
             if (fault) entry.fault = { ...fault.counts, recovered: false };
             try { const shot = `shots/${screen.id}--${state}--${size}--${theme}${freeze ? "--frozen" : ""}--error.png`; await page.screenshot({ path: join(OUT, shot) }); entry.screenshot = shot; } catch { /* page gone */ }
-          } finally { await fault?.remove(); await page.close(); }
+          } finally {
+            // Recorded whether or not the capture went on to succeed.
+            if (bootRetries.has(page)) entry.bootRetries = bootRetries.get(page);
+            await fault?.remove();
+            await page.close();
+          }
           return entry;
         });
         report.push(...batch);
@@ -1010,7 +1039,11 @@ async function main(): Promise<void> {
           } catch (error) {
             entry.error = String(error instanceof Error ? error.message : error).split("\n")[0]!.slice(0, 300);
             console.log(JSON.stringify({ phase: "hover-capture-error", viewport: size, theme, id: screen.id, error: entry.error }));
-          } finally { await page.close(); }
+          } finally {
+            // Recorded whether or not the capture went on to succeed.
+            if (bootRetries.has(page)) entry.bootRetries = bootRetries.get(page);
+            await page.close();
+          }
           return entry;
         });
         hoverDesktop.push(...batch);
@@ -1055,6 +1088,9 @@ async function main(): Promise<void> {
       withBypassedInteractions: report.filter(r => ((r.bypassedInteractions as unknown[] | undefined)?.length ?? 0) > 0).length,
       themeMismatches: report.filter(r => r.effectiveTheme !== undefined && r.effectiveTheme !== r.theme).length,
       errors: report.filter(r => r.error && r.error !== "pending").length,
+      // Captures that met the app's boot recovery panel and pressed Try again (see recoverBoot). Not a failure;
+      // a number that climbs says the stack under the audit is slow to answer the sign-in check.
+      bootRetries: [...report, ...hoverDesktop].filter(r => Number(r.bootRetries) > 0).length,
       // Witness counters, appended; every key above keeps its meaning.
       witnesses: witnessSummary(report),
       // Hover stability: the six audit viewports plus the desktop pass. shifted, error and desktop capture errors fail.
