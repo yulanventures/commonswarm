@@ -77,11 +77,9 @@ const {
 
   <div class="ac__panel ac__result" data-panel="result">
     <div class="ac__result-copy">
-      <p class="ac__eyebrow">Ready to hand off</p>
       <h2 class="ac__result-title">Your agent prompt is ready.</h2>
       <p class="ac__result-lead">
-        Paste the prompt into your assistant. It will ask how you want to receive messages.
-        This page closes the prompt when the agent first connects.
+        Paste it into your assistant. This page closes it when the agent first connects.
       </p>
     </div>
 
@@ -95,24 +93,24 @@ const {
           stroke-linecap="round"
           stroke-linejoin="round"></path>
       </svg>
-      <span>
-        This prompt or setup file carries a secret through the model. Keep it private. For hosts that support it, use the hosted connector to keep credentials out of the model. Copy this prompt before you leave this screen.
-        If you lose it, create another.
-      </span>
+      <span>Keep it private: it carries a secret. Copy it before you leave this screen.</span>
     </p>
-
-    <div class="ac__block">
-      <div class="ac__block-bar">
-        <span class="ac__block-label">Prompt for your AI agent</span>
-      </div>
-      <pre class="ac__pre" data-slot="prompt" tabindex="0" aria-label="The block to give your agent"></pre>
-    </div>
 
     <button class="ac__btn ac__btn--primary ac__btn--copy" type="button" data-action="copy">
       <span data-slot="copy-label">Copy prompt</span>
     </button>
 
     <button class="ac__btn ac__btn--quiet" type="button" data-action="download-connection">Use a setup file</button>
+
+    <details class="ac__show">
+      <summary>Show the prompt</summary>
+      <div class="ac__block">
+        <pre class="ac__pre" data-slot="prompt" tabindex="0" aria-label="The block to give your agent"></pre>
+      </div>
+      <p class="ac__hint">
+        If you lose it, create another. Where the app supports it, the hosted connector keeps the secret out of the model.
+      </p>
+    </details>
 
     <p class="ac__status" role="status" aria-live="polite" data-slot="copy-status"></p>
 
@@ -921,6 +919,8 @@ const {
         // honest fallback is to select the text so the reader's own copy shortcut works.
         const pre = this.#q<HTMLElement>('[data-slot="prompt"]');
         if (pre) {
+          // The prompt sits in a closed disclosure; a selection inside it is only usable once it is open.
+          pre.closest("details")?.setAttribute("open", "");
           const range = document.createRange();
           range.selectNodeContents(pre);
           const selection = window.getSelection();
@@ -959,14 +959,6 @@ const {
     max-inline-size: var(--measure-wide);
   }
 
-  .ac__eyebrow {
-    font-size: var(--t-2xs);
-    line-height: var(--lh-2xs);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-    font-weight: var(--weight-semibold);
-    color: var(--accent-bright);
-  }
 
   .ac__muted {
     font-size: var(--t-sm);
@@ -1126,24 +1118,38 @@ const {
     overflow: hidden;
   }
 
-  .ac__block-bar {
+
+
+  /* The prompt is long and machine-written; it stays folded until someone wants to read it. */
+  .ac__show {
+    min-inline-size: 0;
+    inline-size: 100%;
+  }
+
+  .ac__show > summary {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--gap-inline);
-    padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4);
-    border-block-end: 1px solid var(--border);
+    min-block-size: 44px;
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+    cursor: pointer;
   }
 
-  .ac__block-label {
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    letter-spacing: var(--track-xs);
-    color: var(--text-muted);
+  .ac__show > summary:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
 
-  /* The one primary action of the result panel, sitting directly under the block it copies
-     and matching its width — copying the prompt is the whole point of this screen. */
+  .ac__show[open] > summary {
+    margin-block-end: var(--s-2);
+  }
+
+  .ac__show > .ac__hint {
+    margin-block-start: var(--s-3);
+  }
+
+  /* The one primary action of the result panel: copying the prompt is the whole point of this screen. */
   .ac__btn--copy {
     align-self: stretch;
     padding: var(--s-4) var(--s-6);
