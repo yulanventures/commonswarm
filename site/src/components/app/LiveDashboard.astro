@@ -14487,15 +14487,18 @@ import "../../styles/kylon-command-palette.css";
           trigger.focus({ preventScroll: true });
         }
       });
+      /* The rows a person can reach now. A hidden row (Password and the sign-out rows before sign-in) cannot take
+         focus, so counting it left the arrow keys stuck on the row before it. */
+      const rows = (): HTMLElement[] => [...popover.querySelectorAll<HTMLElement>('[role^="menuitem"]')].filter(item => !item.hidden);
       trigger.addEventListener("keydown", event => {
         if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
         event.preventDefault(); set(true);
-        const items = popover.querySelectorAll<HTMLElement>('[role^="menuitem"]');
+        const items = rows();
         items[event.key === "ArrowDown" ? 0 : items.length - 1]?.focus();
       });
       popover.addEventListener("keydown", event => {
         if (event.key === "Tab") { close(); return; }
-        const items = [...popover.querySelectorAll<HTMLElement>('[role^="menuitem"]')];
+        const items = rows();
         const next = menuFocusIndex(items.indexOf(document.activeElement as HTMLElement), event.key, items.length);
         if (next !== null) { event.preventDefault(); items[next]?.focus(); }
       });
