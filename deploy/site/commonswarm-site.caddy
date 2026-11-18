@@ -56,8 +56,26 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 		# Caddy reports ENOTDIR as 400 when a request adds a segment below a
 		# real file. Vercel treats that path as missing, so normalize both cases.
 		@notFound expression {http.error.status_code} == 404 || {http.error.status_code} == 400
-		header @notFound Content-Type "text/plain; charset=utf-8"
-		respond @notFound <<BODY
+
+		# The site's own not-found page (site/src/pages/404.astro, built to /404.html), still
+		# answered with status 404. A release that has no such file keeps the plain text below,
+		# so this block and the site can ship in either order.
+		@notFoundPage {
+			expression {http.error.status_code} == 404 || {http.error.status_code} == 400
+			file /404.html
+		}
+		handle @notFoundPage {
+			# A missing .js or .md already carries that type from the route above.
+			header Content-Type "text/html; charset=utf-8"
+			rewrite * /404.html
+			file_server {
+				status 404
+			}
+		}
+
+		handle @notFound {
+			header Content-Type "text/plain; charset=utf-8"
+			respond <<BODY
 The page could not be found
 
 NOT_FOUND
@@ -65,5 +83,6 @@ NOT_FOUND
 commonswarm::not-found
 
 BODY 404
+		}
 	}
 }

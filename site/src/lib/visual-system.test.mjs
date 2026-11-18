@@ -76,7 +76,8 @@ test("homepage preloads Bricolage Grotesque and DM Sans, sets root attributes ea
 
   // The homepage's palette, type and header live in one stylesheet that article pages share.
   const publicCss = await readFile(new URL("../styles/public-theme.css", import.meta.url), "utf8");
-  assert.match(publicCss, /:root:is\(\[data-home\],\s*:has\(main :is\(\.lp-home, \.seo-page\)\)\)/u);
+  assert.match(publicCss, /:root:is\(\[data-home\], \[data-public-look\],\s*:has\(main :is\(\.lp-home, \.seo-page\)\)\)/u);
+  assert.match(base, /data-public-look=\{publicLook \? "" : undefined\}/u);
   assert.match(publicCss, /--font-display:\s*"Bricolage Grotesque",\s*"Bricolage Grotesque Fallback"/u);
   assert.match(publicCss, /--font-sans:\s*"DM Sans",\s*"DM Sans Fallback"/u);
   for (const page of ["../pages/index.astro", "../layouts/SeoPage.astro"]) {
