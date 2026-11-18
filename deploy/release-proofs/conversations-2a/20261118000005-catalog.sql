@@ -32,7 +32,7 @@ SELECT (SELECT count(*)=28 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
   ('swarm.conversation_lock_workspace(uuid)','4b4dee8fd30274c4e6a0c980bdacd360','swarm_admin',NULL),
   ('swarm.conversation_person_upkeep()','b0492c8c9166e6986ba6d7bc4ce3b168','swarm_admin',NULL),
   ('swarm.conversation_agent_upkeep()','94de6a575bb202bdc6951840ba04745d','swarm_admin',NULL),
-  ('swarm.conversation_creator_joins()','e2483d8f7868343c0e56f0cbff394468','swarm_admin',NULL),
+  ('swarm.conversation_creator_joins()','3033897f675ad85b0f74a5ca6939acf4','swarm_admin',NULL),
   ('swarm.conversation_reads_follow()','e63b7489ebd4a1ecad71f0a3260cd29c','swarm_admin',NULL),
   ('swarm.conversation_preferences_follow()','1f2f286619531b7eb44774535ecdb8c4','swarm_admin',NULL),
   ('swarm.file_conversation_signal(uuid,uuid)','f650beca97fd09f67a91dcc33cf5a917','swarm_admin',NULL),
@@ -47,7 +47,7 @@ SELECT (SELECT count(*)=28 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
    ('swarm.memberships','memberships_conversation_upkeep','swarm.conversation_person_upkeep()'),
    ('swarm.agent_workspace_memberships','agent_workspace_memberships_conversation_upkeep','swarm.conversation_agent_upkeep()'),
    ('swarm.agent_principals','agent_principals_conversation_upkeep','swarm.conversation_agent_upkeep()'),
-   ('swarm.conversations','conversations_creator_joins','swarm.conversation_creator_joins()'),
+   ('swarm.channels','channels_sync_creator_member','swarm.conversation_creator_joins()'),
    ('swarm.human_channel_reads','human_channel_reads_follow_conversation','swarm.conversation_reads_follow()'),
    ('swarm.agent_channel_reads','agent_channel_reads_follow_conversation','swarm.conversation_reads_follow()'),
    ('swarm.channel_preferences','channel_preferences_follow_conversation','swarm.conversation_preferences_follow()')

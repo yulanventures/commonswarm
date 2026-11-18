@@ -34,7 +34,8 @@ All live CommonSwarm channels use private **Broadcast**. There are no `postgres_
 | Topic | Event | Credential | Producer |
 |---|---|---|---|
 | `cswarm-wake:{wake_id}` | `wake` | Legacy anon JWT; database policy checks the topic capability. | PostgreSQL `realtime.send` trigger after an agent delivery. |
-| `cswarm-signals:{workspace_id}` | `signal` | Human access JWT; database policy checks membership. | PostgreSQL `realtime.send` trigger after a signal insert. |
+| `cswarm-signals:{workspace_id}` | `signal` | Human access JWT; database policy checks membership. | Nothing since 20261118000005; kept so older web bundles still join. |
+| `cswarm-member:{workspace_id}:{user_id}` | `signal` | Human access JWT for that person; database policy checks membership and a live session. | The deferred conversation filer at commit, a bare `{"v":1}` to each reader of a new message; the reaction trigger likewise. |
 | `cswarm-activity:{workspace_id}` | `activity` | Human access JWT; database policy checks membership. | The `activity` edge after agent authentication. |
 
 Supabase JS connects at `/realtime/v1/websocket`. Caddy rewrites it to Realtime's `/socket/websocket` and sets tenant host `realtime-dev`.

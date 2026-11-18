@@ -17405,7 +17405,8 @@ async function handleTransaction(
         auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
         outcome: "accepted", detail: ignoredIdentity, hash, channelIds: outcome.audit_channel_ids,
       });
-      return { status: 200, body: { status: "accepted", ...response, min_client_version: minClientVersion } };
+      // The body a replay answers too (replayResult): nothing beside the stored response.
+      return { status: 200, body: { status: "accepted", ...response } };
     }
 
     if ((CHANNEL_COMMAND_KINDS as readonly string[]).includes(command.kind)) {

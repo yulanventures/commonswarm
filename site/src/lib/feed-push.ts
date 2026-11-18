@@ -1,9 +1,10 @@
 /*
  * Workspace feed wake: subscribe to the private cswarm-signals topic, and to
- * the person's own cswarm-member topic where their private channels are
- * announced, and refresh the feed on events, with a 30-second reconcile while
- * SUBSCRIBED and the existing 2-second poll when not. Push is a hint; the
- * signal page is still the truth.
+ * the person's own cswarm-member topic, and refresh the feed on events, with a
+ * 30-second reconcile while SUBSCRIBED and the existing 2-second poll when not.
+ * Since 20261118000005 every new message and reaction a person can read is
+ * announced on their own topic only, as a bare frame; the workspace topic stays
+ * joined but silent. Push is a hint; the signal page is still the truth.
  *
  * Status is classified by the Realtime subscribe callback names in
  * FEED_PUSH_FALLBACK_STATUSES, never by a thrown Error's presentation text (D-053).
@@ -13,7 +14,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const WORKSPACE_SIGNALS_TOPIC_PREFIX = "cswarm-signals:";
-/** A person's own topic in one workspace. The server sends a private channel's messages to its members' topics. */
+/** A person's own topic in one workspace: the server announces there each message and reaction they can read. */
 export const MEMBER_SIGNALS_TOPIC_PREFIX = "cswarm-member:";
 export const WORKSPACE_SIGNALS_EVENT = "signal";
 export const FEED_PUSH_SUBSCRIBED_STATUS = "SUBSCRIBED";
@@ -142,7 +143,7 @@ function attachSignalsChannel(
 
 /**
  * Bind both topics a signed-in person's feed listens on: the workspace's, and
- * their own, where their private channels are announced. Callers that await
+ * their own, where everything they can read is announced. Callers that await
  * (session, setAuth) must pass a workspace id captured before those awaits.
  * Reports SUBSCRIBED
  * only while both are joined and a fallback status as soon as either drops, so

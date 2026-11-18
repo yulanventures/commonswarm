@@ -20,7 +20,7 @@ let firstRun: { general: number; filed: number; members: number; reads: number; 
 const triggers = [
   ["swarm.signals", "signals_settle_conversation"], ["swarm.signal_recipients", "signal_recipients_settle_conversation"],
   ["swarm.workspaces", "workspaces_create_general"], ["swarm.channels", "channels_sync_conversation"],
-  ["swarm.memberships", "memberships_conversation_upkeep"],
+  ["swarm.channels", "channels_sync_creator_member"], ["swarm.memberships", "memberships_conversation_upkeep"],
   ["swarm.agent_workspace_memberships", "agent_workspace_memberships_conversation_upkeep"],
   ["swarm.agent_principals", "agent_principals_conversation_upkeep"],
   ["swarm.human_channel_reads", "human_channel_reads_follow_conversation"],

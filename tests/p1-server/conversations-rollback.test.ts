@@ -61,6 +61,7 @@ INSERT INTO swarm.users (user_id, display_name) VALUES ('${carol}', 'DrillC');
 INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES ('${ws}', '${carol}', 'member');
 CREATE TEMP TABLE opened ON COMMIT DROP AS
   SELECT swarm.conversation_open('${ws}', 'user', '${alice}', ARRAY['${bob}', '${carol}']::uuid[], '{}'::uuid[], false) AS r;
+GRANT SELECT ON opened TO swarm_command;
 -- As the edge posts it: deferred, so the message is filed by its poster after its recipients and checked at commit
 -- (here, at SET CONSTRAINTS ... IMMEDIATE).
 SET CONSTRAINTS ALL DEFERRED;
