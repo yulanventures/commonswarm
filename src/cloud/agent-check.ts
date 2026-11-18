@@ -364,12 +364,15 @@ export async function checkAgentMessages(options: {
             // Commit before transport: a request that consumes the deadline still counts.
             await persist(attempted);
             /* One batched request for the whole batch (an older edge: the single shape, four at a
-             * time). Requests end a little before the deadline so the outcome below is written. */
+             * time). Requests end a little before the deadline so the outcome below is written. The
+             * request gets the rest of this check's own deadline, not a hook-sized cap: a direct check
+             * (cswarm check, MCP) has 15 s, and a slow server must not leave a message it just showed
+             * unobserved because one request was cut off at the hook's 4 s while time remained. A hook
+             * check's deadline is the hook's own, so nothing changes there. */
             const outcome = await observeUnclaimedDeliveries({
               target, fetcher, credential: token, workspaceId: profile.workspace_id,
               signalIds: [...due.keys()],
               deadlineAtMs: deadlineMs - 2 * AGENT_CHECK_ACK_MIN_REMAINING_MS,
-              requestTimeoutMs: AGENT_CHECK_TIMEOUT_MS,
             });
             for (const id of [...outcome.observed, ...outcome.refused]) removed.add(id);
             if (deadlineMs - Date.now() >= AGENT_CHECK_ACK_MIN_REMAINING_MS) {

@@ -604,3 +604,64 @@ test("a check observes the message it just showed first, even behind a full queu
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }
 });
+
+test("a direct cswarm check waits for a slow observation within its own budget, not the hook's", { timeout: 40_000 }, async () => {
+  const shown = { ...signal(1), id: "77777777-1111-4111-8111-111111111111", body: "shown, slow to observe",
+    created_at: new Date(Date.UTC(2026, 8, 16, 2, 0, 0)).toISOString() };
+  const acks: Array<Record<string, unknown>> = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", chunk => raw += chunk);
+    request.on("end", async () => {
+      const body = JSON.parse(raw || "{}") as Record<string, unknown>;
+      const reply = (status: number, value: unknown) => {
+        if (!response.destroyed) response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      };
+      if (body.resource === "members") return reply(200, {
+        members: [{ user_id: OWNER_ID, display_name: "Owner" }],
+        agents: [{ principal_id: PRINCIPAL_ID, name: "Agent", owner_user_id: OWNER_ID }],
+        identity: { credential_valid: true, principal_id: PRINCIPAL_ID, workspace_id: WORKSPACE_ID, owner_user_id: OWNER_ID },
+      });
+      if (body.resource === "signals") {
+        return reply(200, { signals: [shown], capabilities: { sender_owner_relation: 1, cursor_after: 1 } });
+      }
+      const command = body.command as Record<string, unknown> | undefined;
+      if (command?.kind === "ack_agent_delivery") {
+        acks.push(command);
+        // Slower than a hook check's whole budget, well inside a direct check's.
+        await delay(AGENT_CHECK_TIMEOUT_MS + 500);
+        const ids = command.signal_ids as string[];
+        return reply(200, { status: "accepted", ok: true, event_ids: [], outcome: "observed", signal_ids: ids,
+          observed_signal_ids: ids, refused: [] });
+      }
+      return reply(200, { status: "accepted", ok: true, event_ids: [] });
+    });
+  });
+  await new Promise<void>(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const profilePath = await profile();
+    const stored = JSON.parse(await readFile(profilePath, "utf8"));
+    await writeFile(profilePath, JSON.stringify({ ...stored, url: `http://127.0.0.1:${address.port}` }), { mode: 0o600 });
+    const home = await mkdtemp(join(root, "slow-observe-home-"));
+    const child = spawn(process.execPath, ["--import", tsxImport, cliPath, "check", "--profile", profilePath, "--json"], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, "config"), SWARM_AGENT_STATE_DIR: join(home, "agent-state") },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    const status = await new Promise<number | null>(resolveStatus => child.once("close", resolveStatus));
+    assert.equal(status, 0, stderr);
+    assert.deepEqual(JSON.parse(stdout).messages.map((message: { id: string }) => message.id), [shown.id]);
+    assert.equal(acks.length, 1, "one observation request");
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [], "the shown message is observed in this run, not left for the next");
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+  }
+});
