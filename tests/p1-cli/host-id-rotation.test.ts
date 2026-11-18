@@ -994,3 +994,27 @@ test("compatibility control: a real Linux process holding the credential lock pa
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a lock wait ends near its deadline even when the owner lookup is slow", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-slow-owner-lookup-"));
+  const path = join(root, "check.lock");
+  const live = JSON.stringify({ pid: process.pid, host: hostname(), createdAt: Date.now() });
+  // Like a loaded host's /bin/ps: it blocks for as long as its timeout allows, up to its own 1 s default, then fails.
+  const lookups: Array<number | undefined> = [];
+  const slowLookup = (_pid: number, _runPs?: unknown, timeoutMs?: number) => {
+    lookups.push(timeoutMs);
+    const until = Date.now() + Math.min(timeoutMs ?? 1_000, 1_000);
+    while (Date.now() < until) { /* synchronous, like execFileSync */ }
+    return null;
+  };
+  try {
+    await writeFile(path, live);
+    const started = Date.now();
+    await assert.rejects(withFileLock(root, "check", async () => "wrong",
+      { timeoutMs: 300, pidStartLookup: slowLookup as typeof pidStartMs }), FileLockTimeoutError);
+    const elapsed = Date.now() - started;
+    assert.ok(lookups.length > 0, "the owner lookup ran");
+    assert.ok(elapsed < 300 + 200, `a 300 ms lock wait took ${elapsed} ms`);
+    assert.equal(await readFile(path, "utf8"), live, "a live owner's lock is never reclaimed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
