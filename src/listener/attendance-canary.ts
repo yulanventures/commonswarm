@@ -361,7 +361,7 @@ export function renderAttendedAttendanceCanary(
     return lines.join("\n");
   }
   if (result.stalledAt === "watcher_polled") {
-    lines.push("STALLED: watcher_polled. Next: restart `cswarm inbox --notify` under the same session Monitor.");
+    lines.push("STALLED: watcher_polled. Next: start `cswarm inbox --notify` again under the same session Monitor; it replaces the stalled watcher.");
   } else if (result.stalledAt === "observed") {
     lines.push("STALLED: observed. Next: run `cswarm check` in the session.");
   } else if (result.watcherPollState === "unproved") {

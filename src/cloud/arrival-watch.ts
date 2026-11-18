@@ -7,7 +7,8 @@ import { basename, dirname, join } from "node:path";
 import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import type { SignalRecord } from "./command-client.js";
 import type { CloudTarget } from "./config.js";
-import { printedCommand } from "./wake-lease-constants.js";
+import { printedCommand, WAKE_LEASE_RENEW_MS } from "./wake-lease-constants.js";
+import { WakeLeaseTransientError } from "./wake-lease.js";
 import {
   followHttpDetails,
   isRetryableFollowError,
@@ -19,8 +20,10 @@ import {
   type SignalCursor,
 } from "./signals.js";
 import {
+  deleteSecureJsonFile,
   ensureSecureStateDirectory,
   cleanupDeadOwnerTemps,
+  FileLockTimeoutError,
   fileLockTimeoutSentence,
   HOST_ID_LOCK_INCOMPLETE_GRACE_MS,
   publishCompleteOwnerFile,
@@ -101,7 +104,7 @@ export function notifySignalStopSentence(signal: keyof typeof NOTIFY_SIGNAL_EXIT
     watcher: "another watcher holds this inbox now", h0_poll: "H0 poll holds this inbox now",
     unclaimed: "this watcher had not claimed the inbox lease",
     "claim-unknown": "this watcher's claim result is unknown; check this seat's wake lease before starting another watcher; any lease it took expires within 3 minutes" }[holder];
-  const prose = `inbox --notify stopped because of ${signal} and ${state}; restart it under the session's Monitor`;
+  const prose = `inbox --notify stopped because of ${signal} and ${state}; start it again under the session's Monitor`;
   return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
     ? `${prose} the same way it was started, with the agent token on stdin.`
     : printedCommand(`${prose}.`, notifyRestartCommand(options));
@@ -347,7 +350,7 @@ export async function arrivalHostId(lockPath: string, machineHash?: string | nul
 }
 
 export function arrivalWatchAlreadyRunningSentence(pid: number): string {
-  return `inbox --notify is already running for this agent as pid ${pid}.`;
+  return `inbox --notify is already running for this agent as pid ${pid}; a new start replaces it, so nothing needs to be stopped.`;
 }
 
 export class ArrivalWatchAlreadyRunningError extends Error {
@@ -474,6 +477,184 @@ export async function releaseArrivalWatchSeatLocks(
 ): Promise<void> {
   await releaseArrivalWatchLock(paths.lockPath, pid);
   await releaseArrivalWatchLock(paths.legacyLockPath, pid);
+}
+
+/**
+ * How long a new watcher waits for the one it replaced to let go of the seat's locks. The replaced
+ * watcher stops when its next renewal is refused, so the bound covers one full renewal period, the
+ * 15-second renewal request, the same-host check that follows it and the watcher's teardown.
+ */
+export const NOTIFY_TAKEOVER_TIMEOUT_MS = WAKE_LEASE_RENEW_MS + 45_000;
+const NOTIFY_TAKEOVER_POLL_MS = 250;
+const TAKEOVER_RECORD_MAX_BYTES = 1024;
+
+/** Said by a watcher that a newer start on this host replaced. It exits 0: nothing needs doing. */
+export function notifyReplacedSentence(pid: number): string {
+  return `[notify_replaced] inbox --notify was replaced by a newer watcher on this host (pid ${pid}) and stopped; nothing else is needed.`;
+}
+
+/** The replaced watcher's process did not stop. Name that exact pid; never suggest a pattern. */
+export class ArrivalWatchReplaceTimeoutError extends Error {
+  readonly code = "notify_replace_timeout";
+  constructor(readonly pid: number, waitedMs: number) {
+    super(`[notify_replace_timeout] inbox --notify for this agent was replaced, but pid ${pid} did not stop within ${Math.round(waitedMs / 1000)} seconds and still holds this seat's watch lock. This start released its lease and stopped. Confirm that pid ${pid} is a cswarm inbox --notify process, stop only that pid, then start it again.`);
+    this.name = "ArrivalWatchReplaceTimeoutError";
+  }
+}
+
+/** Another start for the same seat held the start gate past the whole takeover bound. */
+export class ArrivalWatchStartBusyError extends Error {
+  readonly code = "notify_start_busy";
+  constructor(pid: number | undefined) {
+    super(`[notify_start_busy] another inbox --notify for this agent is still starting${pid === undefined ? "" : ` as pid ${pid}`}; let it finish, then start it again.`);
+    this.name = "ArrivalWatchStartBusyError";
+  }
+}
+
+/** Beside the seat lock: which local watcher a start replaced, and by which watcher. */
+export function arrivalWatchTakeoverPath(lockPath: string): string {
+  return lockPath.replace(/\.lock$/u, ".takeover.json");
+}
+
+export interface ArrivalWatchTakeoverRecord {
+  replaced_watcher_id: string;
+  replaced_pid: number;
+  watcher_id: string;
+  pid: number;
+}
+
+export async function readArrivalWatchTakeover(lockPath: string): Promise<ArrivalWatchTakeoverRecord | null> {
+  try {
+    const raw = await readSecureJsonFile(arrivalWatchTakeoverPath(lockPath), TAKEOVER_RECORD_MAX_BYTES);
+    if (raw === null) return null;
+    const row = JSON.parse(raw) as Record<string, unknown>;
+    if (row.version !== 1 || typeof row.replaced_watcher_id !== "string" || !UUID_RE.test(row.replaced_watcher_id) ||
+        typeof row.watcher_id !== "string" || !UUID_RE.test(row.watcher_id) ||
+        !Number.isSafeInteger(row.replaced_pid) || !Number.isSafeInteger(row.pid)) return null;
+    return { replaced_watcher_id: row.replaced_watcher_id.toLowerCase(), replaced_pid: row.replaced_pid as number,
+      watcher_id: row.watcher_id.toLowerCase(), pid: row.pid as number };
+  } catch {
+    return null;
+  }
+}
+
+async function readWatchLockOwner(path: string): Promise<{ pid: number; watcherId: string | null } | null> {
+  try {
+    const raw = await readFile(path, "utf8");
+    return Buffer.byteLength(raw, "utf8") <= WATCH_LOCK_MAX_BYTES ? parseWatchLock(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One start at a time per seat on this host, held from before the watch locks until the caller's
+ * first lease claim returns. A single file lock waits at most 30 seconds, and a start that replaces
+ * a watcher can hold the gate for the whole takeover bound, so this waits in rounds.
+ */
+export async function holdArrivalWatchStartGate(
+  lockPath: string,
+  signal: AbortSignal,
+  timeoutMs = NOTIFY_TAKEOVER_TIMEOUT_MS + 30_000,
+): Promise<() => Promise<void>> {
+  const gateName = `notify-start-${createHash("sha256").update(lockPath).digest("hex").slice(0, 24)}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let release = () => {};
+    let held = () => {};
+    const acquired = new Promise<void>(resolvePromise => { held = resolvePromise; });
+    const holding = withFileLock(dirname(lockPath), gateName, async () => {
+      held();
+      await new Promise<void>(resolvePromise => { release = resolvePromise; });
+    }, { signal, timeoutMs: Math.max(0, Math.min(30_000, deadline - Date.now())) });
+    try {
+      await Promise.race([acquired, holding]);
+      return async () => { release(); await holding; };
+    } catch (error) {
+      if (!(error instanceof FileLockTimeoutError) || error.gate) throw error;
+      if (Date.now() >= deadline) throw new ArrivalWatchStartBusyError(error.ownerPid);
+    }
+  }
+}
+
+/**
+ * Take the seat's watch locks. When a live watcher on this host holds them, replace it without a
+ * signal: claim the wake lease (the server lets a same-host claim supersede), then wait for that
+ * watcher to see its renewal refused and let go. Call this under holdArrivalWatchStartGate.
+ */
+export async function acquireArrivalWatchSeatLocksReplacing(options: {
+  target: CloudTarget;
+  workspaceId: string;
+  principalId: string;
+  watcherId: string;
+  /** One claim attempt; returns the generation, or throws the claim's refusal or transport error. */
+  claim(): Promise<number>;
+  /** Give back a claimed lease when the replaced watcher never let go. */
+  release(generation: number): Promise<void>;
+  replacing?(pid: number): void;
+  signal: AbortSignal;
+  pid?: number;
+  root?: string;
+  timeoutMs?: number;
+}): Promise<{ lockPath: string; legacyLockPath: string }> {
+  const pid = options.pid ?? process.pid;
+  const acquire = () => acquireArrivalWatchSeatLocks(options.target, options.workspaceId,
+    options.principalId, pid, options.watcherId, options.root);
+  let holderPid: number;
+  try {
+    return await acquire();
+  } catch (error) {
+    if (!(error instanceof ArrivalWatchAlreadyRunningError)) throw error;
+    holderPid = error.pid;
+  }
+  const lockPath = arrivalWatchLockPath(options.target, options.workspaceId, options.principalId, options.root);
+  const legacyLockPath = legacyArrivalWatchLockPath(options.target, options.workspaceId, options.principalId, options.root);
+  const holder = [await readWatchLockOwner(lockPath), await readWatchLockOwner(legacyLockPath)]
+    .find(owner => owner !== null && owner.pid === holderPid && owner.watcherId !== null);
+  const recordPath = arrivalWatchTakeoverPath(lockPath);
+  if (holder?.watcherId) {
+    await writeSecureJsonFile(recordPath, `${JSON.stringify({ version: 1,
+      replaced_watcher_id: holder.watcherId, replaced_pid: holderPid,
+      watcher_id: options.watcherId.toLowerCase(), pid })}\n`);
+  }
+  const timeoutMs = options.timeoutMs ?? NOTIFY_TAKEOVER_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  let generation: number | null = null;
+  let failures = 0;
+  let claimError: unknown = null;
+  const giveUp = async (error: unknown): Promise<never> => {
+    if (generation !== null) await options.release(generation).catch(() => undefined);
+    await deleteSecureJsonFile(recordPath).catch(() => undefined);
+    throw error;
+  };
+  for (;;) {
+    if (options.signal.aborted) return await giveUp(options.signal.reason);
+    if (generation === null) {
+      try {
+        generation = await options.claim();
+        options.replacing?.(holderPid);
+      } catch (error) {
+        if (!(error instanceof WakeLeaseTransientError) || options.signal.aborted) return await giveUp(error);
+        failures += 1;
+        claimError = error;
+      }
+    }
+    if (generation !== null) {
+      try {
+        const locks = await acquire();
+        await deleteSecureJsonFile(recordPath).catch(() => undefined);
+        return locks;
+      } catch (error) {
+        if (!(error instanceof ArrivalWatchAlreadyRunningError)) return await giveUp(error);
+        holderPid = error.pid;
+      }
+    }
+    if (Date.now() >= deadline) {
+      return await giveUp(generation === null ? claimError : new ArrivalWatchReplaceTimeoutError(holderPid, timeoutMs));
+    }
+    await delay(Math.min(generation === null ? 1000 * 2 ** Math.min(failures, 4) : NOTIFY_TAKEOVER_POLL_MS,
+      Math.max(0, deadline - Date.now())), undefined, { signal: options.signal }).catch(() => undefined);
+  }
 }
 
 export async function arrivalWatchLockIdentity(path: string): Promise<string | null> {
