@@ -143,6 +143,18 @@ let nextConfirmationId = 0;
 export function workspaceAdminSummary(): string {
   return "This agent can rename this workspace, choose one of your agents here as its lead, add or remove your agents here, cancel member invitations you created here, and create agent seats you own here. It can also remove eligible members, which removes their agents and Lists & docs access from this workspace.";
 }
+/** What an organization admin can do today, in the security reviewer's words: the two "Available now" lines of the fixed
+ * copy. The workspace condition leads the sentence because it applies to the rename too: that command runs from a
+ * covered workspace. "An agent with workspace admin access" names the role whose powers are meant; its six lines are
+ * shown under Show permissions. A test fails if the fixed list changes without this summary being reread. */
+export function organizationAdminSummary(): string {
+  return "From a workspace in this organization that you own and this agent belongs to, it can rename the organization’s display name and use the same powers as an agent with workspace admin access. Those powers include removing eligible members, which removes their agents and Lists & docs access from that workspace.";
+}
+/** Coverage is checked each time the grant is used, so it follows the organization: a workspace qualifies once the
+ * person owns it and the agent is a member, and stops qualifying when either ceases. Said beside the decision. */
+export function organizationAdminCoverage(): string {
+  return "While this grant is active and you own the organization, it also covers workspaces there that you later come to own or this agent later joins, once you own the workspace and the agent is a member.";
+}
 /** The grant also records permissions that are not switched on yet. That is said beside the decision, with their count
  * from the fixed list. "If": a release can leave this grant ineligible, and an action may never become available. */
 export function workspaceAdminLater(count: number): string {
@@ -167,7 +179,7 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   const body = element(doc, "div", "sa-confirm__body");
   body.tabIndex = 0;
   body.setAttribute("role", "region");
-  body.setAttribute("aria-label", "Admin permissions and end date");
+  body.setAttribute("aria-label", "Admin permissions");
   const scopeLabel = element(doc, "label", "sa-field");
   scopeLabel.append(element(doc, "span", "", options.level === "workspace" ? "Workspace" : "Organization"));
   const scope = element(doc, "select", "sa-select");
@@ -184,15 +196,14 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   }
   scope.value = options.scopes.some(item => item.id === options.scopeId) ? options.scopeId! : "";
   scopeLabel.append(scope);
-  /* The workspace grant leads with the decision: who, where, what it can do, what comes later, and when it ends. The
-     full lists follow under Show permissions. The organization grant keeps its layout until its own change. */
-  const decisionFirst = options.level === "workspace";
-  // One workspace to choose from is not a choice: its name is said outright. The field still carries the value.
-  const only = decisionFirst && options.scopes.length === 1 && scope.value === options.scopes[0]!.id ? options.scopes[0]! : null;
+  /* Both grants lead with the decision: who, where, what it can do, what comes later, and when it ends. The full lists
+     follow under Show permissions. */
+  // One workspace or organization to choose from is not a choice: its name is said outright. The field still carries the value.
+  const only = options.scopes.length === 1 && scope.value === options.scopes[0]!.id ? options.scopes[0]! : null;
   body.append(scopeLabel);
   if (only) {
     scopeLabel.hidden = true;
-    const where = element(doc, "p", "sa-confirm__line", `Workspace: ${only.name}`);
+    const where = element(doc, "p", "sa-confirm__line", `${options.level === "workspace" ? "Workspace" : "Organization"}: ${only.name}`);
     where.dataset.seatAdminScopeName = "";
     body.append(where);
   }
@@ -204,18 +215,29 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
     for (const line of lines) list.append(element(doc, "li", "", line));
     section.append(element(doc, "h3", "", heading), list);
     sections.push(section);
-  }
-  if (decisionFirst) {
-    const can = element(doc, "p", "sa-confirm__line", workspaceAdminSummary());
-    can.dataset.seatAdminSummary = "";
-    body.append(can);
-    if (copy.deferred.length) {
-      const later = element(doc, "p", "sa-confirm__later", workspaceAdminLater(copy.deferred.length));
-      later.dataset.seatAdminLater = "";
-      body.append(later);
+    // The organization's first list refers to a workspace admin's powers; those six lines are shown with it, so the
+    // actual actions can be read during this confirmation.
+    if (options.level === "organization" && heading === "Available now") {
+      const detail = element(doc, "section", "sa-confirm__permissions");
+      detail.dataset.seatAdminWorkspacePowers = "";
+      const lines = element(doc, "ul", "");
+      for (const line of SEAT_ADMIN_ROLE_COPY["role:workspace_admin"].included) lines.append(element(doc, "li", "", line));
+      detail.append(element(doc, "h3", "", "Workspace admin powers"), lines);
+      sections.push(detail);
     }
-  } else {
-    body.append(...sections);
+  }
+  const can = element(doc, "p", "sa-confirm__line", options.level === "workspace" ? workspaceAdminSummary() : organizationAdminSummary());
+  can.dataset.seatAdminSummary = "";
+  body.append(can);
+  if (options.level === "organization") {
+    const reach = element(doc, "p", "sa-confirm__later", organizationAdminCoverage());
+    reach.dataset.seatAdminCoverage = "";
+    body.append(reach);
+  }
+  if (copy.deferred.length) {
+    const later = element(doc, "p", "sa-confirm__later", workspaceAdminLater(copy.deferred.length));
+    later.dataset.seatAdminLater = "";
+    body.append(later);
   }
   const endLabel = element(doc, "label", "sa-field");
   endLabel.append(element(doc, "span", "", "End date"));
@@ -238,14 +260,16 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   };
   duration.addEventListener("change", updateEnd);
   updateEnd();
-  body.append(endLabel, endNote);
-  if (decisionFirst) {
-    // Every line of the three lists, unchanged, one press away.
-    const more = element(doc, "details", "sa-confirm__more");
-    more.dataset.seatAdminPermissions = "";
-    more.append(element(doc, "summary", "", "Show permissions"), ...sections);
-    body.append(more);
-  }
+  /* When it ends is pinned with the buttons, outside the part that scrolls: however long the names and sentences are,
+     the whole end-date line is on screen beside Grant. */
+  const end = element(doc, "div", "sa-confirm__end");
+  end.dataset.seatAdminEnd = "";
+  end.append(endLabel, endNote);
+  // Every line of the three lists, unchanged, one press away.
+  const more = element(doc, "details", "sa-confirm__more");
+  more.dataset.seatAdminPermissions = "";
+  more.append(element(doc, "summary", "", "Show permissions"), ...sections);
+  body.append(more);
   const notice = element(doc, "p", "sa-confirm__notice");
   notice.hidden = true;
   notice.setAttribute("role", "status");
@@ -259,7 +283,7 @@ export function buildSeatAdminConfirmation(doc: Document, options: SeatAdminConf
   const refresh = action(doc, "Refresh admin access", () => { refresh.disabled = true; options.refresh(); });
   refresh.classList.add("sa-button--primary");
   footer.append(cancel, submit, signIn, refresh);
-  form.append(header, body, notice, footer);
+  form.append(header, body, end, notice, footer);
   dialog.append(form);
   let state: SeatAdminConfirmationState = { phase: "confirm" };
   let opener: HTMLElement | null = null;
