@@ -6,7 +6,7 @@
  * fails, or returns {enabled: false}, the Admin panel stays hidden and never
  * calls my_seat_admin_grants as a feature probe.
  */
-import { parseWorkspaceAdminGrants, type PeopleAdminGrant } from "./people/admins";
+import { parseWorkspaceAdminGrants, workspaceAdminGrantsNotDeployed, type PeopleAdminGrant } from "./people/admins";
 import type { Session } from "@supabase/supabase-js";
 import { deployment, postCommand } from "./commonswarm";
 import { buildSeatAdminEndConfirmation } from "./seat-admin-view";
@@ -443,7 +443,12 @@ export async function readWorkspaceAdminGrants(session: Session, workspaceId: st
     },
     body: JSON.stringify({ p_workspace_id: workspaceId }),
   });
-  if (!response.ok) throw new Error("Admin access could not load.");
+  if (!response.ok) {
+    const raw = (await response.json().catch(() => null)) as unknown;
+    // Before the read's migration is live, the page falls back to the viewer's own grants, as for a non-owner.
+    if (workspaceAdminGrantsNotDeployed(response.status, isRecord(raw) ? raw.code : undefined)) return null;
+    throw new Error("Admin access could not load.");
+  }
   return parseWorkspaceAdminGrants(await response.json());
 }
 

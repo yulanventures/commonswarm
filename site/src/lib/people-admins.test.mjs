@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminPeople } from "./people/admins.ts";
+import { parseWorkspaceAdminGrants, peopleAdminCoverage, peopleAdminDetail, peopleAdminEmpty, peopleAdminHeading, peopleAdminPeople, workspaceAdminGrantsNotDeployed } from "./people/admins.ts";
 
 const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 const row = (over = {}) => ({ grant_id: id(1), principal_id: id(2), agent_name: "Atlas", owner_user_id: id(3), owner_display: "Sam Rivera",
@@ -36,4 +36,9 @@ test("people who can manage are owners and admins; ending a wider grant says how
   assert.equal(peopleAdminCoverage({ level: "workspace" }, "Rivera household"), "Rivera household");
   assert.equal(peopleAdminCoverage({ level: "organization" }, "Rivera household"), "this organization");
   assert.equal(peopleAdminCoverage({ level: "scoped" }, "Rivera household"), "every workspace it covers");
+});
+
+test("a server without the read yet is not a failed read; any other refusal is", () => {
+  for (const [status, code] of [[404, undefined], [400, "PGRST202"], [400, "42883"]]) assert.equal(workspaceAdminGrantsNotDeployed(status, code), true, `${status} ${code}`);
+  for (const [status, code] of [[500, undefined], [401, "PGRST301"], [403, "42501"], [400, undefined]]) assert.equal(workspaceAdminGrantsNotDeployed(status, code), false, `${status} ${code}`);
 });

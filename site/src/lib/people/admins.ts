@@ -58,6 +58,14 @@ export function parseWorkspaceAdminGrants(raw: unknown): PeopleAdminGrant[] | nu
   });
 }
 
+/**
+ * The read is not on this server yet: its migration has not been applied. The page then lists what the viewer gave,
+ * under the heading that says so, instead of failing. Any other refusal is a failed read.
+ */
+export function workspaceAdminGrantsNotDeployed(status: number, code: unknown): boolean {
+  return status === 404 || code === "PGRST202" || code === "42883";
+}
+
 export const peopleAdminLevelName = (level: PeopleAdminLevel): string =>
   level === "workspace" ? "Workspace admin" : level === "organization" ? "Organization admin" : "Scoped admin";
 

@@ -2431,6 +2431,31 @@
     ]
   },
   {
+    "id": "app.people.admins",
+    "kind": "view",
+    "path": "/app?w={workspace}&v=people",
+    "setup": [
+      {
+        "waitFor": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]",
+        "click": "dialog[data-roster-dialog][open] [data-pd-focus=\"tab-admins\"]"
+      },
+      {
+        "waitFor": "[data-people-context] [data-admin-access] [data-admin-access-state], [data-people-context] [data-admin-access] [data-admin-grant]",
+        "settle": true
+      }
+    ],
+    "ready": "[data-people-context] [data-admin-access] [data-admin-access-state], [data-people-context] [data-admin-access] [data-admin-grant]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace"
+    ],
+    "frame": [
+      "[data-people-context] #pd-admin-access-title"
+    ]
+  },
+  {
     "id": "app.people.agents-error",
     "kind": "view",
     "path": "/app?w={workspace}&v=people",
