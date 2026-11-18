@@ -18,6 +18,9 @@ test("zero is drawn only when every workspace was counted; a minimum says so; no
   assert.equal(waitingText({ min: 3, complete: true }), "3");
   assert.equal(waitingText({ min: 3, complete: false }), "3+");
   assert.equal(waitingText({ min: 0, complete: false }), "");
+  // At most three characters, so the control never changes width as the count changes.
+  for (const total of [{ min: 99, complete: false }, { min: 100, complete: true }, { min: 4000, complete: false }]) assert.equal(waitingText(total), "99+");
+  assert.equal(waitingText({ min: 99, complete: true }), "99");
 });
 
 test("the control's name starts with the words and the number drawn on it", () => {

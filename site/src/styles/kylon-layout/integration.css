@@ -398,15 +398,18 @@ live-dashboard.dashboard[data-kylon-shell] .cs-resizer--lists {
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy > .hm-lead-pill { min-inline-size: 44px; min-block-size: 44px; }
   /* Tablets, landscape phones and narrow windows. The title and the lead share the first line, level with the header's
      44px controls, and the description is one line of text under them: three stacked 44px rows took 128px of a screen
-     that can be 390px tall. The title takes its own width first; the lead has the rest, with room for its mark and a
-     few letters of its name even beside a long title, and its name gives way with an ellipsis. */
+     that can be 390px tall. The title takes its own width first; the lead has the rest, never under its 44px mark,
+     and its name gives way with an ellipsis. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy {
     display: grid; grid-template-columns: minmax(0, max-content); grid-template-rows: minmax(44px, auto);
     align-items: center; gap: 0 10px;
   }
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__copy:has(> .hm-lead-pill) {
-    grid-template-columns: minmax(0, max-content) minmax(6.5rem, 1fr);
+    grid-template-columns: minmax(0, max-content) minmax(44px, 1fr);
   }
+  /* The header's controls sit closer here, so the title has its own width before any of it has to wrap: with the
+     Waiting on you control beside them a wider gap and a wider floor for the lead broke "#household" mid-word. */
+  live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header__actions { gap: 4px; }
   /* The first line is 44px with or without a lead, so the header does not change height when the lead arrives, and
      the controls stay level with the title instead of centring against both lines. */
   live-dashboard.dashboard[data-kylon-shell] .cs-org-shell[data-kylon-live-layout] .hm-ws-header { align-items: start; }

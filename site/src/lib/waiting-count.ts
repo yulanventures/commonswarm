@@ -21,9 +21,11 @@ export function waitingTotal(workspaceIds: readonly string[], counts: ReadonlyMa
   return { min, complete };
 }
 
-/** What is drawn beside the label: "3", "3+" while some workspace is uncounted, "0" only when all were counted, and
- *  nothing when nothing is known. */
+/** What is drawn beside the label: "3", "3+" while some workspace is uncounted, "0" only when all were counted,
+ *  nothing when nothing is known, and "99+" past ninety-nine. */
 export function waitingText(total: WaitingTotal): string {
+  // Never more than three characters, so the control keeps one width whatever it counts.
+  if (total.min > 99) return "99+";
   if (total.complete) return String(total.min);
   return total.min > 0 ? `${total.min}+` : "";
 }
