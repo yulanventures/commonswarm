@@ -437,7 +437,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   }
   if (!page && state.query.trim()) { const shown = groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); host.append(result); }
-  if (page && (state.query.trim() || (state.filter && state.filter !== "all"))) {
+  // The Invites tab already counts its rows; it needs a result line only for a search.
+  if (page && (state.query.trim() || (state.filter && state.filter !== "all" && state.filter !== "invites"))) {
     const people = state.filter === "agents" || state.filter === "invites" ? 0 : groups.length;
     const agents = state.filter === "people" || state.filter === "invites" ? 0 : groups.reduce((count, group) => count + group.agents.length, other.length);
     const result = node(doc, "p", "pd-roster-result pd-muted", `${people} ${people === 1 ? "person" : "people"} · ${agents} ${agents === 1 ? "agent" : "agents"} · ${invites.length} pending ${invites.length === 1 ? "invitation or key" : "invitations or keys"}${!people && !agents && !invites.length ? ". No matches. Try another name." : ""}`);

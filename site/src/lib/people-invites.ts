@@ -115,15 +115,15 @@ export function peopleInviteReceipt(invite: Pick<PeopleInvite, "kind" | "name">)
 export function peopleInviteConfirmCopy(invite: Pick<PeopleInvite, "kind" | "name">) {
   const name = invite.name;
   if (invite.kind === "person") return { title: "Cancel this invitation?", button: "Cancel invitation",
-    stops: [`The invitation for ${name} will no longer work. No one has joined with it.`, "It leaves this list."],
+    stops: [`The invitation for ${name} stops working and leaves this list. No one has joined with it.`],
     stays: ["You can send a new invitation later."] };
   if (invite.kind === "key") return { title: "Cancel this unused key?", button: "Cancel key",
-    stops: [`The unused key for ${name} will no longer work. No agent has used it.`, "It leaves this list."],
+    stops: [`The unused key for ${name} stops working and leaves this list. No agent has used it.`],
     stays: ["You can create a new key later."] };
   if (invite.kind === "code") return { title: "Cancel this connect code?", button: "Cancel code",
-    stops: ["The connect code will no longer work. No more agents can join with it.", "It leaves this list."],
+    stops: ["The connect code stops working and leaves this list. No more agents can join with it."],
     stays: ["Agents that already joined with it stay.", "You can make a new code later."] };
   return { title: `Remove ${name}?`, button: `Remove ${name}`,
-    stops: [`${name} never connected. Its setup will no longer work.`, "It leaves this list and the agent list."],
+    stops: [`${name} never connected. Its setup stops working, and it leaves this list and the agent list.`],
     stays: ["You can add it again later."] };
 }
