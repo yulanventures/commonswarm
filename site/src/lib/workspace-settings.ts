@@ -177,7 +177,7 @@ export function renderWorkspaceSettings(
   form.append(label, button, status);
   danger.append(dangerTitle, warning, form);
   identity.append(idLabel, id, copy, copyStatus);
-  root.replaceChildren(titleRow, counts, identity);
+  root.replaceChildren(titleRow, counts);
   if (options.channelPolicy) root.append(channelPolicyControl(root, options.channelPolicy));
   root.append(cleanup);
   if (options.moveDestinations?.length && options.onMove) {
@@ -237,7 +237,9 @@ export function renderWorkspaceSettings(
     form.append(label, move, error);
     root.append(form);
   }
-  root.append(danger);
+  // The workspace ID is for support and for setting up an agent by hand, so it sits after the settings a person
+  // came here to change, still one press from copied, and before the one action that cannot be undone.
+  root.append(identity, danger);
   return { confirmInput: input, closeButton: button };
 }
 

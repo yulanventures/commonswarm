@@ -633,6 +633,58 @@
     ]
   },
   {
+    "id": "dialog.workspace-settings.id",
+    "kind": "dialog",
+    "path": "/app?w={workspace}",
+    "setup": [
+      {
+        "media": "(width <= 52rem)",
+        "click": "button[aria-label=\"Open navigation\"]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu .hm-menu__trigger"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "waitFor": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width <= 52rem)",
+        "click": ".cs-kylon-workspace-menu [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header .hm-menu__trigger"
+      },
+      {
+        "media": "(width > 52rem)",
+        "waitFor": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "media": "(width > 52rem)",
+        "click": ".hm-ws-header [data-workspace-settings-item]"
+      },
+      {
+        "waitFor": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]",
+        "scroll": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]"
+      }
+    ],
+    "ready": "dialog[data-workspace-details-popover][open] [data-copy-workspace-id]",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "channel_policy"
+    ],
+    "frame": [
+      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"admins\"]:checked)",
+      "dialog[data-workspace-details-popover][open] label:has([data-workspace-channel-policy-choice=\"members\"]:not(:checked))",
+      "dialog[data-workspace-details-popover][open] [data-workspace-channel-policy] h3"
+    ]
+  },
+  {
     "id": "dialog.command-palette",
     "kind": "dialog",
     "path": "/app?w={workspace}",
