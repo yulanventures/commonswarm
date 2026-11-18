@@ -119,20 +119,11 @@ private struct RetryView: View {
     }
 }
 
-@MainActor
-private final class Composer: ObservableObject {
-    @Published var text = ""
-    @Published var sending = false
-    @Published var failed = false
-    var submission: Post?
-}
-
 private struct DirectoryView: View {
     let api: ConversationAPI
     let workspace: Workspace
     @ViewState private var directory: [Conversation]?
     @ViewState private var failed = false
-    @ViewState private var drafts: [Conversation.Destination: Composer] = [:]
 
     var body: some View {
         List {
@@ -144,12 +135,24 @@ private struct DirectoryView: View {
                         if direct && conversations.isEmpty { Text("No direct messages yet") }
                         ForEach(conversations) { item in
                             NavigationLink(value: item) {
-                                Label {
-                                    VStack(alignment: .leading) {
-                                        Text(item.name)
-                                        if case .agent = item.id { Text("Agent").font(.caption).foregroundStyle(.secondary) }
+                                if item.isDirect {
+                                    Label {
+                                        VStack(alignment: .leading) {
+                                            Text(item.name)
+                                            if case .agent = item.id { Text("Agent").font(.caption).foregroundStyle(.secondary) }
+                                        }
+                                    } icon: { Image(systemName: item.symbol) }
+                                } else {
+                                    HStack(spacing: 6) {
+                                        if item.symbol == "lock" {
+                                            Image(systemName: "lock").accessibilityHidden(true)
+                                        }
+                                        Text(item.symbol == "lock" ? String(item.name.dropFirst()) : item.name)
+                                            .lineLimit(1).truncationMode(.tail)
                                     }
-                                } icon: { Image(systemName: item.symbol) }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .accessibilityLabel(item.symbol == "lock" ? "Private channel, " + item.name : item.name)
+                                }
                             }
                         }
                     }
@@ -158,9 +161,8 @@ private struct DirectoryView: View {
         }.navigationTitle(workspace.name)
             .task { await load() }.refreshable { await load() }
             .navigationDestination(for: Conversation.self) { item in
-                if let draft = drafts[item.id] {
-                    HistoryView(api: api, workspace: workspace, item: item, directory: directory ?? [], draft: draft).id(item.id)
-                }
+                HistoryView(api: api, workspace: workspace, item: item, directory: directory ?? [],
+                            draft: api.session.composer(workspace: workspace.id, conversation: item.id)).id(item.id)
             }
     }
 
@@ -168,10 +170,45 @@ private struct DirectoryView: View {
         do {
             let rows = try await api.directory(workspace.id)
             try Task.checkCancellation()
-            for row in rows where drafts[row.id] == nil { drafts[row.id] = Composer() }
             directory = rows
             failed = false
         } catch { if !Task.isCancelled { failed = true } }
+    }
+}
+
+// Align the same point in the row and viewport after prepending history.
+private struct HistoryAnchor: Equatable {
+    let id: UUID
+    let top: CGFloat
+    let alignment: CGFloat
+}
+
+private struct HistoryAnchorKey: PreferenceKey {
+    static let defaultValue: HistoryAnchor? = nil
+    static func reduce(value: inout HistoryAnchor?, nextValue: () -> HistoryAnchor?) {
+        guard let next = nextValue() else { return }
+        if let previous = value, previous.top <= next.top { return }
+        value = next
+    }
+}
+
+private struct HistoryRowPosition: View {
+    let id: UUID
+    var body: some View {
+        GeometryReader { geometry in
+            let viewport = geometry.bounds(of: .scrollView(axis: .vertical))
+            Color.clear.preference(key: HistoryAnchorKey.self, value: viewport.flatMap { bounds in
+                let top = -bounds.minY
+                let room = bounds.height - geometry.size.height
+                // Use the first row lying fully in the viewport, even when the Retry control is above it.
+                guard room != 0 else {
+                    return top == 0 ? HistoryAnchor(id: id, top: top, alignment: 0) : nil
+                }
+                let alignment = top / room
+                guard (0...1).contains(alignment) else { return nil }
+                return HistoryAnchor(id: id, top: top, alignment: alignment)
+            })
+        }
     }
 }
 
@@ -181,11 +218,10 @@ private struct HistoryView: View {
     let item: Conversation
     let directory: [Conversation]
     @ObservedObject var draft: Composer
-    @ViewState private var messages: [Message]?
-    @ViewState private var failed = false
-    @ViewState private var loadingOlder = false
-    @ViewState private var hasOlder = false
-    @ViewState private var requestID = UUID()
+    @StateObject private var history = MessageHistory()
+    @ViewState private var readingAnchor: HistoryAnchor?
+    @ViewState private var restoreAnchor: HistoryAnchor?
+    @ViewState private var restoreGeneration = 0
     @ViewState private var scrollToLatest = 0
     @Environment(\.colorScheme) private var appearance
 
@@ -193,9 +229,11 @@ private struct HistoryView: View {
         ScrollViewReader { reader in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    if failed { RetryView(text: "Couldn’t load messages") { await load() } }
-                    if hasOlder { Button("Load earlier messages") { Task { await load(older: true) } }.disabled(loadingOlder) }
-                    if let messages {
+                    if let retry = history.retry { RetryView(text: "Couldn’t load messages") { await load(retry) } }
+                    if history.hasOlder, let first = history.messages?.first, history.retry == nil {
+                        Button("Load earlier messages") { Task { await load(.older(before: first)) } }.disabled(history.loadingOlder)
+                    }
+                    if let messages = history.messages {
                         if messages.isEmpty { Text("No messages yet").foregroundStyle(.secondary) }
                         ForEach(messages) { message in
                             VStack(alignment: .leading, spacing: 3) {
@@ -207,20 +245,27 @@ private struct HistoryView: View {
                                 }
                                 Text(message.body).textSelection(.enabled)
                                     .foregroundStyle(appearance == .dark ? Color(red: 0.79, green: 0.80, blue: 0.83) : Color(red: 0.25, green: 0.27, blue: 0.31))
-                            }.id(message.id)
+                            }.background(HistoryRowPosition(id: message.id)).id(message.id)
                         }
-                    } else if !failed { ProgressView() }
-                }.padding()
-            }.onChange(of: scrollToLatest) {
-                if let id = messages?.last?.id { reader.scrollTo(id, anchor: .bottom) }
+                    } else if history.retry == nil { ProgressView() }
+                }.scrollTargetLayout().padding()
+            }
+            .onPreferenceChange(HistoryAnchorKey.self) { readingAnchor = $0 }
+            .onChange(of: restoreGeneration) {
+                if let anchor = restoreAnchor {
+                    reader.scrollTo(anchor.id, anchor: UnitPoint(x: 0.5, y: anchor.alignment))
+                }
+            }
+            .onChange(of: scrollToLatest) {
+                if let id = history.messages?.last?.id { reader.scrollTo(id, anchor: .bottom) }
             }
             .refreshable { await load() }
         }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
             .task { await load() }
             .safeAreaInset(edge: .bottom) {
                 VStack {
-                    if draft.failed {
-                        HStack { Text("Couldn’t send message"); Button("Retry") { Task { await send() } }.disabled(draft.sending) }
+                    if let failure = draft.failure, !draft.sending {
+                        HStack { Text(failure == .unconfirmed ? "Delivery unconfirmed" : "Couldn’t send message"); Button("Retry") { Task { await send() } }.disabled(draft.sending) }
                     }
                     HStack(alignment: .bottom) {
                         TextField("Message " + item.name, text: $draft.text, axis: .vertical)
@@ -236,47 +281,33 @@ private struct HistoryView: View {
 
     private func sender(_ message: Message) -> String {
         if message.from_kind == "user", message.from == api.session.userID { return "You" }
-        let key: Conversation.Destination = message.from_kind == "agent" ? .agent(message.from) : .person(message.from)
+        let key: Conversation.ID = message.from_kind == "agent" ? .agent(message.from) : .person(message.from)
         return directory.first { $0.id == key }?.name ?? (message.from_kind == "agent" ? "Agent" : "Member")
     }
 
-    private func load(older: Bool = false, afterSend: Bool = false) async {
-        let id = UUID()
-        requestID = id
-        loadingOlder = older
-        do {
-            let page = try await api.history(workspace.id, item.id, before: older ? messages?.first : nil)
-            try Task.checkCancellation()
-            guard id == requestID else { return }
-            let firstLoad = messages == nil
-            if older {
-                let existing = Set((messages ?? []).map(\.id))
-                messages = page.filter { !existing.contains($0.id) } + (messages ?? [])
-            } else { messages = page }
-            hasOlder = page.count == 50
-            failed = false
-            if firstLoad || afterSend { scrollToLatest += 1 }
-        } catch { if id == requestID && !Task.isCancelled { failed = true } }
-        if id == requestID { loadingOlder = false }
+    private func load(_ request: MessageHistory.Page = .latest, afterSend: Bool = false) async {
+        let firstLoad = history.messages == nil
+        var before: HistoryAnchor?
+        let loaded = await history.load(request, api: api, workspace: workspace.id, destination: item.destination) {
+            before = readingAnchor
+        }
+        guard loaded else { return }
+        if firstLoad || afterSend { scrollToLatest += 1 }
+        else if let before {
+            restoreAnchor = before
+            restoreGeneration += 1
+        }
     }
 
     private func send() async {
-        guard !draft.sending else { return }
-        if draft.submission == nil && (draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.text.utf16.count > 8_000) { return }
-        let post = draft.submission ?? Post(id: UUID(), workspace: workspace.id, destination: item.id, body: draft.text)
-        draft.submission = post
-        draft.sending = true
-        draft.failed = false
-        defer { draft.sending = false }
+        guard let post = draft.begin(workspace: workspace.id, destination: item.destination) else { return }
         do {
             try await api.post(post)
             guard api.session.isActive else { return }
-            if draft.text == post.command["body"] ?? nil { draft.text = "" }
-            draft.submission = nil
+            draft.accepted()
             await load(afterSend: true)
-        } catch APIError.refused(let status) where (400..<500).contains(status) {
-            draft.submission = nil
-            draft.failed = true
-        } catch { if api.session.isActive { draft.failed = true } }
+        } catch {
+            if api.session.isActive { draft.failed(with: error) }
+        }
     }
 }

@@ -7,14 +7,32 @@
 	objects = {
 
 
+/* Begin PBXTargetDependency section */
+		0000000000000000000DA007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 700000000000000000007001;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin PBXFileReference section */
 		F0000000000000000000F001 /* CommonSwarm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CommonSwarm.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0000000000000000000DA002 /* HistoryUITests.xctest */ = {
+			path = HistoryUITests.xctest;
+			isa = PBXFileReference;
+			explicitFileType = wrapper.cfbundle;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A0000000000000000000A002 /* CommonSwarm */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = CommonSwarm;
+			sourceTree = "<group>";
+		};
+		0000000000000000000DA001 /* HistoryUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HistoryUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +52,7 @@
 			isa = PBXGroup;
 			children = (
 				A0000000000000000000A002 /* CommonSwarm */,
+				0000000000000000000DA001 /* HistoryUITests */,
 				A0000000000000000000A003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -42,6 +61,7 @@
 			isa = PBXGroup;
 			children = (
 				F0000000000000000000F001 /* CommonSwarm.app */,
+				0000000000000000000DA002 /* HistoryUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -70,6 +90,18 @@
 			productName = CommonSwarm;
 			productReference = F0000000000000000000F001 /* CommonSwarm.app */;
 			productType = "com.apple.product-type.application";
+		};
+		0000000000000000000DA008 /* HistoryUITests */ = {
+			dependencies = (0000000000000000000DA007);
+			buildConfigurationList = 0000000000000000000DA005;
+			productReference = 0000000000000000000DA002;
+			productType = com.apple.product-type.bundle.ui-testing;
+			productName = HistoryUITests;
+			isa = PBXNativeTarget;
+			fileSystemSynchronizedGroups = (0000000000000000000DA001);
+			buildPhases = (0000000000000000000DA006);
+			name = HistoryUITests;
+			buildRules = ();
 		};
 /* End PBXNativeTarget section */
 
@@ -102,6 +134,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				0000000000000000000DA008 /* HistoryUITests */,
 				700000000000000000007001 /* CommonSwarm */,
 			);
 		};
@@ -123,6 +156,12 @@
 			buildActionMask = 2147483647;
 			files = (
 			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0000000000000000000DA006 /* PBXSourcesBuildPhase */ = {
+			buildActionMask = 2147483647;
+			isa = PBXSourcesBuildPhase;
+			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -206,6 +245,32 @@
 			};
 			name = Release;
 		};
+		0000000000000000000DA003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.commonswarm.history-uitests;
+				CODE_SIGN_STYLE = Automatic;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = CommonSwarm;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				PRODUCT_NAME = HistoryUITests;
+			};
+			name = Debug;
+		};
+		0000000000000000000DA004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.commonswarm.history-uitests;
+				CODE_SIGN_STYLE = Automatic;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = CommonSwarm;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				PRODUCT_NAME = HistoryUITests;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -226,6 +291,12 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		0000000000000000000DA005 /* XCConfigurationList */ = {
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+			isa = XCConfigurationList;
+			buildConfigurations = (0000000000000000000DA003, 0000000000000000000DA004);
 		};
 /* End XCConfigurationList section */
 

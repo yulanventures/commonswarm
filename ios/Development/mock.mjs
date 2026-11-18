@@ -9,15 +9,33 @@ const me = "00000000-0000-4000-8000-000000000001";
 const agent = "00000000-0000-4000-8000-000000000002";
 const workspace = "00000000-0000-4000-8000-000000000003";
 const channel = "00000000-0000-4000-8000-000000000004";
+const secondWorkspace = "00000000-0000-4000-8000-000000000005";
+const longChannel = "00000000-0000-4000-8000-000000000006";
+const verify = process.argv[2] === "--verify";
+const review = verify || process.argv[2] === "--review";
+const workspaces = [{ workspace_id: workspace, name: "Simulator workspace" }];
+const channels = [{ channel_id: channel, slug: "mobile", visibility: "open" }];
+if (review) {
+  workspaces.push({ workspace_id: secondWorkspace, name: "Second workspace" });
+  channels.push({ channel_id: longChannel, slug: "engineering-release-coordination", visibility: "private" });
+}
+let olderPageInterrupted = false;
 const codes = new Map();
 const receipts = new Map();
+const refuseNextLookup = new Set();
 const sessions = new Set();
 let heldPost;
 let notifyPost;
 const postReceived = new Promise(resolve => { notifyPost = resolve; });
 let authenticatedRequests = 0;
 const messages = [];
-const address = (command) => command.channel ? "channel" : command.to_agent_principal_id ? "direct" : "general";
+const address = (command) => command.channel ? command.expected_channel_id : command.to_agent_principal_id ? "direct" : "general";
+if (review) {
+  for (let i = 130; i > 0; i--) {
+    messages.push({ id: randomUUID(), from: me, from_kind: "user", body: "History message " + i,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString().replace("Z", "+00:00"), fixtureDestination: "general", workspace });
+  }
+}
 const server = createServer(async (req, res) => {
   const reply = (status, value) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -68,38 +86,54 @@ const server = createServer(async (req, res) => {
     if (!sessions.has((req.headers.authorization ?? "").replace(/^Bearer /, ""))) return reply(401, {});
     authenticatedRequests++;
     if (req.method === "POST" && url.pathname === "/functions/v1/command") {
-      if (body.workspace_id?.toLowerCase() !== workspace || body.command?.kind !== "post_signal") return reply(400, {});
+      if (!workspaces.some(row => row.workspace_id === body.workspace_id?.toLowerCase()) || body.command?.kind !== "post_signal") return reply(400, {});
       if (verify && body.command.body === "held during sign-out") {
         notifyPost();
         await new Promise(resolve => { heldPost = resolve; });
       }
-      if (body.command.channel && body.command.expected_channel_id !== channel) return reply(404, {});
+      if (body.command.channel && !channels.some(row => row.slug === body.command.channel && row.channel_id === body.command.expected_channel_id)) return reply(404, {});
+      if (refuseNextLookup.delete(body.command_id)) return reply(403, {});
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
         receipts.set(body.command_id, body);
         messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body,
-          created_at: new Date().toISOString(), fixtureDestination: address(body.command) });
+          created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
+        if (review && body.command.body === "Uncertain send") {
+          refuseNextLookup.add(body.command_id);
+          return reply(503, {});
+        }
       }
       return reply(200, { status: "accepted" });
     }
     if (req.method !== "GET" || req.headers["accept-profile"] !== "swarm_read") return reply(400, {});
-    if (url.pathname === "/rest/v1/workspaces") return reply(200, [{ workspace_id: workspace, name: "Simulator workspace" }]);
-    if (url.searchParams.get("workspace_id")?.toLowerCase() !== "eq." + workspace) return reply(403, {});
+    if (url.pathname === "/rest/v1/workspaces") return reply(200, workspaces);
+    const ws = workspaces.find(row => "eq." + row.workspace_id === url.searchParams.get("workspace_id")?.toLowerCase());
+    if (!ws) return reply(403, {});
     switch (url.pathname) {
-      case "/rest/v1/channels": return reply(200, [{ channel_id: channel, slug: "mobile", visibility: "open" }]);
+      case "/rest/v1/channels": return reply(200, ws.workspace_id === workspace ? channels : []);
       case "/rest/v1/member_profiles": return reply(200, [{ user_id: me, display_name: "You" }]);
       case "/rest/v1/agent_principals": return reply(200, [{ principal_id: agent, name: "Atlas" }]);
       case "/rest/v1/signals": {
         const destination = url.searchParams.has("recipients->1") ? "direct" :
-          url.searchParams.get("channel_id") === "is.null" ? "general" : "channel";
-        return reply(200, messages.filter(row => row.fixtureDestination === destination).slice(0, 50));
+          url.searchParams.get("channel_id") === "is.null" ? "general" : url.searchParams.get("channel_id")?.slice(3).toLowerCase();
+        let rows = messages.filter(row => row.workspace === ws.workspace_id && row.fixtureDestination === destination);
+        const cursor = /created_at\.eq\.([^,]+),id\.lt\.([a-f0-9-]+)/i.exec(url.searchParams.get("and") ?? "");
+        if (cursor) {
+          const position = rows.findIndex(row => row.id === cursor[2].toLowerCase() && row.created_at === cursor[1]);
+          if (position < 0) return reply(400, {});
+          if (review && rows[position].body === "History message 31" && !olderPageInterrupted) {
+            olderPageInterrupted = true;
+            return reply(503, {});
+          }
+          rows = rows.slice(position + 1);
+        }
+        return reply(200, rows.slice(0, 50));
       }
       default: return reply(404, {});
     }
   } catch { return reply(400, {}); }
 });
-const verify = process.argv[2] === "--verify";
 server.listen(verify ? 0 : 8765, "127.0.0.1", () => {
   origin = "http://127.0.0.1:" + server.address().port;
   if (!verify) return console.log("Simulator fixture listening on loopback port 8765");
