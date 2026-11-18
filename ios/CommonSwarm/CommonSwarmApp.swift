@@ -220,8 +220,8 @@ private struct HistoryView: View {
             .task { await load() }
             .safeAreaInset(edge: .bottom) {
                 VStack {
-                    if draft.failed {
-                        HStack { Text("Couldn’t send message"); Button("Retry") { Task { await send() } }.disabled(draft.sending) }
+                    if let failure = draft.failure, !draft.sending {
+                        HStack { Text(failure == .unconfirmed ? "Delivery unconfirmed" : "Couldn’t send message"); Button("Retry") { Task { await send() } }.disabled(draft.sending) }
                     }
                     HStack(alignment: .bottom) {
                         TextField("Message " + item.name, text: $draft.text, axis: .vertical)
@@ -254,10 +254,8 @@ private struct HistoryView: View {
             guard api.session.isActive else { return }
             draft.accepted()
             await load(afterSend: true)
-        } catch APIError.refused(let status) where (400..<500).contains(status) {
-            if api.session.isActive { draft.rejected(uncertain: false) }
         } catch {
-            if api.session.isActive { draft.rejected(uncertain: true) }
+            if api.session.isActive { draft.failed(with: error) }
         }
     }
 }

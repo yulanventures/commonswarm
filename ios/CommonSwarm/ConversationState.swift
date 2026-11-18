@@ -5,7 +5,8 @@ import Foundation
 final class Composer: ObservableObject {
     @Published var text = ""
     @Published private(set) var sending = false
-    @Published private(set) var failed = false
+    enum Failure { case refused, unconfirmed }
+    @Published private(set) var failure: Failure?
     private(set) var submission: Post?
 
     func begin(workspace: UUID, destination: Conversation.Destination) -> Post? {
@@ -15,7 +16,6 @@ final class Composer: ObservableObject {
             submission = Post(id: UUID(), workspace: workspace, destination: destination, body: text)
         }
         sending = true
-        failed = false
         return submission
     }
 
@@ -23,13 +23,19 @@ final class Composer: ObservableObject {
         if text == submission?.body { text = "" }
         submission = nil
         sending = false
-        failed = false
+        failure = nil
     }
 
-    func rejected(uncertain: Bool) {
-        if !uncertain { submission = nil }
-        failed = true
+    func failed(with error: Error) {
         sending = false
+        // A refusal on a retry can precede receipt lookup. It cannot settle an earlier attempt.
+        if failure != .unconfirmed, case APIError.refused(let status) = error,
+           (400..<500).contains(status), status != 408 {
+            submission = nil
+            failure = .refused
+        } else {
+            failure = .unconfirmed
+        }
     }
 }
 

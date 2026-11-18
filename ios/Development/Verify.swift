@@ -65,13 +65,30 @@ enum Verify {
         do {
             try await api.post(uncertain)
             throw Failure.mismatch("fixture should withhold first receipt")
-        } catch APIError.refused(503) { draft.rejected(uncertain: true) }
+        } catch let error as APIError {
+            guard case .refused(503) = error else { throw error }
+            draft.failed(with: error)
+        }
         try expect(session.composer(workspace: second.id, conversation: dm.id).submission == nil, "pending ID isolated")
         let returnedDraft = session.composer(workspace: ws.id, conversation: dm.id)
         returnedDraft.text = "Newer typing"
         guard let replayed = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else { throw Failure.mismatch("retry") }
         try expect(replayed.command_id == uncertain.command_id && replayed.body == uncertain.body, "retry preserves intent")
-        try await api.post(replayed)
+        do {
+            try await api.post(replayed)
+            throw Failure.mismatch("fixture should refuse the first receipt lookup")
+        } catch let error as APIError {
+            guard case .refused(403) = error else { throw error }
+            returnedDraft.failed(with: error)
+        }
+        try expect(returnedDraft.failure == .unconfirmed, "pre-receipt 403 cannot settle an accepted post")
+        guard let finalRetry = returnedDraft.begin(workspace: ws.id, destination: dm.destination) else {
+            throw Failure.mismatch("retry after refusal")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        try expect(try encoder.encode(finalRetry) == encoder.encode(uncertain), "the entire envelope survives 503 then 403")
+        try await api.post(finalRetry)
         returnedDraft.accepted()
         try expect(returnedDraft.text == "Newer typing" && inB.text == "Unsent B", "accept retains newer and other workspace drafts")
         let delivered = try await api.history(ws.id, dm.destination)

@@ -22,6 +22,7 @@ if (review) {
 let olderPageInterrupted = false;
 const codes = new Map();
 const receipts = new Map();
+const refuseNextLookup = new Set();
 const sessions = new Set();
 let heldPost;
 let notifyPost;
@@ -91,13 +92,17 @@ const server = createServer(async (req, res) => {
         await new Promise(resolve => { heldPost = resolve; });
       }
       if (body.command.channel && !channels.some(row => row.slug === body.command.channel && row.channel_id === body.command.expected_channel_id)) return reply(404, {});
+      if (refuseNextLookup.delete(body.command_id)) return reply(403, {});
       const old = receipts.get(body.command_id);
       if (old && JSON.stringify(old.command, Object.keys(old.command).sort()) !== JSON.stringify(body.command, Object.keys(body.command).sort())) return reply(409, {});
       if (!old) {
         receipts.set(body.command_id, body);
         messages.unshift({ id: randomUUID(), from: me, from_kind: "user", body: body.command.body,
           created_at: new Date().toISOString(), fixtureDestination: address(body.command), workspace: body.workspace_id.toLowerCase() });
-        if (review && body.command.body === "Uncertain send") return reply(503, {});
+        if (review && body.command.body === "Uncertain send") {
+          refuseNextLookup.add(body.command_id);
+          return reply(503, {});
+        }
       }
       return reply(200, { status: "accepted" });
     }
