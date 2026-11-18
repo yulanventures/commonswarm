@@ -25,6 +25,7 @@ import EmptyState from "../ui/EmptyState.astro";
 import Skeleton from "../ui/Skeleton.astro";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
+import { AUTH_ENTRY_COPY } from "../../lib/auth-entry";
 import SampleNotice from "./SampleNotice.astro";
 import { MARK_AS_READ_LABEL as MARK_AS_READ } from "../../lib/channel-reads";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
@@ -118,16 +119,17 @@ import "../../styles/kylon-command-palette.css";
             inputmode="email"
             required
           />
-          <label for="dashboard-password">Password</label>
+          <label for="dashboard-password" data-signin-only>Password</label>
           <input
             id="dashboard-password"
             name="password"
             type="password"
             autocomplete="current-password"
             required
+            data-signin-only
           />
           <div class="dashboard__email-row">
-            <button class="dashboard__button dashboard__button--primary" type="submit" data-password-signin>
+            <button class="dashboard__button dashboard__button--primary" type="submit" data-password-signin data-signin-only>
               Sign in
             </button>
             <button class="dashboard__button dashboard__button--secondary" type="button" data-email-link>
@@ -135,6 +137,8 @@ import "../../styles/kylon-command-palette.css";
             </button>
           </div>
         </form>
+        {/* The one way from each screen to the other (lib/auth-entry.ts). A real link, so it works before the script runs. */}
+        <a class="dashboard__text-button dashboard__auth-entry-switch" href={AUTH_ENTRY_COPY["sign-in"].otherHref} data-auth-entry-switch>{AUTH_ENTRY_COPY["sign-in"].otherLabel}</a>
       </div>
 
       <div class="dashboard__auth dashboard__email-sent" data-auth-view="email-sent" hidden>
@@ -1405,6 +1409,7 @@ import "../../styles/kylon-command-palette.css";
   } from "../../lib/commonswarm";
   import { memberInviteUrl } from "../../lib/member-invite";
   import { authProvider, listSentence } from "../../lib/auth-providers";
+  import { AUTH_ENTRY_COPY, authEntryFromSearch, type AuthEntry } from "../../lib/auth-entry";
   import { isInviteSubmitCurrent } from "../../lib/invite-submit";
   import { PendingRefreshGate } from "../../lib/pending-refresh";
   import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
@@ -2770,6 +2775,32 @@ import "../../styles/kylon-command-palette.css";
       if (text) text.textContent = message ?? "";
       box.hidden = message === null;
     };
+
+    /* Sign in, or Create an account for someone sent here by Sign up or Start a workspace. The create
+       screen has no password: a password belongs to an existing account. The field is disabled as well
+       as hidden, so it is neither validated nor filled, and Enter sends the link. */
+    let authEntry: AuthEntry = "sign-in";
+    const showAuthEntry = (entry: AuthEntry): void => {
+      authEntry = entry;
+      const copy = AUTH_ENTRY_COPY[entry];
+      const title = one<HTMLElement>("#dashboard-signin-title");
+      if (title) title.textContent = copy.title;
+      for (const part of all<HTMLElement>("[data-signin-only]")) part.hidden = entry === "create";
+      const password = one<HTMLInputElement>("#dashboard-password");
+      if (password) password.disabled = entry === "create";
+      const other = one<HTMLAnchorElement>("[data-auth-entry-switch]");
+      if (other) { other.textContent = copy.otherLabel; other.href = copy.otherHref; }
+    };
+    showAuthEntry(authEntryFromSearch(window.location.search));
+    one<HTMLAnchorElement>("[data-auth-entry-switch]")?.addEventListener("click", (event) => {
+      const link = event.currentTarget as HTMLAnchorElement;
+      event.preventDefault();
+      window.history.replaceState(window.history.state, "", link.href);
+      showAuthEntry(authEntryFromSearch(window.location.search));
+      authError(null);
+      authLinkError(null);
+      one<HTMLInputElement>("#dashboard-email")?.focus();
+    });
 
     const showAuthView = (name: "choices" | "email-sent"): void => {
       for (const view of all<HTMLElement>("[data-auth-view]")) {
@@ -14197,6 +14228,7 @@ import "../../styles/kylon-command-palette.css";
       const email = form.elements.namedItem("email") as HTMLInputElement | null;
       const password = form.elements.namedItem("password") as HTMLInputElement | null;
       const button = form.querySelector<HTMLButtonElement>("[data-password-signin]");
+      if (authEntry === "create") { one<HTMLButtonElement>("[data-email-link]")?.click(); return; }
       if (!email?.value.trim() || !password?.value) return;
       busy(button, true);
       authError(null);

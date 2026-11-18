@@ -28,6 +28,7 @@
 
 import Button from "./ui/Button.astro";
 import Wordmark from "./Wordmark.astro";
+import { CREATE_ACCOUNT_HREF } from "../lib/auth-entry";
 
 interface Props {
   /**
@@ -73,7 +74,7 @@ const nav = signedIn ? APP_NAV : MARKETING_NAV;
  * sign in, create a workspace, or open the workspace they already have. */
 const cta = signedIn
   ? { href: "/app", label: "Open workspace" }
-  : { href: "/app", label: "Sign up" };
+  : { href: CREATE_ACCOUNT_HREF, label: "Sign up" };
 
 /* Only a real route can be the current page. A hash link points inside the page we are
  * already on, so aria-current would be a lie on every one of them. */

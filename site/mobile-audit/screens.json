@@ -11,6 +11,17 @@
     "signedOut": true
   },
   {
+    "id": "app.create-account",
+    "kind": "view",
+    "path": "/app?signup",
+    "setup": [],
+    "ready": "[data-panel=\"signed-out\"]:not([hidden]) #dashboard-password:disabled",
+    "states": [
+      "dense"
+    ],
+    "signedOut": true
+  },
+  {
     "id": "app.catchup",
     "kind": "view",
     "path": "/app?v=catchup",

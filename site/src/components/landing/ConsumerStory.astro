@@ -1,6 +1,7 @@
 ---
 import LandingAvatar from './LandingAvatar.astro';
 import WorkflowExamples from './WorkflowExamples.astro';
+import { CREATE_ACCOUNT_HREF } from '../../lib/auth-entry';
 ---
 <WorkflowExamples />
 <section class="lp-section lp-knowhow" aria-labelledby="knowhow-title">
@@ -34,5 +35,5 @@ import WorkflowExamples from './WorkflowExamples.astro';
   </div>
 </section>
 <section class="lp-close" aria-labelledby="close-title">
-  <div class="lp-container"><div class="lp-close__cast" aria-hidden="true"><LandingAvatar name="maya" /><LandingAvatar name="wren" /><LandingAvatar name="jordan" /><LandingAvatar name="gale" /><LandingAvatar name="pike" /></div><h2 id="close-title">Make room for<br />working together.</h2><a class="lp-button" href="/app">Start a workspace</a><p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p><a class="lp-close__login" href="/app">Log in</a></div>
+  <div class="lp-container"><div class="lp-close__cast" aria-hidden="true"><LandingAvatar name="maya" /><LandingAvatar name="wren" /><LandingAvatar name="jordan" /><LandingAvatar name="gale" /><LandingAvatar name="pike" /></div><h2 id="close-title">Make room for<br />working together.</h2><a class="lp-button" href={CREATE_ACCOUNT_HREF}>Start a workspace</a><p class="lp-fine"><a href="/acceptable-use#limits">Free for 10 workspaces. No card required.</a></p><a class="lp-close__login" href="/app">Log in</a></div>
 </section>
