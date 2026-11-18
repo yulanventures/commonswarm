@@ -2194,28 +2194,35 @@ test("wake-relation-contract: sender_owner_relation matrix, capabilities, and cu
     `;
 
     // Unresolved agent author: from_principal has no FK, so a stamped agent
-    // row whose principal is absent yields unknown.
+    // row whose principal is absent yields unknown. A new post from such an
+    // author cannot be filed in a conversation and aborts (20261118000004), so
+    // the row is written as history, with the filing trigger off inside this
+    // transaction only.
     const orphanPrincipal = randomUUID();
     const unknownSignalId = randomUUID();
-    await sql`
-      INSERT INTO swarm.signals (
-        id, workspace_id, from_principal, from_kind,
-        to_user_id, to_agent_principal_id, in_reply_to,
-        about, kind, body, until
-      ) VALUES (
-        ${unknownSignalId}::uuid,
-        ${f.workspaceA}::uuid,
-        ${orphanPrincipal}::uuid,
-        'agent',
-        NULL,
-        ${receiver.principalId}::uuid,
-        NULL,
-        'wake-relation',
-        'ask',
-        'relation-unresolved-agent',
-        statement_timestamp() + interval '1 day'
-      )
-    `;
+    await sql.begin(async (tx) => {
+      await tx.unsafe("ALTER TABLE swarm.signals DISABLE TRIGGER signals_settle_conversation");
+      await tx`
+        INSERT INTO swarm.signals (
+          id, workspace_id, from_principal, from_kind,
+          to_user_id, to_agent_principal_id, in_reply_to,
+          about, kind, body, until
+        ) VALUES (
+          ${unknownSignalId}::uuid,
+          ${f.workspaceA}::uuid,
+          ${orphanPrincipal}::uuid,
+          'agent',
+          NULL,
+          ${receiver.principalId}::uuid,
+          NULL,
+          'wake-relation',
+          'ask',
+          'relation-unresolved-agent',
+          statement_timestamp() + interval '1 day'
+        )
+      `;
+      await tx.unsafe("ALTER TABLE swarm.signals ENABLE TRIGGER signals_settle_conversation");
+    });
 
     const matrix = await agentSignalRead(
       receiver.token,
