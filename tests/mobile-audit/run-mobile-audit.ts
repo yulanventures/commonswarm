@@ -74,12 +74,14 @@ type Route = { request(): { postData(): string | null; resourceType(): string };
   fetch(): Promise<{ status(): number; headers(): Record<string, string>; body(): Promise<Buffer> }> };
 const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.screens.includes(id) && DIAGNOSTIC.sizes.includes(size));
 
-/** One setup step; fields run in this order: media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
+/** One setup step; fields run in this order: forcedColors, media, waitFor, advance, hover, focus, click, contextmenu, type (with text), select
  *  (with option), press, scroll, storage, fault, wait, settle.
  *  advance: the owner saves the doc's fixed current text (CONFLICT_DOC) from outside the page, so the page's own next save
  *  meets a newer revision. A screen with an advance step is reset to the base text before it opens (see openScreen).
  *  focus: the element takes focus (element.focus()), with no pointer and no hit test: for a control that a hover or a tap
  *  reveals, where a pointer on its way could land on the revealed control instead (pair it with press).
+ *  forcedColors: the page is drawn in forced colours (the system's high-contrast palette) from this step on, for a
+ *  capture that shows what survives when backgrounds and shadows are taken away.
  *  contextmenu: a real right-click on the element (the browser's own contextmenu event at the pointer); no click follows.
  *  select: a native <select> whose value becomes `option`, through the browser's own input and change events.
  *  settle: wait until the page's reads have finished (see `settle` below) before the next step.
@@ -87,7 +89,7 @@ const diagnosed = (id: string, size: string) => !DIAGNOSTIC || (DIAGNOSTIC.scree
  *  matches (for example a phone-only drawer open), and where it matches its other fields still fail
  *  when their element is missing.
  *  waitFor: a selector that must become visible first (non-strict, first match, up to 30 s). */
-type Step = { media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
+type Step = { forcedColors?: true; media?: string; waitFor?: string; advance?: { workspace: string; object: string }; hover?: string; focus?: string; click?: string; contextmenu?: string; type?: string; text?: string; select?: string;
   option?: string; press?: string; wait?: number; scroll?: string; settle?: true;
   /** Load the page again with one localStorage item already in place, so the app starts with it (a draft saved by an
    *  earlier build, for example). Every page load clears stored composer drafts first, so the item is handed across
@@ -763,6 +765,7 @@ async function main(): Promise<void> {
         }, { id: screen.id, hasWorkspace: screen.path.includes("?w=") }, { timeout: screen.path.includes("v=lists") ? 45_000 : 30_000 }).catch(() => {});
         await page.waitForTimeout(screen.path.startsWith("/app") ? 250 : 50);
         for (const step of screen.setup ?? []) {
+          if (step.forcedColors) await page.emulateMedia({ forcedColors: "active" });
           if (step.media && !(await page.evaluate((query: string) => window.matchMedia(query).matches, step.media))) continue;
           if (step.waitFor) await page.waitForSelector(fill(step.waitFor, seed.ids), { state: "visible", timeout: 30_000 });
           if (step.advance) await setHouseholdDoc(env, seed.owner, fill(step.advance.workspace, seed.ids), fill(step.advance.object, seed.ids), CONFLICT_DOC.current);

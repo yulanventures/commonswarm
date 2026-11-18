@@ -856,6 +856,43 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__jump-present-bu
   live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__jump-present-button { border-color: ButtonText; }
 }
 
+/* Whose message it is. A person's message has a quiet neutral edge just before its picture, the reader's own a
+   stronger one with "You" beside the name, and an agent's row stays plain with its Agent label. The edge sits in
+   the row's own gutter (24px wide, 12px on a phone), not at the edge of the pane, where it read as a divider. It is
+   drawn on the row, not laid out, so names, replies and targets keep their places, and each row of a grouped run
+   carries it in the same place. Neutral, never the selection colour, which marks unread and the open thread. A
+   border, so it survives forced colours. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:is([data-author="person"], [data-author="you"])::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 16px;
+  border-inline-start: 1px solid var(--k-shell-control);
+  pointer-events: none;
+}
+@media (width <= 52rem) {
+  live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message:is([data-author="person"], [data-author="you"])::before { inset-inline-start: 6px; }
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__feed > .dashboard__message[data-author="you"]::before { border-inline-start: 2px solid var(--k-shell-secondary); }
+/* Inside an opened thread the box keeps its own outline. A reply's edge sits in the box's gutter, between that
+   outline and the reply's picture, so the two never read as one line. */
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread-replies .dashboard__message--reply:is([data-author="person"], [data-author="you"])::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: -7px;
+  border-inline-start: 1px solid var(--k-shell-control);
+  pointer-events: none;
+}
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__thread-replies .dashboard__message--reply[data-author="you"]::before { border-inline-start: 2px solid var(--k-shell-secondary); }
+live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .hm-author__self {
+  flex: none;
+  color: var(--k-shell-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 /* The message Jump to first unread brought on screen: a visible ring while it holds focus, even when focus arrived
    by script after a click (no :focus-visible then). An outline, so nothing moves. */
 live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message[data-unread-jumped]:focus {

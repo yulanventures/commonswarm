@@ -1431,6 +1431,34 @@
     ]
   },
   {
+    "id": "app.thread.forced-colors",
+    "kind": "view",
+    "path": "/app?w={workspace}&m={message.thread}",
+    "setup": [
+      {
+        "forcedColors": true
+      },
+      {
+        "waitFor": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message[data-signal-id]"
+      },
+      {
+        "scroll": "li[data-thread-root=\"{message.thread}\"]"
+      }
+    ],
+    "ready": "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message--reply[data-author=\"you\"] .hm-author__self",
+    "states": [
+      "dense"
+    ],
+    "requiresSeed": [
+      "create_workspace",
+      "seed_thread",
+      "seed_thread_repliers"
+    ],
+    "frame": [
+      "li[data-thread-root=\"{message.thread}\"] .dashboard__thread-replies:not([hidden]) .dashboard__message--reply[data-author=\"you\"]"
+    ]
+  },
+  {
     "id": "app.chat.mention",
     "kind": "view",
     "path": "/app?w={workspace}&c={channel.long}",
