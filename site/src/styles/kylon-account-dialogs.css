@@ -138,6 +138,12 @@ live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboa
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date {
   margin-block: 0;
 }
+/* The card shows what is saved; the controls open from one quiet action under it. */
+live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date [data-end-date-edit] {
+  justify-self: start;
+  min-block-size: 44px;
+  padding-inline: 0;
+}
 live-dashboard.dashboard[data-kylon-shell] [data-connected-apps-dialog] .dashboard__connected-app .dashboard__connection-end-date h3 {
   margin-block-start: 8px;
   font: 400 12px/18px var(--k-shell-font);

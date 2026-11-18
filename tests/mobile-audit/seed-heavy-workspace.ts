@@ -1068,7 +1068,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     // agents and a third that was removed, written as the p1-server fixtures write one, so the real card, a removed row
     // and the end-date editor are captured. It is
     // the invitee's and lives in a workspace of its own, so the owner's Connected apps stays empty (dialog.connected-apps)
-    // and no roster, rail or chooser in {workspace} gains an agent.
+    // and no roster, rail or chooser in {workspace} gains an agent. A second connection, with one agent, has an end date
+    // saved thirty days out, so a card is captured with a saved date as well as with none.
     try {
       const person = people[2]!, appWorkspace = randomUUID(), grant = randomUUID(), digest = "a".repeat(64);
       if (invitee && ok("create_workspace connected app", await command(person.token, { kind: "create_workspace", workspace_id: appWorkspace, name: "Reading club" }, null))) {
@@ -1089,7 +1090,21 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
             VALUES (${agent.seat}::uuid, ${grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, ${agent.principal}::uuid, ${agent.name},
               clock_timestamp() - interval '2 days', CASE WHEN ${agent.removed}::boolean THEN clock_timestamp() - interval '1 day' END)`;
         });
-        Object.assign(ids, { connectedAppWorkspace: appWorkspace, connectedAppGrant: grant });
+        const dated = { grant: randomUUID(), principal: randomUUID(), seat: randomUUID() };
+        await sql.begin(async (tx) => {
+          await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name, transport, turn_only)
+            VALUES (${dated.principal}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, 'Muse', 'hosted_mcp', true)`;
+          await tx`INSERT INTO swarm.hosted_mcp_grants (grant_id, provider_grant_id, owner_user_id, home_workspace_id, client_id, resource,
+              selected_workspace_ids, manifest_digest, interaction_ref, state, created_at, activated_at, connection_expires_at)
+            VALUES (${dated.grant}::uuid, ${`audit-provider-${dated.grant}`}, ${person.id}::uuid, ${appWorkspace}::uuid, 'https://muse.example.test/oauth/mcp-client',
+              'https://mcp.commonswarm.com/mcp', ARRAY[${appWorkspace}::uuid]::uuid[], decode(${digest}, 'hex'), 'audit-consent-dated', 'active',
+              clock_timestamp(), clock_timestamp(), clock_timestamp() + interval '30 days')`;
+          await tx`INSERT INTO swarm.hosted_mcp_grant_workspaces (grant_id, workspace_id, owner_user_id, manifest_digest, consent_receipt_id, consented_at)
+            VALUES (${dated.grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, decode(${digest}, 'hex'), ${randomUUID()}::uuid, clock_timestamp())`;
+          await tx`INSERT INTO swarm.hosted_mcp_seats (seat_id, grant_id, workspace_id, owner_user_id, principal_id, name, created_at)
+            VALUES (${dated.seat}::uuid, ${dated.grant}::uuid, ${appWorkspace}::uuid, ${person.id}::uuid, ${dated.principal}::uuid, 'Muse', clock_timestamp() - interval '2 days')`;
+        });
+        Object.assign(ids, { connectedAppWorkspace: appWorkspace, connectedAppGrant: grant, connectedAppDatedGrant: dated.grant });
         steps.push("seed_connected_app");
       } else if (!invitee) note("seed_connected_app", "no second viewer was seeded");
     } catch (error) { note("seed_connected_app", error); }
