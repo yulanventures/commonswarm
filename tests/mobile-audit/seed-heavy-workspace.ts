@@ -1002,6 +1002,41 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
         steps.push("seed_lists_approval");
       } else if (ready) note("seed_lists_approval", "the Sprout or Fern agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_approval", error); }
+    // The Admins tab with grants on record (app.people.admins.grants, dialog.people-admins-end), in a workspace of its own so
+    // no other capture changes. Three grants, written as the grant command writes them: a workspace grant with an end date,
+    // an organization grant with none, and a second workspace grant. All three name the admin person as grantor, set
+    // directly here (the product lets only an agent's owner grant), for two reasons: the viewer's own account-wide Admin
+    // access list (dialog.admin-history) stays as it was, and only the owner's read of every grant can return these rows,
+    // so the screen proves that read and cannot be satisfied by the list of what the viewer gave.
+    try {
+      const adminsWorkspace = randomUUID();
+      const ready = ok("create_workspace admins", await command(owner.token, { kind: "create_workspace", workspace_id: adminsWorkspace, name: "Workshop", org_id: workspace }, null))
+        && ok("create_agent_principal admins quill", await command(owner.token, { kind: "create_agent_principal", name: "Quill Workshop Planner", model: "claude-opus-5-5" }, adminsWorkspace))
+        && ok("create_agent_principal admins ledger", await command(owner.token, { kind: "create_agent_principal", name: "Ledger", model: "claude-opus-5-5" }, adminsWorkspace));
+      const seats = ready ? await sql<{ principal_id: string; name: string }[]>`SELECT principal_id, name FROM swarm.agent_principals
+        WHERE workspace_id = ${adminsWorkspace}::uuid AND name IN ('Quill Workshop Planner', 'Ledger')` : [];
+      const [home] = ready ? await sql<{ org_id: string }[]>`SELECT org_id FROM swarm.workspaces WHERE workspace_id = ${adminsWorkspace}::uuid` : [];
+      const quill = seats.find(seat => seat.name === "Quill Workshop Planner")?.principal_id, ledger = seats.find(seat => seat.name === "Ledger")?.principal_id;
+      if (quill && ledger && home?.org_id) {
+        const grant = async (by: string, principal: string, level: "workspace" | "organization", expires: string | null): Promise<string> => {
+          const grantId = randomUUID();
+          const scopeNames = [`role:${level}_admin`], workspaceIds = level === "organization" ? [] : [adminsWorkspace];
+          const organizationId = level === "organization" ? home.org_id : null;
+          const manifest = { registry_version: 3, level, scope_names: scopeNames, workspace_ids: workspaceIds, organization_id: organizationId, principal_id: principal, expires };
+          await sql`INSERT INTO swarm.seat_admin_grants (grant_id, owner_user_id, principal_id, level, organization_id,
+              registry_version, scope_names, workspace_ids, manifest, manifest_digest, created_at, expires_at)
+            VALUES (${grantId}::uuid, ${by}::uuid, ${principal}::uuid, ${level}, ${organizationId}::uuid, 3, ${scopeNames}::text[],
+              ${workspaceIds}::uuid[], ${sql.json(manifest)}::jsonb, ${"a".repeat(64)}, statement_timestamp(),
+              ${expires ? sql.unsafe(expires) : null})`;
+          return grantId;
+        };
+        const listed = await grant(adminPerson.id, quill, "workspace", "statement_timestamp() + interval '30 days'");
+        await grant(adminPerson.id, quill, "organization", null);
+        await grant(adminPerson.id, ledger, "workspace", null);
+        Object.assign(ids, { adminsWorkspace, adminsGrant: listed });
+        steps.push("seed_admin_grants");
+      } else if (ready) note("seed_admin_grants", "the Workshop agents or its organization were not found");
+    } catch (error) { note("seed_admin_grants", error); }
     // A second viewer with a delegated invitation (app.invitation-inbox, dialog.invitation-review). The invitee already belongs
     // to {workspace}, so the inbox shows as the corner card above the composer rather than atop the create-workspace screen.
     // The admin person invites them to a workspace the admin owns, so nothing appears in the owner's captures.
