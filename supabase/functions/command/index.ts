@@ -1,4 +1,5 @@
 import { revokeHostedWorkspaceApproval } from "./admin-routine.ts";
+import { CommandTimer, cfRayOf, slowCommandLine } from "./slow-command-log.ts";
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -15838,7 +15839,9 @@ async function handleTransaction(
   const commandId = String(body.command_id);
   let recoverSavedPending = false;
   let localCredentialDenied = false;
+  const timer = new CommandTimer();
   const response = await retryLocalAuthTransaction(() => db.begin("isolation level read committed", async (tx) => {
+    timer.attempt();
     recoverSavedPending = false;
     localCredentialDenied = false;
     // Only explicit, completed domain decisions may commit a refusal. Unknown
@@ -16028,6 +16031,7 @@ async function handleTransaction(
       : kind==='revoke_agent_principal' && !verifiedHuman && principalTargets.size===1 ? {principal:[...principalTargets][0]!}
       : kind==='revoke_agent_token' && tokenTargets[0] ? {token:tokenTargets[0]} : undefined;
     const target=principalTargets.size || tokenTargets.length ? {principals:[...principalTargets],tokens:tokenTargets}:undefined;
+    timer.mark("plan_start");
     if (resumeFamily && hostedSeat===null) {
       if (verifiedHuman && !resumeAdmissionRefusal) {
         try {
@@ -16081,6 +16085,8 @@ async function handleTransaction(
       }
       if (localState.localPlan) await lockLocalAuthPlan(tx,localState.localPlan);
     }
+    timer.mark("plan_end");
+    timer.streamLocked = (localState.localPlan?.streamIds.length ?? 0) > 0;
     // A changed role/target binding needs a new complete plan, not a suffix
     // appended after the actor-only refusal plan has already been locked.
     if (await humanLocalAdmission()!==humanAdmission) throw new LocalAuthDiscoveryChanged();
@@ -19192,6 +19198,7 @@ async function handleTransaction(
       auth.agent !== null &&
       prepared?.command.kind !== RENEW_AGENT_TOKEN_KIND
     ) {
+      timer.mark("grant_start");
       await tx`
         SELECT swarm.record_renewal_grant_use(
           ${auth.agent.token_id}::uuid,
@@ -19199,6 +19206,7 @@ async function handleTransaction(
           NULL
         )
       `;
+      timer.mark("grant_end");
     }
     await afterStep(13);
 
@@ -19327,6 +19335,7 @@ async function handleTransaction(
         },
       };
     await afterStep(15);
+    timer.mark("body_end");
     return !outcome.decision.ok ? decided(result) : result;
     };
     return agentTokenHash === null ? await executeAuthenticated(tx) : await tx.savepoint(executeAuthenticated);
@@ -19471,6 +19480,9 @@ async function handleTransaction(
     }
     throw error;
   }));
+  timer.mark("end");
+  const slow = slowCommandLine({ commandKind: kind, timer, status: response.status, cfRay: commandCfRay.get(body) ?? null });
+  if (slow !== null) console.log(slow);
   if (localCredentialDenied && agentTokenHash !== null) {
     // Failure path only: discovery's RAISE aborted the refused transaction.
     await reportRevokedLocalCredential(async <T,>(run: (tx: Sql) => Promise<T>): Promise<T> =>
@@ -19548,6 +19560,9 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
   }
 }
 
+/** The request's CF-Ray, keyed by its parsed body, for the slow-command log line (see slow-command-log.ts). */
+const commandCfRay = new WeakMap<object, string | null>();
+
 async function handlePostRequest(request: Request): Promise<Response> {
   const credential = bearer(request);
   if (presentsAdminCredential(request)) {
@@ -19559,6 +19574,7 @@ async function handlePostRequest(request: Request): Promise<Response> {
   // refused as unauthenticated, like any other anonymous command.
   if (!parsed.ok) return credential === null && parsed.response.status === 400 ? json(401, { error: "unauthenticated" }) : parsed.response;
   const body = parsed.body;
+  if (body !== null && typeof body === "object") commandCfRay.set(body, cfRayOf(request.headers.get("cf-ray")));
 
   // Ordinary DPoP remains on ordinary authentication. An explicit admin-resource
   // request may enter the verifier even when its token is malformed or foreign.
