@@ -1003,7 +1003,7 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
       } else if (ready) note("seed_lists_approval", "the Sprout or Fern agent principal was not found as a local agent");
     } catch (error) { note("seed_lists_approval", error); }
     // The Admins tab with grants on record (app.people.admins.grants and the two dialog.people-admins-end screens), in a
-    // workspace of its own. Every grant is one the product could have written: the admin person joins the workspace, adds an
+    // workspace of its own. Every grant is one the product could have written: a second person joins the workspace, adds an
     // agent of their own and gives it workspace and organization admin; the viewer gives their own agent workspace admin with
     // an end date. So the list shows "granted by you" beside "granted by <name>", and Remove can be pictured both for the
     // viewer's own grant and for a grant on another person's agent, which the viewer can end but not give again. The other
@@ -1011,20 +1011,22 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
     // outside this workspace: the viewer's Admin access list gains this one grant under "Show my whole account". The
     // dialog.admin-history screens open scoped to the main workspace, so their first view is unchanged. No grant is given
     // to an agent in the main workspace: dialog.admin-access and dialog.people-admin-access need Atlas's switch off there.
+    // That second person is the seeded second viewer (people[2], the one the runner can sign in as), so the same workspace
+    // also pictures the tab as a member who is not an owner: only the access they gave themselves.
     try {
-      const adminsWorkspace = randomUUID();
+      const adminsWorkspace = randomUUID(), member = people[2]!;
       const invited = ok("create_workspace admins", await command(owner.token, { kind: "create_workspace", workspace_id: adminsWorkspace, name: "Workshop", org_id: workspace }, null))
-        ? await command(owner.token, { kind: "invite_member", email: adminPerson.email, ttl_ms: 7 * 24 * 3_600_000 }, adminsWorkspace) : null;
+        ? await command(owner.token, { kind: "invite_member", email: member.email, ttl_ms: 7 * 24 * 3_600_000 }, adminsWorkspace) : null;
       const joinToken = invited ? String(invited.body.invitation_token ?? "") : "";
       const ready = !!invited && ok("invite admins", invited) && !!joinToken
-        && ok("accept admins", await command(adminPerson.token, { kind: "accept_invitation", token: joinToken }, null))
+        && ok("accept admins", await command(member.token, { kind: "accept_invitation", token: joinToken }, null))
         && ok("create_agent_principal admins quill", await command(owner.token, { kind: "create_agent_principal", name: "Quill Workshop Planner", model: "claude-opus-5-5" }, adminsWorkspace))
-        && ok("create_agent_principal admins ledger", await command(adminPerson.token, { kind: "create_agent_principal", name: "Ledger", model: "claude-opus-5-5" }, adminsWorkspace));
+        && ok("create_agent_principal admins ledger", await command(member.token, { kind: "create_agent_principal", name: "Ledger", model: "claude-opus-5-5" }, adminsWorkspace));
       const seats = ready ? await sql<{ principal_id: string; name: string; owner_user_id: string }[]>`SELECT principal_id, name, owner_user_id FROM swarm.agent_principals
         WHERE workspace_id = ${adminsWorkspace}::uuid AND name IN ('Quill Workshop Planner', 'Ledger')` : [];
       const [home] = ready ? await sql<{ org_id: string }[]>`SELECT org_id FROM swarm.workspaces WHERE workspace_id = ${adminsWorkspace}::uuid` : [];
       const quill = seats.find(seat => seat.name === "Quill Workshop Planner" && seat.owner_user_id === owner.id)?.principal_id;
-      const ledger = seats.find(seat => seat.name === "Ledger" && seat.owner_user_id === adminPerson.id)?.principal_id;
+      const ledger = seats.find(seat => seat.name === "Ledger" && seat.owner_user_id === member.id)?.principal_id;
       if (quill && ledger && home?.org_id) {
         const grant = async (by: string, principal: string, level: "workspace" | "organization", expires: string | null): Promise<string> => {
           const grantId = randomUUID();
@@ -1039,8 +1041,8 @@ export async function seedHeavyWorkspace(env: SeedEnvironment): Promise<SeedResu
           return grantId;
         };
         const own = await grant(owner.id, quill, "workspace", "statement_timestamp() + interval '30 days'");
-        const theirs = await grant(adminPerson.id, ledger, "workspace", null);
-        await grant(adminPerson.id, ledger, "organization", null);
+        const theirs = await grant(member.id, ledger, "workspace", null);
+        await grant(member.id, ledger, "organization", null);
         Object.assign(ids, { adminsWorkspace, adminsGrant: theirs, adminsOwnGrant: own });
         steps.push("seed_admin_grants");
       } else if (ready) note("seed_admin_grants", "the Workshop agents (one per owner) or its organization were not found");

@@ -340,3 +340,14 @@ test("a demotion drops the owner's rows at once, through a held and then failed 
   assert.equal(plain(same.run<any>("currentPeopleAdminAccess()")).grants.length, 2, "same role: the rows stay, pending");
   release([grant(1)]); await refreshing;
 });
+
+test("an owner whose very first read fails still sees the owner's heading, with nothing listed", async () => {
+  const p = await page(); p.io.all = async () => { throw new Error("down"); };
+  await p.run("loadPeopleAdminAccess()");
+  assert.deepEqual(plain(p.run("currentPeopleAdminAccess()")), { read: "failed", all: true, grants: [], notices: {} },
+    "it is the owner's list that could not load, not the list of what they gave");
+  const member = await page({ role: "admin" });
+  member.run("seatAdminGrantsState = { phase: 'idle' }; seatAdminStatusState = { phase: 'loaded', status: { enabled: true } }; refreshSeatAdminState = async () => {}");
+  await member.run("loadPeopleAdminAccess()");
+  assert.equal(plain(member.run<any>("currentPeopleAdminAccess()")).all, false, "a member's failed read is headed as their own list");
+});

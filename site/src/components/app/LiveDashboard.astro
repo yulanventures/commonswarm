@@ -7946,7 +7946,8 @@ import "../../styles/kylon-command-palette.css";
         // Refused (signed out, or no longer allowed to ask): every row and its Remove go. A transient failure keeps
         // the last rows to look at, under the could-not-load line; the view offers no Remove until a read succeeds.
         next = error instanceof WorkspaceAdminGrantsRefused ? { read: "failed", all: false, grants: [] }
-          : { read: "failed", all: before?.all ?? false, grants: before?.grants ?? [] };
+          // With nothing read yet, an owner's failed read is still the owner's list that failed, and is headed as one.
+          : { read: "failed", all: before?.all ?? peopleAdminReadAsOwner === true, grants: before?.grants ?? [] };
       }
       // A refusal shown on a row stays until its grant is gone.
       const notices = Object.fromEntries(Object.entries(before?.notices ?? {}).filter(([grantId]) => next.grants.some((grant) => grant.grantId === grantId)));
