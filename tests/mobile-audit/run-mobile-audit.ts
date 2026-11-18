@@ -1068,9 +1068,10 @@ async function main(): Promise<void> {
         else polledNormally.set(`desktop ${size} ${theme}`, normalPolling.repeats);
         await context.close(); await signedIn.close(); await noScript.close(); await invitee.close();
       }
-      // Picture check: the seeded message with one PNG and one text file, on a desktop with a mouse and on a phone.
+      // Picture check: the seeded message with one PNG and one text file, on desktops with a mouse and on phones.
       const general = screens().find(s => s.id === "app.chat.general");
-      for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false]] as const) {
+      for (const [viewport, theme, desktop] of [[{ width: 1280, height: 800 }, "light", true], [{ width: 390, height: 844 }, "dark", false],
+        [{ width: 360, height: 740 }, "light", false], [{ width: 1024, height: 1366 }, "dark", true]] as const) {
         const size = `${viewport.width}x${viewport.height}`;
         if (!general || !seed.steps.includes("seed_picture")) { pictures.push({ viewport: size, theme, checks: [], error: "picture seed or general channel screen missing" }); continue; }
         const { context, signedIn, noScript, invitee } = await openContexts(viewport, theme, !desktop);

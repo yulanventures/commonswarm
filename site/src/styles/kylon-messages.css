@@ -231,14 +231,20 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   gap: 8px;
   min-inline-size: 0;
 }
-.hm-frame .hm-extras__image {
-  box-sizing: border-box;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+.hm-frame .hm-extras__picture {
+  position: relative;
+  display: block;
   flex: 0 1 24rem;
   min-inline-size: 0;
   inline-size: min(100%, 24rem);
   max-inline-size: 100%;
+}
+.hm-frame .hm-extras__image {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-inline-size: 0;
+  inline-size: 100%;
   gap: 8px;
   padding: 8px;
   border: 1px solid var(--k-shell-line);
@@ -277,19 +283,84 @@ live-dashboard.dashboard[data-kylon-shell] .hm-frame .dashboard__message .dashbo
   font-size: 12px;
   line-height: 1.5;
 }
-.hm-frame .hm-extras__image[data-preview-state="unavailable"] img {
+/* A picture is painted only once it has loaded. While it waits, and when it cannot load, the frame shows that
+   state itself; the browser's alt text and broken-picture mark are never drawn. */
+.hm-frame :is(.hm-extras__image, .dashboard__attachment-card)[data-preview-state] img {
   visibility: hidden;
 }
-.hm-frame .hm-extras__image[data-preview-state="unavailable"] .hm-extras__image-frame::after {
-  content: "Preview unavailable";
+.hm-frame .hm-extras__image[data-preview-state="loading"] .hm-extras__image-frame::before {
+  content: "";
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 12px;
+  background: var(--k-shell-ink);
+  opacity: 0;
+}
+/* A slow pulse, and only for a picture that is taking a while: a quick one never shows it. */
+@media (prefers-reduced-motion: no-preference) {
+  .hm-frame .hm-extras__image[data-preview-state="loading"] .hm-extras__image-frame::before {
+    animation: hm-picture-wait 1.2s ease-in-out 400ms infinite alternate;
+  }
+}
+@keyframes hm-picture-wait {
+  to { opacity: .07; }
+}
+/* "Couldn't load image · Retry", over the frame of the picture it belongs to. It follows the link rather than
+   sitting inside it, and only Retry takes the pointer, so the rest of the card still opens the file. */
+.hm-frame .hm-extras__image-failed {
+  position: absolute;
+  inset: 9px 9px auto;
+  aspect-ratio: 16 / 10;
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  justify-content: center;
+  padding: 8px;
   color: var(--k-shell-secondary);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 20px;
+  text-align: center;
+  pointer-events: none;
+}
+.hm-frame .hm-extras__image-failed[hidden] {
+  display: none;
+}
+.hm-frame .hm-extras__image-failed > button {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--k-shell-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.hm-frame .hm-extras__image-failed > button::before {
+  content: "\00b7";
+  margin-inline-end: 6px;
+  color: var(--k-shell-secondary);
+  font-weight: 400;
+}
+.hm-frame .hm-extras__image-failed > button:hover {
+  text-decoration: underline;
+}
+.hm-frame .hm-extras__image-failed > button:focus-visible {
+  outline: 2px solid var(--k-shell-focus);
+  outline-offset: -2px;
+}
+/* The plain attachment card (a message whose author is no longer known here) has no frame: the note takes the
+   picture's place in the card. */
+.hm-frame .dashboard__attachment-card > .hm-extras__image-failed {
+  position: static;
+  aspect-ratio: auto;
+  min-block-size: 7rem;
+}
+.hm-frame .dashboard__attachment-card[data-preview-state="unavailable"] > img {
+  display: none;
 }
 .hm-frame .hm-extras__image:hover {
   border-color: var(--k-shell-control);

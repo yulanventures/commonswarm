@@ -1,7 +1,9 @@
 /**
  * Picture check for chat image attachments, in the real served app (seeded message: one PNG and one text file).
- * Storage reads are held, failed or passed with page.route, so the check sees the frame before the picture loads,
- * after it loads and when it fails, and needs no production hook. Every check that does not hold fails the audit.
+ * Signing and storage reads are held, failed or passed with page.route, so the check sees the frame before the
+ * picture's link exists, before it loads, after it loads, when a first link fails, and when it cannot load at all,
+ * and needs no production hook. In every state before it has loaded the picture must not be painted: that is what
+ * keeps the browser's alt text and broken-picture mark off the screen. Every check that does not hold fails the audit.
  */
 import { deflateSync } from "node:zlib";
 
@@ -49,6 +51,23 @@ export function auditPng(): Uint8Array {
 type Rect = { x: number; y: number; w: number; h: number };
 export type PictureCheck = { name: string; ok: boolean; detail: unknown };
 const SIGNED = "**/storage/v1/object/sign/**";
+const COMMAND = "**/functions/v1/command";
+/** The failed picture's note and its Retry: where they are, how big the button is, and whether a pointer at its centre reaches it. */
+const FAILED_NOTE = () => {
+  const link = document.querySelector<HTMLElement>(".dashboard__message .hm-extras__image");
+  const note = link?.parentElement?.querySelector<HTMLElement>(".hm-extras__image-failed");
+  const button = note?.querySelector("button");
+  const frame = link?.querySelector(".hm-extras__image-frame")?.getBoundingClientRect();
+  if (!note || !button || !frame || !note.checkVisibility()) return null;
+  const n = note.getBoundingClientRect(), b = button.getBoundingClientRect();
+  return {
+    text: note.textContent, name: button.getAttribute("aria-label"), inLink: !!button.closest("a"),
+    button: { w: b.width, h: b.height },
+    overFrame: Math.max(Math.abs(n.left - frame.left), Math.abs(n.top - frame.top), Math.abs(n.width - frame.width), Math.abs(n.height - frame.height)) <= 1,
+    reached: document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) === button,
+    centre: { x: b.left + b.width / 2, y: b.top + b.height / 2 },
+  };
+};
 const near = (a: Rect | null, b: Rect | null) => !!a && !!b && Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.w - b.w), Math.abs(a.h - b.h)) <= 0.5;
 
 /** The seeded picture card's frame, image state and its message's other attachments. */
@@ -64,6 +83,7 @@ const PICTURE = () => {
     frame: r ? { x: r.left, y: r.top, w: r.width, h: r.height } : null,
     signed: !!image?.getAttribute("src"),
     loaded: !!image && image.complete && image.naturalWidth > 0,
+    painted: !!image && getComputedStyle(image).visibility === "visible",
     natural: image ? { w: image.naturalWidth, h: image.naturalHeight } : null,
     state: link.dataset.previewState ?? null,
     fileId: link.dataset.streamImage ?? null,
@@ -92,6 +112,23 @@ export async function runPictureChecks(
     return last;
   };
   try {
+    // 0. Held signing: the picture has no link yet. The frame is already at its final size and nothing of the picture is painted.
+    let sign: () => void = () => {};
+    const signHeld = new Promise<void>(done => { sign = done; });
+    const unsignedPage = await open(async (p: any) => {
+      await p.route(COMMAND, async (route: any) => {
+        if ((route.request().postData() ?? "").includes("file_download_url")) await signHeld;
+        await route.continue();
+      });
+    });
+    const unsigned = await until(unsignedPage, p => p.state === "loading");
+    check("a picture with no link yet waits in its frame and is not painted", !!unsigned && !unsigned.signed && unsigned.state === "loading" && !unsigned.painted, unsigned);
+    await shot(unsignedPage, "picture-signing");
+    sign();
+    const signedLater = await until(unsignedPage, p => p.loaded);
+    check("it appears in the same frame once its link is signed", !!signedLater?.loaded && signedLater.painted && signedLater.state === null && near(unsigned?.frame ?? null, signedLater.frame), { unsigned: unsigned?.frame, loaded: signedLater });
+    await unsignedPage.close();
+
     // 1. Held storage: the frame is laid out at its final size before any byte arrives, and loading keeps it.
     let release: () => void = () => {};
     const held = new Promise<void>(done => { release = done; });
@@ -103,6 +140,7 @@ export async function runPictureChecks(
     });
     const before = await until(page, p => p.signed);
     check("picture is signed and waiting", !!before?.signed && !before.loaded, before);
+    check("a picture still arriving is not painted", before?.state === "loading" && !before.painted, before);
     check("one picture and one file card on the mixed message", before?.pictures === 1 && before.files === 1, before);
     const frame = before?.frame ?? null;
     check("frame is reserved at 16:10 before the picture loads", !!frame && frame.w > 0 && Math.abs(frame.h - frame.w * 10 / 16) <= 1, frame);
@@ -111,6 +149,7 @@ export async function runPictureChecks(
     const after = await until(page, p => p.loaded);
     check("picture loads at its real size", after?.natural?.w === AUDIT_PNG_SIZE.width && after.natural.h === AUDIT_PNG_SIZE.height, after);
     check("loading does not move or resize the frame", near(frame, after?.frame ?? null), { before: frame, after: after?.frame });
+    check("a loaded picture is painted and carries no state", !!after?.painted && after.state === null, after);
     await shot(page, "picture-loaded");
     // 2. A native click on the picture opens its own signed file.
     if (options.click && after?.frame) {
@@ -122,7 +161,25 @@ export async function runPictureChecks(
     }
     await page.close();
 
-    // 3. Failed storage: after one retry the frame says so and keeps its size; then the composer's staged previews.
+    // 2b. A link that fails once (an expired one does): a new link is signed and the picture loads. No failure is shown on the way.
+    let imageReads = 0, sawFailure = false, paintedUnloaded = false;
+    const flaky = await open(async (p: any) => {
+      await p.route(SIGNED, async (route: any) => {
+        if (route.request().resourceType() !== "image") await route.continue();
+        else if (imageReads++ === 0) await route.fulfill({ status: 403, body: "expired" });
+        else await route.continue();
+      });
+    });
+    const recovered = await until(flaky, p => {
+      if (p.state === "unavailable") sawFailure = true;
+      if (!p.loaded && p.painted) paintedUnloaded = true;
+      return p.loaded;
+    });
+    check("a picture whose first link fails loads from a new one, with no failure shown", !!recovered?.loaded && recovered.painted && imageReads >= 2 && !sawFailure && !paintedUnloaded,
+      { recovered, imageReads, sawFailure, paintedUnloaded });
+    await flaky.close();
+
+        // 3. Failed storage: after one retry the frame says so and keeps its size; then the composer's staged previews.
     const failing = await open(async (p: any) => {
       await p.route(SIGNED, async (route: any) => {
         if (route.request().resourceType() === "image") await route.fulfill({ status: 404, body: "not found" });
@@ -132,7 +189,17 @@ export async function runPictureChecks(
     const failed = await until(failing, p => p.state === "unavailable");
     check("a picture that fails shows the unavailable state", failed?.state === "unavailable" && !failed.loaded, failed);
     check("failing does not move or resize the frame", near(frame, failed?.frame ?? null), { before: frame, failed: failed?.frame });
+    check("a failed picture is not painted", !!failed && !failed.painted, failed);
+    const note = await failing.evaluate(FAILED_NOTE);
+    check("a failed picture says so and offers Retry over its frame", !!note && /^Couldn't load image\s*Retry$/u.test(note.text ?? "") && note.overFrame && !note.inLink && note.reached, note);
+    check("Retry is a 44px target", !!note && note.button.w >= 44 && note.button.h >= 44, note?.button ?? null);
     await shot(failing, "picture-unavailable");
+    // Storage answers again: Retry signs a new link and the picture loads in the same frame.
+    await failing.unroute(SIGNED);
+    if (note) await failing.mouse.click(note.centre.x, note.centre.y);
+    const retried = await until(failing, p => p.loaded);
+    check("Retry loads the picture in the same frame", !!retried?.loaded && retried.painted && retried.state === null && near(frame, retried.frame), retried);
+    check("the note is gone once the picture has loaded", (await failing.evaluate(FAILED_NOTE)) === null, null);
     const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>');
     await failing.setInputFiles("[data-composer-file-input]", [
       { name: "label.png", mimeType: "image/png", buffer: Buffer.from(auditPng()) },
