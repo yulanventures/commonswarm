@@ -9,7 +9,9 @@ const catalog = (rollback = false) => dbAssert(
     .trim().replace(/;$/, ''), rollback ? 'channel lead rollback catalog' : 'channel lead catalog');
 
 test('channel leads roll back to the private-channels view and apply again', () => {
-  runSql(catalog()
+  // 20261118000001 replaces the lead function; its own rollback puts the 20261117000002 body back first.
+  runSql(repoSql('deploy/release-proofs/channel-lead-backup/20261118000001-rollback.sql')
+    + catalog()
     + repoSql(`${root}-rollback.sql`)
     + catalog(true)
     // The older lead objects it leans on are untouched.
