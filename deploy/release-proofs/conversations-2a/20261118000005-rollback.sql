@@ -11,8 +11,8 @@
 -- (deploy/release-proofs/conversations/20261118000004-rollback.sql) runs after this one, never before.
 SET search_path = swarm, pg_catalog, public;
 DROP TRIGGER IF EXISTS memberships_conversation_upkeep ON swarm.memberships;
-DROP TRIGGER IF EXISTS agent_workspace_memberships_conversation_upkeep ON swarm.agent_workspace_memberships;
-DROP TRIGGER IF EXISTS agent_principals_conversation_upkeep ON swarm.agent_principals;
+DROP TRIGGER IF EXISTS agent_workspace_memberships_apply_conversations ON swarm.agent_workspace_memberships;
+DROP TRIGGER IF EXISTS agent_principals_apply_conversations ON swarm.agent_principals;
 DROP TRIGGER IF EXISTS channels_sync_creator_member ON swarm.channels;
 DROP TRIGGER IF EXISTS human_channel_reads_follow_conversation ON swarm.human_channel_reads;
 DROP TRIGGER IF EXISTS agent_channel_reads_follow_conversation ON swarm.agent_channel_reads;

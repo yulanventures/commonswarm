@@ -225,6 +225,7 @@ import {
   prefileConversationPost,
   reauthorizedConversationReplay,
   routeConversationPost,
+  storedConversationId,
 } from "./conversations.ts";
 import { choiceOptionText } from "./choice-text.ts";
 // Supabase's edge graph cannot resolve the NodeNext `.js` specifiers in the
@@ -17104,11 +17105,19 @@ async function handleTransaction(
             },
           };
         }
-        /* A stored conversation answer names a conversation and what was in it: it replays only while the
-         * caller may still open that conversation (the replay row above keeps its tags either way). */
-        if (matches && isConversationCommandKind(kind)) {
+        /* A stored conversation answer, or a post to a conversation (its signal names the members it went
+         * to), replays only while the caller may still open that conversation; the replay row above keeps
+         * its tags either way. */
+        const replayedConversation = !matches
+          ? undefined
+          : isConversationCommandKind(kind)
+          ? storedConversationId(record(existing.response) ?? {})
+          : command.kind === "post_signal"
+          ? command.conversation_id
+          : undefined;
+        if (replayedConversation !== undefined) {
           const reauthorized = await reauthorizedConversationReplay(tx, route.workspaceId, authActorIdentity(auth),
-            kind, record(existing.response) ?? {});
+            replayedConversation, kind === "conversation_leave");
           if (reauthorized !== null) return reauthorized.status === 404 ? reauthorized : decided(reauthorized);
         }
         return matches

@@ -27,9 +27,9 @@ SELECT (SELECT count(*)=30 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
   ('swarm.conversation_prefile(uuid,uuid,uuid)','69ce250ee38007021a6268b6a726e041','swarm_admin','swarm_command'),
   ('swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])','99ccdbdfc8d3178decc4245e1252d524','swarm_admin','swarm_command'),
   ('swarm.conversation_check_route(uuid,uuid,uuid)','4d34bc77e3e0ef54228c7be3fd3d095f','swarm_admin',NULL),
-  ('swarm.signal_frame_readers(uuid,uuid)','b0f3265f5df09247a787ecb569e329ad','swarm_admin',NULL),
+  ('swarm.signal_frame_readers(uuid,uuid)','ce93129b79d9467770325ad2acffab3a','swarm_admin',NULL),
   ('swarm.conversation_visible(uuid,text,uuid,uuid)','d8cff5b7f14b2187487cfe9d057ca832','swarm_admin','swarm_command'),
-  ('swarm.conversation_private_member_lock()','61ab85b03459aaff29bcc4bba69069ba','swarm_admin',NULL),
+  ('swarm.conversation_private_member_lock()','2253129192c6546e06ec4b5d1d769890','swarm_admin',NULL),
   ('swarm.send_signal_frames(uuid,uuid)','b31d19c2812248b4773b08629b3ef21d','postgres','swarm_admin'),
   ('swarm.conversation_lock_workspace(uuid)','4b4dee8fd30274c4e6a0c980bdacd360','swarm_admin',NULL),
   ('swarm.conversation_person_upkeep()','b0492c8c9166e6986ba6d7bc4ce3b168','swarm_admin',NULL),
@@ -47,8 +47,8 @@ SELECT (SELECT count(*)=30 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
  AND (SELECT count(*)=11 FROM unnest(ARRAY['swarm.conversation_member_join(uuid,uuid,text,uuid)','swarm.conversation_member_leave(uuid,text,uuid)','swarm.conversation_target(uuid,text,uuid,uuid)','swarm.conversation_departed_name(uuid)','swarm.conversation_member_key(uuid[],uuid[])','swarm.conversation_next_generation(uuid,text,uuid)','swarm.conversation_live_members(uuid)','swarm.conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)','swarm.conversation_join(uuid,text,uuid,uuid)','swarm.conversation_leave(uuid,text,uuid,uuid)','swarm.conversation_invite(uuid,text,uuid,uuid,uuid[],uuid[])','swarm.conversation_remove(uuid,text,uuid,uuid,text,uuid)','swarm.conversation_mark_read(uuid,text,uuid,uuid,uuid)','swarm.conversation_set_notify(uuid,text,uuid,uuid,text,boolean,integer)','swarm.conversation_post_route(uuid,text,uuid,uuid,uuid[],uuid[])','swarm.conversation_prefile(uuid,uuid,uuid)','swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])','swarm.conversation_check_route(uuid,uuid,uuid)','swarm.signal_frame_readers(uuid,uuid)','swarm.conversation_visible(uuid,text,uuid,uuid)','swarm.conversation_private_member_lock()','swarm.send_signal_frames(uuid,uuid)','swarm.conversation_lock_workspace(uuid)','swarm.conversation_person_upkeep()','swarm.conversation_agent_upkeep()','swarm.conversation_creator_joins()','swarm.conversation_reads_follow()','swarm.conversation_preferences_follow()']) f(sig) WHERE has_function_privilege('swarm_command',f.sig,'EXECUTE'))
  AND (SELECT count(*)=8 FROM pg_trigger t JOIN (VALUES
    ('swarm.memberships','memberships_conversation_upkeep','swarm.conversation_person_upkeep()'),
-   ('swarm.agent_workspace_memberships','agent_workspace_memberships_conversation_upkeep','swarm.conversation_agent_upkeep()'),
-   ('swarm.agent_principals','agent_principals_conversation_upkeep','swarm.conversation_agent_upkeep()'),
+   ('swarm.agent_workspace_memberships','agent_workspace_memberships_apply_conversations','swarm.conversation_agent_upkeep()'),
+   ('swarm.agent_principals','agent_principals_apply_conversations','swarm.conversation_agent_upkeep()'),
    ('swarm.channels','channels_sync_creator_member','swarm.conversation_creator_joins()'),
    ('swarm.human_channel_reads','human_channel_reads_follow_conversation','swarm.conversation_reads_follow()'),
    ('swarm.agent_channel_reads','agent_channel_reads_follow_conversation','swarm.conversation_reads_follow()'),
