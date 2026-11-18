@@ -468,26 +468,29 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
-    const presence = node(doc, "span", "pd-agent-presence"); presence.title = agent.status.label;
-    presence.dataset.agentStatus = agent.status.kind; presence.dataset.attention = String(agent.status.attention);
-    presence.setAttribute("aria-hidden", "true");
-    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(presence, name);
-    nameLine.append(node(doc, "span", "pd-agent-tag", "agent"));
+    // One line each: the name, then the measured status in words beside where the agent runs. Whose agent it is
+    // is the group's heading. The full name is the row's title and the profile's heading.
+    const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     const sentence = agent.status.attention && !model.sample ? agent.status.sentence : "";
-    const details = node(doc, "span", "pd-agent-app pd-ellipsis",
-      [agent.ownerName ?? "Owner no longer a member", agent.app, secondary].filter(Boolean).join(" · "));
-    details.title = details.textContent ?? "";
-    // Keep the dot's measured status and access facts in the row's accessible name.
-    const supplement = [agent.status.label, sentence].filter(Boolean).join(", ") + (approved ? peopleDialogAccessLabel(agent) : "");
+    const details = node(doc, "span", "pd-agent-app pd-ellipsis");
+    const word = node(doc, "span", "pd-agent-status", agent.status.label);
+    word.dataset.agentStatus = agent.status.kind; word.dataset.attention = String(agent.status.attention);
+    const where = [agent.app, secondary].filter(Boolean).join(" · ");
+    details.append(word, doc.createTextNode(` · ${where}`)); details.title = `${agent.status.label} · ${where}`;
+    // What the row does not show stays in its accessible name: what to do about it, and Lists & docs access.
+    const supplement = sentence + (approved ? peopleDialogAccessLabel(agent) : "");
     copy.append(nameLine, doc.createTextNode(" "), details);
     disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-sr-only", ` ${supplement}`)); row.append(disclosure);
     const notice = noticeFor(agent);
     const actions = node(doc, "span", "pd-agent-actions");
     const next = agent.status.attention ? fix(agent, notice) : null;
-    if (next) { next.classList.add("pd-reconnect", "pd-row-repair"); next.setAttribute("aria-label", `${next.textContent}: ${agent.name}`); row.append(next); }
+    // The one thing the row needs is a short button on the row; its accessible name says the whole of it.
+    if (next) { next.classList.add("pd-reconnect", "pd-row-repair"); next.setAttribute("aria-label", `${next.textContent}: ${agent.name}`);
+      if (agent.status.fix.action === "new-key") next.textContent = "New key"; row.append(next); }
     // One click per seat: an own agent not yet allowed into Lists & docs gets the action on its row, in the
     // repair slot, unless a repair already holds it.
     else if (!model.sample && peopleDialogCanAct(model, "allow", agent.id)) {
+      // The row says what is allowed: for a connected agent this one tap grants it.
       const allow = actionButton("allow", agent, "Allow Lists & docs", notice, "data-row-allow-agent-access");
       allow.className = "pd-row-repair"; allow.setAttribute("aria-label", `Allow Lists & docs: ${agent.name}`);
       allow.dataset.pdFocus = `row-allow-${agent.id}`; row.append(allow);
