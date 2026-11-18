@@ -775,9 +775,11 @@ $$;
 -- Who hears that a message moved: the people who may read it, from its placement and audience (see the
 -- header, point 4). Readers are chosen under the conversation's row lock (FOR SHARE), the lock every
 -- membership change takes FOR UPDATE, so a reaction or post serialises with a leave or removal that is
--- in flight. A message with no placement (history only) locks its channel's or #general's row; if it was
--- for everyone it keeps its pre-2a audience, and if it was addressed only its sender and the people it
--- was addressed to hear of it: never an agent's owner by ownership.
+-- in flight; the conversation's kind and channel are read from the locked row, so a channel made private
+-- while this waits is read as private. A message with no placement (history only) locks its channel's or
+-- #general's row; if it was for everyone it keeps its pre-2a audience, if it was addressed only its sender
+-- and the people it was addressed to hear of it (never an agent's owner by ownership), and if it is a
+-- thread reply, whose audience depends on a root that has no placement either, nobody hears of it here.
 CREATE FUNCTION swarm.signal_frame_readers(p_workspace uuid, p_signal uuid) RETURNS SETOF uuid
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
@@ -785,10 +787,11 @@ DECLARE
   v_place record;
   v_kind text;
   v_conversation uuid;
+  v_channel uuid;
   v_visibility text;
 BEGIN
   SELECT s.from_kind, s.from_principal, s.to_user_id, s.to_agent_principal_id, s.channel_id, s.in_reply_to,
-    EXISTS (SELECT 1 FROM swarm.signal_recipients AS sr
+    s.thread_root_id, EXISTS (SELECT 1 FROM swarm.signal_recipients AS sr
       WHERE sr.signal_id = s.id AND sr.workspace_id = s.workspace_id) AS has_recipients
   INTO v_signal
   FROM swarm.signals AS s
@@ -796,34 +799,39 @@ BEGIN
   IF NOT FOUND THEN
     RETURN;
   END IF;
-  SELECT cs.audience, c.kind, c.conversation_id, c.channel_id INTO v_place
+  SELECT cs.audience, cs.conversation_id INTO v_place
   FROM swarm.conversation_signals AS cs
-  JOIN swarm.conversations AS c ON c.conversation_id = cs.conversation_id AND c.workspace_id = cs.workspace_id
   WHERE cs.signal_id = p_signal AND cs.workspace_id = p_workspace;
   IF FOUND THEN
-    v_kind := v_place.kind;
     v_conversation := v_place.conversation_id;
-    PERFORM 1 FROM swarm.conversations AS c WHERE c.conversation_id = v_conversation FOR SHARE;
-    IF v_signal.channel_id IS NOT NULL THEN
+    SELECT c.kind, c.channel_id INTO v_kind, v_channel
+    FROM swarm.conversations AS c
+    WHERE c.conversation_id = v_conversation AND c.workspace_id = p_workspace
+    FOR SHARE;
+    IF v_channel IS NOT NULL THEN
       PERFORM pg_advisory_xact_lock_shared(
-        hashtextextended('conversation-frames:' || p_workspace::text || ':' || v_signal.channel_id::text, 0));
+        hashtextextended('conversation-frames:' || p_workspace::text || ':' || v_channel::text, 0));
     END IF;
     IF v_place.audience = 'conversation' THEN
-      IF v_place.kind IN ('general', 'public_channel') THEN
+      IF v_kind IN ('general', 'public_channel') THEN
         RETURN QUERY SELECT m.user_id FROM swarm.memberships AS m
           WHERE m.workspace_id = p_workspace AND m.revoked_at IS NULL AND swarm.is_member(p_workspace, m.user_id);
-      ELSIF v_place.kind = 'private_channel' THEN
+      ELSIF v_kind = 'private_channel' THEN
         RETURN QUERY SELECT cm.user_id FROM swarm.channel_members AS cm
-          WHERE cm.workspace_id = p_workspace AND cm.channel_id = v_place.channel_id AND cm.member_kind = 'user'
-            AND swarm.actor_can_access_channel(p_workspace, v_place.channel_id, 'user', cm.user_id);
+          WHERE cm.workspace_id = p_workspace AND cm.channel_id = v_channel AND cm.member_kind = 'user'
+            AND swarm.actor_can_access_channel(p_workspace, v_channel, 'user', cm.user_id);
       ELSE
         RETURN QUERY SELECT m.member_user_id FROM swarm.conversation_members AS m
-          WHERE m.conversation_id = v_place.conversation_id AND m.member_user_id IS NOT NULL
+          WHERE m.conversation_id = v_conversation AND m.member_user_id IS NOT NULL
             AND m.left_at IS NULL AND swarm.is_member(p_workspace, m.member_user_id);
       END IF;
       RETURN;
     END IF;
   ELSE
+    IF v_signal.thread_root_id IS NOT NULL THEN
+      RETURN;
+    END IF;
+    v_channel := v_signal.channel_id;
     PERFORM 1 FROM swarm.conversations AS c
     WHERE c.workspace_id = p_workspace
       AND CASE WHEN v_signal.channel_id IS NULL THEN c.kind = 'general' ELSE c.conversation_id = v_signal.channel_id END
@@ -867,8 +875,8 @@ BEGIN
         WHEN v_kind IN ('dm', 'group_dm') THEN EXISTS (
           SELECT 1 FROM swarm.conversation_members AS m
           WHERE m.conversation_id = v_conversation AND m.member_user_id = a.user_id AND m.left_at IS NULL)
-        WHEN v_signal.channel_id IS NOT NULL THEN
-          swarm.actor_can_access_channel(p_workspace, v_signal.channel_id, 'user', a.user_id)
+        WHEN v_channel IS NOT NULL THEN
+          swarm.actor_can_access_channel(p_workspace, v_channel, 'user', a.user_id)
         ELSE true END;
 END;
 $$;

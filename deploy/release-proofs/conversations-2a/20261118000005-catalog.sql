@@ -27,7 +27,7 @@ SELECT (SELECT count(*)=30 AND bool_and(p.proowner=e.owner::regrole AND p.prosec
   ('swarm.conversation_prefile(uuid,uuid,uuid)','69ce250ee38007021a6268b6a726e041','swarm_admin','swarm_command'),
   ('swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])','99ccdbdfc8d3178decc4245e1252d524','swarm_admin','swarm_command'),
   ('swarm.conversation_check_route(uuid,uuid,uuid)','4d34bc77e3e0ef54228c7be3fd3d095f','swarm_admin',NULL),
-  ('swarm.signal_frame_readers(uuid,uuid)','ce93129b79d9467770325ad2acffab3a','swarm_admin',NULL),
+  ('swarm.signal_frame_readers(uuid,uuid)','d33bb4cf1e600dac069a80acba5de6b3','swarm_admin',NULL),
   ('swarm.conversation_visible(uuid,text,uuid,uuid)','d8cff5b7f14b2187487cfe9d057ca832','swarm_admin','swarm_command'),
   ('swarm.conversation_private_member_lock()','2253129192c6546e06ec4b5d1d769890','swarm_admin',NULL),
   ('swarm.send_signal_frames(uuid,uuid)','b31d19c2812248b4773b08629b3ef21d','postgres','swarm_admin'),
