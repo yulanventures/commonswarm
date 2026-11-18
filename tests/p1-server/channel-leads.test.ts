@@ -491,3 +491,137 @@ test("the lead setting reads back through swarm_read.channels and the agent read
     await tx`SELECT swarm.channel_effective_live_lead(${workspace}::uuid, ${open.id}::uuid)`;
   }), /permission denied/);
 });
+
+type Stamps = { watcher?: number; channel?: number; listener?: number; turn?: number; lease?: number };
+
+/**
+ * This agent's presence and wake lease, each stamped that many seconds ago (absent: never), in the
+ * workspace given or its first one, as the edge writes them. Replaces whatever was there.
+ */
+async function stamp(agent: Agent, ages: Stamps, keyedBy?: string): Promise<void> {
+  // statement_timestamp() minus a null interval is null: an absent route was never stamped.
+  const ago = (seconds: number | undefined) => seconds ?? null;
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM swarm.agent_presence WHERE principal_id = ${agent.principal}::uuid`;
+    await tx`DELETE FROM swarm.agent_wake_leases WHERE principal_id = ${agent.principal}::uuid`;
+    const [home] = await tx<{ w: string }[]>`
+      SELECT workspace_id::text AS w FROM swarm.agent_principals WHERE principal_id = ${agent.principal}::uuid`;
+    const at = keyedBy ?? home!.w;
+    if ([ages.watcher, ages.channel, ages.listener, ages.turn].some((age) => age !== undefined)) {
+      await tx`INSERT INTO swarm.agent_presence
+        (workspace_id, principal_id, last_command_at, watcher_at, channel_at, listener_at, turn_at)
+        VALUES (${at}::uuid, ${agent.principal}::uuid, statement_timestamp(),
+          statement_timestamp() - make_interval(secs => ${ago(ages.watcher)}::float8),
+          statement_timestamp() - make_interval(secs => ${ago(ages.channel)}::float8),
+          statement_timestamp() - make_interval(secs => ${ago(ages.listener)}::float8),
+          statement_timestamp() - make_interval(secs => ${ago(ages.turn)}::float8))`;
+    }
+    if (ages.lease !== undefined) {
+      await tx`INSERT INTO swarm.agent_wake_leases
+        (workspace_id, principal_id, watcher_id, host_label, host_id, host_session_ref, generation, claimed_at, renewed_at)
+        VALUES (${at}::uuid, ${agent.principal}::uuid, ${randomUUID()}::uuid, 'lead-tests', ${randomUUID()}::uuid, NULL, 1,
+          statement_timestamp() - make_interval(secs => ${ages.lease}::float8),
+          statement_timestamp() - make_interval(secs => ${ages.lease}::float8))`;
+    }
+  });
+}
+
+test("a channel lead that is not listening hands the post to a listening workspace lead, instead of both", { timeout: 90_000 }, async () => {
+  const room = await channel(owner, "backup");
+  const chLead = await agentOf(owner.id, "backup-lead");
+  await leadSet(owner.jwt, room.id, { lead_mode: "agent", principal_id: chLead.principal });
+  const inRoom = async () => await woken(await post(member.jwt, { channel: room.slug }));
+  try {
+    assert.deepEqual(await inRoom(), only(chLead), "neither listening: the channel lead keeps it, queued");
+    await stamp(wsLead, { watcher: 10 });
+    assert.deepEqual(await inRoom(), only(wsLead), "the workspace lead instead, and only it");
+    assert.equal(await effective(room.id), wsLead.principal);
+
+    // Each route of the channel lead, inside and outside its window. The workspace lead stays listening.
+    const cases: Array<[Stamps, Agent, string]> = [
+      [{ watcher: 10 }, chLead, "a fresh watcher"],
+      [{ watcher: 175 }, chLead, "a watcher inside 180 s"],
+      [{ watcher: 185 }, wsLead, "a watcher past 180 s"],
+      [{ channel: 20 }, chLead, "a fresh channel route"],
+      [{ channel: 185 }, wsLead, "a channel route past 180 s"],
+      [{ listener: 300 }, chLead, "a push listener between reconciles"],
+      [{ listener: 370 }, wsLead, "a listener past 360 s"],
+      [{ lease: 30 }, chLead, "a renewed wake lease alone"],
+      [{ lease: 185 }, wsLead, "a wake lease past 180 s"],
+      [{ turn: 1 }, wsLead, "a turn alone is not a listener"],
+    ];
+    for (const [ages, expected, label] of cases) {
+      await stamp(chLead, ages);
+      assert.deepEqual(await inRoom(), only(expected), label);
+    }
+    await stamp(chLead, { watcher: 10 });
+    assert.deepEqual(await inRoom(), only(chLead), "both listening: the channel lead, not both");
+
+    // The workspace lead as the channel's own lead changes nothing.
+    await leadSet(owner.jwt, room.id, { lead_mode: "agent", principal_id: wsLead.principal });
+    await stamp(wsLead, {});
+    assert.deepEqual(await inRoom(), only(wsLead), "the same agent, not listening, keeps it");
+    await leadSet(owner.jwt, room.id, { lead_mode: "agent", principal_id: chLead.principal });
+
+    // A named lead that fails a live check is never answered: the workspace lead if it listens, else nobody.
+    await sql`UPDATE swarm.agent_principals SET turn_only = true WHERE principal_id = ${chLead.principal}::uuid`;
+    assert.deepEqual(await inRoom(), nobody, "ineligible, and the workspace lead not listening");
+    await stamp(wsLead, { lease: 5 });
+    assert.deepEqual(await inRoom(), only(wsLead), "ineligible, and the workspace lead listening");
+    assert.deepEqual(await stored(room.id), { lead_mode: "agent", lead_agent_principal_id: chLead.principal }, "the setting is untouched");
+
+    // workspace and none modes, and general, do not look at listeners.
+    await stamp(wsLead, {});
+    await leadSet(owner.jwt, room.id, { lead_mode: "workspace" });
+    assert.deepEqual(await inRoom(), only(wsLead), "workspace mode wakes the workspace lead, listening or not");
+    await leadSet(owner.jwt, room.id, { lead_mode: "none" });
+    await stamp(wsLead, { watcher: 5 });
+    assert.deepEqual(await inRoom(), nobody, "none stays none");
+    assert.deepEqual(await woken(await post(member.jwt)), only(wsLead), "general is unchanged");
+  } finally {
+    await stamp(wsLead, {});
+  }
+});
+
+test("the backup never opens a private channel to a workspace lead it has not admitted", { timeout: 90_000 }, async () => {
+  const chLead = await agentOf(owner.id, "backup-lock-lead");
+  const lock = await channel(owner, "backup-lock", { visibility: "private",
+    members: [{ kind: "user", id: member.id }, { kind: "agent", id: chLead.principal }] });
+  await leadSet(owner.jwt, lock.id, { lead_mode: "agent", principal_id: chLead.principal });
+  try {
+    await stamp(wsLead, { watcher: 5 });
+    assert.deepEqual(await woken(await post(member.jwt, { channel: lock.slug })), only(chLead),
+      "the workspace lead is listening but not in the channel: the channel lead keeps it");
+    await addMember(lock.id, wsLead);
+    assert.deepEqual(await woken(await post(member.jwt, { channel: lock.slug })), only(wsLead), "once admitted, it backs up");
+  } finally {
+    await stamp(wsLead, {});
+  }
+});
+
+test("a channel lead from another workspace counts as listening from its own workspace's presence", { timeout: 90_000 }, async () => {
+  const away = randomUUID();
+  const visitor = randomUUID();
+  const token = `swm_agt_${randomBytes(32).toString("base64url")}`;
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.workspaces (workspace_id, name, created_by) VALUES (${away}::uuid, 'LeadsAway', ${owner.id}::uuid)`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role) VALUES (${away}::uuid, ${owner.id}::uuid, 'owner')`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${visitor}::uuid, ${away}::uuid, ${owner.id}::uuid, ${`visitor-${visitor.slice(0, 6)}`})`;
+    await tx`INSERT INTO swarm.agent_workspace_memberships (principal_id, workspace_id, owner_user_id, added_by)
+      VALUES (${visitor}::uuid, ${workspace}::uuid, ${owner.id}::uuid, ${owner.id}::uuid)`;
+  });
+  const lead: Agent = { principal: visitor, token };
+  const room = await channel(owner, "backup-away");
+  await leadSet(owner.jwt, room.id, { lead_mode: "agent", principal_id: visitor });
+  try {
+    await stamp(wsLead, { watcher: 5 });
+    assert.deepEqual(await woken(await post(member.jwt, { channel: room.slug })), only(wsLead), "not listening anywhere");
+    await stamp(lead, { watcher: 5 });
+    assert.deepEqual(await woken(await post(member.jwt, { channel: room.slug })), only(lead), "listening in its first workspace");
+    await stamp(lead, { lease: 5 }, workspace);
+    assert.deepEqual(await woken(await post(member.jwt, { channel: room.slug })), only(lead), "a lease held in this workspace");
+  } finally {
+    await stamp(wsLead, {});
+  }
+});
