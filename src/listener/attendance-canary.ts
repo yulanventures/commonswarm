@@ -178,6 +178,12 @@ export async function runAttendedAttendanceCanary(
   let watcherPollState: AttendedCanaryWatcherPollState = "not_observed";
   let observedAt: string | null = null;
   let wakeLeaseReadError: AttendedAttendanceCanaryResult["wakeLeaseReadError"] = null;
+  /* A lease read that fails in transit (no response, a timeout or a 5xx) is retried until the watcher deadline: one
+   * slow or dropped read says nothing about the watcher, and ending the canary on it reported live watchers as
+   * unproved. Only a refused credential (401/403) stops at once. The error is reported only when no lease read
+   * succeeded at all, so a run with good reads and no renewal still reads as a watcher that did not poll. */
+  let wakeLeaseReadSucceeded = false;
+  let lastTransientLeaseError: AttendedAttendanceCanaryResult["wakeLeaseReadError"] = null;
   let receiptReadErrorCode: AttendedAttendanceCanaryResult["receiptReadErrorCode"] = null;
 
   while (!options.signal?.aborted) {
@@ -199,6 +205,7 @@ export async function runAttendedAttendanceCanary(
           );
         const receivedAt = now();
         wakeLeaseReadError = null;
+        wakeLeaseReadSucceeded = true;
         if (
           lease !== null &&
           lease.watcher_id === options.watcherId &&
@@ -232,10 +239,13 @@ export async function runAttendedAttendanceCanary(
           watcherPollState = "unproved";
           observedDeadline = now() + options.checkWaitMs;
         } else {
-          wakeLeaseReadError = {
-            status: error instanceof WakeLeaseReadError ? error.status : null,
-          };
-          receiptReadErrorCode = null;
+          const status = error instanceof WakeLeaseReadError ? error.status : null;
+          if (status === 401 || status === 403) {
+            wakeLeaseReadError = { status };
+            receiptReadErrorCode = null;
+          } else {
+            lastTransientLeaseError = { status };
+          }
         }
       }
     }
@@ -292,6 +302,11 @@ export async function runAttendedAttendanceCanary(
     await sleep(Math.min(options.pollMs ?? 250, finalDeadline - now()));
   }
 
+  if (wakeLeaseReadError === null && watcherPollState === "not_observed" && !wakeLeaseReadSucceeded &&
+      lastTransientLeaseError !== null) {
+    wakeLeaseReadError = lastTransientLeaseError;
+    receiptReadErrorCode = null;
+  }
   const stalledAt = wakeLeaseReadError !== null ||
       (receiptReadErrorCode !== null && observedAt === null)
     ? null
