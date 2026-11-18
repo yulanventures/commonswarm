@@ -168,6 +168,12 @@ live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh
 live-dashboard[data-kylon-shell] .dashboard__objects-view .household-objects .hh-markdown p { margin-block: 0 12px; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-history { margin-block-start: 24px; padding-block-start: 16px; border-color: var(--k-shell-line); color: var(--k-shell-secondary); font-size: 12px; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-conflict { padding: 16px; margin-block-start: 20px; background: var(--k-shell-subtle); border-inline-start: 2px solid var(--k-shell-control); }
+/* Under Base and Current: who saved that version and when. The exact ids appear only when asked for, as quiet
+   text that wraps anywhere, so a 32-character id never widens a phone screen. */
+live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-version-meta { margin: 0 0 8px; color: var(--k-shell-secondary); font-size: 12px; line-height: 1.5; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view .hh-revision-ids { margin: 12px 0 0; color: var(--k-shell-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.hh-revision-ids, .hh-history small) code { font-size: 12px; overflow-wrap: anywhere; }
+live-dashboard[data-kylon-shell] .dashboard__objects-view button[data-hh-action=revision-ids] { margin-block-start: 12px; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(button,a,input,select,textarea):focus-visible,
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label):has(input:focus-visible) { outline: 2px solid var(--k-shell-focus); outline-offset: 2px; box-shadow: none; }
 live-dashboard[data-kylon-shell] .dashboard__objects-view :is(.dashboard__choice-card,.dashboard__approval-choices label,.hh-conflict label) input:focus-visible { outline: none; box-shadow: none; }

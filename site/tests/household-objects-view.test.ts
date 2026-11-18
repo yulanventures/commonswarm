@@ -137,6 +137,48 @@ test('interrupted and pending saves keep their draft and reuse the original requ
   assert.equal(fixture.controller.getState().selected_id, null);
 });
 
+test('revision ids are shown on request; the conflict review says who saved Base and Current and when', async () => {
+  const fixture = setup('editor', { save: async () => ({ status: 'conflict', object_id: 'weekend',
+    current: fixture.conflict.current.revision, draft_id: 'draft-a' }) });
+  fixture.controller.select('weekend'); fixture.controller.stage(fixture.conflict.proposed);
+  await fixture.controller.save();
+  assert.equal(await fixture.controller.recoverDraft(), true);
+  const base = fixture.conflict.base.revision.token, current = fixture.conflict.current.revision.token;
+  const object = () => fixture.controller.getState().workspace.objects.find((item) => item.object_id === 'weekend')!;
+
+  // Off by default: no exact id is on the page, in the review or in the history, and the switch says so.
+  let state = fixture.controller.getState();
+  assert.equal(state.show_revision_ids, false);
+  let review = renderHouseholdConflict(state);
+  let history = renderHouseholdObjectHistory(object(), false, undefined, state.show_revision_ids);
+  assert.doesNotMatch(review, new RegExp(`${base}|${current}`));
+  // A history row still carries its id as the value its button opens; it is not shown as text.
+  assert.doesNotMatch(history, /<small>Revision|<code>/);
+  for (const html of [review, history]) {
+    assert.match(html, /<button type="button" data-hh-action="revision-ids" aria-pressed="false">Show revision ids<\/button>/);
+  }
+  // Base and Current stay two labelled versions, each with who saved it and a machine-readable time.
+  assert.match(review, /<section aria-label="Base"><h4>Base<\/h4><p class="hh-version-meta">Saved by Agent agent-a for person-a · <time datetime="[^"]+Z">/);
+  assert.match(review, /<section aria-label="Current"><h4>Current<\/h4><p class="hh-version-meta">Saved by Person person-b · <time datetime="[^"]+Z">/);
+  // The person's own draft was never saved, so it claims no author or time.
+  assert.match(review, /<section aria-label="Your proposed draft"><h4>Your proposed draft<\/h4>(?!<p class="hh-version-meta">)/);
+
+  // On: the exact ids are there to compare, labelled Base and Current, and each history row carries its own.
+  assert.equal(fixture.controller.toggleRevisionIds(), true);
+  state = fixture.controller.getState();
+  review = renderHouseholdConflict(state);
+  history = renderHouseholdObjectHistory(object(), false, undefined, state.show_revision_ids);
+  assert.match(review, new RegExp(`Base revision <code>${base}</code> · Current revision <code>${current}</code>`));
+  assert.match(review, /aria-pressed="true">Hide revision ids<\/button>/);
+  for (const version of object().history) assert.match(history, new RegExp(`Revision <code>${version.revision.token}</code>`));
+  assert.match(renderHouseholdObjects(state), new RegExp(`Revision <code>${object().history[0]!.revision.token}</code>`));
+
+  // It is display only: the draft, the conflict and the save state are untouched, and it turns off again.
+  assert.equal(state.save_state, 'conflict'); assert.deepEqual(state.proposed, fixture.conflict.proposed);
+  assert.equal(fixture.controller.toggleRevisionIds(), false);
+  assert.doesNotMatch(renderHouseholdConflict(fixture.controller.getState()), new RegExp(`${base}|${current}`));
+});
+
 test('conflicts require private recovery and review; the reviewed retry uses current base and a new request', async () => {
   const calls: HouseholdSaveRequest[] = [];
   const fixture = setup('editor', { save: async (request) => {
