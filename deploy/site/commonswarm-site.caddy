@@ -68,14 +68,18 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 		header Cache-Control "public, max-age=0, must-revalidate"
 
 		# The site's own not-found page (site/src/pages/404.astro, built to /404.html), still
-		# answered with status 404. A release that has no such file keeps the plain text below,
-		# so this block and the site can ship in either order.
+		# answered with status 404, for requests that are asking for a page: an address with no
+		# file extension, or one ending in .html. Everything else keeps the plain answer below:
+		# a missing .js, .md, .txt, .json or .xml, any other file type, and anything under the
+		# asset folders. An agent or a script fetching a missing file must not be handed HTML.
+		# The original address is tested, because the route above may have rewritten the path.
+		# A release that has no /404.html also keeps the plain answer, so this block and the
+		# site can ship in either order.
 		@notFoundPage {
-			expression {http.error.status_code} == 404 || {http.error.status_code} == 400
+			expression `({http.error.status_code} == 404 || {http.error.status_code} == 400) && !{http.request.orig_uri.path}.matches("^/(_astro|fonts)/") && ({http.request.orig_uri.path}.matches("\\.html?/?$") || !{http.request.orig_uri.path}.matches("\\.[^/.]+/?$"))`
 			file /404.html
 		}
 		handle @notFoundPage {
-			# A missing .js or .md already carries that type from the route above.
 			header Content-Type "text/html; charset=utf-8"
 			rewrite * /404.html
 			file_server {
