@@ -347,7 +347,7 @@ BEGIN
       v_added := v_added || jsonb_build_array(jsonb_build_object('kind', 'agent', 'id', v_id));
     END IF;
   END LOOP;
-  RETURN jsonb_build_object('status', 'ok', 'kind', t.kind, 'channel_id', t.channel_id, 'added', v_added);
+  RETURN jsonb_build_object('status', 'ok', 'kind', t.kind, 'channel_id', t.channel_id, 'members_added', v_added);
 END;
 $$;
 
@@ -557,8 +557,8 @@ BEGIN
       AND (
         -- A note to oneself is addressed to oneself.
         (v_founders = 1)
-        OR (NOT ((p_actor_kind = 'user' AND m.member_user_id = p_actor)
-          OR (p_actor_kind = 'agent' AND m.member_agent_principal_id = p_actor))
+        OR (NOT (coalesce(p_actor_kind = 'user' AND m.member_user_id = p_actor, false)
+          OR coalesce(p_actor_kind = 'agent' AND m.member_agent_principal_id = p_actor, false))
           AND (t.kind = 'dm' OR p_actor_kind = 'user' OR m.member_user_id IS NOT NULL
             OR m.member_agent_principal_id = ANY (coalesce(p_named_agents, '{}'))))
       )

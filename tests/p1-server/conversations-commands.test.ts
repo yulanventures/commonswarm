@@ -269,7 +269,7 @@ test("join, leave, invite and remove follow the Slack rules; mark read and notif
 
   const invite = (bearer: string, id: string, members: Row[]) => send(bearer, { kind: "conversation_invite", conversation_id: id, members });
   assert.equal((await invite(cat.jwt, room, [user(dee)])).body.error, "conversation_not_member", "members invite");
-  assert.deepEqual((ok(await invite(ben.jwt, room, [user(cat), agent(deeBot)])).added as Row[]).length, 2);
+  assert.deepEqual((ok(await invite(ben.jwt, room, [user(cat), agent(deeBot)])).members_added as Row[]).length, 2);
   const group = await opened(ann.jwt, [user(ben), user(dee)]);
   assert.equal((await invite(ann.jwt, String(group.conversation_id), [user(cat)])).body.error, "conversation_members_fixed");
   assert.equal((await invite(ann.jwt, g, [user(cat)])).body.error, "conversation_members_fixed");

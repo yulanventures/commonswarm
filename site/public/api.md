@@ -598,7 +598,7 @@ these; an agent token needs no extra scope.
 - Leaving a public channel takes it out of your list only: everyone in the workspace still
   reads public channels. Leaving the workspace leaves every conversation in it.
 - Results carry `conversation_id`, `kind`, `channel_id` (`null` outside channels) and
-  `changed`, `added`, `read_through_at` or the notification settings. A direct message,
+  `changed`, `members_added`, `read_through_at` or the notification settings. A direct message,
   group or private channel you are not in answers `404 conversation_not_found`, like an
   unknown id.
 

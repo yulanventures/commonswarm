@@ -2,7 +2,15 @@
 -- step 1's filer and commit trigger function, the reaction push and the workspace topic's emitter (with its
 -- trigger) are back with their original bodies and owners.
 SELECT NOT EXISTS(SELECT 1 FROM unnest(ARRAY['swarm.conversation_member_join(uuid,uuid,text,uuid)','swarm.conversation_member_leave(uuid,text,uuid)','swarm.conversation_target(uuid,text,uuid,uuid)','swarm.conversation_departed_name(uuid)','swarm.conversation_member_key(uuid[],uuid[])','swarm.conversation_next_generation(uuid,text,uuid)','swarm.conversation_live_members(uuid)','swarm.conversation_open(uuid,text,uuid,uuid[],uuid[],boolean)','swarm.conversation_join(uuid,text,uuid,uuid)','swarm.conversation_leave(uuid,text,uuid,uuid)','swarm.conversation_invite(uuid,text,uuid,uuid,uuid[],uuid[])','swarm.conversation_remove(uuid,text,uuid,uuid,text,uuid)','swarm.conversation_mark_read(uuid,text,uuid,uuid,uuid)','swarm.conversation_set_notify(uuid,text,uuid,uuid,text,boolean,integer)','swarm.conversation_post_route(uuid,text,uuid,uuid,uuid[],uuid[])','swarm.conversation_prefile(uuid,uuid,uuid)','swarm.conversation_group_departed(uuid,text,uuid,uuid[],uuid[])','swarm.conversation_check_route(uuid,uuid,uuid)','swarm.signal_frame_readers(uuid,uuid)','swarm.send_signal_frames(uuid,uuid)','swarm.conversation_lock_workspace(uuid)','swarm.conversation_person_upkeep()','swarm.conversation_agent_upkeep()','swarm.conversation_creator_joins()','swarm.conversation_reads_follow()','swarm.conversation_preferences_follow()']) f(sig) WHERE to_regprocedure(f.sig) IS NOT NULL)
- AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('memberships_conversation_upkeep','agent_workspace_memberships_conversation_upkeep','agent_principals_conversation_upkeep','channels_sync_creator_member','human_channel_reads_follow_conversation','agent_channel_reads_follow_conversation','channel_preferences_follow_conversation'))
+ AND NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN (VALUES
+   ('swarm.memberships','memberships_conversation_upkeep'),
+   ('swarm.agent_workspace_memberships','agent_workspace_memberships_conversation_upkeep'),
+   ('swarm.agent_principals','agent_principals_conversation_upkeep'),
+   ('swarm.channels','channels_sync_creator_member'),
+   ('swarm.human_channel_reads','human_channel_reads_follow_conversation'),
+   ('swarm.agent_channel_reads','agent_channel_reads_follow_conversation'),
+   ('swarm.channel_preferences','channel_preferences_follow_conversation')
+  ) e(rel,name) ON t.tgrelid=to_regclass(e.rel) AND t.tgname=e.name WHERE NOT t.tgisinternal)
  AND (SELECT count(*)=4 AND bool_and(p.proowner=e.owner::regrole AND p.prosecdef AND md5(p.prosrc)=e.digest)
   FROM (VALUES
    ('swarm.file_conversation_signal(uuid,uuid)','0c110a11b77e30fd80bbe4a799d7fb7d','swarm_admin'),
