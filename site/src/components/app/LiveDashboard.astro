@@ -9794,7 +9794,8 @@ import "../../styles/kylon-command-palette.css";
            first, so it is never dropped on the page. Nothing moves focus when the answer comes back: by then it is
            wherever the reader has put it. */
         if (document.activeElement === retry) {
-          (holder instanceof HTMLAnchorElement ? holder : holder.querySelector<HTMLElement>("button:not([hidden])"))?.focus({ preventScroll: true });
+          // The linked picture takes focus itself. The plain card is not focusable, so its Download button does (focused, not pressed).
+          (holder instanceof HTMLAnchorElement ? holder : holder.querySelector<HTMLElement>(".dashboard__attachment-download"))?.focus({ preventScroll: true });
         }
         failures = 0;
         void load();
